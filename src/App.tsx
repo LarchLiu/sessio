@@ -7,6 +7,7 @@ import {
   listSessions,
 } from "./api";
 import SessionDetail from "./components/SessionDetail";
+import ScrollArea from "./components/ScrollArea";
 import Tag from "./components/Tag";
 
 type Filter =
@@ -158,50 +159,59 @@ export default function App() {
           </div>
         </div>
 
-        <nav className="flex-1 overflow-y-scroll p-2 flex flex-col gap-0.5">
-          <SidebarItem
-            label="All Sessions"
-            count={totalRealSessions}
-            active={filter.kind === "all"}
-            onClick={() => setFilter({ kind: "all" })}
-            dot="#888"
-          />
+        <nav className="flex-1 min-h-0 p-2 flex flex-col gap-0.5">
+          <div className="shrink-0 flex flex-col gap-0.5">
+            <SidebarItem
+              label="All Sessions"
+              count={totalRealSessions}
+              active={filter.kind === "all"}
+              onClick={() => setFilter({ kind: "all" })}
+              dot="#888"
+            />
 
-          <SectionHeader
-            label="By Agent"
-            collapsed={!expandAgent}
-            onToggle={() => setExpandAgent((v) => !v)}
-          />
-          {expandAgent &&
-            agentOrdered.map(({ agent, count }) => (
-              <SidebarItem
-                key={agent}
-                label={AGENT_LABEL[agent]}
-                count={count}
-                active={filter.kind === "agent" && filter.agent === agent}
-                onClick={() => setFilter({ kind: "agent", agent })}
-                dot={AGENT_ACCENT[agent]}
-              />
-            ))}
+            <SectionHeader
+              label="By Agent"
+              collapsed={!expandAgent}
+              onToggle={() => setExpandAgent((v) => !v)}
+            />
+            {expandAgent &&
+              agentOrdered.map(({ agent, count }) => (
+                <SidebarItem
+                  key={agent}
+                  label={AGENT_LABEL[agent]}
+                  count={count}
+                  active={filter.kind === "agent" && filter.agent === agent}
+                  onClick={() => setFilter({ kind: "agent", agent })}
+                  dot={AGENT_ACCENT[agent]}
+                />
+              ))}
 
-          <SectionHeader
-            label="By Project"
-            collapsed={!expandProject}
-            onToggle={() => setExpandProject((v) => !v)}
-          />
-          {expandProject &&
-            projectGroups.map((p) => (
-              <SidebarItem
-                key={p.key}
-                label={p.label}
-                count={p.count}
-                active={filter.kind === "project" && filter.key === p.key}
-                onClick={() =>
-                  setFilter({ kind: "project", key: p.key, label: p.label })
-                }
-                title={p.path ?? p.label}
-              />
-            ))}
+            <SectionHeader
+              label="By Project"
+              collapsed={!expandProject}
+              onToggle={() => setExpandProject((v) => !v)}
+            />
+          </div>
+
+          {expandProject && (
+            <ScrollArea
+              className="flex-1 min-h-0"
+              viewportClassName="flex flex-col gap-0.5"
+            >
+              {projectGroups.map((p) => (
+                <SidebarItem
+                  key={p.key}
+                  label={p.label}
+                  count={p.count}
+                  active={filter.kind === "project" && filter.key === p.key}
+                  onClick={() =>
+                    setFilter({ kind: "project", key: p.key, label: p.label })
+                  }
+                  title={p.path ?? p.label}
+                />
+              ))}
+            </ScrollArea>
+          )}
         </nav>
 
         <div className="p-3 text-meta text-white/30 border-t border-white/5">
@@ -224,7 +234,7 @@ export default function App() {
           />
         </header>
 
-        <div className="flex-1 overflow-y-auto">
+        <ScrollArea className="flex-1 min-h-0">
           {error && (
             <div className="m-5 p-3 rounded bg-red-500/10 text-red-300 text-body-sm">
               {error}
@@ -246,7 +256,7 @@ export default function App() {
               </li>
             ))}
           </ul>
-        </div>
+        </ScrollArea>
       </main>
 
       {selected && (

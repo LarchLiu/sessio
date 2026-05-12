@@ -8,6 +8,7 @@ import {
   getSessionMessages,
 } from "../api";
 import Tag from "./Tag";
+import ScrollArea from "./ScrollArea";
 
 interface Props {
   session: SessionInfo;
@@ -211,7 +212,7 @@ function MessageStream({
   }, [agent, filePath, sessionId, available]);
 
   return (
-    <div className="flex-1 overflow-y-auto px-5 py-4">
+    <ScrollArea className="flex-1 min-h-0" viewportClassName="px-5 py-4">
       {subagentDesc && (
         <div className="text-body-sm text-purple-300/85 bg-purple-500/[0.06] border border-purple-500/15 rounded p-3 mb-4 leading-relaxed">
           <span className="text-purple-200/60 uppercase text-caption mr-2 font-medium">
@@ -241,7 +242,7 @@ function MessageStream({
           <MessageBubble key={i} msg={m} />
         ))}
       </div>
-    </div>
+    </ScrollArea>
   );
 }
 
