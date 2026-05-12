@@ -1,0 +1,99 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Agent {
+    Codex,
+    Claude,
+    Gemini,
+}
+
+impl Agent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Agent::Codex => "codex",
+            Agent::Claude => "claude",
+            Agent::Gemini => "gemini",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub id: String,
+    pub agent: Agent,
+    pub project_path: Option<String>,
+    pub project_name: Option<String>,
+    pub started_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub message_count: usize,
+    pub first_user_message: Option<String>,
+    pub file_path: String,
+    pub file_size: u64,
+    pub partial: bool,
+    pub available: bool,
+    pub archived: bool,
+    #[serde(default)]
+    pub subagents: Vec<SubagentInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInfo {
+    pub id: String,
+    pub agent_type: Option<String>,
+    pub description: Option<String>,
+    pub started_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    pub message_count: usize,
+    pub first_user_message: Option<String>,
+    pub file_path: String,
+    pub file_size: u64,
+    pub partial: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMessage {
+    pub role: String,
+    pub text: String,
+    pub timestamp: Option<i64>,
+}
+
+pub fn truncate_preview(s: &str, max_chars: usize) -> String {
+    let trimmed = s.trim();
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in trimmed.chars() {
+        if count >= max_chars {
+            out.push('…');
+            break;
+        }
+        if ch == '\n' || ch == '\r' {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+        count += 1;
+    }
+    out
+}
+
+pub fn is_system_noise(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("<environment_context>")
+        || t.starts_with("<INSTRUCTIONS>")
+        || t.starts_with("# AGENTS.md")
+        || t.starts_with("<system-reminder>")
+        || t.starts_with("<command-name>")
+        || t.starts_with("<command-message>")
+        || t.starts_with("<command-args>")
+        || t.starts_with("<local-command-stdout>")
+        || t.starts_with("<local-command-caveat>")
+        || t.starts_with("<bash-input>")
+        || t.starts_with("<bash-stdout>")
+        || t.starts_with("<bash-stderr>")
+        || t.starts_with("<user-memory-input>")
+        || t.starts_with("Caveat:")
+}
