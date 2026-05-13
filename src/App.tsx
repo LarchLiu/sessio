@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder } from "lucide-react";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
@@ -16,6 +17,9 @@ type Filter =
   | { kind: "project"; key: string; label: string };
 
 const AGENT_ORDER: Agent[] = ["codex", "claude", "gemini"];
+
+const IS_MAC =
+  typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
 function projectKey(s: SessionInfo): string {
   return s.projectPath ?? `__unknown__:${s.agent}`;
@@ -37,10 +41,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
-  const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<SessionInfo | null>(null);
   const [expandAgent, setExpandAgent] = useState(true);
   const [expandProject, setExpandProject] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,22 +124,12 @@ export default function App() {
   );
 
   const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
     return sessions.filter((s) => {
       if (filter.kind === "agent" && s.agent !== filter.agent) return false;
       if (filter.kind === "project" && projectKey(s) !== filter.key) return false;
-      if (!q) return true;
-      const hay = [
-        s.projectPath ?? "",
-        s.projectName ?? "",
-        s.firstUserMessage ?? "",
-        s.id,
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
+      return true;
     });
-  }, [sessions, filter, query]);
+  }, [sessions, filter]);
 
   const visibleCount = useMemo(
     () => visible.filter((s) => !isSubagentOnly(s)).length,
@@ -151,10 +145,28 @@ export default function App() {
 
   return (
     <div className="flex h-screen text-body">
-      <aside className="w-64 shrink-0 border-r border-white/5 bg-[#22252e] flex flex-col">
-        <div data-tauri-drag-region className="h-12 shrink-0" />
+      <aside
+        className={
+          "shrink-0 border-r border-white/5 bg-[#22252e] flex flex-col overflow-hidden transition-[width] duration-600 ease-in-out " +
+          (sidebarOpen ? "w-64" : "w-0")
+        }
+      >
+        <div
+          data-tauri-drag-region
+          className="relative h-12 shrink-0 w-64"
+        >
+          <button
+            type="button"
+            aria-label="Close sidebar"
+            data-tauri-drag-region="false"
+            onClick={() => setSidebarOpen(false)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-white/55 hover:text-white transition rounded-md"
+          >
+            <PanelLeftClose className="w-4 h-4" />
+          </button>
+        </div>
 
-        <nav className="flex-1 min-h-0 p-2 flex flex-col gap-0.5">
+        <nav className="flex-1 min-h-0 w-64 p-2 flex flex-col gap-0.5">
           <div className="shrink-0 flex flex-col gap-0.5">
             <SidebarItem
               label="All Sessions"
@@ -209,7 +221,7 @@ export default function App() {
           )}
         </nav>
 
-        <div className="p-3 text-meta text-white/30 border-t border-white/5">
+        <div className="w-64 p-3 text-meta text-white/30 border-t border-white/5">
           {loading ? "Loading…" : `${totalRealSessions} sessions`}
         </div>
       </aside>
@@ -217,21 +229,49 @@ export default function App() {
       <main className="flex-1 flex flex-col min-w-0">
         <div
           data-tauri-drag-region
-          className="h-12 shrink-0 bg-[#0f1014] border-b border-white/10"
-        />
-        <header className="flex items-center gap-3 px-5 py-3 border-b border-white/5 bg-[#0f1014]">
-          <h1 className="text-title font-medium truncate">{headerLabel}</h1>
-          <span className="text-white/40 text-body-sm tabular-nums">
-            {visibleCount}
-          </span>
-          <div className="flex-1" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search project, message, id…"
-            className="w-72 bg-white/5 border border-white/5 rounded-md px-3 py-1.5 text-body placeholder:text-white/30 focus:outline-none focus:border-white/20"
-          />
-        </header>
+          className="relative h-12 shrink-0 flex items-center justify-center px-5 bg-[#0f1014] border-b border-white/10"
+        >
+          <button
+            type="button"
+            aria-label="Open sidebar"
+            data-tauri-drag-region="false"
+            onClick={() => setSidebarOpen(true)}
+            className={
+              "absolute top-1/2 -translate-y-1/2 p-1 text-white/55 hover:text-white rounded-md transition-opacity duration-300 " +
+              (IS_MAC ? "left-24 " : "left-3 ") +
+              (sidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
+            }
+          >
+            <PanelLeftOpen className="w-4 h-4" />
+          </button>
+          <div className="flex items-center gap-2 min-w-0">
+            {!sidebarOpen && (
+              <>
+                {filter.kind === "agent" && (
+                  <Bot
+                    className="w-4 h-4 shrink-0"
+                    style={{ color: AGENT_ACCENT[filter.agent] }}
+                  />
+                )}
+                {filter.kind === "project" && (
+                  <Folder className="w-4 h-4 shrink-0 text-white/55" />
+                )}
+                <h1 className="text-title font-medium truncate">{headerLabel}</h1>
+              </>
+            )}
+            <span className="text-white/40 text-body-sm tabular-nums">
+              {visibleCount} sessions
+            </span>
+          </div>
+          <button
+            type="button"
+            aria-label="Search"
+            data-tauri-drag-region="false"
+            className="absolute right-5 top-1/2 -translate-y-1/2 p-1 text-white/55 hover:text-white transition rounded-md"
+          >
+            <Search className="w-4 h-4" />
+          </button>
+        </div>
 
         <ScrollArea className="flex-1 min-h-0">
           {error && (
