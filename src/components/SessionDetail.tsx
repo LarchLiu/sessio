@@ -10,6 +10,7 @@ import {
 } from "../api";
 import Tag from "./Tag";
 import ScrollArea from "./ScrollArea";
+import Tooltip from "./Tooltip";
 
 interface Props {
   session: SessionInfo;
@@ -271,7 +272,7 @@ function UserNav({
   viewportRef,
 }: {
   messages: SessionMessage[];
-  refs: React.MutableRefObject<(HTMLDivElement | null)[]>;
+  refs: React.RefObject<(HTMLDivElement | null)[]>;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const userIndices = useMemo(
@@ -341,48 +342,48 @@ function UserNav({
   return (
     <div className="absolute right-0.5 top-2 bottom-2 z-10 w-5">
       {userIndices.map((idx) => {
-        const preview = messages[idx].text
-          .replace(/\s+/g, " ")
-          .trim()
-          .slice(0, 200);
         const ratio = positions.get(idx);
         if (ratio === undefined) return null;
-        return (
-          <button
-            key={idx}
-            type="button"
-            onClick={() =>
-              refs.current[idx]?.scrollIntoView({
-                behavior: "smooth",
-                block: "start",
-              })
-            }
-            style={{ top: `${ratio * 100}%`, transform: "translateY(-50%)" }}
-            className="group absolute right-0 cursor-pointer p-1.5"
-            aria-label={`Jump to user message ${idx + 1}`}
+        const text = messages[idx].text;
+        const preview = text.replace(/\s+/g, " ").trim().slice(0, 200);
+        const tip = (
+          <div
+            className="w-72 whitespace-normal"
+            style={{
+              display: "-webkit-box",
+              WebkitLineClamp: 3,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
           >
-            <span
-              className={
-                "block w-1.5 h-1.5 rounded-full transition " +
-                (idx === activeIdx
-                  ? "bg-ink scale-125"
-                  : "bg-ink/25 group-hover:bg-ink")
+            {preview}
+            {text.length > 200 ? "…" : ""}
+          </div>
+        );
+        return (
+          <Tooltip key={idx} content={tip} placement="left" offset={12}>
+            <button
+              type="button"
+              onClick={() =>
+                refs.current[idx]?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "start",
+                })
               }
-            />
-            <div className="hidden group-hover:block absolute right-full mr-3 top-1/2 -translate-y-1/2 w-72 bg-tooltip-bg/90 border border-ink/10 text-tooltip-fg/90 text-body-sm px-3 py-2 rounded shadow-lg leading-relaxed pointer-events-none">
+              style={{ top: `${ratio * 100}%`, transform: "translateY(-50%)" }}
+              className="group absolute right-0 cursor-pointer p-1.5"
+              aria-label={`Jump to user message ${idx + 1}`}
+            >
               <span
-                style={{
-                  display: "-webkit-box",
-                  WebkitLineClamp: 3,
-                  WebkitBoxOrient: "vertical",
-                  overflow: "hidden",
-                }}
-              >
-                {preview}
-                {messages[idx].text.length > 200 ? "…" : ""}
-              </span>
-            </div>
-          </button>
+                className={
+                  "block w-1.5 h-1.5 rounded-full transition " +
+                  (idx === activeIdx
+                    ? "bg-ink scale-125"
+                    : "bg-ink/25 group-hover:bg-ink")
+                }
+              />
+            </button>
+          </Tooltip>
         );
       })}
     </div>

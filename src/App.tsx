@@ -11,6 +11,7 @@ import {
 import SessionDetail from "./components/SessionDetail";
 import ScrollArea from "./components/ScrollArea";
 import Tag from "./components/Tag";
+import Tooltip from "./components/Tooltip";
 import { ThemeMode, useTheme } from "./theme";
 
 type Filter =
@@ -158,15 +159,17 @@ export default function App() {
           data-tauri-drag-region
           className="relative h-12 shrink-0 w-64"
         >
-          <button
-            type="button"
-            aria-label="Close sidebar"
-            data-tauri-drag-region="false"
-            onClick={() => setSidebarOpen(false)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
-          >
-            <PanelLeftClose className="w-4 h-4" />
-          </button>
+          <Tooltip content="Close sidebar" placement="bottom">
+            <button
+              type="button"
+              aria-label="Close sidebar"
+              data-tauri-drag-region="false"
+              onClick={() => setSidebarOpen(false)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </button>
+          </Tooltip>
         </div>
 
         <nav className="flex-1 min-h-0 w-64 p-2 flex flex-col gap-0.5">
@@ -237,19 +240,21 @@ export default function App() {
           data-tauri-drag-region
           className="relative h-12 shrink-0 flex items-center justify-center px-5 bg-surface border-b border-ink/10"
         >
-          <button
-            type="button"
-            aria-label="Open sidebar"
-            data-tauri-drag-region="false"
-            onClick={() => setSidebarOpen(true)}
-            className={
-              "absolute top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink rounded-md transition-opacity duration-300 " +
-              (IS_MAC ? "left-24 " : "left-3 ") +
-              (sidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
-            }
-          >
-            <PanelLeftOpen className="w-4 h-4" />
-          </button>
+          <Tooltip content="Open sidebar" placement="bottom">
+            <button
+              type="button"
+              aria-label="Open sidebar"
+              data-tauri-drag-region="false"
+              onClick={() => setSidebarOpen(true)}
+              className={
+                "absolute top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink rounded-md transition-opacity duration-300 " +
+                (IS_MAC ? "left-24 " : "left-3 ") +
+                (sidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
+              }
+            >
+              <PanelLeftOpen className="w-4 h-4" />
+            </button>
+          </Tooltip>
           <div className="flex items-center gap-2 min-w-0">
             {!sidebarOpen && (
               <>
@@ -269,14 +274,16 @@ export default function App() {
               {visibleCount} sessions
             </span>
           </div>
-          <button
-            type="button"
-            aria-label="Search"
-            data-tauri-drag-region="false"
-            className="absolute right-5 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
-          >
-            <Search className="w-4 h-4" />
-          </button>
+          <Tooltip content="Search" placement="bottom">
+            <button
+              type="button"
+              aria-label="Search"
+              data-tauri-drag-region="false"
+              className="absolute right-5 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+          </Tooltip>
         </div>
 
         <ScrollArea className="flex-1 min-h-0">
@@ -464,21 +471,21 @@ function ThemeSwitcher({
       {items.map(({ value, icon: Icon, label }) => {
         const active = mode === value;
         return (
-          <button
-            key={value}
-            type="button"
-            onClick={() => onChange(value)}
-            aria-label={label}
-            title={label}
-            className={
-              "p-1 rounded transition " +
-              (active
-                ? "bg-ink/10 text-ink"
-                : "text-ink/45 hover:text-ink/80")
-            }
-          >
-            <Icon className="w-3.5 h-3.5" />
-          </button>
+          <Tooltip key={value} content={label} placement="top">
+            <button
+              type="button"
+              onClick={() => onChange(value)}
+              aria-label={label}
+              className={
+                "p-1 rounded transition " +
+                (active
+                  ? "bg-ink/10 text-ink"
+                  : "text-ink/45 hover:text-ink/80")
+              }
+            >
+              <Icon className="w-3.5 h-3.5" />
+            </button>
+          </Tooltip>
         );
       })}
     </div>
