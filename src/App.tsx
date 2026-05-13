@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown } from "lucide-react";
 import {
   AGENT_ACCENT,
@@ -49,6 +49,11 @@ export default function App() {
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const { mode, setMode } = useTheme();
+  const listScrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    listScrollRef.current?.scrollTo(0, 0);
+  }, [filter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,7 +291,7 @@ export default function App() {
           </Tooltip>
         </div>
 
-        <ScrollArea className="flex-1 min-h-0">
+        <ScrollArea ref={listScrollRef} className="flex-1 min-h-0">
           {error && (
             <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
               {error}
