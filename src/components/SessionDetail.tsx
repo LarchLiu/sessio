@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
@@ -402,9 +402,62 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
   const preview = collapsible
     ? msg.text.replace(/\s+/g, " ").slice(0, 200)
     : "";
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const anchorTopRef = useRef<number | null>(null);
+
+  function findScroller(el: HTMLElement | null): HTMLElement | null {
+    let node = el?.parentElement ?? null;
+    while (node) {
+      const oy = getComputedStyle(node).overflowY;
+      if (oy === "auto" || oy === "scroll") return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  const toggle = () => {
+    const bubble = bubbleRef.current;
+    const scroller = findScroller(bubble);
+    if (bubble && scroller) {
+      anchorTopRef.current =
+        bubble.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top;
+    }
+    setCollapsed((v) => !v);
+  };
+
+  useLayoutEffect(() => {
+    const before = anchorTopRef.current;
+    if (before === null) return;
+    anchorTopRef.current = null;
+    const bubble = bubbleRef.current;
+    const scroller = findScroller(bubble);
+    if (!bubble || !scroller) return;
+    const after =
+      bubble.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top;
+    // 折叠时若 title 已被滚出视口顶部，拉回到视口顶部；其余保持原位
+    const target = collapsed && before < 0 ? 0 : before;
+    const delta = after - target;
+    if (delta !== 0) scroller.scrollTop += delta;
+  }, [collapsed]);
+
   return (
-    <div className="rounded-lg px-4 py-3 text-body leading-relaxed whitespace-pre-wrap break-words bg-white/[0.06] border border-white/[0.04]">
-      <div className="flex items-center gap-2 mb-2">
+    <div
+      ref={bubbleRef}
+      className="rounded-lg px-4 py-3 text-body leading-relaxed whitespace-pre-wrap break-words bg-white/[0.06] border border-white/[0.04]"
+    >
+      <div
+        className={
+          "flex items-center gap-2 mb-2 " +
+          (collapsible
+            ? "cursor-pointer select-none hover:text-white/70"
+            : "")
+        }
+        onClick={collapsible ? toggle : undefined}
+        role={collapsible ? "button" : undefined}
+        aria-expanded={collapsible ? !collapsed : undefined}
+      >
         <span className="text-caption uppercase text-white/40 font-medium">
           {msg.role}
         </span>
@@ -433,7 +486,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
         <div className="mt-2 flex justify-center">
           <button
             type="button"
-            onClick={() => setCollapsed((v) => !v)}
+            onClick={toggle}
             aria-label={collapsed ? "Expand" : "Collapse"}
             className="text-white/70 hover:text-white text-lg leading-none px-4 py-1 rounded hover:bg-white/5 transition"
           >
