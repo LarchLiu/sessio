@@ -1,5 +1,5 @@
 [package]
-name = "sessio"
+name = "Sessio"
 version = "0.1.0"
 description = "Sessio - Agent sessions manager"
 authors = ["alex"]
