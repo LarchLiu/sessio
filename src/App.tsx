@@ -152,13 +152,7 @@ export default function App() {
   return (
     <div className="flex h-screen text-body">
       <aside className="w-64 shrink-0 border-r border-white/5 bg-[#22252e] flex flex-col">
-        <div data-tauri-drag-region className="h-7 shrink-0" />
-        <div className="px-4 py-3 border-b border-white/5">
-          <div className="text-title font-semibold tracking-tight">Sessio</div>
-          <div className="text-meta text-white/40 mt-0.5">
-            Agent sessions manager
-          </div>
-        </div>
+        <div data-tauri-drag-region className="h-12 shrink-0" />
 
         <nav className="flex-1 min-h-0 p-2 flex flex-col gap-0.5">
           <div className="shrink-0 flex flex-col gap-0.5">
@@ -196,8 +190,8 @@ export default function App() {
 
           {expandProject && (
             <ScrollArea
-              className="flex-1 min-h-0"
-              viewportClassName="flex flex-col gap-0.5"
+              className="flex-1 min-h-0 -mr-2"
+              viewportClassName="pr-3 flex flex-col gap-0.5"
             >
               {projectGroups.map((p) => (
                 <SidebarItem
@@ -223,7 +217,7 @@ export default function App() {
       <main className="flex-1 flex flex-col min-w-0">
         <div
           data-tauri-drag-region
-          className="h-7 shrink-0 bg-[#0f1014]"
+          className="h-12 shrink-0 bg-[#0f1014] border-b border-white/10"
         />
         <header className="flex items-center gap-3 px-5 py-3 border-b border-white/5 bg-[#0f1014]">
           <h1 className="text-title font-medium truncate">{headerLabel}</h1>
