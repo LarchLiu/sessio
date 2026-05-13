@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown } from "lucide-react";
 import {
   AGENT_ACCENT,
@@ -225,6 +225,7 @@ export default function App() {
                   onClick={() =>
                     setFilter({ kind: "project", key: p.key, label: p.label })
                   }
+                  icon={<Folder className="w-3.5 h-3.5 shrink-0 text-ink/55" />}
                   title={p.path ?? p.label}
                 />
               ))}
@@ -363,6 +364,7 @@ function SidebarItem({
   active,
   onClick,
   dot,
+  icon,
   title,
 }: {
   label: string;
@@ -370,6 +372,7 @@ function SidebarItem({
   active: boolean;
   onClick: () => void;
   dot?: string;
+  icon?: ReactNode;
   title?: string;
 }) {
   return (
@@ -383,7 +386,9 @@ function SidebarItem({
           : "text-ink/70 hover:bg-ink/5 hover:text-ink")
       }
     >
-      {dot !== undefined ? (
+      {icon !== undefined ? (
+        icon
+      ) : dot !== undefined ? (
         <span
           className="w-2 h-2 rounded-full shrink-0"
           style={{ background: dot }}
