@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::models::{
-    is_system_noise, strip_injected_context, truncate_preview, Agent, SessionInfo, SessionMessage,
+    is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
     SubagentInfo,
 };
 use crate::readers::jsonl_scan;
@@ -347,7 +347,7 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
                 if !text.trim().is_empty() && !is_system_noise(&text) {
                     let cleaned = strip_injected_context(&text);
                     if !cleaned.is_empty() {
-                        first_user_message = Some(truncate_preview(&cleaned, 160));
+                        first_user_message = Some(normalize_preview(&cleaned));
                     }
                 }
             }
@@ -543,7 +543,7 @@ fn parse_subagent(path: &Path) -> Result<Option<SubagentInfo>> {
                 if !text.trim().is_empty() && !is_system_noise(&text) {
                     let cleaned = strip_injected_context(&text);
                     if !cleaned.is_empty() {
-                        first_user_message = Some(truncate_preview(&cleaned, 160));
+                        first_user_message = Some(normalize_preview(&cleaned));
                     }
                 }
             }
@@ -619,7 +619,7 @@ fn info_from_index(
         .filter(|s| !s.trim().is_empty() && !is_system_noise(s))
         .map(|s| strip_injected_context(s))
         .filter(|s| !s.is_empty())
-        .map(|s| truncate_preview(&s, 160));
+        .map(|s| normalize_preview(&s));
     let (file_size, available) = if file_path.is_empty() {
         (0, false)
     } else {

@@ -249,12 +249,12 @@ export default function App() {
               <>
                 {filter.kind === "agent" && (
                   <Bot
-                    className="w-4 h-4 shrink-0"
+                    className="w-6 h-6 shrink-0"
                     style={{ color: AGENT_ACCENT[filter.agent] }}
                   />
                 )}
                 {filter.kind === "project" && (
-                  <Folder className="w-4 h-4 shrink-0 text-white/55" />
+                  <Folder className="w-5 h-5 shrink-0 text-white/55" />
                 )}
                 <h1 className="text-title font-medium truncate">{headerLabel}</h1>
               </>
@@ -291,7 +291,7 @@ export default function App() {
                 onClick={() => setSelected(s)}
                 className="px-5 py-3.5 cursor-pointer hover:bg-white/[0.03] transition"
               >
-                <SessionRow item={s} />
+                <SessionRow item={s} filter={filter} />
               </li>
             ))}
           </ul>
@@ -389,28 +389,34 @@ function SidebarItem({
   );
 }
 
-function SessionRow({ item }: { item: SessionInfo }) {
+function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
   const accent = AGENT_ACCENT[item.agent];
   return (
     <div className="min-w-0">
-      <div className="flex items-center gap-2 mb-1">
-        <span
-          className="w-2 h-2 rounded-full shrink-0"
-          style={{ background: accent }}
-          title={AGENT_LABEL[item.agent]}
+      <div className={"pl-4 text-body line-clamp-3" + (item.archived ? " text-white/55" : " text-white/90")}>
+        {item.firstUserMessage ?? (
+          <span className="text-white/30">(no user message)</span>
+        )}
+      </div>
+      <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-white/40">
+      {filter.kind !== "project" && (
+        <>
+        <Folder
+          className="w-4 h-4 shrink-0"
         />
         <span
-          className={
-            "text-body font-medium truncate " +
-            (item.archived ? "text-white/55" : "text-white/90")
-          }
+          className="text-body font-medium truncate text-white/55"
         >
           {item.projectName ?? item.projectPath ?? "(unknown project)"}
         </span>
+        </>
+      )}
+      {filter.kind !== "agent" && (
         <Tag
           label={AGENT_LABEL[item.agent]}
           style={{ background: `${accent}22`, color: accent }}
         />
+      )}
         {item.subagents.length > 0 && (
           <Tag
             label={`+${item.subagents.length} subagent${item.subagents.length > 1 ? "s" : ""}`}
@@ -425,27 +431,12 @@ function SessionRow({ item }: { item: SessionInfo }) {
             title="JSONL file was removed by the agent; only index metadata remains."
           />
         )}
-      </div>
-      <div className="pl-4 text-body-sm text-white/55 truncate">
-        {item.firstUserMessage ?? (
-          <span className="text-white/30">(no user message)</span>
-        )}
-      </div>
-      <div className="pl-4 mt-1.5 flex items-center gap-3 text-meta text-white/40">
         <span>{formatTime(item.updatedAt ?? item.startedAt)}</span>
         <span>·</span>
         <span>
           {item.partial && !item.archived ? "~" : ""}
           {item.messageCount} msgs
         </span>
-        {item.projectPath && (
-          <>
-            <span>·</span>
-            <span className="truncate font-mono text-caption text-white/30">
-              {item.projectPath}
-            </span>
-          </>
-        )}
       </div>
     </div>
   );

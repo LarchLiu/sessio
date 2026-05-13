@@ -61,21 +61,15 @@ pub struct SessionMessage {
     pub timestamp: Option<i64>,
 }
 
-pub fn truncate_preview(s: &str, max_chars: usize) -> String {
+pub fn normalize_preview(s: &str) -> String {
     let trimmed = s.trim();
-    let mut out = String::new();
-    let mut count = 0usize;
+    let mut out = String::with_capacity(trimmed.len());
     for ch in trimmed.chars() {
-        if count >= max_chars {
-            out.push('…');
-            break;
-        }
         if ch == '\n' || ch == '\r' {
             out.push(' ');
         } else {
             out.push(ch);
         }
-        count += 1;
     }
     out
 }

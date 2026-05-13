@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::models::{
-    is_system_noise, strip_injected_context, truncate_preview, Agent, SessionInfo, SessionMessage,
+    is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
 };
 use crate::readers::jsonl_scan;
 use crate::readers::system_time_to_millis;
@@ -170,7 +170,7 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
                         if !is_system_noise(&text) {
                             let cleaned = strip_injected_context(&text);
                             if !cleaned.is_empty() {
-                                first_user_message = Some(truncate_preview(&cleaned, 160));
+                                first_user_message = Some(normalize_preview(&cleaned));
                             }
                         }
                     }

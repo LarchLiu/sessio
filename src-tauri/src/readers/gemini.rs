@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::models::{is_system_noise, truncate_preview, Agent, SessionInfo, SessionMessage};
+use crate::models::{is_system_noise, normalize_preview, Agent, SessionInfo, SessionMessage};
 use crate::readers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
@@ -168,7 +168,7 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
             && !text.trim_start().starts_with('/')
             && !is_system_noise(&text)
         {
-            agg.first_user = Some(truncate_preview(&text, 160));
+            agg.first_user = Some(normalize_preview(&text));
         }
     }
 
