@@ -12,6 +12,7 @@ import {
 import Tag from "./Tag";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
+import { localeTag, useI18n } from "../i18n";
 
 interface Props {
   session: SessionInfo;
@@ -23,6 +24,7 @@ type Tab =
   | { kind: "sub"; sub: SubagentInfo };
 
 export default function SessionDetail({ session, onClose }: Props) {
+  const { t } = useI18n();
   const defaultTab: Tab = useMemo(
     () =>
       session.available
@@ -51,7 +53,7 @@ export default function SessionDetail({ session, onClose }: Props) {
           <div className="flex-1 min-w-0">
             <div className="text-subtitle font-medium truncate">
               {session.firstUserMessage ?? (
-                <span className="text-ink/30">(no user message)</span>
+                <span className="text-ink/30">{t("list.no_user_message")}</span>
               )}
             </div>
             {session.projectPath && (
@@ -69,7 +71,7 @@ export default function SessionDetail({ session, onClose }: Props) {
               </span>
               {session.archived && (
                 <Tag
-                  label="archived"
+                  label={t("list.archived")}
                   className="bg-ink/5 text-ink/40 border border-ink/5"
                 />
               )}
@@ -78,7 +80,7 @@ export default function SessionDetail({ session, onClose }: Props) {
           <button
             onClick={onClose}
             className="text-ink/40 hover:text-ink text-2xl leading-none px-2"
-            aria-label="Close"
+            aria-label={t("detail.close")}
           >
             ×
           </button>
@@ -90,11 +92,11 @@ export default function SessionDetail({ session, onClose }: Props) {
               active={tab.kind === "main"}
               disabled={!session.available}
               onClick={() => setTab({ kind: "main" })}
-              label="Main"
+              label={t("detail.main")}
               sub={
                 session.available
-                  ? `${session.messageCount}${session.partial ? "~" : ""} msgs`
-                  : "no jsonl"
+                  ? `${session.partial ? "~" : ""}${t("detail.msgs", { count: session.messageCount })}`
+                  : t("detail.no_jsonl")
               }
             />
             {session.subagents.map((s) => (
@@ -102,8 +104,8 @@ export default function SessionDetail({ session, onClose }: Props) {
                 key={s.id}
                 active={tab.kind === "sub" && tab.sub.id === s.id}
                 onClick={() => setTab({ kind: "sub", sub: s })}
-                label={s.agentType ?? "agent"}
-                sub={`${s.messageCount} msgs`}
+                label={s.agentType ?? t("detail.default_subagent_type")}
+                sub={t("detail.msgs", { count: s.messageCount })}
                 accent="rgb(var(--color-accent-purple))"
                 tooltip={s.description ?? s.id}
               />
@@ -121,8 +123,8 @@ export default function SessionDetail({ session, onClose }: Props) {
           }
           emptyHint={
             tab.kind === "main"
-              ? "Session content is no longer on disk — the agent removed the JSONL file and only metadata remains."
-              : "Subagent jsonl unreadable."
+              ? t("detail.session_archived")
+              : t("detail.subagent_unreadable")
           }
           subagentDesc={tab.kind === "sub" ? tab.sub.description : null}
         />
@@ -190,6 +192,7 @@ function MessageStream({
   emptyHint: string;
   subagentDesc: string | null;
 }) {
+  const { t } = useI18n();
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -228,7 +231,7 @@ function MessageStream({
         {subagentDesc && (
           <div className="text-body-sm text-accent-purple bg-accent-purple/[0.08] border border-accent-purple/20 rounded p-3 mb-4 leading-relaxed">
             <span className="text-accent-purple/70 uppercase text-caption mr-2 font-medium">
-              task
+              {t("detail.task")}
             </span>
             {subagentDesc}
           </div>
@@ -239,7 +242,7 @@ function MessageStream({
           </div>
         )}
         {loading && (
-          <div className="text-ink/40 text-body">Loading messages…</div>
+          <div className="text-ink/40 text-body">{t("detail.loading_messages")}</div>
         )}
         {error && (
           <div className="text-status-error text-body-sm bg-status-error/10 rounded p-3">
@@ -247,7 +250,7 @@ function MessageStream({
           </div>
         )}
         {!loading && !error && available && messages.length === 0 && (
-          <div className="text-ink/40 text-body">No messages.</div>
+          <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
         )}
         <div className="flex flex-col gap-4">
           {messages.map((m, i) => (
@@ -276,6 +279,7 @@ function UserNav({
   refs: React.RefObject<(HTMLDivElement | null)[]>;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
+  const { t } = useI18n();
   const userIndices = useMemo(
     () =>
       messages
@@ -373,7 +377,7 @@ function UserNav({
               }
               style={{ top: `${ratio * 100}%`, transform: "translateY(-50%)" }}
               className="group absolute right-0 cursor-pointer p-1.5"
-              aria-label={`Jump to user message ${idx + 1}`}
+              aria-label={t("detail.jump_to_user_msg", { n: idx + 1 })}
             >
               <span
                 className={
@@ -392,6 +396,7 @@ function UserNav({
 }
 
 function MessageBubble({ msg }: { msg: SessionMessage }) {
+  const { lang, t } = useI18n();
   const LONG_TOOL_THRESHOLD = 500;
   const isToolLike =
     msg.role === "tool_call" || msg.role === "tool_result";
@@ -464,7 +469,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
         </span>
         {msg.timestamp && (
           <span className="text-caption text-ink/30">
-            {new Date(msg.timestamp).toLocaleString([], {
+            {new Date(msg.timestamp).toLocaleString(localeTag(lang), {
               hour: "2-digit",
               minute: "2-digit",
               month: "short",
@@ -488,7 +493,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
           <button
             type="button"
             onClick={toggle}
-            aria-label={collapsed ? "Expand" : "Collapse"}
+            aria-label={collapsed ? t("detail.expand") : t("detail.collapse")}
             className="text-ink/70 hover:text-ink leading-none px-4 py-1 rounded hover:bg-ink/5 transition"
           >
             {collapsed ? (

@@ -13,6 +13,7 @@ import ScrollArea from "./components/ScrollArea";
 import Tag from "./components/Tag";
 import Tooltip from "./components/Tooltip";
 import { ThemeMode, useTheme } from "./theme";
+import { Lang, localeTag, useI18n } from "./i18n";
 
 type Filter =
   | { kind: "all" }
@@ -26,10 +27,6 @@ const IS_MAC =
 
 function projectKey(s: SessionInfo): string {
   return s.projectPath ?? `__unknown__:${s.agent}`;
-}
-
-function projectLabel(s: SessionInfo): string {
-  return s.projectName ?? s.projectPath ?? "(unknown project)";
 }
 
 // Orphan main session that only exists to carry subagents (Claude cleaned
@@ -49,6 +46,7 @@ export default function App() {
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const { mode, setMode } = useTheme();
+  const { lang, setLang, t } = useI18n();
   const listScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -105,27 +103,28 @@ export default function App() {
       string,
       { label: string; count: number; path: string | null; latest: number }
     >();
+    const unknown = t("list.unknown_project");
     for (const s of sessions) {
       if (isSubagentOnly(s)) continue;
       const key = projectKey(s);
-      const t = s.updatedAt ?? s.startedAt ?? 0;
+      const ts = s.updatedAt ?? s.startedAt ?? 0;
       const e = m.get(key);
       if (e) {
         e.count += 1;
-        if (t > e.latest) e.latest = t;
+        if (ts > e.latest) e.latest = ts;
       } else {
         m.set(key, {
-          label: projectLabel(s),
+          label: s.projectName ?? s.projectPath ?? unknown,
           count: 1,
           path: s.projectPath,
-          latest: t,
+          latest: ts,
         });
       }
     }
     return [...m.entries()]
       .map(([key, v]) => ({ key, ...v }))
       .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label));
-  }, [sessions]);
+  }, [sessions, t]);
 
   const totalRealSessions = useMemo(
     () => sessions.filter((s) => !isSubagentOnly(s)).length,
@@ -147,7 +146,7 @@ export default function App() {
 
   const headerLabel =
     filter.kind === "all"
-      ? "All Sessions"
+      ? t("sidebar.all_sessions")
       : filter.kind === "agent"
         ? AGENT_LABEL[filter.agent]
         : filter.label;
@@ -164,10 +163,10 @@ export default function App() {
           data-tauri-drag-region
           className="relative h-12 shrink-0 w-64"
         >
-          <Tooltip content="Close sidebar" placement="bottom">
+          <Tooltip content={t("sidebar.close")} placement="bottom">
             <button
               type="button"
-              aria-label="Close sidebar"
+              aria-label={t("sidebar.close")}
               data-tauri-drag-region="false"
               onClick={() => setSidebarOpen(false)}
               className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
@@ -180,7 +179,7 @@ export default function App() {
         <nav className="flex-1 min-h-0 w-64 p-2 flex flex-col gap-0.5">
           <div className="shrink-0 flex flex-col gap-0.5">
             <SidebarItem
-              label="All Sessions"
+              label={t("sidebar.all_sessions")}
               count={totalRealSessions}
               active={filter.kind === "all"}
               onClick={() => setFilter({ kind: "all" })}
@@ -188,7 +187,7 @@ export default function App() {
             />
 
             <SectionHeader
-              label="By Agent"
+              label={t("sidebar.by_agent")}
               collapsed={!expandAgent}
               onToggle={() => setExpandAgent((v) => !v)}
             />
@@ -205,7 +204,7 @@ export default function App() {
               ))}
 
             <SectionHeader
-              label="By Project"
+              label={t("sidebar.by_project")}
               collapsed={!expandProject}
               onToggle={() => setExpandProject((v) => !v)}
             />
@@ -233,11 +232,16 @@ export default function App() {
           )}
         </nav>
 
-        <div className="w-64 px-3 py-2 flex items-center justify-between border-t border-ink/5">
-          <span className="text-meta text-ink/30">
-            {loading ? "Loading…" : `${totalRealSessions} sessions`}
+        <div className="w-64 px-3 py-2 flex items-center justify-between gap-2 border-t border-ink/5">
+          <span className="text-meta text-ink/30 truncate">
+            {loading
+              ? t("sidebar.loading")
+              : t("sidebar.sessions_count", { count: totalRealSessions })}
           </span>
-          <ThemeSwitcher mode={mode} onChange={setMode} />
+          <div className="shrink-0 flex items-center gap-1">
+            <LanguageSwitcher lang={lang} onChange={setLang} />
+            <ThemeSwitcher mode={mode} onChange={setMode} />
+          </div>
         </div>
       </aside>
 
@@ -246,10 +250,10 @@ export default function App() {
           data-tauri-drag-region
           className="relative h-12 shrink-0 flex items-center justify-center px-5 bg-surface border-b border-ink/10"
         >
-          <Tooltip content="Open sidebar" placement="bottom">
+          <Tooltip content={t("sidebar.open")} placement="bottom">
             <button
               type="button"
-              aria-label="Open sidebar"
+              aria-label={t("sidebar.open")}
               data-tauri-drag-region="false"
               onClick={() => setSidebarOpen(true)}
               className={
@@ -277,13 +281,13 @@ export default function App() {
               </>
             )}
             <span className="text-ink/40 text-body-sm tabular-nums">
-              {visibleCount} sessions
+              {t("header.sessions_count", { count: visibleCount })}
             </span>
           </div>
-          <Tooltip content="Search" placement="bottom">
+          <Tooltip content={t("header.search")} placement="bottom">
             <button
               type="button"
-              aria-label="Search"
+              aria-label={t("header.search")}
               data-tauri-drag-region="false"
               className="absolute right-5 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
             >
@@ -300,7 +304,7 @@ export default function App() {
           )}
           {!error && !loading && visible.length === 0 && (
             <div className="p-10 text-center text-ink/40 text-body">
-              No sessions found.
+              {t("list.empty")}
             </div>
           )}
           <ul className="divide-y divide-ink/5">
@@ -403,11 +407,13 @@ function SidebarItem({
 }
 
 function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
+  const { lang, t } = useI18n();
+  const subCount = item.subagents.length;
   return (
     <div className="min-w-0">
       <div className={"pl-4 text-body line-clamp-3" + (item.archived ? " text-ink/55" : " text-ink/90")}>
         {item.firstUserMessage ?? (
-          <span className="text-ink/30">(no user message)</span>
+          <span className="text-ink/30">{t("list.no_user_message")}</span>
         )}
       </div>
       <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-ink/40">
@@ -419,7 +425,7 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
         <span
           className="text-body font-medium truncate text-ink/55"
         >
-          {item.projectName ?? item.projectPath ?? "(unknown project)"}
+          {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
         </span>
         </>
       )}
@@ -429,25 +435,31 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
           style={{ background: agentTint(item.agent, 0.13), color: AGENT_ACCENT[item.agent] }}
         />
       )}
-        {item.subagents.length > 0 && (
+        {subCount > 0 && (
           <Tag
-            label={`+${item.subagents.length} subagent${item.subagents.length > 1 ? "s" : ""}`}
+            label={t("list.subagent_count", {
+              count: subCount,
+              s: subCount > 1 ? "s" : "",
+            })}
             className="bg-accent-purple/[0.10] text-accent-purple border border-accent-purple/25"
-            title={`${item.subagents.length} subagent invocation${item.subagents.length > 1 ? "s" : ""}`}
+            title={t("list.subagent_tooltip", {
+              count: subCount,
+              s: subCount > 1 ? "s" : "",
+            })}
           />
         )}
         {item.archived && (
           <Tag
-            label="archived"
+            label={t("list.archived")}
             className="bg-ink/5 text-ink/40 border border-ink/5"
-            title="JSONL file was removed by the agent; only index metadata remains."
+            title={t("list.archived_tooltip")}
           />
         )}
-        <span>{formatTime(item.updatedAt ?? item.startedAt)}</span>
+        <span>{formatTime(item.updatedAt ?? item.startedAt, localeTag(lang))}</span>
         <span>·</span>
         <span>
           {item.partial && !item.archived ? "~" : ""}
-          {item.messageCount} msgs
+          {t("list.msgs", { count: item.messageCount })}
         </span>
       </div>
     </div>
@@ -461,10 +473,11 @@ function ThemeSwitcher({
   mode: ThemeMode;
   onChange: (m: ThemeMode) => void;
 }) {
+  const { t } = useI18n();
   const items: { value: ThemeMode; icon: typeof Sun; label: string }[] = [
-    { value: "light", icon: Sun, label: "Light" },
-    { value: "dark", icon: Moon, label: "Dark" },
-    { value: "system", icon: Monitor, label: "System" },
+    { value: "light", icon: Sun, label: t("theme.light") },
+    { value: "dark", icon: Moon, label: t("theme.dark") },
+    { value: "system", icon: Monitor, label: t("theme.system") },
   ];
   return (
     <div className="flex items-center gap-0.5 rounded-md bg-ink/[0.04] p-0.5">
@@ -492,7 +505,45 @@ function ThemeSwitcher({
   );
 }
 
-function formatTime(ts: number | null): string {
+function LanguageSwitcher({
+  lang,
+  onChange,
+}: {
+  lang: Lang;
+  onChange: (l: Lang) => void;
+}) {
+  const { t } = useI18n();
+  const items: { value: Lang; label: string; tip: string }[] = [
+    { value: "en", label: "EN", tip: t("lang.english") },
+    { value: "zh", label: "中", tip: t("lang.chinese") },
+  ];
+  return (
+    <div className="flex items-center gap-0.5 rounded-md bg-ink/[0.04] p-0.5">
+      {items.map(({ value, label, tip }) => {
+        const active = lang === value;
+        return (
+          <Tooltip key={value} content={tip} placement="top">
+            <button
+              type="button"
+              onClick={() => onChange(value)}
+              aria-label={tip}
+              className={
+                "px-1.5 h-[22px] min-w-[22px] flex items-center justify-center rounded text-caption font-medium leading-none transition " +
+                (active
+                  ? "bg-ink/10 text-ink"
+                  : "text-ink/45 hover:text-ink/80")
+              }
+            >
+              {label}
+            </button>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatTime(ts: number | null, locale: string): string {
   if (!ts) return "—";
   const d = new Date(ts);
   const now = new Date();
@@ -501,12 +552,12 @@ function formatTime(ts: number | null): string {
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
   if (sameDay) {
-    return d.toLocaleTimeString([], {
+    return d.toLocaleTimeString(locale, {
       hour: "2-digit",
       minute: "2-digit",
     });
   }
-  return d.toLocaleDateString([], {
+  return d.toLocaleDateString(locale, {
     year: "numeric",
     month: "short",
     day: "numeric",
