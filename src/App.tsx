@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor } from "lucide-react";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
   Agent,
   SessionInfo,
+  agentTint,
   listSessions,
 } from "./api";
 import SessionDetail from "./components/SessionDetail";
 import ScrollArea from "./components/ScrollArea";
 import Tag from "./components/Tag";
+import { ThemeMode, useTheme } from "./theme";
 
 type Filter =
   | { kind: "all" }
@@ -45,6 +47,7 @@ export default function App() {
   const [expandAgent, setExpandAgent] = useState(true);
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const { mode, setMode } = useTheme();
 
   useEffect(() => {
     let cancelled = false;
@@ -147,7 +150,7 @@ export default function App() {
     <div className="flex h-screen text-body">
       <aside
         className={
-          "shrink-0 border-r border-white/5 bg-[#22252e] flex flex-col overflow-hidden transition-[width] duration-600 ease-in-out " +
+          "shrink-0 border-r border-ink/5 bg-surface-sidebar flex flex-col overflow-hidden transition-[width] duration-600 ease-in-out " +
           (sidebarOpen ? "w-64" : "w-0")
         }
       >
@@ -160,7 +163,7 @@ export default function App() {
             aria-label="Close sidebar"
             data-tauri-drag-region="false"
             onClick={() => setSidebarOpen(false)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-white/55 hover:text-white transition rounded-md"
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
           >
             <PanelLeftClose className="w-4 h-4" />
           </button>
@@ -173,7 +176,7 @@ export default function App() {
               count={totalRealSessions}
               active={filter.kind === "all"}
               onClick={() => setFilter({ kind: "all" })}
-              dot="#888"
+              dot="rgb(var(--color-fg) / 0.4)"
             />
 
             <SectionHeader
@@ -221,15 +224,18 @@ export default function App() {
           )}
         </nav>
 
-        <div className="w-64 p-3 text-meta text-white/30 border-t border-white/5">
-          {loading ? "Loading…" : `${totalRealSessions} sessions`}
+        <div className="w-64 px-3 py-2 flex items-center justify-between border-t border-ink/5">
+          <span className="text-meta text-ink/30">
+            {loading ? "Loading…" : `${totalRealSessions} sessions`}
+          </span>
+          <ThemeSwitcher mode={mode} onChange={setMode} />
         </div>
       </aside>
 
       <main className="flex-1 flex flex-col min-w-0">
         <div
           data-tauri-drag-region
-          className="relative h-12 shrink-0 flex items-center justify-center px-5 bg-[#0f1014] border-b border-white/10"
+          className="relative h-12 shrink-0 flex items-center justify-center px-5 bg-surface border-b border-ink/10"
         >
           <button
             type="button"
@@ -237,7 +243,7 @@ export default function App() {
             data-tauri-drag-region="false"
             onClick={() => setSidebarOpen(true)}
             className={
-              "absolute top-1/2 -translate-y-1/2 p-1 text-white/55 hover:text-white rounded-md transition-opacity duration-300 " +
+              "absolute top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink rounded-md transition-opacity duration-300 " +
               (IS_MAC ? "left-24 " : "left-3 ") +
               (sidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
             }
@@ -254,12 +260,12 @@ export default function App() {
                   />
                 )}
                 {filter.kind === "project" && (
-                  <Folder className="w-5 h-5 shrink-0 text-white/55" />
+                  <Folder className="w-5 h-5 shrink-0 text-ink/55" />
                 )}
                 <h1 className="text-title font-medium truncate">{headerLabel}</h1>
               </>
             )}
-            <span className="text-white/40 text-body-sm tabular-nums">
+            <span className="text-ink/40 text-body-sm tabular-nums">
               {visibleCount} sessions
             </span>
           </div>
@@ -267,7 +273,7 @@ export default function App() {
             type="button"
             aria-label="Search"
             data-tauri-drag-region="false"
-            className="absolute right-5 top-1/2 -translate-y-1/2 p-1 text-white/55 hover:text-white transition rounded-md"
+            className="absolute right-5 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
           >
             <Search className="w-4 h-4" />
           </button>
@@ -275,21 +281,21 @@ export default function App() {
 
         <ScrollArea className="flex-1 min-h-0">
           {error && (
-            <div className="m-5 p-3 rounded bg-red-500/10 text-red-300 text-body-sm">
+            <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
               {error}
             </div>
           )}
           {!error && !loading && visible.length === 0 && (
-            <div className="p-10 text-center text-white/40 text-body">
+            <div className="p-10 text-center text-ink/40 text-body">
               No sessions found.
             </div>
           )}
-          <ul className="divide-y divide-white/5">
+          <ul className="divide-y divide-ink/5">
             {visible.map((s) => (
               <li
                 key={`${s.agent}:${s.filePath}:${s.id}`}
                 onClick={() => setSelected(s)}
-                className="px-5 py-3.5 cursor-pointer hover:bg-white/[0.03] transition"
+                className="px-5 py-3.5 cursor-pointer hover:bg-ink/[0.03] transition"
               >
                 <SessionRow item={s} filter={filter} />
               </li>
@@ -320,7 +326,7 @@ function SectionHeader({
   return (
     <button
       onClick={onToggle}
-      className="group flex items-center justify-between w-full px-2 mt-3 mb-1 text-caption uppercase text-white/55 hover:text-white/85 transition"
+      className="group flex items-center justify-between w-full px-2 mt-3 mb-1 text-caption uppercase text-ink/55 hover:text-ink/85 transition"
     >
       <span>{label}</span>
       <Chevron collapsed={collapsed} />
@@ -371,8 +377,8 @@ function SidebarItem({
       className={
         "flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left text-body transition " +
         (active
-          ? "bg-white/10 text-white"
-          : "text-white/70 hover:bg-white/5 hover:text-white")
+          ? "bg-ink/10 text-ink"
+          : "text-ink/70 hover:bg-ink/5 hover:text-ink")
       }
     >
       {dot !== undefined ? (
@@ -384,28 +390,27 @@ function SidebarItem({
         <span className="w-2 shrink-0" />
       )}
       <span className="flex-1 truncate">{label}</span>
-      <span className="text-meta text-white/40 tabular-nums">{count}</span>
+      <span className="text-meta text-ink/40 tabular-nums">{count}</span>
     </button>
   );
 }
 
 function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
-  const accent = AGENT_ACCENT[item.agent];
   return (
     <div className="min-w-0">
-      <div className={"pl-4 text-body line-clamp-3" + (item.archived ? " text-white/55" : " text-white/90")}>
+      <div className={"pl-4 text-body line-clamp-3" + (item.archived ? " text-ink/55" : " text-ink/90")}>
         {item.firstUserMessage ?? (
-          <span className="text-white/30">(no user message)</span>
+          <span className="text-ink/30">(no user message)</span>
         )}
       </div>
-      <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-white/40">
+      <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-ink/40">
       {filter.kind !== "project" && (
         <>
         <Folder
           className="w-4 h-4 shrink-0"
         />
         <span
-          className="text-body font-medium truncate text-white/55"
+          className="text-body font-medium truncate text-ink/55"
         >
           {item.projectName ?? item.projectPath ?? "(unknown project)"}
         </span>
@@ -414,20 +419,20 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
       {filter.kind !== "agent" && (
         <Tag
           label={AGENT_LABEL[item.agent]}
-          style={{ background: `${accent}22`, color: accent }}
+          style={{ background: agentTint(item.agent, 0.13), color: AGENT_ACCENT[item.agent] }}
         />
       )}
         {item.subagents.length > 0 && (
           <Tag
             label={`+${item.subagents.length} subagent${item.subagents.length > 1 ? "s" : ""}`}
-            className="bg-purple-500/10 text-purple-300/90 border border-purple-500/20"
+            className="bg-accent-purple/[0.10] text-accent-purple border border-accent-purple/25"
             title={`${item.subagents.length} subagent invocation${item.subagents.length > 1 ? "s" : ""}`}
           />
         )}
         {item.archived && (
           <Tag
             label="archived"
-            className="bg-white/5 text-white/40 border border-white/5"
+            className="bg-ink/5 text-ink/40 border border-ink/5"
             title="JSONL file was removed by the agent; only index metadata remains."
           />
         )}
@@ -438,6 +443,44 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
           {item.messageCount} msgs
         </span>
       </div>
+    </div>
+  );
+}
+
+function ThemeSwitcher({
+  mode,
+  onChange,
+}: {
+  mode: ThemeMode;
+  onChange: (m: ThemeMode) => void;
+}) {
+  const items: { value: ThemeMode; icon: typeof Sun; label: string }[] = [
+    { value: "light", icon: Sun, label: "Light" },
+    { value: "dark", icon: Moon, label: "Dark" },
+    { value: "system", icon: Monitor, label: "System" },
+  ];
+  return (
+    <div className="flex items-center gap-0.5 rounded-md bg-ink/[0.04] p-0.5">
+      {items.map(({ value, icon: Icon, label }) => {
+        const active = mode === value;
+        return (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onChange(value)}
+            aria-label={label}
+            title={label}
+            className={
+              "p-1 rounded transition " +
+              (active
+                ? "bg-ink/10 text-ink"
+                : "text-ink/45 hover:text-ink/80")
+            }
+          >
+            <Icon className="w-3.5 h-3.5" />
+          </button>
+        );
+      })}
     </div>
   );
 }

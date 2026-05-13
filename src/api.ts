@@ -61,7 +61,11 @@ export const AGENT_LABEL: Record<Agent, string> = {
 };
 
 export const AGENT_ACCENT: Record<Agent, string> = {
-  codex: "#10a37f",
-  claude: "#d97757",
-  gemini: "#4285f4",
+  codex: "rgb(var(--color-agent-codex))",
+  claude: "rgb(var(--color-agent-claude))",
+  gemini: "rgb(var(--color-agent-gemini))",
 };
+
+export function agentTint(a: Agent, alpha: number): string {
+  return `rgb(var(--color-agent-${a}) / ${alpha})`;
+}

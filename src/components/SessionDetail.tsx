@@ -5,6 +5,7 @@ import {
   SessionInfo,
   SessionMessage,
   SubagentInfo,
+  agentTint,
   getSessionMessages,
 } from "../api";
 import Tag from "./Tag";
@@ -35,48 +36,46 @@ export default function SessionDetail({ session, onClose }: Props) {
     setTab(defaultTab);
   }, [defaultTab]);
 
-  const accent = AGENT_ACCENT[session.agent];
-
   return (
     <div
       className="absolute inset-0 bg-black/40 backdrop-blur-sm flex items-stretch justify-end z-10"
       onClick={onClose}
     >
       <div
-        className="w-[720px] max-w-[85vw] h-full bg-[#0b0c10] border-l border-white/10 flex flex-col"
+        className="w-[720px] max-w-[85vw] h-full bg-surface-panel border-l border-ink/10 flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="px-5 py-4 border-b border-white/5 flex items-start gap-3">
+        <header className="px-5 py-4 border-b border-ink/5 flex items-start gap-3">
           <div className="flex-1 min-w-0">
             <div className="text-subtitle font-medium truncate">
               {session.firstUserMessage ?? (
-                <span className="text-white/30">(no user message)</span>
+                <span className="text-ink/30">(no user message)</span>
               )}
             </div>
             {session.projectPath && (
-              <div className="text-meta font-mono text-white/30 truncate mt-0.5">
+              <div className="text-meta font-mono text-ink/30 truncate mt-0.5">
                 {session.projectPath}
               </div>
             )}
             <div className="flex items-center gap-2 mt-1.5">
               <Tag
                 label={AGENT_LABEL[session.agent]}
-                style={{ background: `${accent}22`, color: accent }}
+                style={{ background: agentTint(session.agent, 0.13), color: AGENT_ACCENT[session.agent] }}
               />
-              <span className="text-body-sm text-white/40 truncate font-mono">
+              <span className="text-body-sm text-ink/40 truncate font-mono">
                 {session.id}
               </span>
               {session.archived && (
                 <Tag
                   label="archived"
-                  className="bg-white/5 text-white/40 border border-white/5"
+                  className="bg-ink/5 text-ink/40 border border-ink/5"
                 />
               )}
             </div>
           </div>
           <button
             onClick={onClose}
-            className="text-white/40 hover:text-white text-2xl leading-none px-2"
+            className="text-ink/40 hover:text-ink text-2xl leading-none px-2"
             aria-label="Close"
           >
             ×
@@ -84,7 +83,7 @@ export default function SessionDetail({ session, onClose }: Props) {
         </header>
 
         {session.subagents.length > 0 && (
-          <div className="px-3 py-2 border-b border-white/5 flex gap-1 overflow-x-auto bg-[#0a0b0f]">
+          <div className="px-3 py-2 border-b border-ink/5 flex gap-1 overflow-x-auto bg-surface-panel-alt">
             <TabButton
               active={tab.kind === "main"}
               disabled={!session.available}
@@ -103,7 +102,7 @@ export default function SessionDetail({ session, onClose }: Props) {
                 onClick={() => setTab({ kind: "sub", sub: s })}
                 label={s.agentType ?? "agent"}
                 sub={`${s.messageCount} msgs`}
-                accent="#a78bfa"
+                accent="rgb(var(--color-accent-purple))"
                 tooltip={s.description ?? s.id}
               />
             ))}
@@ -147,7 +146,7 @@ function TabButton({
   accent?: string;
   tooltip?: string;
 }) {
-  const color = accent ?? "#e6e7ea";
+  const color = accent ?? "currentColor";
   return (
     <button
       disabled={disabled}
@@ -156,10 +155,10 @@ function TabButton({
       className={
         "shrink-0 px-3 py-2 rounded-md text-left text-body-sm transition border " +
         (active
-          ? "bg-white/[0.08] border-white/15"
+          ? "bg-ink/[0.08] border-ink/15"
           : disabled
-            ? "bg-transparent border-transparent text-white/25 cursor-not-allowed"
-            : "bg-transparent border-transparent text-white/60 hover:bg-white/5 hover:text-white")
+            ? "bg-transparent border-transparent text-ink/25 cursor-not-allowed"
+            : "bg-transparent border-transparent text-ink/60 hover:bg-ink/5 hover:text-ink")
       }
     >
       <div className="flex items-center gap-1.5">
@@ -169,7 +168,7 @@ function TabButton({
         />
         <span className="font-medium">{label}</span>
       </div>
-      <div className="text-caption text-white/40 mt-0.5">{sub}</div>
+      <div className="text-caption text-ink/40 mt-0.5">{sub}</div>
     </button>
   );
 }
@@ -225,28 +224,28 @@ function MessageStream({
         viewportClassName="px-5 py-4"
       >
         {subagentDesc && (
-          <div className="text-body-sm text-purple-300/85 bg-purple-500/[0.06] border border-purple-500/15 rounded p-3 mb-4 leading-relaxed">
-            <span className="text-purple-200/60 uppercase text-caption mr-2 font-medium">
+          <div className="text-body-sm text-accent-purple bg-accent-purple/[0.08] border border-accent-purple/20 rounded p-3 mb-4 leading-relaxed">
+            <span className="text-accent-purple/70 uppercase text-caption mr-2 font-medium">
               task
             </span>
             {subagentDesc}
           </div>
         )}
         {!available && (
-          <div className="text-amber-200/80 text-body bg-amber-500/[0.08] border border-amber-500/20 rounded p-3 leading-relaxed">
+          <div className="text-status-warn text-body bg-status-warn/[0.10] border border-status-warn/30 rounded p-3 leading-relaxed">
             {emptyHint}
           </div>
         )}
         {loading && (
-          <div className="text-white/40 text-body">Loading messages…</div>
+          <div className="text-ink/40 text-body">Loading messages…</div>
         )}
         {error && (
-          <div className="text-red-300 text-body-sm bg-red-500/10 rounded p-3">
+          <div className="text-status-error text-body-sm bg-status-error/10 rounded p-3">
             {error}
           </div>
         )}
         {!loading && !error && available && messages.length === 0 && (
-          <div className="text-white/40 text-body">No messages.</div>
+          <div className="text-ink/40 text-body">No messages.</div>
         )}
         <div className="flex flex-col gap-4">
           {messages.map((m, i) => (
@@ -366,11 +365,11 @@ function UserNav({
               className={
                 "block w-1.5 h-1.5 rounded-full transition " +
                 (idx === activeIdx
-                  ? "bg-white scale-125"
-                  : "bg-white/25 group-hover:bg-white")
+                  ? "bg-ink scale-125"
+                  : "bg-ink/25 group-hover:bg-ink")
               }
             />
-            <div className="hidden group-hover:block absolute right-full mr-3 top-1/2 -translate-y-1/2 w-72 bg-black/90 border border-white/10 text-white/90 text-body-sm px-3 py-2 rounded shadow-lg leading-relaxed pointer-events-none">
+            <div className="hidden group-hover:block absolute right-full mr-3 top-1/2 -translate-y-1/2 w-72 bg-tooltip-bg/90 border border-ink/10 text-tooltip-fg/90 text-body-sm px-3 py-2 rounded shadow-lg leading-relaxed pointer-events-none">
               <span
                 style={{
                   display: "-webkit-box",
@@ -445,24 +444,24 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
   return (
     <div
       ref={bubbleRef}
-      className="rounded-lg px-4 py-3 text-body leading-relaxed whitespace-pre-wrap break-words bg-white/[0.06] border border-white/[0.04]"
+      className="rounded-lg px-4 py-3 text-body leading-relaxed whitespace-pre-wrap break-words bg-ink/[0.06] border border-ink/[0.04]"
     >
       <div
         className={
           "flex items-center gap-2 mb-2 " +
           (collapsible
-            ? "cursor-pointer select-none hover:text-white/70"
+            ? "cursor-pointer select-none hover:text-ink/70"
             : "")
         }
         onClick={collapsible ? toggle : undefined}
         role={collapsible ? "button" : undefined}
         aria-expanded={collapsible ? !collapsed : undefined}
       >
-        <span className="text-caption uppercase text-white/40 font-medium">
+        <span className="text-caption uppercase text-ink/40 font-medium">
           {msg.role}
         </span>
         {msg.timestamp && (
-          <span className="text-caption text-white/30">
+          <span className="text-caption text-ink/30">
             {new Date(msg.timestamp).toLocaleString([], {
               hour: "2-digit",
               minute: "2-digit",
@@ -472,9 +471,9 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
           </span>
         )}
       </div>
-      <div className="text-white/85">
+      <div className="text-ink/85">
         {collapsible && collapsed ? (
-          <span className="text-white/60">
+          <span className="text-ink/60">
             {preview}
             {msg.text.length > 200 ? "…" : ""}
           </span>
@@ -488,7 +487,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
             type="button"
             onClick={toggle}
             aria-label={collapsed ? "Expand" : "Collapse"}
-            className="text-white/70 hover:text-white text-lg leading-none px-4 py-1 rounded hover:bg-white/5 transition"
+            className="text-ink/70 hover:text-ink text-lg leading-none px-4 py-1 rounded hover:bg-ink/5 transition"
           >
             {collapsed ? "▾" : "▴"}
           </button>

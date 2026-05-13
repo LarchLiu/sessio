@@ -2,6 +2,40 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --color-fg: 255 255 255;
+  --color-bg: 15 16 20;
+  --color-bg-sidebar: 34 37 46;
+  --color-bg-panel: 11 12 16;
+  --color-bg-panel-alt: 10 11 15;
+  --color-tooltip-bg: 0 0 0;
+  --color-tooltip-fg: 255 255 255;
+  --color-accent-purple: 167 139 250;
+  --color-agent-codex: 16 163 127;
+  --color-agent-claude: 217 119 87;
+  --color-agent-gemini: 66 133 244;
+  --color-status-warn: 245 158 11;
+  --color-status-error: 248 113 113;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --color-fg: 28 28 32;
+  --color-bg: 245 245 247;
+  --color-bg-sidebar: 232 232 237;
+  --color-bg-panel: 255 255 255;
+  --color-bg-panel-alt: 241 241 244;
+  --color-tooltip-bg: 28 28 32;
+  --color-tooltip-fg: 255 255 255;
+  --color-accent-purple: 109 40 217;
+  --color-agent-codex: 13 138 106;
+  --color-agent-claude: 196 90 53;
+  --color-agent-gemini: 26 115 232;
+  --color-status-warn: 180 83 9;
+  --color-status-error: 185 28 28;
+  color-scheme: light;
+}
+
 html,
 body,
 #root {
@@ -10,8 +44,8 @@ body,
 
 body {
   margin: 0;
-  background: #0f1014;
-  color: #e6e7ea;
+  background: rgb(var(--color-bg));
+  color: rgb(var(--color-fg) / 0.9);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     Roboto, "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;

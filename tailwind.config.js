@@ -15,8 +15,6 @@ export default {
         ],
         mono: ["SF Mono", "Menlo", "Monaco", "Consolas", "monospace"],
       },
-      // Semantic font sizes — change here and it propagates everywhere.
-      // Use these instead of arbitrary `text-[12px]` values.
       fontSize: {
         caption: ["11px", { lineHeight: "1.35", letterSpacing: "0.04em" }],
         meta: ["12px", { lineHeight: "1.45" }],
@@ -27,17 +25,21 @@ export default {
         hero: ["20px", { lineHeight: "1.2" }],
       },
       colors: {
-        ink: {
-          50: "#f7f7f8",
-          100: "#eeeef0",
-          200: "#d9d9de",
-          300: "#b6b6bd",
-          400: "#8c8c95",
-          500: "#6b6b75",
-          600: "#4f4f58",
-          700: "#3a3a42",
-          800: "#26262c",
-          900: "#16161a",
+        ink: "rgb(var(--color-fg) / <alpha-value>)",
+        surface: {
+          DEFAULT: "rgb(var(--color-bg) / <alpha-value>)",
+          sidebar: "rgb(var(--color-bg-sidebar) / <alpha-value>)",
+          panel: "rgb(var(--color-bg-panel) / <alpha-value>)",
+          "panel-alt": "rgb(var(--color-bg-panel-alt) / <alpha-value>)",
+        },
+        tooltip: {
+          bg: "rgb(var(--color-tooltip-bg) / <alpha-value>)",
+          fg: "rgb(var(--color-tooltip-fg) / <alpha-value>)",
+        },
+        "accent-purple": "rgb(var(--color-accent-purple) / <alpha-value>)",
+        status: {
+          warn: "rgb(var(--color-status-warn) / <alpha-value>)",
+          error: "rgb(var(--color-status-error) / <alpha-value>)",
         },
       },
     },
