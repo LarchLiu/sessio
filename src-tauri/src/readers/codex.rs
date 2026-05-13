@@ -78,6 +78,9 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
                 if text.trim().is_empty() {
                     continue;
                 }
+                if role == "user" && is_system_noise(&text) {
+                    continue;
+                }
                 out.push(SessionMessage {
                     role,
                     text,

@@ -186,6 +186,9 @@ fn expand_message(
         if s.trim().is_empty() {
             return Vec::new();
         }
+        if role_raw == "user" && is_system_noise(s) {
+            return Vec::new();
+        }
         return vec![SessionMessage {
             role: role_raw.to_string(),
             text: s.to_string(),
@@ -212,7 +215,9 @@ fn expand_message(
             "tool_use" => {
                 if !text_parts.is_empty() {
                     let joined = text_parts.join("\n");
-                    if !joined.trim().is_empty() {
+                    if !joined.trim().is_empty()
+                        && !(role_raw == "user" && is_system_noise(&joined))
+                    {
                         out.push(SessionMessage {
                             role: role_raw.to_string(),
                             text: joined,
@@ -245,7 +250,9 @@ fn expand_message(
             "tool_result" => {
                 if !text_parts.is_empty() {
                     let joined = text_parts.join("\n");
-                    if !joined.trim().is_empty() {
+                    if !joined.trim().is_empty()
+                        && !(role_raw == "user" && is_system_noise(&joined))
+                    {
                         out.push(SessionMessage {
                             role: role_raw.to_string(),
                             text: joined,
@@ -269,7 +276,9 @@ fn expand_message(
 
     if !text_parts.is_empty() {
         let joined = text_parts.join("\n");
-        if !joined.trim().is_empty() {
+        if !joined.trim().is_empty()
+            && !(role_raw == "user" && is_system_noise(&joined))
+        {
             out.push(SessionMessage {
                 role: role_raw.to_string(),
                 text: joined,

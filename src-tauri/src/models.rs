@@ -95,7 +95,9 @@ pub fn is_system_noise(text: &str) -> bool {
         || t.starts_with("<bash-stdout>")
         || t.starts_with("<bash-stderr>")
         || t.starts_with("<user-memory-input>")
+        || t.starts_with("<turn_aborted>")
         || t.starts_with("Caveat:")
+        || t.starts_with("Warning: apply_patch was requested via exec_command")
 }
 
 // Strip IDE-injected context blocks that some agents prepend to the real user
