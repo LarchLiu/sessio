@@ -5,7 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use crate::models::{
-    is_system_noise, truncate_preview, Agent, SessionInfo, SessionMessage, SubagentInfo,
+    is_system_noise, strip_injected_context, truncate_preview, Agent, SessionInfo, SessionMessage,
+    SubagentInfo,
 };
 use crate::readers::jsonl_scan;
 use crate::readers::system_time_to_millis;
@@ -154,22 +155,152 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
             Some(m) => m,
             None => continue,
         };
-        let role = msg
+        let role_raw = msg
             .get("role")
             .and_then(|x| x.as_str())
             .unwrap_or(t)
             .to_string();
-        let text = extract_message_text(msg);
-        if text.trim().is_empty() {
-            continue;
+        for sm in expand_message(&role_raw, msg, ts) {
+            out.push(sm);
         }
-        out.push(SessionMessage {
-            role,
-            text,
-            timestamp: ts,
-        });
     }
     Ok(out)
+}
+
+// Convert a single Anthropic message into one or more SessionMessage entries:
+// - assistant text -> {role:"assistant"}
+// - assistant tool_use -> {role:"tool_call"}
+// - user tool_result -> {role:"tool_result"}
+// - user text -> {role:"user"}
+fn expand_message(
+    role_raw: &str,
+    msg: &serde_json::Value,
+    ts: Option<i64>,
+) -> Vec<SessionMessage> {
+    let content = match msg.get("content") {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    if let Some(s) = content.as_str() {
+        if s.trim().is_empty() {
+            return Vec::new();
+        }
+        return vec![SessionMessage {
+            role: role_raw.to_string(),
+            text: s.to_string(),
+            timestamp: ts,
+        }];
+    }
+
+    let arr = match content.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    let mut text_parts: Vec<String> = Vec::new();
+
+    for item in arr {
+        let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        match kind {
+            "text" => {
+                if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
+                    text_parts.push(t.to_string());
+                }
+            }
+            "tool_use" => {
+                if !text_parts.is_empty() {
+                    let joined = text_parts.join("\n");
+                    if !joined.trim().is_empty() {
+                        out.push(SessionMessage {
+                            role: role_raw.to_string(),
+                            text: joined,
+                            timestamp: ts,
+                        });
+                    }
+                    text_parts.clear();
+                }
+                let name = item
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("tool");
+                let input_pretty = item
+                    .get("input")
+                    .and_then(|i| serde_json::to_string_pretty(i).ok())
+                    .unwrap_or_default();
+                let text = if input_pretty.trim().is_empty()
+                    || input_pretty.trim() == "{}"
+                {
+                    format!("[{name}]")
+                } else {
+                    format!("[{name}]\n{input_pretty}")
+                };
+                out.push(SessionMessage {
+                    role: "tool_call".to_string(),
+                    text,
+                    timestamp: ts,
+                });
+            }
+            "tool_result" => {
+                if !text_parts.is_empty() {
+                    let joined = text_parts.join("\n");
+                    if !joined.trim().is_empty() {
+                        out.push(SessionMessage {
+                            role: role_raw.to_string(),
+                            text: joined,
+                            timestamp: ts,
+                        });
+                    }
+                    text_parts.clear();
+                }
+                let body = extract_tool_result_text(item);
+                if !body.trim().is_empty() {
+                    out.push(SessionMessage {
+                        role: "tool_result".to_string(),
+                        text: body,
+                        timestamp: ts,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !text_parts.is_empty() {
+        let joined = text_parts.join("\n");
+        if !joined.trim().is_empty() {
+            out.push(SessionMessage {
+                role: role_raw.to_string(),
+                text: joined,
+                timestamp: ts,
+            });
+        }
+    }
+
+    out
+}
+
+fn extract_tool_result_text(item: &serde_json::Value) -> String {
+    let content = match item.get("content") {
+        Some(c) => c,
+        None => return String::new(),
+    };
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        let mut parts = Vec::new();
+        for sub in arr {
+            if sub.get("type").and_then(|x| x.as_str()) == Some("text") {
+                if let Some(t) = sub.get("text").and_then(|x| x.as_str()) {
+                    parts.push(t.to_string());
+                }
+            }
+        }
+        return parts.join("\n");
+    }
+    String::new()
 }
 
 fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
@@ -205,7 +336,10 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
             if let Some(msg) = v.get("message") {
                 let text = extract_message_text(msg);
                 if !text.trim().is_empty() && !is_system_noise(&text) {
-                    first_user_message = Some(truncate_preview(&text, 160));
+                    let cleaned = strip_injected_context(&text);
+                    if !cleaned.is_empty() {
+                        first_user_message = Some(truncate_preview(&cleaned, 160));
+                    }
                 }
             }
         }
@@ -398,7 +532,10 @@ fn parse_subagent(path: &Path) -> Result<Option<SubagentInfo>> {
             if let Some(msg) = v.get("message") {
                 let text = extract_message_text(msg);
                 if !text.trim().is_empty() && !is_system_noise(&text) {
-                    first_user_message = Some(truncate_preview(&text, 160));
+                    let cleaned = strip_injected_context(&text);
+                    if !cleaned.is_empty() {
+                        first_user_message = Some(truncate_preview(&cleaned, 160));
+                    }
                 }
             }
         }
@@ -471,7 +608,9 @@ fn info_from_index(
         .first_prompt
         .as_deref()
         .filter(|s| !s.trim().is_empty() && !is_system_noise(s))
-        .map(|s| truncate_preview(s, 160));
+        .map(|s| strip_injected_context(s))
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate_preview(&s, 160));
     let (file_size, available) = if file_path.is_empty() {
         (0, false)
     } else {

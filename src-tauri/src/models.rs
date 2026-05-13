@@ -97,3 +97,46 @@ pub fn is_system_noise(text: &str) -> bool {
         || t.starts_with("<user-memory-input>")
         || t.starts_with("Caveat:")
 }
+
+// Strip IDE-injected context blocks that some agents prepend to the real user
+// message. Returns the underlying request text, or empty if the message is
+// entirely context.
+pub fn strip_injected_context(s: &str) -> String {
+    let mut text: &str = s;
+
+    // Claude-style: leading <ide_*>...</ide_*> wrapper blocks (e.g.
+    // <ide_opened_file>, <ide_selection>).
+    loop {
+        let trimmed = text.trim_start();
+        let after_lt = match trimmed.strip_prefix("<ide_") {
+            Some(rest) => rest,
+            None => break,
+        };
+        let close_idx = match after_lt.find('>') {
+            Some(i) => i,
+            None => break,
+        };
+        let tag = &after_lt[..close_idx];
+        let close = format!("</ide_{}>", tag);
+        let after_open = &after_lt[close_idx + 1..];
+        match after_open.find(close.as_str()) {
+            Some(i) => {
+                text = &after_open[i + close.len()..];
+            }
+            None => break,
+        }
+    }
+
+    // Codex-style: a leading "# Context from my IDE setup:" block, ending
+    // before the "## My request for Codex:" header which precedes the real
+    // user input.
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("# Context from my IDE setup:") {
+        const MARKER: &str = "## My request for Codex:";
+        if let Some(i) = trimmed.find(MARKER) {
+            text = &trimmed[i + MARKER.len()..];
+        }
+    }
+
+    text.trim().to_string()
+}

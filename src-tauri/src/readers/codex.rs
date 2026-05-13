@@ -3,7 +3,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::models::{is_system_noise, truncate_preview, Agent, SessionInfo, SessionMessage};
+use crate::models::{
+    is_system_noise, strip_injected_context, truncate_preview, Agent, SessionInfo, SessionMessage,
+};
 use crate::readers::jsonl_scan;
 use crate::readers::system_time_to_millis;
 
@@ -64,23 +66,64 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
             Some(p) => p,
             None => continue,
         };
-        if payload.get("type").and_then(|t| t.as_str()) != Some("message") {
-            continue;
+        let kind = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match kind {
+            "message" => {
+                let role = payload
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let text = extract_message_text(payload).unwrap_or_default();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                out.push(SessionMessage {
+                    role,
+                    text,
+                    timestamp: ts,
+                });
+            }
+            "function_call" => {
+                let name = payload
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("tool");
+                let args_raw = payload
+                    .get("arguments")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let args_pretty = serde_json::from_str::<serde_json::Value>(args_raw)
+                    .ok()
+                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                    .unwrap_or_else(|| args_raw.to_string());
+                let text = if args_pretty.trim().is_empty() {
+                    format!("[{name}]")
+                } else {
+                    format!("[{name}]\n{args_pretty}")
+                };
+                out.push(SessionMessage {
+                    role: "tool_call".to_string(),
+                    text,
+                    timestamp: ts,
+                });
+            }
+            "function_call_output" => {
+                let output = payload
+                    .get("output")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                if output.trim().is_empty() {
+                    continue;
+                }
+                out.push(SessionMessage {
+                    role: "tool_result".to_string(),
+                    text: output.to_string(),
+                    timestamp: ts,
+                });
+            }
+            _ => continue,
         }
-        let role = payload
-            .get("role")
-            .and_then(|r| r.as_str())
-            .unwrap_or("")
-            .to_string();
-        let text = extract_message_text(payload).unwrap_or_default();
-        if text.trim().is_empty() {
-            continue;
-        }
-        out.push(SessionMessage {
-            role,
-            text,
-            timestamp: ts,
-        });
     }
     Ok(out)
 }
@@ -122,7 +165,10 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
                 {
                     if let Some(text) = extract_message_text(payload) {
                         if !is_system_noise(&text) {
-                            first_user_message = Some(truncate_preview(&text, 160));
+                            let cleaned = strip_injected_context(&text);
+                            if !cleaned.is_empty() {
+                                first_user_message = Some(truncate_preview(&cleaned, 160));
+                            }
                         }
                     }
                 }

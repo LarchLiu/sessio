@@ -1,7 +1,9 @@
 import {
+  forwardRef,
   ReactNode,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useRef,
   useState,
@@ -16,11 +18,10 @@ type Props = {
   children: ReactNode;
 };
 
-export default function ScrollArea({
-  className,
-  viewportClassName,
-  children,
-}: Props) {
+const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
+  { className, viewportClassName, children },
+  ref,
+) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const thumbRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<number | undefined>(undefined);
@@ -120,6 +121,8 @@ export default function ScrollArea({
     flashVisible();
   };
 
+  useImperativeHandle(ref, () => viewportRef.current as HTMLDivElement, []);
+
   return (
     <div className={"relative flex flex-col " + (className ?? "")}>
       <div
@@ -136,7 +139,7 @@ export default function ScrollArea({
         <div
           aria-hidden
           className={
-            "absolute top-0 right-0.5 w-1.5 rounded-full bg-white/15 hover:bg-white/30 cursor-pointer transition-opacity " +
+            "absolute top-0 right-0.5 w-1.5 rounded-full bg-white/30 hover:bg-white/50 cursor-pointer transition-opacity " +
             (visible
               ? "opacity-100 duration-150"
               : "opacity-0 pointer-events-none duration-700")
@@ -151,4 +154,6 @@ export default function ScrollArea({
       )}
     </div>
   );
-}
+});
+
+export default ScrollArea;

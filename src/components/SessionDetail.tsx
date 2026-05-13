@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
@@ -190,6 +190,8 @@ function MessageStream({
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const viewportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -211,52 +213,195 @@ function MessageStream({
     };
   }, [agent, filePath, sessionId, available]);
 
+  bubbleRefs.current.length = messages.length;
+
   return (
-    <ScrollArea className="flex-1 min-h-0" viewportClassName="px-5 py-4">
-      {subagentDesc && (
-        <div className="text-body-sm text-purple-300/85 bg-purple-500/[0.06] border border-purple-500/15 rounded p-3 mb-4 leading-relaxed">
-          <span className="text-purple-200/60 uppercase text-caption mr-2 font-medium">
-            task
-          </span>
-          {subagentDesc}
+    <div className="relative flex-1 min-h-0 flex flex-col">
+      <ScrollArea
+        ref={viewportRef}
+        className="flex-1 min-h-0"
+        viewportClassName="px-5 py-4"
+      >
+        {subagentDesc && (
+          <div className="text-body-sm text-purple-300/85 bg-purple-500/[0.06] border border-purple-500/15 rounded p-3 mb-4 leading-relaxed">
+            <span className="text-purple-200/60 uppercase text-caption mr-2 font-medium">
+              task
+            </span>
+            {subagentDesc}
+          </div>
+        )}
+        {!available && (
+          <div className="text-amber-200/80 text-body bg-amber-500/[0.08] border border-amber-500/20 rounded p-3 leading-relaxed">
+            {emptyHint}
+          </div>
+        )}
+        {loading && (
+          <div className="text-white/40 text-body">Loading messages…</div>
+        )}
+        {error && (
+          <div className="text-red-300 text-body-sm bg-red-500/10 rounded p-3">
+            {error}
+          </div>
+        )}
+        {!loading && !error && available && messages.length === 0 && (
+          <div className="text-white/40 text-body">No messages.</div>
+        )}
+        <div className="flex flex-col gap-4">
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              ref={(el) => {
+                bubbleRefs.current[i] = el;
+              }}
+            >
+              <MessageBubble msg={m} />
+            </div>
+          ))}
         </div>
-      )}
-      {!available && (
-        <div className="text-amber-200/80 text-body bg-amber-500/[0.08] border border-amber-500/20 rounded p-3 leading-relaxed">
-          {emptyHint}
-        </div>
-      )}
-      {loading && (
-        <div className="text-white/40 text-body">Loading messages…</div>
-      )}
-      {error && (
-        <div className="text-red-300 text-body-sm bg-red-500/10 rounded p-3">
-          {error}
-        </div>
-      )}
-      {!loading && !error && available && messages.length === 0 && (
-        <div className="text-white/40 text-body">No messages.</div>
-      )}
-      <div className="flex flex-col gap-4">
-        {messages.map((m, i) => (
-          <MessageBubble key={i} msg={m} />
-        ))}
-      </div>
-    </ScrollArea>
+      </ScrollArea>
+      <UserNav messages={messages} refs={bubbleRefs} viewportRef={viewportRef} />
+    </div>
+  );
+}
+
+function UserNav({
+  messages,
+  refs,
+  viewportRef,
+}: {
+  messages: SessionMessage[];
+  refs: React.MutableRefObject<(HTMLDivElement | null)[]>;
+  viewportRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const userIndices = useMemo(
+    () =>
+      messages
+        .map((m, i) => (m.role === "user" ? i : -1))
+        .filter((i) => i >= 0),
+    [messages],
+  );
+
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
+  const [positions, setPositions] = useState<Map<number, number>>(new Map());
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp || userIndices.length === 0) {
+      setActiveIdx(null);
+      setPositions(new Map());
+      return;
+    }
+
+    const computeActive = () => {
+      const vpRect = vp.getBoundingClientRect();
+      const threshold = vpRect.top + vpRect.height * 0.33;
+      let active: number | null = null;
+      for (const idx of userIndices) {
+        const el = refs.current[idx];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (r.top <= threshold) active = idx;
+        else break;
+      }
+      setActiveIdx(active ?? userIndices[0]);
+    };
+
+    const computePositions = () => {
+      const sh = vp.scrollHeight;
+      if (sh <= 0) return;
+      const vpRect = vp.getBoundingClientRect();
+      const m = new Map<number, number>();
+      for (const idx of userIndices) {
+        const el = refs.current[idx];
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const top = r.top - vpRect.top + vp.scrollTop;
+        m.set(idx, Math.min(Math.max(top / sh, 0), 1));
+      }
+      setPositions(m);
+    };
+
+    computePositions();
+    computeActive();
+    vp.addEventListener("scroll", computeActive, { passive: true });
+    const ro = new ResizeObserver(() => {
+      computePositions();
+      computeActive();
+    });
+    ro.observe(vp);
+    for (const child of Array.from(vp.children)) ro.observe(child);
+    return () => {
+      vp.removeEventListener("scroll", computeActive);
+      ro.disconnect();
+    };
+  }, [viewportRef, refs, userIndices]);
+
+  if (userIndices.length === 0) return null;
+  return (
+    <div className="absolute right-0.5 top-2 bottom-2 z-10 w-5">
+      {userIndices.map((idx) => {
+        const preview = messages[idx].text
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 200);
+        const ratio = positions.get(idx);
+        if (ratio === undefined) return null;
+        return (
+          <button
+            key={idx}
+            type="button"
+            onClick={() =>
+              refs.current[idx]?.scrollIntoView({
+                behavior: "smooth",
+                block: "start",
+              })
+            }
+            style={{ top: `${ratio * 100}%`, transform: "translateY(-50%)" }}
+            className="group absolute right-0 cursor-pointer p-1.5"
+            aria-label={`Jump to user message ${idx + 1}`}
+          >
+            <span
+              className={
+                "block w-1.5 h-1.5 rounded-full transition " +
+                (idx === activeIdx
+                  ? "bg-white scale-125"
+                  : "bg-white/25 group-hover:bg-white")
+              }
+            />
+            <div className="hidden group-hover:block absolute right-full mr-3 top-1/2 -translate-y-1/2 w-72 bg-black/90 border border-white/10 text-white/90 text-body-sm px-3 py-2 rounded shadow-lg leading-relaxed pointer-events-none">
+              <span
+                style={{
+                  display: "-webkit-box",
+                  WebkitLineClamp: 3,
+                  WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                }}
+              >
+                {preview}
+                {messages[idx].text.length > 200 ? "…" : ""}
+              </span>
+            </div>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
 function MessageBubble({ msg }: { msg: SessionMessage }) {
-  const isUser = msg.role === "user";
+  const LONG_TOOL_THRESHOLD = 500;
+  const isToolLike =
+    msg.role === "tool_call" || msg.role === "tool_result";
+  const collapsible =
+    msg.role === "developer" ||
+    msg.role === "system" ||
+    (isToolLike && msg.text.length > LONG_TOOL_THRESHOLD);
+  const [collapsed, setCollapsed] = useState(collapsible);
+  const preview = collapsible
+    ? msg.text.replace(/\s+/g, " ").slice(0, 200)
+    : "";
   return (
-    <div
-      className={
-        "rounded-lg px-4 py-3 text-body leading-relaxed whitespace-pre-wrap break-words " +
-        (isUser
-          ? "bg-white/[0.06] border border-white/[0.04]"
-          : "bg-white/[0.02] border border-white/[0.04]")
-      }
-    >
+    <div className="rounded-lg px-4 py-3 text-body leading-relaxed whitespace-pre-wrap break-words bg-white/[0.06] border border-white/[0.04]">
       <div className="flex items-center gap-2 mb-2">
         <span className="text-caption uppercase text-white/40 font-medium">
           {msg.role}
@@ -272,7 +417,28 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
           </span>
         )}
       </div>
-      <div className="text-white/85">{msg.text}</div>
+      <div className="text-white/85">
+        {collapsible && collapsed ? (
+          <span className="text-white/60">
+            {preview}
+            {msg.text.length > 200 ? "…" : ""}
+          </span>
+        ) : (
+          msg.text
+        )}
+      </div>
+      {collapsible && (
+        <div className="mt-2 flex justify-center">
+          <button
+            type="button"
+            onClick={() => setCollapsed((v) => !v)}
+            aria-label={collapsed ? "Expand" : "Collapse"}
+            className="text-white/70 hover:text-white text-lg leading-none px-4 py-1 rounded hover:bg-white/5 transition"
+          >
+            {collapsed ? "▾" : "▴"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
