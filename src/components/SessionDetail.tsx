@@ -48,7 +48,17 @@ export default function SessionDetail({ session, onClose }: Props) {
       >
         <header className="px-5 py-4 border-b border-white/5 flex items-start gap-3">
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1.5">
+            <div className="text-subtitle font-medium truncate">
+              {session.firstUserMessage ?? (
+                <span className="text-white/30">(no user message)</span>
+              )}
+            </div>
+            {session.projectPath && (
+              <div className="text-meta font-mono text-white/30 truncate mt-0.5">
+                {session.projectPath}
+              </div>
+            )}
+            <div className="flex items-center gap-2 mt-1.5">
               <Tag
                 label={AGENT_LABEL[session.agent]}
                 style={{ background: `${accent}22`, color: accent }}
@@ -63,14 +73,6 @@ export default function SessionDetail({ session, onClose }: Props) {
                 />
               )}
             </div>
-            <div className="text-subtitle font-medium truncate">
-              {session.projectName ?? session.projectPath ?? "(unknown)"}
-            </div>
-            {session.projectPath && (
-              <div className="text-meta font-mono text-white/30 truncate mt-0.5">
-                {session.projectPath}
-              </div>
-            )}
           </div>
           <button
             onClick={onClose}
