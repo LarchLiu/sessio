@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
@@ -488,9 +489,13 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
             type="button"
             onClick={toggle}
             aria-label={collapsed ? "Expand" : "Collapse"}
-            className="text-ink/70 hover:text-ink text-lg leading-none px-4 py-1 rounded hover:bg-ink/5 transition"
+            className="text-ink/70 hover:text-ink leading-none px-4 py-1 rounded hover:bg-ink/5 transition"
           >
-            {collapsed ? "▾" : "▴"}
+            {collapsed ? (
+              <ChevronDown className="w-4 h-4" />
+            ) : (
+              <ChevronUp className="w-4 h-4" />
+            )}
           </button>
         </div>
       )}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown } from "lucide-react";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
@@ -343,22 +343,12 @@ function SectionHeader({
 
 function Chevron({ collapsed }: { collapsed: boolean }) {
   return (
-    <svg
-      viewBox="0 0 16 16"
-      fill="none"
+    <ChevronDown
       className={
         "w-3.5 h-3.5 transition-transform duration-150 " +
         (collapsed ? "-rotate-90" : "")
       }
-    >
-      <path
-        d="M4 6l4 4 4-4"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
+    />
   );
 }
 
