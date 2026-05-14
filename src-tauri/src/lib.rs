@@ -4,6 +4,11 @@ pub mod readers;
 use std::path::PathBuf;
 
 use models::{Agent, SessionInfo, SessionMessage};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::TrayIconBuilder,
+    Manager, WindowEvent,
+};
 
 #[tauri::command]
 fn list_sessions() -> Vec<SessionInfo> {
@@ -120,6 +125,45 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            let show = MenuItem::with_id(app, "show", "Show Sessio", true, None::<&str>)?;
+            let hide = MenuItem::with_id(app, "hide", "Hide Sessio", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Sessio", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &hide, &sep, &quit])?;
+
+            TrayIconBuilder::with_id("main")
+                .icon(tauri::include_image!("icons/tray-icon.png"))
+                .icon_as_template(true)
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "hide" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+
+            if let Some(win) = app.get_webview_window("main") {
+                let w = win.clone();
+                win.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = w.hide();
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
