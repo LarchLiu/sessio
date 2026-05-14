@@ -49,7 +49,7 @@ export default function SessionDetail({ session, onClose }: Props) {
         className="w-[720px] max-w-[85vw] h-full bg-surface-panel border-l border-ink/10 flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="px-5 py-4 border-b border-ink/5 flex items-start gap-3">
+        <header className="px-5 py-4 border-b border-ink/15 flex items-start gap-3">
           <div className="flex-1 min-w-0">
             <div className="text-subtitle font-medium truncate">
               {session.firstUserMessage ?? (
@@ -264,6 +264,7 @@ function MessageStream({
               ref={(el) => {
                 bubbleRefs.current[i] = el;
               }}
+              className={m.role === "user" ? "ml-12" : ""}
             >
               <MessageBubble msg={m} />
             </div>
@@ -294,28 +295,58 @@ function UserNav({
   );
 
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
+  const activeRef = useRef<number | null>(null);
   const [positions, setPositions] = useState<Map<number, number>>(new Map());
 
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp || userIndices.length === 0) {
       setActiveIdx(null);
+      activeRef.current = null;
       setPositions(new Map());
       return;
     }
 
+    // 滞回判定:进入线在视口顶部下方 1/4,退出线在 3/4,中间为死区
+    // 向下滚:下一条顶端越过 1/4 → 切到下一条(此时它已占视口 ≈ 3/4)
+    // 向上滚:当前条顶端退过 3/4 → 回到上一条(此时下一条只剩 ≈ 1/4)
     const computeActive = () => {
       const vpRect = vp.getBoundingClientRect();
-      const threshold = vpRect.top + vpRect.height * 0.33;
-      let active: number | null = null;
-      for (const idx of userIndices) {
-        const el = refs.current[idx];
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (r.top <= threshold) active = idx;
-        else break;
+      const enter = vpRect.top + vpRect.height * 0.25;
+      const exit = vpRect.top + vpRect.height * 0.75;
+
+      let active = activeRef.current;
+      if (active === null || !userIndices.includes(active)) {
+        // 初始化沿用单线规则:取顶端已越过 enter 线的最后一条
+        let init: number | null = null;
+        for (const idx of userIndices) {
+          const el = refs.current[idx];
+          if (!el) continue;
+          if (el.getBoundingClientRect().top <= enter) init = idx;
+          else break;
+        }
+        active = init ?? userIndices[0];
+      } else {
+        // 向下推进:跳跃式滚动可能一次跨过多条
+        const pos = userIndices.indexOf(active);
+        for (let i = pos + 1; i < userIndices.length; i++) {
+          const el = refs.current[userIndices[i]];
+          if (!el) break;
+          if (el.getBoundingClientRect().top <= enter) active = userIndices[i];
+          else break;
+        }
+        // 向上回退:同样支持连续回退多条
+        while (true) {
+          const i = userIndices.indexOf(active);
+          if (i <= 0) break;
+          const el = refs.current[active];
+          if (!el) break;
+          if (el.getBoundingClientRect().top > exit) active = userIndices[i - 1];
+          else break;
+        }
       }
-      setActiveIdx(active ?? userIndices[0]);
+      activeRef.current = active;
+      setActiveIdx(active);
     };
 
     const computePositions = () => {

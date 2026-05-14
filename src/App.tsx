@@ -231,7 +231,7 @@ export default function App() {
           )}
         </nav>
 
-        <div className="w-64 px-3 py-2 flex items-center justify-between gap-2 border-t border-ink/5">
+        <div className="w-64 px-3 py-2 flex items-center justify-between gap-2 border-t border-ink/10">
           <span className="text-meta text-ink/30 truncate">
             {loading
               ? t("sidebar.loading")
