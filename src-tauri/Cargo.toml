@@ -26,3 +26,7 @@ dirs = "5.0"
 walkdir = "2.5"
 sha2 = "0.10"
 hex = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"

@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 export type ThemeMode = "light" | "dark" | "system";
 
 const STORAGE_KEY = "sessio.theme";
+
+function syncWindowAppearance(effective: "light" | "dark") {
+  // Force NSWindow.effectiveAppearance to match the webview theme so macOS
+  // draws inactive traffic lights with a tone that contrasts the window
+  // background instead of blending in. Tauri's `setTheme` does not touch
+  // NSAppearance on macOS, so we have to go through a Rust command that calls
+  // AppKit directly.
+  invoke("set_window_appearance", { theme: effective }).catch(() => {});
+}
 
 function readStored(): ThemeMode {
   if (typeof localStorage === "undefined") return "system";
@@ -10,18 +20,33 @@ function readStored(): ThemeMode {
   return v === "light" || v === "dark" || v === "system" ? v : "system";
 }
 
-function resolveEffective(mode: ThemeMode): "light" | "dark" {
+// Used only for the initial React state, before any NSWindow override has been
+// applied — at that point webview matchMedia still reflects the real system.
+function bootstrapEffective(mode: ThemeMode): "light" | "dark" {
   if (mode !== "system") return mode;
   if (typeof window === "undefined" || !window.matchMedia) return "dark";
-  return window.matchMedia("(prefers-color-scheme: light)").matches
-    ? "light"
-    : "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+// Runtime resolution: once we've overridden the window's NSAppearance, webview
+// matchMedia mirrors the window, not the system, so we must ask AppKit.
+async function resolveEffective(mode: ThemeMode): Promise<"light" | "dark"> {
+  if (mode !== "system") return mode;
+  try {
+    const v = await invoke<string>("get_system_appearance");
+    return v === "dark" ? "dark" : "light";
+  } catch {
+    return bootstrapEffective("system");
+  }
 }
 
 function applyTheme(effective: "light" | "dark") {
   const el = document.documentElement;
   if (effective === "light") el.setAttribute("data-theme", "light");
   else el.removeAttribute("data-theme");
+  syncWindowAppearance(effective);
 }
 
 type ViewTransitionDocument = Document & {
@@ -47,19 +72,25 @@ function applyThemeAnimated(
 export function useTheme() {
   const [mode, setMode] = useState<ThemeMode>(() => readStored());
   const [effective, setEffective] = useState<"light" | "dark">(() =>
-    resolveEffective(readStored()),
+    bootstrapEffective(readStored()),
   );
   const prevEffectiveRef = useRef<"light" | "dark">(effective);
   const initializedRef = useRef(false);
 
   useEffect(() => {
-    const eff = resolveEffective(mode);
-    const prev = prevEffectiveRef.current;
-    setEffective(eff);
-    applyThemeAnimated(eff, prev, initializedRef.current);
-    prevEffectiveRef.current = eff;
-    initializedRef.current = true;
-    localStorage.setItem(STORAGE_KEY, mode);
+    let cancelled = false;
+    resolveEffective(mode).then((eff) => {
+      if (cancelled) return;
+      const prev = prevEffectiveRef.current;
+      setEffective(eff);
+      applyThemeAnimated(eff, prev, initializedRef.current);
+      prevEffectiveRef.current = eff;
+      initializedRef.current = true;
+      localStorage.setItem(STORAGE_KEY, mode);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [mode]);
 
   useEffect(() => {

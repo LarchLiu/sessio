@@ -44,6 +44,71 @@ fn get_session_messages(
     }
 }
 
+#[tauri::command]
+fn set_window_appearance(window: tauri::Window, theme: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{class, msg_send, runtime::AnyObject};
+        use objc2_foundation::NSString;
+
+        let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())?;
+        if ns_window_ptr.is_null() {
+            return Err("ns_window is null".into());
+        }
+        let name = NSString::from_str(if theme == "dark" {
+            "NSAppearanceNameDarkAqua"
+        } else {
+            "NSAppearanceNameAqua"
+        });
+        unsafe {
+            let appearance: *mut AnyObject =
+                msg_send![class!(NSAppearance), appearanceNamed: &*name];
+            if appearance.is_null() {
+                return Err(format!("unknown NSAppearance name for theme '{}'", theme));
+            }
+            let ns_window = ns_window_ptr as *mut AnyObject;
+            let _: () = msg_send![ns_window, setAppearance: appearance];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, theme);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_system_appearance() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{class, msg_send, runtime::AnyObject};
+        use objc2_foundation::NSString;
+
+        // Once we override the window's NSAppearance, webview matchMedia stops
+        // reflecting the system. Read AppleInterfaceStyle directly so the
+        // frontend can resolve "system" mode accurately. The key is absent in
+        // light mode and equals "Dark" in dark mode.
+        unsafe {
+            let defaults: *mut AnyObject =
+                msg_send![class!(NSUserDefaults), standardUserDefaults];
+            if defaults.is_null() {
+                return "light".into();
+            }
+            let key = NSString::from_str("AppleInterfaceStyle");
+            let value: *mut AnyObject = msg_send![defaults, stringForKey: &*key];
+            if value.is_null() {
+                "light".into()
+            } else {
+                "dark".into()
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "light".into()
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -57,7 +122,12 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_sessions, get_session_messages])
+        .invoke_handler(tauri::generate_handler![
+            list_sessions,
+            get_session_messages,
+            set_window_appearance,
+            get_system_appearance
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
