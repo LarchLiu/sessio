@@ -63,3 +63,48 @@ body {
   height: 0;
   display: none;
 }
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root) {
+  z-index: 1;
+}
+::view-transition-new(root) {
+  z-index: 2;
+}
+
+:root[data-theme-transition="to-light"]::view-transition-new(root) {
+  animation: theme-wipe-ltr 600ms cubic-bezier(0.65, 0, 0.35, 1) forwards;
+}
+:root[data-theme-transition="to-dark"]::view-transition-new(root) {
+  animation: theme-wipe-rtl 600ms cubic-bezier(0.65, 0, 0.35, 1) forwards;
+}
+
+@keyframes theme-wipe-ltr {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes theme-wipe-rtl {
+  from {
+    clip-path: inset(0 0 0 100%);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme-transition]::view-transition-new(root),
+  :root[data-theme-transition]::view-transition-old(root) {
+    animation: none;
+  }
+}

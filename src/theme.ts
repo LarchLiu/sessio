@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -24,16 +24,41 @@ function applyTheme(effective: "light" | "dark") {
   else el.removeAttribute("data-theme");
 }
 
+type ViewTransitionDocument = Document & {
+  startViewTransition?: (cb: () => void) => { finished: Promise<void> };
+};
+
+function applyThemeAnimated(
+  next: "light" | "dark",
+  prev: "light" | "dark",
+  animate: boolean,
+) {
+  const doc = document as ViewTransitionDocument;
+  if (!animate || next === prev || !doc.startViewTransition) {
+    applyTheme(next);
+    return;
+  }
+  const root = document.documentElement;
+  root.setAttribute("data-theme-transition", next === "light" ? "to-light" : "to-dark");
+  const t = doc.startViewTransition(() => applyTheme(next));
+  t.finished.finally(() => root.removeAttribute("data-theme-transition"));
+}
+
 export function useTheme() {
   const [mode, setMode] = useState<ThemeMode>(() => readStored());
   const [effective, setEffective] = useState<"light" | "dark">(() =>
     resolveEffective(readStored()),
   );
+  const prevEffectiveRef = useRef<"light" | "dark">(effective);
+  const initializedRef = useRef(false);
 
   useEffect(() => {
     const eff = resolveEffective(mode);
+    const prev = prevEffectiveRef.current;
     setEffective(eff);
-    applyTheme(eff);
+    applyThemeAnimated(eff, prev, initializedRef.current);
+    prevEffectiveRef.current = eff;
+    initializedRef.current = true;
     localStorage.setItem(STORAGE_KEY, mode);
   }, [mode]);
 
@@ -42,8 +67,10 @@ export function useTheme() {
     const mql = window.matchMedia("(prefers-color-scheme: light)");
     const onChange = () => {
       const eff = mql.matches ? "light" : "dark";
+      const prev = prevEffectiveRef.current;
       setEffective(eff);
-      applyTheme(eff);
+      applyThemeAnimated(eff, prev, true);
+      prevEffectiveRef.current = eff;
     };
     mql.addEventListener("change", onChange);
     return () => mql.removeEventListener("change", onChange);
