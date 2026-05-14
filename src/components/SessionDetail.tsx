@@ -72,7 +72,12 @@ export default function SessionDetail({ session, onClose }: Props) {
               {session.archived && (
                 <Tag
                   label={t("list.archived")}
-                  className="bg-ink/5 text-ink/40 border border-ink/5"
+                  color="var(--color-muted)"
+                  title={t(
+                    session.available
+                      ? "list.archived_tooltip_by_user"
+                      : "list.archived_tooltip"
+                  )}
                 />
               )}
             </div>

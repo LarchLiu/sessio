@@ -16,6 +16,7 @@
   --color-agent-gemini: 66 133 244;
   --color-status-warn: 245 158 11;
   --color-status-error: 248 113 113;
+  --color-muted: 148 163 184;
   color-scheme: dark;
 }
 
@@ -33,6 +34,7 @@
   --color-agent-gemini: 26 115 232;
   --color-status-warn: 180 83 9;
   --color-status-error: 185 28 28;
+  --color-muted: 100 116 139;
   color-scheme: light;
 }
 

@@ -28,6 +28,8 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "list.archived": "archived",
     "list.archived_tooltip":
       "JSONL file was removed by the agent; only index metadata remains.",
+    "list.archived_tooltip_by_user":
+      "Session was archived by the user; JSONL is preserved.",
     "list.subagent_count": "+{count} subagent{s}",
     "list.subagent_tooltip": "{count} subagent invocation{s}",
     "list.msgs": "{count} msgs",
@@ -66,6 +68,7 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "list.unknown_project": "(未知项目)",
     "list.archived": "已归档",
     "list.archived_tooltip": "JSONL 文件已被 agent 移除，仅保留索引元数据。",
+    "list.archived_tooltip_by_user": "会话由用户主动归档，JSONL 仍完整保留。",
     "list.subagent_count": "+{count} 个子助手",
     "list.subagent_tooltip": "{count} 次子助手调用",
     "list.msgs": "{count} 条消息",

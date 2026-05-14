@@ -5,7 +5,6 @@ import {
   AGENT_LABEL,
   Agent,
   SessionInfo,
-  agentTint,
   listSessions,
 } from "./api";
 import SessionDetail from "./components/SessionDetail";
@@ -176,7 +175,7 @@ export default function App() {
           </Tooltip>
         </div>
 
-        <nav className="flex-1 min-h-0 w-64 p-2 flex flex-col gap-0.5">
+        <nav className="flex-1 min-h-0 w-64 p-2 pb-0 flex flex-col gap-0.5">
           <div className="shrink-0 flex flex-col gap-0.5">
             <SidebarItem
               label={t("sidebar.all_sessions")}
@@ -420,7 +419,7 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
       {filter.kind !== "project" && (
         <>
         <Folder
-          className="w-4 h-4 shrink-0"
+          className="w-3.5 h-3.5 shrink-0"
         />
         <span
           className="text-body font-medium truncate text-ink/55"
@@ -432,7 +431,7 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
       {filter.kind !== "agent" && (
         <Tag
           label={AGENT_LABEL[item.agent]}
-          style={{ background: agentTint(item.agent, 0.13), color: AGENT_ACCENT[item.agent] }}
+          color={`var(--color-agent-${item.agent})`}
         />
       )}
         {subCount > 0 && (
@@ -441,7 +440,7 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
               count: subCount,
               s: subCount > 1 ? "s" : "",
             })}
-            className="bg-accent-purple/[0.10] text-accent-purple border border-accent-purple/25"
+            color="var(--color-accent-purple)"
             title={t("list.subagent_tooltip", {
               count: subCount,
               s: subCount > 1 ? "s" : "",
@@ -451,8 +450,12 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
         {item.archived && (
           <Tag
             label={t("list.archived")}
-            className="bg-ink/5 text-ink/40 border border-ink/5"
-            title={t("list.archived_tooltip")}
+            color="var(--color-muted)"
+            title={t(
+              item.available
+                ? "list.archived_tooltip_by_user"
+                : "list.archived_tooltip"
+            )}
           />
         )}
         <span>{formatTime(item.updatedAt ?? item.startedAt, localeTag(lang))}</span>
