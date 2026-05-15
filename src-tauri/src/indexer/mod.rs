@@ -1,0 +1,348 @@
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use anyhow::Result;
+use tauri::{AppHandle, Emitter};
+
+use crate::models::Agent;
+use crate::readers;
+use crate::store::SessionStore;
+
+#[derive(Debug, Clone)]
+pub enum IndexTask {
+    FullRebuild,
+    ReindexCodexFile(PathBuf),
+    ReindexClaudeProject(PathBuf),
+    ReindexGeminiLogs(PathBuf),
+    RefreshGeminiProjectMappings,
+    DeleteFile(PathBuf),
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexStatus {
+    pub indexing: bool,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct IndexerHandle {
+    tx: Sender<IndexTask>,
+    state: Arc<IndexerState>,
+}
+
+struct IndexerState {
+    indexing: AtomicBool,
+    last_error: Mutex<Option<String>>,
+}
+
+impl IndexerHandle {
+    pub fn submit(&self, task: IndexTask) -> Result<()> {
+        self.tx
+            .send(task)
+            .map_err(|e| anyhow::anyhow!("indexer channel closed: {e}"))
+    }
+
+    pub fn status(&self) -> IndexStatus {
+        IndexStatus {
+            indexing: self.state.indexing.load(Ordering::SeqCst),
+            last_error: self.state.last_error.lock().unwrap().clone(),
+        }
+    }
+}
+
+pub fn spawn(
+    app: AppHandle,
+    store: Arc<dyn SessionStore>,
+    auto_rebuild_if_empty: bool,
+) -> IndexerHandle {
+    let (tx, rx) = unbounded::<IndexTask>();
+    let state = Arc::new(IndexerState {
+        indexing: AtomicBool::new(auto_rebuild_if_empty),
+        last_error: Mutex::new(None),
+    });
+    let handle = IndexerHandle {
+        tx: tx.clone(),
+        state: state.clone(),
+    };
+
+    if auto_rebuild_if_empty {
+        let _ = tx.send(IndexTask::FullRebuild);
+    }
+
+    thread::spawn(move || {
+        run_loop(app, store, rx, state);
+    });
+
+    handle
+}
+
+fn run_loop(
+    app: AppHandle,
+    store: Arc<dyn SessionStore>,
+    rx: Receiver<IndexTask>,
+    state: Arc<IndexerState>,
+) {
+    while let Ok(first) = rx.recv() {
+        state.indexing.store(true, Ordering::SeqCst);
+        {
+            let mut slot = state.last_error.lock().unwrap();
+            *slot = None;
+        }
+        let _ = app.emit("sessions_index_status", current_status(&state));
+        let mut batch = vec![first];
+        thread::sleep(Duration::from_millis(50));
+        while let Ok(t) = rx.try_recv() {
+            batch.push(t);
+        }
+        let coalesced = coalesce(batch);
+        let mut had_error = false;
+        let mut last_error = None;
+        for task in coalesced {
+            if let Err(e) = execute(&task, store.as_ref()) {
+                log::warn!("indexer task {:?} failed: {e}", task);
+                had_error = true;
+                last_error = Some(e.to_string());
+            }
+        }
+        {
+            let mut slot = state.last_error.lock().unwrap();
+            *slot = last_error;
+        }
+        state.indexing.store(false, Ordering::SeqCst);
+        let _ = app.emit("sessions_index_status", current_status(&state));
+        if !had_error {
+            let _ = app.emit("sessions_index_updated", ());
+        }
+    }
+}
+
+fn current_status(state: &IndexerState) -> IndexStatus {
+    IndexStatus {
+        indexing: state.indexing.load(Ordering::SeqCst),
+        last_error: state.last_error.lock().unwrap().clone(),
+    }
+}
+
+fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
+    let mut seen_codex: HashSet<PathBuf> = HashSet::new();
+    let mut seen_claude: HashSet<PathBuf> = HashSet::new();
+    let mut seen_gemini: HashSet<PathBuf> = HashSet::new();
+    let mut seen_delete: HashSet<PathBuf> = HashSet::new();
+    let mut full = false;
+    let mut refresh_gemini_mappings = false;
+    let mut out = Vec::new();
+
+    for t in tasks {
+        match t {
+            IndexTask::FullRebuild => full = true,
+            IndexTask::ReindexCodexFile(p) => {
+                if seen_codex.insert(p.clone()) {
+                    out.push(IndexTask::ReindexCodexFile(p));
+                }
+            }
+            IndexTask::ReindexClaudeProject(p) => {
+                if seen_claude.insert(p.clone()) {
+                    out.push(IndexTask::ReindexClaudeProject(p));
+                }
+            }
+            IndexTask::ReindexGeminiLogs(p) => {
+                if seen_gemini.insert(p.clone()) {
+                    out.push(IndexTask::ReindexGeminiLogs(p));
+                }
+            }
+            IndexTask::RefreshGeminiProjectMappings => refresh_gemini_mappings = true,
+            IndexTask::DeleteFile(p) => {
+                if seen_delete.insert(p.clone()) {
+                    out.push(IndexTask::DeleteFile(p));
+                }
+            }
+        }
+    }
+
+    if full {
+        return vec![IndexTask::FullRebuild];
+    }
+    if refresh_gemini_mappings {
+        out.push(IndexTask::RefreshGeminiProjectMappings);
+    }
+    out
+}
+
+fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<()> {
+    match task {
+        IndexTask::FullRebuild => full_rebuild(store),
+        IndexTask::ReindexCodexFile(path) => reindex_codex_file(path, store),
+        IndexTask::ReindexClaudeProject(dir) => reindex_claude_project(dir, store),
+        IndexTask::ReindexGeminiLogs(path) => reindex_gemini_logs(path, store),
+        IndexTask::RefreshGeminiProjectMappings => refresh_gemini_mappings(store),
+        IndexTask::DeleteFile(path) => {
+            store.delete_by_file_path(&path.to_string_lossy())?;
+            Ok(())
+        }
+    }
+}
+
+pub fn full_rebuild(store: &dyn SessionStore) -> Result<()> {
+    let (codex_live, codex_archived) = readers::codex::roots()?;
+    let mut codex_scopes: HashSet<String> = HashSet::new();
+    for (root, archived) in [(codex_live.as_path(), false), (codex_archived.as_path(), true)] {
+        if !root.exists() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            match readers::codex::parse_one_file(path, archived) {
+                Ok(Some(info)) => {
+                    let scope = info.file_path.clone();
+                    store.replace_by_scope(&scope, Agent::Codex, &[info])?;
+                    codex_scopes.insert(scope);
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("codex parse {} failed: {e}", path.display()),
+            }
+        }
+    }
+    store.purge_missing_scopes(Agent::Codex, &codex_scopes)?;
+
+    let mut claude_scopes: HashSet<String> = HashSet::new();
+    if let Some(root) = readers::claude::root_dir()? {
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let dir = entry.path();
+            let scope = dir.to_string_lossy().into_owned();
+            match readers::claude::scan_project_dir(&dir) {
+                Ok(sessions) => {
+                    store.replace_by_scope(&scope, Agent::Claude, &sessions)?;
+                    claude_scopes.insert(scope);
+                }
+                Err(e) => log::warn!("claude scan {} failed: {e}", dir.display()),
+            }
+        }
+    }
+    store.purge_missing_scopes(Agent::Claude, &claude_scopes)?;
+
+    let mut gemini_scopes: HashSet<String> = HashSet::new();
+    let (gemini_tmp, _) = readers::gemini::paths()?;
+    if gemini_tmp.exists() {
+        for entry in std::fs::read_dir(&gemini_tmp)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let logs = entry.path().join("logs.json");
+            if !logs.exists() {
+                continue;
+            }
+            let scope = logs.to_string_lossy().into_owned();
+            match readers::gemini::parse_logs_file(&logs) {
+                Ok(sessions) => {
+                    store.replace_by_scope(&scope, Agent::Gemini, &sessions)?;
+                    gemini_scopes.insert(scope);
+                }
+                Err(e) => log::warn!("gemini parse {} failed: {e}", logs.display()),
+            }
+        }
+    }
+    store.purge_missing_scopes(Agent::Gemini, &gemini_scopes)?;
+
+    Ok(())
+}
+
+fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
+    if !path.exists() {
+        store.delete_by_file_path(&path.to_string_lossy())?;
+        return Ok(());
+    }
+    let (_, archived_root) = readers::codex::roots()?;
+    let archived = path.starts_with(&archived_root);
+    match readers::codex::parse_one_file(path, archived)? {
+        Some(info) => {
+            let scope = info.file_path.clone();
+            store.replace_by_scope(&scope, Agent::Codex, &[info])?;
+        }
+        None => {
+            store.delete_by_file_path(&path.to_string_lossy())?;
+        }
+    }
+    Ok(())
+}
+
+fn reindex_claude_project(dir: &Path, store: &dyn SessionStore) -> Result<()> {
+    if !dir.exists() {
+        let scope = dir.to_string_lossy().into_owned();
+        store.replace_by_scope(&scope, Agent::Claude, &[])?;
+        return Ok(());
+    }
+    let sessions = readers::claude::scan_project_dir(dir)?;
+    let scope = dir.to_string_lossy().into_owned();
+    store.replace_by_scope(&scope, Agent::Claude, &sessions)?;
+    Ok(())
+}
+
+fn reindex_gemini_logs(path: &Path, store: &dyn SessionStore) -> Result<()> {
+    if !path.exists() {
+        let scope = path.to_string_lossy().into_owned();
+        store.replace_by_scope(&scope, Agent::Gemini, &[])?;
+        return Ok(());
+    }
+    let sessions = readers::gemini::parse_logs_file(path)?;
+    let scope = path.to_string_lossy().into_owned();
+    store.replace_by_scope(&scope, Agent::Gemini, &sessions)?;
+    Ok(())
+}
+
+fn refresh_gemini_mappings(store: &dyn SessionStore) -> Result<()> {
+    let (tmp_dir, _) = readers::gemini::paths()?;
+    if !tmp_dir.exists() {
+        return Ok(());
+    }
+    let mut scopes: HashSet<String> = HashSet::new();
+    for entry in std::fs::read_dir(&tmp_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let logs = entry.path().join("logs.json");
+        if !logs.exists() {
+            continue;
+        }
+        let scope = logs.to_string_lossy().into_owned();
+        match readers::gemini::parse_logs_file(&logs) {
+            Ok(sessions) => {
+                store.replace_by_scope(&scope, Agent::Gemini, &sessions)?;
+                scopes.insert(scope);
+            }
+            Err(e) => log::warn!("gemini parse {} failed: {e}", logs.display()),
+        }
+    }
+    store.purge_missing_scopes(Agent::Gemini, &scopes)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn group_by<K: std::hash::Hash + Eq, V, F: Fn(&V) -> K>(
+    items: Vec<V>,
+    key_fn: F,
+) -> HashMap<K, Vec<V>> {
+    let mut out: HashMap<K, Vec<V>> = HashMap::new();
+    for item in items {
+        let k = key_fn(&item);
+        out.entry(k).or_default().push(item);
+    }
+    out
+}

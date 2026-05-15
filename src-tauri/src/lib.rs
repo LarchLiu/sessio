@@ -1,20 +1,49 @@
+pub mod indexer;
 pub mod models;
+pub mod polling;
 pub mod readers;
+pub mod store;
+pub mod watch;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use indexer::{IndexTask, IndexerHandle};
 use models::{Agent, SessionInfo, SessionMessage};
+use store::sqlite::SqliteStore;
+use store::SessionStore;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Manager, WindowEvent,
+    Manager, State, WindowEvent,
 };
 
 #[tauri::command]
-fn list_sessions() -> Vec<SessionInfo> {
-    let mut sessions = readers::list_all();
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    sessions
+fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionInfo>, String> {
+    store.list_sessions().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rebuild_session_index(indexer: State<'_, IndexerHandle>) -> Result<(), String> {
+    indexer
+        .submit(IndexTask::FullRebuild)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexStatus {
+    indexing: bool,
+    last_error: Option<String>,
+}
+
+#[tauri::command]
+fn get_index_status(indexer: State<'_, IndexerHandle>) -> IndexStatus {
+    let s = indexer.status();
+    IndexStatus {
+        indexing: s.indexing,
+        last_error: s.last_error,
+    }
 }
 
 #[tauri::command]
@@ -126,6 +155,37 @@ pub fn run() {
                 )?;
             }
 
+            let data_dir = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("no home dir"))?
+                .join(".sessio")
+                .join("db-data");
+            std::fs::create_dir_all(&data_dir).ok();
+            let db_path = data_dir.join("sessio-index.db");
+            let sqlite = SqliteStore::open(&db_path)?;
+            sqlite.init()?;
+            let store: Arc<dyn SessionStore> = Arc::new(sqlite);
+            let needs_full_rebuild = store
+                .list_sessions()
+                .map(|v| v.is_empty())
+                .unwrap_or(true);
+            let indexer_handle =
+                indexer::spawn(app.handle().clone(), store.clone(), needs_full_rebuild);
+            log::info!("indexer spawned, needs_full_rebuild={}", needs_full_rebuild);
+
+            polling::spawn_polling(store.clone(), indexer_handle.clone());
+            log::info!("polling thread spawned");
+
+            match watch::spawn(indexer_handle.clone()) {
+                Ok(handle) => {
+                    log::info!("watcher spawned successfully");
+                    // Keep watcher alive for the lifetime of the process.
+                    Box::leak(Box::new(handle));
+                }
+                Err(e) => log::warn!("watcher failed to start: {e}"),
+            }
+            app.manage(store);
+            app.manage(indexer_handle);
+
             let show = MenuItem::with_id(app, "show", "Show Sessio", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Sessio", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
@@ -170,7 +230,9 @@ pub fn run() {
             list_sessions,
             get_session_messages,
             set_window_appearance,
-            get_system_appearance
+            get_system_appearance,
+            rebuild_session_index,
+            get_index_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

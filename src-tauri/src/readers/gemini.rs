@@ -8,10 +8,7 @@ use crate::models::{is_system_noise, normalize_preview, Agent, SessionInfo, Sess
 use crate::readers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
-    let home = dirs::home_dir().context("no home dir")?;
-    let tmp_dir = home.join(".gemini").join("tmp");
-    let projects_json = home.join(".gemini").join("projects.json");
-
+    let (tmp_dir, projects_json) = paths()?;
     let mappings = load_project_mappings(&projects_json).unwrap_or_default();
 
     let mut out = Vec::new();
@@ -37,6 +34,26 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         }
     }
     Ok(out)
+}
+
+pub fn paths() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let home = dirs::home_dir().context("no home dir")?;
+    Ok((
+        home.join(".gemini").join("tmp"),
+        home.join(".gemini").join("projects.json"),
+    ))
+}
+
+pub fn parse_logs_file(path: &Path) -> Result<Vec<SessionInfo>> {
+    let (_, projects_json) = paths()?;
+    let mappings = load_project_mappings(&projects_json).unwrap_or_default();
+    let dir_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let project_path = resolve_project_path(dir_name, &mappings);
+    parse_logs(path, project_path.as_deref())
 }
 
 pub fn read_messages(path: &Path, session_id: &str) -> Result<Vec<SessionMessage>> {

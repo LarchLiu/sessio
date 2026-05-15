@@ -12,122 +12,141 @@ use crate::readers::jsonl_scan;
 use crate::readers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
-    let home = dirs::home_dir().context("no home dir")?;
-    let root = home.join(".claude").join("projects");
+    let root = match root_dir()? {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
     let mut out = Vec::new();
-    if !root.exists() {
-        return Ok(out);
-    }
     for entry in fs::read_dir(&root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
         let project_dir = entry.path();
-        let index = read_index(&project_dir.join("sessions-index.json")).ok();
-        let mut group: Vec<SessionInfo> = Vec::new();
-        let mut seen_ids: HashSet<String> = HashSet::new();
-        for f in fs::read_dir(&project_dir)? {
-            let f = f?;
-            let p = f.path();
-            if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            match parse_session(&p) {
-                Ok(Some(info)) => {
-                    seen_ids.insert(info.id.clone());
-                    group.push(info);
-                }
-                Ok(None) => {}
-                Err(e) => log::warn!("claude parse {} failed: {e}", p.display()),
-            }
+        match scan_project_dir(&project_dir) {
+            Ok(mut group) => out.append(&mut group),
+            Err(e) => log::warn!("claude scan {} failed: {e}", project_dir.display()),
         }
-
-        if let Some(idx) = &index {
-            for entry in &idx.entries {
-                if seen_ids.contains(&entry.session_id) {
-                    continue;
-                }
-                if let Some(info) = info_from_index(entry, idx, &project_dir) {
-                    seen_ids.insert(info.id.clone());
-                    group.push(info);
-                }
-            }
-        }
-
-        for sub_entry in fs::read_dir(&project_dir)?.flatten() {
-            if !sub_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let sub_id = match sub_entry.file_name().to_str() {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if seen_ids.contains(&sub_id) {
-                continue;
-            }
-            let subagents_dir = sub_entry.path().join("subagents");
-            if !subagents_dir.is_dir() {
-                continue;
-            }
-            let subagents = read_subagents(&subagents_dir);
-            if subagents.is_empty() {
-                continue;
-            }
-            let earliest = subagents.iter().filter_map(|s| s.started_at).min();
-            let latest = subagents.iter().filter_map(|s| s.updated_at).max();
-            seen_ids.insert(sub_id.clone());
-            group.push(SessionInfo {
-                id: sub_id,
-                agent: Agent::Claude,
-                project_path: None,
-                project_name: None,
-                started_at: earliest,
-                updated_at: latest,
-                message_count: 0,
-                first_user_message: None,
-                file_path: String::new(),
-                file_size: 0,
-                partial: true,
-                available: false,
-                archived: true,
-                subagents,
-            });
-        }
-
-        let index_cwd = index.as_ref().and_then(|i| {
-            i.original_path.clone().or_else(|| {
-                i.entries
-                    .iter()
-                    .find_map(|e| e.project_path.clone())
-            })
-        });
-        let shared_cwd = index_cwd.or_else(|| group.iter().find_map(|s| s.project_path.clone()));
-        let dir_name = project_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(String::from);
-        let shared_project_name = shared_cwd.as_deref().and_then(|p| {
-            Path::new(p)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(String::from)
-        });
-        for s in group.iter_mut() {
-            if s.project_path.is_none() {
-                s.project_path = shared_cwd.clone();
-            }
-            if s.project_name.is_none() {
-                s.project_name = shared_project_name.clone().or_else(|| dir_name.clone());
-            }
-            let subagents_dir = project_dir.join(&s.id).join("subagents");
-            if subagents_dir.is_dir() {
-                s.subagents = read_subagents(&subagents_dir);
-            }
-        }
-        out.append(&mut group);
     }
     Ok(out)
+}
+
+pub fn root_dir() -> Result<Option<PathBuf>> {
+    let home = dirs::home_dir().context("no home dir")?;
+    let root = home.join(".claude").join("projects");
+    if root.exists() {
+        Ok(Some(root))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn scan_project_dir(project_dir: &Path) -> Result<Vec<SessionInfo>> {
+    if !project_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let index = read_index(&project_dir.join("sessions-index.json")).ok();
+    let mut group: Vec<SessionInfo> = Vec::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    for f in fs::read_dir(project_dir)? {
+        let f = f?;
+        let p = f.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        match parse_session(&p) {
+            Ok(Some(info)) => {
+                seen_ids.insert(info.id.clone());
+                group.push(info);
+            }
+            Ok(None) => {}
+            Err(e) => log::warn!("claude parse {} failed: {e}", p.display()),
+        }
+    }
+
+    if let Some(idx) = &index {
+        for entry in &idx.entries {
+            if seen_ids.contains(&entry.session_id) {
+                continue;
+            }
+            if let Some(info) = info_from_index(entry, idx, project_dir) {
+                seen_ids.insert(info.id.clone());
+                group.push(info);
+            }
+        }
+    }
+
+    for sub_entry in fs::read_dir(project_dir)?.flatten() {
+        if !sub_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let sub_id = match sub_entry.file_name().to_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        if seen_ids.contains(&sub_id) {
+            continue;
+        }
+        let subagents_dir = sub_entry.path().join("subagents");
+        if !subagents_dir.is_dir() {
+            continue;
+        }
+        let subagents = read_subagents(&subagents_dir);
+        if subagents.is_empty() {
+            continue;
+        }
+        let earliest = subagents.iter().filter_map(|s| s.started_at).min();
+        let latest = subagents.iter().filter_map(|s| s.updated_at).max();
+        seen_ids.insert(sub_id.clone());
+        group.push(SessionInfo {
+            id: sub_id,
+            agent: Agent::Claude,
+            project_path: None,
+            project_name: None,
+            started_at: earliest,
+            updated_at: latest,
+            message_count: 0,
+            first_user_message: None,
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: false,
+            archived: true,
+            subagents,
+        });
+    }
+
+    let index_cwd = index.as_ref().and_then(|i| {
+        i.original_path.clone().or_else(|| {
+            i.entries
+                .iter()
+                .find_map(|e| e.project_path.clone())
+        })
+    });
+    let shared_cwd = index_cwd.or_else(|| group.iter().find_map(|s| s.project_path.clone()));
+    let dir_name = project_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(String::from);
+    let shared_project_name = shared_cwd.as_deref().and_then(|p| {
+        Path::new(p)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(String::from)
+    });
+    for s in group.iter_mut() {
+        if s.project_path.is_none() {
+            s.project_path = shared_cwd.clone();
+        }
+        if s.project_name.is_none() {
+            s.project_name = shared_project_name.clone().or_else(|| dir_name.clone());
+        }
+        let subagents_dir = project_dir.join(&s.id).join("subagents");
+        if subagents_dir.is_dir() {
+            s.subagents = read_subagents(&subagents_dir);
+        }
+    }
+    Ok(group)
 }
 
 pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {

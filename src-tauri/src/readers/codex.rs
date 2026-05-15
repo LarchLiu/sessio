@@ -10,13 +10,27 @@ use crate::readers::jsonl_scan;
 use crate::readers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
-    let home = dirs::home_dir().context("no home dir")?;
     let mut out = Vec::new();
-    let live = home.join(".codex").join("sessions");
-    let archived = home.join(".codex").join("archived_sessions");
+    let (live, archived) = roots()?;
     scan_dir(&live, false, &mut out);
     scan_dir(&archived, true, &mut out);
     Ok(out)
+}
+
+pub fn roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let home = dirs::home_dir().context("no home dir")?;
+    Ok((
+        home.join(".codex").join("sessions"),
+        home.join(".codex").join("archived_sessions"),
+    ))
+}
+
+pub fn parse_one_file(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
+    parse_session(path, archived)
+}
+
+pub fn path_is_archived(path: &Path, archived_root: &Path) -> bool {
+    path.starts_with(archived_root)
 }
 
 fn scan_dir(root: &Path, archived: bool, out: &mut Vec<SessionInfo>) {

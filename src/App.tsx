@@ -1,10 +1,13 @@
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
   Agent,
+  getIndexStatus,
   SessionInfo,
+  rebuildSessionIndex,
   listSessions,
 } from "./api";
 import SessionDetail from "./components/SessionDetail";
@@ -38,6 +41,7 @@ function isSubagentOnly(s: SessionInfo): boolean {
 export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [indexing, setIndexing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [selected, setSelected] = useState<SessionInfo | null>(null);
@@ -71,6 +75,31 @@ export default function App() {
       });
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    getIndexStatus()
+      .then((status) => {
+        setIndexing(status.indexing);
+        if (status.lastError) setError(status.lastError);
+      })
+      .catch(() => {});
+
+    const unlisten = listen("sessions_index_updated", () => {
+      setIndexing(false);
+      listSessions()
+        .then(setSessions)
+        .catch(() => {});
+    });
+    const statusUnlisten = listen("sessions_index_status", (event) => {
+      const payload = event.payload as { indexing?: boolean; lastError?: string | null };
+      if (typeof payload.indexing === "boolean") setIndexing(payload.indexing);
+      if (payload.lastError !== undefined) setError(payload.lastError);
+    });
+    return () => {
+      unlisten.then((f) => f()).catch(() => {});
+      statusUnlisten.then((f) => f()).catch(() => {});
     };
   }, []);
 
@@ -233,11 +262,29 @@ export default function App() {
 
         <div className="w-64 px-3 py-2 flex items-center justify-between gap-2 border-t border-ink/10">
           <span className="text-meta text-ink/30 truncate">
-            {loading
-              ? t("sidebar.loading")
-              : t("sidebar.sessions_count", { count: totalRealSessions })}
+            {indexing
+              ? t("sidebar.indexing")
+              : loading
+                ? t("sidebar.loading")
+                : ""}
           </span>
           <div className="shrink-0 flex items-center gap-1">
+            <Tooltip content={t("sidebar.rebuild_index")} placement="top">
+              <button
+                type="button"
+                aria-label={t("sidebar.rebuild_index")}
+                onClick={() => {
+                  setIndexing(true);
+                  rebuildSessionIndex().catch((err) => {
+                    setError(String(err));
+                    setIndexing(false);
+                  });
+                }}
+                className="p-1 text-ink/55 hover:text-ink transition rounded-md"
+              >
+                <RefreshCw className={"w-4 h-4 " + (indexing ? "animate-spin" : "")} />
+              </button>
+            </Tooltip>
             <LanguageSwitcher lang={lang} onChange={setLang} />
             <ThemeSwitcher mode={mode} onChange={setMode} />
           </div>
@@ -301,7 +348,7 @@ export default function App() {
               {error}
             </div>
           )}
-          {!error && !loading && visible.length === 0 && (
+          {!error && !loading && !indexing && visible.length === 0 && (
             <div className="p-10 text-center text-ink/40 text-body">
               {t("list.empty")}
             </div>

@@ -26,6 +26,10 @@ dirs = "5.0"
 walkdir = "2.5"
 sha2 = "0.10"
 hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+notify = "6"
+notify-debouncer-full = "0.3"
+crossbeam-channel = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

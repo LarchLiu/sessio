@@ -38,8 +38,21 @@ export interface SessionMessage {
   timestamp: number | null;
 }
 
+export interface IndexStatus {
+  indexing: boolean;
+  lastError: string | null;
+}
+
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function getIndexStatus(): Promise<IndexStatus> {
+  return invoke<IndexStatus>("get_index_status");
+}
+
+export async function rebuildSessionIndex(): Promise<void> {
+  return invoke<void>("rebuild_session_index");
 }
 
 export async function getSessionMessages(
