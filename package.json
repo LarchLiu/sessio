@@ -11,6 +11,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@lobehub/icons": "^5.8.0",
     "@tauri-apps/api": "^2.4.0",
     "lucide-react": "^1.14.0",
     "react": "^19.1.0",

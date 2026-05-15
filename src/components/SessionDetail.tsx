@@ -9,6 +9,7 @@ import {
   agentTint,
   getSessionMessages,
 } from "../api";
+import { AgentGlyph } from "./AgentIcon";
 import Tag from "./Tag";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
@@ -65,6 +66,7 @@ export default function SessionDetail({ session, onClose }: Props) {
               <Tag
                 label={AGENT_LABEL[session.agent]}
                 style={{ background: agentTint(session.agent, 0.13), color: AGENT_ACCENT[session.agent] }}
+                icon={<AgentGlyph agent={session.agent} className="w-3 h-3 shrink-0" />}
               />
               <span className="text-body-sm text-ink/40 truncate font-mono">
                 {session.id}

@@ -1,7 +1,8 @@
-import { CSSProperties } from "react";
+import { CSSProperties, ReactNode } from "react";
 
 interface TagProps {
   label: string;
+  icon?: ReactNode;
   // CSS RGB triplet (space-separated channels), e.g. "var(--color-agent-codex)"
   // or "167 139 250". Used to derive text, background, and border colors.
   color?: string;
@@ -10,24 +11,34 @@ interface TagProps {
   title?: string;
 }
 
-export default function Tag({ label, color, className, style, title }: TagProps) {
+export default function Tag({
+  label,
+  icon,
+  color,
+  className,
+  style,
+  title,
+}: TagProps) {
   const derived: CSSProperties | undefined = color
-    ? {
-        color: `rgb(${color})`,
-        background: `rgb(${color} / 0.13)`,
-        border: `1px solid rgb(${color} / 0.25)`,
-      }
+    ? icon
+      ? { color: `rgb(${color})` }
+      : {
+          color: `rgb(${color})`,
+          background: `rgb(${color} / 0.13)`,
+          border: `1px solid rgb(${color} / 0.25)`,
+        }
     : undefined;
   return (
     <span
       title={title}
       style={{ ...derived, ...style }}
       className={
-        "shrink-0 text-caption uppercase font-medium rounded px-2 py-[3px] " +
+        "shrink-0 inline-flex items-center gap-1.5 text-caption uppercase font-medium rounded px-2 py-[3px] leading-none " +
         (className ?? "")
       }
     >
-      {label}
+      {icon}
+      {icon ? null : label}
     </span>
   );
 }

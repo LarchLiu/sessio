@@ -1,8 +1,7 @@
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  AGENT_ACCENT,
   AGENT_LABEL,
   Agent,
   getIndexStatus,
@@ -11,6 +10,7 @@ import {
   listSessions,
 } from "./api";
 import SessionDetail from "./components/SessionDetail";
+import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
 import Tag from "./components/Tag";
 import Tooltip from "./components/Tooltip";
@@ -216,7 +216,7 @@ export default function App() {
               count={totalRealSessions}
               active={filter.kind === "all"}
               onClick={() => setFilter({ kind: "all" })}
-              dot="rgb(var(--color-fg) / 0.4)"
+              icon={<BotMessageSquare className="w-3.5 h-3.5 shrink-0 text-ink/55" />}
             />
 
             <SectionHeader
@@ -232,7 +232,7 @@ export default function App() {
                   count={count}
                   active={filter.kind === "agent" && filter.agent === agent}
                   onClick={() => setFilter({ kind: "agent", agent })}
-                  dot={AGENT_ACCENT[agent]}
+                  icon={<AgentBadge agent={agent} className="w-3.5 h-3.5" />}
                 />
               ))}
 
@@ -371,16 +371,16 @@ export default function App() {
           <div className="flex items-center gap-2 min-w-0">
             {!sidebarOpen && (
               <>
+                {filter.kind === "all" && (
+                  <BotMessageSquare className="w-5 h-5 shrink-0 text-ink/55" />
+                )}
                 {filter.kind === "agent" && (
-                  <Bot
-                    className="w-6 h-6 shrink-0"
-                    style={{ color: AGENT_ACCENT[filter.agent] }}
-                  />
+                  <AgentBadge agent={filter.agent} className="w-5 h-5" />
                 )}
                 {filter.kind === "project" && (
                   <Folder className="w-5 h-5 shrink-0 text-ink/55" />
                 )}
-                <h1 className="text-title font-medium truncate">{headerLabel}</h1>
+                <div className="text-title font-medium truncate">{headerLabel}</div>
               </>
             )}
             <span className="text-ink/40 text-body-sm tabular-nums">
@@ -470,7 +470,6 @@ function SidebarItem({
   count,
   active,
   onClick,
-  dot,
   icon,
   title,
 }: {
@@ -478,7 +477,6 @@ function SidebarItem({
   count: number;
   active: boolean;
   onClick: () => void;
-  dot?: string;
   icon?: ReactNode;
   title?: string;
 }) {
@@ -495,11 +493,6 @@ function SidebarItem({
     >
       {icon !== undefined ? (
         icon
-      ) : dot !== undefined ? (
-        <span
-          className="w-2 h-2 rounded-full shrink-0"
-          style={{ background: dot }}
-        />
       ) : (
         <span className="w-2 shrink-0" />
       )}
@@ -536,6 +529,7 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
         <Tag
           label={AGENT_LABEL[item.agent]}
           color={`var(--color-agent-${item.agent})`}
+          icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
         />
       )}
         {subCount > 0 && (
