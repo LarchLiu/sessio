@@ -17,6 +17,7 @@ use crate::store::SessionStore;
 pub enum IndexTask {
     FullRebuild,
     ReindexCodexFile(PathBuf),
+    ReindexClaudeFile(PathBuf),
     ReindexClaudeProject(PathBuf),
     ReindexGeminiLogs(PathBuf),
     RefreshGeminiProjectMappings,
@@ -131,6 +132,7 @@ fn current_status(state: &IndexerState) -> IndexStatus {
 
 fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
     let mut seen_codex: HashSet<PathBuf> = HashSet::new();
+    let mut seen_claude_file: HashSet<PathBuf> = HashSet::new();
     let mut seen_claude: HashSet<PathBuf> = HashSet::new();
     let mut seen_gemini: HashSet<PathBuf> = HashSet::new();
     let mut seen_delete: HashSet<PathBuf> = HashSet::new();
@@ -144,6 +146,11 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
             IndexTask::ReindexCodexFile(p) => {
                 if seen_codex.insert(p.clone()) {
                     out.push(IndexTask::ReindexCodexFile(p));
+                }
+            }
+            IndexTask::ReindexClaudeFile(p) => {
+                if seen_claude_file.insert(p.clone()) {
+                    out.push(IndexTask::ReindexClaudeFile(p));
                 }
             }
             IndexTask::ReindexClaudeProject(p) => {
@@ -168,6 +175,17 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
     if full {
         return vec![IndexTask::FullRebuild];
     }
+    // If we already have a full project rescan queued, the per-file tasks
+    // inside that project are redundant work.
+    if !seen_claude.is_empty() {
+        out.retain(|task| match task {
+            IndexTask::ReindexClaudeFile(p) => p
+                .parent()
+                .map(|parent| !seen_claude.contains(parent))
+                .unwrap_or(true),
+            _ => true,
+        });
+    }
     if refresh_gemini_mappings {
         out.push(IndexTask::RefreshGeminiProjectMappings);
     }
@@ -178,6 +196,7 @@ fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<()> {
     match task {
         IndexTask::FullRebuild => full_rebuild(store),
         IndexTask::ReindexCodexFile(path) => reindex_codex_file(path, store),
+        IndexTask::ReindexClaudeFile(path) => reindex_claude_file(path, store),
         IndexTask::ReindexClaudeProject(dir) => reindex_claude_project(dir, store),
         IndexTask::ReindexGeminiLogs(path) => reindex_gemini_logs(path, store),
         IndexTask::RefreshGeminiProjectMappings => refresh_gemini_mappings(store),
@@ -291,6 +310,28 @@ fn reindex_claude_project(dir: &Path, store: &dyn SessionStore) -> Result<()> {
     let sessions = readers::claude::scan_project_dir(dir)?;
     let scope = dir.to_string_lossy().into_owned();
     store.replace_by_scope(&scope, Agent::Claude, &sessions)?;
+    Ok(())
+}
+
+fn reindex_claude_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
+    if !path.exists() {
+        store.delete_by_file_path(&path.to_string_lossy())?;
+        return Ok(());
+    }
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    match readers::claude::parse_single_file(path)? {
+        Some(info) => {
+            // Keep scope = project dir so this row stays consistent with rows
+            // produced by full project scans (PK is agent+session_id+scope).
+            let scope = parent.to_string_lossy().into_owned();
+            store.upsert_session(&scope, &info)?;
+        }
+        None => {
+            store.delete_by_file_path(&path.to_string_lossy())?;
+        }
+    }
     Ok(())
 }
 

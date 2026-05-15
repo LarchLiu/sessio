@@ -436,12 +436,7 @@ function UserNav({
 function MessageBubble({ msg }: { msg: SessionMessage }) {
   const { lang, t } = useI18n();
   const LONG_TOOL_THRESHOLD = 500;
-  const isToolLike =
-    msg.role === "tool_call" || msg.role === "tool_result";
-  const collapsible =
-    msg.role === "developer" ||
-    msg.role === "system" ||
-    (isToolLike && msg.text.length > LONG_TOOL_THRESHOLD);
+  const collapsible = msg.text.length > LONG_TOOL_THRESHOLD;
   const [collapsed, setCollapsed] = useState(collapsible);
   const preview = collapsible
     ? msg.text.replace(/\s+/g, " ").slice(0, 200)

@@ -105,6 +105,9 @@ struct Roots {
 }
 
 fn dispatch(path: &Path, kind: EventKind, roots: &Roots) -> Option<IndexTask> {
+    if is_platform_junk(path) {
+        return None;
+    }
     let removed = matches!(kind, EventKind::Remove(_));
 
     if path == roots.gemini_projects_json {
@@ -144,11 +147,24 @@ fn dispatch_claude(path: &Path, claude_root: &Path, _removed: bool) -> Option<In
     if file_name == "sessions-index.json" {
         return Some(IndexTask::ReindexClaudeProject(project_dir));
     }
+    // Top-level <project>/<session>.jsonl edits only affect that one session;
+    // no need to rescan every sibling jsonl in the project.
     if is_jsonl(path) && rel.components().count() == 2 {
-        return Some(IndexTask::ReindexClaudeProject(project_dir));
+        return Some(IndexTask::ReindexClaudeFile(path.to_path_buf()));
     }
+    // Subagent jsonls live under <project>/<parent_session>/subagents/...
+    // and only affect that parent session's row (its subagents column).
+    // Reuse the single-file path on the parent jsonl so we don't rescan the
+    // whole project. If the parent jsonl is gone (archived), fall back to
+    // project rescan to refresh the subagent-only synthetic row.
     let rest: Vec<_> = rel.components().skip(1).collect();
     if rest.iter().any(|c| c.as_os_str() == "subagents") {
+        if let Some(parent_id) = rest.first().map(|c| c.as_os_str().to_owned()) {
+            let parent_jsonl = project_dir.join(format!("{}.jsonl", parent_id.to_string_lossy()));
+            if parent_jsonl.exists() {
+                return Some(IndexTask::ReindexClaudeFile(parent_jsonl));
+            }
+        }
         return Some(IndexTask::ReindexClaudeProject(project_dir));
     }
     None
@@ -168,4 +184,21 @@ fn dispatch_gemini(path: &Path, gemini_tmp: &Path) -> Option<IndexTask> {
 
 fn is_jsonl(path: &Path) -> bool {
     path.extension().and_then(|s| s.to_str()) == Some("jsonl")
+}
+
+// Ignore filesystem metadata noise that OS file managers sprinkle into watched
+// directories so we don't keep firing reindex tasks on every Finder browse.
+fn is_platform_junk(path: &Path) -> bool {
+    let name = match path.file_name().and_then(|s| s.to_str()) {
+        Some(n) => n,
+        None => return false,
+    };
+    matches!(
+        name,
+        ".DS_Store"             // macOS Finder
+            | "Thumbs.db"       // Windows Explorer
+            | "ehthumbs.db"     // Windows Explorer (legacy)
+            | "desktop.ini"     // Windows
+            | ".directory"      // KDE Dolphin
+    ) || name.starts_with("._") // macOS AppleDouble sidecar
 }

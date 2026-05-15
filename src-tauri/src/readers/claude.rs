@@ -149,6 +149,50 @@ pub fn scan_project_dir(project_dir: &Path) -> Result<Vec<SessionInfo>> {
     Ok(group)
 }
 
+// Single-file reindex path: parse only the given jsonl and fill in the
+// project-shared metadata (cwd/name, sibling subagents). Lets the watcher
+// react to a single jsonl write without rescanning every session in the
+// project directory.
+pub fn parse_single_file(path: &Path) -> Result<Option<SessionInfo>> {
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    let path_buf = path.to_path_buf();
+    let mut info = match parse_session(&path_buf)? {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+
+    let index = read_index(&parent.join("sessions-index.json")).ok();
+    if info.project_path.is_none() {
+        info.project_path = index.as_ref().and_then(|i| {
+            i.original_path.clone().or_else(|| {
+                i.entries.iter().find_map(|e| e.project_path.clone())
+            })
+        });
+    }
+    if info.project_name.is_none() {
+        let from_cwd = info.project_path.as_deref().and_then(|p| {
+            Path::new(p)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        });
+        let dir_name = parent
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(String::from);
+        info.project_name = from_cwd.or(dir_name);
+    }
+
+    let subagents_dir = parent.join(&info.id).join("subagents");
+    if subagents_dir.is_dir() {
+        info.subagents = read_subagents(&subagents_dir);
+    }
+
+    Ok(Some(info))
+}
+
 pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -229,6 +273,30 @@ fn expand_message(
             "text" => {
                 if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
                     text_parts.push(t.to_string());
+                }
+            }
+            "thinking" => {
+                if !text_parts.is_empty() {
+                    let joined = text_parts.join("\n");
+                    if !joined.trim().is_empty()
+                        && !(role_raw == "user" && is_system_noise(&joined))
+                    {
+                        out.push(SessionMessage {
+                            role: role_raw.to_string(),
+                            text: joined,
+                            timestamp: ts,
+                        });
+                    }
+                    text_parts.clear();
+                }
+                if let Some(t) = item.get("thinking").and_then(|x| x.as_str()) {
+                    if !t.trim().is_empty() {
+                        out.push(SessionMessage {
+                            role: "thinking".to_string(),
+                            text: t.to_string(),
+                            timestamp: ts,
+                        });
+                    }
                 }
             }
             "tool_use" => {
