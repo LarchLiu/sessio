@@ -4,13 +4,18 @@ pub mod sqlite;
 use anyhow::Result;
 use std::collections::HashSet;
 
-use crate::models::{Agent, SessionInfo};
+use crate::models::{Agent, SessionInfo, SubagentInfo};
 
 #[derive(Debug, Clone)]
 pub struct IndexedSubagentRecord {
+    pub parent_agent: Agent,
+    pub parent_session_id: String,
+    pub parent_scope: String,
+    pub subagent_id: String,
     pub file_path: String,
     pub file_size: u64,
     pub file_mtime: Option<i64>,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +43,15 @@ pub trait SessionStore: Send + Sync {
         agent: Agent,
         sessions: &[SessionInfo],
     ) -> Result<()>;
+    fn upsert_subagent(
+        &self,
+        parent_agent: Agent,
+        parent_scope: &str,
+        parent_session_id: &str,
+        subagent: &SubagentInfo,
+    ) -> Result<()>;
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()>;
+    fn mark_subagent_file_unavailable(&self, file_path: &str) -> Result<()>;
     fn mark_missing_scopes_unavailable(
         &self,
         agent: Agent,

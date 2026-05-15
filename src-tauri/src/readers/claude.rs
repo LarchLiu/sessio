@@ -678,7 +678,28 @@ fn parse_subagent(path: &Path) -> Result<Option<SubagentInfo>> {
         file_path: path.to_string_lossy().into_owned(),
         file_size: scan.file_size,
         partial: scan.partial,
+        available: true,
     }))
+}
+
+// Parse a single subagent jsonl in isolation, recovering its parent session
+// id from the path layout `<project>/<parent_session_id>/subagents/<id>.jsonl`.
+// Used by per-file reindex paths so a subagent change doesn't touch the
+// parent session's main row.
+pub fn parse_single_subagent_file(path: &Path) -> Result<Option<(String, SubagentInfo)>> {
+    let parent_session_id = match path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+    {
+        Some(s) => s.to_string(),
+        None => return Ok(None),
+    };
+    match parse_subagent(path)? {
+        Some(info) => Ok(Some((parent_session_id, info))),
+        None => Ok(None),
+    }
 }
 
 fn info_from_index(

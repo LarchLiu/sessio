@@ -74,10 +74,19 @@ CREATE TABLE IF NOT EXISTS subagents (
     file_size          INTEGER NOT NULL DEFAULT 0,
     file_mtime         INTEGER,
     partial            INTEGER NOT NULL DEFAULT 0,
+    available          INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (parent_agent, parent_session_id, subagent_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_subagents_parent ON subagents(parent_agent, parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
+"#;
+
+// v2: subagents.available column (subagents can now be soft-deleted
+// independently of their parent session row).
+const SCHEMA_V2: &str = r#"
+ALTER TABLE subagents ADD COLUMN available INTEGER NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
 "#;
 
 fn now_ms() -> i64 {
@@ -97,9 +106,19 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         .optional()
         .ok()
         .flatten();
-    if current.unwrap_or(0) < 1 {
+    let current = current.unwrap_or(0);
+    if current < 1 {
         conn.execute_batch(SCHEMA_V1)?;
         conn.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)", [])?;
+    }
+    if current < 2 {
+        // V1 dbs already have the index; v2 only adds the column. Both are
+        // idempotent on a fresh v1 schema since execute_batch tolerates the
+        // CREATE INDEX IF NOT EXISTS, and the ALTER is guarded by version.
+        // Catch & ignore errors from ALTER when the column already exists
+        // (e.g. an old dev db that pre-baked it).
+        let _ = conn.execute_batch(SCHEMA_V2);
+        conn.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)", [])?;
     }
     Ok(())
 }
@@ -134,7 +153,8 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             now_ms(),
         ],
     )?;
-    replace_subagents_inner(conn, s.agent, &s.id, &s.subagents)?;
+    // Subagent rows are written through upsert_subagent so their lifecycle
+    // is independent from the parent session's reindex.
     Ok(())
 }
 
@@ -152,42 +172,37 @@ fn file_mtime_for(file_path: &str) -> Option<i64> {
         })
 }
 
-fn replace_subagents_inner(
+fn upsert_subagent_inner(
     conn: &Connection,
     parent_agent: Agent,
     parent_session_id: &str,
-    items: &[SubagentInfo],
+    sub: &SubagentInfo,
 ) -> Result<()> {
     conn.execute(
-        "DELETE FROM subagents WHERE parent_agent = ? AND parent_session_id = ?",
-        params![parent_agent.as_str(), parent_session_id],
+        "INSERT OR REPLACE INTO subagents (
+            parent_agent, parent_session_id, subagent_id, file_path,
+            agent_type, description,
+            started_at, updated_at,
+            message_count, first_user_message,
+            file_size, file_mtime, partial, available
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?, ?,?,?,?)",
+        params![
+            parent_agent.as_str(),
+            parent_session_id,
+            sub.id,
+            sub.file_path,
+            sub.agent_type,
+            sub.description,
+            sub.started_at,
+            sub.updated_at,
+            sub.message_count as i64,
+            sub.first_user_message,
+            sub.file_size as i64,
+            file_mtime_for(&sub.file_path),
+            sub.partial as i64,
+            sub.available as i64,
+        ],
     )?;
-    for sub in items {
-        conn.execute(
-            "INSERT OR REPLACE INTO subagents (
-                parent_agent, parent_session_id, subagent_id, file_path,
-                agent_type, description,
-                started_at, updated_at,
-                message_count, first_user_message,
-                file_size, file_mtime, partial
-            ) VALUES (?,?,?,?, ?,?, ?,?, ?,?, ?,?,?)",
-            params![
-                parent_agent.as_str(),
-                parent_session_id,
-                sub.id,
-                sub.file_path,
-                sub.agent_type,
-                sub.description,
-                sub.started_at,
-                sub.updated_at,
-                sub.message_count as i64,
-                sub.first_user_message,
-                sub.file_size as i64,
-                file_mtime_for(&sub.file_path),
-                sub.partial as i64,
-            ],
-        )?;
-    }
     Ok(())
 }
 
@@ -198,7 +213,7 @@ fn load_all_subagents_grouped(
         "SELECT parent_agent, parent_session_id,
                 subagent_id, file_path, agent_type, description,
                 started_at, updated_at, message_count, first_user_message,
-                file_size, partial
+                file_size, partial, available
          FROM subagents
          ORDER BY started_at ASC",
     )?;
@@ -217,6 +232,7 @@ fn load_all_subagents_grouped(
             first_user_message: row.get(9)?,
             file_size: row.get::<_, i64>(10)? as u64,
             partial: row.get::<_, i64>(11)? != 0,
+            available: row.get::<_, i64>(12)? != 0,
         };
         Ok((agent_str, parent_session_id, sub))
     })?;
@@ -234,24 +250,43 @@ fn load_all_indexed_subagents_grouped(
     conn: &Connection,
 ) -> Result<HashMap<(Agent, String), Vec<IndexedSubagentRecord>>> {
     let mut stmt = conn.prepare(
-        "SELECT parent_agent, parent_session_id, file_path, file_size, file_mtime
+        "SELECT parent_agent, parent_session_id,
+                subagent_id, file_path, file_size, file_mtime, available
          FROM subagents",
     )?;
     let mut grouped: HashMap<(Agent, String), Vec<IndexedSubagentRecord>> = HashMap::new();
     let rows = stmt.query_map([], |row| {
         let agent_str: String = row.get(0)?;
         let parent_session_id: String = row.get(1)?;
-        let rec = IndexedSubagentRecord {
-            file_path: row.get(2)?,
-            file_size: row.get::<_, i64>(3)? as u64,
-            file_mtime: row.get(4)?,
-        };
-        Ok((agent_str, parent_session_id, rec))
+        let subagent_id: String = row.get(2)?;
+        let file_path: String = row.get(3)?;
+        let file_size = row.get::<_, i64>(4)? as u64;
+        let file_mtime: Option<i64> = row.get(5)?;
+        let available: bool = row.get::<_, i64>(6)? != 0;
+        Ok((
+            agent_str,
+            parent_session_id,
+            subagent_id,
+            file_path,
+            file_size,
+            file_mtime,
+            available,
+        ))
     })?;
     for r in rows {
-        let (agent_str, parent_session_id, rec) = r?;
+        let (agent_str, parent_session_id, subagent_id, file_path, file_size, file_mtime, available) = r?;
         let Some(agent) = Agent::from_db_str(&agent_str) else {
             continue;
+        };
+        let rec = IndexedSubagentRecord {
+            parent_agent: agent,
+            parent_session_id: parent_session_id.clone(),
+            parent_scope: String::new(), // filled in by list_indexed_sessions
+            subagent_id,
+            file_path,
+            file_size,
+            file_mtime,
+            available,
         };
         grouped.entry((agent, parent_session_id)).or_default().push(rec);
     }
@@ -330,9 +365,15 @@ impl SessionStore for SqliteStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for s in sessions.iter_mut() {
-            s.subagents = subs_by_parent
+            let mut subs = subs_by_parent
                 .remove(&(s.agent, s.session_id.clone()))
                 .unwrap_or_default();
+            // The grouped loader doesn't know the parent's scope (subagents
+            // table doesn't store it); fill it in from the parent session row.
+            for sub in subs.iter_mut() {
+                sub.parent_scope = s.scope.clone();
+            }
+            s.subagents = subs;
         }
         Ok(sessions)
     }
@@ -382,6 +423,26 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE sessions SET available = 0 WHERE file_path = ?",
+            params![file_path],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_subagent(
+        &self,
+        parent_agent: Agent,
+        _parent_scope: &str,
+        parent_session_id: &str,
+        subagent: &SubagentInfo,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        upsert_subagent_inner(&conn, parent_agent, parent_session_id, subagent)
+    }
+
+    fn mark_subagent_file_unavailable(&self, file_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE subagents SET available = 0 WHERE file_path = ?",
             params![file_path],
         )?;
         Ok(())

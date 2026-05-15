@@ -51,6 +51,12 @@ pub struct SubagentInfo {
     pub file_path: String,
     pub file_size: u64,
     pub partial: bool,
+    #[serde(default = "default_available")]
+    pub available: bool,
+}
+
+fn default_available() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

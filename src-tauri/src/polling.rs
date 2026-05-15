@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::indexer::{IndexTask, IndexerHandle};
 use crate::models::Agent;
 use crate::readers;
-use crate::store::{IndexedSessionRecord, SessionStore};
+use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
 
 pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
     thread::spawn(move || {
@@ -101,10 +101,22 @@ fn poll_claude(
         return Ok(());
     };
 
-    let mut by_scope: HashMap<String, Vec<&IndexedSessionRecord>> = HashMap::new();
+    // Index claude rows by their on-disk file path. Main rows and subagent
+    // rows are tracked separately so a change on one doesn't touch the other.
+    let mut known_main: HashMap<String, &IndexedSessionRecord> = HashMap::new();
+    let mut known_sub: HashMap<String, &IndexedSubagentRecord> = HashMap::new();
     for row in indexed.iter().filter(|s| s.agent == Agent::Claude) {
-        by_scope.entry(row.scope.clone()).or_default().push(row);
+        if !row.file_path.is_empty() {
+            known_main.insert(row.file_path.clone(), row);
+        }
+        for sub in &row.subagents {
+            if !sub.file_path.is_empty() {
+                known_sub.insert(sub.file_path.clone(), sub);
+            }
+        }
     }
+    let mut seen_main: HashSet<String> = HashSet::new();
+    let mut seen_sub: HashSet<String> = HashSet::new();
 
     let mut current_index_mtimes: HashMap<PathBuf, Option<i64>> = HashMap::new();
     let mut seen_scopes: HashSet<String> = HashSet::new();
@@ -117,19 +129,90 @@ fn poll_claude(
         let dir = entry.path();
         let scope = dir.to_string_lossy().into_owned();
         seen_scopes.insert(scope.clone());
+
+        // sessions-index.json hint: archived main rows have no jsonl on disk,
+        // so a per-file walk can't see them. When the index file appears or
+        // changes, queue a project rescan to materialize those synthetic rows.
         let sessions_index = dir.join("sessions-index.json");
         let index_mtime = file_mtime(&sessions_index);
         current_index_mtimes.insert(sessions_index.clone(), index_mtime);
-
-        let rows = by_scope.remove(&scope).unwrap_or_default();
         let index_changed = claude_index_mtimes.get(&sessions_index) != Some(&index_mtime);
-        let needs_reindex = index_changed || claude_project_needs_reindex(&dir, &rows)?;
-        if needs_reindex {
-            indexer.submit(IndexTask::ReindexClaudeProject(dir))?;
+        if index_changed {
+            indexer.submit(IndexTask::ReindexClaudeProject(dir.clone()))?;
+        }
+
+        // Per-file scan. Main jsonl sits at <project>/<id>.jsonl; subagent
+        // jsonl sits at <project>/<id>/subagents/<sid>.jsonl. They get their
+        // own task types and never trigger each other.
+        for child in std::fs::read_dir(&dir)? {
+            let child = child?;
+            let cpath = child.path();
+            let ctype = child.file_type()?;
+            if ctype.is_file()
+                && cpath.extension().and_then(|s| s.to_str()) == Some("jsonl")
+            {
+                let path_str = cpath.to_string_lossy().into_owned();
+                seen_main.insert(path_str.clone());
+                let needs_reindex = match known_main.get(&path_str) {
+                    Some(row) => {
+                        !row.available
+                            || file_changed(&cpath, row.file_size, row.file_mtime)
+                    }
+                    None => true,
+                };
+                if needs_reindex {
+                    indexer.submit(IndexTask::ReindexClaudeFile(cpath))?;
+                }
+                continue;
+            }
+            if !ctype.is_dir() {
+                continue;
+            }
+            let subagents_dir = cpath.join("subagents");
+            if !subagents_dir.is_dir() {
+                continue;
+            }
+            for sub_entry in std::fs::read_dir(&subagents_dir)? {
+                let sub_entry = sub_entry?;
+                let sub_path = sub_entry.path();
+                if !sub_entry.file_type()?.is_file()
+                    || sub_path.extension().and_then(|s| s.to_str()) != Some("jsonl")
+                {
+                    continue;
+                }
+                let sub_path_str = sub_path.to_string_lossy().into_owned();
+                seen_sub.insert(sub_path_str.clone());
+                let needs_reindex = match known_sub.get(&sub_path_str) {
+                    Some(row) => {
+                        !row.available
+                            || file_changed(&sub_path, row.file_size, row.file_mtime)
+                    }
+                    None => true,
+                };
+                if needs_reindex {
+                    indexer.submit(IndexTask::ReindexClaudeSubagentFile(sub_path))?;
+                }
+            }
         }
     }
 
     *claude_index_mtimes = current_index_mtimes;
+
+    // Soft-delete vanished files. Skip rows already unavailable so we don't
+    // re-issue the same write every tick.
+    for (path, row) in &known_main {
+        if !seen_main.contains(path) && row.available {
+            indexer.submit(IndexTask::DeleteFile(PathBuf::from(path)))?;
+        }
+    }
+    for (path, sub) in &known_sub {
+        if !seen_sub.contains(path) && sub.available {
+            indexer.submit(IndexTask::DeleteSubagentFile(PathBuf::from(path)))?;
+        }
+    }
+
+    // Whole project dir gone: every main row under that scope is gone.
+    // Subagents below are picked up by their per-file delete above.
     store.mark_missing_scopes_unavailable(Agent::Claude, &seen_scopes)?;
 
     Ok(())
@@ -183,58 +266,6 @@ fn poll_gemini(
     store.mark_missing_scopes_unavailable(Agent::Gemini, &present_scopes)?;
 
     Ok(())
-}
-
-fn claude_project_needs_reindex(
-    project_dir: &Path,
-    rows: &[&IndexedSessionRecord],
-) -> Result<bool> {
-    if rows.is_empty() {
-        return Ok(true);
-    }
-    let mut indexed_files: HashMap<String, (u64, Option<i64>)> = HashMap::new();
-    for row in rows {
-        if !row.file_path.is_empty() {
-            indexed_files.insert(row.file_path.clone(), (row.file_size, row.file_mtime));
-        }
-        for sub in &row.subagents {
-            indexed_files.insert(sub.file_path.clone(), (sub.file_size, sub.file_mtime));
-        }
-    }
-
-    let mut disk_files: HashMap<String, (u64, Option<i64>)> = HashMap::new();
-    for entry in std::fs::read_dir(project_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_file() && path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            // Can't stat? Treat as changed and let the indexer surface any
-            // real error on its own (parse, etc).
-            let Some(meta) = current_file_meta(&path) else {
-                return Ok(true);
-            };
-            disk_files.insert(path.to_string_lossy().into_owned(), meta);
-            continue;
-        }
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let subagents_dir = path.join("subagents");
-        if !subagents_dir.is_dir() {
-            continue;
-        }
-        for sub in std::fs::read_dir(subagents_dir)? {
-            let sub = sub?;
-            let sub_path = sub.path();
-            if sub.file_type()?.is_file() && sub_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                let Some(meta) = current_file_meta(&sub_path) else {
-                    return Ok(true);
-                };
-                disk_files.insert(sub_path.to_string_lossy().into_owned(), meta);
-            }
-        }
-    }
-
-    Ok(disk_files != indexed_files)
 }
 
 fn projects_json_changed(

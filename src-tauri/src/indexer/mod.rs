@@ -19,9 +19,11 @@ pub enum IndexTask {
     ReindexCodexFile(PathBuf),
     ReindexClaudeFile(PathBuf),
     ReindexClaudeProject(PathBuf),
+    ReindexClaudeSubagentFile(PathBuf),
     ReindexGeminiLogs(PathBuf),
     RefreshGeminiProjectMappings,
     DeleteFile(PathBuf),
+    DeleteSubagentFile(PathBuf),
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -129,8 +131,10 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
     let mut seen_codex: HashSet<PathBuf> = HashSet::new();
     let mut seen_claude_file: HashSet<PathBuf> = HashSet::new();
     let mut seen_claude: HashSet<PathBuf> = HashSet::new();
+    let mut seen_claude_subagent: HashSet<PathBuf> = HashSet::new();
     let mut seen_gemini: HashSet<PathBuf> = HashSet::new();
     let mut seen_delete: HashSet<PathBuf> = HashSet::new();
+    let mut seen_delete_subagent: HashSet<PathBuf> = HashSet::new();
     let mut full = false;
     let mut refresh_gemini_mappings = false;
     let mut out = Vec::new();
@@ -153,6 +157,11 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
                     out.push(IndexTask::ReindexClaudeProject(p));
                 }
             }
+            IndexTask::ReindexClaudeSubagentFile(p) => {
+                if seen_claude_subagent.insert(p.clone()) {
+                    out.push(IndexTask::ReindexClaudeSubagentFile(p));
+                }
+            }
             IndexTask::ReindexGeminiLogs(p) => {
                 if seen_gemini.insert(p.clone()) {
                     out.push(IndexTask::ReindexGeminiLogs(p));
@@ -164,14 +173,20 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
                     out.push(IndexTask::DeleteFile(p));
                 }
             }
+            IndexTask::DeleteSubagentFile(p) => {
+                if seen_delete_subagent.insert(p.clone()) {
+                    out.push(IndexTask::DeleteSubagentFile(p));
+                }
+            }
         }
     }
 
     if full {
         return vec![IndexTask::FullRebuild];
     }
-    // If we already have a full project rescan queued, the per-file tasks
-    // inside that project are redundant work.
+    // A queued project rescan covers every main jsonl in that dir, so
+    // per-file main reindexes for the same project are redundant. Subagent
+    // tasks live on their own track and survive the filter.
     if !seen_claude.is_empty() {
         out.retain(|task| match task {
             IndexTask::ReindexClaudeFile(p) => p
@@ -193,10 +208,15 @@ fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<()> {
         IndexTask::ReindexCodexFile(path) => reindex_codex_file(path, store),
         IndexTask::ReindexClaudeFile(path) => reindex_claude_file(path, store),
         IndexTask::ReindexClaudeProject(dir) => reindex_claude_project(dir, store),
+        IndexTask::ReindexClaudeSubagentFile(path) => reindex_claude_subagent_file(path, store),
         IndexTask::ReindexGeminiLogs(path) => reindex_gemini_logs(path, store),
         IndexTask::RefreshGeminiProjectMappings => refresh_gemini_mappings(store),
         IndexTask::DeleteFile(path) => {
             store.mark_file_path_unavailable(&path.to_string_lossy())?;
+            Ok(())
+        }
+        IndexTask::DeleteSubagentFile(path) => {
+            store.mark_subagent_file_unavailable(&path.to_string_lossy())?;
             Ok(())
         }
     }
@@ -242,6 +262,13 @@ pub fn full_rebuild(store: &dyn SessionStore) -> Result<()> {
             match readers::claude::scan_project_dir(&dir) {
                 Ok(sessions) => {
                     store.replace_by_scope(&scope, Agent::Claude, &sessions)?;
+                    // Write subagent rows on their own path, mirroring
+                    // reindex_claude_project.
+                    for session in &sessions {
+                        for sub in &session.subagents {
+                            store.upsert_subagent(Agent::Claude, &scope, &session.id, sub)?;
+                        }
+                    }
                     claude_scopes.insert(scope);
                 }
                 Err(e) => log::warn!("claude scan {} failed: {e}", dir.display()),
@@ -306,6 +333,14 @@ fn reindex_claude_project(dir: &Path, store: &dyn SessionStore) -> Result<()> {
     let sessions = readers::claude::scan_project_dir(dir)?;
     let scope = dir.to_string_lossy().into_owned();
     store.replace_by_scope(&scope, Agent::Claude, &sessions)?;
+    // Subagent rows are written separately so a project rescan still keeps
+    // their per-file metadata fresh on a full project sweep, even though
+    // replace_by_scope no longer touches the subagents table.
+    for session in &sessions {
+        for sub in &session.subagents {
+            store.upsert_subagent(Agent::Claude, &scope, &session.id, sub)?;
+        }
+    }
     Ok(())
 }
 
@@ -321,11 +356,36 @@ fn reindex_claude_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
         Some(info) => {
             // Keep scope = project dir so this row stays consistent with rows
             // produced by full project scans (PK is agent+session_id+scope).
+            // Subagents on the parsed SessionInfo are ignored — a main-jsonl
+            // edit doesn't entitle us to rewrite subagent rows.
             let scope = parent.to_string_lossy().into_owned();
             store.upsert_session(&scope, &info)?;
         }
         None => {
             store.mark_file_path_unavailable(&path.to_string_lossy())?;
+        }
+    }
+    Ok(())
+}
+
+fn reindex_claude_subagent_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
+    if !path.exists() {
+        store.mark_subagent_file_unavailable(&path.to_string_lossy())?;
+        return Ok(());
+    }
+    // Path layout is `<project>/<parent_session_id>/subagents/<id>.jsonl`,
+    // so the project dir is `path.parent().parent().parent()`.
+    let Some(project_dir) = path.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+    else {
+        return Ok(());
+    };
+    let scope = project_dir.to_string_lossy().into_owned();
+    match readers::claude::parse_single_subagent_file(path)? {
+        Some((parent_session_id, info)) => {
+            store.upsert_subagent(Agent::Claude, &scope, &parent_session_id, &info)?;
+        }
+        None => {
+            store.mark_subagent_file_unavailable(&path.to_string_lossy())?;
         }
     }
     Ok(())

@@ -137,7 +137,7 @@ fn dispatch(path: &Path, kind: EventKind, roots: &Roots) -> Option<IndexTask> {
     None
 }
 
-fn dispatch_claude(path: &Path, claude_root: &Path, _removed: bool) -> Option<IndexTask> {
+fn dispatch_claude(path: &Path, claude_root: &Path, removed: bool) -> Option<IndexTask> {
     let rel = path.strip_prefix(claude_root).ok()?;
     let mut comps = rel.components();
     let project_name = comps.next()?.as_os_str();
@@ -147,25 +147,23 @@ fn dispatch_claude(path: &Path, claude_root: &Path, _removed: bool) -> Option<In
     if file_name == "sessions-index.json" {
         return Some(IndexTask::ReindexClaudeProject(project_dir));
     }
-    // Top-level <project>/<session>.jsonl edits only affect that one session;
-    // no need to rescan every sibling jsonl in the project.
+    // Top-level <project>/<session>.jsonl edits only affect that one session's
+    // main row. Subagents are handled below on their own track.
     if is_jsonl(path) && rel.components().count() == 2 {
+        if removed {
+            return Some(IndexTask::DeleteFile(path.to_path_buf()));
+        }
         return Some(IndexTask::ReindexClaudeFile(path.to_path_buf()));
     }
     // Subagent jsonls live under <project>/<parent_session>/subagents/...
-    // and only affect that parent session's row (its subagents column).
-    // Reuse the single-file path on the parent jsonl so we don't rescan the
-    // whole project. If the parent jsonl is gone (archived), fall back to
-    // project rescan to refresh the subagent-only synthetic row.
+    // and have an independent lifecycle from the parent main row — touch
+    // only the subagent row.
     let rest: Vec<_> = rel.components().skip(1).collect();
-    if rest.iter().any(|c| c.as_os_str() == "subagents") {
-        if let Some(parent_id) = rest.first().map(|c| c.as_os_str().to_owned()) {
-            let parent_jsonl = project_dir.join(format!("{}.jsonl", parent_id.to_string_lossy()));
-            if parent_jsonl.exists() {
-                return Some(IndexTask::ReindexClaudeFile(parent_jsonl));
-            }
+    if rest.iter().any(|c| c.as_os_str() == "subagents") && is_jsonl(path) {
+        if removed {
+            return Some(IndexTask::DeleteSubagentFile(path.to_path_buf()));
         }
-        return Some(IndexTask::ReindexClaudeProject(project_dir));
+        return Some(IndexTask::ReindexClaudeSubagentFile(path.to_path_buf()));
     }
     None
 }
