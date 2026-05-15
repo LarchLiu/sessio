@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use indexer::{IndexTask, IndexerHandle};
 use models::{Agent, SessionInfo, SessionMessage};
+use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::SessionStore;
 use tauri::{
@@ -237,14 +238,10 @@ pub fn run() {
             let db_path = data_dir.join("sessio-index.db");
             let sqlite = SqliteStore::open(&db_path)?;
             sqlite.init()?;
-            let store: Arc<dyn SessionStore> = Arc::new(sqlite);
-            let needs_full_rebuild = store
-                .list_sessions()
-                .map(|v| v.is_empty())
-                .unwrap_or(true);
-            let indexer_handle =
-                indexer::spawn(app.handle().clone(), store.clone(), needs_full_rebuild);
-            log::info!("indexer spawned, needs_full_rebuild={}", needs_full_rebuild);
+            let inner: Arc<dyn SessionStore> = Arc::new(sqlite);
+            let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
+            let indexer_handle = indexer::spawn(app.handle().clone(), store.clone());
+            log::info!("indexer spawned");
 
             polling::spawn_polling(store.clone(), indexer_handle.clone());
             log::info!("polling thread spawned");

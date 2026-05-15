@@ -60,21 +60,16 @@ impl IndexerHandle {
 pub fn spawn(
     app: AppHandle,
     store: Arc<dyn SessionStore>,
-    auto_rebuild_if_empty: bool,
 ) -> IndexerHandle {
     let (tx, rx) = unbounded::<IndexTask>();
     let state = Arc::new(IndexerState {
-        indexing: AtomicBool::new(auto_rebuild_if_empty),
+        indexing: AtomicBool::new(false),
         last_error: Mutex::new(None),
     });
     let handle = IndexerHandle {
         tx: tx.clone(),
         state: state.clone(),
     };
-
-    if auto_rebuild_if_empty {
-        let _ = tx.send(IndexTask::FullRebuild);
-    }
 
     thread::spawn(move || {
         run_loop(app, store, rx, state);
@@ -201,7 +196,7 @@ fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<()> {
         IndexTask::ReindexGeminiLogs(path) => reindex_gemini_logs(path, store),
         IndexTask::RefreshGeminiProjectMappings => refresh_gemini_mappings(store),
         IndexTask::DeleteFile(path) => {
-            store.delete_by_file_path(&path.to_string_lossy())?;
+            store.mark_file_path_unavailable(&path.to_string_lossy())?;
             Ok(())
         }
     }
@@ -233,7 +228,7 @@ pub fn full_rebuild(store: &dyn SessionStore) -> Result<()> {
             }
         }
     }
-    store.purge_missing_scopes(Agent::Codex, &codex_scopes)?;
+    store.mark_missing_scopes_unavailable(Agent::Codex, &codex_scopes)?;
 
     let mut claude_scopes: HashSet<String> = HashSet::new();
     if let Some(root) = readers::claude::root_dir()? {
@@ -253,7 +248,7 @@ pub fn full_rebuild(store: &dyn SessionStore) -> Result<()> {
             }
         }
     }
-    store.purge_missing_scopes(Agent::Claude, &claude_scopes)?;
+    store.mark_missing_scopes_unavailable(Agent::Claude, &claude_scopes)?;
 
     let mut gemini_scopes: HashSet<String> = HashSet::new();
     let (gemini_tmp, _) = readers::gemini::paths()?;
@@ -277,14 +272,15 @@ pub fn full_rebuild(store: &dyn SessionStore) -> Result<()> {
             }
         }
     }
-    store.purge_missing_scopes(Agent::Gemini, &gemini_scopes)?;
+    store.mark_missing_scopes_unavailable(Agent::Gemini, &gemini_scopes)?;
 
     Ok(())
 }
 
+
 fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
     if !path.exists() {
-        store.delete_by_file_path(&path.to_string_lossy())?;
+        store.mark_file_path_unavailable(&path.to_string_lossy())?;
         return Ok(());
     }
     let (_, archived_root) = readers::codex::roots()?;
@@ -295,7 +291,7 @@ fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
             store.replace_by_scope(&scope, Agent::Codex, &[info])?;
         }
         None => {
-            store.delete_by_file_path(&path.to_string_lossy())?;
+            store.mark_file_path_unavailable(&path.to_string_lossy())?;
         }
     }
     Ok(())
@@ -315,7 +311,7 @@ fn reindex_claude_project(dir: &Path, store: &dyn SessionStore) -> Result<()> {
 
 fn reindex_claude_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
     if !path.exists() {
-        store.delete_by_file_path(&path.to_string_lossy())?;
+        store.mark_file_path_unavailable(&path.to_string_lossy())?;
         return Ok(());
     }
     let Some(parent) = path.parent() else {
@@ -329,7 +325,7 @@ fn reindex_claude_file(path: &Path, store: &dyn SessionStore) -> Result<()> {
             store.upsert_session(&scope, &info)?;
         }
         None => {
-            store.delete_by_file_path(&path.to_string_lossy())?;
+            store.mark_file_path_unavailable(&path.to_string_lossy())?;
         }
     }
     Ok(())
@@ -371,7 +367,7 @@ fn refresh_gemini_mappings(store: &dyn SessionStore) -> Result<()> {
             Err(e) => log::warn!("gemini parse {} failed: {e}", logs.display()),
         }
     }
-    store.purge_missing_scopes(Agent::Gemini, &scopes)?;
+    store.mark_missing_scopes_unavailable(Agent::Gemini, &scopes)?;
     Ok(())
 }
 

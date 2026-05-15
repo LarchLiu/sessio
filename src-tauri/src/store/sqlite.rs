@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
 use crate::models::{Agent, SessionInfo, SubagentInfo};
-use crate::store::SessionStore;
+use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -191,39 +191,71 @@ fn replace_subagents_inner(
     Ok(())
 }
 
-fn load_subagents_for(
+fn load_all_subagents_grouped(
     conn: &Connection,
-    parent_agent: Agent,
-    parent_session_id: &str,
-) -> Result<Vec<SubagentInfo>> {
+) -> Result<HashMap<(Agent, String), Vec<SubagentInfo>>> {
     let mut stmt = conn.prepare(
-        "SELECT subagent_id, file_path, agent_type, description,
+        "SELECT parent_agent, parent_session_id,
+                subagent_id, file_path, agent_type, description,
                 started_at, updated_at, message_count, first_user_message,
                 file_size, partial
          FROM subagents
-         WHERE parent_agent = ? AND parent_session_id = ?
          ORDER BY started_at ASC",
     )?;
-    let rows = stmt
-        .query_map(
-            params![parent_agent.as_str(), parent_session_id],
-            |row| {
-                Ok(SubagentInfo {
-                    id: row.get(0)?,
-                    file_path: row.get(1)?,
-                    agent_type: row.get(2)?,
-                    description: row.get(3)?,
-                    started_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    message_count: row.get::<_, i64>(6)? as usize,
-                    first_user_message: row.get(7)?,
-                    file_size: row.get::<_, i64>(8)? as u64,
-                    partial: row.get::<_, i64>(9)? != 0,
-                })
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    let mut grouped: HashMap<(Agent, String), Vec<SubagentInfo>> = HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        let agent_str: String = row.get(0)?;
+        let parent_session_id: String = row.get(1)?;
+        let sub = SubagentInfo {
+            id: row.get(2)?,
+            file_path: row.get(3)?,
+            agent_type: row.get(4)?,
+            description: row.get(5)?,
+            started_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            message_count: row.get::<_, i64>(8)? as usize,
+            first_user_message: row.get(9)?,
+            file_size: row.get::<_, i64>(10)? as u64,
+            partial: row.get::<_, i64>(11)? != 0,
+        };
+        Ok((agent_str, parent_session_id, sub))
+    })?;
+    for r in rows {
+        let (agent_str, parent_session_id, sub) = r?;
+        let Some(agent) = Agent::from_db_str(&agent_str) else {
+            continue;
+        };
+        grouped.entry((agent, parent_session_id)).or_default().push(sub);
+    }
+    Ok(grouped)
+}
+
+fn load_all_indexed_subagents_grouped(
+    conn: &Connection,
+) -> Result<HashMap<(Agent, String), Vec<IndexedSubagentRecord>>> {
+    let mut stmt = conn.prepare(
+        "SELECT parent_agent, parent_session_id, file_path, file_size, file_mtime
+         FROM subagents",
+    )?;
+    let mut grouped: HashMap<(Agent, String), Vec<IndexedSubagentRecord>> = HashMap::new();
+    let rows = stmt.query_map([], |row| {
+        let agent_str: String = row.get(0)?;
+        let parent_session_id: String = row.get(1)?;
+        let rec = IndexedSubagentRecord {
+            file_path: row.get(2)?,
+            file_size: row.get::<_, i64>(3)? as u64,
+            file_mtime: row.get(4)?,
+        };
+        Ok((agent_str, parent_session_id, rec))
+    })?;
+    for r in rows {
+        let (agent_str, parent_session_id, rec) = r?;
+        let Some(agent) = Agent::from_db_str(&agent_str) else {
+            continue;
+        };
+        grouped.entry((agent, parent_session_id)).or_default().push(rec);
+    }
+    Ok(grouped)
 }
 
 impl SessionStore for SqliteStore {
@@ -234,6 +266,7 @@ impl SessionStore for SqliteStore {
 
     fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
+        let mut subs_by_parent = load_all_subagents_grouped(&conn)?;
         let mut stmt = conn.prepare(
             "SELECT agent, session_id, file_path, project_path, project_name,
                     started_at, updated_at, message_count, first_user_message,
@@ -264,7 +297,42 @@ impl SessionStore for SqliteStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for s in sessions.iter_mut() {
-            s.subagents = load_subagents_for(&conn, s.agent, &s.id)?;
+            s.subagents = subs_by_parent
+                .remove(&(s.agent, s.id.clone()))
+                .unwrap_or_default();
+        }
+        Ok(sessions)
+    }
+
+    fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut subs_by_parent = load_all_indexed_subagents_grouped(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT agent, session_id, scope, file_path, file_size, file_mtime, last_indexed_at, available, archived
+             FROM sessions",
+        )?;
+        let mut sessions: Vec<IndexedSessionRecord> = stmt
+            .query_map([], |row| {
+                let agent_str: String = row.get(0)?;
+                let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+                Ok(IndexedSessionRecord {
+                    agent,
+                    session_id: row.get(1)?,
+                    scope: row.get(2)?,
+                    file_path: row.get(3)?,
+                    file_size: row.get::<_, i64>(4)? as u64,
+                    file_mtime: row.get(5)?,
+                    last_indexed_at: row.get(6)?,
+                    available: row.get::<_, i64>(7)? != 0,
+                    archived: row.get::<_, i64>(8)? != 0,
+                    subagents: Vec::new(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for s in sessions.iter_mut() {
+            s.subagents = subs_by_parent
+                .remove(&(s.agent, s.session_id.clone()))
+                .unwrap_or_default();
         }
         Ok(sessions)
     }
@@ -282,6 +350,7 @@ impl SessionStore for SqliteStore {
     ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let new_ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         let stale_ids: Vec<String> = {
             let mut stmt = tx.prepare(
                 "SELECT session_id FROM sessions WHERE scope = ? AND agent = ?",
@@ -293,16 +362,12 @@ impl SessionStore for SqliteStore {
             }
             v
         };
-        tx.execute(
-            "DELETE FROM sessions WHERE scope = ? AND agent = ?",
-            params![scope, agent.as_str()],
-        )?;
-        let new_ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         for sid in &stale_ids {
             if !new_ids.contains(sid.as_str()) {
                 tx.execute(
-                    "DELETE FROM subagents WHERE parent_agent = ? AND parent_session_id = ?",
-                    params![agent.as_str(), sid],
+                    "UPDATE sessions SET available = 0
+                     WHERE scope = ? AND agent = ? AND session_id = ?",
+                    params![scope, agent.as_str(), sid],
                 )?;
             }
         }
@@ -313,34 +378,20 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
-    fn delete_by_file_path(&self, file_path: &str) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        let rows: Vec<(String, String)> = {
-            let mut stmt = tx.prepare(
-                "SELECT agent, session_id FROM sessions WHERE file_path = ?",
-            )?;
-            let rs = stmt.query_map(params![file_path], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?;
-            let mut out = Vec::new();
-            for r in rs {
-                out.push(r?);
-            }
-            out
-        };
-        for (agent_str, sid) in &rows {
-            tx.execute(
-                "DELETE FROM subagents WHERE parent_agent = ? AND parent_session_id = ?",
-                params![agent_str, sid],
-            )?;
-        }
-        tx.execute("DELETE FROM sessions WHERE file_path = ?", params![file_path])?;
-        tx.commit()?;
+    fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET available = 0 WHERE file_path = ?",
+            params![file_path],
+        )?;
         Ok(())
     }
 
-    fn purge_missing_scopes(&self, agent: Agent, present: &HashSet<String>) -> Result<()> {
+    fn mark_missing_scopes_unavailable(
+        &self,
+        agent: Agent,
+        present: &HashSet<String>,
+    ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let all_scopes: Vec<String> = {
@@ -358,25 +409,8 @@ impl SessionStore for SqliteStore {
             if present.contains(scope) {
                 continue;
             }
-            let stale_ids: Vec<String> = {
-                let mut stmt = tx.prepare(
-                    "SELECT session_id FROM sessions WHERE scope = ? AND agent = ?",
-                )?;
-                let rs = stmt.query_map(params![scope, agent.as_str()], |r| r.get::<_, String>(0))?;
-                let mut v = Vec::new();
-                for r in rs {
-                    v.push(r?);
-                }
-                v
-            };
-            for sid in &stale_ids {
-                tx.execute(
-                    "DELETE FROM subagents WHERE parent_agent = ? AND parent_session_id = ?",
-                    params![agent.as_str(), sid],
-                )?;
-            }
             tx.execute(
-                "DELETE FROM sessions WHERE scope = ? AND agent = ?",
+                "UPDATE sessions SET available = 0 WHERE scope = ? AND agent = ?",
                 params![scope, agent.as_str()],
             )?;
         }
