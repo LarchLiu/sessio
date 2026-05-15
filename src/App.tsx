@@ -1,5 +1,5 @@
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Bot, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
   AGENT_ACCENT,
@@ -48,6 +48,7 @@ export default function App() {
   const [expandAgent, setExpandAgent] = useState(true);
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { mode, setMode } = useTheme();
   const { lang, setLang, t } = useI18n();
   const listScrollRef = useRef<HTMLDivElement>(null);
@@ -55,6 +56,10 @@ export default function App() {
   useEffect(() => {
     listScrollRef.current?.scrollTo(0, 0);
   }, [filter]);
+
+  useEffect(() => {
+    if (!sidebarOpen) setSettingsOpen(false);
+  }, [sidebarOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -260,33 +265,85 @@ export default function App() {
           )}
         </nav>
 
-        <div className="w-64 px-3 py-2 flex items-center justify-between gap-2 border-t border-ink/10">
-          <span className="text-meta text-ink/30 truncate">
-            {indexing
-              ? t("sidebar.indexing")
-              : loading
-                ? t("sidebar.loading")
-                : ""}
-          </span>
-          <div className="shrink-0 flex items-center gap-1">
-            <Tooltip content={t("sidebar.rebuild_index")} placement="top">
-              <button
-                type="button"
-                aria-label={t("sidebar.rebuild_index")}
-                onClick={() => {
-                  setIndexing(true);
-                  rebuildSessionIndex().catch((err) => {
-                    setError(String(err));
-                    setIndexing(false);
-                  });
-                }}
-                className="p-1 text-ink/55 hover:text-ink transition rounded-md"
-              >
-                <RefreshCw className={"w-4 h-4 " + (indexing ? "animate-spin" : "")} />
-              </button>
-            </Tooltip>
-            <LanguageSwitcher lang={lang} onChange={setLang} />
-            <ThemeSwitcher mode={mode} onChange={setMode} />
+        <div className="relative w-64 border-t border-ink/10">
+          <div
+            className={
+              "absolute left-0 bottom-full w-64 overflow-hidden transition-all duration-250 ease-out " +
+              (settingsOpen
+                ? "translate-y-0 opacity-100 max-h-80 pointer-events-auto"
+                : "translate-y-2 opacity-0 max-h-0 pointer-events-none")
+            }
+          >
+            <div className="border-t border-ink/10 bg-surface shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur">
+              <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-3">
+                <span className="text-caption uppercase tracking-[0.12em] text-ink/40">
+                  {t("sidebar.settings")}
+                </span>
+                <button
+                  type="button"
+                  aria-label={t("sidebar.close_settings")}
+                  onClick={() => setSettingsOpen(false)}
+                  className="p-1 -m-1 text-ink/40 hover:text-ink transition rounded-md"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="mx-3 border-t border-ink/10" />
+              <div className="px-3 pt-3 pb-3 flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-body-sm text-ink/55">{t("sidebar.language")}</span>
+                  <LanguageSwitcher lang={lang} onChange={setLang} />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-body-sm text-ink/55">{t("sidebar.theme")}</span>
+                  <ThemeSwitcher mode={mode} onChange={setMode} />
+                </div>
+                <div className="flex items-center justify-between gap-3 text-body-sm text-ink/55">
+                  <span>{t("sidebar.rebuild_index")}</span>
+                  <button
+                    type="button"
+                    aria-label={t("sidebar.rebuild_index")}
+                    onClick={() => {
+                      setIndexing(true);
+                      rebuildSessionIndex().catch((err) => {
+                        setError(String(err));
+                        setIndexing(false);
+                      });
+                    }}
+                    className="p-1 -m-1 text-ink/55 transition hover:text-ink rounded-md"
+                  >
+                    <RefreshCw className={"w-4 h-4 shrink-0 " + (indexing ? "animate-spin" : "")} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="px-3 py-2 flex items-center justify-between gap-2">
+            <div className="shrink-0 flex items-center gap-1">
+              <Tooltip content={t("sidebar.settings")} placement="top">
+                <button
+                  type="button"
+                  aria-label={t("sidebar.settings")}
+                  onClick={() => setSettingsOpen((v) => !v)}
+                  className="p-1 text-ink/55 hover:text-ink transition rounded-md"
+                >
+                  <Settings
+                    className={
+                      "w-4 h-4 transition-transform duration-200 " +
+                      (settingsOpen ? "rotate-90" : "")
+                    }
+                  />
+                </button>
+              </Tooltip>
+            </div>
+            <span className="text-meta text-ink/30 truncate text-right">
+              {indexing
+                ? t("sidebar.indexing")
+                : loading
+                  ? t("sidebar.loading")
+                  : ""}
+            </span>
           </div>
         </div>
       </aside>
