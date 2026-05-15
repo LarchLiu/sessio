@@ -20,6 +20,32 @@ interface Props {
   onClose: () => void;
 }
 
+// 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
+// 剥离 IDE 注入的上下文块，仅在展示 user 消息预览时使用，展开仍保留原文。
+function stripInjectedContext(s: string): string {
+  let text = s;
+  for (;;) {
+    const trimmed = text.trimStart();
+    if (!trimmed.startsWith("<ide_")) break;
+    const afterLt = trimmed.slice("<ide_".length);
+    const closeIdx = afterLt.indexOf(">");
+    if (closeIdx < 0) break;
+    const tag = afterLt.slice(0, closeIdx);
+    const close = `</ide_${tag}>`;
+    const afterOpen = afterLt.slice(closeIdx + 1);
+    const endIdx = afterOpen.indexOf(close);
+    if (endIdx < 0) break;
+    text = afterOpen.slice(endIdx + close.length);
+  }
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("# Context from my IDE setup:")) {
+    const MARKER = "## My request for Codex:";
+    const idx = trimmed.indexOf(MARKER);
+    if (idx >= 0) text = trimmed.slice(idx + MARKER.length);
+  }
+  return text.trim();
+}
+
 type Tab =
   | { kind: "main" }
   | { kind: "sub"; sub: SubagentInfo };
@@ -388,7 +414,8 @@ function UserNav({
         const ratio = positions.get(idx);
         if (ratio === undefined) return null;
         const text = messages[idx].text;
-        const preview = text.replace(/\s+/g, " ").trim().slice(0, 200);
+        const cleaned = stripInjectedContext(text);
+        const preview = cleaned.replace(/\s+/g, " ").trim().slice(0, 200);
         const tip = (
           <div
             className="w-72 whitespace-normal"
@@ -400,7 +427,7 @@ function UserNav({
             }}
           >
             {preview}
-            {text.length > 200 ? "…" : ""}
+            {cleaned.length > 200 ? "…" : ""}
           </div>
         );
         return (
@@ -438,8 +465,10 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
   const LONG_TOOL_THRESHOLD = 500;
   const collapsible = msg.text.length > LONG_TOOL_THRESHOLD;
   const [collapsed, setCollapsed] = useState(collapsible);
+  const previewSource =
+    msg.role === "user" ? stripInjectedContext(msg.text) : msg.text;
   const preview = collapsible
-    ? msg.text.replace(/\s+/g, " ").slice(0, 200)
+    ? previewSource.replace(/\s+/g, " ").slice(0, 200)
     : "";
   const bubbleRef = useRef<HTMLDivElement>(null);
   const anchorTopRef = useRef<number | null>(null);
@@ -515,7 +544,7 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
         {collapsible && collapsed ? (
           <span className="text-ink/60">
             {preview}
-            {msg.text.length > 200 ? "…" : ""}
+            {previewSource.length > 200 ? "…" : ""}
           </span>
         ) : (
           msg.text
