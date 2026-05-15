@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export type ThemeMode = "light" | "dark" | "system";
 
@@ -94,17 +95,39 @@ export function useTheme() {
   }, [mode]);
 
   useEffect(() => {
-    if (mode !== "system" || !window.matchMedia) return;
-    const mql = window.matchMedia("(prefers-color-scheme: light)");
-    const onChange = () => {
-      const eff = mql.matches ? "light" : "dark";
+    if (mode !== "system") return;
+    let cancelled = false;
+
+    const apply = (eff: "light" | "dark") => {
+      if (cancelled) return;
       const prev = prevEffectiveRef.current;
+      if (eff === prev) return;
       setEffective(eff);
       applyThemeAnimated(eff, prev, true);
       prevEffectiveRef.current = eff;
     };
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
+
+    // macOS: matchMedia inside the webview tracks our pinned NSWindow
+    // appearance, not the real system, so we rely on a Rust-side poll that
+    // emits this event when AppleInterfaceStyle flips.
+    const unlisten = listen<string>("system_appearance_changed", (event) => {
+      apply(event.payload === "dark" ? "dark" : "light");
+    });
+
+    // Windows/Linux: we don't pin webview appearance there, so matchMedia is
+    // still the right signal. Keep it as a fallback alongside the Rust event.
+    const mql = window.matchMedia?.("(prefers-color-scheme: light)") ?? null;
+    const onMqlChange = () => {
+      if (!mql) return;
+      apply(mql.matches ? "light" : "dark");
+    };
+    mql?.addEventListener("change", onMqlChange);
+
+    return () => {
+      cancelled = true;
+      unlisten.then((f) => f()).catch(() => {});
+      mql?.removeEventListener("change", onMqlChange);
+    };
   }, [mode]);
 
   return { mode, setMode, effective };

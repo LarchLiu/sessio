@@ -15,7 +15,7 @@ use store::SessionStore;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    Manager, State, WindowEvent,
+    AppHandle, Manager, State, WindowEvent,
 };
 
 #[tauri::command]
@@ -113,6 +113,10 @@ fn set_window_appearance(window: tauri::Window, theme: String) -> Result<(), Str
 
 #[tauri::command]
 fn get_system_appearance() -> String {
+    current_system_appearance()
+}
+
+fn current_system_appearance() -> String {
     #[cfg(target_os = "macos")]
     {
         use objc2::{class, msg_send, runtime::AnyObject};
@@ -140,6 +144,76 @@ fn get_system_appearance() -> String {
     #[cfg(not(target_os = "macos"))]
     {
         "light".into()
+    }
+}
+
+// macOS won't fire prefers-color-scheme change events into the webview once
+// we've pinned the NSWindow's appearance, so we hook into the system-wide
+// AppleInterfaceThemeChangedNotification (posted by macOS whenever the
+// effective appearance flips, including the automatic sunset schedule) and
+// push the new value down to the frontend. Other platforms don't pin
+// appearance, so matchMedia in the webview already works there.
+#[cfg(target_os = "macos")]
+mod appearance_observer {
+    use std::sync::OnceLock;
+
+    use objc2::{
+        class, msg_send, sel,
+        runtime::{AnyClass, AnyObject, ClassBuilder, Sel},
+    };
+    use objc2_foundation::NSString;
+    use tauri::{AppHandle, Emitter};
+
+    static HANDLE: OnceLock<AppHandle> = OnceLock::new();
+    static OBSERVER_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+
+    extern "C" fn theme_changed(_this: &AnyObject, _cmd: Sel, _notif: *mut AnyObject) {
+        if let Some(handle) = HANDLE.get() {
+            let value = super::current_system_appearance();
+            let _ = handle.emit("system_appearance_changed", value);
+        }
+    }
+
+    pub fn install(handle: AppHandle) {
+        if HANDLE.set(handle).is_err() {
+            return;
+        }
+
+        let cls = OBSERVER_CLASS.get_or_init(|| {
+            let mut builder = ClassBuilder::new(c"SessioAppearanceObserver", class!(NSObject))
+                .expect("SessioAppearanceObserver name already registered");
+            unsafe {
+                let imp: extern "C" fn(_, _, _) = theme_changed;
+                builder.add_method(sel!(themeChanged:), imp);
+            }
+            builder.register()
+        });
+
+        unsafe {
+            // `new` returns a +1 retained instance. We deliberately drop the
+            // pointer without releasing so the observer lives for the lifetime
+            // of the app (NSDistributedNotificationCenter holds it weakly).
+            let observer: *mut AnyObject = msg_send![*cls, new];
+            let center: *mut AnyObject =
+                msg_send![class!(NSDistributedNotificationCenter), defaultCenter];
+            let name = NSString::from_str("AppleInterfaceThemeChangedNotification");
+            let _: () = msg_send![
+                center,
+                addObserver: observer,
+                selector: sel!(themeChanged:),
+                name: &*name,
+                object: std::ptr::null::<AnyObject>(),
+            ];
+        }
+    }
+}
+
+fn install_appearance_observer(handle: AppHandle) {
+    #[cfg(target_os = "macos")]
+    appearance_observer::install(handle);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = handle;
     }
 }
 
@@ -185,6 +259,8 @@ pub fn run() {
             }
             app.manage(store);
             app.manage(indexer_handle);
+
+            install_appearance_observer(app.handle().clone());
 
             let show = MenuItem::with_id(app, "show", "Show Sessio", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "Hide Sessio", true, None::<&str>)?;
