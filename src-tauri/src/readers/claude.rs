@@ -278,8 +278,7 @@ fn expand_message(
             "thinking" => {
                 if !text_parts.is_empty() {
                     let joined = text_parts.join("\n");
-                    if !joined.trim().is_empty()
-                        && !(role_raw == "user" && is_system_noise(&joined))
+                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
                     {
                         out.push(SessionMessage {
                             role: role_raw.to_string(),
@@ -302,8 +301,7 @@ fn expand_message(
             "tool_use" => {
                 if !text_parts.is_empty() {
                     let joined = text_parts.join("\n");
-                    if !joined.trim().is_empty()
-                        && !(role_raw == "user" && is_system_noise(&joined))
+                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
                     {
                         out.push(SessionMessage {
                             role: role_raw.to_string(),
@@ -337,8 +335,7 @@ fn expand_message(
             "tool_result" => {
                 if !text_parts.is_empty() {
                     let joined = text_parts.join("\n");
-                    if !joined.trim().is_empty()
-                        && !(role_raw == "user" && is_system_noise(&joined))
+                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
                     {
                         out.push(SessionMessage {
                             role: role_raw.to_string(),
@@ -363,8 +360,7 @@ fn expand_message(
 
     if !text_parts.is_empty() {
         let joined = text_parts.join("\n");
-        if !joined.trim().is_empty()
-            && !(role_raw == "user" && is_system_noise(&joined))
+        if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
         {
             out.push(SessionMessage {
                 role: role_raw.to_string(),
@@ -600,7 +596,7 @@ fn read_subagents(dir: &Path) -> Vec<SubagentInfo> {
             Err(e) => log::warn!("subagent parse {} failed: {e}", p.display()),
         }
     }
-    out.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+    out.sort_by_key(|a| a.started_at);
     out
 }
 
@@ -725,7 +721,7 @@ fn info_from_index(
         .first_prompt
         .as_deref()
         .filter(|s| !s.trim().is_empty() && !is_system_noise(s))
-        .map(|s| strip_injected_context(s))
+        .map(strip_injected_context)
         .filter(|s| !s.is_empty())
         .map(|s| normalize_preview(&s));
     let (file_size, available) = if file_path.is_empty() {
