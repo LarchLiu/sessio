@@ -4,11 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "dev": "tauri dev",
+    "build": "tauri build --no-bundle",
     "typecheck": "tsc --noEmit",
-    "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release": "run-script-os",
+    "release:win32": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1",
+    "release:default": "./scripts/release.sh",
+    "bundle": "tauri build"
   },
   "dependencies": {
     "@lobehub/icons": "^5.8.0",
@@ -24,6 +27,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.5.1",
+    "run-script-os": "^1.1.6",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
     "vite": "^6.1.0"

@@ -45,12 +45,10 @@ jobs:
           workspaces: src-tauri
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build frontend
-        run: pnpm build
       - name: Build arm64
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin
+        run: pnpm run build --target aarch64-apple-darwin
       - name: Build x86_64
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-apple-darwin
+        run: pnpm run build --target x86_64-apple-darwin
       - name: Lipo universal binary
         run: |
           lipo -create \
@@ -91,10 +89,8 @@ jobs:
             libssl-dev
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build frontend
-        run: pnpm build
       - name: Build
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+        run: pnpm run build
       - name: Stage asset
         run: cp src-tauri/target/release/Sessio sessio-linux-x86_64
       - uses: actions/upload-artifact@v4
@@ -130,10 +126,8 @@ jobs:
             libssl-dev
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build frontend
-        run: pnpm build
       - name: Build
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+        run: pnpm run build
       - name: Stage asset
         run: cp src-tauri/target/release/Sessio sessio-linux-arm64
       - uses: actions/upload-artifact@v4
@@ -160,10 +154,8 @@ jobs:
           workspaces: src-tauri
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build frontend
-        run: pnpm build
       - name: Build
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+        run: pnpm run build
       - name: Stage asset
         shell: pwsh
         run: Copy-Item src-tauri\target\release\Sessio.exe sessio-windows-x86_64.exe
