@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -21,6 +21,16 @@ type Filter =
   | { kind: "all" }
   | { kind: "agent"; agent: Agent }
   | { kind: "project"; key: string; label: string };
+
+export type ViewMode = "native" | "cross";
+
+const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
+
+function readViewMode(): ViewMode {
+  if (typeof localStorage === "undefined") return "native";
+  const v = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+  return v === "cross" ? "cross" : "native";
+}
 
 const AGENT_ORDER: Agent[] = ["codex", "claude", "gemini"];
 
@@ -49,6 +59,8 @@ export default function App() {
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
+  const deferredViewMode = useDeferredValue(viewMode);
   const { mode, setMode } = useTheme();
   const { lang, setLang, t } = useI18n();
   const listScrollRef = useRef<HTMLDivElement>(null);
@@ -60,6 +72,10 @@ export default function App() {
   useEffect(() => {
     if (!sidebarOpen) setSettingsOpen(false);
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    localStorage.setItem(VIEW_MODE_STORAGE_KEY, viewMode);
+  }, [viewMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -351,7 +367,7 @@ export default function App() {
       <main className="flex-1 flex flex-col min-w-0">
         <div
           data-tauri-drag-region
-          className="relative h-12 shrink-0 flex items-center justify-center px-5 bg-surface border-b border-ink/10"
+          className="relative h-12 shrink-0 grid grid-cols-3 items-center px-5 bg-surface border-b border-ink/10 select-none"
         >
           <Tooltip content={t("sidebar.open")} placement="bottom">
             <button
@@ -368,7 +384,12 @@ export default function App() {
               <PanelLeftOpen className="w-4 h-4" />
             </button>
           </Tooltip>
-          <div className="flex items-center gap-2 min-w-0">
+          <div
+            className={
+              "flex items-center gap-2 min-w-0 pointer-events-none " +
+              (sidebarOpen ? "" : IS_MAC ? "pl-[112px] " : "pl-9 ")
+            }
+          >
             {!sidebarOpen && (
               <>
                 {filter.kind === "all" && (
@@ -383,50 +404,57 @@ export default function App() {
                 <div className="text-title font-medium truncate">{headerLabel}</div>
               </>
             )}
-            <span className="text-ink/40 text-body-sm tabular-nums">
+            <span className="text-ink/40 text-body-sm tabular-nums shrink-0">
               {t("header.sessions_count", { count: visibleCount })}
             </span>
           </div>
-          <Tooltip content={t("header.search")} placement="bottom">
-            <button
-              type="button"
-              aria-label={t("header.search")}
-              data-tauri-drag-region="false"
-              className="absolute right-5 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
-            >
-              <Search className="w-4 h-4" />
-            </button>
-          </Tooltip>
+          <div
+            data-tauri-drag-region="false"
+            className="justify-self-center"
+          >
+            <ViewModeSwitcher mode={viewMode} onChange={setViewMode} />
+          </div>
+          <div className="justify-self-end">
+            <Tooltip content={t("header.search")} placement="bottom">
+              <button
+                type="button"
+                aria-label={t("header.search")}
+                data-tauri-drag-region="false"
+                className="p-1 text-ink/55 hover:text-ink transition rounded-md"
+              >
+                <Search className="w-4 h-4" />
+              </button>
+            </Tooltip>
+          </div>
         </div>
 
         <ScrollArea ref={listScrollRef} className="flex-1 min-h-0">
-          {error && (
-            <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
-              {error}
-            </div>
+          {deferredViewMode === "native" ? (
+            <NativeSessionList
+              visible={visible}
+              filter={filter}
+              error={error}
+              loading={loading}
+              indexing={indexing}
+              onSelect={setSelected}
+            />
+          ) : (
+            <CrossSessionList
+              visible={visible}
+              filter={filter}
+              error={error}
+              loading={loading}
+              indexing={indexing}
+              onSelect={setSelected}
+            />
           )}
-          {!error && !loading && !indexing && visible.length === 0 && (
-            <div className="p-10 text-center text-ink/40 text-body">
-              {t("list.empty")}
-            </div>
-          )}
-          <ul className="divide-y divide-ink/5">
-            {visible.map((s) => (
-              <li
-                key={`${s.agent}:${s.filePath}:${s.id}`}
-                onClick={() => setSelected(s)}
-                className="px-5 py-3.5 cursor-pointer hover:bg-ink/[0.03] transition"
-              >
-                <SessionRow item={s} filter={filter} />
-              </li>
-            ))}
-          </ul>
         </ScrollArea>
       </main>
 
       {selected && (
         <SessionDetail
           session={selected}
+          viewMode={viewMode}
           onClose={() => setSelected(null)}
         />
       )}
@@ -502,7 +530,101 @@ function SidebarItem({
   );
 }
 
-function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
+function NativeSessionList({
+  visible,
+  filter,
+  error,
+  loading,
+  indexing,
+  onSelect,
+}: {
+  visible: SessionInfo[];
+  filter: Filter;
+  error: string | null;
+  loading: boolean;
+  indexing: boolean;
+  onSelect: (s: SessionInfo) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <>
+      {error && (
+        <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
+          {error}
+        </div>
+      )}
+      {!error && !loading && !indexing && visible.length === 0 && (
+        <div className="p-10 text-center text-ink/40 text-body">
+          {t("list.empty")}
+        </div>
+      )}
+      <ul className="divide-y divide-ink/5">
+        {visible.map((s) => (
+          <li
+            key={`${s.agent}:${s.filePath}:${s.id}`}
+            onClick={() => onSelect(s)}
+            className="px-5 py-3.5 cursor-pointer hover:bg-ink/[0.03] transition"
+          >
+            <SessionRow item={s} filter={filter} />
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+function CrossSessionList({
+  visible,
+  filter,
+  error,
+  loading,
+  indexing,
+  onSelect,
+}: {
+  visible: SessionInfo[];
+  filter: Filter;
+  error: string | null;
+  loading: boolean;
+  indexing: boolean;
+  onSelect: (s: SessionInfo) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <>
+      {error && (
+        <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
+          {error}
+        </div>
+      )}
+      {!error && !loading && !indexing && visible.length === 0 && (
+        <div className="p-10 text-center text-ink/40 text-body">
+          {t("list.empty")}
+        </div>
+      )}
+      <ul className="divide-y divide-ink/5">
+        {visible.map((s) => (
+          <li
+            key={`${s.agent}:${s.filePath}:${s.id}`}
+            onClick={() => onSelect(s)}
+            className="px-5 py-3.5 cursor-pointer hover:bg-ink/[0.03] transition"
+          >
+            <SessionRow item={s} filter={filter} showOtherAgents />
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+function SessionRow({
+  item,
+  filter,
+  showOtherAgents,
+}: {
+  item: SessionInfo;
+  filter: Filter;
+  showOtherAgents?: boolean;
+}) {
   const { lang, t } = useI18n();
   const subCount = item.subagents.length;
   return (
@@ -512,26 +634,35 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
           <span className="text-ink/30">{t("list.no_user_message")}</span>
         )}
       </div>
-      <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-ink/40">
+      <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-ink/40 leading-none">
       {filter.kind !== "project" && (
         <>
         <Folder
           className="w-3.5 h-3.5 shrink-0"
         />
         <span
-          className="text-body font-medium truncate text-ink/55"
+          className="font-medium truncate text-ink/55"
         >
           {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
         </span>
         </>
       )}
-      {filter.kind !== "agent" && (
-        <Tag
-          label={AGENT_LABEL[item.agent]}
-          color={`var(--color-agent-${item.agent})`}
-          icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
-        />
-      )}
+      {showOtherAgents
+        ? AGENT_ORDER.filter((a) => a !== item.agent).map((a) => (
+            <Tag
+              key={a}
+              label={AGENT_LABEL[a]}
+              color={`var(--color-agent-${a})`}
+              icon={<AgentGlyph agent={a} className="w-3.5 h-3.5 shrink-0" />}
+            />
+          ))
+        : (
+          <Tag
+            label={AGENT_LABEL[item.agent]}
+            color={`var(--color-agent-${item.agent})`}
+            icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
+          />
+        )}
         {subCount > 0 && (
           <Tag
             label={t("list.subagent_count", {
@@ -563,6 +694,55 @@ function SessionRow({ item, filter }: { item: SessionInfo, filter: Filter }) {
           {t("list.msgs", { count: item.messageCount })}
         </span>
       </div>
+    </div>
+  );
+}
+
+function ViewModeSwitcher({
+  mode,
+  onChange,
+}: {
+  mode: ViewMode;
+  onChange: (m: ViewMode) => void;
+}) {
+  const { t } = useI18n();
+  const items: { value: ViewMode; label: string }[] = [
+    { value: "native", label: t("header.mode_native") },
+    { value: "cross", label: t("header.mode_cross") },
+  ];
+  const activeIndex = Math.max(
+    0,
+    items.findIndex((it) => it.value === mode),
+  );
+  const BTN_W = 72;
+  return (
+    <div className="relative flex items-center rounded-md bg-ink/[0.14] p-0.5">
+      <div
+        aria-hidden
+        className="absolute top-0.5 left-0.5 h-[26px] rounded bg-surface shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-transform duration-200 ease-out"
+        style={{
+          width: `${BTN_W}px`,
+          transform: `translateX(${activeIndex * BTN_W}px)`,
+        }}
+      />
+      {items.map(({ value, label }) => {
+        const active = mode === value;
+        return (
+          <button
+            key={value}
+            type="button"
+            onClick={() => onChange(value)}
+            data-tauri-drag-region="false"
+            style={{ width: `${BTN_W}px` }}
+            className={
+              "relative z-10 h-[26px] flex items-center justify-center rounded text-body-sm leading-none transition-colors duration-150 " +
+              (active ? "text-ink" : "text-ink/55 hover:text-ink/85")
+            }
+          >
+            {label}
+          </button>
+        );
+      })}
     </div>
   );
 }

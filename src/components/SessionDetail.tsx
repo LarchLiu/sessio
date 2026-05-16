@@ -14,9 +14,11 @@ import Tag from "./Tag";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
 import { localeTag, useI18n } from "../i18n";
+import type { ViewMode } from "../App";
 
 interface Props {
   session: SessionInfo;
+  viewMode: ViewMode;
   onClose: () => void;
 }
 
@@ -50,7 +52,7 @@ type Tab =
   | { kind: "main" }
   | { kind: "sub"; sub: SubagentInfo };
 
-export default function SessionDetail({ session, onClose }: Props) {
+export default function SessionDetail({ session, viewMode, onClose }: Props) {
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
     () =>
@@ -160,6 +162,7 @@ export default function SessionDetail({ session, onClose }: Props) {
               : t("detail.subagent_unreadable")
           }
           subagentDesc={tab.kind === "sub" ? tab.sub.description : null}
+          viewMode={viewMode}
         />
       </div>
     </div>
@@ -217,6 +220,7 @@ function MessageStream({
   available,
   emptyHint,
   subagentDesc,
+  viewMode,
 }: {
   agent: SessionInfo["agent"];
   filePath: string;
@@ -224,6 +228,7 @@ function MessageStream({
   available: boolean;
   emptyHint: string;
   subagentDesc: string | null;
+  viewMode: ViewMode;
 }) {
   const { t } = useI18n();
   const [messages, setMessages] = useState<SessionMessage[]>([]);
@@ -252,7 +257,14 @@ function MessageStream({
     };
   }, [agent, filePath, sessionId, available]);
 
-  bubbleRefs.current.length = messages.length;
+  const displayMessages = useMemo(() => {
+    if (viewMode === "native") return messages;
+    return messages.filter(
+      (m) => m.role === "user" || m.role === "thinking" || m.role === "assistant",
+    );
+  }, [messages, viewMode]);
+
+  bubbleRefs.current.length = displayMessages.length;
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
@@ -282,11 +294,11 @@ function MessageStream({
             {error}
           </div>
         )}
-        {!loading && !error && available && messages.length === 0 && (
+        {!loading && !error && available && displayMessages.length === 0 && (
           <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
         )}
         <div className="flex flex-col gap-4">
-          {messages.map((m, i) => (
+          {displayMessages.map((m, i) => (
             <div
               key={i}
               ref={(el) => {
@@ -299,7 +311,7 @@ function MessageStream({
           ))}
         </div>
       </ScrollArea>
-      <UserNav messages={messages} refs={bubbleRefs} viewportRef={viewportRef} />
+      <UserNav messages={displayMessages} refs={bubbleRefs} viewportRef={viewportRef} />
     </div>
   );
 }
