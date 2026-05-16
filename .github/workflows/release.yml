@@ -36,7 +36,7 @@ jobs:
           node-version: 20
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 11
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -46,9 +46,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build arm64
-        run: pnpm run build --target aarch64-apple-darwin
+        run: pnpm ci:build --target aarch64-apple-darwin
       - name: Build x86_64
-        run: pnpm run build --target x86_64-apple-darwin
+        run: pnpm ci:build --target x86_64-apple-darwin
       - name: Lipo universal binary
         run: |
           lipo -create \
@@ -73,7 +73,7 @@ jobs:
           node-version: 20
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 11
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,7 +90,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build
-        run: pnpm run build
+        run: pnpm ci:build
       - name: Stage asset
         run: cp src-tauri/target/release/Sessio sessio-linux-x86_64
       - uses: actions/upload-artifact@v4
@@ -110,7 +110,7 @@ jobs:
           node-version: 20
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 11
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -127,7 +127,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build
-        run: pnpm run build
+        run: pnpm ci:build
       - name: Stage asset
         run: cp src-tauri/target/release/Sessio sessio-linux-arm64
       - uses: actions/upload-artifact@v4
@@ -147,7 +147,7 @@ jobs:
           node-version: 20
       - uses: pnpm/action-setup@v4
         with:
-          version: 10
+          version: 11
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -155,7 +155,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build
-        run: pnpm run build
+        run: pnpm ci:build
       - name: Stage asset
         shell: pwsh
         run: Copy-Item src-tauri\target\release\Sessio.exe sessio-windows-x86_64.exe

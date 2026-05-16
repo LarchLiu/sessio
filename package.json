@@ -4,9 +4,10 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build --no-bundle",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "ci:build": "tauri build --no-bundle",
     "tauri": "tauri",
     "release": "run-script-os",
     "release:win32": "powershell -ExecutionPolicy Bypass -File scripts/release.ps1",
