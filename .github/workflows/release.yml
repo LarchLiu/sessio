@@ -28,15 +28,16 @@ jobs:
   build-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
+          node-version: 24
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Activate pnpm
+        run: corepack prepare pnpm@11.1.0 --activate
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -56,7 +57,7 @@ jobs:
             src-tauri/target/x86_64-apple-darwin/release/Sessio \
             -output sessio-darwin-universal
           file sessio-darwin-universal
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sessio-darwin-universal
           path: sessio-darwin-universal
@@ -65,15 +66,16 @@ jobs:
   build-linux-x86_64:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
+          node-version: 24
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Activate pnpm
+        run: corepack prepare pnpm@11.1.0 --activate
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -93,7 +95,7 @@ jobs:
         run: pnpm ci:build
       - name: Stage asset
         run: cp src-tauri/target/release/Sessio sessio-linux-x86_64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sessio-linux-x86_64
           path: sessio-linux-x86_64
@@ -102,15 +104,16 @@ jobs:
   build-linux-arm64:
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
+          node-version: 24
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Activate pnpm
+        run: corepack prepare pnpm@11.1.0 --activate
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -130,7 +133,7 @@ jobs:
         run: pnpm ci:build
       - name: Stage asset
         run: cp src-tauri/target/release/Sessio sessio-linux-arm64
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sessio-linux-arm64
           path: sessio-linux-arm64
@@ -139,15 +142,16 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
+          node-version: 24
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Activate pnpm
+        run: corepack prepare pnpm@11.1.0 --activate
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -159,7 +163,7 @@ jobs:
       - name: Stage asset
         shell: pwsh
         run: Copy-Item src-tauri\target\release\Sessio.exe sessio-windows-x86_64.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sessio-windows-x86_64.exe
           path: sessio-windows-x86_64.exe
@@ -173,14 +177,14 @@ jobs:
       - build-windows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-      - uses: actions/download-artifact@v4
+          node-version: 24
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
       - name: Stage release assets
@@ -188,6 +192,11 @@ jobs:
           mkdir -p staged
           find artifacts -type f -print -exec mv {} staged/ \;
           ls -la staged
+      - name: Restore executable bits
+        run: |
+          chmod +x staged/sessio-darwin-universal
+          chmod +x staged/sessio-linux-x86_64
+          chmod +x staged/sessio-linux-arm64
       - name: Generate SHA256SUMS
         run: |
           cd staged
@@ -197,7 +206,7 @@ jobs:
         run: npx changelogithub
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
