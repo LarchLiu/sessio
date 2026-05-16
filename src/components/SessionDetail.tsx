@@ -69,13 +69,32 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
     setTab(defaultTab);
   }, [defaultTab]);
 
+  const [open, setOpen] = useState(false);
+  const closingRef = useRef(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setOpen(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+  const handleClose = () => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setOpen(false);
+    window.setTimeout(onClose, 300);
+  };
+
   return (
     <div
-      className="absolute inset-0 bg-black/40 backdrop-blur-sm flex items-stretch justify-end z-10"
-      onClick={onClose}
+      className={
+        "absolute inset-x-0 top-12 bottom-0 bg-black/40 backdrop-blur-sm flex items-stretch justify-end z-10 transition-opacity duration-300 ease-out " +
+        (open ? "opacity-100" : "opacity-0")
+      }
+      onClick={handleClose}
     >
       <div
-        className="w-[720px] max-w-[85vw] h-full bg-surface-panel border-l border-ink/10 flex flex-col"
+        className={
+          "w-[720px] max-w-[85vw] h-full bg-surface-panel border-l border-ink/10 flex flex-col will-change-transform transition-transform duration-300 ease-out " +
+          (open ? "translate-x-0" : "translate-x-full")
+        }
         onClick={(e) => e.stopPropagation()}
       >
         <header className="px-5 py-4 border-b border-ink/15 flex items-start gap-3">
@@ -123,7 +142,7 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="text-ink/40 hover:text-ink text-2xl leading-none px-2"
             aria-label={t("detail.close")}
           >
@@ -268,9 +287,11 @@ function MessageStream({
   }, [agent, filePath, sessionId, available]);
 
   const displayMessages = useMemo(() => {
-    if (viewMode === "native") return messages;
-    return messages.filter(
-      (m) => m.role === "user" || m.role === "thinking" || m.role === "assistant",
+    const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
+    if (viewMode === "native") return all;
+    return all.filter(
+      ({ m }) =>
+        m.role === "user" || m.role === "thinking" || m.role === "assistant",
     );
   }, [messages, viewMode]);
 
@@ -308,9 +329,9 @@ function MessageStream({
           <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
         )}
         <div className="flex flex-col gap-4">
-          {displayMessages.map((m, i) => (
+          {displayMessages.map(({ m, srcIdx }, i) => (
             <div
-              key={i}
+              key={srcIdx}
               ref={(el) => {
                 bubbleRefs.current[i] = el;
               }}
@@ -321,7 +342,11 @@ function MessageStream({
           ))}
         </div>
       </ScrollArea>
-      <UserNav messages={displayMessages} refs={bubbleRefs} viewportRef={viewportRef} />
+      <UserNav
+        messages={displayMessages.map((d) => d.m)}
+        refs={bubbleRefs}
+        viewportRef={viewportRef}
+      />
     </div>
   );
 }
@@ -364,6 +389,9 @@ function UserNav({
       const vpRect = vp.getBoundingClientRect();
       const enter = vpRect.top + vpRect.height * 0.25;
       const exit = vpRect.top + vpRect.height * 0.75;
+      const atBottom =
+        vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 1;
+      const atTop = vp.scrollTop <= 0;
 
       let active = activeRef.current;
       if (active === null || !userIndices.includes(active)) {
@@ -395,6 +423,10 @@ function UserNav({
           else break;
         }
       }
+      // 已经滚到底部:最后一条若因后续内容不足无法越过 enter,强制置为 active
+      if (atBottom) active = userIndices[userIndices.length - 1];
+      // 已经滚到顶部:第一条若因前面内容不足无法把第二条挤出 exit,强制置为 active
+      if (atTop) active = userIndices[0];
       activeRef.current = active;
       setActiveIdx(active);
     };

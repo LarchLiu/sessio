@@ -424,7 +424,7 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className="relative flex-1 flex flex-col min-w-0">
         <div
           data-tauri-drag-region
           className="relative h-12 shrink-0 grid grid-cols-3 items-center px-5 bg-surface border-b border-ink/10 select-none"
@@ -509,15 +509,15 @@ export default function App() {
             />
           )}
         </ScrollArea>
-      </main>
 
-      {selected && (
-        <SessionDetail
-          session={selected}
-          viewMode={viewMode}
-          onClose={() => setSelected(null)}
-        />
-      )}
+        {selected && (
+          <SessionDetail
+            session={selected}
+            viewMode={viewMode}
+            onClose={() => setSelected(null)}
+          />
+        )}
+      </main>
     </div>
   );
 }
