@@ -80,6 +80,23 @@ fn get_session_messages(
 }
 
 #[tauri::command]
+fn write_cross_prompt(session_id: String, content: String) -> Result<String, String> {
+    let safe_id: String = session_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = std::env::temp_dir().join(format!("sessio-cross-{}.txt", safe_id));
+    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn set_window_appearance(window: tauri::Window, theme: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -305,7 +322,8 @@ pub fn run() {
             set_window_appearance,
             get_system_appearance,
             rebuild_session_index,
-            get_index_status
+            get_index_status,
+            write_cross_prompt
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -67,6 +67,13 @@ export async function getSessionMessages(
   });
 }
 
+export async function writeCrossPrompt(
+  sessionId: string,
+  content: string,
+): Promise<string> {
+  return invoke<string>("write_cross_prompt", { sessionId, content });
+}
+
 export const AGENT_LABEL: Record<Agent, string> = {
   codex: "Codex",
   claude: "Claude Code",

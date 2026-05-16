@@ -5,9 +5,12 @@ import {
   AGENT_LABEL,
   Agent,
   getIndexStatus,
+  getSessionMessages,
   SessionInfo,
+  SessionMessage,
   rebuildSessionIndex,
   listSessions,
+  writeCrossPrompt,
 } from "./api";
 import SessionDetail from "./components/SessionDetail";
 import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
@@ -33,6 +36,63 @@ function readViewMode(): ViewMode {
 }
 
 const AGENT_ORDER: Agent[] = ["codex", "claude", "gemini"];
+
+const RESUME_CMD: Record<Agent, (id: string) => string> = {
+  codex: (id) => `codex resume ${id}`,
+  claude: (id) => `claude --resume ${id}`,
+  gemini: (id) => `gemini --resume ${id}`,
+};
+
+const CROSS_PROMPT_MAX = 16 * 1024;
+
+const IS_WIN =
+  typeof navigator !== "undefined" && /Win/i.test(navigator.platform);
+
+function bashQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+function pwshQuote(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+function buildCrossPrompt(messages: SessionMessage[]): string {
+  const filtered = messages.filter(
+    (m) => m.role === "user" || m.role === "thinking" || m.role === "assistant",
+  );
+  if (filtered.length === 0) return "";
+  const SEP = "\n\n";
+  const formatted = filtered.map((m) => `[${m.role}]\n${m.text}`);
+  let size = 0;
+  let startIdx = filtered.length;
+  for (let i = filtered.length - 1; i >= 0; i--) {
+    const extra = formatted[i].length + (i === filtered.length - 1 ? 0 : SEP.length);
+    if (size + extra > CROSS_PROMPT_MAX) break;
+    size += extra;
+    startIdx = i;
+  }
+  while (startIdx < filtered.length && filtered[startIdx].role !== "user") {
+    startIdx++;
+  }
+  if (startIdx >= filtered.length) return "";
+  const header =
+    `\n\n# Continued session from agent\n` +
+    `The dialogue below is the recent context of an in-progress session ` +
+    `(oldest → latest). Pick up from the last turn and continue helping ` +
+    `the user.\n\n`;
+  return header + formatted.slice(startIdx).join(SEP);
+}
+
+function buildCrossCommand(
+  targetAgent: Agent,
+  filePath: string,
+  placeholder: string,
+): string {
+  if (IS_WIN) {
+    return `${targetAgent} "<${placeholder}>$(Get-Content -Raw ${pwshQuote(filePath)})"`;
+  }
+  return `${targetAgent} "<${placeholder}>$(cat ${bashQuote(filePath)})"`;
+}
 
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -562,10 +622,13 @@ function NativeSessionList({
         {visible.map((s) => (
           <li
             key={`${s.agent}:${s.filePath}:${s.id}`}
-            onClick={() => onSelect(s)}
-            className="px-5 py-3.5 cursor-pointer hover:bg-ink/[0.03] transition"
+            className="px-5 py-3.5 hover:bg-ink/[0.03] transition"
           >
-            <SessionRow item={s} filter={filter} />
+            <SessionRow
+              item={s}
+              filter={filter}
+              onOpenDetail={() => onSelect(s)}
+            />
           </li>
         ))}
       </ul>
@@ -605,10 +668,14 @@ function CrossSessionList({
         {visible.map((s) => (
           <li
             key={`${s.agent}:${s.filePath}:${s.id}`}
-            onClick={() => onSelect(s)}
-            className="px-5 py-3.5 cursor-pointer hover:bg-ink/[0.03] transition"
+            className="px-5 py-3.5 hover:bg-ink/[0.03] transition"
           >
-            <SessionRow item={s} filter={filter} showOtherAgents />
+            <SessionRow
+              item={s}
+              filter={filter}
+              showOtherAgents
+              onOpenDetail={() => onSelect(s)}
+            />
           </li>
         ))}
       </ul>
@@ -620,49 +687,46 @@ function SessionRow({
   item,
   filter,
   showOtherAgents,
+  onOpenDetail,
 }: {
   item: SessionInfo;
   filter: Filter;
   showOtherAgents?: boolean;
+  onOpenDetail?: () => void;
 }) {
   const { lang, t } = useI18n();
   const subCount = item.subagents.length;
   return (
     <div className="min-w-0">
-      <div className={"pl-4 text-body line-clamp-3" + (item.archived ? " text-ink/55" : " text-ink/90")}>
+      <div
+        onClick={onOpenDetail}
+        className={
+          "pl-4 text-body line-clamp-3 cursor-pointer" +
+          (item.archived ? " text-ink/55" : " text-ink/90")
+        }
+      >
         {item.firstUserMessage ?? (
           <span className="text-ink/30">{t("list.no_user_message")}</span>
         )}
       </div>
       <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-ink/40 leading-none">
-      {filter.kind !== "project" && (
-        <>
-        <Folder
-          className="w-3.5 h-3.5 shrink-0"
-        />
-        <span
-          className="font-medium truncate text-ink/55"
-        >
-          {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
-        </span>
-        </>
-      )}
-      {showOtherAgents
-        ? AGENT_ORDER.filter((a) => a !== item.agent).map((a) => (
-            <Tag
-              key={a}
-              label={AGENT_LABEL[a]}
-              color={`var(--color-agent-${a})`}
-              icon={<AgentGlyph agent={a} className="w-3.5 h-3.5 shrink-0" />}
-            />
-          ))
-        : (
-          <Tag
-            label={AGENT_LABEL[item.agent]}
-            color={`var(--color-agent-${item.agent})`}
-            icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
-          />
+        {filter.kind !== "project" && (
+          <>
+            <Folder className="w-3.5 h-3.5 shrink-0" />
+            <span className="font-medium truncate text-ink/55">
+              {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
+            </span>
+            <MetaDivider />
+          </>
         )}
+        <span className="shrink-0">
+          {formatTime(item.updatedAt ?? item.startedAt, localeTag(lang))}
+        </span>
+        <span className="shrink-0">·</span>
+        <span className="shrink-0">
+          {item.partial && !item.archived ? "~" : ""}
+          {t("list.msgs", { count: item.messageCount })}
+        </span>
         {subCount > 0 && (
           <Tag
             label={t("list.subagent_count", {
@@ -687,14 +751,139 @@ function SessionRow({
             )}
           />
         )}
-        <span>{formatTime(item.updatedAt ?? item.startedAt, localeTag(lang))}</span>
-        <span>·</span>
-        <span>
-          {item.partial && !item.archived ? "~" : ""}
-          {t("list.msgs", { count: item.messageCount })}
-        </span>
+        <MetaDivider />
+        {showOtherAgents
+          ? AGENT_ORDER.filter((a) => a !== item.agent).map((a) => (
+              <CrossAgentButton key={a} item={item} targetAgent={a} />
+            ))
+          : <ResumeAgentButton item={item} />}
       </div>
     </div>
+  );
+}
+
+function MetaDivider() {
+  return <span aria-hidden className="shrink-0 w-px h-3 bg-ink/15" />;
+}
+
+function CrossAgentButton({
+  item,
+  targetAgent,
+}: {
+  item: SessionInfo;
+  targetAgent: Agent;
+}) {
+  const { t } = useI18n();
+  const [state, setState] = useState<"idle" | "loading" | "copied" | "error">(
+    "idle",
+  );
+  const timerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const handleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (state === "loading") return;
+    setState("loading");
+    try {
+      const messages = await getSessionMessages(item.agent, item.filePath, item.id);
+      const prompt = buildCrossPrompt(messages);
+      if (!prompt) {
+        setState("error");
+        if (timerRef.current) window.clearTimeout(timerRef.current);
+        timerRef.current = window.setTimeout(() => setState("idle"), 1500);
+        return;
+      }
+      const path = await writeCrossPrompt(item.id, prompt);
+      await navigator.clipboard.writeText(
+        buildCrossCommand(targetAgent, path, t("list.cross_prompt_placeholder")),
+      );
+      setState("copied");
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setState("idle"), 1500);
+    } catch (err) {
+      console.error("cross copy failed", err);
+      setState("error");
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setState("idle"), 1500);
+    }
+  };
+
+  const tipText =
+    state === "loading"
+      ? t("list.copying")
+      : state === "copied"
+        ? IS_WIN
+          ? t("list.copied_powershell")
+          : t("list.copied")
+        : state === "error"
+          ? t("list.copy_failed")
+          : t("list.copy_cross_to", { agent: AGENT_LABEL[targetAgent] });
+
+  return (
+    <Tooltip content={tipText} placement="top">
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={state === "loading"}
+        aria-label={t("list.copy_cross_to", { agent: AGENT_LABEL[targetAgent] })}
+        className="appearance-none p-0 bg-transparent border-0 rounded transition hover:opacity-70 disabled:opacity-50"
+      >
+        <Tag
+          label={AGENT_LABEL[targetAgent]}
+          color={`var(--color-agent-${targetAgent})`}
+          icon={<AgentGlyph agent={targetAgent} className="w-3.5 h-3.5 shrink-0" />}
+        />
+      </button>
+    </Tooltip>
+  );
+}
+
+function ResumeAgentButton({ item }: { item: SessionInfo }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const handleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(RESUME_CMD[item.agent](item.id));
+      setCopied(true);
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      console.error("clipboard write failed", err);
+    }
+  };
+
+  return (
+    <Tooltip
+      content={copied ? t("list.copied") : t("list.copy_resume")}
+      placement="top"
+    >
+      <button
+        type="button"
+        onClick={handleClick}
+        aria-label={t("list.copy_resume")}
+        className="appearance-none p-0 bg-transparent border-0 rounded transition hover:opacity-70"
+      >
+        <Tag
+          label={AGENT_LABEL[item.agent]}
+          color={`var(--color-agent-${item.agent})`}
+          icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
+        />
+      </button>
+    </Tooltip>
   );
 }
 

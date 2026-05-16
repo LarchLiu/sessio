@@ -80,10 +80,20 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
       >
         <header className="px-5 py-4 border-b border-ink/15 flex items-start gap-3">
           <div className="flex-1 min-w-0">
-            <div className="text-subtitle font-medium truncate">
-              {session.firstUserMessage ?? (
-                <span className="text-ink/30">{t("list.no_user_message")}</span>
-              )}
+            <div className="flex items-center gap-2 min-w-0">
+              <Tag
+                label={
+                  viewMode === "native"
+                    ? t("header.mode_native")
+                    : t("header.mode_cross")
+                }
+                color="var(--color-muted)"
+              />
+              <div className="text-subtitle font-medium truncate">
+                {session.firstUserMessage ?? (
+                  <span className="text-ink/30">{t("list.no_user_message")}</span>
+                )}
+              </div>
             </div>
             {session.projectPath && (
               <div className="text-meta font-mono text-ink/30 truncate mt-0.5">
