@@ -67,6 +67,11 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "detail.collapse": "Collapse",
     "detail.default_subagent_type": "agent",
     "detail.msgs": "{count} msgs",
+    "menubar.show": "Open Sessio",
+    "menubar.quit": "Quit Sessio",
+    "menubar.no_sessions": "No recent sessions",
+    "menubar.resume_command": "Resume command",
+    "menubar.cross_command": "Cross command",
   },
   zh: {
     "sidebar.all_sessions": "全部会话",
@@ -121,6 +126,11 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "detail.collapse": "收起",
     "detail.default_subagent_type": "助手",
     "detail.msgs": "{count} 条消息",
+    "menubar.show": "打开 Sessio",
+    "menubar.quit": "退出 Sessio",
+    "menubar.no_sessions": "暂无最近会话",
+    "menubar.resume_command": "Resume 命令",
+    "menubar.cross_command": "Cross 命令",
   },
 };
 

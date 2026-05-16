@@ -7,11 +7,17 @@ import {
   getIndexStatus,
   getSessionMessages,
   SessionInfo,
-  SessionMessage,
   rebuildSessionIndex,
   listSessions,
   writeCrossPrompt,
 } from "./api";
+import {
+  IS_WIN,
+  RESUME_CMD,
+  buildCrossCommand,
+  buildCrossPrompt,
+} from "./cross";
+import { syncTrayMenu } from "./tray";
 import SessionDetail from "./components/SessionDetail";
 import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
@@ -36,63 +42,6 @@ function readViewMode(): ViewMode {
 }
 
 const AGENT_ORDER: Agent[] = ["codex", "claude", "gemini"];
-
-const RESUME_CMD: Record<Agent, (id: string) => string> = {
-  codex: (id) => `codex resume ${id}`,
-  claude: (id) => `claude --resume ${id}`,
-  gemini: (id) => `gemini --resume ${id}`,
-};
-
-const CROSS_PROMPT_MAX = 16 * 1024;
-
-const IS_WIN =
-  typeof navigator !== "undefined" && /Win/i.test(navigator.platform);
-
-function bashQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
-
-function pwshQuote(s: string): string {
-  return `'${s.replace(/'/g, "''")}'`;
-}
-
-function buildCrossPrompt(messages: SessionMessage[]): string {
-  const filtered = messages.filter(
-    (m) => m.role === "user" || m.role === "thinking" || m.role === "assistant",
-  );
-  if (filtered.length === 0) return "";
-  const SEP = "\n\n";
-  const formatted = filtered.map((m) => `[${m.role}]\n${m.text}`);
-  let size = 0;
-  let startIdx = filtered.length;
-  for (let i = filtered.length - 1; i >= 0; i--) {
-    const extra = formatted[i].length + (i === filtered.length - 1 ? 0 : SEP.length);
-    if (size + extra > CROSS_PROMPT_MAX) break;
-    size += extra;
-    startIdx = i;
-  }
-  while (startIdx < filtered.length && filtered[startIdx].role !== "user") {
-    startIdx++;
-  }
-  if (startIdx >= filtered.length) return "";
-  const header =
-    `\n\n# Continued session from agent\n` +
-    `The dialogue below is the recent context of an in-progress session ` +
-    `(oldest → latest). Pick up from the last turn and continue helping ` +
-    `the user.\n\n`;
-  return header + formatted.slice(startIdx).join(SEP);
-}
-
-function buildCrossCommand(
-  targetAgent: Agent,
-  filePath: string,
-  placeholder: string,
-): string {
-  if (IS_WIN) {
-    return `${targetAgent} "<${placeholder}>$(Get-Content -Raw ${pwshQuote(filePath)})"`;
-  }
-  return `${targetAgent} "<${placeholder}>$(cat ${bashQuote(filePath)})"`;
-}
 
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -239,6 +188,23 @@ export default function App() {
     () => sessions.filter((s) => !isSubagentOnly(s)).length,
     [sessions]
   );
+
+  const recentForMenu = useMemo(
+    () => sessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
+    [sessions]
+  );
+
+  useEffect(() => {
+    syncTrayMenu(recentForMenu, {
+      show: t("menubar.show"),
+      quit: t("menubar.quit"),
+      noSessions: t("menubar.no_sessions"),
+      noMessage: t("list.no_user_message"),
+      resumeCommand: t("menubar.resume_command"),
+      crossCommand: t("menubar.cross_command"),
+      crossPromptPlaceholder: t("list.cross_prompt_placeholder"),
+    });
+  }, [recentForMenu, t]);
 
   const visible = useMemo(() => {
     return sessions.filter((s) => {

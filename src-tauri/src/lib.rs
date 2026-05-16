@@ -277,10 +277,9 @@ pub fn run() {
             install_appearance_observer(app.handle().clone());
 
             let show = MenuItem::with_id(app, "show", "Show Sessio", true, None::<&str>)?;
-            let hide = MenuItem::with_id(app, "hide", "Hide Sessio", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Sessio", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &hide, &sep, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
 
             TrayIconBuilder::with_id("main")
                 .icon(tauri::include_image!("icons/tray-icon.png"))
@@ -292,11 +291,6 @@ pub fn run() {
                         if let Some(w) = app.get_webview_window("main") {
                             let _ = w.show();
                             let _ = w.set_focus();
-                        }
-                    }
-                    "hide" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.hide();
                         }
                     }
                     "quit" => app.exit(0),
