@@ -33,7 +33,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -70,7 +70,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -107,7 +107,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -144,7 +144,7 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -179,7 +179,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
