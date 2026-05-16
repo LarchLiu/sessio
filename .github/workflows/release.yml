@@ -1,0 +1,217 @@
+name: release
+
+# Build Sessio as raw binaries for the platforms we want to publish first.
+# This intentionally does not create Tauri installers yet; each job builds the
+# Vite frontend into dist/ and then compiles the Tauri/Rust binary against it.
+#
+# Trigger: push a tag like `v0.1.0`. Manual dispatch can rebuild artifacts for
+# an existing release without creating another tag.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to attach artifacts to (must already exist)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        run: pnpm build
+      - name: Build arm64
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --target aarch64-apple-darwin
+      - name: Build x86_64
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --target x86_64-apple-darwin
+      - name: Lipo universal binary
+        run: |
+          lipo -create \
+            src-tauri/target/aarch64-apple-darwin/release/Sessio \
+            src-tauri/target/x86_64-apple-darwin/release/Sessio \
+            -output sessio-darwin-universal
+          file sessio-darwin-universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sessio-darwin-universal
+          path: sessio-darwin-universal
+          if-no-files-found: error
+
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libssl-dev
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        run: pnpm build
+      - name: Build
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Stage asset
+        run: cp src-tauri/target/release/Sessio sessio-linux-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sessio-linux-x86_64
+          path: sessio-linux-x86_64
+          if-no-files-found: error
+
+  build-linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libssl-dev
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        run: pnpm build
+      - name: Build
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Stage asset
+        run: cp src-tauri/target/release/Sessio sessio-linux-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sessio-linux-arm64
+          path: sessio-linux-arm64
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        run: pnpm build
+      - name: Build
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Stage asset
+        shell: pwsh
+        run: Copy-Item src-tauri\target\release\Sessio.exe sessio-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sessio-windows-x86_64.exe
+          path: sessio-windows-x86_64.exe
+          if-no-files-found: error
+
+  release:
+    needs:
+      - build-macos
+      - build-linux-x86_64
+      - build-linux-arm64
+      - build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage release assets
+        run: |
+          mkdir -p staged
+          find artifacts -type f -print -exec mv {} staged/ \;
+          ls -la staged
+      - name: Generate SHA256SUMS
+        run: |
+          cd staged
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Generate release changelog
+        run: npx changelogithub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            staged/sessio-darwin-universal
+            staged/sessio-linux-x86_64
+            staged/sessio-linux-arm64
+            staged/sessio-windows-x86_64.exe
+            staged/SHA256SUMS
+          fail_on_unmatched_files: true
