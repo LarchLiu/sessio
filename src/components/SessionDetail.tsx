@@ -39,12 +39,9 @@ function stripInjectedContext(s: string): string {
     if (endIdx < 0) break;
     text = afterOpen.slice(endIdx + close.length);
   }
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith("# Context from my IDE setup:")) {
-    const MARKER = "## My request for Codex:";
-    const idx = trimmed.indexOf(MARKER);
-    if (idx >= 0) text = trimmed.slice(idx + MARKER.length);
-  }
+  const MARKER = "## My request for Codex:";
+  const idx = text.indexOf(MARKER);
+  if (idx >= 0) text = text.slice(idx + MARKER.length);
   return text.trim();
 }
 

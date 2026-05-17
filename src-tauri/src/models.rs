@@ -129,15 +129,12 @@ pub fn strip_injected_context(s: &str) -> String {
         }
     }
 
-    // Codex-style: a leading "# Context from my IDE setup:" block, ending
-    // before the "## My request for Codex:" header which precedes the real
-    // user input.
-    let trimmed = text.trim_start();
-    if trimmed.starts_with("# Context from my IDE setup:") {
-        const MARKER: &str = "## My request for Codex:";
-        if let Some(i) = trimmed.find(MARKER) {
-            text = &trimmed[i + MARKER.len()..];
-        }
+    // Codex-style: strip any preamble before the "## My request for Codex:"
+    // header (e.g. "# Context from my IDE setup:", "# Files mentioned by the
+    // user:"); the real user input follows the marker.
+    const MARKER: &str = "## My request for Codex:";
+    if let Some(i) = text.find(MARKER) {
+        text = &text[i + MARKER.len()..];
     }
 
     text.trim().to_string()
