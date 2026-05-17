@@ -72,6 +72,7 @@ export function useUpdateCheck(current: string): UpdateState {
   }, [current]);
 
   useEffect(() => {
+    if (import.meta.env.DEV) return;
     check();
     const id = window.setInterval(check, CHECK_INTERVAL_MS);
     return () => window.clearInterval(id);
