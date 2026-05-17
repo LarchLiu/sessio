@@ -85,6 +85,20 @@ export default function App() {
     if (!sidebarOpen) setSettingsOpen(false);
   }, [sidebarOpen]);
 
+  // Don't let webview restore focus on the last interactive control when
+  // the window is shown again — leaves a stale focus ring (and tooltip).
+  useEffect(() => {
+    const drop = () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body) return;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable) return;
+      el.blur();
+    };
+    window.addEventListener("blur", drop);
+    return () => window.removeEventListener("blur", drop);
+  }, []);
+
   useEffect(() => {
     localStorage.setItem(VIEW_MODE_STORAGE_KEY, viewMode);
   }, [viewMode]);
