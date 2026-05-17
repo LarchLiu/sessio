@@ -7,6 +7,22 @@
     "node": "24.x"
   },
   "type": "module",
+  "changelogithub": {
+    "types": {
+      "feat": {
+        "title": "🚀 Features"
+      },
+      "fix": {
+        "title": "🐞 Bug Fixes"
+      },
+      "perf": {
+        "title": "⚡ Performance"
+      },
+      "refactor": {
+        "title": "🛠 Refactors"
+      }
+    }
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
