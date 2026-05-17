@@ -4,7 +4,7 @@
 
 <h1 align="center">Sessio</h1>
 
-<p align="center">聚合 Codex、Claude Code 与 Gemini 本地会话的桌面管理工具。</p>
+<p align="center">用于管理本地多 agent 会话历史的桌面工具。</p>
 
 <p align="center">
   <a href="./README-cn.md">中文</a> · <a href="./README.md">English</a>

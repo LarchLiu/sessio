@@ -4,7 +4,7 @@
 
 <h1 align="center">Sessio</h1>
 
-<p align="center">A desktop app for browsing local session history from Codex, Claude Code, and Gemini.</p>
+<p align="center">A desktop app for managing local multiple agents session history.</p>
 
 <p align="center">
   <a href="./README-cn.md">中文</a> · <a href="./README.md">English</a>
