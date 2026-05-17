@@ -3,7 +3,7 @@ import { CSSProperties, ReactNode } from "react";
 interface TagProps {
   label: string;
   icon?: ReactNode;
-  // CSS RGB triplet (space-separated channels), e.g. "var(--color-agent-codex)"
+  // CSS RGB triplet (space-separated channels), e.g. "var(--color-emerald)"
   // or "167 139 250". Used to derive text, background, and border colors.
   color?: string;
   className?: string;

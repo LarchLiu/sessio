@@ -11,9 +11,9 @@
   --color-tooltip-bg: 28 28 32;
   --color-tooltip-fg: 255 255 255;
   --color-accent-purple: 167 139 250;
-  --color-agent-codex: 16 163 127;
-  --color-agent-claude: 217 119 87;
-  --color-agent-gemini: 66 133 244;
+  --color-emerald: 16 163 127;
+  --color-orange: 217 119 87;
+  --color-blue: 66 133 244;
   --color-status-warn: 245 158 11;
   --color-status-error: 248 113 113;
   --color-muted: 148 163 184;
@@ -29,9 +29,9 @@
   --color-tooltip-bg: 255 255 255;
   --color-tooltip-fg: 28 28 32;
   --color-accent-purple: 109 40 217;
-  --color-agent-codex: 13 138 106;
-  --color-agent-claude: 196 90 53;
-  --color-agent-gemini: 26 115 232;
+  --color-emerald: 13 138 106;
+  --color-orange: 196 90 53;
+  --color-blue: 26 115 232;
   --color-status-warn: 180 83 9;
   --color-status-error: 185 28 28;
   --color-muted: 100 116 139;

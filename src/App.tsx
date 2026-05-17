@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   AGENT_LABEL,
   Agent,
+  agentColorVar,
   getIndexStatus,
   getSessionMessages,
   SessionInfo,
@@ -60,7 +61,6 @@ function isSubagentOnly(s: SessionInfo): boolean {
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [loading, setLoading] = useState(true);
   const [indexing, setIndexing] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
@@ -89,7 +89,6 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     setError(null);
     listSessions()
       .then((rows) => {
@@ -99,10 +98,6 @@ export default function App() {
       .catch((err) => {
         if (cancelled) return;
         setError(String(err));
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -383,13 +378,7 @@ export default function App() {
                 </button>
               </Tooltip>
             </div>
-            <span className="text-meta text-ink/30 truncate text-right">
-              {indexing
-                ? t("sidebar.indexing")
-                : loading
-                  ? t("sidebar.loading")
-                  : ""}
-            </span>
+            <IndexStatusDot indexing={indexing} />
           </div>
         </div>
       </aside>
@@ -470,7 +459,6 @@ export default function App() {
               visible={visible}
               filter={filter}
               error={error}
-              loading={loading}
               indexing={indexing}
               onSelect={setSelected}
             />
@@ -479,7 +467,6 @@ export default function App() {
               visible={visible}
               filter={filter}
               error={error}
-              loading={loading}
               indexing={indexing}
               onSelect={setSelected}
             />
@@ -495,6 +482,73 @@ export default function App() {
         )}
       </main>
     </div>
+  );
+}
+
+function IndexStatusDot({ indexing }: { indexing: boolean }) {
+  const { t } = useI18n();
+  // Decouple the ripple lifecycle from `indexing` so a quick true→false flip
+  // still plays at least one full ring iteration; while indexing stays true
+  // the animation loops infinitely via CSS.
+  const [animating, setAnimating] = useState(indexing);
+  const indexingRef = useRef(indexing);
+  useEffect(() => {
+    indexingRef.current = indexing;
+    if (indexing) setAnimating(true);
+  }, [indexing]);
+
+  const tip = (
+    <div className="flex flex-col gap-2 py-0.5">
+      <div className="flex items-center gap-2.5">
+        <StatusDot />
+        <span>{t("sidebar.status_idle")}</span>
+      </div>
+      <div className="flex items-center gap-2.5">
+        <StatusDot ripple />
+        <span>{t("sidebar.status_indexing")}</span>
+      </div>
+    </div>
+  );
+  return (
+    <Tooltip content={tip} placement="top">
+      <span
+        aria-label={
+          animating ? t("sidebar.status_indexing") : t("sidebar.status_idle")
+        }
+        className="inline-flex items-center justify-center p-1.5 -m-1.5"
+      >
+        <StatusDot
+          ripple={animating}
+          onIterationEnd={() => {
+            if (!indexingRef.current) setAnimating(false);
+          }}
+        />
+      </span>
+    </Tooltip>
+  );
+}
+
+function StatusDot({
+  ripple,
+  onIterationEnd,
+}: {
+  ripple?: boolean;
+  onIterationEnd?: () => void;
+}) {
+  return (
+    <span className="relative inline-block w-1.5 h-1.5 shrink-0">
+      {ripple && (
+        <span
+          onAnimationIteration={onIterationEnd}
+          className="absolute inset-0 rounded-full animate-ping"
+          style={{ background: "rgb(var(--color-emerald))" }}
+        />
+      )}
+      <span
+        className="absolute inset-0 rounded-full"
+        style={{ background: "rgb(var(--color-emerald))" }}
+      />
+    </span>
   );
 }
 
@@ -570,14 +624,12 @@ function NativeSessionList({
   visible,
   filter,
   error,
-  loading,
   indexing,
   onSelect,
 }: {
   visible: SessionInfo[];
   filter: Filter;
   error: string | null;
-  loading: boolean;
   indexing: boolean;
   onSelect: (s: SessionInfo) => void;
 }) {
@@ -589,7 +641,7 @@ function NativeSessionList({
           {error}
         </div>
       )}
-      {!error && !loading && !indexing && visible.length === 0 && (
+      {!error && !indexing && visible.length === 0 && (
         <div className="p-10 text-center text-ink/40 text-body">
           {t("list.empty")}
         </div>
@@ -616,14 +668,12 @@ function CrossSessionList({
   visible,
   filter,
   error,
-  loading,
   indexing,
   onSelect,
 }: {
   visible: SessionInfo[];
   filter: Filter;
   error: string | null;
-  loading: boolean;
   indexing: boolean;
   onSelect: (s: SessionInfo) => void;
 }) {
@@ -635,7 +685,7 @@ function CrossSessionList({
           {error}
         </div>
       )}
-      {!error && !loading && !indexing && visible.length === 0 && (
+      {!error && !indexing && visible.length === 0 && (
         <div className="p-10 text-center text-ink/40 text-body">
           {t("list.empty")}
         </div>
@@ -811,7 +861,7 @@ function CrossAgentButton({
       >
         <Tag
           label={AGENT_LABEL[targetAgent]}
-          color={`var(--color-agent-${targetAgent})`}
+          color={agentColorVar(targetAgent)}
           icon={<AgentGlyph agent={targetAgent} className="w-3.5 h-3.5 shrink-0" />}
         />
       </button>
@@ -855,7 +905,7 @@ function ResumeAgentButton({ item }: { item: SessionInfo }) {
       >
         <Tag
           label={AGENT_LABEL[item.agent]}
-          color={`var(--color-agent-${item.agent})`}
+          color={agentColorVar(item.agent)}
           icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
         />
       </button>
