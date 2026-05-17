@@ -488,13 +488,18 @@ export default function App() {
 function IndexStatusDot({ indexing }: { indexing: boolean }) {
   const { t } = useI18n();
   // Decouple the ripple lifecycle from `indexing` so a quick true→false flip
-  // still plays at least one full ring iteration; while indexing stays true
-  // the animation loops infinitely via CSS.
+  // still plays at least MIN_ITERATIONS full ring iterations; while indexing
+  // stays true the animation loops infinitely via CSS.
+  const MIN_ITERATIONS = 2;
   const [animating, setAnimating] = useState(indexing);
   const indexingRef = useRef(indexing);
+  const iterRef = useRef(0);
   useEffect(() => {
     indexingRef.current = indexing;
-    if (indexing) setAnimating(true);
+    if (indexing) {
+      iterRef.current = 0;
+      setAnimating(true);
+    }
   }, [indexing]);
 
   const tip = (
@@ -520,7 +525,10 @@ function IndexStatusDot({ indexing }: { indexing: boolean }) {
         <StatusDot
           ripple={animating}
           onIterationEnd={() => {
-            if (!indexingRef.current) setAnimating(false);
+            iterRef.current += 1;
+            if (!indexingRef.current && iterRef.current >= MIN_ITERATIONS) {
+              setAnimating(false);
+            }
           }}
         />
       </span>
