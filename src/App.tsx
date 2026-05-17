@@ -883,7 +883,11 @@ function CrossAgentButton({
     setState("loading");
     try {
       const messages = await getSessionMessages(item.agent, item.filePath, item.id);
-      const prompt = buildCrossPrompt(messages);
+      const prompt = buildCrossPrompt(messages, {
+        sourceAgent: item.agent,
+        sourceSessionId: item.id,
+        sourceFilePath: item.filePath,
+      });
       if (!prompt) {
         setState("error");
         if (timerRef.current) window.clearTimeout(timerRef.current);
