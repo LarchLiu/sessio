@@ -23,6 +23,7 @@ import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
 import Tag from "./components/Tag";
 import Tooltip from "./components/Tooltip";
+import WindowControls from "./components/WindowControls";
 import { ThemeMode, useTheme } from "./theme";
 import { Lang, localeTag, useI18n } from "./i18n";
 
@@ -244,7 +245,10 @@ export default function App() {
               aria-label={t("sidebar.close")}
               data-tauri-drag-region="false"
               onClick={() => setSidebarOpen(false)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
+              className={
+                "absolute top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md " +
+                (IS_MAC ? "right-2" : "left-2")
+              }
             >
               <PanelLeftClose className="w-4 h-4" />
             </button>
@@ -393,7 +397,10 @@ export default function App() {
       <main className="relative flex-1 flex flex-col min-w-0">
         <div
           data-tauri-drag-region
-          className="relative h-12 shrink-0 grid grid-cols-3 items-center px-5 bg-surface border-b border-ink/10 select-none"
+          className={
+            "relative h-12 shrink-0 grid grid-cols-3 items-center px-5 bg-surface border-b border-ink/10 select-none " +
+            (IS_MAC ? "" : "pr-[138px]")
+          }
         >
           <Tooltip content={t("sidebar.open")} placement="bottom">
             <button
@@ -403,7 +410,7 @@ export default function App() {
               onClick={() => setSidebarOpen(true)}
               className={
                 "absolute top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink rounded-md transition-opacity duration-300 " +
-                (IS_MAC ? "left-24 " : "left-3 ") +
+                (IS_MAC ? "left-24 " : "left-2 ") +
                 (sidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
               }
             >
@@ -451,6 +458,9 @@ export default function App() {
                 <Search className="w-4 h-4" />
               </button>
             </Tooltip>
+          </div>
+          <div className="absolute top-0 right-0 z-20">
+            <WindowControls />
           </div>
         </div>
 

@@ -299,6 +299,10 @@ pub fn run() {
                 .build(app)?;
 
             if let Some(win) = app.get_webview_window("main") {
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = win.set_decorations(false);
+                }
                 let w = win.clone();
                 win.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
