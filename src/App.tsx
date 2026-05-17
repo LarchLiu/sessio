@@ -250,16 +250,18 @@ export default function App() {
           data-tauri-drag-region
           className="relative h-12 shrink-0 w-64"
         >
+          {!IS_MAC && (
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-title font-semibold text-ink/85 pointer-events-none select-none">
+              Sessio
+            </span>
+          )}
           <Tooltip content={t("sidebar.close")} placement="bottom">
             <button
               type="button"
               aria-label={t("sidebar.close")}
               data-tauri-drag-region="false"
               onClick={() => setSidebarOpen(false)}
-              className={
-                "absolute top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md " +
-                (IS_MAC ? "right-2" : "left-2")
-              }
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
             >
               <PanelLeftClose className="w-4 h-4" />
             </button>
@@ -426,7 +428,7 @@ export default function App() {
                         setError(String(err));
                       });
                     }}
-                    className="relative p-1 text-accent-purple hover:text-accent-purple/80 transition rounded-md"
+                    className="relative p-1 text-ink/55 hover:text-ink transition rounded-md"
                   >
                     <Download className="w-4 h-4" />
                     <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent-purple" />
