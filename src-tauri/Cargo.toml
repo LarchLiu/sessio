@@ -30,6 +30,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 notify = "6"
 notify-debouncer-full = "0.3"
 crossbeam-channel = "0.5"
+tauri-plugin-opener = "2.5.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

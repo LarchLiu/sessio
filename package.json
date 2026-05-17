@@ -21,6 +21,7 @@
   "dependencies": {
     "@lobehub/icons": "^5.8.0",
     "@tauri-apps/api": "^2.4.0",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "lucide-react": "^1.14.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

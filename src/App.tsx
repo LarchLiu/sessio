@@ -1,5 +1,5 @@
 import { ReactNode, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import {
   AGENT_LABEL,
@@ -27,6 +27,7 @@ import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
 import { ThemeMode, useTheme } from "./theme";
 import { Lang, localeTag, useI18n } from "./i18n";
+import { useUpdateCheck, openReleasePage } from "./updater";
 
 type Filter =
   | { kind: "all" }
@@ -73,6 +74,7 @@ export default function App() {
   const deferredViewMode = useDeferredValue(viewMode);
   const { mode, setMode } = useTheme();
   const { lang, setLang, t } = useI18n();
+  const update = useUpdateCheck(__APP_VERSION__);
   const listScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -319,6 +321,22 @@ export default function App() {
               <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-3">
                 <span className="text-caption uppercase tracking-[0.12em] text-ink/40">
                   {t("sidebar.settings")}
+                  <Tooltip content={t("sidebar.check_update")} placement="top">
+                    <button
+                      type="button"
+                      aria-label={t("sidebar.check_update")}
+                      onClick={() => update.check()}
+                      disabled={update.checking}
+                      className={
+                        "ml-2 normal-case tracking-normal transition " +
+                        (update.checking
+                          ? "text-ink/50 animate-pulse"
+                          : "text-ink/30 hover:text-ink/70 cursor-pointer")
+                      }
+                    >
+                      v{__APP_VERSION__}
+                    </button>
+                  </Tooltip>
                 </span>
                 <button
                   type="button"
@@ -377,6 +395,30 @@ export default function App() {
                   />
                 </button>
               </Tooltip>
+              {update.hasUpdate && update.latestVersion && (
+                <Tooltip
+                  content={t("sidebar.update_available", {
+                    version: update.latestVersion,
+                  })}
+                  placement="top"
+                >
+                  <button
+                    type="button"
+                    aria-label={t("sidebar.update_available", {
+                      version: update.latestVersion,
+                    })}
+                    onClick={() => {
+                      openReleasePage(update.releaseUrl).catch((err) => {
+                        setError(String(err));
+                      });
+                    }}
+                    className="relative p-1 text-accent-purple hover:text-accent-purple/80 transition rounded-md"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent-purple" />
+                  </button>
+                </Tooltip>
+              )}
             </div>
             <IndexStatusDot indexing={indexing} />
           </div>
