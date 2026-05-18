@@ -119,23 +119,26 @@ impl SessionStore for CachedStore {
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         self.inner.upsert_session(scope, session)?;
         let new_rec = Self::to_indexed_session_only(scope, session);
-        let key = (new_rec.agent, new_rec.session_id.clone(), new_rec.scope.clone());
+        let key = (
+            new_rec.agent,
+            new_rec.session_id.clone(),
+            new_rec.scope.clone(),
+        );
         let mut snap = self.snapshot.write().unwrap();
         // Preserve any subagents already attached to this session in the
         // snapshot; their lifecycle is independent of the main row.
-        let existing_subs = snap.by_pk.get(&key).map(|r| r.subagents.clone()).unwrap_or_default();
+        let existing_subs = snap
+            .by_pk
+            .get(&key)
+            .map(|r| r.subagents.clone())
+            .unwrap_or_default();
         let mut rec = new_rec;
         rec.subagents = existing_subs;
         snap.by_pk.insert(key, rec);
         Ok(())
     }
 
-    fn replace_by_scope(
-        &self,
-        scope: &str,
-        agent: Agent,
-        sessions: &[SessionInfo],
-    ) -> Result<()> {
+    fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()> {
         self.inner.replace_by_scope(scope, agent, sessions)?;
         let new_ids: HashSet<String> = sessions.iter().map(|s| s.id.clone()).collect();
         let mut snap = self.snapshot.write().unwrap();
@@ -148,7 +151,11 @@ impl SessionStore for CachedStore {
         }
         for s in sessions {
             let key = (agent, s.id.clone(), scope.to_string());
-            let existing_subs = snap.by_pk.get(&key).map(|r| r.subagents.clone()).unwrap_or_default();
+            let existing_subs = snap
+                .by_pk
+                .get(&key)
+                .map(|r| r.subagents.clone())
+                .unwrap_or_default();
             let mut rec = Self::to_indexed_session_only(scope, s);
             rec.subagents = existing_subs;
             snap.by_pk.insert(key, rec);
@@ -165,8 +172,13 @@ impl SessionStore for CachedStore {
     ) -> Result<()> {
         self.inner
             .upsert_subagent(parent_agent, parent_scope, parent_session_id, subagent)?;
-        let rec = Self::to_indexed_subagent(parent_agent, parent_scope, parent_session_id, subagent);
-        let key = (parent_agent, parent_session_id.to_string(), parent_scope.to_string());
+        let rec =
+            Self::to_indexed_subagent(parent_agent, parent_scope, parent_session_id, subagent);
+        let key = (
+            parent_agent,
+            parent_session_id.to_string(),
+            parent_scope.to_string(),
+        );
         let mut snap = self.snapshot.write().unwrap();
         if let Some(session) = snap.by_pk.get_mut(&key) {
             if let Some(existing) = session

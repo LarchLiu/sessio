@@ -37,12 +37,7 @@ pub trait SessionStore: Send + Sync {
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
-    fn replace_by_scope(
-        &self,
-        scope: &str,
-        agent: Agent,
-        sessions: &[SessionInfo],
-    ) -> Result<()>;
+    fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(
         &self,
         parent_agent: Agent,

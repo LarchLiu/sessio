@@ -8,8 +8,8 @@ use crate::models::{
     is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
     SubagentInfo,
 };
-use crate::readers::jsonl_scan;
-use crate::readers::system_time_to_millis;
+use crate::providers::shared::jsonl_scan;
+use crate::providers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let root = match root_dir()? {
@@ -117,11 +117,9 @@ pub fn scan_project_dir(project_dir: &Path) -> Result<Vec<SessionInfo>> {
     }
 
     let index_cwd = index.as_ref().and_then(|i| {
-        i.original_path.clone().or_else(|| {
-            i.entries
-                .iter()
-                .find_map(|e| e.project_path.clone())
-        })
+        i.original_path
+            .clone()
+            .or_else(|| i.entries.iter().find_map(|e| e.project_path.clone()))
     });
     let shared_cwd = index_cwd.or_else(|| group.iter().find_map(|s| s.project_path.clone()));
     let dir_name = project_dir
@@ -166,9 +164,9 @@ pub fn parse_single_file(path: &Path) -> Result<Option<SessionInfo>> {
     let index = read_index(&parent.join("sessions-index.json")).ok();
     if info.project_path.is_none() {
         info.project_path = index.as_ref().and_then(|i| {
-            i.original_path.clone().or_else(|| {
-                i.entries.iter().find_map(|e| e.project_path.clone())
-            })
+            i.original_path
+                .clone()
+                .or_else(|| i.entries.iter().find_map(|e| e.project_path.clone()))
         });
     }
     if info.project_name.is_none() {
@@ -235,11 +233,7 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
 // - assistant tool_use -> {role:"tool_call"}
 // - user tool_result -> {role:"tool_result"}
 // - user text -> {role:"user"}
-fn expand_message(
-    role_raw: &str,
-    msg: &serde_json::Value,
-    ts: Option<i64>,
-) -> Vec<SessionMessage> {
+fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
     let content = match msg.get("content") {
         Some(c) => c,
         None => return Vec::new(),
@@ -311,17 +305,12 @@ fn expand_message(
                     }
                     text_parts.clear();
                 }
-                let name = item
-                    .get("name")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("tool");
+                let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
                 let input_pretty = item
                     .get("input")
                     .and_then(|i| serde_json::to_string_pretty(i).ok())
                     .unwrap_or_default();
-                let text = if input_pretty.trim().is_empty()
-                    || input_pretty.trim() == "{}"
-                {
+                let text = if input_pretty.trim().is_empty() || input_pretty.trim() == "{}" {
                     format!("[{name}]")
                 } else {
                     format!("[{name}]\n{input_pretty}")
@@ -360,8 +349,7 @@ fn expand_message(
 
     if !text_parts.is_empty() {
         let joined = text_parts.join("\n");
-        if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
-        {
+        if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined)) {
             out.push(SessionMessage {
                 role: role_raw.to_string(),
                 text: joined,
@@ -698,11 +686,7 @@ pub fn parse_single_subagent_file(path: &Path) -> Result<Option<(String, Subagen
     }
 }
 
-fn info_from_index(
-    entry: &IndexEntry,
-    idx: &IndexFile,
-    project_dir: &Path,
-) -> Option<SessionInfo> {
+fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> Option<SessionInfo> {
     let file_path = entry.full_path.clone().unwrap_or_default();
     let cwd = entry
         .project_path

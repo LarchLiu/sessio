@@ -22,7 +22,7 @@ Sessio 下一阶段目标是把桌面应用背后的会话索引、消息提取�
 ```text
 Codex / Claude / Gemini JSONL
   ↓
-readers
+providers
   ↓
 indexer
   ├─ sessions / subagents metadata -> sessio-index.db
@@ -51,7 +51,7 @@ Sessio resolves card source refs back to raw JSONL
     sessio-index.db
   qmd-memory/
     projects/
-      <project_key>/
+      <project_slug>/
         cards/
           <card_id>.md
         manifest.json
@@ -61,12 +61,12 @@ qmd 自己的 SQLite index 仍由 qmd 管理，可以使用 qmd 默认目录，�
 
 ## Layering And Extensibility
 
-为了后续添加新的 agent reader，Sessio 应把 reader、indexer、memory、qmd、CLI 做成清晰分层。除 reader 层外，其他层不应该关心 Codex / Claude / Gemini 的原始文件格式。
+为了后续添加新的 agent provider，Sessio 应把 provider、indexer、memory、qmd、CLI 做成清晰分层。除 provider 层外，其他层不应该关心 Codex / Claude / Gemini 的原始文件格式。
 
 建议分层：
 
 ```text
-agent reader layer
+agent provider layer
   只负责识别和解析各 agent 的磁盘格式
   输出统一 SessionRecord / MessageEvent / SourceRef
 
@@ -87,25 +87,25 @@ qmd backend layer
 
 CLI / skill layer
   只暴露稳定 JSON API
-  不暴露内部 reader 差异
+  不暴露内部 provider 差异
 ```
 
 依赖方向必须单向：
 
 ```text
-CLI/UI -> indexer/store/memory -> readers
+CLI/UI -> indexer/store/memory -> providers
 memory -> qmd backend
-qmd backend 不反向依赖 readers/store 之外的 agent 细节
+qmd backend 不反向依赖 providers/store 之外的 agent 细节
 ```
 
-### Agent Reader Interface
+### Agent Provider Interface
 
-每个 agent reader 应实现同一个 trait。新增 agent 时只需要实现 reader 和 watch path 规则，不改 memory/qmd/CLI。
+每个 agent provider 应实现同一个 trait。新增 agent 时只需要实现 provider 和 watch path 规则，不改 memory/qmd/CLI。
 
 建议接口：
 
 ```rust
-trait AgentReader: Send + Sync {
+trait AgentProvider: Send + Sync {
     fn agent(&self) -> AgentKind;
     fn display_name(&self) -> &'static str;
 
@@ -114,14 +114,14 @@ trait AgentReader: Send + Sync {
     fn parse_source(&self, source: &SessionSource) -> Result<ParsedSession>;
     fn read_messages(&self, source: &SessionSource) -> Result<Vec<MessageEvent>>;
 
-    fn classify_path_event(&self, event: &PathEvent) -> Option<ReaderTask>;
+    fn classify_path_event(&self, event: &PathEvent) -> Option<ProviderTask>;
 }
 ```
 
 统一 task：
 
 ```rust
-enum ReaderTask {
+enum ProviderTask {
     ReindexSource(SessionSource),
     ReindexScope(SourceScope),
     MarkSourceUnavailable(SessionSource),
@@ -140,11 +140,11 @@ struct WatchRoot {
 }
 ```
 
-这样 watcher/polling 只负责收集文件事件并询问 reader 如何分类，不把 Claude / Gemini 的路径规则写死在上层。
+这样 watcher/polling 只负责收集文件事件并询问 provider 如何分类，不把 Claude / Gemini 的路径规则写死在上层。
 
 ### Unified Data Model
 
-建议把现有 `Agent` 扩展为可注册的 `AgentKind`。第一版可以仍用 enum，后续如果要支持外部插件或动态 reader，再迁移到 string id。
+建议把现有 `Agent` 扩展为可注册的 `AgentKind`。第一版可以仍用 enum，后续如果要支持外部插件或动态 provider，再迁移到 string id。
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -174,7 +174,7 @@ enum SourceKind {
 }
 ```
 
-reader 输出的 session 元数据：
+provider 输出的 session 元数据：
 
 ```rust
 struct SessionRecord {
@@ -231,7 +231,7 @@ struct SourceLocation {
 }
 ```
 
-memory pipeline 只接收 `MessageEvent`，因此新增 agent 的 tool 格式、消息格式都在 reader 内部归一化。
+memory pipeline 只接收 `MessageEvent`，因此新增 agent 的 tool 格式、消息格式都在 provider 内部归一化。
 
 ### Store Interfaces
 
@@ -261,38 +261,38 @@ trait MemoryStore {
 }
 ```
 
-`SessionStore` 负责列表和增量索引，`MessageSourceStore` 负责详情回源定位，`MemoryStore` 负责 card 和 qmd 映射。这样后续换 DB 或加远程同步时，不会影响 reader。
+`SessionStore` 负责列表和增量索引，`MessageSourceStore` 负责详情回源定位，`MemoryStore` 负责 card 和 qmd 映射。这样后续换 DB 或加远程同步时，不会影响 provider。
 
-### Reader Registry
+### Provider Registry
 
-建议新增 registry，集中管理可用 reader：
+建议新增 registry，集中管理可用 provider：
 
 ```rust
-struct ReaderRegistry {
-    readers: Vec<Box<dyn AgentReader>>,
+struct ProviderRegistry {
+    providers: Vec<Box<dyn AgentProvider>>,
 }
 
-impl ReaderRegistry {
+impl ProviderRegistry {
     fn discover_all(&self) -> Result<Vec<SessionSource>>;
-    fn reader_for_agent(&self, agent: &AgentKind) -> Option<&dyn AgentReader>;
-    fn classify_path_event(&self, event: &PathEvent) -> Vec<ReaderTask>;
+    fn provider_for_agent(&self, agent: &AgentKind) -> Option<&dyn AgentProvider>;
+    fn classify_path_event(&self, event: &PathEvent) -> Vec<ProviderTask>;
     fn watch_roots(&self) -> Result<Vec<WatchRoot>>;
 }
 ```
 
-当前内置 reader：
+当前内置 provider：
 
 ```text
-codex reader
-claude reader
-gemini reader
+codex provider
+claude provider
+gemini provider
 ```
 
-未来新增 reader 时：
+未来新增 provider 时：
 
-1. 新增 `src-tauri/src/readers/<agent>.rs`
-2. 实现 `AgentReader`
-3. 注册到 `ReaderRegistry`
+1. 新增 `src-tauri/src/providers/<agent>/parser.rs`
+2. 实现 `AgentProvider`
+3. 注册到 `ProviderRegistry`
 4. 增加 parser 测试和 sample fixtures
 5. 不修改 memory/qmd/CLI 的核心逻辑
 
@@ -300,8 +300,8 @@ gemini reader
 
 必须保持以下边界：
 
-- reader 可以知道 agent 原始格式
-- indexer 不可以解析 JSONL 内容，只调 reader
+- provider 可以知道 agent 原始格式
+- indexer 不可以解析 JSONL 内容，只调 provider
 - memory 不可以读取 agent 特有 JSON 字段，只处理 `MessageEvent`
 - qmd backend 不可以读取原始 session 文件，只处理 card files
 - CLI 不可以暴露 agent 特有字段，除非放在 `metadata` map 中
@@ -321,7 +321,7 @@ type Metadata = BTreeMap<String, serde_json::Value>;
 
 ```mermaid
 flowchart TD
-    Raw["Agent raw sessions<br/>Codex / Claude / Gemini JSONL"] --> Readers["Sessio readers<br/>parse sessions and messages"]
+    Raw["Agent raw sessions<br/>Codex / Claude / Gemini JSONL"] --> Readers["Sessio providers<br/>parse sessions and messages"]
     Readers --> Indexer["Sessio indexer<br/>full rebuild / file task"]
     Indexer --> SessionDB[("sessio-index.db<br/>sessions / subagents")]
     Indexer --> Changed["Changed session sources<br/>project + agent + session + file"]
@@ -329,12 +329,12 @@ flowchart TD
     Changed --> Normalizer["Memory normalizer<br/>strip injected context<br/>strip sessio-cross replay"]
     Normalizer --> ToolCompact["Tool compactor<br/>summarize tool use/result<br/>hash large outputs"]
     ToolCompact --> Dedupe["Dedupe<br/>turn hash / card hash<br/>merge source refs"]
-    Dedupe --> Cards["Memory card generator<br/>300-900 token project cards"]
+    Dedupe --> Cards["Memory card generator<br/>stable 1:1 session cards<br/>sessio-&lt;agent&gt;-&lt;session_id&gt;"]
 
     Cards --> MemoryDB[("sessio-index.db<br/>memory_cards / memory_sources<br/>turn_fingerprints / jobs")]
-    Cards --> CardFiles["~/.sessio/qmd-memory/projects/&lt;project_key&gt;/cards/*.md"]
+    Cards --> CardFiles["~/.sessio/qmd-memory/projects/&lt;project_slug&gt;/cards/*.md"]
 
-    CardFiles --> QmdUpdate["qmd update<br/>refresh BM25 / document index"]
+    CardFiles --> QmdUpdate["qmd update<br/>project collection refresh"]
     QmdUpdate --> QmdIndex[("qmd index<br/>documents / FTS / chunks")]
     QmdIndex --> QmdEmbed["qmd embed<br/>debounced / optional"]
     QmdEmbed --> QmdVectors[("qmd vectors<br/>semantic index")]
@@ -352,11 +352,11 @@ flowchart TD
     Parse --> StoreUpdate["Update session store<br/>upsert or mark unavailable"]
     StoreUpdate --> Affected["Resolve affected project_key<br/>and source session"]
 
-    Affected --> RebuildCards["Rebuild cards for source<br/>or mark old cards unavailable"]
-    RebuildCards --> WriteCards["Write / delete / tombstone<br/>Markdown card files"]
+    Affected --> RebuildCards["Rebuild cards for one source session<br/>or mark old cards unavailable"]
+    RebuildCards --> WriteCards["Write new card or delete stale markdown<br/>for that source session"]
     RebuildCards --> UpdateMemoryTables["Update memory tables<br/>cards, sources, fingerprints"]
 
-    WriteCards --> QmdUpdate["qmd update for affected project"]
+    WriteCards --> QmdUpdate["qmd update for affected project collection"]
     QmdUpdate --> EmbedQueue["enqueue embed job<br/>debounced 30-120s"]
     EmbedQueue --> QmdEmbed["qmd embed when idle<br/>or on manual build --embed"]
 
@@ -389,23 +389,23 @@ CLI 是给 skill 和其他 agent 用的稳定接口。第一版命令建议放�
 src-tauri/src/bin/sessio.rs
 ```
 
-CLI 复用现有 `app_lib::readers`、`store`、`indexer` 模块。后续如果 GUI 和 CLI 共享逻辑变多，可以抽出 `core` 模块。
+CLI 复用现有 `app_lib::providers`、`store`、`indexer` 模块。后续如果 GUI 和 CLI 共享逻辑变多，可以抽出 `core` 模块。
 
-建议命令：
+已实现命令：
 
 ```bash
 sessio sessions list --project /path/to/project --json
-sessio sessions rebuild --project /path/to/project --json
-sessio sessions messages --agent codex --session-id <id> --json
+sessio sessions messages --agent codex --session-id <id> --file-path <path> --json
 
 sessio memory build --project /path/to/project --json
-sessio memory update --project /path/to/project --json
 sessio memory search --project /path/to/project "query text" --json
+sessio memory search --project-key <project_slug> "query text" --json
 sessio memory resolve --card-id <card_id> --json
+sessio memory jobs --project-key <project_slug> --json
 
 sessio qmd status --json
-sessio qmd configure --binary qmd --json
-sessio qmd rebuild --project /path/to/project --json
+sessio qmd sync --project-key <project_slug> --cards-root <path> --json
+sessio qmd sync --project-key <project_slug> --cards-root <path> --embed --json
 ```
 
 Skill 主入口应该尽量简单：
@@ -419,27 +419,40 @@ sessio memory search --project "$PWD" "之前怎么设计 qmd 存储？" --json
 ```json
 {
   "query": "之前怎么设计 qmd 存储？",
-  "projectPath": "/Users/alex/Work/cloudgeek/sessio",
-  "projectKey": "p_9f31aa",
+  "projectKey": "-Users-alex-Work-cloudgeek-sessio",
+  "collection": "sessio--Users-alex-Work-cloudgeek-sessio",
+  "backendError": null,
   "hits": [
     {
-      "cardId": "p_9f31aa_8fa91c",
+      "cardId": "sessio-codex-abc123",
       "title": "Project-level qmd memory design",
       "summary": "Use qmd for compressed project memory cards while Sessio keeps raw JSONL source mappings.",
+      "qmdPath": "-Users-alex-Work-cloudgeek-sessio/cards/sessio-codex-abc123.md",
       "score": 0.82,
+      "snippet": null,
       "sources": [
         {
+          "cardId": "sessio-codex-abc123",
           "agent": "codex",
           "sessionId": "abc123",
           "filePath": "/Users/alex/.codex/sessions/...",
-          "lineStart": 120,
-          "lineEnd": 186
+          "location": {
+            "filePath": "/Users/alex/.codex/sessions/...",
+            "lineStart": null,
+            "lineEnd": null,
+            "byteStart": null,
+            "byteEnd": null
+          }
         }
       ]
     }
   ]
 }
 ```
+
+默认输出 **不** 包含 qmd 内部 payload。需要调试 qmd 返回结构时加 `--include-raw`，响应会多一个 `raw` 字段携带 qmd 原始 JSON。Skill 不应在正常工作流中使用该字段。
+
+当 qmd 不可用、损坏或超时时，`memory search --json` 返回 `hits: []` 和非空 `backendError`。skill 应把这视为“本次没有可用 Sessio memory 命中”，不要猜测历史上下文。
 
 ## Skill Design
 
@@ -465,7 +478,7 @@ Skill 说明里应强调：
 
 ### Normalization
 
-Session 处理管线应复用现有 readers，但需要比 UI 展示多保留来源定位信息。
+Session 处理管线应复用现有 providers，但需要比 UI 展示多保留来源定位信息。
 
 建议新增内部结构：
 
@@ -484,7 +497,7 @@ struct RawTurn {
 }
 ```
 
-第一版如果 line / byte offset 难以一次性补齐，可以先记录 session 级来源，后续再增强精确定位。但 `memory_sources` 表应预留 line / byte 字段。
+**v1 status**: 当前实现只记录 session 级来源；`memory_sources` 表已预留 `line_start/line_end/byte_start/byte_end` 字段，所有 provider 暂时写入 None。精确 line / byte offset 的填充和 `MessageSourceStore::resolve_source_range` 的实现属于 **v2 路线**。
 
 ### Cross Prompt 去重
 
@@ -538,10 +551,15 @@ qmd memory 不应保存完整 tool output。建议规则：
 
 不要一条 session 一个 Markdown，也不要一条 message 一个 Markdown。推荐：
 
+当前实现是更保守的第一版：
+
 ```text
-1 card = 一个连续任务片段 / 一个设计决策 / 一个 bug 修复 / 一次调研结论
-目标大小 = 300-900 tokens
+1 card = 1 session source
+card_id = sessio-<agent>-<session_id>
+project folder = <project_slug derived from canonical project path>
 ```
+
+后续如果要把单 session 再细分成多个 task/decision cards，可以在保持 source ref 抽象不变的前提下扩展。
 
 card 内容应面向检索，包含：
 
@@ -558,8 +576,8 @@ card 内容应面向检索，包含：
 
 ```md
 ---
-card_id: p_9f31aa_8fa91c
-project_key: p_9f31aa
+card_id: sessio-codex-abc123
+project_key: -Users-alex-Work-cloudgeek-sessio
 project_path: /Users/alex/Work/cloudgeek/sessio
 agent: codex
 session_id: abc123
@@ -591,22 +609,22 @@ Sources:
 
 qmd can help avoid exact duplicate document content, but Sessio must own real dedupe. Cross-agent continuation creates partial and near duplicates that qmd cannot reliably remove.
 
-Recommended layers:
+### v1 (implemented)
 
-- turn-level canonical hash
-  - normalize role + text
-  - remove cross prompt blocks
-  - normalize whitespace
-  - ignore volatile timestamps and temp paths where safe
-- tool result digest hash
-  - hash command, exit code, key errors, output hash
-- card-level canonical hash
-  - normalize title, summary, decisions, files, keywords
-- near duplicate detection
-  - optional SimHash / MinHash for card text
-  - merge highly similar cards by adding source refs instead of creating a new qmd card
+- card-level stable id: `sessio-<agent>-<session_id>` (1 card per session source)
+- `memory_cards.canonical_hash`: SHA-256 over normalized title/summary/body for change detection
+- **turn content hash** (`turn_content_hash`): SHA-256 over `role + canonical_text(content)` **only**. Intentionally excludes agent / session_id / turn_index so two turns with the same normalized content collide across sessions (and across agents during cross-agent continuation). This is what gets stored in `turn_fingerprints.canonical_hash`.
+- **turn source location** is preserved separately through the `turn_fingerprints` primary key `(project_key, agent, session_id, turn_index)` plus the `file_path / line_start / line_end / byte_start / byte_end` columns — these answer "where did this turn come from", not "what does it say".
+- per-turn fingerprints are written during card build (`build_project_memory` and `build_source_memory`), and cleared (`replace_turn_fingerprints(..., &[])`) whenever a source no longer produces cards
+- stale cards marked `available = 0` and their markdown removed when the source no longer produces them
 
-Suggested tables:
+### v2 (planned)
+
+- tool result digest hash: hash command, exit code, key errors, output hash
+- near-duplicate detection across cards: SimHash / MinHash over card text; merge similar cards by appending source refs instead of creating a new qmd card. `memory_cards.simhash` column is reserved for this; v1 leaves it `NULL`.
+- using `turn_fingerprints` to actively suppress card generation for sessions whose turns are fully covered by an existing card (continuation dedupe), instead of relying purely on stable card id collision
+
+Suggested tables (v1 schema, v2 fields reserved):
 
 ```sql
 memory_cards(
@@ -666,19 +684,19 @@ qmd 作为外部检索后端接入。第一版不要把 qmd SDK 或 native depen
 每个 project 推荐一个 qmd collection：
 
 ```bash
-qmd --index sessio collection add ~/.sessio/qmd-memory/projects/<project_key> \
-  --name sessio-<project_key> \
+qmd --index sessio collection add ~/.sessio/qmd-memory/projects/<project_slug> \
+  --name sessio-<project_slug> \
   --mask "**/*.md"
 
 qmd --index sessio update
 qmd --index sessio embed
-qmd --index sessio query "query text" -c sessio-<project_key> --json
+qmd --index sessio search "query text" -c sessio-<project_slug> --json
 ```
 
 Sessio 侧要维护：
 
-- project path -> project key
-- project key -> qmd collection name
+- project path -> project slug
+- project slug -> qmd collection name
 - qmd binary path
 - qmd index name or db path
 - last qmd update/embed status
@@ -696,10 +714,11 @@ Sessio 侧要维护：
 2. 更新 `sessions` 和 `subagents`
 3. 收集本次 rebuild 中所有受影响 project
 4. 对每个 project 运行 memory rebuild
-   - 删除或标记不可用的旧 memory cards
-   - 重新生成 project cards
+   - 重新扫描该 project 下的全部 session sources
+   - 重新生成稳定 session cards
    - 更新 `memory_cards` / `memory_sources` / `turn_fingerprints`
-   - 写入 `~/.sessio/qmd-memory/projects/<project_key>/cards/*.md`
+   - 写入 `~/.sessio/qmd-memory/projects/<project_slug>/cards/*.md`
+   - 对本次未再出现的旧 source cards 标记 unavailable 并删除对应 markdown
 5. 对每个受影响 project 调 qmd update
 6. 按配置决定是否立即调 qmd embed
 7. 发出 `sessions_index_updated` 和可选 `memory_index_updated`
@@ -714,15 +733,18 @@ Sessio 侧要维护：
 2. 更新 `sessions` / `subagents`
 3. 识别 affected project
 4. 只重建该 session 对应的 memory cards
-5. 将旧 card 标记 unavailable 或替换为新 card
-6. 删除对应旧 Markdown 文件或写 tombstone
-7. 写新 Markdown card
-8. 对 affected project 调 qmd update
-9. 根据策略延迟 embed
+   - 复用稳定 card id `sessio-<agent>-<session_id>`
+   - 仅更新该 source 对应的 `memory_cards` / `memory_sources`
+   - 若该 session 不再能生成可用 memory，则把旧 card 标记 unavailable 并删除 markdown
+5. 写新 Markdown card，或删除该 session 旧 Markdown card
+6. 对 affected project 调 qmd update
+   - 当前仍是 qmd index 级 `update`
+   - 不是单 card 直写 qmd
+7. 根据策略延迟 embed
 
 建议不要每次小变更都同步跑 expensive embedding：
 
-- `qmd update` 可以更频繁执行
+- `qmd update` 可以更频繁执行，但当前粒度仍是整个 index / collection 刷新
 - `qmd embed` 做防抖批处理，例如 30-120 秒
 - 用户主动 search 前，如果检测到 project 有 pending embeddings，可以先提示或后台补齐
 - 可提供 `sessio memory build --embed` 手动强制生成向量
@@ -769,10 +791,11 @@ src-tauri/src/bin/sessio.rs
 
 ```rust
 trait MemoryStore {
-    fn init(&self) -> Result<()>;
     fn upsert_card(&self, card: &MemoryCard) -> Result<()>;
-    fn replace_session_cards(&self, source: &SessionSource, cards: &[MemoryCard]) -> Result<()>;
-    fn mark_session_cards_unavailable(&self, source: &SessionSource) -> Result<()>;
+    fn replace_card_sources(&self, card_id: &str, sources: &[MemorySource]) -> Result<()>;
+    fn list_cards_for_source(&self, agent: &str, session_id: &str, file_path: &str) -> Result<Vec<MemoryCard>>;
+    fn mark_card_unavailable(&self, card_id: &str) -> Result<()>;
+    fn mark_source_cards_unavailable(&self, agent: &str, session_id: &str, file_path: &str) -> Result<()>;
     fn list_project_cards(&self, project_key: &str) -> Result<Vec<MemoryCard>>;
 }
 
@@ -808,7 +831,7 @@ trait MemoryIndexer {
 ### Phase 2: Memory Card Pipeline
 
 - 新增 memory tables
-- 从现有 readers 生成 normalized turns
+- 从现有 providers 生成 normalized turns
 - 删除 `sessio-cross` replay block
 - 压缩 tool use / tool result
 - 生成 project memory cards
@@ -847,6 +870,7 @@ trait MemoryIndexer {
 - `sessio sessions messages --json` 能读取 Codex / Claude / Gemini
 - project path 不存在时返回结构化错误
 - qmd 不存在时 `sessio qmd status --json` 返回可读错误
+- qmd query 超时时 `sessio memory search --json` 返回空 hits 和 `backendError`
 
 ### Memory
 
@@ -861,12 +885,12 @@ trait MemoryIndexer {
 - memory build 后 qmd collection 能创建
 - qmd query 返回 card path / score / snippet
 - `memory search` 能把 qmd hit 映射回 `card_id`
-- `memory resolve` 能回源原始 JSONL 范围
+- `memory resolve` 返回 card metadata/body 和 source refs；原始 JSONL 精确范围可后续增强
 
 ### Indexer / Polling
 
 - 全量 rebuild 后同步生成 qmd memory cards
-- 单个 Codex JSONL 更新后只更新对应 session cards
+- 单个 Codex JSONL 更新后只重建对应 session card，并删除该 session 的 stale markdown
 - Claude project 重扫后对应 project qmd collection 更新
 - Gemini logs.json 变化后对应 project cards 更新
 - qmd update 失败不影响 session index
@@ -876,7 +900,7 @@ trait MemoryIndexer {
 
 - 第一版是否先不做 LLM summary，只做规则压缩和 extractive cards？
 - qmd embedding 是否默认关闭，等用户显式启用后再下载模型？
-- memory card 的 project key 是否用 canonical project path hash，还是复用 agent 自带 project id？
+- memory card 的 project key 当前已经改为 canonical project path 派生的可读 slug，而不是 hash 或 agent 自带 id。
 - line / byte offset 是否第一版就必须实现，还是先 session 级 source refs？
 - qmd collection 是每个 project 一个，还是一个 collection + metadata filter？当前建议每 project 一个 collection，便于 skill 限定搜索范围。
 

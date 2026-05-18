@@ -1,7 +1,9 @@
+pub mod cli;
 pub mod indexer;
+pub mod memory;
 pub mod models;
 pub mod polling;
-pub mod readers;
+pub mod providers;
 pub mod store;
 pub mod watch;
 
@@ -9,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use indexer::{IndexTask, IndexerHandle};
+use memory::MemoryStore;
 use models::{Agent, SessionInfo, SessionMessage};
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -70,11 +73,11 @@ fn get_session_messages(
         ));
     }
     match agent {
-        Agent::Codex => readers::codex::read_messages(&path).map_err(|e| e.to_string()),
-        Agent::Claude => readers::claude::read_messages(&path).map_err(|e| e.to_string()),
+        Agent::Codex => providers::codex::parser::read_messages(&path).map_err(|e| e.to_string()),
+        Agent::Claude => providers::claude::parser::read_messages(&path).map_err(|e| e.to_string()),
         Agent::Gemini => {
             let sid = session_id.unwrap_or_default();
-            readers::gemini::read_messages(&path, &sid).map_err(|e| e.to_string())
+            providers::gemini::parser::read_messages(&path, &sid).map_err(|e| e.to_string())
         }
     }
 }
@@ -145,8 +148,7 @@ fn current_system_appearance() -> String {
         // frontend can resolve "system" mode accurately. The key is absent in
         // light mode and equals "Dark" in dark mode.
         unsafe {
-            let defaults: *mut AnyObject =
-                msg_send![class!(NSUserDefaults), standardUserDefaults];
+            let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
             if defaults.is_null() {
                 return "light".into();
             }
@@ -176,8 +178,9 @@ mod appearance_observer {
     use std::sync::OnceLock;
 
     use objc2::{
-        class, msg_send, sel,
+        class, msg_send,
         runtime::{AnyClass, AnyObject, ClassBuilder, Sel},
+        sel,
     };
     use objc2_foundation::NSString;
     use tauri::{AppHandle, Emitter};
@@ -254,11 +257,13 @@ pub fn run() {
                 .join("db-data");
             std::fs::create_dir_all(&data_dir).ok();
             let db_path = data_dir.join("sessio-index.db");
-            let sqlite = SqliteStore::open(&db_path)?;
+            let sqlite = Arc::new(SqliteStore::open(&db_path)?);
             sqlite.init()?;
-            let inner: Arc<dyn SessionStore> = Arc::new(sqlite);
+            let inner: Arc<dyn SessionStore> = sqlite.clone();
+            let memory_store: Arc<dyn MemoryStore> = sqlite;
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
-            let indexer_handle = indexer::spawn(app.handle().clone(), store.clone());
+            let indexer_handle =
+                indexer::spawn(app.handle().clone(), store.clone(), memory_store.clone());
             log::info!("indexer spawned");
 
             polling::spawn_polling(store.clone(), indexer_handle.clone());

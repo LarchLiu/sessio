@@ -6,8 +6,8 @@ use std::path::Path;
 use crate::models::{
     is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
 };
-use crate::readers::jsonl_scan;
-use crate::readers::system_time_to_millis;
+use crate::providers::shared::jsonl_scan;
+use crate::providers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let mut out = Vec::new();
@@ -126,10 +126,7 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
                 });
             }
             "function_call_output" => {
-                let output = payload
-                    .get("output")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("");
+                let output = payload.get("output").and_then(|x| x.as_str()).unwrap_or("");
                 if output.trim().is_empty() {
                     continue;
                 }
@@ -169,12 +166,21 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
         let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if t == "session_meta" {
             let payload = v.get("payload").cloned().unwrap_or_default();
-            id = payload.get("id").and_then(|x| x.as_str()).map(String::from);
-            started_at = payload
-                .get("timestamp")
-                .and_then(|x| x.as_str())
-                .and_then(parse_iso);
-            cwd = payload.get("cwd").and_then(|x| x.as_str()).map(String::from);
+            if id.is_none() {
+                id = payload.get("id").and_then(|x| x.as_str()).map(String::from);
+            }
+            if started_at.is_none() {
+                started_at = payload
+                    .get("timestamp")
+                    .and_then(|x| x.as_str())
+                    .and_then(parse_iso);
+            }
+            if cwd.is_none() {
+                cwd = payload
+                    .get("cwd")
+                    .and_then(|x| x.as_str())
+                    .map(String::from);
+            }
         } else if t == "response_item" && first_user_message.is_none() {
             if let Some(payload) = v.get("payload") {
                 if payload.get("type").and_then(|x| x.as_str()) == Some("message")
@@ -204,15 +210,6 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
             .and_then(parse_iso)
         {
             latest_ts = Some(latest_ts.map_or(t, |e| e.max(t)));
-        }
-    }
-
-    if id.is_none() {
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            let parts: Vec<&str> = stem.split('-').collect();
-            if parts.len() >= 5 {
-                id = Some(parts[parts.len() - 5..].join("-"));
-            }
         }
     }
 
@@ -272,4 +269,33 @@ fn parse_iso(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.timestamp_millis())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_one_file;
+    use std::fs;
+
+    #[test]
+    fn first_session_meta_id_wins_over_replayed_session_meta() {
+        let dir =
+            std::env::temp_dir().join(format!("sessio-codex-parser-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("renamed-session-file.jsonl");
+        fs::write(
+            &path,
+            r#"{"timestamp":"2026-05-18T05:09:14.748Z","type":"session_meta","payload":{"id":"019e397d-032a-72f3-ab4d-5e69683a02ae","forked_from_id":"019e364b-640b-7de0-aaba-9b1a1f5e6b87","timestamp":"2026-05-18T05:09:14.666Z","cwd":"/tmp/new"}}
+{"timestamp":"2026-05-17T14:16:11.000Z","type":"session_meta","payload":{"id":"019e364b-640b-7de0-aaba-9b1a1f5e6b87","timestamp":"2026-05-17T14:16:11.000Z","cwd":"/tmp/old"}}
+{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}
+"#,
+        )
+        .unwrap();
+
+        let info = parse_one_file(&path, false).unwrap().unwrap();
+        assert_eq!(info.id, "019e397d-032a-72f3-ab4d-5e69683a02ae");
+        assert_eq!(info.project_path.as_deref(), Some("/tmp/new"));
+
+        fs::remove_file(path).ok();
+        fs::remove_dir(dir).ok();
+    }
 }

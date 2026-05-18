@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::models::{is_system_noise, normalize_preview, Agent, SessionInfo, SessionMessage};
-use crate::readers::system_time_to_millis;
+use crate::providers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let (tmp_dir, projects_json) = paths()?;
@@ -61,10 +61,7 @@ pub fn read_messages(path: &Path, session_id: &str) -> Result<Vec<SessionMessage
     let arr: Vec<serde_json::Value> = serde_json::from_str(&text)?;
     let mut out = Vec::new();
     for item in arr {
-        let sid = item
-            .get("sessionId")
-            .and_then(|x| x.as_str())
-            .unwrap_or("");
+        let sid = item.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
         if sid != session_id {
             continue;
         }

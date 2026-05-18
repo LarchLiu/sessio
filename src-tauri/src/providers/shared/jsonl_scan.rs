@@ -24,7 +24,11 @@ pub fn scan(path: &Path) -> Result<JsonlScan> {
         let content = fs::read_to_string(path)?;
         let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
         let total = lines.len();
-        let head: Vec<String> = lines.iter().take(HEAD_LINES).map(|s| s.to_string()).collect();
+        let head: Vec<String> = lines
+            .iter()
+            .take(HEAD_LINES)
+            .map(|s| s.to_string())
+            .collect();
         let tail_start = total.saturating_sub(TAIL_LINES);
         let tail: Vec<String> = lines[tail_start..].iter().map(|s| s.to_string()).collect();
         return Ok(JsonlScan {

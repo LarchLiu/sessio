@@ -7,7 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::indexer::{IndexTask, IndexerHandle};
-use crate::readers;
+use crate::providers;
+use crate::providers::types::{PathEvent, PathEventKind, ProviderTask, SourceKind, WatchPurpose};
 
 pub struct WatcherHandle {
     _debouncer: Box<dyn std::any::Any + Send>,
@@ -15,69 +16,86 @@ pub struct WatcherHandle {
 
 pub fn spawn(indexer: IndexerHandle) -> Result<WatcherHandle> {
     let (tx, rx) = mpsc::channel::<DebounceEventResult>();
-    let mut debouncer = new_debouncer(Duration::from_millis(500), None, tx)
-        .context("create file debouncer")?;
+    let mut debouncer =
+        new_debouncer(Duration::from_millis(500), None, tx).context("create file debouncer")?;
 
-    let (codex_live, codex_archived) = readers::codex::roots()?;
-    let claude_root = readers::claude::root_dir()?;
-    let (gemini_tmp, gemini_projects_json) = readers::gemini::paths()?;
+    let registry = providers::builtin_providers();
+    let watch_roots = registry.watch_roots().context("collect watch roots")?;
 
-    for root in [&codex_live, &codex_archived] {
-        if root.exists() {
-            log::info!("watcher: watching codex {}", root.display());
-            debouncer
-                .watcher()
-                .watch(root, RecursiveMode::Recursive)
-                .with_context(|| format!("watch {}", root.display()))?;
-        } else {
-            log::warn!("watcher: codex root does not exist: {}", root.display());
+    for root in &watch_roots {
+        // ProjectMappings roots are typically a single file (e.g. Gemini's
+        // projects.json). We watch the parent dir non-recursively so we can
+        // still catch create/modify/remove events even when the file does
+        // not exist yet.
+        let (watch_path, mode) = match root.purpose {
+            WatchPurpose::ProjectMappings => {
+                let Some(parent) = root.path.parent() else {
+                    continue;
+                };
+                (parent.to_path_buf(), RecursiveMode::NonRecursive)
+            }
+            _ => {
+                let mode = if root.recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                (root.path.clone(), mode)
+            }
+        };
+
+        if !watch_path.exists() {
+            log::warn!(
+                "watcher: skipping missing root {} (agent={}, purpose={:?})",
+                watch_path.display(),
+                root.agent.as_str(),
+                root.purpose
+            );
+            continue;
         }
-    }
-    if let Some(root) = claude_root.as_ref() {
-        if root.exists() {
-            debouncer
-                .watcher()
-                .watch(root, RecursiveMode::Recursive)
-                .with_context(|| format!("watch {}", root.display()))?;
-        }
-    }
-    if gemini_tmp.exists() {
-        debouncer
+
+        match debouncer
             .watcher()
-            .watch(&gemini_tmp, RecursiveMode::Recursive)
-            .with_context(|| format!("watch {}", gemini_tmp.display()))?;
-    }
-    if let Some(parent) = gemini_projects_json.parent() {
-        if parent.exists() {
-            debouncer
-                .watcher()
-                .watch(parent, RecursiveMode::NonRecursive)
-                .ok();
+            .watch(&watch_path, mode)
+            .with_context(|| format!("watch {}", watch_path.display()))
+        {
+            Ok(()) => log::info!(
+                "watcher: watching {} ({:?}, agent={}, purpose={:?})",
+                watch_path.display(),
+                mode,
+                root.agent.as_str(),
+                root.purpose
+            ),
+            Err(e) => log::warn!("watcher: failed to register {}: {e}", watch_path.display()),
         }
     }
 
     thread::spawn(move || {
-        let roots = Roots {
-            codex_live,
-            codex_archived,
-            claude_root,
-            gemini_tmp,
-            gemini_projects_json,
-        };
         log::info!("watcher: event loop started");
         while let Ok(result) = rx.recv() {
             match result {
                 Ok(events) => {
                     log::info!("watcher: received {} events", events.len());
                     for ev in events {
+                        let kind = path_event_kind(ev.event.kind);
                         for path in &ev.event.paths {
                             log::info!("watcher: event {:?} on {}", ev.event.kind, path.display());
-            if let Some(task) = dispatch(path, ev.event.kind, &roots) {
-                log::info!("watcher: dispatching task {:?}", task);
-                if let Err(e) = indexer.submit(task) {
-                    log::warn!("indexer submit failed: {e}");
-                }
-            }
+                            if is_platform_junk(path) {
+                                continue;
+                            }
+                            let path_event = PathEvent {
+                                path: path.clone(),
+                                kind,
+                            };
+                            for task in registry.classify_path_event(&path_event) {
+                                let Some(index_task) = provider_task_to_index_task(task) else {
+                                    continue;
+                                };
+                                log::info!("watcher: dispatching task {:?}", index_task);
+                                if let Err(e) = indexer.submit(index_task) {
+                                    log::warn!("indexer submit failed: {e}");
+                                }
+                            }
                         }
                     }
                 }
@@ -96,92 +114,55 @@ pub fn spawn(indexer: IndexerHandle) -> Result<WatcherHandle> {
     })
 }
 
-struct Roots {
-    codex_live: PathBuf,
-    codex_archived: PathBuf,
-    claude_root: Option<PathBuf>,
-    gemini_tmp: PathBuf,
-    gemini_projects_json: PathBuf,
+fn path_event_kind(kind: EventKind) -> PathEventKind {
+    match kind {
+        EventKind::Create(_) => PathEventKind::Create,
+        EventKind::Modify(_) => PathEventKind::Modify,
+        EventKind::Remove(_) => PathEventKind::Remove,
+        _ => PathEventKind::Unknown,
+    }
 }
 
-fn dispatch(path: &Path, kind: EventKind, roots: &Roots) -> Option<IndexTask> {
-    if is_platform_junk(path) {
-        return None;
-    }
-    let removed = matches!(kind, EventKind::Remove(_));
-
-    if path == roots.gemini_projects_json {
-        return Some(IndexTask::RefreshGeminiProjectMappings);
-    }
-
-    if path.starts_with(&roots.codex_live) || path.starts_with(&roots.codex_archived) {
-        if is_jsonl(path) {
-            if removed {
-                return Some(IndexTask::DeleteFile(path.to_path_buf()));
+// Translates a provider-emitted ProviderTask into the concrete IndexTask
+// consumed by the indexer. ProviderTask keeps the provider abstraction
+// agent-agnostic; this function is the only place the watcher layer needs to
+// know which IndexTask variant corresponds to which agent's source kind.
+// Adding a new agent today is "add the agent to this match plus add an
+// IndexTask variant" — no path-prefix branching elsewhere in watch/.
+fn provider_task_to_index_task(task: ProviderTask) -> Option<IndexTask> {
+    match task {
+        ProviderTask::ReindexSource(source) => {
+            let path = PathBuf::from(&source.file_path);
+            match source.agent.as_str() {
+                "codex" => Some(IndexTask::ReindexCodexFile(path)),
+                "claude" => match source.source_kind {
+                    SourceKind::Subagent => Some(IndexTask::ReindexClaudeSubagentFile(path)),
+                    _ => Some(IndexTask::ReindexClaudeFile(path)),
+                },
+                "gemini" => Some(IndexTask::ReindexGeminiLogs(path)),
+                _ => None,
             }
-            return Some(IndexTask::ReindexCodexFile(path.to_path_buf()));
         }
-        return None;
-    }
-
-    if let Some(claude_root) = roots.claude_root.as_ref() {
-        if path.starts_with(claude_root) {
-            return dispatch_claude(path, claude_root, removed);
+        ProviderTask::ReindexScope { agent, scope } => {
+            let path = PathBuf::from(&scope);
+            match agent.as_str() {
+                "claude" => Some(IndexTask::ReindexClaudeProject(path)),
+                "gemini" => Some(IndexTask::ReindexGeminiLogs(path)),
+                _ => None,
+            }
         }
-    }
-
-    if path.starts_with(&roots.gemini_tmp) {
-        return dispatch_gemini(path, &roots.gemini_tmp);
-    }
-
-    None
-}
-
-fn dispatch_claude(path: &Path, claude_root: &Path, removed: bool) -> Option<IndexTask> {
-    let rel = path.strip_prefix(claude_root).ok()?;
-    let mut comps = rel.components();
-    let project_name = comps.next()?.as_os_str();
-    let project_dir = claude_root.join(project_name);
-
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if file_name == "sessions-index.json" {
-        return Some(IndexTask::ReindexClaudeProject(project_dir));
-    }
-    // Top-level <project>/<session>.jsonl edits only affect that one session's
-    // main row. Subagents are handled below on their own track.
-    if is_jsonl(path) && rel.components().count() == 2 {
-        if removed {
-            return Some(IndexTask::DeleteFile(path.to_path_buf()));
+        ProviderTask::MarkSourceUnavailable(source) => {
+            let path = PathBuf::from(&source.file_path);
+            match source.source_kind {
+                SourceKind::Subagent => Some(IndexTask::DeleteSubagentFile(path)),
+                _ => Some(IndexTask::DeleteFile(path)),
+            }
         }
-        return Some(IndexTask::ReindexClaudeFile(path.to_path_buf()));
+        ProviderTask::RefreshProjectMappings { agent } => match agent.as_str() {
+            "gemini" => Some(IndexTask::RefreshGeminiProjectMappings),
+            _ => None,
+        },
     }
-    // Subagent jsonls live under <project>/<parent_session>/subagents/...
-    // and have an independent lifecycle from the parent main row — touch
-    // only the subagent row.
-    let rest: Vec<_> = rel.components().skip(1).collect();
-    if rest.iter().any(|c| c.as_os_str() == "subagents") && is_jsonl(path) {
-        if removed {
-            return Some(IndexTask::DeleteSubagentFile(path.to_path_buf()));
-        }
-        return Some(IndexTask::ReindexClaudeSubagentFile(path.to_path_buf()));
-    }
-    None
-}
-
-fn dispatch_gemini(path: &Path, gemini_tmp: &Path) -> Option<IndexTask> {
-    let rel = path.strip_prefix(gemini_tmp).ok()?;
-    let mut comps = rel.components();
-    let dir = comps.next()?.as_os_str();
-    let logs = gemini_tmp.join(dir).join("logs.json");
-    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if file_name == "logs.json" {
-        return Some(IndexTask::ReindexGeminiLogs(logs));
-    }
-    None
-}
-
-fn is_jsonl(path: &Path) -> bool {
-    path.extension().and_then(|s| s.to_str()) == Some("jsonl")
 }
 
 // Ignore filesystem metadata noise that OS file managers sprinkle into watched
@@ -197,6 +178,114 @@ fn is_platform_junk(path: &Path) -> bool {
             | "Thumbs.db"       // Windows Explorer
             | "ehthumbs.db"     // Windows Explorer (legacy)
             | "desktop.ini"     // Windows
-            | ".directory"      // KDE Dolphin
+            | ".directory" // KDE Dolphin
     ) || name.starts_with("._") // macOS AppleDouble sidecar
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::types::{AgentKind, SessionSource};
+
+    fn src(agent: &str, file_path: &str, kind: SourceKind) -> SessionSource {
+        SessionSource {
+            agent: AgentKind::new(agent),
+            session_id: String::new(),
+            scope: file_path.to_string(),
+            file_path: file_path.to_string(),
+            project: None,
+            source_kind: kind,
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn codex_reindex_source_translates_to_reindex_codex_file() {
+        let task = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "codex",
+            "/tmp/codex/a.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(matches!(task, Some(IndexTask::ReindexCodexFile(_))));
+    }
+
+    #[test]
+    fn claude_main_vs_subagent_translate_to_different_tasks() {
+        let main = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "claude",
+            "/tmp/claude/proj/a.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(matches!(main, Some(IndexTask::ReindexClaudeFile(_))));
+
+        let sub = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "claude",
+            "/tmp/claude/proj/a/subagents/b.jsonl",
+            SourceKind::Subagent,
+        )));
+        assert!(matches!(sub, Some(IndexTask::ReindexClaudeSubagentFile(_))));
+    }
+
+    #[test]
+    fn gemini_reindex_source_translates_to_reindex_gemini_logs() {
+        let task = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "gemini",
+            "/tmp/gemini/abc/logs.json",
+            SourceKind::Logs,
+        )));
+        assert!(matches!(task, Some(IndexTask::ReindexGeminiLogs(_))));
+    }
+
+    #[test]
+    fn claude_scope_maps_to_reindex_claude_project() {
+        let task = provider_task_to_index_task(ProviderTask::ReindexScope {
+            agent: AgentKind::new("claude"),
+            scope: "/tmp/claude/proj".to_string(),
+        });
+        assert!(matches!(task, Some(IndexTask::ReindexClaudeProject(_))));
+    }
+
+    #[test]
+    fn gemini_scope_maps_to_reindex_gemini_logs() {
+        let task = provider_task_to_index_task(ProviderTask::ReindexScope {
+            agent: AgentKind::new("gemini"),
+            scope: "/tmp/gemini/abc/logs.json".to_string(),
+        });
+        assert!(matches!(task, Some(IndexTask::ReindexGeminiLogs(_))));
+    }
+
+    #[test]
+    fn mark_source_unavailable_main_vs_subagent_translate_to_distinct_deletes() {
+        let main = provider_task_to_index_task(ProviderTask::MarkSourceUnavailable(src(
+            "claude",
+            "/tmp/claude/proj/a.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(matches!(main, Some(IndexTask::DeleteFile(_))));
+
+        let sub = provider_task_to_index_task(ProviderTask::MarkSourceUnavailable(src(
+            "claude",
+            "/tmp/claude/proj/a/subagents/b.jsonl",
+            SourceKind::Subagent,
+        )));
+        assert!(matches!(sub, Some(IndexTask::DeleteSubagentFile(_))));
+    }
+
+    #[test]
+    fn refresh_gemini_project_mappings_translates() {
+        let task = provider_task_to_index_task(ProviderTask::RefreshProjectMappings {
+            agent: AgentKind::new("gemini"),
+        });
+        assert!(matches!(task, Some(IndexTask::RefreshGeminiProjectMappings)));
+    }
+
+    #[test]
+    fn unknown_agent_returns_none() {
+        let task = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "future-agent",
+            "/tmp/x.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(task.is_none());
+    }
 }

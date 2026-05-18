@@ -7,19 +7,34 @@ use std::time::Duration;
 
 use crate::indexer::{IndexTask, IndexerHandle};
 use crate::models::Agent;
-use crate::readers;
+use crate::providers;
 use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
 
 pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
     thread::spawn(move || {
         let mut claude_index_mtimes: HashMap<PathBuf, Option<i64>> = HashMap::new();
+        let mut gemini_projects_mtime: Option<i64> = None;
         let mut first_tick = true;
         loop {
             if !first_tick {
                 thread::sleep(Duration::from_secs(10));
             }
             first_tick = false;
-            if let Err(e) = poll_once(store.clone(), &indexer, &mut claude_index_mtimes) {
+            // Skip while the indexer is busy. A full rebuild can take a long
+            // time (it now also drives the per-source memory/QMD pipeline),
+            // and our DB snapshot would be stale mid-rebuild — every file we
+            // saw would look "not yet indexed" and we'd submit redundant
+            // per-file reindex tasks whose outcomes re-trigger the heavy
+            // memory work. The next tick (10s later) will catch real changes.
+            if indexer.status().indexing {
+                continue;
+            }
+            if let Err(e) = poll_once(
+                store.clone(),
+                &indexer,
+                &mut claude_index_mtimes,
+                &mut gemini_projects_mtime,
+            ) {
                 log::warn!("polling check failed: {e}");
             }
         }
@@ -30,16 +45,27 @@ fn poll_once(
     store: Arc<dyn SessionStore>,
     indexer: &IndexerHandle,
     claude_index_mtimes: &mut HashMap<PathBuf, Option<i64>>,
+    gemini_projects_mtime: &mut Option<i64>,
 ) -> Result<()> {
     let indexed = store.list_indexed_sessions()?;
+    if indexed.is_empty() {
+        // Fresh / wiped DB: skip the per-file submission storm. FullRebuild
+        // produces project-level affected items only, so the memory + QMD
+        // pipeline runs once per project instead of once per session file.
+        // Subsequent ticks see indexing=true and skip until the rebuild
+        // finishes, then resume the normal per-file diffing flow.
+        log::info!("polling: indexed DB is empty, submitting FullRebuild");
+        indexer.submit(IndexTask::FullRebuild)?;
+        return Ok(());
+    }
     poll_codex(&indexed, indexer)?;
     poll_claude(&indexed, claude_index_mtimes, store.as_ref(), indexer)?;
-    poll_gemini(&indexed, store.as_ref(), indexer)?;
+    poll_gemini(&indexed, store.as_ref(), indexer, gemini_projects_mtime)?;
     Ok(())
 }
 
 fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Result<()> {
-    let (live_root, archived_root) = readers::codex::roots()?;
+    let (live_root, archived_root) = providers::codex::parser::roots()?;
     let mut known: HashMap<String, &IndexedSessionRecord> = indexed
         .iter()
         .filter(|s| s.agent == Agent::Codex && !s.file_path.is_empty())
@@ -50,7 +76,10 @@ fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Resu
         if !root.exists() {
             continue;
         }
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -59,7 +88,7 @@ fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Resu
                 continue;
             }
             let path_str = path.to_string_lossy().into_owned();
-            let archived = readers::codex::path_is_archived(path, &archived_root);
+            let archived = providers::codex::parser::path_is_archived(path, &archived_root);
             let needs_reindex = match known.remove(&path_str) {
                 // File reappeared after a previous soft-delete, or it changed,
                 // or it switched between live/archived: re-parse it.
@@ -93,7 +122,7 @@ fn poll_claude(
     store: &dyn SessionStore,
     indexer: &IndexerHandle,
 ) -> Result<()> {
-    let Some(root) = readers::claude::root_dir()? else {
+    let Some(root) = providers::claude::parser::root_dir()? else {
         // Root not present (yet). Mark every Claude row unavailable but keep
         // history — when the root reappears the next tick will reindex and
         // flip rows back to available.
@@ -148,15 +177,12 @@ fn poll_claude(
             let child = child?;
             let cpath = child.path();
             let ctype = child.file_type()?;
-            if ctype.is_file()
-                && cpath.extension().and_then(|s| s.to_str()) == Some("jsonl")
-            {
+            if ctype.is_file() && cpath.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                 let path_str = cpath.to_string_lossy().into_owned();
                 seen_main.insert(path_str.clone());
                 let needs_reindex = match known_main.get(&path_str) {
                     Some(row) => {
-                        !row.available
-                            || file_changed(&cpath, row.file_size, row.file_mtime)
+                        !row.available || file_changed(&cpath, row.file_size, row.file_mtime)
                     }
                     None => true,
                 };
@@ -184,8 +210,7 @@ fn poll_claude(
                 seen_sub.insert(sub_path_str.clone());
                 let needs_reindex = match known_sub.get(&sub_path_str) {
                     Some(row) => {
-                        !row.available
-                            || file_changed(&sub_path, row.file_size, row.file_mtime)
+                        !row.available || file_changed(&sub_path, row.file_size, row.file_mtime)
                     }
                     None => true,
                 };
@@ -222,16 +247,22 @@ fn poll_gemini(
     indexed: &[IndexedSessionRecord],
     store: &dyn SessionStore,
     indexer: &IndexerHandle,
+    gemini_projects_mtime: &mut Option<i64>,
 ) -> Result<()> {
-    let (tmp_dir, projects_json) = readers::gemini::paths()?;
+    let (tmp_dir, projects_json) = providers::gemini::parser::paths()?;
     let mut by_scope: HashMap<String, Vec<&IndexedSessionRecord>> = HashMap::new();
     for row in indexed.iter().filter(|s| s.agent == Agent::Gemini) {
         by_scope.entry(row.scope.clone()).or_default().push(row);
     }
 
     let projects_mtime = file_mtime(&projects_json);
-    let projects_changed = projects_json_changed(projects_mtime, indexed);
+    let projects_changed = projects_json_changed(projects_mtime, indexed, gemini_projects_mtime);
     if projects_changed {
+        log::info!(
+            "polling: submit {:?} because gemini projects.json changed (mtime={:?})",
+            IndexTask::RefreshGeminiProjectMappings,
+            projects_mtime
+        );
         indexer.submit(IndexTask::RefreshGeminiProjectMappings)?;
     }
 
@@ -255,10 +286,17 @@ fn poll_gemini(
         present_scopes.insert(scope.clone());
         let rows = by_scope.remove(&scope).unwrap_or_default();
         let needs_reindex = rows.is_empty()
-            || rows.iter().any(|row| {
-                !row.available || file_changed(&logs, row.file_size, row.file_mtime)
-            });
+            || rows
+                .iter()
+                .any(|row| !row.available || file_changed(&logs, row.file_size, row.file_mtime));
         if needs_reindex {
+            log::info!(
+                "polling: submit {:?} for {} (rows={}, available_mismatch_or_file_changed={})",
+                IndexTask::ReindexGeminiLogs(logs.clone()),
+                scope,
+                rows.len(),
+                true
+            );
             indexer.submit(IndexTask::ReindexGeminiLogs(logs))?;
         }
     }
@@ -271,27 +309,41 @@ fn poll_gemini(
 fn projects_json_changed(
     projects_mtime: Option<i64>,
     indexed: &[IndexedSessionRecord],
+    last_seen_mtime: &mut Option<i64>,
 ) -> bool {
     let Some(projects_mtime) = projects_mtime else {
         return false;
     };
+    if last_seen_mtime.is_some_and(|seen| seen == projects_mtime) {
+        return false;
+    }
     let mut latest_indexed = None;
     for row in indexed.iter().filter(|s| s.agent == Agent::Gemini) {
-        latest_indexed = Some(latest_indexed.map_or(row.last_indexed_at, |v: i64| v.max(row.last_indexed_at)));
+        latest_indexed =
+            Some(latest_indexed.map_or(row.last_indexed_at, |v: i64| v.max(row.last_indexed_at)));
     }
-    latest_indexed.is_none_or(|ts| projects_mtime > ts)
+    let changed = latest_indexed.is_none_or(|ts| projects_mtime > ts);
+    if changed {
+        *last_seen_mtime = Some(projects_mtime);
+    }
+    changed
 }
 
 fn current_file_meta(path: &Path) -> Option<(u64, Option<i64>)> {
     let md = std::fs::metadata(path).ok()?;
-    Some((md.len(), md.modified().ok().and_then(readers::system_time_to_millis)))
+    Some((
+        md.len(),
+        md.modified()
+            .ok()
+            .and_then(providers::system_time_to_millis),
+    ))
 }
 
 fn file_mtime(path: &Path) -> Option<i64> {
     std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
-        .and_then(readers::system_time_to_millis)
+        .and_then(providers::system_time_to_millis)
 }
 
 fn file_changed(path: &Path, indexed_size: u64, indexed_mtime: Option<i64>) -> bool {

@@ -2,5 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  app_lib::run();
+    if std::env::args_os().len() > 1 {
+        app_lib::cli::run_from_env();
+    } else {
+        app_lib::run();
+    }
 }
