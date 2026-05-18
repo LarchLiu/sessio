@@ -44,7 +44,7 @@ pub fn cards_for_source(
         agent: source.agent.as_str().to_string(),
         session_id: source.session_id.clone(),
         file_path: source.file_path.clone(),
-        location: SourceLocation::file(source.file_path.clone()),
+        location: events_span_location(&source.file_path, events),
     };
 
     vec![(
@@ -146,9 +146,42 @@ pub fn fingerprints_for_source(
             turn_index: event.turn_index,
             role: format!("{:?}", event.role).to_lowercase(),
             canonical_hash: turn_content_hash(event),
-            location: SourceLocation::file(source.file_path.clone()),
+            location: event.location.clone(),
         })
         .collect()
+}
+
+// Aggregate the line/byte span covered by all events into a single
+// SourceLocation that can sit on the card-level MemorySource. The resulting
+// location lets `memory resolve` map a card back to the contiguous raw-JSONL
+// range it summarizes. Falls back to a session-level pointer when none of
+// the events carry offset info (e.g. Gemini until v2 follow-up).
+fn events_span_location(file_path: &str, events: &[MessageEvent]) -> SourceLocation {
+    let mut line_start: Option<u64> = None;
+    let mut line_end: Option<u64> = None;
+    let mut byte_start: Option<u64> = None;
+    let mut byte_end: Option<u64> = None;
+    for event in events {
+        if let Some(value) = event.location.line_start {
+            line_start = Some(line_start.map_or(value, |existing| existing.min(value)));
+        }
+        if let Some(value) = event.location.line_end {
+            line_end = Some(line_end.map_or(value, |existing| existing.max(value)));
+        }
+        if let Some(value) = event.location.byte_start {
+            byte_start = Some(byte_start.map_or(value, |existing| existing.min(value)));
+        }
+        if let Some(value) = event.location.byte_end {
+            byte_end = Some(byte_end.map_or(value, |existing| existing.max(value)));
+        }
+    }
+    SourceLocation {
+        file_path: file_path.to_string(),
+        line_start,
+        line_end,
+        byte_start,
+        byte_end,
+    }
 }
 
 fn tool_summaries(events: &[MessageEvent]) -> Vec<String> {

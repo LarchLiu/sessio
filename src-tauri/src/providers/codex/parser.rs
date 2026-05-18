@@ -8,6 +8,7 @@ use crate::models::{
 };
 use crate::providers::shared::jsonl_scan;
 use crate::providers::system_time_to_millis;
+use crate::providers::types::SourceLocation;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let mut out = Vec::new();
@@ -57,17 +58,46 @@ fn scan_dir(root: &Path, archived: bool, out: &mut Vec<SessionInfo>) {
 }
 
 pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
+    Ok(read_messages_with_locations(path)?
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect())
+}
+
+// Same as read_messages but also returns the SourceLocation (line + byte
+// range) of the JSONL line each message was parsed from. One Codex line
+// produces at most one SessionMessage, so line_start == line_end and the
+// byte range covers the full line including its trailing newline.
+pub fn read_messages_with_locations(
+    path: &Path,
+) -> Result<Vec<(SessionMessage, SourceLocation)>> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut out = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let file_path = path.to_string_lossy().to_string();
+    let mut buf = Vec::new();
+    let mut byte_offset: u64 = 0;
+    let mut line_number: u64 = 0;
+
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        line_number += 1;
+        let line_start_byte = byte_offset;
+        let line_end_byte = byte_offset + n as u64;
+        byte_offset = line_end_byte;
+
+        let Ok(line_str) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        if line_str.trim().is_empty() {
             continue;
         }
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line_str) else {
+            continue;
         };
         let ts = v
             .get("timestamp")
@@ -76,70 +106,83 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
         if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
             continue;
         }
-        let payload = match v.get("payload") {
-            Some(p) => p,
-            None => continue,
+        let Some(payload) = v.get("payload") else {
+            continue;
         };
-        let kind = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match kind {
-            "message" => {
-                let role = payload
-                    .get("role")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let text = extract_message_text(payload).unwrap_or_default();
-                if text.trim().is_empty() {
-                    continue;
-                }
-                if role == "user" && is_system_noise(&text) {
-                    continue;
-                }
-                out.push(SessionMessage {
-                    role,
-                    text,
-                    timestamp: ts,
-                });
-            }
-            "function_call" => {
-                let name = payload
-                    .get("name")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("tool");
-                let args_raw = payload
-                    .get("arguments")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("");
-                let args_pretty = serde_json::from_str::<serde_json::Value>(args_raw)
-                    .ok()
-                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                    .unwrap_or_else(|| args_raw.to_string());
-                let text = if args_pretty.trim().is_empty() {
-                    format!("[{name}]")
-                } else {
-                    format!("[{name}]\n{args_pretty}")
-                };
-                out.push(SessionMessage {
-                    role: "tool_call".to_string(),
-                    text,
-                    timestamp: ts,
-                });
-            }
-            "function_call_output" => {
-                let output = payload.get("output").and_then(|x| x.as_str()).unwrap_or("");
-                if output.trim().is_empty() {
-                    continue;
-                }
-                out.push(SessionMessage {
-                    role: "tool_result".to_string(),
-                    text: output.to_string(),
-                    timestamp: ts,
-                });
-            }
-            _ => continue,
-        }
+        let Some(message) = interpret_payload(payload, ts) else {
+            continue;
+        };
+        let location = SourceLocation {
+            file_path: file_path.clone(),
+            line_start: Some(line_number),
+            line_end: Some(line_number),
+            byte_start: Some(line_start_byte),
+            byte_end: Some(line_end_byte),
+        };
+        out.push((message, location));
     }
     Ok(out)
+}
+
+fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<SessionMessage> {
+    let kind = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match kind {
+        "message" => {
+            let role = payload
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = extract_message_text(payload).unwrap_or_default();
+            if text.trim().is_empty() {
+                return None;
+            }
+            if role == "user" && is_system_noise(&text) {
+                return None;
+            }
+            Some(SessionMessage {
+                role,
+                text,
+                timestamp: ts,
+            })
+        }
+        "function_call" => {
+            let name = payload
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("tool");
+            let args_raw = payload
+                .get("arguments")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let args_pretty = serde_json::from_str::<serde_json::Value>(args_raw)
+                .ok()
+                .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                .unwrap_or_else(|| args_raw.to_string());
+            let text = if args_pretty.trim().is_empty() {
+                format!("[{name}]")
+            } else {
+                format!("[{name}]\n{args_pretty}")
+            };
+            Some(SessionMessage {
+                role: "tool_call".to_string(),
+                text,
+                timestamp: ts,
+            })
+        }
+        "function_call_output" => {
+            let output = payload.get("output").and_then(|x| x.as_str()).unwrap_or("");
+            if output.trim().is_empty() {
+                return None;
+            }
+            Some(SessionMessage {
+                role: "tool_result".to_string(),
+                text: output.to_string(),
+                timestamp: ts,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
@@ -273,7 +316,7 @@ fn parse_iso(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_one_file;
+    use super::{parse_one_file, read_messages_with_locations};
     use std::fs;
 
     #[test]
@@ -297,5 +340,60 @@ mod tests {
 
         fs::remove_file(path).ok();
         fs::remove_dir(dir).ok();
+    }
+
+    #[test]
+    fn read_messages_with_locations_records_line_and_byte_range() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-location-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        // Line 1: skipped (session_meta is not a response_item)
+        // Line 2: produces a user message
+        // Line 3: produces an assistant message
+        let line1 = r#"{"timestamp":"2026-05-18T05:09:14.748Z","type":"session_meta","payload":{"id":"abc","timestamp":"2026-05-18T05:09:14.666Z"}}"#;
+        let line2 = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}"#;
+        let line3 = r#"{"timestamp":"2026-05-18T05:09:16.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi back"}]}}"#;
+        let body = format!("{line1}\n{line2}\n{line3}\n");
+        fs::write(&path, &body).unwrap();
+
+        let line1_bytes = line1.len() as u64 + 1; // include the \n
+        let line2_bytes = line2.len() as u64 + 1;
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 2, "session_meta line must not yield messages");
+
+        let (user_msg, user_loc) = &events[0];
+        assert_eq!(user_msg.role, "user");
+        assert_eq!(user_msg.text, "hello");
+        assert_eq!(user_loc.line_start, Some(2));
+        assert_eq!(user_loc.line_end, Some(2));
+        assert_eq!(user_loc.byte_start, Some(line1_bytes));
+        assert_eq!(
+            user_loc.byte_end,
+            Some(line1_bytes + line2_bytes),
+            "byte_end should include trailing \\n"
+        );
+
+        let (asst_msg, asst_loc) = &events[1];
+        assert_eq!(asst_msg.role, "assistant");
+        assert_eq!(asst_loc.line_start, Some(3));
+        assert_eq!(asst_loc.line_end, Some(3));
+
+        // Verify the byte range actually slices back to the original JSONL line.
+        let slice = &body.as_bytes()
+            [user_loc.byte_start.unwrap() as usize..user_loc.byte_end.unwrap() as usize];
+        let slice_str = std::str::from_utf8(slice).unwrap();
+        assert!(slice_str.starts_with(line2));
+        assert!(slice_str.ends_with('\n'));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
     }
 }

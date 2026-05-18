@@ -36,6 +36,7 @@ enum MemoryCommand {
     Resolve {
         card_id: String,
         db_path: Option<String>,
+        include_source_excerpt: bool,
         json: bool,
     },
     Search {
@@ -167,19 +168,42 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
         MemoryCommand::Resolve {
             card_id,
             db_path,
+            include_source_excerpt,
             json,
         } => {
             let store = open_store(db_path.as_deref())?;
             store.init()?;
             let card = store.card_by_id(&card_id)?;
             let sources = store.sources_for_card(&card_id)?;
+            let payload_sources: Vec<serde_json::Value> = sources
+                .iter()
+                .map(|source| {
+                    let mut value = serde_json::to_value(source).unwrap_or(serde_json::json!({}));
+                    if include_source_excerpt {
+                        let excerpt = match crate::memory::resolve::read_source_excerpt(source) {
+                            Ok(text) => text,
+                            Err(e) => {
+                                eprintln!(
+                                    "sessio: read excerpt for {} failed: {e}",
+                                    source.file_path
+                                );
+                                None
+                            }
+                        };
+                        if let Some(map) = value.as_object_mut() {
+                            map.insert("excerpt".to_string(), serde_json::json!(excerpt));
+                        }
+                    }
+                    value
+                })
+                .collect();
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "cardId": card_id,
                         "card": card,
-                        "sources": sources
+                        "sources": payload_sources
                     }))?
                 );
             } else {
@@ -491,6 +515,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
         "resolve" => {
             let mut card_id = None;
             let mut db_path = None;
+            let mut include_source_excerpt = false;
             let mut json = false;
             let mut i = 1;
             while i < args.len() {
@@ -503,6 +528,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                         i += 1;
                         db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
                     }
+                    "--include-source-excerpt" => include_source_excerpt = true,
                     "--json" => json = true,
                     other => bail!("unknown memory resolve option '{other}'"),
                 }
@@ -512,6 +538,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                 command: Command::Memory(MemoryCommand::Resolve {
                     card_id: card_id.context("missing --card-id")?,
                     db_path,
+                    include_source_excerpt,
                     json,
                 }),
             })
@@ -984,7 +1011,7 @@ Usage:
   sessio sessions messages --agent <codex|claude|gemini> [--session-id <id>] [--file-path <path>] [--json]
   sessio memory build --project <path> [--output-root <path>] [--db-path <path>] [--json]
   sessio memory search (--project <path>|--project-key <key>) <query> [--index sessio] [--binary <path>] [--db-path <path>] [--include-raw] [--json]
-  sessio memory resolve --card-id <id> [--db-path <path>] [--json]
+  sessio memory resolve --card-id <id> [--db-path <path>] [--include-source-excerpt] [--json]
   sessio memory jobs --project-key <key> [--status <status>] [--db-path <path>] [--json]
   sessio qmd status [--binary <path>] [--json]
   sessio qmd sync --project-key <key> --cards-root <path> [--index sessio] [--binary <path>] [--embed] [--json]
@@ -993,6 +1020,7 @@ Notes:
   --json emits stable machine-readable output for skills and agents.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
+  memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at (Codex / Claude today; Gemini is session-level only).
   Gemini message lookup requires --session-id because multiple sessions can share one logs.json.
 "#
     );

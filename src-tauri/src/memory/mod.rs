@@ -3,6 +3,7 @@ pub mod cards;
 pub mod hash;
 pub mod normalize;
 pub mod qmd;
+pub mod resolve;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

@@ -497,7 +497,7 @@ struct RawTurn {
 }
 ```
 
-**v1 status**: 当前实现只记录 session 级来源；`memory_sources` 表已预留 `line_start/line_end/byte_start/byte_end` 字段，所有 provider 暂时写入 None。精确 line / byte offset 的填充和 `MessageSourceStore::resolve_source_range` 的实现属于 **v2 路线**。
+**v1 status**: 来源定位采用混合粒度。Codex 和 Claude 的 `read_messages_with_locations` 会为每条消息记录 `line_start/line_end/byte_start/byte_end`；card 级 `memory_sources` 取所有 events 的并集 (min line_start ..= max line_end，byte 同理)。Gemini 的 `logs.json` 是单个 JSON Array，`serde_json::from_str` 不暴露每个 element 的 byte offset，因此 Gemini 暂时仍是 session 级（全 None），等流式 JSON 扫描器到位再补 — 见 `docs/sessio-cli-qmd-memory-todos.md` 的 v2 roadmap。`memory resolve --include-source-excerpt` 会基于 location 把原始 JSONL 范围回读出来。
 
 ### Cross Prompt 去重
 

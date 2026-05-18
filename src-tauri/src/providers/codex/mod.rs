@@ -59,7 +59,7 @@ impl AgentProvider for CodexProvider {
     }
 
     fn read_messages(&self, source: &SessionSource) -> Result<Vec<MessageEvent>> {
-        let messages = parser::read_messages(Path::new(&source.file_path))?;
+        let messages = parser::read_messages_with_locations(Path::new(&source.file_path))?;
         Ok(message_events_from_messages(source, messages))
     }
 

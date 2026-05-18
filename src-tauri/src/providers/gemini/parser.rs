@@ -57,9 +57,25 @@ pub fn parse_logs_file(path: &Path) -> Result<Vec<SessionInfo>> {
 }
 
 pub fn read_messages(path: &Path, session_id: &str) -> Result<Vec<SessionMessage>> {
+    Ok(read_messages_with_locations(path, session_id)?
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect())
+}
+
+// Gemini stores all sessions under ~/.gemini/tmp/<dir>/logs.json as a single
+// JSON array. v1 ships session-level source pointers only — every message
+// inherits the file-level SourceLocation (line/byte are None). Precise
+// per-message byte offsets require a streaming JSON scanner and are tracked
+// as a v2 follow-up in docs/sessio-cli-qmd-memory-todos.md.
+pub fn read_messages_with_locations(
+    path: &Path,
+    session_id: &str,
+) -> Result<Vec<(SessionMessage, crate::providers::types::SourceLocation)>> {
     let text = fs::read_to_string(path)?;
     let arr: Vec<serde_json::Value> = serde_json::from_str(&text)?;
     let mut out = Vec::new();
+    let location = crate::providers::types::SourceLocation::file(path.to_string_lossy().to_string());
     for item in arr {
         let sid = item.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
         if sid != session_id {
@@ -82,11 +98,14 @@ pub fn read_messages(path: &Path, session_id: &str) -> Result<Vec<SessionMessage
         if text.is_empty() {
             continue;
         }
-        out.push(SessionMessage {
-            role,
-            text,
-            timestamp: ts,
-        });
+        out.push((
+            SessionMessage {
+                role,
+                text,
+                timestamp: ts,
+            },
+            location.clone(),
+        ));
     }
     Ok(out)
 }

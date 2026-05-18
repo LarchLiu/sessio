@@ -10,6 +10,7 @@ use crate::models::{
 };
 use crate::providers::shared::jsonl_scan;
 use crate::providers::system_time_to_millis;
+use crate::providers::types::SourceLocation;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let root = match root_dir()? {
@@ -192,17 +193,47 @@ pub fn parse_single_file(path: &Path) -> Result<Option<SessionInfo>> {
 }
 
 pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
+    Ok(read_messages_with_locations(path)?
+        .into_iter()
+        .map(|(m, _)| m)
+        .collect())
+}
+
+// Same as read_messages but also returns the SourceLocation for each
+// SessionMessage. A single Claude JSONL line can expand into multiple
+// SessionMessage entries (e.g. an assistant turn with text + tool_use);
+// all expansions share the originating line's location so resolve can
+// point back to the exact JSONL line.
+pub fn read_messages_with_locations(
+    path: &Path,
+) -> Result<Vec<(SessionMessage, SourceLocation)>> {
     let file = File::open(path)?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut out = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let file_path = path.to_string_lossy().to_string();
+    let mut buf = Vec::new();
+    let mut byte_offset: u64 = 0;
+    let mut line_number: u64 = 0;
+
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        line_number += 1;
+        let line_start_byte = byte_offset;
+        let line_end_byte = byte_offset + n as u64;
+        byte_offset = line_end_byte;
+
+        let Ok(line_str) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        if line_str.trim().is_empty() {
             continue;
         }
-        let v: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line_str) else {
+            continue;
         };
         let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
         if t != "user" && t != "assistant" {
@@ -212,17 +243,23 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
             .get("timestamp")
             .and_then(|x| x.as_str())
             .and_then(parse_iso);
-        let msg = match v.get("message") {
-            Some(m) => m,
-            None => continue,
+        let Some(msg) = v.get("message") else {
+            continue;
         };
         let role_raw = msg
             .get("role")
             .and_then(|x| x.as_str())
             .unwrap_or(t)
             .to_string();
+        let location = SourceLocation {
+            file_path: file_path.clone(),
+            line_start: Some(line_number),
+            line_end: Some(line_number),
+            byte_start: Some(line_start_byte),
+            byte_end: Some(line_end_byte),
+        };
         for sm in expand_message(&role_raw, msg, ts) {
-            out.push(sm);
+            out.push((sm, location.clone()));
         }
     }
     Ok(out)

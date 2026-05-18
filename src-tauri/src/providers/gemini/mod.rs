@@ -64,7 +64,8 @@ impl AgentProvider for GeminiProvider {
     }
 
     fn read_messages(&self, source: &SessionSource) -> Result<Vec<MessageEvent>> {
-        let messages = parser::read_messages(Path::new(&source.file_path), &source.session_id)?;
+        let messages =
+            parser::read_messages_with_locations(Path::new(&source.file_path), &source.session_id)?;
         Ok(message_events_from_messages(source, messages))
     }
 

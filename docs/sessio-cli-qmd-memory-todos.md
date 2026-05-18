@@ -154,6 +154,7 @@
 - [x] `cargo check` passed after gating polling on `indexer.status().indexing` and draining post-`FullRebuild` per-file reindex tasks from the indexer channel.
 - [x] `cargo check` passed after short-circuiting empty-DB polling ticks to `FullRebuild`.
 - [x] `cargo test` (27 tests) passed after routing watcher events through `ProviderRegistry::classify_path_event` and replacing byte-slice `short_id`/`short_hash` in cards with `chars().take(12)`.
+- [x] `cargo test` (32 tests) passed after Codex/Claude parsers started returning per-message line/byte ranges, cards aggregated those into `memory_sources`, and `sessio memory resolve --include-source-excerpt` started returning raw JSONL excerpts.
 
 - [x] `cargo run --bin sessio -- --help` printed CLI usage.
 - [x] `cargo run -- --help` printed CLI usage through the single desktop binary.
@@ -169,8 +170,9 @@
 
 These items are intentionally **not** in scope for v1. Schema columns are reserved so v2 work is additive.
 
-- [ ] Fill `memory_sources.line_start/line_end/byte_start/byte_end` from provider parsers (Codex / Claude / Gemini).
-- [ ] Implement `MessageSourceStore::resolve_source_range` so `memory resolve --json` can return precise raw-JSONL excerpts instead of session-level pointers.
+- [x] Fill `memory_sources.line_start/line_end/byte_start/byte_end` from Codex and Claude parsers. Card-level `memory_sources` rows now carry the aggregated line/byte span over all events in the card.
+- [ ] Fill the same offsets for Gemini — requires a streaming JSON scanner for `logs.json` (array of objects) since `serde_json::from_str` does not surface per-item byte positions.
+- [x] Implement source-range resolution (`crate::memory::resolve::read_source_excerpt`) that reads back a raw JSONL excerpt by byte range or, failing that, by inclusive line range; exposed through `sessio memory resolve --include-source-excerpt`.
 - [ ] Tool-result digest hash (command + exit code + key errors + output hash) feeding into a future tool-result dedupe layer.
 - [ ] SimHash / MinHash near-duplicate detection over card text; populate `memory_cards.simhash` and merge near-dup cards by appending source refs.
 - [ ] Use `turn_fingerprints` for cross-session continuation dedupe: suppress new cards when a candidate session's turn set is fully covered by an existing card.

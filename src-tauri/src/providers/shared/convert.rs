@@ -71,12 +71,12 @@ pub fn session_source_from_info(info: &SessionInfo) -> SessionSource {
 
 pub fn message_events_from_messages(
     source: &SessionSource,
-    messages: Vec<SessionMessage>,
+    messages: Vec<(SessionMessage, SourceLocation)>,
 ) -> Vec<MessageEvent> {
     messages
         .into_iter()
         .enumerate()
-        .map(|(turn_index, message)| {
+        .map(|(turn_index, (message, location))| {
             let role = message_role(&message.role);
             let content = message_content(&message.role, &message.text);
             MessageEvent {
@@ -86,7 +86,7 @@ pub fn message_events_from_messages(
                 role,
                 content,
                 timestamp: message.timestamp,
-                location: SourceLocation::file(source.file_path.clone()),
+                location,
                 metadata: Default::default(),
             }
         })
@@ -244,7 +244,7 @@ mod tests {
     use super::{message_events_from_messages, project_key_for_path_or_name};
     use crate::models::SessionMessage;
     use crate::providers::types::{
-        AgentKind, MessageContent, ProjectRef, SessionSource, SourceKind,
+        AgentKind, MessageContent, ProjectRef, SessionSource, SourceKind, SourceLocation,
     };
 
     #[test]
@@ -265,16 +265,22 @@ mod tests {
         let events = message_events_from_messages(
             &source,
             vec![
-                SessionMessage {
-                    role: "tool_call".to_string(),
-                    text: "[shell]\n{\"cmd\":\"cargo check\"}".to_string(),
-                    timestamp: None,
-                },
-                SessionMessage {
-                    role: "tool_result".to_string(),
-                    text: "ok ".repeat(1000),
-                    timestamp: None,
-                },
+                (
+                    SessionMessage {
+                        role: "tool_call".to_string(),
+                        text: "[shell]\n{\"cmd\":\"cargo check\"}".to_string(),
+                        timestamp: None,
+                    },
+                    SourceLocation::file("/tmp/session.jsonl"),
+                ),
+                (
+                    SessionMessage {
+                        role: "tool_result".to_string(),
+                        text: "ok ".repeat(1000),
+                        timestamp: None,
+                    },
+                    SourceLocation::file("/tmp/session.jsonl"),
+                ),
             ],
         );
         match &events[0].content {
