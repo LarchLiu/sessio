@@ -5,7 +5,6 @@ use crate::providers::types::{
 };
 
 const MAX_SUMMARY_CHARS: usize = 360;
-const MAX_BODY_CHARS: usize = 2400;
 
 pub fn cards_for_source(
     source: &SessionSource,
@@ -95,29 +94,10 @@ fn card_body(source: &SessionSource, events: &[MessageEvent]) -> String {
     lines.push("Summary:".to_string());
     lines.push(summarize_events(events));
     lines.push(String::new());
-    lines.push("Key turns:".to_string());
-    for event in events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.role,
-                MessageRole::User | MessageRole::Assistant | MessageRole::Thinking
-            )
-        })
-        .take(12)
-    {
-        let role = format!("{:?}", event.role).to_lowercase();
-        let text = compact(&content_text(&event.content), 280);
-        if text.is_empty() {
-            continue;
-        }
-        lines.push(format!("- {}: {}", role, text));
-    }
-    lines.push(String::new());
-    let tool_lines = tool_summaries(events);
-    if !tool_lines.is_empty() {
-        lines.push("Tool activity:".to_string());
-        lines.extend(tool_lines);
+    let flow_lines = flow_summaries(events);
+    if !flow_lines.is_empty() {
+        lines.push("Flow:".to_string());
+        lines.extend(flow_lines);
         lines.push(String::new());
     }
     lines.push("Source:".to_string());
@@ -127,7 +107,7 @@ fn card_body(source: &SessionSource, events: &[MessageEvent]) -> String {
         source.session_id,
         source.file_path
     ));
-    compact(&lines.join("\n"), MAX_BODY_CHARS)
+    lines.join("\n")
 }
 
 pub fn fingerprints_for_source(
@@ -184,38 +164,45 @@ fn events_span_location(file_path: &str, events: &[MessageEvent]) -> SourceLocat
     }
 }
 
-fn tool_summaries(events: &[MessageEvent]) -> Vec<String> {
-    events
-        .iter()
-        .filter_map(|event| match &event.content {
-            MessageContent::ToolUse { tool } => {
-                let input = tool
-                    .raw
-                    .as_deref()
-                    .map(|s| compact(s, 160))
-                    .filter(|s| !s.is_empty());
-                Some(match input {
-                    Some(input) => format!("- use {}: {}", tool.name, input),
-                    None => format!("- use {}", tool.name),
-                })
-            }
-            MessageContent::ToolResult { result } => {
-                let hash = result.output_hash.as_deref().unwrap_or("");
-                let preview = compact(&result.text, 180);
-                Some(if preview.is_empty() {
-                    format!("- result hash {}", short_hash(hash))
-                } else {
-                    format!("- result {}: {}", short_hash(hash), preview)
-                })
-            }
-            _ => None,
-        })
-        .take(12)
-        .collect()
+fn flow_summaries(events: &[MessageEvent]) -> Vec<String> {
+    events.iter().filter_map(flow_line).collect()
 }
 
-fn short_hash(hash: &str) -> String {
-    hash.chars().take(12).collect()
+fn flow_line(event: &MessageEvent) -> Option<String> {
+    match &event.content {
+        MessageContent::ToolUse { tool } => {
+            let input = tool
+                .raw
+                .as_deref()
+                .map(canonical_inline)
+                .filter(|s| !s.is_empty());
+            Some(match input {
+                Some(input) => format!("- use {}: {}", tool.name, input),
+                None => format!("- use {}", tool.name),
+            })
+        }
+        MessageContent::ToolResult { result } => {
+            let text = canonical_inline(&result.text);
+            if text.is_empty() {
+                None
+            } else {
+                Some(format!("- result: {}", text))
+            }
+        }
+        _ => {
+            let role = format!("{:?}", event.role).to_lowercase();
+            let text = canonical_inline(&content_text(&event.content));
+            if text.is_empty() {
+                None
+            } else {
+                Some(format!("- {}: {}", role, text))
+            }
+        }
+    }
+}
+
+fn canonical_inline(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn compact(input: &str, max_chars: usize) -> String {
@@ -258,7 +245,7 @@ mod tests {
     use super::cards_for_source;
     use crate::providers::types::{
         AgentKind, MessageContent, MessageEvent, MessageRole, ProjectRef, SessionSource,
-        SourceKind, SourceLocation,
+        SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
     };
 
     #[test]
@@ -293,5 +280,92 @@ mod tests {
         assert_eq!(cards[0].0.project_key, "p_test");
         assert_eq!(cards[0].0.card_id, "sessio-codex-abc123");
         assert_eq!(cards[0].1[0].session_id, "abc123");
+    }
+
+    #[test]
+    fn card_body_keeps_tool_events_in_flow_without_hash_noise() {
+        let source = SessionSource {
+            agent: AgentKind::new("codex"),
+            session_id: "flow-test".to_string(),
+            scope: "scope".to_string(),
+            file_path: "/tmp/session.jsonl".to_string(),
+            project: Some(ProjectRef {
+                project_key: "p_test".to_string(),
+                project_path: Some("/tmp/project".to_string()),
+                project_name: Some("project".to_string()),
+            }),
+            source_kind: SourceKind::MainSession,
+            metadata: Default::default(),
+        };
+        let mk_event = |turn_index, role, content| MessageEvent {
+            source: source.clone(),
+            event_id: None,
+            turn_index,
+            role,
+            content,
+            timestamp: Some(turn_index as i64),
+            location: SourceLocation::file("/tmp/session.jsonl"),
+            metadata: Default::default(),
+        };
+        let events = vec![
+            mk_event(
+                0,
+                MessageRole::User,
+                MessageContent::Text {
+                    text: "Find qmd memory code".to_string(),
+                },
+            ),
+            mk_event(
+                1,
+                MessageRole::ToolUse,
+                MessageContent::ToolUse {
+                    tool: ToolUseEvent {
+                        name: "rg".to_string(),
+                        input: None,
+                        raw: Some("qmd memory".to_string()),
+                    },
+                },
+            ),
+            mk_event(
+                2,
+                MessageRole::ToolResult,
+                MessageContent::ToolResult {
+                    result: ToolResultEvent {
+                        tool_name: Some("rg".to_string()),
+                        exit_code: Some(0),
+                        success: Some(true),
+                        text: "src-tauri/src/memory/cards.rs: Flow generation".to_string(),
+                        output_hash: Some("0123456789abcdef".to_string()),
+                    },
+                },
+            ),
+            mk_event(
+                3,
+                MessageRole::Assistant,
+                MessageContent::Text {
+                    text: "The card builder lives in memory/cards.rs.".to_string(),
+                },
+            ),
+        ];
+
+        let cards = cards_for_source(&source, &events);
+        let body = &cards[0].0.body;
+
+        assert!(body.contains("Flow:"));
+        assert!(!body.contains("Key turns:"));
+        assert!(!body.contains("Tool activity:"));
+        assert!(!body.contains("0123456789ab"));
+
+        let user_pos = body.find("- user: Find qmd memory code").unwrap();
+        let use_pos = body.find("- use rg: qmd memory").unwrap();
+        let result_pos = body
+            .find("- result: src-tauri/src/memory/cards.rs: Flow generation")
+            .unwrap();
+        let assistant_pos = body
+            .find("- assistant: The card builder lives in memory/cards.rs.")
+            .unwrap();
+        assert!(user_pos < use_pos);
+        assert!(use_pos < result_pos);
+        assert!(result_pos < assistant_pos);
     }
 }
