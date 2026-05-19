@@ -985,16 +985,44 @@ impl MemoryStore for SqliteStore {
         &self,
         base_agent: &str,
         base_session_id: &str,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<CardContinuation>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let affected: Vec<String> = {
+        let affected: Vec<CardContinuation> = {
             let mut stmt = tx.prepare(
-                "SELECT card_id FROM card_continuations
+                "SELECT card_id, project_key,
+                        candidate_agent, candidate_session_id, candidate_file_path,
+                        base_agent, base_session_id, base_file_path,
+                        base_start_turn_index, base_start_line_start, base_start_byte_start,
+                        base_end_turn_index, base_end_line_end, base_end_byte_end,
+                        candidate_trim_turn_start, candidate_trim_line_start, candidate_trim_byte_start,
+                        updated_at
+                 FROM card_continuations
                  WHERE base_agent = ? AND base_session_id = ?",
             )?;
-            let rows = stmt.query_map(params![base_agent, base_session_id], |row| row.get(0))?;
-            rows.collect::<rusqlite::Result<Vec<String>>>()?
+            let rows = stmt.query_map(params![base_agent, base_session_id], |row| {
+                Ok(CardContinuation {
+                    card_id: row.get(0)?,
+                    project_key: row.get(1)?,
+                    candidate_agent: row.get(2)?,
+                    candidate_session_id: row.get(3)?,
+                    candidate_file_path: row.get(4)?,
+                    base_agent: row.get(5)?,
+                    base_session_id: row.get(6)?,
+                    base_file_path: row.get(7)?,
+                    base_start_turn_index: row.get::<_, i64>(8)? as usize,
+                    base_start_line_start: opt_i64_to_u64(row.get(9)?),
+                    base_start_byte_start: opt_i64_to_u64(row.get(10)?),
+                    base_end_turn_index: row.get::<_, i64>(11)? as usize,
+                    base_end_line_end: opt_i64_to_u64(row.get(12)?),
+                    base_end_byte_end: opt_i64_to_u64(row.get(13)?),
+                    candidate_trim_turn_start: row.get::<_, i64>(14)? as usize,
+                    candidate_trim_line_start: opt_i64_to_u64(row.get(15)?),
+                    candidate_trim_byte_start: opt_i64_to_u64(row.get(16)?),
+                    updated_at: row.get(17)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         tx.execute(
             "DELETE FROM card_continuations

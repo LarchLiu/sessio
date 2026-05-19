@@ -135,7 +135,7 @@ pub trait MemoryStore: Send + Sync {
         &self,
         base_agent: &str,
         base_session_id: &str,
-    ) -> Result<Vec<String>>;
+    ) -> Result<Vec<CardContinuation>>;
     fn replace_turn_fingerprints(
         &self,
         project_key: &str,

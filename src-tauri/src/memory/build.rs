@@ -28,6 +28,7 @@ pub struct MemoryBuildSummary {
     pub cards_written: usize,
     pub output_root: String,
     pub errors: Vec<String>,
+    pub dependent_source_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,7 @@ pub struct MemoryBuildSourceResult {
     pub project_key: Option<String>,
     pub cards_written: usize,
     pub cards_marked_unavailable: usize,
+    pub dependent_source_paths: Vec<PathBuf>,
 }
 
 pub fn build_project_memory(
@@ -51,6 +53,7 @@ pub fn build_project_memory(
         sources_skipped: 0,
         cards_written: 0,
         output_root: options.output_root.to_string_lossy().to_string(),
+        dependent_source_paths: Vec::new(),
         errors: Vec::new(),
     };
     let mut seen_sources = HashSet::new();
@@ -239,13 +242,14 @@ pub fn build_project_memory(
                 &source.session_id,
                 &fingerprints,
             )?;
-            invalidate_dependent_continuations(
+            let dependent_source_paths = invalidate_dependent_continuations(
                 store,
                 &options.output_root,
                 source.agent.as_str(),
                 &source.session_id,
                 &mut summary.errors,
             );
+            extend_unique_paths(&mut summary.dependent_source_paths, dependent_source_paths);
             for (card, sources) in generated {
                 write_card_markdown(
                     &options.output_root,
@@ -298,6 +302,7 @@ pub fn build_source_memory(
             project_key: None,
             cards_written: 0,
             cards_marked_unavailable: 0,
+            dependent_source_paths: Vec::new(),
         });
     };
     let Some(provider) = registry.provider_for_agent(&source.agent) else {
@@ -326,6 +331,7 @@ pub fn build_source_memory(
             project_key: Some(project.project_key.clone()),
             cards_written: 0,
             cards_marked_unavailable: marked_unavailable,
+            dependent_source_paths: Vec::new(),
         });
     }
 
@@ -350,6 +356,7 @@ pub fn build_source_memory(
                 project_key: Some(project.project_key.clone()),
                 cards_written: 0,
                 cards_marked_unavailable: marked_unavailable,
+                dependent_source_paths: Vec::new(),
             });
         }
     };
@@ -368,6 +375,7 @@ pub fn build_source_memory(
             project_key: Some(project.project_key.clone()),
             cards_written: 0,
             cards_marked_unavailable: marked_unavailable,
+            dependent_source_paths: Vec::new(),
         });
     }
 
@@ -390,7 +398,7 @@ pub fn build_source_memory(
         &fingerprints,
     )?;
     let mut invalidation_errors: Vec<String> = Vec::new();
-    invalidate_dependent_continuations(
+    let dependent_source_paths = invalidate_dependent_continuations(
         store,
         output_root,
         source.agent.as_str(),
@@ -414,6 +422,7 @@ pub fn build_source_memory(
         project_key: Some(project.project_key.clone()),
         cards_written,
         cards_marked_unavailable: marked_unavailable,
+        dependent_source_paths,
     })
 }
 
@@ -476,33 +485,62 @@ fn invalidate_dependent_continuations(
     base_agent: &str,
     base_session_id: &str,
     errors: &mut Vec<String>,
-) {
-    let affected = match store
-        .invalidate_continuations_referencing_base(base_agent, base_session_id)
-    {
-        Ok(affected) => affected,
-        Err(e) => {
-            errors.push(format!(
-                "invalidate dependent continuations for {base_agent} {base_session_id} failed: {e}"
-            ));
-            return;
+) -> Vec<PathBuf> {
+    let continuations =
+        match store.invalidate_continuations_referencing_base(base_agent, base_session_id) {
+            Ok(continuations) => continuations,
+            Err(e) => {
+                errors.push(format!(
+                    "invalidate dependent continuations for {base_agent} {base_session_id} failed: {e}"
+                ));
+                return Vec::new();
+            }
+        };
+
+    let mut dependent_source_paths = Vec::new();
+    let mut seen = HashSet::new();
+    for continuation in continuations {
+        let path = PathBuf::from(&continuation.candidate_file_path);
+        if seen.insert(path.clone()) {
+            dependent_source_paths.push(path);
         }
-    };
-    for card_id in affected {
-        match store.card_by_id(&card_id) {
+        match store.card_by_id(&continuation.card_id) {
             Ok(Some(card)) if card.available => {
                 if let Err(e) = store.mark_card_unavailable(&card.card_id) {
                     errors.push(format!(
-                        "mark dependent card {card_id} unavailable failed: {e}"
+                        "mark dependent card {} unavailable failed: {e}",
+                        card.card_id
                     ));
                     continue;
                 }
                 if let Err(e) = remove_card_markdown(output_root, &card) {
-                    errors.push(format!("remove dependent card markdown {card_id} failed: {e}"));
+                    errors.push(format!(
+                        "remove dependent card markdown {} failed: {e}",
+                        card.card_id
+                    ));
                 }
             }
             Ok(_) => {}
-            Err(e) => errors.push(format!("load dependent card {card_id} failed: {e}")),
+            Err(e) => errors.push(format!(
+                "load dependent card {} failed: {e}",
+                continuation.card_id
+            )),
+        }
+    }
+    dependent_source_paths
+}
+fn extend_unique_paths(existing: &mut Vec<PathBuf>, additions: Vec<PathBuf>) {
+    if additions.is_empty() {
+        return;
+    }
+    // Seed dedupe set borrowing from `existing` so we don't clone the
+    // already-collected paths. New `additions` still cost one clone each
+    // because the set must outlive the borrow of `path`.
+    let mut seen: HashSet<PathBuf> = existing.iter().cloned().collect();
+    existing.reserve(additions.len());
+    for path in additions {
+        if seen.insert(path.clone()) {
+            existing.push(path);
         }
     }
 }
@@ -1739,6 +1777,207 @@ mod tests {
         assert!(
             !card.available,
             "candidate card must be marked unavailable after its base was reindexed"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // Regression: when continuation chains exist (A is base of B, B is base
+    // of C), reindexing A must surface B as a dependent so the indexer can
+    // requeue it; building B in turn must surface C. The test exercises one
+    // link at a time — together they prove the chain converges across
+    // successive build passes.
+    #[test]
+    fn build_source_memory_propagates_dependents_along_chain() {
+        let root = unique_temp_dir("sessio-memory-chain");
+        let db_path = root.join("memory.db");
+        let cards_root = root.join("cards-root");
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let project = ProjectRef {
+            project_key: "chain-project".to_string(),
+            project_path: Some(root.join("project").to_string_lossy().to_string()),
+            project_name: Some("project".to_string()),
+        };
+        let a_source = SessionSource {
+            agent: AgentKind::new("fake"),
+            session_id: "001-a".to_string(),
+            scope: "scope".to_string(),
+            file_path: root.join("a.jsonl").to_string_lossy().to_string(),
+            project: Some(project.clone()),
+            source_kind: SourceKind::MainSession,
+            metadata: Metadata::default(),
+        };
+        let b_source = SessionSource {
+            agent: AgentKind::new("fake"),
+            session_id: "002-b".to_string(),
+            scope: "scope".to_string(),
+            file_path: root.join("b.jsonl").to_string_lossy().to_string(),
+            project: Some(project.clone()),
+            source_kind: SourceKind::MainSession,
+            metadata: Metadata::default(),
+        };
+        let c_source = SessionSource {
+            agent: AgentKind::new("fake"),
+            session_id: "003-c".to_string(),
+            scope: "scope".to_string(),
+            file_path: root.join("c.jsonl").to_string_lossy().to_string(),
+            project: Some(project),
+            source_kind: SourceKind::MainSession,
+            metadata: Metadata::default(),
+        };
+        let make_event = |source: &SessionSource, turn_index, role, text: &str| MessageEvent {
+            source: source.clone(),
+            event_id: None,
+            turn_index,
+            role,
+            content: MessageContent::Text {
+                text: text.to_string(),
+            },
+            timestamp: Some(turn_index as i64),
+            location: SourceLocation::file(source.file_path.clone()),
+            metadata: Metadata::default(),
+        };
+
+        let a_turns = vec![
+            (MessageRole::User, "chain shared opening request"),
+            (MessageRole::Assistant, "chain shared opening answer"),
+            (MessageRole::User, "chain shared follow-up"),
+            (MessageRole::Assistant, "chain shared follow-up answer"),
+            (MessageRole::User, "chain third shared request"),
+            (MessageRole::Assistant, "chain third shared answer"),
+        ];
+        let a_events = a_turns
+            .iter()
+            .enumerate()
+            .map(|(idx, (role, text))| make_event(&a_source, idx, *role, text))
+            .collect::<Vec<_>>();
+        let mut a_registry = ProviderRegistry::new();
+        a_registry.register(FakeProvider::new(a_source.clone(), a_events.clone()));
+        build_source_memory(&a_registry, &store, &cards_root, &a_source).unwrap();
+
+        let mut b_events = a_turns
+            .iter()
+            .enumerate()
+            .map(|(idx, (role, text))| make_event(&b_source, idx, *role, text))
+            .collect::<Vec<_>>();
+        b_events.push(make_event(
+            &b_source,
+            6,
+            MessageRole::User,
+            "chain b unique request after shared prefix",
+        ));
+        b_events.push(make_event(
+            &b_source,
+            7,
+            MessageRole::Assistant,
+            "chain b unique answer that is long enough",
+        ));
+        b_events.push(make_event(
+            &b_source,
+            8,
+            MessageRole::User,
+            "chain b second unique request after shared prefix",
+        ));
+        b_events.push(make_event(
+            &b_source,
+            9,
+            MessageRole::Assistant,
+            "chain b second unique answer that is long enough",
+        ));
+        let mut b_registry = ProviderRegistry::new();
+        b_registry.register(FakeProvider::new(b_source.clone(), b_events.clone()));
+        build_source_memory(&b_registry, &store, &cards_root, &b_source).unwrap();
+
+        let mut c_events = b_events.clone();
+        for event in c_events.iter_mut() {
+            event.source = c_source.clone();
+            event.location = SourceLocation::file(c_source.file_path.clone());
+        }
+        c_events.push(make_event(
+            &c_source,
+            10,
+            MessageRole::User,
+            "chain c unique tail request",
+        ));
+        c_events.push(make_event(
+            &c_source,
+            11,
+            MessageRole::Assistant,
+            "chain c unique tail answer that is long enough",
+        ));
+        let mut c_registry = ProviderRegistry::new();
+        c_registry.register(FakeProvider::new(c_source.clone(), c_events));
+        build_source_memory(&c_registry, &store, &cards_root, &c_source).unwrap();
+
+        let b_card_id = "sessio-fake-002-b";
+        let c_card_id = "sessio-fake-003-c";
+        let b_continuation_before = store
+            .continuation_for_card(b_card_id)
+            .unwrap()
+            .expect("B must record continuation pointing at A");
+        assert_eq!(b_continuation_before.base_session_id, a_source.session_id);
+        let c_continuation_before = store
+            .continuation_for_card(c_card_id)
+            .unwrap()
+            .expect("C must record continuation pointing at B");
+        assert_eq!(c_continuation_before.base_session_id, b_source.session_id);
+
+        // Reindex A with extended content. B is the only direct dependent,
+        // so we should get B's path back. C is the dependent of B and
+        // remains untouched until B itself rebuilds.
+        let mut extended_a_events = a_events;
+        extended_a_events.push(make_event(
+            &a_source,
+            6,
+            MessageRole::User,
+            "chain a extension request",
+        ));
+        extended_a_events.push(make_event(
+            &a_source,
+            7,
+            MessageRole::Assistant,
+            "chain a extension answer",
+        ));
+        let mut extended_a_registry = ProviderRegistry::new();
+        extended_a_registry.register(FakeProvider::new(a_source.clone(), extended_a_events));
+        let a_result =
+            build_source_memory(&extended_a_registry, &store, &cards_root, &a_source).unwrap();
+        let b_path = PathBuf::from(&b_source.file_path);
+        assert!(
+            a_result.dependent_source_paths.contains(&b_path),
+            "rebuilding A must surface B as a dependent (got {:?})",
+            a_result.dependent_source_paths
+        );
+        assert!(
+            !a_result
+                .dependent_source_paths
+                .contains(&PathBuf::from(&c_source.file_path)),
+            "C is not a direct dependent of A; it should not appear in A's first-hop result"
+        );
+
+        let b_continuation_after_a = store.continuation_for_card(b_card_id).unwrap();
+        assert!(
+            b_continuation_after_a.is_none(),
+            "B's continuation row must be invalidated when its base A changes"
+        );
+
+        // Simulate the indexer requeueing B. Building B must now surface C.
+        let mut b_registry_again = ProviderRegistry::new();
+        b_registry_again.register(FakeProvider::new(b_source.clone(), b_events));
+        let b_result =
+            build_source_memory(&b_registry_again, &store, &cards_root, &b_source).unwrap();
+        let c_path = PathBuf::from(&c_source.file_path);
+        assert!(
+            b_result.dependent_source_paths.contains(&c_path),
+            "rebuilding B must surface C as a dependent (got {:?})",
+            b_result.dependent_source_paths
+        );
+        let c_continuation_after_b = store.continuation_for_card(c_card_id).unwrap();
+        assert!(
+            c_continuation_after_b.is_none(),
+            "C's continuation row must be invalidated once B has been rebuilt"
         );
 
         let _ = fs::remove_dir_all(&root);

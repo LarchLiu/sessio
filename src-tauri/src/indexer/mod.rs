@@ -18,8 +18,9 @@ use crate::memory::MemoryStore;
 use crate::models::Agent;
 use crate::providers;
 use crate::providers::shared::convert::session_source_from_info;
-use crate::providers::types::ProjectRef;
-use crate::providers::types::SessionSource;
+use crate::providers::types::{
+    PathEvent, PathEventKind, ProjectRef, ProviderTask, SessionSource, SourceKind,
+};
 use crate::store::SessionStore;
 
 #[derive(Debug, Clone)]
@@ -162,9 +163,11 @@ fn run_loop(
             }
         }
         let mut qmd_jobs = HashMap::new();
+        let mut deferred_requeues: Vec<PathBuf> = Vec::new();
         for source in affected_sources.values() {
             match build_source_memory_for_indexer(source, memory_store.as_ref()) {
                 Ok(Some(job)) => {
+                    deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                     qmd_jobs.insert(job.project_key.clone(), job);
                     if let Some(project) = &source.project {
                         let _ = app.emit("memory_index_updated", project);
@@ -193,6 +196,7 @@ fn run_loop(
             }
             match build_project_memory_for_indexer(project, memory_store.as_ref()) {
                 Ok(Some(job)) => {
+                    deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                     qmd_jobs.insert(job.project_key.clone(), job);
                     let _ = app.emit("memory_index_updated", project);
                 }
@@ -235,6 +239,50 @@ fn run_loop(
                     dropped,
                     requeued
                 );
+            }
+        }
+        if !deferred_requeues.is_empty() {
+            let registry = providers::builtin_providers();
+            // Seed with paths already in this batch's affected_sources so we
+            // don't re-queue a build we're about to do anyway. Both sides
+            // canonicalize to PathBuf for set equality.
+            let mut seen: HashSet<PathBuf> = affected_sources
+                .values()
+                .map(|source| PathBuf::from(&source.file_path))
+                .collect();
+            let mut requeued = 0usize;
+            for path in deferred_requeues {
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                let event = PathEvent {
+                    path: path.clone(),
+                    kind: PathEventKind::Modify,
+                };
+                let mut routed = false;
+                for provider_task in registry.classify_path_event(&event) {
+                    let Some(task) = provider_task_to_index_task(provider_task) else {
+                        continue;
+                    };
+                    if let Err(e) = tx.send(task) {
+                        log::warn!(
+                            "indexer: failed to requeue dependent source {}: {e}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                    requeued += 1;
+                    routed = true;
+                }
+                if !routed {
+                    log::warn!(
+                        "indexer: dependent source {} not routed by any provider",
+                        path.display()
+                    );
+                }
+            }
+            if requeued > 0 {
+                log::info!("indexer: requeued {} dependent source tasks", requeued);
             }
         }
         {
@@ -342,6 +390,7 @@ struct QmdSyncJob {
     project_key: String,
     project_path: String,
     cards_root: PathBuf,
+    dependent_source_paths: Vec<PathBuf>,
 }
 
 fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<TaskOutcome> {
@@ -668,6 +717,7 @@ fn build_project_memory_for_indexer(
         project_key,
         project_path: project_path.to_string(),
         cards_root,
+        dependent_source_paths: summary.dependent_source_paths,
     }))
 }
 
@@ -712,7 +762,69 @@ fn build_source_memory_for_indexer(
         project_key,
         project_path: project_path.to_string(),
         cards_root,
+        dependent_source_paths: result.dependent_source_paths,
     }))
+}
+
+fn provider_task_to_index_task(task: ProviderTask) -> Option<IndexTask> {
+    match task {
+        ProviderTask::ReindexSource(source) => {
+            let path = PathBuf::from(&source.file_path);
+            let mapped = match source.agent.as_str() {
+                "codex" => Some(IndexTask::ReindexCodexFile(path)),
+                "claude" => match source.source_kind {
+                    SourceKind::Subagent => Some(IndexTask::ReindexClaudeSubagentFile(path)),
+                    _ => Some(IndexTask::ReindexClaudeFile(path)),
+                },
+                "gemini" => Some(IndexTask::ReindexGeminiLogs(path)),
+                _ => None,
+            };
+            if mapped.is_none() {
+                log::warn!(
+                    "indexer: no IndexTask mapping for ReindexSource agent={} file={}",
+                    source.agent.as_str(),
+                    source.file_path
+                );
+            }
+            mapped
+        }
+        ProviderTask::ReindexScope { agent, scope } => {
+            let path = PathBuf::from(&scope);
+            let mapped = match agent.as_str() {
+                "claude" => Some(IndexTask::ReindexClaudeProject(path)),
+                "gemini" => Some(IndexTask::ReindexGeminiLogs(path)),
+                _ => None,
+            };
+            if mapped.is_none() {
+                log::warn!(
+                    "indexer: no IndexTask mapping for ReindexScope agent={} scope={}",
+                    agent.as_str(),
+                    scope
+                );
+            }
+            mapped
+        }
+        ProviderTask::MarkSourceUnavailable(source) => {
+            let path = PathBuf::from(&source.file_path);
+            match source.source_kind {
+                SourceKind::Subagent => Some(IndexTask::DeleteSubagentFile(path)),
+                _ => Some(IndexTask::DeleteFile(path)),
+            }
+        }
+        ProviderTask::RefreshProjectMappings { agent } => {
+            let mapped = match agent.as_str() {
+                "gemini" => Some(IndexTask::RefreshGeminiProjectMappings),
+                _ => None,
+            };
+            if mapped.is_none() {
+                log::warn!(
+                    "indexer: no IndexTask mapping for RefreshProjectMappings agent={}",
+                    agent.as_str()
+                );
+            }
+            mapped
+        }
+    }
 }
 
 fn run_qmd_loop(store: Arc<dyn MemoryStore>, rx: Receiver<QmdSyncJob>) {
