@@ -33,6 +33,7 @@ memory pipeline
   ├─ strip sessio-cross replay blocks
   ├─ compact tool use / tool result
   ├─ dedupe turns and cards
+  ├─ trim/suppress continuation replay prefixes
   ├─ write project memory cards
   └─ update qmd collection
        ↓
@@ -263,6 +264,13 @@ trait MemoryStore {
 
 `SessionStore` 负责列表和增量索引，`MessageSourceStore` 负责详情回源定位，`MemoryStore` 负责 card 和 qmd 映射。这样后续换 DB 或加远程同步时，不会影响 provider。
 
+当前实现里，memory 相关结构化数据已经不止 card/source 两层，还包括：
+
+- `turn_fingerprints`: continuation 候选召回和顺序比对材料
+- `card_continuations`: 记录 continuation trim 的 base source、base coverage 范围，以及 candidate trim 起点
+
+这意味着 continuation 的精确证据已经是 DB 一等数据，而不是只存在 markdown 文本里。
+
 ### Provider Registry
 
 建议新增 registry，集中管理可用 provider：
@@ -328,10 +336,10 @@ flowchart TD
 
     Changed --> Normalizer["Memory normalizer<br/>strip injected context<br/>strip sessio-cross replay"]
     Normalizer --> ToolCompact["Tool compactor<br/>summarize tool use/result<br/>hash large outputs"]
-    ToolCompact --> Dedupe["Dedupe<br/>turn hash / card hash<br/>merge source refs"]
+    ToolCompact --> Dedupe["Dedupe<br/>turn hash / card hash<br/>continuation trim/suppress"]
     Dedupe --> Cards["Memory card generator<br/>stable 1:1 session cards<br/>sessio-&lt;agent&gt;-&lt;session_id&gt;"]
 
-    Cards --> MemoryDB[("sessio-index.db<br/>memory_cards / memory_sources<br/>turn_fingerprints / jobs")]
+    Cards --> MemoryDB[("sessio-index.db<br/>memory_cards / memory_sources<br/>turn_fingerprints / card_continuations / jobs")]
     Cards --> CardFiles["~/.sessio/qmd-memory/projects/&lt;project_slug&gt;/cards/*.md"]
 
     CardFiles --> QmdUpdate["qmd update<br/>project collection refresh"]
@@ -378,7 +386,7 @@ flowchart TD
     Agent --> CliResolve["sessio memory resolve<br/>--card-id"]
     CliResolve --> SourceRefs["Load memory_sources"]
     SourceRefs --> RawRead["Read raw JSONL ranges<br/>line / byte range when available"]
-    RawRead --> ResolveJson["Return detailed source excerpt<br/>and provenance"]
+    RawRead --> ResolveJson["Return detailed source excerpt<br/>and continuation provenance"]
 ```
 
 ## CLI Goals
@@ -430,6 +438,11 @@ sessio memory search --project "$PWD" "之前怎么设计 qmd 存储？" --json
       "qmdPath": "-Users-alex-Work-cloudgeek-sessio/cards/sessio-codex-abc123.md",
       "score": 0.82,
       "snippet": null,
+      "continuation": {
+        "coveredBy": "codex parent-session-id",
+        "baseTurnRange": "turn 0..12",
+        "candidateTrimStart": "turn 44, line 53, byte 340751"
+      },
       "sources": [
         {
           "cardId": "sessio-codex-abc123",
@@ -453,6 +466,19 @@ sessio memory search --project "$PWD" "之前怎么设计 qmd 存储？" --json
 默认输出 **不** 包含 qmd 内部 payload。需要调试 qmd 返回结构时加 `--include-raw`，响应会多一个 `raw` 字段携带 qmd 原始 JSON。Skill 不应在正常工作流中使用该字段。
 
 当 qmd 不可用、损坏或超时时，`memory search --json` 返回 `hits: []` 和非空 `backendError`。skill 应把这视为“本次没有可用 Sessio memory 命中”，不要猜测历史上下文。
+
+当命中的 card 是 continuation trim 过的，当前 CLI 还会补一层适合人看的摘要：
+
+- `memory search --json`: 每个 hit 可带 `continuation`
+- `memory resolve --json`: 返回 `continuation` 和 `continuationSummary`
+
+其中 `continuationSummary` 是给人直接看的压缩视图，包含：
+
+- `coveredBy`
+- `baseTurnRange`
+- `baseLineRange`
+- `baseByteRange`
+- `candidateTrimStart`
 
 ## Skill Design
 
@@ -498,6 +524,8 @@ struct RawTurn {
 ```
 
 **v1 status**: 来源定位采用混合粒度。Codex 和 Claude 的 `read_messages_with_locations` 会为每条消息记录 `line_start/line_end/byte_start/byte_end`；card 级 `memory_sources` 取所有 events 的并集 (min line_start ..= max line_end，byte 同理)。Gemini 的 `logs.json` 是单个 JSON Array，`serde_json::from_str` 不暴露每个 element 的 byte offset，因此 Gemini 暂时仍是 session 级（全 None），等流式 JSON 扫描器到位再补 — 见 `docs/sessio-cli-qmd-memory-todos.md` 的 v2 roadmap。`memory resolve --include-source-excerpt` 会基于 location 把原始 JSONL 范围回读出来。
+
+对于 continuation-trim 过的 card，`memory_sources.location` 记录的是 **保留后正文** 对应的原始范围，而不是整个 session 的起点。这和 `card_continuations` 一起，能把“card 现在展示的正文来自哪里”和“前缀是被哪张 base card 覆盖掉的”区分开。
 
 ### Cross Prompt 去重
 
@@ -572,6 +600,8 @@ card 内容应面向检索，包含：
 - source refs
 - keywords
 
+当前实现有一个额外约束：为了避免 qmd 索引 continuation 的定位噪音，card markdown 不再写入 detailed continuation provenance。`Source:` 区块只保留当前 source ref；continuation 的详细 base/trim 范围只存在 `card_continuations` 和 CLI resolve/search 的摘要里。
+
 示例：
 
 ```md
@@ -616,13 +646,26 @@ qmd can help avoid exact duplicate document content, but Sessio must own real de
 - **turn content hash** (`turn_content_hash`): SHA-256 over `role + canonical_text(content)` **only**. Intentionally excludes agent / session_id / turn_index so two turns with the same normalized content collide across sessions (and across agents during cross-agent continuation). This is what gets stored in `turn_fingerprints.canonical_hash`.
 - **turn source location** is preserved separately through the `turn_fingerprints` primary key `(project_key, agent, session_id, turn_index)` plus the `file_path / line_start / line_end / byte_start / byte_end` columns — these answer "where did this turn come from", not "what does it say".
 - per-turn fingerprints are written during card build (`build_project_memory` and `build_source_memory`), and cleared (`replace_turn_fingerprints(..., &[])`) whenever a source no longer produces cards
+- continuation dedupe is active for same-project session sources and compares **ordered event sequences**, not just single hash collisions
+- candidate recall still uses shared `turn_fingerprints.canonical_hash`, but final trim/suppress requires ordered prefix/suffix alignment plus low-information tail checks
+- current directionality is intentionally conservative:
+  - only same-agent candidates are compared
+  - Codex with `forked_from_id` requires the candidate to be exactly that parent session (siblings never qualify, regardless of timestamps)
+  - Codex without `forked_from_id`, Claude, and Gemini all fall back to earlier-session ordering via `started_at`, then `updated_at`, then `session_id`
+- trim boundaries are snapped to the next `user` block start so the remaining card does not begin with dangling `tool_use` / `tool_result`
+- when no user-block boundary exists after the matched prefix (i.e. the candidate has no fresh user turn of its own), the entire source is suppressed instead of generating a card — a continuation that only adds dangling tool work or assistant tail has no independent value
+- detailed continuation provenance is persisted in `card_continuations` and exposed through `memory resolve` / `memory search`
+- when a base session's `turn_fingerprints` get replaced (reindex), every `card_continuations` row pointing at that base is dropped and the dependent candidate cards are marked unavailable so the next build pass regenerates them against the new base ranges
 - stale cards marked `available = 0` and their markdown removed when the source no longer produces them
 
 ### v2 (planned)
 
 - tool result digest hash: hash command, exit code, key errors, output hash
 - near-duplicate detection across cards: SimHash / MinHash over card text; merge similar cards by appending source refs instead of creating a new qmd card. `memory_cards.simhash` column is reserved for this; v1 leaves it `NULL`.
-- using `turn_fingerprints` to actively suppress card generation for sessions whose turns are fully covered by an existing card (continuation dedupe), instead of relying purely on stable card id collision
+- broaden continuation coverage only if needed later:
+  - cross-agent continuation
+  - multi-source joint coverage
+  - fuzzier approximate matching across paraphrased turns
 
 Suggested tables (v1 schema, v2 fields reserved):
 
@@ -658,9 +701,34 @@ turn_fingerprints(
   turn_index INTEGER NOT NULL,
   role TEXT NOT NULL,
   canonical_hash TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  text_len INTEGER NOT NULL,
   line_start INTEGER,
   line_end INTEGER,
+  byte_start INTEGER,
+  byte_end INTEGER,
   PRIMARY KEY(project_key, agent, session_id, turn_index)
+);
+
+card_continuations(
+  card_id TEXT PRIMARY KEY,
+  project_key TEXT NOT NULL,
+  candidate_agent TEXT NOT NULL,
+  candidate_session_id TEXT NOT NULL,
+  candidate_file_path TEXT NOT NULL,
+  base_agent TEXT NOT NULL,
+  base_session_id TEXT NOT NULL,
+  base_file_path TEXT NOT NULL,
+  base_start_turn_index INTEGER NOT NULL,
+  base_start_line_start INTEGER,
+  base_start_byte_start INTEGER,
+  base_end_turn_index INTEGER NOT NULL,
+  base_end_line_end INTEGER,
+  base_end_byte_end INTEGER,
+  candidate_trim_turn_start INTEGER NOT NULL,
+  candidate_trim_line_start INTEGER,
+  candidate_trim_byte_start INTEGER,
+  updated_at INTEGER NOT NULL
 );
 ```
 
@@ -741,6 +809,8 @@ Sessio 侧要维护：
    - 当前仍是 qmd index 级 `update`
    - 不是单 card 直写 qmd
 7. 根据策略延迟 embed
+
+Cold-start 注意：polling 进程内部用 in-memory HashMap 缓存 Claude `sessions-index.json` 和 Gemini `projects.json` 的 mtime。每次 app 重启缓存都是空的，如果只看缓存就会在冷启动那一次 tick 把每个 project 都视为"index 文件变了"并触发 reindex 风暴。两条路径都用同一种兜底：cache miss 时把当前 mtime 跟该 scope 下 sessions 行的 `last_indexed_at` 最大值比较，只有当 index 文件比上次 reindex 完成时间更新才算真的变化。
 
 建议不要每次小变更都同步跑 expensive embedding：
 
@@ -876,8 +946,8 @@ trait MemoryIndexer {
 
 - cross prompt marker 内的 replay block 不进入 card
 - tool result 大输出被压缩为摘要和 hash
-- 同一 turn 重复出现在 continuation 中不会生成重复 card
-- 同一 card 被多个 session source 引用时能合并 source refs
+- continuation replay 前缀会被 trim，或者在尾部无有效新信息时整张 source 被 suppress
+- continuation trim 会从下一个 `user` block 开始，不会留下没头没尾的 tool 事件
 - 删除 session 文件后相关 cards 被标记 unavailable
 
 ### qmd
@@ -885,7 +955,7 @@ trait MemoryIndexer {
 - memory build 后 qmd collection 能创建
 - qmd query 返回 card path / score / snippet
 - `memory search` 能把 qmd hit 映射回 `card_id`
-- `memory resolve` 返回 card metadata/body 和 source refs；原始 JSONL 精确范围可后续增强
+- `memory resolve` 返回 card metadata/body、source refs、continuation provenance；原始 JSONL 可按 location 回读 excerpt
 
 ### Indexer / Polling
 
@@ -901,7 +971,7 @@ trait MemoryIndexer {
 - 第一版是否先不做 LLM summary，只做规则压缩和 extractive cards？
 - qmd embedding 是否默认关闭，等用户显式启用后再下载模型？
 - memory card 的 project key 当前已经改为 canonical project path 派生的可读 slug，而不是 hash 或 agent 自带 id。
-- line / byte offset 是否第一版就必须实现，还是先 session 级 source refs？
+- Gemini 的 per-item line / byte offset 何时补齐？这需要把 `logs.json` 从整包 `serde_json::from_str` 改为可回报 element 位置的流式扫描。
 - qmd collection 是每个 project 一个，还是一个 collection + metadata filter？当前建议每 project 一个 collection，便于 skill 限定搜索范围。
 
 ## Recommended Defaults

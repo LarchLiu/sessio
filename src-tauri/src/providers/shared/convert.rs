@@ -55,6 +55,18 @@ pub fn session_record_from_info(info: &SessionInfo) -> SessionRecord {
 
 pub fn session_source_from_info(info: &SessionInfo) -> SessionSource {
     let mut metadata = Metadata::default();
+    if let Some(started_at) = info.started_at {
+        metadata.insert(
+            "started_at".to_string(),
+            serde_json::Value::Number(started_at.into()),
+        );
+    }
+    if let Some(updated_at) = info.updated_at {
+        metadata.insert(
+            "updated_at".to_string(),
+            serde_json::Value::Number(updated_at.into()),
+        );
+    }
     if info.agent == Agent::Codex {
         if let Some(forked_from_id) = &info.forked_from_id {
             metadata.insert(

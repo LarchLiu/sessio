@@ -71,9 +71,44 @@ pub struct MemoryJob {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTimeInfo {
+    pub started_at: Option<i64>,
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardContinuation {
+    pub card_id: String,
+    pub project_key: String,
+    pub candidate_agent: String,
+    pub candidate_session_id: String,
+    pub candidate_file_path: String,
+    pub base_agent: String,
+    pub base_session_id: String,
+    pub base_file_path: String,
+    pub base_start_turn_index: usize,
+    pub base_start_line_start: Option<u64>,
+    pub base_start_byte_start: Option<u64>,
+    pub base_end_turn_index: usize,
+    pub base_end_line_end: Option<u64>,
+    pub base_end_byte_end: Option<u64>,
+    pub candidate_trim_turn_start: usize,
+    pub candidate_trim_line_start: Option<u64>,
+    pub candidate_trim_byte_start: Option<u64>,
+    pub updated_at: i64,
+}
+
 pub trait MemoryStore: Send + Sync {
     fn upsert_card(&self, card: &MemoryCard) -> Result<()>;
     fn replace_card_sources(&self, card_id: &str, sources: &[MemorySource]) -> Result<()>;
+    fn replace_card_continuation(
+        &self,
+        card_id: &str,
+        continuation: Option<&CardContinuation>,
+    ) -> Result<()>;
     fn list_cards_for_source(
         &self,
         agent: &str,
@@ -90,6 +125,12 @@ pub trait MemoryStore: Send + Sync {
     fn list_project_cards(&self, project_key: &str) -> Result<Vec<MemoryCard>>;
     fn card_by_id(&self, card_id: &str) -> Result<Option<MemoryCard>>;
     fn sources_for_card(&self, card_id: &str) -> Result<Vec<MemorySource>>;
+    fn continuation_for_card(&self, card_id: &str) -> Result<Option<CardContinuation>>;
+    fn invalidate_continuations_referencing_base(
+        &self,
+        base_agent: &str,
+        base_session_id: &str,
+    ) -> Result<Vec<String>>;
     fn replace_turn_fingerprints(
         &self,
         project_key: &str,
@@ -111,6 +152,7 @@ pub trait MemoryStore: Send + Sync {
         canonical_hashes: &[&str],
         limit: usize,
     ) -> Result<Vec<TurnFingerprintCandidate>>;
+    fn session_time_info(&self, agent: &str, session_id: &str) -> Result<Option<SessionTimeInfo>>;
     fn record_memory_job(
         &self,
         project_key: &str,

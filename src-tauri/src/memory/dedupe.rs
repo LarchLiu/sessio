@@ -2,11 +2,10 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::memory::{MemoryStore, TurnFingerprint};
+use crate::memory::{MemoryStore, SessionTimeInfo, TurnFingerprint};
 use crate::providers::types::SessionSource;
 
 const MIN_SHARED_HASHES: usize = 3;
-const PREFIX_WINDOW: usize = 12;
 const MAX_SKIP_A: usize = 2;
 const MAX_SKIP_B: usize = 2;
 const MIN_MATCHED_TURNS: usize = 4;
@@ -29,6 +28,12 @@ pub struct DedupeMatch {
     pub source_agent: String,
     pub source_session_id: String,
     pub source_file_path: String,
+    pub source_first_matched_turn_index: usize,
+    pub source_first_matched_line_start: Option<u64>,
+    pub source_first_matched_byte_start: Option<u64>,
+    pub source_last_matched_turn_index: usize,
+    pub source_last_matched_line_end: Option<u64>,
+    pub source_last_matched_byte_end: Option<u64>,
     pub shared_hashes: usize,
     pub suffix_start_turn_index: usize,
     pub matched_turns: usize,
@@ -52,12 +57,21 @@ struct WeightedFingerprint {
     canonical_hash: String,
     text_len: usize,
     weight: f64,
+    line_start: Option<u64>,
+    line_end: Option<u64>,
+    byte_start: Option<u64>,
+    byte_end: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 struct MatchScore {
     matched_turns: usize,
-    first_matched_candidate_index: usize,
+    source_first_matched_turn_index: usize,
+    source_first_matched_line_start: Option<u64>,
+    source_first_matched_byte_start: Option<u64>,
+    source_last_matched_turn_index: usize,
+    source_last_matched_line_end: Option<u64>,
+    source_last_matched_byte_end: Option<u64>,
     last_matched_turn_index: usize,
     prefix_coverage: f64,
     total_coverage: f64,
@@ -94,7 +108,8 @@ pub fn should_suppress_source(
     )?;
 
     for candidate in candidates {
-        if !is_allowed_candidate(source, &candidate.agent, &candidate.session_id) {
+        let candidate_time = store.session_time_info(&candidate.agent, &candidate.session_id)?;
+        if !is_allowed_candidate(source, &candidate.agent, &candidate.session_id, candidate_time) {
             continue;
         }
         let cards = store.list_cards_for_source(
@@ -121,7 +136,7 @@ pub fn should_suppress_source(
             continue;
         }
 
-        if let Some(score) = best_suffix_prefix_alignment(&existing, &current) {
+        if let Some(score) = best_confirmed_prefix_alignment(&existing, &current) {
             let suppress = should_suppress_score(&score);
             let trim = should_trim_score(&score);
             if suppress || trim {
@@ -134,6 +149,12 @@ pub fn should_suppress_source(
                     source_agent: candidate.agent,
                     source_session_id: candidate.session_id,
                     source_file_path: candidate.file_path,
+                    source_first_matched_turn_index: score.source_first_matched_turn_index,
+                    source_first_matched_line_start: score.source_first_matched_line_start,
+                    source_first_matched_byte_start: score.source_first_matched_byte_start,
+                    source_last_matched_turn_index: score.source_last_matched_turn_index,
+                    source_last_matched_line_end: score.source_last_matched_line_end,
+                    source_last_matched_byte_end: score.source_last_matched_byte_end,
                     shared_hashes,
                     suffix_start_turn_index: score.last_matched_turn_index.saturating_add(1),
                     matched_turns: score.matched_turns,
@@ -154,18 +175,53 @@ fn is_allowed_candidate(
     source: &SessionSource,
     candidate_agent: &str,
     candidate_session_id: &str,
+    candidate_time: Option<SessionTimeInfo>,
 ) -> bool {
-    if source.agent.as_str() != "codex" {
-        return true;
+    if candidate_agent != source.agent.as_str() {
+        return false;
     }
-    let Some(forked_from_id) = source
-        .metadata
-        .get("forked_from_id")
-        .and_then(|value| value.as_str())
-    else {
-        return candidate_agent != "codex" || candidate_session_id < source.session_id.as_str();
-    };
-    candidate_agent == "codex" && candidate_session_id == forked_from_id
+    // Codex sessions carry an explicit fork lineage. When present, the
+    // only valid base is the parent — never a sibling, regardless of
+    // timestamps. When absent, fall through to the same time-based
+    // ordering used by other agents.
+    if source.agent.as_str() == "codex" {
+        if let Some(forked_from_id) = source
+            .metadata
+            .get("forked_from_id")
+            .and_then(|value| value.as_str())
+        {
+            return candidate_session_id == forked_from_id;
+        }
+    }
+
+    let candidate_started_at = candidate_time.as_ref().and_then(|info| info.started_at);
+    let candidate_updated_at = candidate_time.as_ref().and_then(|info| info.updated_at);
+    let source_started_at = metadata_i64(&source.metadata, "started_at");
+    let source_updated_at = metadata_i64(&source.metadata, "updated_at");
+
+    if let (Some(candidate_started_at), Some(source_started_at)) =
+        (candidate_started_at, source_started_at)
+    {
+        if candidate_started_at != source_started_at {
+            return candidate_started_at < source_started_at;
+        }
+    }
+    if let (Some(candidate_updated_at), Some(source_updated_at)) =
+        (candidate_updated_at, source_updated_at)
+    {
+        if candidate_updated_at != source_updated_at {
+            return candidate_updated_at < source_updated_at;
+        }
+    }
+
+    candidate_session_id < source.session_id.as_str()
+}
+
+fn metadata_i64(
+    metadata: &std::collections::BTreeMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<i64> {
+    metadata.get(key).and_then(|value| value.as_i64())
 }
 
 fn informative_fingerprints(fingerprints: &[TurnFingerprint]) -> Vec<WeightedFingerprint> {
@@ -183,13 +239,17 @@ fn informative_fingerprints(fingerprints: &[TurnFingerprint]) -> Vec<WeightedFin
                     canonical_hash: fp.canonical_hash.clone(),
                     text_len: fp.text_len,
                     weight,
+                    line_start: fp.location.line_start,
+                    line_end: fp.location.line_end,
+                    byte_start: fp.location.byte_start,
+                    byte_end: fp.location.byte_end,
                 })
             }
         })
         .collect()
 }
 
-fn best_suffix_prefix_alignment(
+fn best_confirmed_prefix_alignment(
     existing: &[WeightedFingerprint],
     candidate: &[WeightedFingerprint],
 ) -> Option<MatchScore> {
@@ -198,44 +258,39 @@ fn best_suffix_prefix_alignment(
         return None;
     }
 
-    let prefix_window = candidate.len().min(PREFIX_WINDOW);
-    let prefix = &candidate[..prefix_window];
     let mut best: Option<MatchScore> = None;
 
-    for (b_idx, anchor_b) in prefix.iter().enumerate() {
-        for (a_idx, anchor_a) in existing.iter().enumerate() {
-            if anchor_a.role != anchor_b.role || anchor_a.canonical_hash != anchor_b.canonical_hash
-            {
-                continue;
-            }
-            let score = align_from_anchor(existing, &candidate, a_idx, b_idx);
-            best = Some(best_score(best, score));
+    for (a_idx, anchor_a) in existing.iter().enumerate() {
+        if anchor_a.role != candidate[0].role
+            || anchor_a.canonical_hash != candidate[0].canonical_hash
+        {
+            continue;
         }
+        let score = align_from_prefix_start(existing, &candidate, a_idx);
+        best = Some(best_score(best, score));
     }
 
     best
 }
 
-fn align_from_anchor(
+fn align_from_prefix_start(
     existing: &[WeightedFingerprint],
     candidate: &[WeightedFingerprint],
     anchor_a: usize,
-    anchor_b: usize,
 ) -> MatchScore {
     let mut matched_candidate = vec![false; candidate.len()];
     let mut matched_weight = 0.0;
     let mut matched_turns = 1;
-    let mut prefix_matched_weight = 0.0;
     let mut longest_contiguous_run = 1;
     let mut current_run = 1;
-    let mut last_matched_b = anchor_b;
+    let mut last_matched_a = anchor_a;
+    let mut last_matched_b = 0;
 
-    matched_candidate[anchor_b] = true;
-    matched_weight += candidate[anchor_b].weight;
-    prefix_matched_weight += candidate[anchor_b].weight;
+    matched_candidate[0] = true;
+    matched_weight += candidate[0].weight;
 
     let mut ai = anchor_a + 1;
-    let mut bi = anchor_b + 1;
+    let mut bi = 1;
     while ai < existing.len() && bi < candidate.len() {
         let mut found = false;
         let a_end = (ai + MAX_SKIP_A + 1).min(existing.len());
@@ -259,21 +314,28 @@ fn align_from_anchor(
         matched_candidate[bi] = true;
         matched_weight += candidate[bi].weight;
         matched_turns += 1;
-        if bi < PREFIX_WINDOW {
-            prefix_matched_weight += candidate[bi].weight;
-        }
         if bi == last_matched_b + 1 {
             current_run += 1;
         } else {
             current_run = 1;
         }
         longest_contiguous_run = longest_contiguous_run.max(current_run);
+        last_matched_a = ai;
         last_matched_b = bi;
         ai += 1;
         bi += 1;
     }
 
     let total_weight: f64 = candidate.iter().map(|fp| fp.weight).sum();
+    let confirmed_prefix_weight: f64 = candidate[..=last_matched_b]
+        .iter()
+        .map(|fp| fp.weight)
+        .sum();
+    let matched_prefix_weight: f64 = candidate[..=last_matched_b]
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, fp)| matched_candidate[idx].then_some(fp.weight))
+        .sum();
     let mut new_tail_weight = 0.0;
     let mut new_tail_user_or_assistant_count = 0;
     for (idx, fp) in candidate.iter().enumerate().skip(last_matched_b + 1) {
@@ -288,16 +350,17 @@ fn align_from_anchor(
 
     MatchScore {
         matched_turns,
-        first_matched_candidate_index: anchor_b,
+        source_first_matched_turn_index: existing[anchor_a].turn_index,
+        source_first_matched_line_start: existing[anchor_a].line_start,
+        source_first_matched_byte_start: existing[anchor_a].byte_start,
+        source_last_matched_turn_index: existing[last_matched_a].turn_index,
+        source_last_matched_line_end: existing[last_matched_a].line_end,
+        source_last_matched_byte_end: existing[last_matched_a].byte_end,
         last_matched_turn_index: candidate[last_matched_b].turn_index,
-        prefix_coverage: if candidate.len().min(PREFIX_WINDOW) == 0 {
-            0.0
+        prefix_coverage: if confirmed_prefix_weight > 0.0 {
+            matched_prefix_weight / confirmed_prefix_weight
         } else {
-            prefix_matched_weight
-                / candidate[..candidate.len().min(PREFIX_WINDOW)]
-                    .iter()
-                    .map(|fp| fp.weight)
-                    .sum::<f64>()
+            0.0
         },
         total_coverage: if total_weight > 0.0 {
             matched_weight / total_weight
@@ -314,11 +377,17 @@ fn best_score(current: Option<MatchScore>, next: MatchScore) -> MatchScore {
     let Some(current) = current else {
         return next;
     };
-    if next.prefix_coverage > current.prefix_coverage {
+    if next.last_matched_turn_index > current.last_matched_turn_index {
         return next;
     }
-    if (next.prefix_coverage - current.prefix_coverage).abs() < f64::EPSILON
-        && next.last_matched_turn_index > current.last_matched_turn_index
+    if next.last_matched_turn_index == current.last_matched_turn_index
+        && next.prefix_coverage > current.prefix_coverage
+    {
+        return next;
+    }
+    if next.last_matched_turn_index == current.last_matched_turn_index
+        && (next.prefix_coverage - current.prefix_coverage).abs() < f64::EPSILON
+        && next.matched_turns > current.matched_turns
     {
         return next;
     }
@@ -342,8 +411,8 @@ fn should_suppress_score(score: &MatchScore) -> bool {
 
 fn should_trim_score(score: &MatchScore) -> bool {
     score.matched_turns >= MIN_MATCHED_TURNS
-        && score.first_matched_candidate_index <= MAX_SKIP_B
         && score.longest_contiguous_run >= MIN_STRONG_CONTIGUOUS_RUN
+        && score.prefix_coverage >= MIN_STRONG_PREFIX_COVERAGE
         && score.new_tail_weight > 0.0
 }
 

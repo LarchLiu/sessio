@@ -223,7 +223,7 @@ fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
 }
 
-fn safe_id_part(value: &str) -> String {
+pub fn safe_id_part(value: &str) -> String {
     let safe = value
         .chars()
         .map(|ch| {

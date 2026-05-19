@@ -134,6 +134,12 @@ fn poll_claude(
     // rows are tracked separately so a change on one doesn't touch the other.
     let mut known_main: HashMap<String, &IndexedSessionRecord> = HashMap::new();
     let mut known_sub: HashMap<String, &IndexedSubagentRecord> = HashMap::new();
+    // Track the most recent successful reindex per scope so that on app
+    // startup (when the in-memory `claude_index_mtimes` cache is empty)
+    // we can still tell whether the sessions-index.json file has actually
+    // changed since we last processed this project. Without this we would
+    // submit a ReindexClaudeProject for every project on every cold start.
+    let mut last_indexed_per_scope: HashMap<String, i64> = HashMap::new();
     for row in indexed.iter().filter(|s| s.agent == Agent::Claude) {
         if !row.file_path.is_empty() {
             known_main.insert(row.file_path.clone(), row);
@@ -143,6 +149,14 @@ fn poll_claude(
                 known_sub.insert(sub.file_path.clone(), sub);
             }
         }
+        last_indexed_per_scope
+            .entry(row.scope.clone())
+            .and_modify(|v| {
+                if row.last_indexed_at > *v {
+                    *v = row.last_indexed_at;
+                }
+            })
+            .or_insert(row.last_indexed_at);
     }
     let mut seen_main: HashSet<String> = HashSet::new();
     let mut seen_sub: HashSet<String> = HashSet::new();
@@ -165,7 +179,18 @@ fn poll_claude(
         let sessions_index = dir.join("sessions-index.json");
         let index_mtime = file_mtime(&sessions_index);
         current_index_mtimes.insert(sessions_index.clone(), index_mtime);
-        let index_changed = claude_index_mtimes.get(&sessions_index) != Some(&index_mtime);
+        let index_changed = match claude_index_mtimes.get(&sessions_index) {
+            Some(prev) => prev != &index_mtime,
+            // Cold-start fallback: only treat it as changed if the file
+            // is newer than the most recent reindex we have on record for
+            // this scope. Equal-or-older means we already processed this
+            // version on a previous run.
+            None => match (index_mtime, last_indexed_per_scope.get(&scope)) {
+                (Some(mtime), Some(last_indexed)) => mtime > *last_indexed,
+                (Some(_), None) => true,
+                (None, _) => false,
+            },
+        };
         if index_changed {
             indexer.submit(IndexTask::ReindexClaudeProject(dir.clone()))?;
         }

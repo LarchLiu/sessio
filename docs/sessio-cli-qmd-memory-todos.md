@@ -41,13 +41,20 @@
 - [x] Strip `sessio-cross:start/end` replay blocks before memory generation.
 - [x] Compact tool use and tool result events.
 - [x] Add turn-level canonical hashing.
-- [ ] Persist per-turn fingerprints into the `turn_fingerprints` table during card build (substrate for future continuation dedupe).
+- [x] Persist per-turn fingerprints into the `turn_fingerprints` table during card build.
 - [x] Add card-level canonical hashing.
 - [x] Generate project-level memory card Markdown files.
 - [x] Use readable path-derived project keys for qmd-memory project folders.
 - [x] Use stable `sessio-<agent>-<session id>` memory card names instead of content-hash names.
 - [x] Implement source refs from card back to raw session data.
 - [x] Make project memory builds skip missing/unreadable session sources instead of failing the whole project.
+- [x] Implement same-project continuation dedupe over ordered event sequences using `turn_fingerprints`.
+- [x] Trim replayed prefixes at the next `user` block boundary so continuation cards do not start mid-flow.
+- [x] Suppress the whole source when dedupe matches a continuation prefix but no `user` block boundary follows it — a forked session with only replay + dangling tail has no independent value.
+- [x] Store continuation provenance structurally in `card_continuations` instead of embedding detailed ranges in card markdown.
+- [x] Invalidate dependent `card_continuations` rows and mark dependent candidate cards unavailable when a base session's turn fingerprints get replaced, so trimmed cards get rebuilt against the new base ranges.
+- [x] Persist `forked_from_id` on the `sessions` table (V7 migration) so loading `SessionInfo` from the store keeps codex fork lineage intact.
+- [x] Drop pre-V4 `turn_fingerprints` rows whose `text_len` defaulted to 0 (V6 migration) so dedupe scoring does not silently underweight legacy rows.
 
 ## Phase 4: qmd Backend
 
@@ -59,6 +66,7 @@
 - [x] Implement `sessio memory search --project <path> <query> --json`.
 - [x] Implement `sessio memory resolve --card-id <id> --json`.
 - [x] Map qmd search results back to stable Sessio memory hits.
+- [x] Include continuation provenance summaries in `memory resolve` and `memory search`.
 - [x] Make `memory search --json` return empty hits plus `backendError` when qmd is unavailable or broken.
 - [x] Include the memory card body/metadata in `memory resolve --json`.
 - [x] Make qmd update failures structured and non-panicking.
@@ -82,6 +90,7 @@
 - [x] Gate polling on `indexer.status().indexing` so a long-running `FullRebuild` (now driving the per-source memory/QMD pipeline) cannot race with polling and resubmit redundant per-file reindex tasks.
 - [x] Drain residual per-file reindex tasks from the indexer channel at the end of a `FullRebuild` batch (re-queueing `DeleteFile` / `DeleteSubagentFile`) so watcher events accumulated during the rebuild do not retrigger the heavy memory/QMD pipeline for already-covered files.
 - [x] Detect an empty session index in polling and submit a single `FullRebuild` instead of a per-file reindex storm, so cold-start / wiped-DB bootstrap goes through the project-level memory path.
+- [x] Stop Claude polling from submitting `ReindexClaudeProject` for every project on cold start by falling back to per-scope `last_indexed_at` when the in-memory `sessions-index.json` mtime cache is empty.
 
 ## Phase 6: Skill
 
@@ -155,6 +164,8 @@
 - [x] `cargo check` passed after short-circuiting empty-DB polling ticks to `FullRebuild`.
 - [x] `cargo test` (27 tests) passed after routing watcher events through `ProviderRegistry::classify_path_event` and replacing byte-slice `short_id`/`short_hash` in cards with `chars().take(12)`.
 - [x] `cargo test` (32 tests) passed after Codex/Claude parsers started returning per-message line/byte ranges, cards aggregated those into `memory_sources`, and `sessio memory resolve --include-source-excerpt` started returning raw JSONL excerpts.
+- [x] `cargo test` (38 tests) passed after adding continuation dedupe, user-block trim boundaries, `card_continuations`, and human-readable continuation summaries in CLI resolve/search output.
+- [x] `cargo test` (41 tests) passed after tightening codex dedupe direction (forked_from_id-then-time fallback), persisting `forked_from_id` in the sessions table (V7), dropping stale `text_len=0` fingerprints (V6), invalidating dependent `card_continuations` on base reindex, and extracting the dedupe plan helper.
 
 - [x] `cargo run --bin sessio -- --help` printed CLI usage.
 - [x] `cargo run -- --help` printed CLI usage through the single desktop binary.
@@ -175,7 +186,9 @@ These items are intentionally **not** in scope for v1. Schema columns are reserv
 - [x] Implement source-range resolution (`crate::memory::resolve::read_source_excerpt`) that reads back a raw JSONL excerpt by byte range or, failing that, by inclusive line range; exposed through `sessio memory resolve --include-source-excerpt`.
 - [ ] Tool-result digest hash (command + exit code + key errors + output hash) feeding into a future tool-result dedupe layer.
 - [ ] SimHash / MinHash near-duplicate detection over card text; populate `memory_cards.simhash` and merge near-dup cards by appending source refs.
-- [ ] Use `turn_fingerprints` for cross-session continuation dedupe: suppress new cards when a candidate session's turn set is fully covered by an existing card.
+- [x] Use `turn_fingerprints` for same-project continuation dedupe: trim or suppress a candidate only when an ordered replay prefix is covered and the remaining tail is low-information.
+- [ ] Extend continuation dedupe beyond same-agent comparison (e.g. cross-agent continuation, multi-source joint coverage, or fuzzier paraphrased-turn matching) if real workflows show those gaps.
+- [ ] Add first-class CLI/UI inspection for cards covered by a given base card, building on `card_continuations`.
 
 ## Known Follow-Ups
 

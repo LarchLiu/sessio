@@ -1,6 +1,6 @@
 use crate::memory::build::{build_project_memory, default_output_root, MemoryBuildOptions};
 use crate::memory::qmd;
-use crate::memory::MemoryStore;
+use crate::memory::{CardContinuation, MemoryStore};
 use crate::models::Agent;
 use crate::providers;
 use crate::providers::shared::convert::project_key_for_path_or_name;
@@ -104,6 +104,19 @@ struct MemorySearchHit {
     score: Option<f64>,
     snippet: Option<String>,
     sources: Vec<crate::memory::MemorySource>,
+    continuation: Option<MemoryContinuationSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryContinuationSummary {
+    covered_by: String,
+    base_file_path: String,
+    base_turn_range: String,
+    base_line_range: Option<String>,
+    base_byte_range: Option<String>,
+    candidate_trim_start: String,
+    candidate_file_path: String,
 }
 
 pub fn run_from_env() {
@@ -175,6 +188,7 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             store.init()?;
             let card = store.card_by_id(&card_id)?;
             let sources = store.sources_for_card(&card_id)?;
+            let continuation = store.continuation_for_card(&card_id)?;
             let payload_sources: Vec<serde_json::Value> = sources
                 .iter()
                 .map(|source| {
@@ -203,7 +217,11 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                     serde_json::to_string_pretty(&serde_json::json!({
                         "cardId": card_id,
                         "card": card,
-                        "sources": payload_sources
+                        "sources": payload_sources,
+                        "continuation": continuation,
+                        "continuationSummary": continuation
+                            .as_ref()
+                            .map(continuation_summary)
                     }))?
                 );
             } else {
@@ -212,6 +230,9 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                         "{}\t{}\t{}",
                         source.agent, source.session_id, source.file_path
                     );
+                }
+                if let Some(continuation) = continuation {
+                    print_continuation_summary(&continuation);
                 }
             }
             Ok(())
@@ -273,6 +294,14 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                                 .unwrap_or_else(|| "-".to_string()),
                             hit.title,
                         );
+                        if let Some(continuation) = &hit.continuation {
+                            println!(
+                                "  continuation: {} | base {} | trim {}",
+                                continuation.covered_by,
+                                continuation.base_turn_range,
+                                continuation.candidate_trim_start,
+                            );
+                        }
                     }
                 }
             }
@@ -916,9 +945,79 @@ fn map_qmd_hits_to_memory(
             score: candidate.score,
             snippet: candidate.snippet,
             sources: store.sources_for_card(&card.card_id)?,
+            continuation: store
+                .continuation_for_card(&card.card_id)?
+                .as_ref()
+                .map(continuation_summary),
         });
     }
     Ok(out)
+}
+
+fn continuation_summary(continuation: &CardContinuation) -> MemoryContinuationSummary {
+    MemoryContinuationSummary {
+        covered_by: format!(
+            "{} {}",
+            continuation.base_agent, continuation.base_session_id
+        ),
+        base_file_path: continuation.base_file_path.clone(),
+        base_turn_range: format!(
+            "turn {}..{}",
+            continuation.base_start_turn_index, continuation.base_end_turn_index
+        ),
+        base_line_range: format_optional_range(
+            "line",
+            continuation.base_start_line_start,
+            continuation.base_end_line_end,
+        ),
+        base_byte_range: format_optional_range(
+            "byte",
+            continuation.base_start_byte_start,
+            continuation.base_end_byte_end,
+        ),
+        candidate_trim_start: format_trim_start(
+            continuation.candidate_trim_turn_start,
+            continuation.candidate_trim_line_start,
+            continuation.candidate_trim_byte_start,
+        ),
+        candidate_file_path: continuation.candidate_file_path.clone(),
+    }
+}
+
+fn format_optional_range(label: &str, start: Option<u64>, end: Option<u64>) -> Option<String> {
+    match (start, end) {
+        (Some(start), Some(end)) => Some(format!("{label} {start}..{end}")),
+        (Some(start), None) => Some(format!("{label} {start}..")),
+        (None, Some(end)) => Some(format!("{label} ..{end}")),
+        (None, None) => None,
+    }
+}
+
+fn format_trim_start(turn: usize, line: Option<u64>, byte: Option<u64>) -> String {
+    let mut parts = vec![format!("turn {turn}")];
+    if let Some(line) = line {
+        parts.push(format!("line {line}"));
+    }
+    if let Some(byte) = byte {
+        parts.push(format!("byte {byte}"));
+    }
+    parts.join(", ")
+}
+
+fn print_continuation_summary(continuation: &CardContinuation) {
+    let summary = continuation_summary(continuation);
+    println!("continuation:");
+    println!("  covered by: {}", summary.covered_by);
+    println!("  base file: {}", summary.base_file_path);
+    println!("  base coverage: {}", summary.base_turn_range);
+    if let Some(line_range) = summary.base_line_range {
+        println!("  base lines: {}", line_range);
+    }
+    if let Some(byte_range) = summary.base_byte_range {
+        println!("  base bytes: {}", byte_range);
+    }
+    println!("  candidate trim starts: {}", summary.candidate_trim_start);
+    println!("  candidate file: {}", summary.candidate_file_path);
 }
 
 #[derive(Debug, Default)]

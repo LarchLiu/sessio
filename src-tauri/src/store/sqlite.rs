@@ -5,7 +5,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::memory::{
-    MemoryCard, MemoryJob, MemorySource, MemoryStore, TurnFingerprint, TurnFingerprintCandidate,
+    CardContinuation, MemoryCard, MemoryJob, MemorySource, MemoryStore, SessionTimeInfo,
+    TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{Agent, SessionInfo, SubagentInfo};
 use crate::providers::types::SourceLocation;
@@ -162,6 +163,46 @@ const SCHEMA_V4: &str = r#"
 ALTER TABLE turn_fingerprints ADD COLUMN text_len INTEGER NOT NULL DEFAULT 0;
 "#;
 
+// text_len=0 means the row predates the V4 migration and would silently
+// underweight in dedupe scoring. Drop those rows so they get rebuilt with
+// real lengths on the next build pass. Idempotent: new rows always carry
+// a non-zero text_len, so re-running this is a no-op.
+const SCHEMA_V6: &str = r#"
+DELETE FROM turn_fingerprints WHERE text_len = 0;
+"#;
+
+const SCHEMA_V7: &str = r#"
+ALTER TABLE sessions ADD COLUMN forked_from_id TEXT;
+"#;
+
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS card_continuations (
+    card_id                     TEXT PRIMARY KEY,
+    project_key                 TEXT NOT NULL,
+    candidate_agent             TEXT NOT NULL,
+    candidate_session_id        TEXT NOT NULL,
+    candidate_file_path         TEXT NOT NULL,
+    base_agent                  TEXT NOT NULL,
+    base_session_id             TEXT NOT NULL,
+    base_file_path              TEXT NOT NULL,
+    base_start_turn_index       INTEGER NOT NULL,
+    base_start_line_start       INTEGER,
+    base_start_byte_start       INTEGER,
+    base_end_turn_index         INTEGER NOT NULL,
+    base_end_line_end           INTEGER,
+    base_end_byte_end           INTEGER,
+    candidate_trim_turn_start   INTEGER NOT NULL,
+    candidate_trim_line_start   INTEGER,
+    candidate_trim_byte_start   INTEGER,
+    updated_at                  INTEGER NOT NULL,
+    FOREIGN KEY(card_id) REFERENCES memory_cards(card_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_card_continuations_project ON card_continuations(project_key, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_card_continuations_candidate ON card_continuations(candidate_agent, candidate_session_id);
+CREATE INDEX IF NOT EXISTS idx_card_continuations_base ON card_continuations(base_agent, base_session_id);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -211,6 +252,27 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 5 {
+        conn.execute_batch(SCHEMA_V5)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)",
+            [],
+        )?;
+    }
+    if current < 6 {
+        conn.execute_batch(SCHEMA_V6)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
+            [],
+        )?;
+    }
+    if current < 7 {
+        let _ = conn.execute_batch(SCHEMA_V7);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -223,8 +285,8 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             message_count, first_user_message,
             file_size, file_mtime,
             partial, available, archived,
-            last_indexed_at
-        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?, ?,?, ?,?,?, ?)",
+            last_indexed_at, forked_from_id
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?, ?,?, ?,?,?, ?,?)",
         params![
             s.agent.as_str(),
             s.id,
@@ -242,6 +304,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             s.available as i64,
             s.archived as i64,
             now_ms(),
+            s.forked_from_id,
         ],
     )?;
     // Subagent rows are written through upsert_subagent so their lifecycle
@@ -418,7 +481,7 @@ impl SessionStore for SqliteStore {
         let mut stmt = conn.prepare(
             "SELECT agent, session_id, file_path, project_path, project_name,
                     started_at, updated_at, message_count, first_user_message,
-                    file_size, partial, available, archived
+                    file_size, partial, available, archived, forked_from_id
              FROM sessions
              ORDER BY updated_at DESC",
         )?;
@@ -429,7 +492,7 @@ impl SessionStore for SqliteStore {
                 Ok(SessionInfo {
                     id: row.get(1)?,
                     agent,
-                    forked_from_id: None,
+                    forked_from_id: row.get(13)?,
                     file_path: row.get(2)?,
                     project_path: row.get(3)?,
                     project_name: row.get(4)?,
@@ -639,6 +702,54 @@ impl MemoryStore for SqliteStore {
         Ok(())
     }
 
+    fn replace_card_continuation(
+        &self,
+        card_id: &str,
+        continuation: Option<&CardContinuation>,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM card_continuations WHERE card_id = ?",
+            params![card_id],
+        )?;
+        if let Some(continuation) = continuation {
+            tx.execute(
+                "INSERT INTO card_continuations (
+                    card_id, project_key,
+                    candidate_agent, candidate_session_id, candidate_file_path,
+                    base_agent, base_session_id, base_file_path,
+                    base_start_turn_index, base_start_line_start, base_start_byte_start,
+                    base_end_turn_index, base_end_line_end, base_end_byte_end,
+                    candidate_trim_turn_start, candidate_trim_line_start, candidate_trim_byte_start,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    continuation.card_id,
+                    continuation.project_key,
+                    continuation.candidate_agent,
+                    continuation.candidate_session_id,
+                    continuation.candidate_file_path,
+                    continuation.base_agent,
+                    continuation.base_session_id,
+                    continuation.base_file_path,
+                    continuation.base_start_turn_index as i64,
+                    opt_u64_to_i64(continuation.base_start_line_start),
+                    opt_u64_to_i64(continuation.base_start_byte_start),
+                    continuation.base_end_turn_index as i64,
+                    opt_u64_to_i64(continuation.base_end_line_end),
+                    opt_u64_to_i64(continuation.base_end_byte_end),
+                    continuation.candidate_trim_turn_start as i64,
+                    opt_u64_to_i64(continuation.candidate_trim_line_start),
+                    opt_u64_to_i64(continuation.candidate_trim_byte_start),
+                    continuation.updated_at,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn list_cards_for_source(
         &self,
         agent: &str,
@@ -787,6 +898,70 @@ impl MemoryStore for SqliteStore {
         Ok(sources)
     }
 
+    fn continuation_for_card(&self, card_id: &str) -> Result<Option<CardContinuation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT card_id, project_key,
+                    candidate_agent, candidate_session_id, candidate_file_path,
+                    base_agent, base_session_id, base_file_path,
+                    base_start_turn_index, base_start_line_start, base_start_byte_start,
+                    base_end_turn_index, base_end_line_end, base_end_byte_end,
+                    candidate_trim_turn_start, candidate_trim_line_start, candidate_trim_byte_start,
+                    updated_at
+             FROM card_continuations
+             WHERE card_id = ?",
+        )?;
+        let continuation = stmt
+            .query_row(params![card_id], |row| {
+                Ok(CardContinuation {
+                    card_id: row.get(0)?,
+                    project_key: row.get(1)?,
+                    candidate_agent: row.get(2)?,
+                    candidate_session_id: row.get(3)?,
+                    candidate_file_path: row.get(4)?,
+                    base_agent: row.get(5)?,
+                    base_session_id: row.get(6)?,
+                    base_file_path: row.get(7)?,
+                    base_start_turn_index: row.get::<_, i64>(8)? as usize,
+                    base_start_line_start: opt_i64_to_u64(row.get(9)?),
+                    base_start_byte_start: opt_i64_to_u64(row.get(10)?),
+                    base_end_turn_index: row.get::<_, i64>(11)? as usize,
+                    base_end_line_end: opt_i64_to_u64(row.get(12)?),
+                    base_end_byte_end: opt_i64_to_u64(row.get(13)?),
+                    candidate_trim_turn_start: row.get::<_, i64>(14)? as usize,
+                    candidate_trim_line_start: opt_i64_to_u64(row.get(15)?),
+                    candidate_trim_byte_start: opt_i64_to_u64(row.get(16)?),
+                    updated_at: row.get(17)?,
+                })
+            })
+            .optional()?;
+        Ok(continuation)
+    }
+
+    fn invalidate_continuations_referencing_base(
+        &self,
+        base_agent: &str,
+        base_session_id: &str,
+    ) -> Result<Vec<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let affected: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT card_id FROM card_continuations
+                 WHERE base_agent = ? AND base_session_id = ?",
+            )?;
+            let rows = stmt.query_map(params![base_agent, base_session_id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        tx.execute(
+            "DELETE FROM card_continuations
+             WHERE base_agent = ? AND base_session_id = ?",
+            params![base_agent, base_session_id],
+        )?;
+        tx.commit()?;
+        Ok(affected)
+    }
+
     fn replace_turn_fingerprints(
         &self,
         project_key: &str,
@@ -914,6 +1089,25 @@ impl MemoryStore for SqliteStore {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn session_time_info(&self, agent: &str, session_id: &str) -> Result<Option<SessionTimeInfo>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT started_at, updated_at
+             FROM sessions
+             WHERE agent = ? AND session_id = ?
+             LIMIT 1",
+            params![agent, session_id],
+            |row| {
+                Ok(SessionTimeInfo {
+                    started_at: row.get(0)?,
+                    updated_at: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     fn record_memory_job(
