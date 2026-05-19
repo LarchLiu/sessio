@@ -1,6 +1,7 @@
 use crate::memory::build::{build_project_memory, default_output_root, MemoryBuildOptions};
+use crate::memory::cards::safe_id_part;
 use crate::memory::qmd;
-use crate::memory::{CardContinuation, MemoryStore};
+use crate::memory::{CardContinuation, MemoryCard, MemoryStore};
 use crate::models::Agent;
 use crate::providers;
 use crate::providers::shared::convert::project_key_for_path_or_name;
@@ -37,6 +38,16 @@ enum MemoryCommand {
         card_id: String,
         db_path: Option<String>,
         include_source_excerpt: bool,
+        json: bool,
+    },
+    CoveredBy {
+        card_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Base {
+        card_id: String,
+        db_path: Option<String>,
         json: bool,
     },
     Search {
@@ -104,6 +115,24 @@ struct MemorySearchHit {
     score: Option<f64>,
     snippet: Option<String>,
     sources: Vec<crate::memory::MemorySource>,
+    continuation: Option<MemoryContinuationSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryBaseHit {
+    card_id: String,
+    card: Option<MemoryCard>,
+    continuation: MemoryContinuationSummary,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryCoveredByResult {
+    card_id: String,
+    card: MemoryCard,
+    base_card_id: Option<String>,
+    base_card: Option<MemoryCard>,
     continuation: Option<MemoryContinuationSummary>,
 }
 
@@ -233,6 +262,97 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                 }
                 if let Some(continuation) = continuation {
                     print_continuation_summary(&continuation);
+                }
+            }
+            Ok(())
+        }
+        MemoryCommand::CoveredBy {
+            card_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let card = store.card_by_id(&card_id)?;
+            let Some(card) = card else {
+                bail!("card not found: {card_id}");
+            };
+            let continuation = store.continuation_for_card(&card_id)?;
+            let base_card_id = continuation.as_ref().map(base_card_id_for_continuation);
+            let base_card = match base_card_id.as_deref() {
+                Some(base_card_id) => store.card_by_id(base_card_id)?,
+                None => None,
+            };
+            let payload = MemoryCoveredByResult {
+                card_id,
+                card,
+                base_card_id,
+                base_card,
+                continuation: continuation.as_ref().map(continuation_summary),
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if let Some(continuation) = continuation {
+                println!(
+                    "base card: {}",
+                    base_card_id_for_continuation(&continuation)
+                );
+                print_continuation_summary(&continuation);
+            } else {
+                println!("no continuation provenance recorded");
+            }
+            Ok(())
+        }
+        MemoryCommand::Base {
+            card_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let card = store.card_by_id(&card_id)?;
+            let Some(card) = card else {
+                bail!("card not found: {card_id}");
+            };
+            let sources = store.sources_for_card(&card.card_id)?;
+            let Some(base_source) = sources.first() else {
+                bail!("base card has no source refs: {card_id}");
+            };
+            let continuations = store
+                .continuations_for_base(&base_source.agent, &base_source.session_id)?;
+            let hits: Vec<MemoryBaseHit> = continuations
+                .into_iter()
+                .filter_map(|continuation| {
+                    let card_id = continuation.card_id.clone();
+                    let summary = continuation_summary(&continuation);
+                    let card = store.card_by_id(&card_id).ok().flatten();
+                    Some(MemoryBaseHit {
+                        card_id,
+                        card,
+                        continuation: summary,
+                    })
+                })
+                .collect();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "baseCardId": card.card_id,
+                        "baseCard": card,
+                        "baseSource": base_source,
+                        "hits": hits,
+                    }))?
+                );
+            } else {
+                println!("base card: {}", card.card_id);
+                println!("base source: {} {}", base_source.agent, base_source.session_id);
+                for hit in hits {
+                    println!(
+                        "{}\t{}\t{}",
+                        hit.card_id,
+                        hit.continuation.covered_by,
+                        hit.continuation.candidate_trim_start
+                    );
                 }
             }
             Ok(())
@@ -541,6 +661,34 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                 }),
             })
         }
+        "base" => {
+            let mut card_id = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--card-id" => {
+                        i += 1;
+                        card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown memory base option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Memory(MemoryCommand::Base {
+                    card_id: card_id.context("missing --card-id")?,
+                    db_path,
+                    json,
+                }),
+            })
+        }
         "resolve" => {
             let mut card_id = None;
             let mut db_path = None;
@@ -568,6 +716,34 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                     card_id: card_id.context("missing --card-id")?,
                     db_path,
                     include_source_excerpt,
+                    json,
+                }),
+            })
+        }
+        "covered-by" => {
+            let mut card_id = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--card-id" => {
+                        i += 1;
+                        card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown memory covered-by option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Memory(MemoryCommand::CoveredBy {
+                    card_id: card_id.context("missing --card-id")?,
+                    db_path,
                     json,
                 }),
             })
@@ -984,6 +1160,14 @@ fn continuation_summary(continuation: &CardContinuation) -> MemoryContinuationSu
     }
 }
 
+fn base_card_id_for_continuation(continuation: &CardContinuation) -> String {
+    format!(
+        "sessio-{}-{}",
+        safe_id_part(&continuation.base_agent),
+        safe_id_part(&continuation.base_session_id)
+    )
+}
+
 fn format_optional_range(label: &str, start: Option<u64>, end: Option<u64>) -> Option<String> {
     match (start, end) {
         (Some(start), Some(end)) => Some(format!("{label} {start}..{end}")),
@@ -1115,6 +1299,8 @@ Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
   sessio sessions messages --agent <codex|claude|gemini> [--session-id <id>] [--file-path <path>] [--json]
   sessio memory build --project <path> [--output-root <path>] [--db-path <path>] [--json]
+  sessio memory covered-by --card-id <id> [--db-path <path>] [--json]
+  sessio memory base --card-id <id> [--db-path <path>] [--json]
   sessio memory search (--project <path>|--project-key <key>) <query> [--index sessio] [--binary <path>] [--db-path <path>] [--include-raw] [--json]
   sessio memory resolve --card-id <id> [--db-path <path>] [--include-source-excerpt] [--json]
   sessio memory jobs --project-key <key> [--status <status>] [--db-path <path>] [--json]
@@ -1127,6 +1313,8 @@ Notes:
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
   memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at (Codex / Claude today; Gemini is session-level only).
   Gemini message lookup requires --session-id because multiple sessions can share one logs.json.
+  memory covered-by shows which base card covered a given card, if continuation provenance exists.
+  memory base lists cards covered by a given base card via card_continuations.
 "#
     );
 }

@@ -67,6 +67,7 @@
 - [x] Implement `sessio memory resolve --card-id <id> --json`.
 - [x] Map qmd search results back to stable Sessio memory hits.
 - [x] Include continuation provenance summaries in `memory resolve` and `memory search`.
+- [x] Add `sessio memory covered-by --card-id <id>` and `sessio memory base --card-id <id>` CLI commands so callers can walk continuation provenance from both directions (which base covered this card / which cards did this base cover).
 - [x] Make `memory search --json` return empty hits plus `backendError` when qmd is unavailable or broken.
 - [x] Include the memory card body/metadata in `memory resolve --json`.
 - [x] Make qmd update failures structured and non-panicking.
@@ -99,6 +100,7 @@
 - [x] Teach the skill to call `sessio memory resolve --card-id`.
 - [x] Document no-hit behavior: do not guess when memory search returns nothing.
 - [x] Add skill usage examples.
+- [x] Teach the skill to call `sessio memory covered-by` and `sessio memory base` when the user asks about continuation lineage between sessions.
 
 ## Verification
 
@@ -166,6 +168,7 @@
 - [x] `cargo test` (32 tests) passed after Codex/Claude parsers started returning per-message line/byte ranges, cards aggregated those into `memory_sources`, and `sessio memory resolve --include-source-excerpt` started returning raw JSONL excerpts.
 - [x] `cargo test` (38 tests) passed after adding continuation dedupe, user-block trim boundaries, `card_continuations`, and human-readable continuation summaries in CLI resolve/search output.
 - [x] `cargo test` (41 tests) passed after tightening codex dedupe direction (forked_from_id-then-time fallback), persisting `forked_from_id` in the sessions table (V7), dropping stale `text_len=0` fingerprints (V6), invalidating dependent `card_continuations` on base reindex, and extracting the dedupe plan helper.
+- [x] `cargo test` (45 tests) passed after adding `memory covered-by` / `memory base` CLI commands backed by `continuations_for_base`, Gemini per-item line/byte offsets via `scan_json_array_entries`, and skill updates for the new commands.
 
 - [x] `cargo run --bin sessio -- --help` printed CLI usage.
 - [x] `cargo run -- --help` printed CLI usage through the single desktop binary.
@@ -182,13 +185,13 @@
 These items are intentionally **not** in scope for v1. Schema columns are reserved so v2 work is additive.
 
 - [x] Fill `memory_sources.line_start/line_end/byte_start/byte_end` from Codex and Claude parsers. Card-level `memory_sources` rows now carry the aggregated line/byte span over all events in the card.
-- [ ] Fill the same offsets for Gemini — requires a streaming JSON scanner for `logs.json` (array of objects) since `serde_json::from_str` does not surface per-item byte positions.
+- [x] Fill the same offsets for Gemini — implemented by scanning the JSON array and deserializing each object from its raw byte range.
 - [x] Implement source-range resolution (`crate::memory::resolve::read_source_excerpt`) that reads back a raw JSONL excerpt by byte range or, failing that, by inclusive line range; exposed through `sessio memory resolve --include-source-excerpt`.
 - [ ] Tool-result digest hash (command + exit code + key errors + output hash) feeding into a future tool-result dedupe layer.
 - [ ] SimHash / MinHash near-duplicate detection over card text; populate `memory_cards.simhash` and merge near-dup cards by appending source refs.
 - [x] Use `turn_fingerprints` for same-project continuation dedupe: trim or suppress a candidate only when an ordered replay prefix is covered and the remaining tail is low-information.
 - [ ] Extend continuation dedupe beyond same-agent comparison (e.g. cross-agent continuation, multi-source joint coverage, or fuzzier paraphrased-turn matching) if real workflows show those gaps.
-- [ ] Add first-class CLI/UI inspection for cards covered by a given base card, building on `card_continuations`.
+- [x] Add first-class CLI/UI inspection for cards covered by a given base card, and a reverse `covered-by` lookup for any card.
 
 ## Known Follow-Ups
 

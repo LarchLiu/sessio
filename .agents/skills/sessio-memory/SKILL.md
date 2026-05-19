@@ -24,12 +24,25 @@ sessio memory search --project "$PWD" "<query>" --json
 sessio memory resolve --card-id "<card_id>" --json
 ```
 
-6. If search returns no hits, an empty result, or a non-null `backendError`, say that Sessio memory did not return a usable match. Do not invent historical context.
+6. If the user asks which base card covered a specific card, use:
 
-When a hit or resolved card contains continuation metadata:
+```bash
+sessio memory covered-by --card-id "<card_id>" --json
+```
+
+7. If the user asks which cards were covered by a base card, use:
+
+```bash
+sessio memory base --card-id "<card_id>" --json
+```
+
+8. If search returns no hits, an empty result, or a non-null `backendError`, say that Sessio memory did not return a usable match. Do not invent historical context.
+
+When a hit, resolved card, or `covered-by`/`base` result contains continuation metadata:
 
 - Treat `continuation` / `continuationSummary` as provenance about replay trimming, not as the substantive project memory itself.
 - Use it to explain where a card's kept suffix came from or which earlier session covered the trimmed prefix.
+- Use `covered-by` when the user asks "what covered this card?" and `base` when they ask "what cards did this one cover?".
 - Do not quote raw turn/byte ranges unless the user is asking about dedupe/provenance mechanics.
 
 ## Commands
@@ -62,6 +75,18 @@ Read a raw source excerpt for debugging provenance only when needed:
 
 ```bash
 sessio memory resolve --card-id "<card_id>" --include-source-excerpt --json
+```
+
+Inspect cards covered by a base card:
+
+```bash
+sessio memory base --card-id "<card_id>" --json
+```
+
+Inspect which base card covered a given card:
+
+```bash
+sessio memory covered-by --card-id "<card_id>" --json
 ```
 
 ## Interpretation Rules

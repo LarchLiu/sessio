@@ -64,20 +64,19 @@ pub fn read_messages(path: &Path, session_id: &str) -> Result<Vec<SessionMessage
 }
 
 // Gemini stores all sessions under ~/.gemini/tmp/<dir>/logs.json as a single
-// JSON array. v1 ships session-level source pointers only — every message
-// inherits the file-level SourceLocation (line/byte are None). Precise
-// per-message byte offsets require a streaming JSON scanner and are tracked
-// as a v2 follow-up in docs/sessio-cli-qmd-memory-todos.md.
+// JSON array. We scan the array boundaries and then deserialize each object
+// from its raw byte range so per-message offsets stay precise without a full
+// custom parser.
 pub fn read_messages_with_locations(
     path: &Path,
     session_id: &str,
 ) -> Result<Vec<(SessionMessage, crate::providers::types::SourceLocation)>> {
-    let text = fs::read_to_string(path)?;
-    let arr: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+    let text = fs::read(path)?;
+    let entries = scan_json_array_entries(&text)?;
     let mut out = Vec::new();
-    let location =
-        crate::providers::types::SourceLocation::file(path.to_string_lossy().to_string());
-    for item in arr {
+    let file_path = path.to_string_lossy().to_string();
+    for entry in entries {
+        let item: serde_json::Value = serde_json::from_slice(&text[entry.start..entry.end])?;
         let sid = item.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
         if sid != session_id {
             continue;
@@ -105,7 +104,13 @@ pub fn read_messages_with_locations(
                 text,
                 timestamp: ts,
             },
-            location.clone(),
+            crate::providers::types::SourceLocation {
+                file_path: file_path.clone(),
+                line_start: Some(entry.line_start),
+                line_end: Some(entry.line_end),
+                byte_start: Some(entry.start as u64),
+                byte_end: Some(entry.end as u64),
+            },
         ));
     }
     Ok(out)
@@ -153,9 +158,9 @@ fn resolve_project_path(dir_name: &str, mappings: &ProjectMappings) -> Option<St
 }
 
 fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo>> {
-    let text = fs::read_to_string(path)?;
-    let arr: Vec<serde_json::Value> = match serde_json::from_str(&text) {
-        Ok(v) => v,
+    let text = fs::read(path)?;
+    let entries = match scan_json_array_entries(&text) {
+        Ok(entries) => entries,
         Err(e) => {
             log::warn!("gemini logs.json parse error {}: {e}", path.display());
             return Ok(Vec::new());
@@ -170,7 +175,14 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
         .and_then(system_time_to_millis);
 
     let mut groups: HashMap<String, GeminiAgg> = HashMap::new();
-    for item in arr {
+    for entry in entries {
+        let item: serde_json::Value = match serde_json::from_slice(&text[entry.start..entry.end]) {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!("gemini logs.json item parse error {}: {e}", path.display());
+                continue;
+            }
+        };
         let sid = match item.get("sessionId").and_then(|x| x.as_str()) {
             Some(s) => s.to_string(),
             None => continue,
@@ -234,6 +246,169 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
         });
     }
     Ok(out)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct JsonArrayEntry {
+    start: usize,
+    end: usize,
+    line_start: u64,
+    line_end: u64,
+}
+
+fn scan_json_array_entries(bytes: &[u8]) -> Result<Vec<JsonArrayEntry>> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    let len = bytes.len();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut current_start: Option<usize> = None;
+    let mut line = 1u64;
+    let mut entry_line_start = 1u64;
+    let mut saw_array_open = false;
+
+    while i < len {
+        let b = bytes[i];
+        match b {
+            b'\n' => {
+                line += 1;
+                if !in_string && depth == 0 {
+                    i += 1;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'"' => {
+                in_string = true;
+            }
+            b'[' => {
+                if depth == 0 {
+                    saw_array_open = true;
+                }
+                depth += 1;
+            }
+            b']' => {
+                depth -= 1;
+                if depth < 0 {
+                    break;
+                }
+            }
+            b'{' => {
+                if depth == 1 && current_start.is_none() {
+                    current_start = Some(i);
+                    entry_line_start = line;
+                }
+                depth += 1;
+            }
+            b'}' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 1 {
+                        if let Some(start) = current_start.take() {
+                            out.push(JsonArrayEntry {
+                                start,
+                                end: i + 1,
+                                line_start: entry_line_start,
+                                line_end: line,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // An empty `[]` is a valid (just uninteresting) Gemini logs file, so
+    // only error out when no top-level array opener was ever seen.
+    if !saw_array_open && bytes.iter().any(|b| !b.is_ascii_whitespace()) {
+        return Err(anyhow::anyhow!("no JSON array found"));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_messages_with_locations, scan_json_array_entries};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_tmp(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{prefix}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn scan_json_array_entries_tracks_object_ranges() {
+        let bytes = br#"
+[
+  {"sessionId":"a","type":"user","message":"hello","timestamp":"2026-05-19T00:00:00Z"},
+  {"sessionId":"b","type":"assistant","message":"skip","timestamp":"2026-05-19T00:00:01Z"}
+]
+"#;
+        let entries = scan_json_array_entries(bytes).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(&bytes[entries[0].start..entries[0].end], br#"{"sessionId":"a","type":"user","message":"hello","timestamp":"2026-05-19T00:00:00Z"}"#);
+        assert_eq!(&bytes[entries[1].start..entries[1].end], br#"{"sessionId":"b","type":"assistant","message":"skip","timestamp":"2026-05-19T00:00:01Z"}"#);
+        assert!(entries[0].line_start >= 1);
+        assert!(entries[0].line_end >= entries[0].line_start);
+    }
+
+    #[test]
+    fn read_messages_with_locations_records_precise_offsets() {
+        let dir = unique_tmp("gemini-parser");
+        let path = dir.join("logs.json");
+        fs::write(
+            &path,
+            r#"
+[
+  {"sessionId":"sess-1","type":"user","message":"hello","timestamp":"2026-05-19T00:00:00Z"},
+  {"sessionId":"sess-1","type":"assistant","message":"world","timestamp":"2026-05-19T00:00:01Z"}
+]
+"#,
+        )
+        .unwrap();
+        let messages = read_messages_with_locations(&path, "sess-1").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].0.text, "hello");
+        assert!(messages[0].1.byte_start.is_some());
+        assert!(messages[0].1.byte_end.is_some());
+        assert!(messages[0].1.byte_end.unwrap() > messages[0].1.byte_start.unwrap());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_json_array_entries_accepts_empty_array() {
+        let entries = scan_json_array_entries(b"[]\n").unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn scan_json_array_entries_rejects_garbage_without_array_opener() {
+        assert!(scan_json_array_entries(b"not json").is_err());
+    }
 }
 
 #[derive(Default)]

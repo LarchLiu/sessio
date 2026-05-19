@@ -126,6 +126,11 @@ pub trait MemoryStore: Send + Sync {
     fn card_by_id(&self, card_id: &str) -> Result<Option<MemoryCard>>;
     fn sources_for_card(&self, card_id: &str) -> Result<Vec<MemorySource>>;
     fn continuation_for_card(&self, card_id: &str) -> Result<Option<CardContinuation>>;
+    fn continuations_for_base(
+        &self,
+        base_agent: &str,
+        base_session_id: &str,
+    ) -> Result<Vec<CardContinuation>>;
     fn invalidate_continuations_referencing_base(
         &self,
         base_agent: &str,
