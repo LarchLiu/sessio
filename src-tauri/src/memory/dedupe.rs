@@ -117,7 +117,7 @@ pub fn should_suppress_source(
         ) {
             continue;
         }
-        let cards = store.list_cards_for_source(
+        let cards = store.list_records_for_source(
             &candidate.agent,
             &candidate.session_id,
             &candidate.file_path,
@@ -300,6 +300,11 @@ fn align_from_prefix_start(
         let mut found = false;
         let a_end = (ai + MAX_SKIP_A + 1).min(existing.len());
         let b_end = (bi + MAX_SKIP_B + 1).min(candidate.len());
+        // The inner loops break out of `'search` on the first match. Assigning
+        // `ai` / `bi` is for the *next* iteration of the outer `while`, where
+        // the ranges are recomputed — the rebinding doesn't affect the range
+        // currently being iterated.
+        #[allow(clippy::mut_range_bound)]
         'search: for next_a in ai..a_end {
             for next_b in bi..b_end {
                 if existing[next_a].role == candidate[next_b].role

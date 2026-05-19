@@ -42,10 +42,10 @@ impl MemoryRecordKind {
         }
     }
 
-    pub fn from_db_str(value: &str) -> Self {
+    pub fn from_db_str(value: &str) -> Result<Self> {
         match value {
-            "session" => Self::Session,
-            _ => Self::Session,
+            "session" => Ok(Self::Session),
+            other => Err(anyhow::anyhow!("unknown MemoryRecordKind '{other}'")),
         }
     }
 }
@@ -66,6 +66,11 @@ pub struct MemoryBackendStatus {
     pub backend: String,
     pub available: bool,
     pub error: Option<String>,
+    // Optional backend-specific diagnostics. qmd uses this to surface
+    // its binary path and reported version without leaking qmd types
+    // into the backend-neutral trait.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +110,11 @@ pub trait MemoryIndexBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn status(&self) -> MemoryBackendStatus;
 
+    // The `records` slice carries the full project record set (available
+    // and unavailable). Backends that need the corpus may inspect it; those
+    // that index by scanning the artifact sink (e.g. qmd) can ignore it.
+    // The slice is provided so backends never have to call back into the
+    // repository themselves.
     fn sync_project(
         &self,
         project_key: &str,
@@ -125,7 +135,7 @@ pub trait MemoryIndexBackend: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemorySource {
-    pub card_id: String,
+    pub record_id: String,
     pub agent: String,
     pub session_id: String,
     pub file_path: String,
@@ -177,8 +187,8 @@ pub struct SessionTimeInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CardContinuation {
-    pub card_id: String,
+pub struct RecordContinuation {
+    pub record_id: String,
     pub project_key: String,
     pub candidate_agent: String,
     pub candidate_session_id: String,
@@ -199,43 +209,44 @@ pub struct CardContinuation {
 }
 
 pub trait MemoryStore: Send + Sync {
-    fn upsert_card(&self, card: &MemoryRecord) -> Result<()>;
+    fn upsert_record(&self, record: &MemoryRecord) -> Result<()>;
     fn upsert_memory_artifact(&self, artifact: &MemoryArtifact) -> Result<()>;
     fn artifact_for_record(&self, record_id: &str, backend: &str)
         -> Result<Option<MemoryArtifact>>;
-    fn replace_card_sources(&self, card_id: &str, sources: &[MemorySource]) -> Result<()>;
-    fn replace_card_continuation(
+    fn remove_memory_artifact(&self, record_id: &str, backend: &str) -> Result<()>;
+    fn replace_record_sources(&self, record_id: &str, sources: &[MemorySource]) -> Result<()>;
+    fn replace_record_continuation(
         &self,
-        card_id: &str,
-        continuation: Option<&CardContinuation>,
+        record_id: &str,
+        continuation: Option<&RecordContinuation>,
     ) -> Result<()>;
-    fn list_cards_for_source(
+    fn list_records_for_source(
         &self,
         agent: &str,
         session_id: &str,
         file_path: &str,
     ) -> Result<Vec<MemoryRecord>>;
-    fn mark_card_unavailable(&self, card_id: &str) -> Result<()>;
-    fn mark_source_cards_unavailable(
+    fn mark_record_unavailable(&self, record_id: &str) -> Result<()>;
+    fn mark_source_records_unavailable(
         &self,
         agent: &str,
         session_id: &str,
         file_path: &str,
     ) -> Result<()>;
-    fn list_project_cards(&self, project_key: &str) -> Result<Vec<MemoryRecord>>;
-    fn card_by_id(&self, card_id: &str) -> Result<Option<MemoryRecord>>;
-    fn sources_for_card(&self, card_id: &str) -> Result<Vec<MemorySource>>;
-    fn continuation_for_card(&self, card_id: &str) -> Result<Option<CardContinuation>>;
+    fn list_project_records(&self, project_key: &str) -> Result<Vec<MemoryRecord>>;
+    fn record_by_id(&self, record_id: &str) -> Result<Option<MemoryRecord>>;
+    fn sources_for_record(&self, record_id: &str) -> Result<Vec<MemorySource>>;
+    fn continuation_for_record(&self, record_id: &str) -> Result<Option<RecordContinuation>>;
     fn continuations_for_base(
         &self,
         base_agent: &str,
         base_session_id: &str,
-    ) -> Result<Vec<CardContinuation>>;
+    ) -> Result<Vec<RecordContinuation>>;
     fn invalidate_continuations_referencing_base(
         &self,
         base_agent: &str,
         base_session_id: &str,
-    ) -> Result<Vec<CardContinuation>>;
+    ) -> Result<Vec<RecordContinuation>>;
     fn replace_turn_fingerprints(
         &self,
         project_key: &str,

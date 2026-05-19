@@ -25,19 +25,28 @@ pub trait MemoryArtifactSink: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct MarkdownArtifactSink {
     root: PathBuf,
+    backend: String,
 }
 
 impl MarkdownArtifactSink {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub fn new(root: PathBuf, backend: impl Into<String>) -> Self {
+        Self {
+            root,
+            backend: backend.into(),
+        }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    pub fn backend(&self) -> &str {
+        &self.backend
+    }
+
     fn artifact_path(&self, project_key: &str, record_id: &str) -> PathBuf {
         self.root
+            .join(&self.backend)
             .join(project_key)
             .join("sessions")
             .join(format!("{record_id}.md"))
@@ -51,6 +60,11 @@ impl MemoryArtifactSink for MarkdownArtifactSink {
         project_key: &str,
         record: &MemoryRecord,
     ) -> Result<MemoryArtifact> {
+        debug_assert_eq!(
+            backend, self.backend,
+            "MarkdownArtifactSink built for {} cannot serve {}",
+            self.backend, backend
+        );
         let path = self.artifact_path(project_key, &record.record_id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -67,10 +81,15 @@ impl MemoryArtifactSink for MarkdownArtifactSink {
 
     fn remove_record_artifact(
         &self,
-        _backend: &str,
+        backend: &str,
         project_key: &str,
         record_id: &str,
     ) -> Result<()> {
+        debug_assert_eq!(
+            backend, self.backend,
+            "MarkdownArtifactSink built for {} cannot serve {}",
+            self.backend, backend
+        );
         let path = self.artifact_path(project_key, record_id);
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
@@ -176,7 +195,7 @@ mod tests {
     #[test]
     fn markdown_sink_writes_sessions_layout_and_removes_artifact() {
         let root = unique_tmp("sessio-markdown-artifact");
-        let sink = MarkdownArtifactSink::new(root.clone());
+        let sink = MarkdownArtifactSink::new(root.clone(), "qmd");
         let record = MemoryRecord {
             record_id: "sessio-codex-abc".to_string(),
             project_key: "project-key".to_string(),
@@ -194,6 +213,7 @@ mod tests {
             .write_record_artifact("qmd", &record.project_key, &record)
             .unwrap();
         let path = root
+            .join("qmd")
             .join("project-key")
             .join("sessions")
             .join("sessio-codex-abc.md");

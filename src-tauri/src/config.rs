@@ -21,6 +21,7 @@ pub struct QmdBackendConfig {
     pub binary: Option<String>,
     pub index: String,
     pub artifacts_root: PathBuf,
+    pub auto_embed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +45,7 @@ struct RawQmdBackendConfig {
     binary: Option<String>,
     index: Option<String>,
     artifacts_root: Option<String>,
+    auto_embed: Option<bool>,
 }
 
 pub fn load_config() -> Result<AppConfig> {
@@ -97,6 +99,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "binary" => raw.memory.backends.qmd.binary = value,
                 "index" => raw.memory.backends.qmd.index = value,
                 "artifacts_root" => raw.memory.backends.qmd.artifacts_root = value,
+                "auto_embed" => raw.memory.backends.qmd.auto_embed = value.map(parse_bool).transpose()?,
                 other => bail!("unknown key in [memory.backends.qmd]: {other}"),
             },
             Section::Root | Section::Ignored => {}
@@ -147,6 +150,14 @@ fn parse_value(value: &str) -> Result<Option<String>> {
         return Ok(Some(String::new()));
     }
     Ok(Some(value.to_string()))
+}
+
+fn parse_bool(value: String) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => bail!("invalid boolean value: {other}"),
+    }
 }
 
 fn unescape_string(value: &str) -> Result<String> {
@@ -206,6 +217,7 @@ fn resolve_memory_config(raw: RawConfig) -> Result<MemoryConfig> {
             .map(expand_path)
             .transpose()?
             .unwrap_or(default_artifacts_root()?),
+        auto_embed: qmd.auto_embed.unwrap_or(false),
     };
     if let Ok(binary) = std::env::var("SESSIO_QMD_BINARY") {
         config.binary = Some(binary);
@@ -217,6 +229,12 @@ fn resolve_memory_config(raw: RawConfig) -> Result<MemoryConfig> {
     }
     if let Ok(root) = std::env::var("SESSIO_QMD_ARTIFACTS_ROOT") {
         config.artifacts_root = expand_path(&root)?;
+    }
+    if let Ok(value) = std::env::var("SESSIO_QMD_AUTO_EMBED") {
+        config.auto_embed = matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
     }
 
     Ok(MemoryConfig {
@@ -281,5 +299,59 @@ mod tests {
         .unwrap();
 
         assert!(resolve_memory_config(raw).is_err());
+    }
+
+    #[test]
+    fn parses_auto_embed_boolean_and_strips_comments() {
+        let raw = parse_raw_config(
+            r#"
+            # global comment
+            [memory.backends.qmd]
+            auto_embed = true  # inline comment after value
+            "#,
+        )
+        .unwrap();
+        let config = resolve_memory_config(raw).unwrap();
+        assert!(config.qmd.auto_embed);
+    }
+
+    #[test]
+    fn rejects_invalid_boolean_value() {
+        let raw = parse_raw_config(
+            r#"
+            [memory.backends.qmd]
+            auto_embed = sometimes
+            "#,
+        );
+        assert!(raw.is_err());
+    }
+
+    #[test]
+    fn ignores_unknown_sections() {
+        let raw = parse_raw_config(
+            r#"
+            [unrelated.section]
+            key = "value"
+
+            [memory]
+            backend = "qmd"
+            "#,
+        )
+        .unwrap();
+        let config = resolve_memory_config(raw).unwrap();
+        assert_eq!(config.backend, "qmd");
+    }
+
+    #[test]
+    fn comment_inside_quoted_string_is_preserved() {
+        let raw = parse_raw_config(
+            r#"
+            [memory.backends.qmd]
+            binary = "/path/with#hash/qmd"
+            "#,
+        )
+        .unwrap();
+        let config = resolve_memory_config(raw).unwrap();
+        assert_eq!(config.qmd.binary.as_deref(), Some("/path/with#hash/qmd"));
     }
 }

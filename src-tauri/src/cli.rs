@@ -2,10 +2,7 @@ use crate::memory::build::MemoryBuildOptions;
 use crate::memory::cards::safe_id_part;
 use crate::memory::qmd;
 use crate::memory::service::MemoryService;
-use crate::memory::{
-    CardContinuation, MemoryBackendHit, MemoryIndexBackend, MemoryRecord, MemorySearchOptions,
-    MemoryStore,
-};
+use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
 use crate::models::Agent;
 use crate::providers;
 use crate::providers::shared::convert::project_key_for_path_or_name;
@@ -69,8 +66,6 @@ enum MemoryCommand {
         project_key: Option<String>,
         project: Option<String>,
         query: String,
-        binary: Option<String>,
-        index: String,
         db_path: Option<String>,
         include_raw: bool,
         json: bool,
@@ -107,7 +102,7 @@ struct CliError {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MemorySearchHit {
-    card_id: String,
+    record_id: String,
     title: String,
     summary: Option<String>,
     score: Option<f64>,
@@ -119,18 +114,18 @@ struct MemorySearchHit {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MemoryBaseHit {
-    card_id: String,
-    card: Option<MemoryRecord>,
+    record_id: String,
+    record: Option<MemoryRecord>,
     continuation: MemoryContinuationSummary,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MemoryCoveredByResult {
-    card_id: String,
-    card: MemoryRecord,
-    base_card_id: Option<String>,
-    base_card: Option<MemoryRecord>,
+    record_id: String,
+    record: MemoryRecord,
+    base_record_id: Option<String>,
+    base_record: Option<MemoryRecord>,
     continuation: Option<MemoryContinuationSummary>,
 }
 
@@ -174,25 +169,26 @@ fn run() -> Result<()> {
 fn run_memory(cmd: MemoryCommand) -> Result<()> {
     match cmd {
         MemoryCommand::Status { binary, json } => {
-            let status = qmd::qmd_status(binary.as_deref());
-            let backend_status = serde_json::json!({
-                "backend": "qmd",
-                "available": status.available,
-                "error": status.error,
-                "binary": status.binary,
-                "version": status.version,
-            });
+            // Honor an explicit CLI --binary override by transiently setting
+            // the env var the config layer reads. Keeps `memory status` going
+            // through MemoryService without re-introducing a qmd-specific
+            // status path in the CLI.
+            if let Some(binary) = binary.as_deref() {
+                std::env::set_var("SESSIO_QMD_BINARY", binary);
+            }
+            let service = build_cli_service(None)?;
+            let status = service.backend_status();
             if json {
-                println!("{}", serde_json::to_string_pretty(&backend_status)?);
+                println!("{}", serde_json::to_string_pretty(&status)?);
             } else if status.available {
-                println!(
-                    "memory backend available: qmd{}",
-                    status
-                        .version
-                        .as_deref()
-                        .map(|v| format!(" ({v})"))
-                        .unwrap_or_default()
-                );
+                let version = status
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("version"))
+                    .and_then(|v| v.as_str())
+                    .map(|v| format!(" ({v})"))
+                    .unwrap_or_default();
+                println!("memory backend available: {}{version}", status.backend);
             } else {
                 println!(
                     "memory backend unavailable: {}",
@@ -209,19 +205,25 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             embed,
             json,
         } => {
-            let artifacts_root = match artifacts_root {
-                Some(path) => PathBuf::from(path),
-                None => crate::config::load_memory_config()?.qmd.artifacts_root,
-            };
-            let options = qmd::QmdOptions { binary, index };
-            let backend = qmd::QmdBackend::new(options.clone(), artifacts_root.clone());
-            let sync = backend.sync_project(
-                &project_key,
-                &[],
-                &crate::memory::artifacts::NoopArtifactSink,
-            )?;
+            if let Some(binary) = binary.as_deref() {
+                std::env::set_var("SESSIO_QMD_BINARY", binary);
+            }
+            if !index.is_empty() && index != "sessio" {
+                std::env::set_var("SESSIO_QMD_INDEX", &index);
+            }
+            if let Some(root) = artifacts_root.as_deref() {
+                std::env::set_var("SESSIO_QMD_ARTIFACTS_ROOT", root);
+            }
+            let service = build_cli_service(None)?;
+            let sync = service.sync_project(&project_key)?;
             let embed_result = if embed {
-                Some(qmd::embed_index(&options)?)
+                Some(qmd::embed_index(&qmd::QmdOptions {
+                    binary: std::env::var("SESSIO_QMD_BINARY").ok(),
+                    index: std::env::var("SESSIO_QMD_INDEX")
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| "sessio".to_string()),
+                })?)
             } else {
                 None
             };
@@ -230,10 +232,10 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "projectKey": project_key,
-                        "artifactsRoot": artifacts_root,
+                        "artifactsRoot": service.backend_artifacts_root(),
                         "backend": sync.backend,
                         "sync": sync,
-                        "embed": embed_result
+                        "embed": embed_result,
                     }))?
                 );
             } else {
@@ -250,15 +252,11 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             db_path,
             json,
         } => {
-            let store = Arc::new(open_store(db_path.as_deref())?);
-            store.init()?;
-            let memory_store: Arc<dyn MemoryStore> = store.clone();
-            let service =
-                MemoryService::new(memory_store, Arc::new(providers::builtin_providers()))?;
-            let artifacts_root = match artifacts_root {
-                Some(path) => PathBuf::from(path),
-                None => service.backend_artifacts_root()?,
-            };
+            if let Some(root) = artifacts_root.as_deref() {
+                std::env::set_var("SESSIO_QMD_ARTIFACTS_ROOT", root);
+            }
+            let service = build_cli_service(db_path.as_deref())?;
+            let artifacts_root = service.backend_artifacts_root();
             let (summary, sync_result) = service.build_project_and_sync(MemoryBuildOptions {
                 project_path: PathBuf::from(project),
                 artifacts_root,
@@ -280,7 +278,7 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                 );
             } else {
                 println!(
-                    "built {} memory cards from {} sources",
+                    "built {} memory records from {} sources",
                     summary.cards_written, summary.sources_built
                 );
                 if let Some(error) = backend_error {
@@ -295,17 +293,10 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             include_source_excerpt,
             json,
         } => {
-            let store = Arc::new(open_store(db_path.as_deref())?);
-            store.init()?;
-            let memory_store: Arc<dyn MemoryStore> = store.clone();
-            let service = MemoryService::new(
-                memory_store.clone(),
-                Arc::new(providers::builtin_providers()),
-            )?;
-            let card = service.resolve(&card_id)?;
-            let sources = memory_store.sources_for_card(&card_id)?;
-            let continuation = memory_store.continuation_for_card(&card_id)?;
-            let payload_sources: Vec<serde_json::Value> = sources
+            let service = build_cli_service(db_path.as_deref())?;
+            let response = service.resolve_full(&card_id)?;
+            let payload_sources: Vec<serde_json::Value> = response
+                .sources
                 .iter()
                 .map(|source| {
                     let mut value = serde_json::to_value(source).unwrap_or(serde_json::json!({}));
@@ -331,24 +322,24 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "cardId": card_id,
-                        "card": card,
+                        "recordId": response.record_id,
+                        "record": response.record,
                         "sources": payload_sources,
-                        "continuation": continuation,
-                        "continuationSummary": continuation
+                        "continuation": response.continuation,
+                        "continuationSummary": response.continuation
                             .as_ref()
                             .map(continuation_summary)
                     }))?
                 );
             } else {
-                for source in sources {
+                for source in &response.sources {
                     println!(
                         "{}\t{}\t{}",
                         source.agent, source.session_id, source.file_path
                     );
                 }
-                if let Some(continuation) = continuation {
-                    print_continuation_summary(&continuation);
+                if let Some(continuation) = &response.continuation {
+                    print_continuation_summary(continuation);
                 }
             }
             Ok(())
@@ -358,31 +349,30 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             db_path,
             json,
         } => {
-            let store = open_store(db_path.as_deref())?;
-            store.init()?;
-            let card = store.card_by_id(&card_id)?;
-            let Some(card) = card else {
-                bail!("card not found: {card_id}");
+            let service = build_cli_service(db_path.as_deref())?;
+            let resolved = service.resolve_full(&card_id)?;
+            let Some(record) = resolved.record else {
+                bail!("record not found: {card_id}");
             };
-            let continuation = store.continuation_for_card(&card_id)?;
-            let base_card_id = continuation.as_ref().map(base_card_id_for_continuation);
-            let base_card = match base_card_id.as_deref() {
-                Some(base_card_id) => store.card_by_id(base_card_id)?,
+            let continuation = resolved.continuation;
+            let base_record_id = continuation.as_ref().map(base_record_id_for_continuation);
+            let base_record = match base_record_id.as_deref() {
+                Some(id) => service.resolve(id)?,
                 None => None,
             };
             let payload = MemoryCoveredByResult {
-                card_id,
-                card,
-                base_card_id,
-                base_card,
+                record_id: resolved.record_id,
+                record,
+                base_record_id,
+                base_record,
                 continuation: continuation.as_ref().map(continuation_summary),
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else if let Some(continuation) = continuation {
                 println!(
-                    "base card: {}",
-                    base_card_id_for_continuation(&continuation)
+                    "base record: {}",
+                    base_record_id_for_continuation(&continuation)
                 );
                 print_continuation_summary(&continuation);
             } else {
@@ -397,41 +387,40 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
         } => {
             let store = open_store(db_path.as_deref())?;
             store.init()?;
-            let card = store.card_by_id(&card_id)?;
-            let Some(card) = card else {
-                bail!("card not found: {card_id}");
+            let Some(record) = store.record_by_id(&card_id)? else {
+                bail!("record not found: {card_id}");
             };
-            let sources = store.sources_for_card(&card.record_id)?;
+            let sources = store.sources_for_record(&record.record_id)?;
             let Some(base_source) = sources.first() else {
-                bail!("base card has no source refs: {card_id}");
+                bail!("base record has no source refs: {card_id}");
             };
             let continuations =
                 store.continuations_for_base(&base_source.agent, &base_source.session_id)?;
             let hits: Vec<MemoryBaseHit> = continuations
                 .into_iter()
-                .filter_map(|continuation| {
-                    let card_id = continuation.card_id.clone();
+                .map(|continuation| {
+                    let record_id = continuation.record_id.clone();
                     let summary = continuation_summary(&continuation);
-                    let card = store.card_by_id(&card_id).ok().flatten();
-                    Some(MemoryBaseHit {
-                        card_id,
-                        card,
+                    let record = store.record_by_id(&record_id).ok().flatten();
+                    MemoryBaseHit {
+                        record_id,
+                        record,
                         continuation: summary,
-                    })
+                    }
                 })
                 .collect();
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "baseCardId": card.record_id,
-                        "baseCard": card,
+                        "baseRecordId": record.record_id,
+                        "baseRecord": record,
                         "baseSource": base_source,
                         "hits": hits,
                     }))?
                 );
             } else {
-                println!("base card: {}", card.record_id);
+                println!("base record: {}", record.record_id);
                 println!(
                     "base source: {} {}",
                     base_source.agent, base_source.session_id
@@ -439,7 +428,7 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                 for hit in hits {
                     println!(
                         "{}\t{}\t{}",
-                        hit.card_id,
+                        hit.record_id,
                         hit.continuation.covered_by,
                         hit.continuation.candidate_trim_start
                     );
@@ -451,34 +440,42 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             project_key,
             project,
             query,
-            binary,
-            index,
             db_path,
             include_raw,
             json,
         } => {
             let project_key = resolve_project_key(project_key, project.as_deref())?;
-            let store = Arc::new(open_store(db_path.as_deref())?);
-            store.init()?;
-            let memory_store: Arc<dyn MemoryStore> = store.clone();
-            let _ = (binary, index);
-            let service = MemoryService::new(
-                memory_store.clone(),
-                Arc::new(providers::builtin_providers()),
-            )?;
+            let service = build_cli_service(db_path.as_deref())?;
             let search_result =
-                service.search(&project_key, &query, MemorySearchOptions { include_raw });
+                service.search_full(&project_key, &query, MemorySearchOptions { include_raw });
             let (backend_name, raw, hits, backend_error) = match search_result {
-                Ok(result) => {
-                    let hits = map_backend_hits_to_memory(
-                        memory_store.as_ref(),
-                        &project_key,
-                        &result.backend,
-                        &result.hits,
-                    )?;
-                    (result.backend, result.raw, hits, None)
-                }
-                Err(e) => ("qmd".to_string(), None, Vec::new(), Some(e.to_string())),
+                Ok(response) => (
+                    response.backend,
+                    response.raw,
+                    response
+                        .hits
+                        .into_iter()
+                        .map(|hit| MemorySearchHit {
+                            record_id: hit.record.record_id.clone(),
+                            title: hit.record.title.clone(),
+                            summary: hit.record.summary.clone(),
+                            score: hit.score,
+                            snippet: hit.snippet,
+                            sources: hit.sources,
+                            continuation: hit
+                                .continuation
+                                .as_ref()
+                                .map(continuation_summary),
+                        })
+                        .collect::<Vec<_>>(),
+                    None,
+                ),
+                Err(e) => (
+                    service.backend_name().to_string(),
+                    None,
+                    Vec::new(),
+                    Some(e.to_string()),
+                ),
             };
             if json {
                 let mut payload = serde_json::json!({
@@ -495,29 +492,27 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                         .insert("raw".to_string(), raw);
                 }
                 println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if let Some(error) = backend_error {
+                println!("memory search backend unavailable: {error}");
+            } else if include_raw {
+                println!("{}", serde_json::to_string_pretty(&raw)?);
             } else {
-                if let Some(error) = backend_error {
-                    println!("memory search backend unavailable: {error}");
-                } else if include_raw {
-                    println!("{}", serde_json::to_string_pretty(&raw)?);
-                } else {
-                    for hit in &hits {
+                for hit in &hits {
+                    println!(
+                        "{}\t{}\t{}",
+                        hit.record_id,
+                        hit.score
+                            .map(|s| format!("{s:.3}"))
+                            .unwrap_or_else(|| "-".to_string()),
+                        hit.title,
+                    );
+                    if let Some(continuation) = &hit.continuation {
                         println!(
-                            "{}\t{}\t{}",
-                            hit.card_id,
-                            hit.score
-                                .map(|s| format!("{s:.3}"))
-                                .unwrap_or_else(|| "-".to_string()),
-                            hit.title,
+                            "  continuation: {} | base {} | trim {}",
+                            continuation.covered_by,
+                            continuation.base_turn_range,
+                            continuation.candidate_trim_start,
                         );
-                        if let Some(continuation) = &hit.continuation {
-                            println!(
-                                "  continuation: {} | base {} | trim {}",
-                                continuation.covered_by,
-                                continuation.base_turn_range,
-                                continuation.candidate_trim_start,
-                            );
-                        }
                     }
                 }
             }
@@ -688,7 +683,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                                 .clone(),
                         );
                     }
-                    "--artifacts-root" | "--cards-root" => {
+                    "--artifacts-root" => {
                         i += 1;
                         artifacts_root = Some(
                             args.get(i)
@@ -733,7 +728,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                         i += 1;
                         project = Some(args.get(i).context("missing value for --project")?.clone());
                     }
-                    "--artifacts-root" | "--output-root" => {
+                    "--artifacts-root" => {
                         i += 1;
                         artifacts_root = Some(
                             args.get(i)
@@ -766,7 +761,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--card-id" => {
+                    "--card-id" | "--record-id" => {
                         i += 1;
                         card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
                     }
@@ -795,7 +790,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--card-id" => {
+                    "--card-id" | "--record-id" => {
                         i += 1;
                         card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
                     }
@@ -825,7 +820,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--card-id" => {
+                    "--card-id" | "--record-id" => {
                         i += 1;
                         card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
                     }
@@ -850,8 +845,6 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             let mut project_key = None;
             let mut project = None;
             let mut query_parts = Vec::new();
-            let mut binary = None;
-            let mut index = "sessio".to_string();
             let mut db_path = None;
             let mut include_raw = false;
             let mut json = false;
@@ -869,14 +862,6 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                     "--project" => {
                         i += 1;
                         project = Some(args.get(i).context("missing value for --project")?.clone());
-                    }
-                    "--binary" => {
-                        i += 1;
-                        binary = Some(args.get(i).context("missing value for --binary")?.clone());
-                    }
-                    "--index" => {
-                        i += 1;
-                        index = args.get(i).context("missing value for --index")?.clone();
                     }
                     "--db-path" => {
                         i += 1;
@@ -897,8 +882,6 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                     project_key,
                     project,
                     query,
-                    binary,
-                    index,
                     db_path,
                     include_raw,
                     json,
@@ -1056,6 +1039,13 @@ fn open_store(db_path: Option<&str>) -> Result<SqliteStore> {
     SqliteStore::open(&data_dir.join("sessio-index.db"))
 }
 
+fn build_cli_service(db_path: Option<&str>) -> Result<MemoryService> {
+    let store = Arc::new(open_store(db_path)?);
+    store.init()?;
+    let memory_store: Arc<dyn MemoryStore> = store;
+    MemoryService::new(memory_store, Arc::new(providers::builtin_providers()))
+}
+
 fn load_sessions_from_store_or_scan(
     db_path: Option<&str>,
 ) -> Result<Vec<crate::models::SessionInfo>> {
@@ -1099,56 +1089,7 @@ fn resolve_project_key(project_key: Option<String>, project: Option<&str>) -> Re
     ))
 }
 
-fn map_backend_hits_to_memory(
-    store: &dyn MemoryStore,
-    project_key: &str,
-    backend: &str,
-    backend_hits: &[MemoryBackendHit],
-) -> Result<Vec<MemorySearchHit>> {
-    let records = store
-        .list_project_cards(project_key)?
-        .into_iter()
-        .filter(|record| record.available)
-        .collect::<Vec<_>>();
-    let mut out = Vec::new();
-    for candidate in backend_hits {
-        let Some(record) = records.iter().find(|record| {
-            candidate
-                .record_id
-                .as_deref()
-                .map(|id| id == record.record_id)
-                .unwrap_or(false)
-                || candidate
-                    .artifact_uri
-                    .as_deref()
-                    .map(|path| path_matches_record_artifact(path, record, store, backend))
-                    .unwrap_or(false)
-        }) else {
-            continue;
-        };
-        if out
-            .iter()
-            .any(|hit: &MemorySearchHit| hit.card_id == record.record_id)
-        {
-            continue;
-        }
-        out.push(MemorySearchHit {
-            card_id: record.record_id.clone(),
-            title: record.title.clone(),
-            summary: record.summary.clone(),
-            score: candidate.score,
-            snippet: candidate.snippet.clone(),
-            sources: store.sources_for_card(&record.record_id)?,
-            continuation: store
-                .continuation_for_card(&record.record_id)?
-                .as_ref()
-                .map(continuation_summary),
-        });
-    }
-    Ok(out)
-}
-
-fn continuation_summary(continuation: &CardContinuation) -> MemoryContinuationSummary {
+fn continuation_summary(continuation: &RecordContinuation) -> MemoryContinuationSummary {
     MemoryContinuationSummary {
         covered_by: format!(
             "{} {}",
@@ -1178,7 +1119,7 @@ fn continuation_summary(continuation: &CardContinuation) -> MemoryContinuationSu
     }
 }
 
-fn base_card_id_for_continuation(continuation: &CardContinuation) -> String {
+fn base_record_id_for_continuation(continuation: &RecordContinuation) -> String {
     format!(
         "sessio-{}-{}",
         safe_id_part(&continuation.base_agent),
@@ -1206,7 +1147,7 @@ fn format_trim_start(turn: usize, line: Option<u64>, byte: Option<u64>) -> Strin
     parts.join(", ")
 }
 
-fn print_continuation_summary(continuation: &CardContinuation) {
+fn print_continuation_summary(continuation: &RecordContinuation) {
     let summary = continuation_summary(continuation);
     println!("continuation:");
     println!("  covered by: {}", summary.covered_by);
@@ -1222,43 +1163,6 @@ fn print_continuation_summary(continuation: &CardContinuation) {
     println!("  candidate file: {}", summary.candidate_file_path);
 }
 
-fn path_matches_record_artifact(
-    path: &str,
-    record: &MemoryRecord,
-    store: &dyn MemoryStore,
-    backend: &str,
-) -> bool {
-    if path_matches_record_id(path, &record.record_id) {
-        return true;
-    }
-    let Ok(Some(artifact)) = store.artifact_for_record(&record.record_id, backend) else {
-        return false;
-    };
-    path_matches_artifact(path, &record.record_id, &artifact.artifact_uri)
-}
-
-fn path_matches_record_id(path: &str, record_id: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    let dashed_record_id = record_id.replace('_', "-");
-    normalized.ends_with(&format!("{record_id}.md"))
-        || normalized.ends_with(&format!("{dashed_record_id}.md"))
-}
-
-fn path_matches_artifact(path: &str, record_id: &str, artifact_uri: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    let artifact = artifact_uri.replace('\\', "/");
-    let dashed_record_id = record_id.replace('_', "-");
-    let dashed_artifact = artifact.replace('_', "-");
-    let slashless_artifact = artifact.replace('/', "-");
-    normalized.ends_with(&artifact)
-        || normalized.ends_with(&dashed_artifact)
-        || normalized.ends_with(&slashless_artifact)
-        || normalized.contains(&format!("/cards/{record_id}.md"))
-        || normalized.contains(&format!("/cards/{dashed_record_id}.md"))
-        || normalized.contains(&format!("/sessions/{record_id}.md"))
-        || normalized.contains(&format!("/sessions/{dashed_record_id}.md"))
-}
-
 fn print_help() {
     println!(
         r#"sessio
@@ -1267,22 +1171,23 @@ Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
   sessio sessions messages --agent <codex|claude|gemini> [--session-id <id>] [--file-path <path>] [--json]
   sessio memory build --project <path> [--artifacts-root <path>] [--db-path <path>] [--json]
-  sessio memory covered-by --card-id <id> [--db-path <path>] [--json]
-  sessio memory base --card-id <id> [--db-path <path>] [--json]
+  sessio memory covered-by --record-id <id> [--db-path <path>] [--json]
+  sessio memory base --record-id <id> [--db-path <path>] [--json]
   sessio memory status [--binary <path>] [--json]
   sessio memory sync --project-key <key> [--artifacts-root <path>] [--index sessio] [--binary <path>] [--embed] [--json]
-  sessio memory search (--project <path>|--project-key <key>) <query> [--index sessio] [--binary <path>] [--db-path <path>] [--include-raw] [--json]
-  sessio memory resolve --card-id <id> [--db-path <path>] [--include-source-excerpt] [--json]
+  sessio memory search (--project <path>|--project-key <key>) <query> [--db-path <path>] [--include-raw] [--json]
+  sessio memory resolve --record-id <id> [--db-path <path>] [--include-source-excerpt] [--json]
   sessio memory jobs --project-key <key> [--status <status>] [--db-path <path>] [--json]
 
 Notes:
   --json emits stable machine-readable output for skills and agents.
+  --card-id is accepted as a deprecated alias for --record-id.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
   memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at (Codex / Claude today; Gemini is session-level only).
   Gemini message lookup requires --session-id because multiple sessions can share one logs.json.
-  memory covered-by shows which base card covered a given card, if continuation provenance exists.
-  memory base lists cards covered by a given base card via card_continuations.
+  memory covered-by shows which base record covered a given record, if continuation provenance exists.
+  memory base lists records covered by a given base record via record_continuations.
 "#
     );
 }

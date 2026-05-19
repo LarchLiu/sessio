@@ -55,6 +55,7 @@ pub struct QmdSearchResult {
 pub struct QmdBackend {
     options: QmdOptions,
     artifacts_root: PathBuf,
+    auto_embed: bool,
 }
 
 impl QmdBackend {
@@ -62,7 +63,13 @@ impl QmdBackend {
         Self {
             options,
             artifacts_root,
+            auto_embed: false,
         }
+    }
+
+    pub fn with_auto_embed(mut self, auto_embed: bool) -> Self {
+        self.auto_embed = auto_embed;
+        self
     }
 
     pub fn options(&self) -> &QmdOptions {
@@ -70,7 +77,10 @@ impl QmdBackend {
     }
 
     fn project_sessions_root(&self, project_key: &str) -> PathBuf {
-        self.artifacts_root.join(project_key).join("sessions")
+        self.artifacts_root
+            .join(self.name())
+            .join(project_key)
+            .join("sessions")
     }
 }
 
@@ -81,10 +91,15 @@ impl MemoryIndexBackend for QmdBackend {
 
     fn status(&self) -> MemoryBackendStatus {
         let status = qmd_status(self.options.binary.as_deref());
+        let details = serde_json::json!({
+            "binary": status.binary,
+            "version": status.version,
+        });
         MemoryBackendStatus {
             backend: self.name().to_string(),
             available: status.available,
             error: status.error,
+            details: Some(details),
         }
     }
 
@@ -97,12 +112,18 @@ impl MemoryIndexBackend for QmdBackend {
         let sessions_root = self.project_sessions_root(project_key);
         ensure_project_collection(&self.options, project_key, &sessions_root)?;
         update_index(&self.options)?;
+        let mut errors = Vec::new();
+        if self.auto_embed {
+            if let Err(e) = embed_index(&self.options) {
+                errors.push(format!("qmd embed failed: {e}"));
+            }
+        }
         Ok(MemorySyncReport {
             backend: self.name().to_string(),
             project_key: project_key.to_string(),
             synced_records: records.iter().filter(|record| record.available).count(),
             removed_records: records.iter().filter(|record| !record.available).count(),
-            errors: Vec::new(),
+            errors,
         })
     }
 

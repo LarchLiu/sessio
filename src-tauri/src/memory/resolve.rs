@@ -92,7 +92,7 @@ mod tests {
         // 3 lines: "alpha\n", "beta\n", "gamma\n" -> bytes 0..6, 6..11, 11..17
         fs::write(&file_path, "alpha\nbeta\ngamma\n").unwrap();
         let source = MemorySource {
-            card_id: "c".to_string(),
+            record_id: "c".to_string(),
             agent: "codex".to_string(),
             session_id: "s".to_string(),
             file_path: file_path.to_string_lossy().to_string(),
@@ -115,7 +115,7 @@ mod tests {
         let file_path = dir.join("session.jsonl");
         fs::write(&file_path, "one\ntwo\nthree\nfour\n").unwrap();
         let source = MemorySource {
-            card_id: "c".to_string(),
+            record_id: "c".to_string(),
             agent: "codex".to_string(),
             session_id: "s".to_string(),
             file_path: file_path.to_string_lossy().to_string(),
@@ -138,7 +138,7 @@ mod tests {
         let file_path = dir.join("session.jsonl");
         fs::write(&file_path, "hello\n").unwrap();
         let source = MemorySource {
-            card_id: "c".to_string(),
+            record_id: "c".to_string(),
             agent: "gemini".to_string(),
             session_id: "s".to_string(),
             file_path: file_path.to_string_lossy().to_string(),
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn returns_none_when_file_missing() {
         let source = MemorySource {
-            card_id: "c".to_string(),
+            record_id: "c".to_string(),
             agent: "codex".to_string(),
             session_id: "s".to_string(),
             file_path: "/tmp/does-not-exist-sessio.jsonl".to_string(),

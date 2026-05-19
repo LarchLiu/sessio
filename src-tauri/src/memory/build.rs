@@ -5,10 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::memory::artifacts::{MarkdownArtifactSink, MemoryArtifactSink};
-use crate::memory::cards::{cards_for_source, fingerprints_for_source, safe_id_part};
+use crate::memory::cards::{cards_for_source, fingerprints_for_source, record_id_for_source};
 use crate::memory::dedupe::{should_suppress_source, DedupeAction, DedupeMatch};
 use crate::memory::normalize::normalize_events;
-use crate::memory::{CardContinuation, MemoryStore, TurnFingerprint};
+use crate::memory::{RecordContinuation, MemoryStore, TurnFingerprint};
 use crate::providers::registry::ProviderRegistry;
 use crate::providers::types::{MessageEvent, MessageRole, SessionSource};
 
@@ -45,13 +45,15 @@ pub fn build_project_memory(
     store: &dyn MemoryStore,
     options: &MemoryBuildOptions,
 ) -> Result<MemoryBuildSummary> {
-    build_project_memory_with_backend(registry, store, "qmd", options)
+    let sink = MarkdownArtifactSink::new(options.artifacts_root.clone(), "qmd");
+    build_project_memory_with_backend(registry, store, "qmd", &sink, options)
 }
 
 pub fn build_project_memory_with_backend(
     registry: &ProviderRegistry,
     store: &dyn MemoryStore,
     backend: &str,
+    artifact_sink: &dyn MemoryArtifactSink,
     options: &MemoryBuildOptions,
 ) -> Result<MemoryBuildSummary> {
     let wanted_project = normalize_path(&options.project_path);
@@ -67,7 +69,6 @@ pub fn build_project_memory_with_backend(
         errors: Vec::new(),
     };
     let mut seen_sources = HashSet::new();
-    let artifact_sink = MarkdownArtifactSink::new(options.artifacts_root.clone());
 
     for provider in registry.providers() {
         let sources = match provider.discover() {
@@ -105,65 +106,25 @@ pub fn build_project_memory_with_backend(
                         source.session_id,
                         source.file_path
                     ));
-                    if let Err(mark_error) = store.mark_source_cards_unavailable(
-                        source.agent.as_str(),
-                        &source.session_id,
-                        &source.file_path,
-                    ) {
-                        summary.errors.push(format!(
-                            "mark source unavailable {} {} failed: {mark_error}",
-                            source.agent.as_str(),
-                            source.file_path
-                        ));
-                    }
-                    if let Err(remove_error) =
-                        remove_existing_source_card_files(store, &artifact_sink, backend, &source)
-                    {
-                        summary.errors.push(format!(
-                            "remove source card files {} {} failed: {remove_error}",
-                            source.agent.as_str(),
-                            source.file_path
-                        ));
-                    }
-                    if let Err(fp_error) = clear_source_fingerprints(store, &source) {
-                        summary.errors.push(format!(
-                            "clear fingerprints {} {} failed: {fp_error}",
-                            source.agent.as_str(),
-                            source.file_path
-                        ));
-                    }
+                    finalize_source_unavailable(
+                        store,
+                        artifact_sink,
+                        backend,
+                        &source,
+                        &mut summary.errors,
+                    );
                     continue;
                 }
             };
             let events = normalize_events(events);
             if events.is_empty() {
-                if let Err(mark_error) = store.mark_source_cards_unavailable(
-                    source.agent.as_str(),
-                    &source.session_id,
-                    &source.file_path,
-                ) {
-                    summary.errors.push(format!(
-                        "mark empty source unavailable {} {} failed: {mark_error}",
-                        source.agent.as_str(),
-                        source.file_path
-                    ));
-                }
-                if let Err(remove_error) =
-                    remove_existing_source_card_files(store, &artifact_sink, backend, &source)
-                {
-                    summary.errors.push(format!(
-                        "remove empty source card files {} {} failed: {remove_error}",
-                        source.agent.as_str(),
-                        source.file_path
-                    ));
-                }
-                if let Err(fp_error) = clear_source_fingerprints(store, &source) {
-                    summary.errors.push(format!(
-                        "clear fingerprints {} {} failed: {fp_error}",
-                        source.agent.as_str(),
-                        source.file_path
-                    ));
-                }
+                finalize_source_unavailable(
+                    store,
+                    artifact_sink,
+                    backend,
+                    &source,
+                    &mut summary.errors,
+                );
                 continue;
             }
 
@@ -179,66 +140,26 @@ pub fn build_project_memory_with_backend(
                 DedupePlan::Suppress { reason } => {
                     summary.sources_skipped += 1;
                     summary.errors.push(reason);
-                    if let Err(mark_error) = store.mark_source_cards_unavailable(
-                        source.agent.as_str(),
-                        &source.session_id,
-                        &source.file_path,
-                    ) {
-                        summary.errors.push(format!(
-                            "mark suppressed source unavailable {} {} failed: {mark_error}",
-                            source.agent.as_str(),
-                            source.file_path
-                        ));
-                    }
-                    if let Err(remove_error) =
-                        remove_existing_source_card_files(store, &artifact_sink, backend, &source)
-                    {
-                        summary.errors.push(format!(
-                            "remove suppressed source card files {} {} failed: {remove_error}",
-                            source.agent.as_str(),
-                            source.file_path
-                        ));
-                    }
-                    if let Err(fp_error) = clear_source_fingerprints(store, &source) {
-                        summary.errors.push(format!(
-                            "clear fingerprints {} {} failed: {fp_error}",
-                            source.agent.as_str(),
-                            source.file_path
-                        ));
-                    }
+                    finalize_source_unavailable(
+                        store,
+                        artifact_sink,
+                        backend,
+                        &source,
+                        &mut summary.errors,
+                    );
                     continue;
                 }
             };
 
             let generated = cards_for_source(&source, card_events);
             if generated.is_empty() {
-                if let Err(mark_error) = store.mark_source_cards_unavailable(
-                    source.agent.as_str(),
-                    &source.session_id,
-                    &source.file_path,
-                ) {
-                    summary.errors.push(format!(
-                        "mark source without cards unavailable {} {} failed: {mark_error}",
-                        source.agent.as_str(),
-                        source.file_path
-                    ));
-                }
-                if let Err(remove_error) =
-                    remove_existing_source_card_files(store, &artifact_sink, backend, &source)
-                {
-                    summary.errors.push(format!(
-                        "remove source without cards files {} {} failed: {remove_error}",
-                        source.agent.as_str(),
-                        source.file_path
-                    ));
-                }
-                if let Err(fp_error) = clear_source_fingerprints(store, &source) {
-                    summary.errors.push(format!(
-                        "clear fingerprints {} {} failed: {fp_error}",
-                        source.agent.as_str(),
-                        source.file_path
-                    ));
-                }
+                finalize_source_unavailable(
+                    store,
+                    artifact_sink,
+                    backend,
+                    &source,
+                    &mut summary.errors,
+                );
                 continue;
             }
             summary.sources_built += 1;
@@ -250,7 +171,7 @@ pub fn build_project_memory_with_backend(
             )?;
             let dependent_source_paths = invalidate_dependent_continuations(
                 store,
-                &artifact_sink,
+                artifact_sink,
                 backend,
                 source.agent.as_str(),
                 &source.session_id,
@@ -258,23 +179,23 @@ pub fn build_project_memory_with_backend(
             );
             extend_unique_paths(&mut summary.dependent_source_paths, dependent_source_paths);
             for (card, sources) in generated {
-                store.upsert_card(&card)?;
+                store.upsert_record(&card)?;
                 let artifact =
                     artifact_sink.write_record_artifact(backend, &card.project_key, &card)?;
                 store.upsert_memory_artifact(&artifact)?;
-                store.replace_card_sources(&card.record_id, &sources)?;
-                store.replace_card_continuation(&card.record_id, card_continuation.as_ref())?;
+                store.replace_record_sources(&card.record_id, &sources)?;
+                store.replace_record_continuation(&card.record_id, card_continuation.as_ref())?;
                 summary.cards_written += 1;
             }
         }
     }
 
     if let Some(project_key) = summary.project_key.as_deref() {
-        for card in store.list_project_cards(project_key)? {
+        for card in store.list_project_records(project_key)? {
             if !card.available {
                 continue;
             }
-            let sources = store.sources_for_card(&card.record_id)?;
+            let sources = store.sources_for_record(&card.record_id)?;
             if sources.is_empty() {
                 continue;
             }
@@ -286,13 +207,7 @@ pub fn build_project_memory_with_backend(
                 ))
             });
             if all_missing {
-                store.mark_card_unavailable(&card.record_id)?;
-                remove_record_artifact(
-                    &artifact_sink,
-                    backend,
-                    &card.project_key,
-                    &card.record_id,
-                )?;
+                finalize_record_unavailable(store, artifact_sink, backend, &card)?;
             }
         }
     }
@@ -306,14 +221,15 @@ pub fn build_source_memory(
     artifacts_root: &Path,
     source: &SessionSource,
 ) -> Result<MemoryBuildSourceResult> {
-    build_source_memory_with_backend(registry, store, "qmd", artifacts_root, source)
+    let sink = MarkdownArtifactSink::new(artifacts_root.to_path_buf(), "qmd");
+    build_source_memory_with_backend(registry, store, "qmd", &sink, source)
 }
 
 pub fn build_source_memory_with_backend(
     registry: &ProviderRegistry,
     store: &dyn MemoryStore,
     backend: &str,
-    artifacts_root: &Path,
+    artifact_sink: &dyn MemoryArtifactSink,
     source: &SessionSource,
 ) -> Result<MemoryBuildSourceResult> {
     let Some(project) = &source.project else {
@@ -327,9 +243,8 @@ pub fn build_source_memory_with_backend(
     let Some(provider) = registry.provider_for_agent(&source.agent) else {
         anyhow::bail!("no provider for agent {}", source.agent.as_str());
     };
-    let artifact_sink = MarkdownArtifactSink::new(artifacts_root.to_path_buf());
 
-    let existing = store.list_cards_for_source(
+    let existing = store.list_records_for_source(
         source.agent.as_str(),
         &source.session_id,
         &source.file_path,
@@ -341,13 +256,7 @@ pub fn build_source_memory_with_backend(
     if events.is_empty() {
         for card in existing {
             if card.available {
-                store.mark_card_unavailable(&card.record_id)?;
-                remove_record_artifact(
-                    &artifact_sink,
-                    backend,
-                    &card.project_key,
-                    &card.record_id,
-                )?;
+                finalize_record_unavailable(store, artifact_sink, backend, &card)?;
                 marked_unavailable += 1;
             }
         }
@@ -371,13 +280,7 @@ pub fn build_source_memory_with_backend(
         DedupePlan::Suppress { reason: _ } => {
             for card in existing {
                 if card.available {
-                    store.mark_card_unavailable(&card.record_id)?;
-                    remove_record_artifact(
-                        &artifact_sink,
-                        backend,
-                        &card.project_key,
-                        &card.record_id,
-                    )?;
+                    finalize_record_unavailable(store, artifact_sink, backend, &card)?;
                     marked_unavailable += 1;
                 }
             }
@@ -395,13 +298,7 @@ pub fn build_source_memory_with_backend(
     if generated.is_empty() {
         for card in existing {
             if card.available {
-                store.mark_card_unavailable(&card.record_id)?;
-                remove_record_artifact(
-                    &artifact_sink,
-                    backend,
-                    &card.project_key,
-                    &card.record_id,
-                )?;
+                finalize_record_unavailable(store, artifact_sink, backend, &card)?;
                 marked_unavailable += 1;
             }
         }
@@ -420,8 +317,7 @@ pub fn build_source_memory_with_backend(
         .collect::<std::collections::HashSet<_>>();
     for card in existing {
         if card.available && !generated_ids.contains(&card.record_id) {
-            store.mark_card_unavailable(&card.record_id)?;
-            remove_record_artifact(&artifact_sink, backend, &card.project_key, &card.record_id)?;
+            finalize_record_unavailable(store, artifact_sink, backend, &card)?;
             marked_unavailable += 1;
         }
     }
@@ -435,7 +331,7 @@ pub fn build_source_memory_with_backend(
     let mut invalidation_errors: Vec<String> = Vec::new();
     let dependent_source_paths = invalidate_dependent_continuations(
         store,
-        &artifact_sink,
+        artifact_sink,
         backend,
         source.agent.as_str(),
         &source.session_id,
@@ -447,11 +343,11 @@ pub fn build_source_memory_with_backend(
 
     let mut cards_written = 0;
     for (card, sources) in generated {
-        store.upsert_card(&card)?;
+        store.upsert_record(&card)?;
         let artifact = artifact_sink.write_record_artifact(backend, &card.project_key, &card)?;
         store.upsert_memory_artifact(&artifact)?;
-        store.replace_card_sources(&card.record_id, &sources)?;
-        store.replace_card_continuation(&card.record_id, card_continuation.as_ref())?;
+        store.replace_record_sources(&card.record_id, &sources)?;
+        store.replace_record_continuation(&card.record_id, card_continuation.as_ref())?;
         cards_written += 1;
     }
 
@@ -473,18 +369,80 @@ pub fn default_artifacts_root() -> Result<PathBuf> {
         .join("projects"))
 }
 
-fn remove_existing_source_card_files(
+fn finalize_record_unavailable(
+    store: &dyn MemoryStore,
+    artifact_sink: &dyn MemoryArtifactSink,
+    backend: &str,
+    record: &crate::memory::MemoryRecord,
+) -> Result<()> {
+    store.mark_record_unavailable(&record.record_id)?;
+    artifact_sink.remove_record_artifact(backend, &record.project_key, &record.record_id)?;
+    store.remove_memory_artifact(&record.record_id, backend)?;
+    Ok(())
+}
+
+// All five "no card to produce here" branches in build_project / build_source
+// do the same three things: mark the source's records unavailable, drop
+// their artifacts (file + store row), and clear the source's turn
+// fingerprints so future passes don't keep matching against stale hashes.
+// Centralizing it keeps a future branch from forgetting one of the steps.
+fn finalize_source_unavailable(
     store: &dyn MemoryStore,
     artifact_sink: &dyn MemoryArtifactSink,
     backend: &str,
     source: &SessionSource,
-) -> Result<()> {
-    for card in
-        store.list_cards_for_source(source.agent.as_str(), &source.session_id, &source.file_path)?
-    {
-        remove_record_artifact(artifact_sink, backend, &card.project_key, &card.record_id)?;
+    errors: &mut Vec<String>,
+) {
+    let records = match store.list_records_for_source(
+        source.agent.as_str(),
+        &source.session_id,
+        &source.file_path,
+    ) {
+        Ok(records) => records,
+        Err(e) => {
+            errors.push(format!(
+                "list records for {} {} failed: {e}",
+                source.agent.as_str(),
+                source.file_path
+            ));
+            Vec::new()
+        }
+    };
+    if let Err(e) = store.mark_source_records_unavailable(
+        source.agent.as_str(),
+        &source.session_id,
+        &source.file_path,
+    ) {
+        errors.push(format!(
+            "mark source unavailable {} {} failed: {e}",
+            source.agent.as_str(),
+            source.file_path
+        ));
     }
-    Ok(())
+    for record in records {
+        if let Err(e) =
+            artifact_sink.remove_record_artifact(backend, &record.project_key, &record.record_id)
+        {
+            errors.push(format!(
+                "remove artifact for {} failed: {e}",
+                record.record_id
+            ));
+            continue;
+        }
+        if let Err(e) = store.remove_memory_artifact(&record.record_id, backend) {
+            errors.push(format!(
+                "remove artifact row for {} failed: {e}",
+                record.record_id
+            ));
+        }
+    }
+    if let Err(e) = clear_source_fingerprints(store, source) {
+        errors.push(format!(
+            "clear fingerprints {} {} failed: {e}",
+            source.agent.as_str(),
+            source.file_path
+        ));
+    }
 }
 
 fn clear_source_fingerprints(store: &dyn MemoryStore, source: &SessionSource) -> Result<()> {
@@ -535,23 +493,13 @@ fn invalidate_dependent_continuations(
         if seen.insert(path.clone()) {
             dependent_source_paths.push(path);
         }
-        match store.card_by_id(&continuation.card_id) {
+        match store.record_by_id(&continuation.record_id) {
             Ok(Some(card)) if card.available => {
-                if let Err(e) = store.mark_card_unavailable(&card.record_id) {
+                if let Err(e) =
+                    finalize_record_unavailable(store, artifact_sink, backend, &card)
+                {
                     errors.push(format!(
-                        "mark dependent card {} unavailable failed: {e}",
-                        card.record_id
-                    ));
-                    continue;
-                }
-                if let Err(e) = remove_record_artifact(
-                    artifact_sink,
-                    backend,
-                    &card.project_key,
-                    &card.record_id,
-                ) {
-                    errors.push(format!(
-                        "remove dependent card markdown {} failed: {e}",
+                        "finalize dependent card {} unavailable failed: {e}",
                         card.record_id
                     ));
                 }
@@ -559,7 +507,7 @@ fn invalidate_dependent_continuations(
             Ok(_) => {}
             Err(e) => errors.push(format!(
                 "load dependent card {} failed: {e}",
-                continuation.card_id
+                continuation.record_id
             )),
         }
     }
@@ -588,7 +536,7 @@ enum DedupePlan {
     },
     Trim {
         offset: usize,
-        continuation: CardContinuation,
+        continuation: RecordContinuation,
     },
 }
 
@@ -624,12 +572,8 @@ fn resolve_dedupe_plan(
                     reason: suppress_reason(source, &dedupe_match),
                 });
             };
-            let continuation = CardContinuation {
-                card_id: format!(
-                    "sessio-{}-{}",
-                    safe_id_part(source.agent.as_str()),
-                    safe_id_part(&source.session_id)
-                ),
+            let continuation = RecordContinuation {
+                record_id: record_id_for_source(source),
                 project_key: project_key.to_string(),
                 candidate_agent: source.agent.as_str().to_string(),
                 candidate_session_id: source.session_id.clone(),
@@ -670,15 +614,6 @@ fn suppress_reason(source: &SessionSource, dedupe_match: &DedupeMatch) -> String
         dedupe_match.prefix_coverage,
         dedupe_match.total_coverage,
     )
-}
-
-fn remove_record_artifact(
-    artifact_sink: &dyn MemoryArtifactSink,
-    backend: &str,
-    project_key: &str,
-    record_id: &str,
-) -> Result<()> {
-    artifact_sink.remove_record_artifact(backend, project_key, record_id)
 }
 
 fn remove_legacy_qmd_memory_root(home: &Path) -> Result<()> {
@@ -832,12 +767,12 @@ mod tests {
         assert_eq!(first.cards_marked_unavailable, 0);
 
         let card_id = "sessio-fake-session-1";
-        let card_path = artifacts_root
+        let card_path = artifacts_root.join("qmd")
             .join("test-project")
             .join("sessions")
             .join(format!("{card_id}.md"));
         assert!(card_path.exists());
-        assert!(store.card_by_id(card_id).unwrap().unwrap().available);
+        assert!(store.record_by_id(card_id).unwrap().unwrap().available);
         let fingerprints_before = store
             .list_turn_fingerprints("test-project", "fake", "session-1")
             .unwrap();
@@ -854,7 +789,7 @@ mod tests {
         assert_eq!(second.cards_written, 0);
         assert_eq!(second.cards_marked_unavailable, 1);
         assert!(!card_path.exists());
-        assert!(!store.card_by_id(card_id).unwrap().unwrap().available);
+        assert!(!store.record_by_id(card_id).unwrap().unwrap().available);
         let fingerprints_after = store
             .list_turn_fingerprints("test-project", "fake", "session-1")
             .unwrap();
@@ -1058,7 +993,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.cards_written, 1);
 
-        let card_path = artifacts_root
+        let card_path = artifacts_root.join("qmd")
             .join("continuation-project")
             .join("sessions")
             .join("sessio-fake-002-continuation.md");
@@ -1070,7 +1005,7 @@ mod tests {
         assert!(!body.contains("shared prefix covered by:"));
 
         let continuation = store
-            .continuation_for_card("sessio-fake-002-continuation")
+            .continuation_for_record("sessio-fake-002-continuation")
             .unwrap()
             .unwrap();
         assert_eq!(continuation.base_session_id, existing_source.session_id);
@@ -1200,7 +1135,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.cards_written, 1);
 
-        let card_path = artifacts_root
+        let card_path = artifacts_root.join("qmd")
             .join("continuation-project-long")
             .join("sessions")
             .join("sessio-fake-002-continuation-long.md");
@@ -1307,7 +1242,7 @@ mod tests {
         earlier_registry.register(FakeProvider::new(earlier_source.clone(), earlier_events));
         build_source_memory(&earlier_registry, &store, &artifacts_root, &earlier_source).unwrap();
 
-        let earlier_card_path = artifacts_root
+        let earlier_card_path = artifacts_root.join("qmd")
             .join("continuation-project-sibling")
             .join("sessions")
             .join("sessio-claude-07-earlier.md");
@@ -1463,7 +1398,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.cards_written, 1);
 
-        let card_path = artifacts_root
+        let card_path = artifacts_root.join("qmd")
             .join("continuation-project-user-block")
             .join("sessions")
             .join("sessio-fake-002-continuation-user-block.md");
@@ -1585,7 +1520,7 @@ mod tests {
         );
 
         let candidate_card_id = "sessio-fake-002-continuation-no-anchor";
-        let card_path = artifacts_root
+        let card_path = artifacts_root.join("qmd")
             .join("no-anchor-project")
             .join("sessions")
             .join(format!("{candidate_card_id}.md"));
@@ -1593,12 +1528,12 @@ mod tests {
             !card_path.exists(),
             "no card markdown should remain for a fully-covered continuation"
         );
-        let continuation = store.continuation_for_card(candidate_card_id).unwrap();
+        let continuation = store.continuation_for_record(candidate_card_id).unwrap();
         assert!(
             continuation.is_none(),
             "suppressed source should not record continuation provenance"
         );
-        let card = store.card_by_id(candidate_card_id).unwrap();
+        let card = store.record_by_id(candidate_card_id).unwrap();
         assert!(
             card.is_none_or(|c| !c.available),
             "any pre-existing candidate card must be marked unavailable"
@@ -1738,7 +1673,7 @@ mod tests {
         build_source_memory(&later_registry, &store, &artifacts_root, &later_source).unwrap();
 
         let later_card_id = format!("sessio-codex-{}", later_session_id);
-        let later_card_path = artifacts_root
+        let later_card_path = artifacts_root.join("qmd")
             .join("codex-no-fork-project")
             .join("sessions")
             .join(format!("{later_card_id}.md"));
@@ -1748,7 +1683,7 @@ mod tests {
             "later codex card should have the shared prefix trimmed"
         );
         assert!(later_body.contains("later unique request after the shared prefix"));
-        let continuation = store.continuation_for_card(&later_card_id).unwrap();
+        let continuation = store.continuation_for_record(&later_card_id).unwrap();
         let continuation = continuation.expect(
             "later card must record continuation provenance pointing at the earlier session",
         );
@@ -1861,7 +1796,7 @@ mod tests {
         .unwrap();
 
         let candidate_card_id = "sessio-fake-002-candidate";
-        let continuation_before = store.continuation_for_card(candidate_card_id).unwrap();
+        let continuation_before = store.continuation_for_record(candidate_card_id).unwrap();
         assert!(
             continuation_before.is_some(),
             "candidate must record continuation initially"
@@ -1894,12 +1829,12 @@ mod tests {
         )
         .unwrap();
 
-        let continuation_after = store.continuation_for_card(candidate_card_id).unwrap();
+        let continuation_after = store.continuation_for_record(candidate_card_id).unwrap();
         assert!(
             continuation_after.is_none(),
             "candidate continuation row must be invalidated when base fingerprints change"
         );
-        let card = store.card_by_id(candidate_card_id).unwrap().unwrap();
+        let card = store.record_by_id(candidate_card_id).unwrap().unwrap();
         assert!(
             !card.available,
             "candidate card must be marked unavailable after its base was reindexed"
@@ -2040,12 +1975,12 @@ mod tests {
         let b_card_id = "sessio-fake-002-b";
         let c_card_id = "sessio-fake-003-c";
         let b_continuation_before = store
-            .continuation_for_card(b_card_id)
+            .continuation_for_record(b_card_id)
             .unwrap()
             .expect("B must record continuation pointing at A");
         assert_eq!(b_continuation_before.base_session_id, a_source.session_id);
         let c_continuation_before = store
-            .continuation_for_card(c_card_id)
+            .continuation_for_record(c_card_id)
             .unwrap()
             .expect("C must record continuation pointing at B");
         assert_eq!(c_continuation_before.base_session_id, b_source.session_id);
@@ -2083,7 +2018,7 @@ mod tests {
             "C is not a direct dependent of A; it should not appear in A's first-hop result"
         );
 
-        let b_continuation_after_a = store.continuation_for_card(b_card_id).unwrap();
+        let b_continuation_after_a = store.continuation_for_record(b_card_id).unwrap();
         assert!(
             b_continuation_after_a.is_none(),
             "B's continuation row must be invalidated when its base A changes"
@@ -2100,7 +2035,7 @@ mod tests {
             "rebuilding B must surface C as a dependent (got {:?})",
             b_result.dependent_source_paths
         );
-        let c_continuation_after_b = store.continuation_for_card(c_card_id).unwrap();
+        let c_continuation_after_b = store.continuation_for_record(c_card_id).unwrap();
         assert!(
             c_continuation_after_b.is_none(),
             "C's continuation row must be invalidated once B has been rebuilt"

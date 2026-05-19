@@ -257,6 +257,73 @@ Design doc: `docs/sessio-memory-backend-abstraction-plan.md`
 - `--backend` CLI flag and `SESSIO_MEMORY_BACKEND` env var.
 - Tool-result digest hash and SimHash/MinHash near-duplicate detection (still tracked in Phase 7 v2 Roadmap).
 
+## Phase 8H: Backend Abstraction Cleanup
+
+Goal: close the gaps between "the abstraction was introduced" and "every call site goes through it". Phase 8A–8G stood up `MemoryService` / `MemoryIndexBackend` / `MemoryArtifactSink` and made `cargo test` green, but several hot paths still bypass the new seams. Phase 8H is the finishing pass that must land **before** a second backend (SQLite FTS / vector / remote) is wired up, because every item below would otherwise leak qmd-shaped assumptions into the new backend.
+
+### Phase 8H1 — Make `MemoryService` the only orchestration path
+
+- [x] Replace `MemoryService::sync_backend_job_oneshot` with a real shared queue. The CLI must enqueue onto the same `MemoryBackendSyncJob` channel the indexer drains, then block on a oneshot signal until the relevant job for `project_key` completes (or fails with a structured `backendError`). Today's `thread::spawn` + `mpsc::channel` + immediate `recv()` is the "parallel synchronous pipeline" the design doc forbids.
+- [x] Cache the `Arc<MemoryService>` once at indexer/CLI startup and clone it into workers. Stop calling `MemoryService::new(...)` per source/per job (currently re-reads config and rebuilds `ProviderRegistry` + `QmdBackend` + `MarkdownArtifactSink` on every `build_source_memory_for_indexer` / `build_project_memory_for_indexer` / `sync_qmd_project`).
+- [x] Route `sessio memory status` and `sessio memory sync` through `MemoryService` instead of `QmdBackend::new(...)` and `qmd::qmd_status(...)` directly. Phase 8E said CLI must depend on `MemoryService`.
+- [x] Move `map_backend_hits_to_memory` and the resolve `(card + sources + continuation + optional excerpt)` assembly out of `cli.rs` and into `MemoryService::search_full` / `MemoryService::resolve_full`. CLI should be a thin printer, not an orchestrator.
+- [x] Add a `MemoryService` unit test that exercises build → enqueue → sync via an in-memory `MemoryIndexBackend` mock so this seam stays intact when a second backend lands.
+
+### Phase 8H2 — Backend-neutral execution paths
+
+- [x] Move qmd's `embed` step inside `QmdBackend` (e.g. `QmdBackend::sync_project` performs an internal post-sync embed when configured). Drop `sync_qmd_embed` and the direct `qmd::embed_index(&QmdOptions::default())` call in `indexer/mod.rs` — that path silently ignores `SESSIO_QMD_BINARY` / `SESSIO_QMD_INDEX` because it doesn't reuse the configured options.
+- [x] Move `SESSIO_QMD_AUTO_EMBED` into `[memory.backends.qmd] auto_embed = true|false` and read it from `MemoryConfig`, not from `env::var` in the indexer.
+- [x] Rename `run_qmd_loop` / `sync_qmd_project` / `sync_qmd_embed` / `qmd_tx` / `qmd_rx` in `indexer/mod.rs` to backend-neutral names (`run_backend_sync_loop`, `sync_memory_project`, `backend_sync_tx`, …). The channel already carries `MemoryBackendSyncJob`; the naming should follow.
+- [x] Decide on `MemoryBackendSyncJob.changed_record_ids` / `removed_record_ids`: either actually populate them at the build-output boundary and let `sync_backend_job` route them to the backend, or delete the fields. Today every producer fills `Vec::new()` and `sync_backend_job` does `let _ = (...)`.
+- [x] Decide on `MemoryIndexBackend::sync_project(records: &[MemoryRecord], …)`: the `records` slice is unused by `QmdBackend` because qmd rescans the artifact root on its own. Either pass an empty list (and document the contract as "backend reads artifacts from the sink") or have the trait take only `(project_key, sink)` and let backends that *need* the corpus query the repository themselves.
+
+### Phase 8H3 — Artifact sink correctness
+
+- [x] Include `<backend>` in `MarkdownArtifactSink` paths so two backends can coexist without colliding. Today `MarkdownArtifactSink::artifact_path` only joins `(project_key, "sessions", "<record_id>.md")`; the `backend` argument is accepted and discarded. Either join `backend` into the path, or instantiate one sink per backend with a backend-scoped root.
+- [x] Stop instantiating `MarkdownArtifactSink::new(...)` inside `build_project_memory_with_backend` / `build_source_memory_with_backend`. Take `&dyn MemoryArtifactSink` as a parameter and have `MemoryService` inject its own sink. Today the service's sink is bypassed during build; a remote/object-store backend would still get markdown files written it never asked for.
+- [x] Add `MemoryStore::remove_memory_artifact(record_id, backend)` and call it from every code path that calls `mark_card_unavailable` or `remove_record_artifact`. Today the file is deleted but the `memory_artifacts` row stays, leaving a dangling pointer that `artifact_for_record` will happily return.
+
+### Phase 8H4 — Naming consistency (`MemoryCard` → `MemoryRecord` finish line)
+
+- [x] Rename `MemoryStore` methods: `upsert_card` → `upsert_record`, `card_by_id` → `record_by_id`, `list_project_cards` → `list_project_records`, `list_cards_for_source` → `list_records_for_source`, `mark_card_unavailable` → `mark_record_unavailable`, `mark_source_cards_unavailable` → `mark_source_records_unavailable`, `sources_for_card` → `sources_for_record`, `replace_card_sources` → `replace_record_sources`, `continuation_for_card` → `continuation_for_record`, `replace_card_continuation` → `replace_record_continuation`.
+- [x] Rename `MemorySource.card_id` → `MemorySource.record_id` and update the `memory_sources` SQL column accordingly (already renamed in V8) — the struct field is the last `card_id` straggler.
+- [x] Rename `CardContinuation` → `RecordContinuation` and `card_continuations` table → `record_continuations` (plus the V5 schema constant and every site that reads/writes it). No transitional alias.
+- [x] Update the CLI JSON contract: `cardId` → `recordId` everywhere in `sessio memory ...` JSON output. Bump skill docs to match. (One coordinated rename, no `cardId`/`recordId` dual emission.)
+
+### Phase 8H5 — Schema and migration hygiene
+
+- [x] Reorder the schema constants in `src-tauri/src/store/sqlite.rs` so they appear in version order (`SCHEMA_V1` … `SCHEMA_V9`). Today `SCHEMA_V9` is defined above `SCHEMA_V8`, which makes the file misleading even though `run_migrations` executes by version number.
+- [x] Add an inline comment on `SCHEMA_V3` and `SCHEMA_V8` explaining that V3 was rewritten to the post-V8 column names (`record_id`, `kind`) and V8 is guarded by `memory_cards_has_qmd_path` so it only runs on pre-V8 databases. Without the note the next reader will assume V8 is dead code on fresh installs.
+- [x] Add a regression test that opens a synthetic pre-V8 database (with `qmd_path` + `card_id` columns) and verifies migration to current schema preserves all rows.
+- [x] Make `MemoryRecordKind::from_db_str` return `Result<Self>` (or `panic!`) on unknown values instead of silently mapping to `Session`. Today adding a new kind without updating the match arm corrupts data on read.
+
+### Phase 8H6 — CLI and `path_matches_artifact` cleanup
+
+- [x] Drop CLI aliases `--cards-root` and `--output-root` (Phase 8C said "no compatibility shim"). Keep only `--artifacts-root`.
+- [x] Remove `/cards/{id}.md` matching from `path_matches_artifact` in `cli.rs`. The artifact layout moved to `/sessions/<record_id>.md` in Phase 8C; the `/cards/` branch is dead code.
+- [x] In CLI `memory search`, replace the hardcoded `"qmd".to_string()` fallback (used when the backend errors) with `service.backend_name().to_string()`.
+- [x] Drop the unused `--binary` / `--index` flags from `memory search` (they are accepted then discarded with `let _ = (binary, index);`). Config + env override is the supported configuration surface.
+- [x] Expose backend-specific diagnostics (binary path, version, last error) via an optional `MemoryBackendStatus.details: serde_json::Value` so `sessio memory status` can keep showing `binary` / `version` without re-importing `qmd`-shaped types in the CLI.
+
+### Phase 8H7 — Build pipeline simplification
+
+- [x] Extract a `clear_source_artifacts(store, sink, backend, source, errors, reason_tag)` helper in `memory/build.rs`. The five branches that all do `mark_source_cards_unavailable` + `remove_existing_source_card_files` + `clear_source_fingerprints` collapse into one call site each, removing ~80 lines of duplication and reducing the chance of forgetting one of the three steps in a future branch.
+- [x] Compute `record_id` once in `cards_for_source` (or a shared helper) and reuse it when building `CardContinuation` in `resolve_dedupe_plan`. Today both sites independently `format!("sessio-{agent}-{session_id}")`; a future format change would touch two places.
+- [x] Settle the `memory_jobs.scope` column's semantics: today it stores `project_path` for project-level jobs and `file_path` for source-level jobs. Either pick one (with `kind` distinguishing project vs source jobs) or split into `project_path` / `source_path` columns. Document the choice in the schema.
+
+### Phase 8H8 — Misc polish (defer if time-bound)
+
+- [x] Address `clippy::mut_range_bound` warnings in `memory/dedupe.rs::align_from_prefix_start`. The current `for next_a in ai..a_end { ai = next_a; }` pattern reads as if `ai` mutation widens the range — it doesn't (range is captured by value). Rewrite as a `while let` or explicit index loop to remove the false-alarm warning and make the intent clearer.
+- [x] Either swap the hand-rolled mini TOML parser in `config.rs` for the `toml` crate, or add a parser regression test for: quoted strings with embedded `#`, escape sequences (`\\`, `\"`, `\n`), `null` literal, comment-only lines, malformed sections. The current parser is ~200 lines and silently ignores unknown sections.
+
+### Phase 8H9 — Verification
+
+- [x] `cargo check` and `cargo test` pass after each sub-phase.
+- [x] `pnpm run typecheck` passes (CLI JSON renames in Phase 8H4 will touch the frontend if it consumes any memory JSON).
+- [x] `sessio memory build`, `memory search`, `memory resolve`, `memory base`, `memory covered-by`, `memory jobs`, `memory status`, `memory sync` all return valid JSON post-rename.
+- [x] Bench: indexer warm path no longer reconstructs `MemoryService` per source — confirm by counting `MemoryService::new` calls during a full rebuild on this repo (expected: 1, not N).
+- [x] Add a synthetic non-qmd `MemoryIndexBackend` test double and run the full build → enqueue → sync pipeline through it. The seam is "proven backend-neutral" only when at least one non-qmd implementation exits successfully through `MemoryService`.
+
 ## Known Follow-Ups
 
 - [x] Investigate why writing memory tables to default `~/.sessio/db-data/sessio-index.db` returned `attempt to write a readonly database` during CLI smoke testing.

@@ -27,18 +27,14 @@ pub fn cards_for_source(
     let summary = summarize_events(events);
     let body = card_body(source, events);
     let canonical_hash = card_hash(&project.project_key, &title, &summary, &body);
-    let record_id = format!(
-        "sessio-{}-{}",
-        safe_id_part(source.agent.as_str()),
-        safe_id_part(&source.session_id)
-    );
+    let record_id = record_id_for_source(source);
     let updated_at = events
         .iter()
         .filter_map(|event| event.timestamp)
         .max()
         .unwrap_or(0);
     let source_ref = MemorySource {
-        card_id: record_id.clone(),
+        record_id: record_id.clone(),
         agent: source.agent.as_str().to_string(),
         session_id: source.session_id.clone(),
         file_path: source.file_path.clone(),
@@ -220,6 +216,14 @@ fn compact(input: &str, max_chars: usize) -> String {
 
 fn short_id(id: &str) -> String {
     id.chars().take(12).collect()
+}
+
+pub fn record_id_for_source(source: &SessionSource) -> String {
+    format!(
+        "sessio-{}-{}",
+        safe_id_part(source.agent.as_str()),
+        safe_id_part(&source.session_id)
+    )
 }
 
 pub fn safe_id_part(value: &str) -> String {

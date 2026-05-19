@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::memory::{
-    CardContinuation, MemoryArtifact, MemoryJob, MemoryRecord, MemoryRecordKind, MemorySource,
-    MemoryStore, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
+    MemoryArtifact, MemoryJob, MemoryRecord, MemoryRecordKind, MemorySource, MemoryStore,
+    RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{Agent, SessionInfo, SubagentInfo};
 use crate::providers::types::SourceLocation;
@@ -94,6 +94,11 @@ ALTER TABLE subagents ADD COLUMN available INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
 "#;
 
+// V3 was rewritten to the post-V8 shape (`record_id` instead of `card_id`,
+// `memory_artifacts` table, no `qmd_path` column) so a fresh install reaches
+// the same end state without running V8. V8 still ships verbatim for upgrades
+// from pre-V8 databases — it's guarded by `memory_cards_has_qmd_path` so it
+// does nothing on installs that already came in via the new V3.
 const SCHEMA_V3: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_cards (
     record_id      TEXT PRIMARY KEY,
@@ -155,6 +160,11 @@ CREATE TABLE IF NOT EXISTS turn_fingerprints (
 
 CREATE INDEX IF NOT EXISTS idx_turn_fingerprints_hash ON turn_fingerprints(canonical_hash);
 
+-- memory_jobs records per-project memory pipeline steps for diagnostics.
+-- `kind` tells you which step ran: `project_build` (full project rebuild,
+-- scope = project_path), `source_build` (single-source rebuild, scope =
+-- source file_path), or `backend_sync` (push the project's records to the
+-- backend index, scope = project_path). `scope` is interpreted via `kind`.
 CREATE TABLE IF NOT EXISTS memory_jobs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_key TEXT NOT NULL,
@@ -170,11 +180,55 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, backend, status);
 "#;
 
-const SCHEMA_V9: &str = r#"
-ALTER TABLE memory_jobs ADD COLUMN backend TEXT NOT NULL DEFAULT 'qmd';
-CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, backend, status);
+const SCHEMA_V4: &str = r#"
+ALTER TABLE turn_fingerprints ADD COLUMN text_len INTEGER NOT NULL DEFAULT 0;
 "#;
 
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS record_continuations (
+    record_id                   TEXT PRIMARY KEY,
+    project_key                 TEXT NOT NULL,
+    candidate_agent             TEXT NOT NULL,
+    candidate_session_id        TEXT NOT NULL,
+    candidate_file_path         TEXT NOT NULL,
+    base_agent                  TEXT NOT NULL,
+    base_session_id             TEXT NOT NULL,
+    base_file_path              TEXT NOT NULL,
+    base_start_turn_index       INTEGER NOT NULL,
+    base_start_line_start       INTEGER,
+    base_start_byte_start       INTEGER,
+    base_end_turn_index         INTEGER NOT NULL,
+    base_end_line_end           INTEGER,
+    base_end_byte_end           INTEGER,
+    candidate_trim_turn_start   INTEGER NOT NULL,
+    candidate_trim_line_start   INTEGER,
+    candidate_trim_byte_start   INTEGER,
+    updated_at                  INTEGER NOT NULL,
+    FOREIGN KEY(record_id) REFERENCES memory_cards(record_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_record_continuations_project ON record_continuations(project_key, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_record_continuations_candidate ON record_continuations(candidate_agent, candidate_session_id);
+CREATE INDEX IF NOT EXISTS idx_record_continuations_base ON record_continuations(base_agent, base_session_id);
+"#;
+
+// text_len=0 means the row predates the V4 migration and would silently
+// underweight in dedupe scoring. Drop those rows so they get rebuilt with
+// real lengths on the next build pass. Idempotent: new rows always carry
+// a non-zero text_len, so re-running this is a no-op.
+const SCHEMA_V6: &str = r#"
+DELETE FROM turn_fingerprints WHERE text_len = 0;
+"#;
+
+const SCHEMA_V7: &str = r#"
+ALTER TABLE sessions ADD COLUMN forked_from_id TEXT;
+"#;
+
+// V8 only runs on pre-V8 databases (guarded by `memory_cards_has_qmd_path`).
+// On fresh installs V3 already provisions the post-V8 shape, so the guard
+// returns false and this block is a no-op. The SQL deliberately uses the
+// old `card_id` / `qmd_path` names — those columns only exist on the
+// pre-V8 schema this migration is meant to upgrade.
 const SCHEMA_V8: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_artifacts (
     record_id    TEXT NOT NULL,
@@ -200,48 +254,28 @@ ALTER TABLE memory_sources RENAME COLUMN card_id TO record_id;
 ALTER TABLE memory_cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'session';
 "#;
 
-const SCHEMA_V4: &str = r#"
-ALTER TABLE turn_fingerprints ADD COLUMN text_len INTEGER NOT NULL DEFAULT 0;
+// V9 only runs on pre-V9 databases where memory_jobs lacks a backend column.
+// On fresh installs V3 already declares `backend TEXT NOT NULL DEFAULT 'qmd'`,
+// so the ALTER fails (column exists) and we swallow the error. The index
+// re-create is idempotent.
+const SCHEMA_V9: &str = r#"
+ALTER TABLE memory_jobs ADD COLUMN backend TEXT NOT NULL DEFAULT 'qmd';
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, backend, status);
 "#;
 
-// text_len=0 means the row predates the V4 migration and would silently
-// underweight in dedupe scoring. Drop those rows so they get rebuilt with
-// real lengths on the next build pass. Idempotent: new rows always carry
-// a non-zero text_len, so re-running this is a no-op.
-const SCHEMA_V6: &str = r#"
-DELETE FROM turn_fingerprints WHERE text_len = 0;
-"#;
-
-const SCHEMA_V7: &str = r#"
-ALTER TABLE sessions ADD COLUMN forked_from_id TEXT;
-"#;
-
-const SCHEMA_V5: &str = r#"
-CREATE TABLE IF NOT EXISTS card_continuations (
-    card_id                     TEXT PRIMARY KEY,
-    project_key                 TEXT NOT NULL,
-    candidate_agent             TEXT NOT NULL,
-    candidate_session_id        TEXT NOT NULL,
-    candidate_file_path         TEXT NOT NULL,
-    base_agent                  TEXT NOT NULL,
-    base_session_id             TEXT NOT NULL,
-    base_file_path              TEXT NOT NULL,
-    base_start_turn_index       INTEGER NOT NULL,
-    base_start_line_start       INTEGER,
-    base_start_byte_start       INTEGER,
-    base_end_turn_index         INTEGER NOT NULL,
-    base_end_line_end           INTEGER,
-    base_end_byte_end           INTEGER,
-    candidate_trim_turn_start   INTEGER NOT NULL,
-    candidate_trim_line_start   INTEGER,
-    candidate_trim_byte_start   INTEGER,
-    updated_at                  INTEGER NOT NULL,
-    FOREIGN KEY(card_id) REFERENCES memory_cards(record_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_card_continuations_project ON card_continuations(project_key, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_card_continuations_candidate ON card_continuations(candidate_agent, candidate_session_id);
-CREATE INDEX IF NOT EXISTS idx_card_continuations_base ON card_continuations(base_agent, base_session_id);
+// V10 renames the legacy `card_continuations` table (created by pre-V10 V5)
+// to `record_continuations` and its `card_id` column to `record_id`. Only
+// runs when `card_continuations` exists; on fresh installs V5 already
+// provisions the new name so the guard returns false and V10 is a no-op.
+const SCHEMA_V10: &str = r#"
+ALTER TABLE card_continuations RENAME TO record_continuations;
+ALTER TABLE record_continuations RENAME COLUMN card_id TO record_id;
+DROP INDEX IF EXISTS idx_card_continuations_project;
+DROP INDEX IF EXISTS idx_card_continuations_candidate;
+DROP INDEX IF EXISTS idx_card_continuations_base;
+CREATE INDEX IF NOT EXISTS idx_record_continuations_project ON record_continuations(project_key, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_record_continuations_candidate ON record_continuations(candidate_agent, candidate_session_id);
+CREATE INDEX IF NOT EXISTS idx_record_continuations_base ON record_continuations(base_agent, base_session_id);
 "#;
 
 fn now_ms() -> i64 {
@@ -330,7 +364,23 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 10 {
+        if table_exists(conn, "card_continuations")? {
+            conn.execute_batch(SCHEMA_V10)?;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1")?;
+    let exists = stmt.exists(params![table])?;
+    Ok(exists)
 }
 
 fn memory_cards_has_qmd_path(conn: &Connection) -> Result<bool> {
@@ -400,6 +450,20 @@ fn opt_u64_to_i64(v: Option<u64>) -> Option<i64> {
 
 fn opt_i64_to_u64(v: Option<i64>) -> Option<u64> {
     v.map(|n| n as u64)
+}
+
+fn read_record_kind(
+    row: &rusqlite::Row<'_>,
+    idx: usize,
+) -> rusqlite::Result<MemoryRecordKind> {
+    let raw: String = row.get(idx)?;
+    MemoryRecordKind::from_db_str(&raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(e.to_string())),
+        )
+    })
 }
 
 fn upsert_subagent_inner(
@@ -718,7 +782,7 @@ impl SessionStore for SqliteStore {
 }
 
 impl MemoryStore for SqliteStore {
-    fn upsert_card(&self, card: &MemoryRecord) -> Result<()> {
+    fn upsert_record(&self, record: &MemoryRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO memory_cards (
@@ -726,16 +790,16 @@ impl MemoryStore for SqliteStore {
                 title, summary, body, kind, available, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
-                card.record_id,
-                card.project_key,
-                card.canonical_hash,
-                card.simhash,
-                card.title,
-                card.summary,
-                card.body,
-                card.kind.as_db_str(),
-                card.available as i64,
-                card.updated_at,
+                record.record_id,
+                record.project_key,
+                record.canonical_hash,
+                record.simhash,
+                record.title,
+                record.summary,
+                record.body,
+                record.kind.as_db_str(),
+                record.available as i64,
+                record.updated_at,
             ],
         )?;
         Ok(())
@@ -783,12 +847,21 @@ impl MemoryStore for SqliteStore {
         .map_err(Into::into)
     }
 
-    fn replace_card_sources(&self, card_id: &str, sources: &[MemorySource]) -> Result<()> {
+    fn remove_memory_artifact(&self, record_id: &str, backend: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM memory_artifacts WHERE record_id = ? AND backend = ?",
+            params![record_id, backend],
+        )?;
+        Ok(())
+    }
+
+    fn replace_record_sources(&self, record_id: &str, sources: &[MemorySource]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
             "DELETE FROM memory_sources WHERE record_id = ?",
-            params![card_id],
+            params![record_id],
         )?;
         for source in sources {
             tx.execute(
@@ -797,7 +870,7 @@ impl MemoryStore for SqliteStore {
                     line_start, line_end, byte_start, byte_end
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
-                    source.card_id,
+                    source.record_id,
                     source.agent,
                     source.session_id,
                     source.file_path,
@@ -812,21 +885,21 @@ impl MemoryStore for SqliteStore {
         Ok(())
     }
 
-    fn replace_card_continuation(
+    fn replace_record_continuation(
         &self,
-        card_id: &str,
-        continuation: Option<&CardContinuation>,
+        record_id: &str,
+        continuation: Option<&RecordContinuation>,
     ) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
-            "DELETE FROM card_continuations WHERE card_id = ?",
-            params![card_id],
+            "DELETE FROM record_continuations WHERE record_id = ?",
+            params![record_id],
         )?;
         if let Some(continuation) = continuation {
             tx.execute(
-                "INSERT INTO card_continuations (
-                    card_id, project_key,
+                "INSERT INTO record_continuations (
+                    record_id, project_key,
                     candidate_agent, candidate_session_id, candidate_file_path,
                     base_agent, base_session_id, base_file_path,
                     base_start_turn_index, base_start_line_start, base_start_byte_start,
@@ -835,7 +908,7 @@ impl MemoryStore for SqliteStore {
                     updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
-                    continuation.card_id,
+                    continuation.record_id,
                     continuation.project_key,
                     continuation.candidate_agent,
                     continuation.candidate_session_id,
@@ -860,7 +933,7 @@ impl MemoryStore for SqliteStore {
         Ok(())
     }
 
-    fn list_cards_for_source(
+    fn list_records_for_source(
         &self,
         agent: &str,
         session_id: &str,
@@ -875,7 +948,7 @@ impl MemoryStore for SqliteStore {
              WHERE s.agent = ? AND s.session_id = ? AND s.file_path = ?
              ORDER BY c.updated_at DESC",
         )?;
-        let cards = stmt
+        let records = stmt
             .query_map(params![agent, session_id, file_path], |row| {
                 Ok(MemoryRecord {
                     record_id: row.get(0)?,
@@ -885,25 +958,25 @@ impl MemoryStore for SqliteStore {
                     title: row.get(4)?,
                     summary: row.get(5)?,
                     body: row.get(6)?,
-                    kind: MemoryRecordKind::from_db_str(&row.get::<_, String>(7)?),
+                    kind: read_record_kind(row, 7)?,
                     available: row.get::<_, i64>(8)? != 0,
                     updated_at: row.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(cards)
+        Ok(records)
     }
 
-    fn mark_card_unavailable(&self, card_id: &str) -> Result<()> {
+    fn mark_record_unavailable(&self, record_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE memory_cards SET available = 0 WHERE record_id = ?",
-            params![card_id],
+            params![record_id],
         )?;
         Ok(())
     }
 
-    fn mark_source_cards_unavailable(
+    fn mark_source_records_unavailable(
         &self,
         agent: &str,
         session_id: &str,
@@ -923,7 +996,7 @@ impl MemoryStore for SqliteStore {
         Ok(())
     }
 
-    fn list_project_cards(&self, project_key: &str) -> Result<Vec<MemoryRecord>> {
+    fn list_project_records(&self, project_key: &str) -> Result<Vec<MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT record_id, project_key, canonical_hash, simhash,
@@ -932,7 +1005,7 @@ impl MemoryStore for SqliteStore {
              WHERE project_key = ?
              ORDER BY updated_at DESC",
         )?;
-        let cards = stmt
+        let records = stmt
             .query_map(params![project_key], |row| {
                 Ok(MemoryRecord {
                     record_id: row.get(0)?,
@@ -942,16 +1015,16 @@ impl MemoryStore for SqliteStore {
                     title: row.get(4)?,
                     summary: row.get(5)?,
                     body: row.get(6)?,
-                    kind: MemoryRecordKind::from_db_str(&row.get::<_, String>(7)?),
+                    kind: read_record_kind(row, 7)?,
                     available: row.get::<_, i64>(8)? != 0,
                     updated_at: row.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(cards)
+        Ok(records)
     }
 
-    fn card_by_id(&self, card_id: &str) -> Result<Option<MemoryRecord>> {
+    fn record_by_id(&self, record_id: &str) -> Result<Option<MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT record_id, project_key, canonical_hash, simhash,
@@ -959,8 +1032,8 @@ impl MemoryStore for SqliteStore {
              FROM memory_cards
              WHERE record_id = ?",
         )?;
-        let card = stmt
-            .query_row(params![card_id], |row| {
+        let record = stmt
+            .query_row(params![record_id], |row| {
                 Ok(MemoryRecord {
                     record_id: row.get(0)?,
                     project_key: row.get(1)?,
@@ -969,16 +1042,16 @@ impl MemoryStore for SqliteStore {
                     title: row.get(4)?,
                     summary: row.get(5)?,
                     body: row.get(6)?,
-                    kind: MemoryRecordKind::from_db_str(&row.get::<_, String>(7)?),
+                    kind: read_record_kind(row, 7)?,
                     available: row.get::<_, i64>(8)? != 0,
                     updated_at: row.get(9)?,
                 })
             })
             .optional()?;
-        Ok(card)
+        Ok(record)
     }
 
-    fn sources_for_card(&self, card_id: &str) -> Result<Vec<MemorySource>> {
+    fn sources_for_record(&self, record_id: &str) -> Result<Vec<MemorySource>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT record_id, agent, session_id, file_path,
@@ -988,10 +1061,10 @@ impl MemoryStore for SqliteStore {
              ORDER BY agent ASC, session_id ASC, line_start ASC",
         )?;
         let sources = stmt
-            .query_map(params![card_id], |row| {
+            .query_map(params![record_id], |row| {
                 let file_path: String = row.get(3)?;
                 Ok(MemorySource {
-                    card_id: row.get(0)?,
+                    record_id: row.get(0)?,
                     agent: row.get(1)?,
                     session_id: row.get(2)?,
                     file_path: file_path.clone(),
@@ -1008,42 +1081,21 @@ impl MemoryStore for SqliteStore {
         Ok(sources)
     }
 
-    fn continuation_for_card(&self, card_id: &str) -> Result<Option<CardContinuation>> {
+    fn continuation_for_record(&self, record_id: &str) -> Result<Option<RecordContinuation>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT card_id, project_key,
+            "SELECT record_id, project_key,
                     candidate_agent, candidate_session_id, candidate_file_path,
                     base_agent, base_session_id, base_file_path,
                     base_start_turn_index, base_start_line_start, base_start_byte_start,
                     base_end_turn_index, base_end_line_end, base_end_byte_end,
                     candidate_trim_turn_start, candidate_trim_line_start, candidate_trim_byte_start,
                     updated_at
-             FROM card_continuations
-             WHERE card_id = ?",
+             FROM record_continuations
+             WHERE record_id = ?",
         )?;
         let continuation = stmt
-            .query_row(params![card_id], |row| {
-                Ok(CardContinuation {
-                    card_id: row.get(0)?,
-                    project_key: row.get(1)?,
-                    candidate_agent: row.get(2)?,
-                    candidate_session_id: row.get(3)?,
-                    candidate_file_path: row.get(4)?,
-                    base_agent: row.get(5)?,
-                    base_session_id: row.get(6)?,
-                    base_file_path: row.get(7)?,
-                    base_start_turn_index: row.get::<_, i64>(8)? as usize,
-                    base_start_line_start: opt_i64_to_u64(row.get(9)?),
-                    base_start_byte_start: opt_i64_to_u64(row.get(10)?),
-                    base_end_turn_index: row.get::<_, i64>(11)? as usize,
-                    base_end_line_end: opt_i64_to_u64(row.get(12)?),
-                    base_end_byte_end: opt_i64_to_u64(row.get(13)?),
-                    candidate_trim_turn_start: row.get::<_, i64>(14)? as usize,
-                    candidate_trim_line_start: opt_i64_to_u64(row.get(15)?),
-                    candidate_trim_byte_start: opt_i64_to_u64(row.get(16)?),
-                    updated_at: row.get(17)?,
-                })
-            })
+            .query_row(params![record_id], record_continuation_from_row)
             .optional()?;
         Ok(continuation)
     }
@@ -1052,41 +1104,22 @@ impl MemoryStore for SqliteStore {
         &self,
         base_agent: &str,
         base_session_id: &str,
-    ) -> Result<Vec<CardContinuation>> {
+    ) -> Result<Vec<RecordContinuation>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT card_id, project_key,
+            "SELECT record_id, project_key,
                     candidate_agent, candidate_session_id, candidate_file_path,
                     base_agent, base_session_id, base_file_path,
                     base_start_turn_index, base_start_line_start, base_start_byte_start,
                     base_end_turn_index, base_end_line_end, base_end_byte_end,
                     candidate_trim_turn_start, candidate_trim_line_start, candidate_trim_byte_start,
                     updated_at
-             FROM card_continuations
+             FROM record_continuations
              WHERE base_agent = ? AND base_session_id = ?
-             ORDER BY updated_at DESC, candidate_session_id ASC, card_id ASC",
+             ORDER BY updated_at DESC, candidate_session_id ASC, record_id ASC",
         )?;
         let rows = stmt.query_map(params![base_agent, base_session_id], |row| {
-            Ok(CardContinuation {
-                card_id: row.get(0)?,
-                project_key: row.get(1)?,
-                candidate_agent: row.get(2)?,
-                candidate_session_id: row.get(3)?,
-                candidate_file_path: row.get(4)?,
-                base_agent: row.get(5)?,
-                base_session_id: row.get(6)?,
-                base_file_path: row.get(7)?,
-                base_start_turn_index: row.get::<_, i64>(8)? as usize,
-                base_start_line_start: opt_i64_to_u64(row.get(9)?),
-                base_start_byte_start: opt_i64_to_u64(row.get(10)?),
-                base_end_turn_index: row.get::<_, i64>(11)? as usize,
-                base_end_line_end: opt_i64_to_u64(row.get(12)?),
-                base_end_byte_end: opt_i64_to_u64(row.get(13)?),
-                candidate_trim_turn_start: row.get::<_, i64>(14)? as usize,
-                candidate_trim_line_start: opt_i64_to_u64(row.get(15)?),
-                candidate_trim_byte_start: opt_i64_to_u64(row.get(16)?),
-                updated_at: row.get(17)?,
-            })
+            record_continuation_from_row(row)
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1095,47 +1128,28 @@ impl MemoryStore for SqliteStore {
         &self,
         base_agent: &str,
         base_session_id: &str,
-    ) -> Result<Vec<CardContinuation>> {
+    ) -> Result<Vec<RecordContinuation>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let affected: Vec<CardContinuation> = {
+        let affected: Vec<RecordContinuation> = {
             let mut stmt = tx.prepare(
-                "SELECT card_id, project_key,
+                "SELECT record_id, project_key,
                         candidate_agent, candidate_session_id, candidate_file_path,
                         base_agent, base_session_id, base_file_path,
                         base_start_turn_index, base_start_line_start, base_start_byte_start,
                         base_end_turn_index, base_end_line_end, base_end_byte_end,
                         candidate_trim_turn_start, candidate_trim_line_start, candidate_trim_byte_start,
                         updated_at
-                 FROM card_continuations
+                 FROM record_continuations
                  WHERE base_agent = ? AND base_session_id = ?",
             )?;
             let rows = stmt.query_map(params![base_agent, base_session_id], |row| {
-                Ok(CardContinuation {
-                    card_id: row.get(0)?,
-                    project_key: row.get(1)?,
-                    candidate_agent: row.get(2)?,
-                    candidate_session_id: row.get(3)?,
-                    candidate_file_path: row.get(4)?,
-                    base_agent: row.get(5)?,
-                    base_session_id: row.get(6)?,
-                    base_file_path: row.get(7)?,
-                    base_start_turn_index: row.get::<_, i64>(8)? as usize,
-                    base_start_line_start: opt_i64_to_u64(row.get(9)?),
-                    base_start_byte_start: opt_i64_to_u64(row.get(10)?),
-                    base_end_turn_index: row.get::<_, i64>(11)? as usize,
-                    base_end_line_end: opt_i64_to_u64(row.get(12)?),
-                    base_end_byte_end: opt_i64_to_u64(row.get(13)?),
-                    candidate_trim_turn_start: row.get::<_, i64>(14)? as usize,
-                    candidate_trim_line_start: opt_i64_to_u64(row.get(15)?),
-                    candidate_trim_byte_start: opt_i64_to_u64(row.get(16)?),
-                    updated_at: row.get(17)?,
-                })
+                record_continuation_from_row(row)
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         tx.execute(
-            "DELETE FROM card_continuations
+            "DELETE FROM record_continuations
              WHERE base_agent = ? AND base_session_id = ?",
             params![base_agent, base_session_id],
         )?;
@@ -1353,4 +1367,248 @@ fn memory_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryJob> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
+}
+
+fn record_continuation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RecordContinuation> {
+    Ok(RecordContinuation {
+        record_id: row.get(0)?,
+        project_key: row.get(1)?,
+        candidate_agent: row.get(2)?,
+        candidate_session_id: row.get(3)?,
+        candidate_file_path: row.get(4)?,
+        base_agent: row.get(5)?,
+        base_session_id: row.get(6)?,
+        base_file_path: row.get(7)?,
+        base_start_turn_index: row.get::<_, i64>(8)? as usize,
+        base_start_line_start: opt_i64_to_u64(row.get(9)?),
+        base_start_byte_start: opt_i64_to_u64(row.get(10)?),
+        base_end_turn_index: row.get::<_, i64>(11)? as usize,
+        base_end_line_end: opt_i64_to_u64(row.get(12)?),
+        base_end_byte_end: opt_i64_to_u64(row.get(13)?),
+        candidate_trim_turn_start: row.get::<_, i64>(14)? as usize,
+        candidate_trim_line_start: opt_i64_to_u64(row.get(15)?),
+        candidate_trim_byte_start: opt_i64_to_u64(row.get(16)?),
+        updated_at: row.get(17)?,
+    })
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_db(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}.db"))
+    }
+
+    // Verify a synthetic pre-V8 schema (memory_cards uses `card_id` + `qmd_path`
+    // and there's no `memory_artifacts` table or `memory_jobs.backend` column)
+    // migrates cleanly into the current shape and existing rows survive the
+    // rename / artifact extraction.
+    #[test]
+    fn migrates_pre_v8_database_to_current_schema() {
+        let path = unique_db("sessio-mig-prev8");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+                INSERT INTO schema_migrations(version) VALUES (1),(2),(3),(4),(5),(6),(7);
+                CREATE TABLE sessions (
+                    agent TEXT NOT NULL, session_id TEXT NOT NULL, scope TEXT NOT NULL,
+                    file_path TEXT NOT NULL, project_path TEXT, project_name TEXT,
+                    started_at INTEGER, updated_at INTEGER,
+                    message_count INTEGER NOT NULL DEFAULT 0, first_user_message TEXT,
+                    file_size INTEGER NOT NULL DEFAULT 0, file_mtime INTEGER,
+                    partial INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 1,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    last_indexed_at INTEGER NOT NULL, forked_from_id TEXT,
+                    PRIMARY KEY (agent, session_id, scope)
+                );
+                CREATE TABLE subagents (
+                    parent_agent TEXT NOT NULL, parent_session_id TEXT NOT NULL,
+                    subagent_id TEXT NOT NULL, file_path TEXT NOT NULL,
+                    agent_type TEXT, description TEXT,
+                    started_at INTEGER, updated_at INTEGER,
+                    message_count INTEGER NOT NULL DEFAULT 0, first_user_message TEXT,
+                    file_size INTEGER NOT NULL DEFAULT 0, file_mtime INTEGER,
+                    partial INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (parent_agent, parent_session_id, subagent_id)
+                );
+                CREATE TABLE memory_cards (
+                    card_id TEXT PRIMARY KEY, project_key TEXT NOT NULL,
+                    canonical_hash TEXT NOT NULL, simhash TEXT,
+                    qmd_path TEXT NOT NULL,
+                    title TEXT NOT NULL, summary TEXT, body TEXT NOT NULL,
+                    available INTEGER NOT NULL DEFAULT 1,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE memory_sources (
+                    card_id TEXT NOT NULL, agent TEXT NOT NULL,
+                    session_id TEXT NOT NULL, file_path TEXT NOT NULL,
+                    line_start INTEGER, line_end INTEGER,
+                    byte_start INTEGER, byte_end INTEGER,
+                    PRIMARY KEY(card_id, agent, session_id, file_path, line_start, line_end)
+                );
+                CREATE TABLE turn_fingerprints (
+                    project_key TEXT NOT NULL, agent TEXT NOT NULL,
+                    session_id TEXT NOT NULL, turn_index INTEGER NOT NULL,
+                    role TEXT NOT NULL, canonical_hash TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    line_start INTEGER, line_end INTEGER,
+                    byte_start INTEGER, byte_end INTEGER,
+                    text_len INTEGER NOT NULL DEFAULT 5,
+                    PRIMARY KEY(project_key, agent, session_id, turn_index)
+                );
+                CREATE TABLE memory_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_key TEXT NOT NULL,
+                    scope TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+                    error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE card_continuations (
+                    card_id TEXT PRIMARY KEY,
+                    project_key TEXT NOT NULL,
+                    candidate_agent TEXT NOT NULL,
+                    candidate_session_id TEXT NOT NULL,
+                    candidate_file_path TEXT NOT NULL,
+                    base_agent TEXT NOT NULL,
+                    base_session_id TEXT NOT NULL,
+                    base_file_path TEXT NOT NULL,
+                    base_start_turn_index INTEGER NOT NULL,
+                    base_start_line_start INTEGER,
+                    base_start_byte_start INTEGER,
+                    base_end_turn_index INTEGER NOT NULL,
+                    base_end_line_end INTEGER,
+                    base_end_byte_end INTEGER,
+                    candidate_trim_turn_start INTEGER NOT NULL,
+                    candidate_trim_line_start INTEGER,
+                    candidate_trim_byte_start INTEGER,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO memory_cards(card_id, project_key, canonical_hash, qmd_path, title, body, updated_at)
+                    VALUES ('sessio-codex-x', 'proj', 'h1', '/legacy/path/sessio-codex-x.md', 'T', 'B', 100);
+                INSERT INTO memory_sources(card_id, agent, session_id, file_path)
+                    VALUES ('sessio-codex-x', 'codex', 'x', '/tmp/x.jsonl');
+                INSERT INTO memory_jobs(project_key, scope, kind, status, created_at, updated_at)
+                    VALUES ('proj', '/tmp/proj', 'memory_build', 'succeeded', 1, 2);
+                "#,
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        // Card row survived rename: card_id → record_id and got default kind.
+        let (record_id, kind, available): (String, String, i64) = conn
+            .query_row(
+                "SELECT record_id, kind, available FROM memory_cards WHERE record_id = ?",
+                params!["sessio-codex-x"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(record_id, "sessio-codex-x");
+        assert_eq!(kind, "session");
+        assert_eq!(available, 1);
+
+        // memory_artifacts row was populated from the legacy qmd_path.
+        let (artifact_record_id, backend, uri, hash): (String, String, String, String) = conn
+            .query_row(
+                "SELECT record_id, backend, artifact_uri, content_hash FROM memory_artifacts WHERE record_id = ?",
+                params!["sessio-codex-x"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(artifact_record_id, "sessio-codex-x");
+        assert_eq!(backend, "qmd");
+        assert_eq!(uri, "/legacy/path/sessio-codex-x.md");
+        assert_eq!(hash, "h1");
+
+        // memory_sources row was renamed: card_id → record_id.
+        let source_record_id: String = conn
+            .query_row(
+                "SELECT record_id FROM memory_sources WHERE session_id = ?",
+                params!["x"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_record_id, "sessio-codex-x");
+
+        // memory_jobs.backend column was added with default 'qmd'.
+        let job_backend: String = conn
+            .query_row(
+                "SELECT backend FROM memory_jobs WHERE project_key = ?",
+                params!["proj"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_backend, "qmd");
+
+        let qmd_path_present = {
+            let mut stmt = conn.prepare("PRAGMA table_info(memory_cards)").unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            let mut found = false;
+            while let Some(row) = rows.next().unwrap() {
+                let name: String = row.get(1).unwrap();
+                if name == "qmd_path" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        assert!(!qmd_path_present, "qmd_path column must be dropped");
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Verify a fresh install reaches the post-V8/V9 shape without ever
+    // running the V8 column rewrite (qmd_path never exists).
+    #[test]
+    fn fresh_install_skips_v8_column_rewrite() {
+        let path = unique_db("sessio-mig-fresh");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let conn = store.conn.lock().unwrap();
+        let columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(memory_cards)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(columns.contains(&"record_id".to_string()));
+        assert!(columns.contains(&"kind".to_string()));
+        assert!(!columns.contains(&"card_id".to_string()));
+        assert!(!columns.contains(&"qmd_path".to_string()));
+
+        // memory_artifacts table exists from V3 already.
+        let artifact_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_artifacts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifact_table, 1);
+
+        // memory_jobs.backend column is present from V3.
+        let job_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(memory_jobs)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(job_columns.contains(&"backend".to_string()));
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
 }

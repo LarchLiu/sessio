@@ -5,7 +5,7 @@ description: Search and resolve project-level Sessio session memory. Use this wh
 
 # Sessio Memory
 
-Use Sessio as the source of truth for project session memory. Sessio stores compact project memory cards and source references; raw JSONL remains outside this skill and should only be accessed through Sessio commands.
+Use Sessio as the source of truth for project session memory. Sessio stores compact project memory records and source references; raw JSONL remains outside this skill and should only be accessed through Sessio commands.
 
 ## Default Workflow
 
@@ -16,33 +16,33 @@ Use Sessio as the source of truth for project session memory. Sessio stores comp
 sessio memory search --project "$PWD" "<query>" --json
 ```
 
-3. Read the JSON response. Use the stable `hits` array and `backendError` field. The qmd-internal payload is **not** included by default; pass `--include-raw` only when debugging the backend.
-4. If `hits` contains useful memory cards, summarize only what those hits support.
-5. If the user asks for details or source provenance, resolve a card:
+3. Read the JSON response. Use the stable `hits` array and `backendError` field. Each hit carries a `recordId` (the stable Sessio memory record identifier). The qmd-internal payload is **not** included by default; pass `--include-raw` only when debugging the backend.
+4. If `hits` contains useful records, summarize only what those hits support.
+5. If the user asks for details or source provenance, resolve a record:
 
 ```bash
-sessio memory resolve --card-id "<card_id>" --json
+sessio memory resolve --record-id "<record_id>" --json
 ```
 
-6. If the user asks which base card covered a specific card, use:
+6. If the user asks which base record covered a specific record, use:
 
 ```bash
-sessio memory covered-by --card-id "<card_id>" --json
+sessio memory covered-by --record-id "<record_id>" --json
 ```
 
-7. If the user asks which cards were covered by a base card, use:
+7. If the user asks which records were covered by a base record, use:
 
 ```bash
-sessio memory base --card-id "<card_id>" --json
+sessio memory base --record-id "<record_id>" --json
 ```
 
 8. If search returns no hits, an empty result, or a non-null `backendError`, say that Sessio memory did not return a usable match. Do not invent historical context.
 
-When a hit, resolved card, or `covered-by`/`base` result contains continuation metadata:
+When a hit, resolved record, or `covered-by`/`base` result contains continuation metadata:
 
 - Treat `continuation` / `continuationSummary` as provenance about replay trimming, not as the substantive project memory itself.
-- Use it to explain where a card's kept suffix came from or which earlier session covered the trimmed prefix.
-- Use `covered-by` when the user asks "what covered this card?" and `base` when they ask "what cards did this one cover?".
+- Use it to explain where a record's kept suffix came from or which earlier session covered the trimmed prefix.
+- Use `covered-by` when the user asks "what covered this record?" and `base` when they ask "what records did this one cover?".
 - Do not quote raw turn/byte ranges unless the user is asking about dedupe/provenance mechanics.
 
 ## Commands
@@ -65,40 +65,41 @@ Inspect background memory/qmd job state when search fails unexpectedly:
 sessio memory jobs --project-key "<project_key>" --json
 ```
 
-Resolve sources for a card:
+Resolve sources for a record:
 
 ```bash
-sessio memory resolve --card-id "<card_id>" --json
+sessio memory resolve --record-id "<record_id>" --json
 ```
 
 Read a raw source excerpt for debugging provenance only when needed:
 
 ```bash
-sessio memory resolve --card-id "<card_id>" --include-source-excerpt --json
+sessio memory resolve --record-id "<record_id>" --include-source-excerpt --json
 ```
 
-Inspect cards covered by a base card:
+Inspect records covered by a base record:
 
 ```bash
-sessio memory base --card-id "<card_id>" --json
+sessio memory base --record-id "<record_id>" --json
 ```
 
-Inspect which base card covered a given card:
+Inspect which base record covered a given record:
 
 ```bash
-sessio memory covered-by --card-id "<card_id>" --json
+sessio memory covered-by --record-id "<record_id>" --json
 ```
 
 ## Interpretation Rules
 
 - Do not call `qmd` directly from this skill.
 - Do not parse agent JSONL directly from this skill.
-- Prefer concise answers that cite card titles, summaries, and source refs when available.
+- Prefer concise answers that cite record titles, summaries, and source refs when available.
 - Distinguish clearly between "Sessio memory says..." and your own inference.
 - If `backendError` is present, report it briefly and suggest running `sessio memory status --json` only if the user wants troubleshooting.
 - Do not pass `--include-raw` in normal workflows; it is for debugging the qmd backend.
 - Do not use `--include-source-excerpt` in normal workflows; it is for provenance debugging and can return large payloads.
 - If `continuationSummary` is present, prefer that human-readable summary over unpacking raw `continuation` fields by hand.
+- The CLI accepts `--card-id` as a deprecated alias for `--record-id`. Always use `--record-id` in new commands.
 
 ## No-Hit Behavior
 
