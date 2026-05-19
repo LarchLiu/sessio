@@ -23,6 +23,7 @@ impl Agent {
 pub struct SessionInfo {
     pub id: String,
     pub agent: Agent,
+    pub forked_from_id: Option<String>,
     pub project_path: Option<String>,
     pub project_name: Option<String>,
     pub started_at: Option<i64>,

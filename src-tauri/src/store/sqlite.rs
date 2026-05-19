@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::memory::{MemoryCard, MemoryJob, MemorySource, MemoryStore, TurnFingerprint};
+use crate::memory::{
+    MemoryCard, MemoryJob, MemorySource, MemoryStore, TurnFingerprint, TurnFingerprintCandidate,
+};
 use crate::models::{Agent, SessionInfo, SubagentInfo};
 use crate::providers::types::SourceLocation;
 use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
@@ -156,6 +158,10 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, status);
 "#;
 
+const SCHEMA_V4: &str = r#"
+ALTER TABLE turn_fingerprints ADD COLUMN text_len INTEGER NOT NULL DEFAULT 0;
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -195,6 +201,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V3)?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)",
+            [],
+        )?;
+    }
+    if current < 4 {
+        let _ = conn.execute_batch(SCHEMA_V4);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)",
             [],
         )?;
     }
@@ -416,6 +429,7 @@ impl SessionStore for SqliteStore {
                 Ok(SessionInfo {
                     id: row.get(1)?,
                     agent,
+                    forked_from_id: None,
                     file_path: row.get(2)?,
                     project_path: row.get(3)?,
                     project_name: row.get(4)?,
@@ -792,8 +806,8 @@ impl MemoryStore for SqliteStore {
                 "INSERT OR REPLACE INTO turn_fingerprints (
                     project_key, agent, session_id, turn_index, role,
                     canonical_hash, file_path,
-                    line_start, line_end, byte_start, byte_end
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    text_len, line_start, line_end, byte_start, byte_end
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     fp.project_key,
                     fp.agent,
@@ -802,6 +816,7 @@ impl MemoryStore for SqliteStore {
                     fp.role,
                     fp.canonical_hash,
                     fp.location.file_path,
+                    fp.text_len as i64,
                     opt_u64_to_i64(fp.location.line_start),
                     opt_u64_to_i64(fp.location.line_end),
                     opt_u64_to_i64(fp.location.byte_start),
@@ -822,7 +837,7 @@ impl MemoryStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT project_key, agent, session_id, turn_index, role,
-                    canonical_hash, file_path,
+                    canonical_hash, file_path, text_len,
                     line_start, line_end, byte_start, byte_end
              FROM turn_fingerprints
              WHERE project_key = ? AND agent = ? AND session_id = ?
@@ -837,12 +852,13 @@ impl MemoryStore for SqliteStore {
                 turn_index: row.get::<_, i64>(3)? as usize,
                 role: row.get(4)?,
                 canonical_hash: row.get(5)?,
+                text_len: row.get::<_, i64>(7)? as usize,
                 location: SourceLocation {
                     file_path,
-                    line_start: opt_i64_to_u64(row.get(7)?),
-                    line_end: opt_i64_to_u64(row.get(8)?),
-                    byte_start: opt_i64_to_u64(row.get(9)?),
-                    byte_end: opt_i64_to_u64(row.get(10)?),
+                    line_start: opt_i64_to_u64(row.get(8)?),
+                    line_end: opt_i64_to_u64(row.get(9)?),
+                    byte_start: opt_i64_to_u64(row.get(10)?),
+                    byte_end: opt_i64_to_u64(row.get(11)?),
                 },
             })
         })?;
@@ -851,6 +867,53 @@ impl MemoryStore for SqliteStore {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    fn find_turn_fingerprint_candidates(
+        &self,
+        project_key: &str,
+        exclude_agent: &str,
+        exclude_session_id: &str,
+        canonical_hashes: &[&str],
+        limit: usize,
+    ) -> Result<Vec<TurnFingerprintCandidate>> {
+        if canonical_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let placeholders = canonical_hashes
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT agent, session_id, file_path, COUNT(*) AS shared_hashes
+             FROM turn_fingerprints
+             WHERE project_key = ?
+               AND NOT (agent = ? AND session_id = ?)
+               AND canonical_hash IN ({})
+             GROUP BY agent, session_id, file_path
+             ORDER BY shared_hashes DESC, session_id ASC
+             LIMIT {}",
+            placeholders, limit
+        );
+        let mut params: Vec<&dyn ToSql> = Vec::with_capacity(3 + canonical_hashes.len());
+        params.push(&project_key);
+        params.push(&exclude_agent);
+        params.push(&exclude_session_id);
+        for hash in canonical_hashes {
+            params.push(hash);
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(params), |row| {
+            Ok(TurnFingerprintCandidate {
+                agent: row.get(0)?,
+                session_id: row.get(1)?,
+                file_path: row.get(2)?,
+                shared_hashes: row.get::<_, i64>(3)? as usize,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn record_memory_job(

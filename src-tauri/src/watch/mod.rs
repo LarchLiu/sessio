@@ -276,7 +276,10 @@ mod tests {
         let task = provider_task_to_index_task(ProviderTask::RefreshProjectMappings {
             agent: AgentKind::new("gemini"),
         });
-        assert!(matches!(task, Some(IndexTask::RefreshGeminiProjectMappings)));
+        assert!(matches!(
+            task,
+            Some(IndexTask::RefreshGeminiProjectMappings)
+        ));
     }
 
     #[test]

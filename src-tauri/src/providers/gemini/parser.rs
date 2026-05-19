@@ -75,7 +75,8 @@ pub fn read_messages_with_locations(
     let text = fs::read_to_string(path)?;
     let arr: Vec<serde_json::Value> = serde_json::from_str(&text)?;
     let mut out = Vec::new();
-    let location = crate::providers::types::SourceLocation::file(path.to_string_lossy().to_string());
+    let location =
+        crate::providers::types::SourceLocation::file(path.to_string_lossy().to_string());
     for item in arr {
         let sid = item.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
         if sid != session_id {
@@ -217,6 +218,7 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
         out.push(SessionInfo {
             id: sid,
             agent: Agent::Gemini,
+            forked_from_id: None,
             project_path: project_path.map(String::from),
             project_name: project_name.clone(),
             started_at: agg.earliest,

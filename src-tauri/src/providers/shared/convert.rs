@@ -3,8 +3,8 @@ use std::path::Path;
 
 use crate::models::{Agent, SessionInfo, SessionMessage};
 use crate::providers::types::{
-    AgentKind, MessageContent, MessageEvent, MessageRole, ProjectRef, SessionRecord, SessionSource,
-    SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
+    AgentKind, MessageContent, MessageEvent, MessageRole, Metadata, ProjectRef, SessionRecord,
+    SessionSource, SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
 };
 
 const TOOL_RESULT_PREVIEW_CHARS: usize = 1200;
@@ -54,6 +54,15 @@ pub fn session_record_from_info(info: &SessionInfo) -> SessionRecord {
 }
 
 pub fn session_source_from_info(info: &SessionInfo) -> SessionSource {
+    let mut metadata = Metadata::default();
+    if info.agent == Agent::Codex {
+        if let Some(forked_from_id) = &info.forked_from_id {
+            metadata.insert(
+                "forked_from_id".to_string(),
+                serde_json::Value::String(forked_from_id.clone()),
+            );
+        }
+    }
     SessionSource {
         agent: agent_kind(info.agent),
         session_id: info.id.clone(),
@@ -65,7 +74,7 @@ pub fn session_source_from_info(info: &SessionInfo) -> SessionSource {
         } else {
             SourceKind::MainSession
         },
-        metadata: Default::default(),
+        metadata,
     }
 }
 

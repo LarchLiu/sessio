@@ -17,8 +17,9 @@ use crate::memory::qmd::{self, QmdOptions};
 use crate::memory::MemoryStore;
 use crate::models::Agent;
 use crate::providers;
+use crate::providers::shared::convert::session_source_from_info;
 use crate::providers::types::ProjectRef;
-use crate::providers::types::{AgentKind, SessionSource, SourceKind};
+use crate::providers::types::SessionSource;
 use crate::store::SessionStore;
 
 #[derive(Debug, Clone)]
@@ -130,7 +131,8 @@ fn run_loop(
             log::info!("indexer: executing task {:?}", task);
             match execute(&task, store.as_ref()) {
                 Ok(outcome) => {
-                    if !outcome.affected_projects.is_empty() || !outcome.affected_sources.is_empty() {
+                    if !outcome.affected_projects.is_empty() || !outcome.affected_sources.is_empty()
+                    {
                         log::info!(
                             "indexer: task {:?} affected {} projects and {} sources",
                             task,
@@ -825,29 +827,7 @@ fn push_session_project(outcome: &mut TaskOutcome, session: &crate::models::Sess
 }
 
 fn push_session_source(outcome: &mut TaskOutcome, session: &crate::models::SessionInfo) {
-    let source = SessionSource {
-        agent: AgentKind::new(session.agent.as_str()),
-        session_id: session.id.clone(),
-        scope: session.file_path.clone(),
-        file_path: session.file_path.clone(),
-        project: session
-            .project_path
-            .as_ref()
-            .map(|project_path| ProjectRef {
-                project_key: providers::shared::convert::project_key_for_path_or_name(
-                    Some(project_path),
-                    session.project_name.as_deref(),
-                ),
-                project_path: Some(project_path.clone()),
-                project_name: session.project_name.clone(),
-            }),
-        source_kind: if session.archived {
-            SourceKind::Archive
-        } else {
-            SourceKind::MainSession
-        },
-        metadata: Default::default(),
-    };
+    let source = session_source_from_info(session);
     if outcome.affected_sources.iter().any(|existing| {
         existing.agent == source.agent
             && existing.session_id == source.session_id

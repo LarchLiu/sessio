@@ -1,4 +1,4 @@
-use crate::memory::hash::{card_hash, content_text, turn_content_hash};
+use crate::memory::hash::{card_hash, content_text, turn_content_hash, turn_content_len};
 use crate::memory::{MemoryCard, MemorySource, TurnFingerprint};
 use crate::providers::types::{
     MessageContent, MessageEvent, MessageRole, SessionSource, SourceLocation,
@@ -126,6 +126,7 @@ pub fn fingerprints_for_source(
             turn_index: event.turn_index,
             role: format!("{:?}", event.role).to_lowercase(),
             canonical_hash: turn_content_hash(event),
+            text_len: turn_content_len(event),
             location: event.location.clone(),
         })
         .collect()

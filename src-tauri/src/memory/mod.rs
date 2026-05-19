@@ -1,5 +1,6 @@
 pub mod build;
 pub mod cards;
+pub mod dedupe;
 pub mod hash;
 pub mod normalize;
 pub mod qmd;
@@ -44,7 +45,17 @@ pub struct TurnFingerprint {
     pub turn_index: usize,
     pub role: String,
     pub canonical_hash: String,
+    pub text_len: usize,
     pub location: SourceLocation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnFingerprintCandidate {
+    pub agent: String,
+    pub session_id: String,
+    pub file_path: String,
+    pub shared_hashes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +103,14 @@ pub trait MemoryStore: Send + Sync {
         agent: &str,
         session_id: &str,
     ) -> Result<Vec<TurnFingerprint>>;
+    fn find_turn_fingerprint_candidates(
+        &self,
+        project_key: &str,
+        exclude_agent: &str,
+        exclude_session_id: &str,
+        canonical_hashes: &[&str],
+        limit: usize,
+    ) -> Result<Vec<TurnFingerprintCandidate>>;
     fn record_memory_job(
         &self,
         project_key: &str,

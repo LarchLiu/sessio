@@ -68,9 +68,7 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
 // range) of the JSONL line each message was parsed from. One Codex line
 // produces at most one SessionMessage, so line_start == line_end and the
 // byte range covers the full line including its trailing newline.
-pub fn read_messages_with_locations(
-    path: &Path,
-) -> Result<Vec<(SessionMessage, SourceLocation)>> {
+pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, SourceLocation)>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut out = Vec::new();
@@ -133,6 +131,9 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
                 .and_then(|r| r.as_str())
                 .unwrap_or("")
                 .to_string();
+            if role == "developer" {
+                return None;
+            }
             let text = extract_message_text(payload).unwrap_or_default();
             if text.trim().is_empty() {
                 return None;
@@ -189,6 +190,7 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
     let scan = jsonl_scan::scan(path)?;
 
     let mut id: Option<String> = None;
+    let mut forked_from_id: Option<String> = None;
     let mut started_at: Option<i64> = None;
     let mut cwd: Option<String> = None;
     let mut first_user_message: Option<String> = None;
@@ -211,6 +213,12 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
             let payload = v.get("payload").cloned().unwrap_or_default();
             if id.is_none() {
                 id = payload.get("id").and_then(|x| x.as_str()).map(String::from);
+            }
+            if forked_from_id.is_none() {
+                forked_from_id = payload
+                    .get("forked_from_id")
+                    .and_then(|x| x.as_str())
+                    .map(String::from);
             }
             if started_at.is_none() {
                 started_at = payload
@@ -275,6 +283,7 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
                 .unwrap_or_default()
         }),
         agent: Agent::Codex,
+        forked_from_id,
         project_path: cwd,
         project_name,
         started_at,
@@ -392,6 +401,31 @@ mod tests {
         let slice_str = std::str::from_utf8(slice).unwrap();
         assert!(slice_str.starts_with(line2));
         assert!(slice_str.ends_with('\n'));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_with_locations_filters_developer_messages() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-developer-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let developer = r#"{"timestamp":"2026-05-18T05:09:14.900Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"internal instruction"}]}}"#;
+        let user = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real request"}]}}"#;
+        fs::write(&path, format!("{developer}\n{user}\n")).unwrap();
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0.role, "user");
+        assert_eq!(events[0].0.text, "real request");
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();

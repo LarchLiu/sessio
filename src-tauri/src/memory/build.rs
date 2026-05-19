@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::memory::cards::{cards_for_source, fingerprints_for_source};
+use crate::memory::dedupe::{should_suppress_source, DedupeAction};
 use crate::memory::normalize::normalize_events;
 use crate::memory::{MemoryCard, MemoryStore};
 use crate::providers::registry::ProviderRegistry;
@@ -152,7 +153,97 @@ pub fn build_project_memory(
                 continue;
             }
 
-            let generated = cards_for_source(&source, &events);
+            let fingerprints = fingerprints_for_source(&source, &events);
+            let mut card_events = events.as_slice();
+            if let Some(dedupe_match) = should_suppress_source(store, &source, &fingerprints)? {
+                match dedupe_match.action {
+                    DedupeAction::SuppressWholeSource => {
+                        summary.sources_skipped += 1;
+                        summary.errors.push(format!(
+                            "suppress {} {} by {} {} (shared_hashes={}, prefix_coverage={:.2}, total_coverage={:.2})",
+                            source.agent.as_str(),
+                            source.session_id,
+                            dedupe_match.source_agent,
+                            dedupe_match.source_session_id,
+                            dedupe_match.shared_hashes,
+                            dedupe_match.prefix_coverage,
+                            dedupe_match.total_coverage,
+                        ));
+                        if let Err(mark_error) = store.mark_source_cards_unavailable(
+                            source.agent.as_str(),
+                            &source.session_id,
+                            &source.file_path,
+                        ) {
+                            summary.errors.push(format!(
+                                "mark suppressed source unavailable {} {} failed: {mark_error}",
+                                source.agent.as_str(),
+                                source.file_path
+                            ));
+                        }
+                        if let Err(remove_error) =
+                            remove_existing_source_card_files(store, &options.output_root, &source)
+                        {
+                            summary.errors.push(format!(
+                                "remove suppressed source card files {} {} failed: {remove_error}",
+                                source.agent.as_str(),
+                                source.file_path
+                            ));
+                        }
+                        if let Err(fp_error) = clear_source_fingerprints(store, &source) {
+                            summary.errors.push(format!(
+                                "clear fingerprints {} {} failed: {fp_error}",
+                                source.agent.as_str(),
+                                source.file_path
+                            ));
+                        }
+                        continue;
+                    }
+                    DedupeAction::TrimPrefix => {
+                        let trim_at = events
+                            .iter()
+                            .position(|event| {
+                                event.turn_index >= dedupe_match.suffix_start_turn_index
+                            })
+                            .unwrap_or(events.len());
+                        card_events = &events[trim_at..];
+                        if card_events.is_empty() {
+                            summary.sources_skipped += 1;
+                            if let Err(mark_error) = store.mark_source_cards_unavailable(
+                                source.agent.as_str(),
+                                &source.session_id,
+                                &source.file_path,
+                            ) {
+                                summary.errors.push(format!(
+                                    "mark empty continuation tail unavailable {} {} failed: {mark_error}",
+                                    source.agent.as_str(),
+                                    source.file_path
+                                ));
+                            }
+                            if let Err(remove_error) = remove_existing_source_card_files(
+                                store,
+                                &options.output_root,
+                                &source,
+                            ) {
+                                summary.errors.push(format!(
+                                    "remove empty continuation tail files {} {} failed: {remove_error}",
+                                    source.agent.as_str(),
+                                    source.file_path
+                                ));
+                            }
+                            if let Err(fp_error) = clear_source_fingerprints(store, &source) {
+                                summary.errors.push(format!(
+                                    "clear fingerprints {} {} failed: {fp_error}",
+                                    source.agent.as_str(),
+                                    source.file_path
+                                ));
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let generated = cards_for_source(&source, card_events);
             if generated.is_empty() {
                 if let Err(mark_error) = store.mark_source_cards_unavailable(
                     source.agent.as_str(),
@@ -184,7 +275,6 @@ pub fn build_project_memory(
                 continue;
             }
             summary.sources_built += 1;
-            let fingerprints = fingerprints_for_source(&source, &events);
             store.replace_turn_fingerprints(
                 &project.project_key,
                 source.agent.as_str(),
@@ -273,7 +363,51 @@ pub fn build_source_memory(
         });
     }
 
-    let generated = cards_for_source(source, &events);
+    let fingerprints = fingerprints_for_source(source, &events);
+    let mut card_events = events.as_slice();
+    if let Some(dedupe_match) = should_suppress_source(store, source, &fingerprints)? {
+        match dedupe_match.action {
+            DedupeAction::SuppressWholeSource => {
+                for card in existing {
+                    if card.available {
+                        store.mark_card_unavailable(&card.card_id)?;
+                        remove_card_markdown(output_root, &card)?;
+                        marked_unavailable += 1;
+                    }
+                }
+                clear_source_fingerprints(store, source)?;
+                return Ok(MemoryBuildSourceResult {
+                    project_key: Some(project.project_key.clone()),
+                    cards_written: 0,
+                    cards_marked_unavailable: marked_unavailable,
+                });
+            }
+            DedupeAction::TrimPrefix => {
+                let trim_at = events
+                    .iter()
+                    .position(|event| event.turn_index >= dedupe_match.suffix_start_turn_index)
+                    .unwrap_or(events.len());
+                card_events = &events[trim_at..];
+                if card_events.is_empty() {
+                    for card in existing {
+                        if card.available {
+                            store.mark_card_unavailable(&card.card_id)?;
+                            remove_card_markdown(output_root, &card)?;
+                            marked_unavailable += 1;
+                        }
+                    }
+                    clear_source_fingerprints(store, source)?;
+                    return Ok(MemoryBuildSourceResult {
+                        project_key: Some(project.project_key.clone()),
+                        cards_written: 0,
+                        cards_marked_unavailable: marked_unavailable,
+                    });
+                }
+            }
+        }
+    }
+
+    let generated = cards_for_source(source, card_events);
     if generated.is_empty() {
         for card in existing {
             if card.available {
@@ -302,7 +436,6 @@ pub fn build_source_memory(
         }
     }
 
-    let fingerprints = fingerprints_for_source(source, &events);
     store.replace_turn_fingerprints(
         &project.project_key,
         source.agent.as_str(),
@@ -622,6 +755,137 @@ mod tests {
         assert!(second
             .iter()
             .all(|fp| fp.canonical_hash != initial_hash_for_turn_2));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_source_memory_trims_continuation_replay_prefix() {
+        let root = unique_temp_dir("sessio-memory-continuation-trim");
+        let db_path = root.join("memory.db");
+        let cards_root = root.join("cards-root");
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let project = ProjectRef {
+            project_key: "continuation-project".to_string(),
+            project_path: Some(root.join("project").to_string_lossy().to_string()),
+            project_name: Some("project".to_string()),
+        };
+        let existing_source = SessionSource {
+            agent: AgentKind::new("fake"),
+            session_id: "existing".to_string(),
+            scope: "scope".to_string(),
+            file_path: root.join("existing.jsonl").to_string_lossy().to_string(),
+            project: Some(project.clone()),
+            source_kind: SourceKind::MainSession,
+            metadata: Metadata::default(),
+        };
+        let continuation_source = SessionSource {
+            agent: AgentKind::new("fake"),
+            session_id: "continuation".to_string(),
+            scope: "scope".to_string(),
+            file_path: root
+                .join("continuation.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            project: Some(project),
+            source_kind: SourceKind::MainSession,
+            metadata: Metadata::default(),
+        };
+        let make_event = |source: &SessionSource, turn_index, role, text: &str| MessageEvent {
+            source: source.clone(),
+            event_id: None,
+            turn_index,
+            role,
+            content: MessageContent::Text {
+                text: text.to_string(),
+            },
+            timestamp: Some(turn_index as i64),
+            location: SourceLocation::file(source.file_path.clone()),
+            metadata: Metadata::default(),
+        };
+        let replay = vec![
+            (
+                MessageRole::User,
+                "Explain turn fingerprints in this project",
+            ),
+            (
+                MessageRole::Assistant,
+                "They are generated from role and canonical event text",
+            ),
+            (
+                MessageRole::User,
+                "So session id should not be part of the hash",
+            ),
+            (
+                MessageRole::Assistant,
+                "Correct, otherwise cross-session replay cannot match",
+            ),
+            (MessageRole::User, "How should continuation dedupe work"),
+            (
+                MessageRole::Assistant,
+                "It should compare ordered event sequences",
+            ),
+        ];
+        let existing_events = replay
+            .iter()
+            .enumerate()
+            .map(|(idx, (role, text))| make_event(&existing_source, idx, *role, text))
+            .collect::<Vec<_>>();
+        let mut existing_registry = ProviderRegistry::new();
+        existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
+        build_source_memory(&existing_registry, &store, &cards_root, &existing_source).unwrap();
+
+        let mut continuation_events = replay
+            .iter()
+            .enumerate()
+            .map(|(idx, (role, text))| make_event(&continuation_source, idx, *role, text))
+            .collect::<Vec<_>>();
+        continuation_events.push(make_event(
+            &continuation_source,
+            6,
+            MessageRole::User,
+            "Please implement prefix trim now",
+        ));
+        continuation_events.push(make_event(
+            &continuation_source,
+            7,
+            MessageRole::Assistant,
+            "I will generate the continuation card from suffix events only",
+        ));
+        let mut continuation_registry = ProviderRegistry::new();
+        continuation_registry.register(FakeProvider::new(
+            continuation_source.clone(),
+            continuation_events,
+        ));
+        let result = build_source_memory(
+            &continuation_registry,
+            &store,
+            &cards_root,
+            &continuation_source,
+        )
+        .unwrap();
+        assert_eq!(result.cards_written, 1);
+
+        let card_path = cards_root
+            .join("continuation-project")
+            .join("cards")
+            .join("sessio-fake-continuation.md");
+        let body = fs::read_to_string(card_path).unwrap();
+        assert!(!body.contains("Explain turn fingerprints in this project"));
+        assert!(!body.contains("They are generated from role and canonical event text"));
+        assert!(body.contains("Please implement prefix trim now"));
+        assert!(body.contains("I will generate the continuation card from suffix events only"));
+
+        let fingerprints = store
+            .list_turn_fingerprints("continuation-project", "fake", "continuation")
+            .unwrap();
+        assert_eq!(
+            fingerprints.len(),
+            8,
+            "fingerprints remain full-source for future overlap detection"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -61,11 +61,7 @@ impl AgentProvider for ClaudeProvider {
     }
 }
 
-fn classify_claude_event(
-    root: &Path,
-    agent: AgentKind,
-    event: &PathEvent,
-) -> Option<ProviderTask> {
+fn classify_claude_event(root: &Path, agent: AgentKind, event: &PathEvent) -> Option<ProviderTask> {
     let rel = event.path.strip_prefix(root).ok()?;
     let file_name = event
         .path

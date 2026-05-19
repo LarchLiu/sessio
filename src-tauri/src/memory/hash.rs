@@ -28,6 +28,12 @@ pub fn turn_content_hash(event: &MessageEvent) -> String {
     sha256_hex(&[&role, &text])
 }
 
+pub fn turn_content_len(event: &MessageEvent) -> usize {
+    canonical_text(&content_text(&event.content))
+        .chars()
+        .count()
+}
+
 pub fn card_hash(project_key: &str, title: &str, summary: &str, body: &str) -> String {
     let title = canonical_text(title);
     let summary = canonical_text(summary);

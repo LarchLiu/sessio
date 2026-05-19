@@ -102,6 +102,7 @@ pub fn scan_project_dir(project_dir: &Path) -> Result<Vec<SessionInfo>> {
         group.push(SessionInfo {
             id: sub_id,
             agent: Agent::Claude,
+            forked_from_id: None,
             project_path: None,
             project_name: None,
             started_at: earliest,
@@ -204,9 +205,7 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
 // SessionMessage entries (e.g. an assistant turn with text + tool_use);
 // all expansions share the originating line's location so resolve can
 // point back to the exact JSONL line.
-pub fn read_messages_with_locations(
-    path: &Path,
-) -> Result<Vec<(SessionMessage, SourceLocation)>> {
+pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, SourceLocation)>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut out = Vec::new();
@@ -504,6 +503,7 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
     Ok(Some(SessionInfo {
         id,
         agent: Agent::Claude,
+        forked_from_id: None,
         project_path: cwd,
         project_name,
         started_at: earliest_ts,
@@ -762,6 +762,7 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
     Some(SessionInfo {
         id: entry.session_id.clone(),
         agent: Agent::Claude,
+        forked_from_id: None,
         project_path: cwd,
         project_name,
         started_at,
