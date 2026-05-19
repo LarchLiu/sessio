@@ -53,6 +53,10 @@ function projectKey(s: SessionInfo): string {
   return s.projectPath ?? `__unknown__:${s.agent}`;
 }
 
+function sessionKey(s: SessionInfo): string {
+  return `${s.agent}:${s.filePath}:${s.id}`;
+}
+
 // Orphan main session that only exists to carry subagents (Claude cleaned
 // the main jsonl, no index entry either). Don't count it as a "real" session
 // but still show it in the list so subagents stay reachable.
@@ -76,6 +80,11 @@ export default function App() {
   const { lang, setLang, t } = useI18n();
   const update = useUpdateCheck(__APP_VERSION__);
   const listScrollRef = useRef<HTMLDivElement>(null);
+
+  const availableSessions = useMemo(
+    () => sessions.filter((s) => s.available),
+    [sessions]
+  );
 
   useEffect(() => {
     listScrollRef.current?.scrollTo(0, 0);
@@ -109,7 +118,7 @@ export default function App() {
     listSessions()
       .then((rows) => {
         if (cancelled) return;
-        setSessions(rows);
+        setSessions(rows.filter((s) => s.available));
       })
       .catch((err) => {
         if (cancelled) return;
@@ -131,7 +140,7 @@ export default function App() {
     const unlisten = listen("sessions_index_updated", () => {
       setIndexing(false);
       listSessions()
-        .then(setSessions)
+        .then((rows) => setSessions(rows.filter((s) => s.available)))
         .catch(() => {});
     });
     const statusUnlisten = listen("sessions_index_status", (event) => {
@@ -145,20 +154,32 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!selected) return;
+    const next = availableSessions.find((s) => sessionKey(s) === sessionKey(selected));
+    if (!next) {
+      setSelected(null);
+      return;
+    }
+    if (next !== selected) {
+      setSelected(next);
+    }
+  }, [availableSessions, selected]);
+
   const agentStats = useMemo(() => {
     const m: Record<Agent, { count: number; latest: number }> = {
       codex: { count: 0, latest: 0 },
       claude: { count: 0, latest: 0 },
       gemini: { count: 0, latest: 0 },
     };
-    for (const s of sessions) {
+    for (const s of availableSessions) {
       if (isSubagentOnly(s)) continue;
       m[s.agent].count += 1;
       const t = s.updatedAt ?? s.startedAt ?? 0;
       if (t > m[s.agent].latest) m[s.agent].latest = t;
     }
     return m;
-  }, [sessions]);
+  }, [availableSessions]);
 
   const agentOrdered = useMemo(
     () =>
@@ -174,7 +195,7 @@ export default function App() {
       { label: string; count: number; path: string | null; latest: number }
     >();
     const unknown = t("list.unknown_project");
-    for (const s of sessions) {
+    for (const s of availableSessions) {
       if (isSubagentOnly(s)) continue;
       const key = projectKey(s);
       const ts = s.updatedAt ?? s.startedAt ?? 0;
@@ -194,16 +215,16 @@ export default function App() {
     return [...m.entries()]
       .map(([key, v]) => ({ key, ...v }))
       .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label));
-  }, [sessions, t]);
+  }, [availableSessions, t]);
 
   const totalRealSessions = useMemo(
-    () => sessions.filter((s) => !isSubagentOnly(s)).length,
-    [sessions]
+    () => availableSessions.filter((s) => !isSubagentOnly(s)).length,
+    [availableSessions]
   );
 
   const recentForMenu = useMemo(
-    () => sessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
-    [sessions]
+    () => availableSessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
+    [availableSessions]
   );
 
   useEffect(() => {
@@ -219,12 +240,12 @@ export default function App() {
   }, [recentForMenu, t]);
 
   const visible = useMemo(() => {
-    return sessions.filter((s) => {
+    return availableSessions.filter((s) => {
       if (filter.kind === "agent" && s.agent !== filter.agent) return false;
       if (filter.kind === "project" && projectKey(s) !== filter.key) return false;
       return true;
     });
-  }, [sessions, filter]);
+  }, [availableSessions, filter]);
 
   const visibleCount = useMemo(
     () => visible.filter((s) => !isSubagentOnly(s)).length,
