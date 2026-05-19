@@ -20,6 +20,8 @@
 - Supports Claude subagents
 - Copies native `resume` commands for each agent
 - Generates cross-agent continuation commands
+- Exposes a CLI for listing sessions and working with project memory
+- Builds, searches, and resolves project memory cards
 - Provides a tray menu for quick access to recent sessions
 - Supports English and Chinese, plus light / dark / system themes
 - Checks GitHub for the latest release in production builds
@@ -136,6 +138,17 @@ You can:
 - Copy `resume` commands for the same agent
 - Copy `cross` commands to continue the context in another agent
 - Jump to recent sessions from the tray menu
+
+Sessio also runs as a CLI when invoked with arguments:
+
+```bash
+sessio sessions list --json
+sessio sessions messages --agent codex --session-id <id> --json
+sessio memory search --project "$PWD" <query> --json
+sessio memory resolve --record-id <id> --json
+```
+
+The `memory` namespace covers project-memory operations, including `build`, `search`, `resolve`, `base`, `covered-by`, `status`, `sync`, and `jobs`.
 
 If the original session files are cleaned up by the agent, Sessio keeps the index metadata when possible. When the message file is gone, the detail view will show that the content is no longer readable.
 

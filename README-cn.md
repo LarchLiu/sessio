@@ -20,6 +20,8 @@
 - 支持 Claude subagents 展示
 - 为原助手复制 `resume` 命令
 - 生成跨助手续写命令，把一个助手的上下文接续到另一个助手
+- 提供 CLI，可列出会话并操作项目记忆
+- 支持构建、检索和回源 project memory card
 - 托盘菜单快速打开最近会话
 - 支持中英文界面、浅色 / 深色 / 跟随系统主题
 - 发布版内置 GitHub 最新版本检查
@@ -136,6 +138,17 @@ Linux 构建通常需要先安装 Tauri/WebKitGTK 依赖，例如：
 - 对同一助手复制 `resume` 命令
 - 对其他助手复制 `cross` 命令，把上下文迁移过去继续对话
 - 从托盘菜单快速进入最近会话
+
+Sessio 也可以作为 CLI 运行，例如：
+
+```bash
+sessio sessions list --json
+sessio sessions messages --agent codex --session-id <id> --json
+sessio memory search --project "$PWD" <query> --json
+sessio memory resolve --record-id <id> --json
+```
+
+`memory` 命令组还包括 `build`、`search`、`resolve`、`base`、`covered-by`、`status`、`sync` 和 `jobs`。
 
 当原始会话文件被工具清理后，Sessio 仍会尽量保留索引元数据；如果正文文件已经不存在，详情页会提示该会话内容不可再读取。
 
