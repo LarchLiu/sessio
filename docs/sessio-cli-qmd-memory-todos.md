@@ -193,9 +193,83 @@ These items are intentionally **not** in scope for v1. Schema columns are reserv
 - [ ] Extend continuation dedupe beyond same-agent comparison (e.g. cross-agent continuation, multi-source joint coverage, or fuzzier paraphrased-turn matching) if real workflows show those gaps.
 - [x] Add first-class CLI/UI inspection for cards covered by a given base card, and a reverse `covered-by` lookup for any card.
 
+## Phase 8: Memory Backend Abstraction
+
+Goal: make qmd one replaceable memory backend behind a `MemoryIndexBackend` trait. qmd remains the only shipping implementation in this iteration; a second backend lands later as additive work.
+
+Design doc: `docs/sessio-memory-backend-abstraction-plan.md`
+
+### Phase 8A — Document and stabilize
+
+- [x] Land the design document and resolve open questions into a `Resolved Decisions` section.
+- [x] Reference the design doc from this TODO file.
+
+### Phase 8B — Backend-neutral types and schema
+
+- [x] Rename `MemoryCard` → `MemoryRecord` outright (no transitional alias). Update all call sites.
+- [x] Drop `memory_cards.qmd_path` column via a new migration.
+- [x] Add `memory_artifacts` table `(record_id, backend, artifact_uri, content_hash, updated_at)` with `PRIMARY KEY(record_id, backend)`.
+- [x] Add `MemoryBackendStatus`, `MemorySearchOptions`, `MemoryBackendHit`, `MemorySyncReport` types.
+- [x] Keep Sessio SQLite as the source of truth for records, source refs, fingerprints, continuations, jobs, and artifact metadata.
+
+### Phase 8C — Path layout and artifact sink
+
+- [x] Move artifact root from `~/.sessio/qmd-memory/projects/<key>/cards/` to `~/.sessio/memory/<backend>/projects/<key>/sessions/`.
+- [x] On first run after upgrade, delete the old `~/.sessio/qmd-memory/` tree and rebuild artifacts from SQLite (no compatibility shim).
+- [x] Introduce `MemoryArtifactSink` trait with `MarkdownArtifactSink`, `NoopArtifactSink`, and `TempArtifactSink` implementations.
+- [x] Move markdown writing/removal out of `memory/build.rs` and behind `MarkdownArtifactSink`.
+- [x] Rename CLI flag `--cards-root` → `--artifacts-root` and update help text / examples.
+
+### Phase 8D — `MemoryIndexBackend` trait and qmd backend
+
+- [x] Define `MemoryIndexBackend` trait (`name`, `status`, `sync_project`, `remove_project`, `search`). `embed` is **not** on the trait.
+- [x] Wrap `memory/qmd.rs` in `QmdBackend` that implements `MemoryIndexBackend`.
+- [x] Update `sessio memory search` to call the backend through the trait while keeping the JSON response backend-neutral.
+- [x] Map qmd search hit document paths back to `record_id` via `memory_artifacts`.
+- [x] Expose diagnostics as `sessio memory status` / `sessio memory sync`; keep qmd behind `QmdBackend`, with diagnostic `--embed` available under the memory namespace.
+- [x] Replace `QmdSyncJob` in the indexer with `MemoryBackendSyncJob { backend, project_key, project_path, changed_record_ids, removed_record_ids, dependent_source_paths }`.
+
+### Phase 8E — `MemoryService` orchestration
+
+- [x] Introduce `MemoryService` as the single orchestration layer over `MemoryRepository`, `MemoryIndexBackend`, and `MemoryArtifactSink`.
+- [x] Make the indexer call `MemoryService` instead of `memory::qmd` directly.
+- [x] Make the CLI call `MemoryService` too; CLI mode blocks on the relevant `MemoryBackendSyncJob` via a oneshot signal (no parallel synchronous pipeline).
+- [x] Record backend job state generically (backend name stored separately from action), reusing the existing memory job tables.
+
+### Phase 8F — Backend configuration
+
+- [x] Add `[memory] backend = "qmd"` and `[memory.backends.qmd] { binary, index, artifacts_root }` to the config loader with sensible defaults.
+- [x] Honor `SESSIO_QMD_BINARY` / `SESSIO_QMD_INDEX` / `SESSIO_QMD_ARTIFACTS_ROOT` env overrides (highest precedence).
+- [x] Reject any `[memory].backend` value other than `"qmd"` with a config error.
+- [x] Do **not** add `--backend` CLI flag or `SESSIO_MEMORY_BACKEND` env var yet.
+
+### Phase 8G — End-to-end validation with qmd
+
+- [x] Confirm `memory build` produces records with identical `canonical_hash` before and after the refactor.
+- [x] Confirm `sessio memory search --json` returns the same hit payloads through the trait as the pre-refactor direct wrapper.
+- [x] Confirm indexer + watcher path still triggers backend sync after watcher/polling updates.
+- [x] Confirm CLI `memory build` blocks until backend sync completes and surfaces `backendError` on failure.
+- [x] `cargo check`, `cargo test`, and `pnpm run typecheck` pass after each phase.
+
+### Out of scope for this iteration
+
+- Second backend (SQLite FTS, vector, remote).
+- `--backend` CLI flag and `SESSIO_MEMORY_BACKEND` env var.
+- Tool-result digest hash and SimHash/MinHash near-duplicate detection (still tracked in Phase 7 v2 Roadmap).
+
 ## Known Follow-Ups
 
 - [x] Investigate why writing memory tables to default `~/.sessio/db-data/sessio-index.db` returned `attempt to write a readonly database` during CLI smoke testing.
 - [x] Ensure qmd wrapper uses the Node runtime from the same directory as the discovered qmd binary to avoid native module ABI mismatches.
-- [x] Reconcile existing qmd collection roots when `sessio qmd sync` is pointed at a new cards root.
+- [x] Reconcile existing qmd collection roots when `sessio memory sync` is pointed at a new artifacts root.
 - [x] Confirmed default DB readonly was sandbox-specific: the same default `memory build` succeeded with escalated filesystem access.
+- [x] `cargo check` passed after wiring backend config, shared `MemoryBackendSyncJob`, and CLI oneshot sync wait.
+- [x] `cargo test memory::` passed after backend-aware artifact writing/removal and service sync changes.
+- [x] `SESSIO_QMD_ARTIFACTS_ROOT=/tmp/sessio-memory-backend-artifacts cargo run --bin sessio -- memory build --project /Users/alex/Work/cloudgeek/sessio --db-path /tmp/sessio-memory-backend-abstraction-env-check.db --json` returned `summary.artifactsRoot` from the env override and surfaced the qmd sync failure as `backendError`.
+- [x] Built memory twice into `/tmp/sessio-memory-hash-a.db` and `/tmp/sessio-memory-hash-b.db`, then compared sorted `(record_id, canonical_hash)` rows with `cmp`; 56 rows matched exactly.
+- [x] `cargo run --bin sessio -- memory search --project /Users/alex/Work/cloudgeek/sessio backend abstraction --db-path /tmp/sessio-memory-hash-a.db --json` returned backend-neutral qmd hits through `MemoryService` with `backendError: null`.
+- [x] `SESSIO_QMD_BINARY=/tmp/sessio-missing-qmd cargo run --bin sessio -- memory search --project /Users/alex/Work/cloudgeek/sessio backend abstraction --db-path /tmp/sessio-memory-hash-a.db --json` returned empty hits with `backendError`.
+- [x] Added indexer routing tests covering watcher `ReindexSource` and polling `ReindexScope` tasks reaching memory rebuild task variants.
+- [x] `pnpm run typecheck` passed after the backend abstraction validation pass.
+- [x] `cargo test` passed after completing Phase 8G validation (51 tests).
+- [x] Migrated user-facing qmd diagnostics from top-level `sessio qmd ...` to `sessio memory status` / `sessio memory sync`; qmd remains an internal backend implementation.

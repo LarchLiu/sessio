@@ -1,0 +1,285 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context, Result};
+
+use crate::memory::build::default_artifacts_root;
+
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    pub memory: MemoryConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    pub backend: String,
+    pub qmd: QmdBackendConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct QmdBackendConfig {
+    pub binary: Option<String>,
+    pub index: String,
+    pub artifacts_root: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct RawConfig {
+    memory: RawMemoryConfig,
+}
+
+#[derive(Debug, Default)]
+struct RawMemoryConfig {
+    backend: Option<String>,
+    backends: RawMemoryBackends,
+}
+
+#[derive(Debug, Default)]
+struct RawMemoryBackends {
+    qmd: RawQmdBackendConfig,
+}
+
+#[derive(Debug, Default)]
+struct RawQmdBackendConfig {
+    binary: Option<String>,
+    index: Option<String>,
+    artifacts_root: Option<String>,
+}
+
+pub fn load_config() -> Result<AppConfig> {
+    Ok(AppConfig {
+        memory: load_memory_config()?,
+    })
+}
+
+pub fn load_memory_config() -> Result<MemoryConfig> {
+    let raw = load_raw_config()?;
+    resolve_memory_config(raw)
+}
+
+fn load_raw_config() -> Result<RawConfig> {
+    let path = config_path()?;
+    if !path.exists() {
+        return Ok(RawConfig::default());
+    }
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("read config {}", path.display()))?;
+    if contents.trim().is_empty() {
+        return Ok(RawConfig::default());
+    }
+    parse_raw_config(&contents).with_context(|| format!("parse config {}", path.display()))
+}
+
+fn parse_raw_config(contents: &str) -> Result<RawConfig> {
+    let mut raw = RawConfig::default();
+    let mut section = Section::Root;
+
+    for line in contents.lines() {
+        let line = strip_comment(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(section_name) = parse_section(line)? {
+            section = section_name;
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            bail!("invalid config line: {line}");
+        };
+        let key = key.trim();
+        let value = parse_value(value.trim())?;
+        match section {
+            Section::Memory => match key {
+                "backend" => raw.memory.backend = value,
+                other => bail!("unknown key in [memory]: {other}"),
+            },
+            Section::MemoryBackendsQmd => match key {
+                "binary" => raw.memory.backends.qmd.binary = value,
+                "index" => raw.memory.backends.qmd.index = value,
+                "artifacts_root" => raw.memory.backends.qmd.artifacts_root = value,
+                other => bail!("unknown key in [memory.backends.qmd]: {other}"),
+            },
+            Section::Root | Section::Ignored => {}
+        }
+    }
+
+    Ok(raw)
+}
+
+#[derive(Debug, Clone)]
+enum Section {
+    Root,
+    Memory,
+    MemoryBackendsQmd,
+    Ignored,
+}
+
+fn parse_section(line: &str) -> Result<Option<Section>> {
+    if !(line.starts_with('[') && line.ends_with(']')) {
+        return Ok(None);
+    }
+    let name = &line[1..line.len() - 1];
+    let parts: Vec<String> = name
+        .split('.')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect();
+    if parts.is_empty() {
+        bail!("empty section header");
+    }
+    Ok(Some(match parts.as_slice() {
+        [a] if a == "memory" => Section::Memory,
+        [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
+        _ => Section::Ignored,
+    }))
+}
+
+fn parse_value(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("null") {
+        return Ok(None);
+    }
+    if let Some(stripped) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        return Ok(Some(unescape_string(stripped)?));
+    }
+    if value.is_empty() {
+        return Ok(Some(String::new()));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn unescape_string(value: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            bail!("unfinished escape sequence");
+        };
+        match next {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+fn strip_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '#' if !in_string => return &line[..idx],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn resolve_memory_config(raw: RawConfig) -> Result<MemoryConfig> {
+    let backend = raw.memory.backend.unwrap_or_else(|| "qmd".to_string());
+    if backend != "qmd" {
+        bail!("unsupported memory backend in config: {backend}");
+    }
+
+    let qmd = raw.memory.backends.qmd;
+    let mut config = QmdBackendConfig {
+        binary: qmd.binary,
+        index: qmd.index.unwrap_or_else(|| "sessio".to_string()),
+        artifacts_root: qmd
+            .artifacts_root
+            .as_deref()
+            .map(expand_path)
+            .transpose()?
+            .unwrap_or(default_artifacts_root()?),
+    };
+    if let Ok(binary) = std::env::var("SESSIO_QMD_BINARY") {
+        config.binary = Some(binary);
+    }
+    if let Ok(index) = std::env::var("SESSIO_QMD_INDEX") {
+        if !index.is_empty() {
+            config.index = index;
+        }
+    }
+    if let Ok(root) = std::env::var("SESSIO_QMD_ARTIFACTS_ROOT") {
+        config.artifacts_root = expand_path(&root)?;
+    }
+
+    Ok(MemoryConfig {
+        backend,
+        qmd: config,
+    })
+}
+
+fn config_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("no home dir")?;
+    Ok(home.join(".sessio").join("config.toml"))
+}
+
+fn expand_path(value: &str) -> Result<PathBuf> {
+    if let Some(rest) = value.strip_prefix("~/") {
+        let home = dirs::home_dir().context("no home dir")?;
+        return Ok(home.join(rest));
+    }
+    if value == "~" {
+        return dirs::home_dir().context("no home dir");
+    }
+    Ok(Path::new(value).to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_raw_config, resolve_memory_config};
+
+    #[test]
+    fn parses_memory_qmd_config() {
+        let raw = parse_raw_config(
+            r#"
+            [memory]
+            backend = "qmd"
+
+            [memory.backends.qmd]
+            binary = "/usr/local/bin/qmd"
+            index = "sessio-test"
+            artifacts_root = "/tmp/sessio-artifacts"
+            "#,
+        )
+        .unwrap();
+        let config = resolve_memory_config(raw).unwrap();
+
+        assert_eq!(config.backend, "qmd");
+        assert_eq!(config.qmd.binary.as_deref(), Some("/usr/local/bin/qmd"));
+        assert_eq!(config.qmd.index, "sessio-test");
+        assert_eq!(
+            config.qmd.artifacts_root.to_string_lossy(),
+            "/tmp/sessio-artifacts"
+        );
+    }
+
+    #[test]
+    fn rejects_non_qmd_backend() {
+        let raw = parse_raw_config(
+            r#"
+            [memory]
+            backend = "sqlite"
+            "#,
+        )
+        .unwrap();
+
+        assert!(resolve_memory_config(raw).is_err());
+    }
+}

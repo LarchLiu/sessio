@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::memory::{
-    CardContinuation, MemoryCard, MemoryJob, MemorySource, MemoryStore, SessionTimeInfo,
-    TurnFingerprint, TurnFingerprintCandidate,
+    CardContinuation, MemoryArtifact, MemoryJob, MemoryRecord, MemoryRecordKind, MemorySource,
+    MemoryStore, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{Agent, SessionInfo, SubagentInfo};
 use crate::providers::types::SourceLocation;
@@ -96,24 +96,34 @@ CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
 
 const SCHEMA_V3: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_cards (
-    card_id        TEXT PRIMARY KEY,
+    record_id      TEXT PRIMARY KEY,
     project_key    TEXT NOT NULL,
     canonical_hash TEXT NOT NULL,
     simhash        TEXT,
-    qmd_path       TEXT NOT NULL,
     title          TEXT NOT NULL,
     summary        TEXT,
     body           TEXT NOT NULL,
+    kind           TEXT NOT NULL DEFAULT 'session',
     available      INTEGER NOT NULL DEFAULT 1,
     updated_at     INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_cards_project ON memory_cards(project_key, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_cards_hash ON memory_cards(canonical_hash);
-CREATE INDEX IF NOT EXISTS idx_memory_cards_qmd_path ON memory_cards(qmd_path);
+
+CREATE TABLE IF NOT EXISTS memory_artifacts (
+    record_id    TEXT NOT NULL,
+    backend      TEXT NOT NULL,
+    artifact_uri TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY(record_id, backend)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_artifacts_backend ON memory_artifacts(backend, artifact_uri);
 
 CREATE TABLE IF NOT EXISTS memory_sources (
-    card_id     TEXT NOT NULL,
+    record_id    TEXT NOT NULL,
     agent       TEXT NOT NULL,
     session_id  TEXT NOT NULL,
     file_path   TEXT NOT NULL,
@@ -121,8 +131,8 @@ CREATE TABLE IF NOT EXISTS memory_sources (
     line_end    INTEGER,
     byte_start  INTEGER,
     byte_end    INTEGER,
-    PRIMARY KEY(card_id, agent, session_id, file_path, line_start, line_end),
-    FOREIGN KEY(card_id) REFERENCES memory_cards(card_id) ON DELETE CASCADE
+    PRIMARY KEY(record_id, agent, session_id, file_path, line_start, line_end),
+    FOREIGN KEY(record_id) REFERENCES memory_cards(record_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_sources_session ON memory_sources(agent, session_id);
@@ -148,6 +158,7 @@ CREATE INDEX IF NOT EXISTS idx_turn_fingerprints_hash ON turn_fingerprints(canon
 CREATE TABLE IF NOT EXISTS memory_jobs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_key TEXT NOT NULL,
+    backend     TEXT NOT NULL DEFAULT 'qmd',
     scope       TEXT NOT NULL,
     kind        TEXT NOT NULL,
     status      TEXT NOT NULL,
@@ -156,7 +167,37 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
     updated_at  INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, status);
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, backend, status);
+"#;
+
+const SCHEMA_V9: &str = r#"
+ALTER TABLE memory_jobs ADD COLUMN backend TEXT NOT NULL DEFAULT 'qmd';
+CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, backend, status);
+"#;
+
+const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS memory_artifacts (
+    record_id    TEXT NOT NULL,
+    backend      TEXT NOT NULL,
+    artifact_uri TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY(record_id, backend)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_artifacts_backend ON memory_artifacts(backend, artifact_uri);
+
+INSERT INTO memory_artifacts (
+    record_id, backend, artifact_uri, content_hash, updated_at
+) SELECT
+    card_id, 'qmd', qmd_path, canonical_hash, updated_at
+FROM memory_cards;
+
+DROP INDEX IF EXISTS idx_memory_cards_qmd_path;
+ALTER TABLE memory_cards DROP COLUMN qmd_path;
+ALTER TABLE memory_cards RENAME COLUMN card_id TO record_id;
+ALTER TABLE memory_sources RENAME COLUMN card_id TO record_id;
+ALTER TABLE memory_cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'session';
 "#;
 
 const SCHEMA_V4: &str = r#"
@@ -195,7 +236,7 @@ CREATE TABLE IF NOT EXISTS card_continuations (
     candidate_trim_line_start   INTEGER,
     candidate_trim_byte_start   INTEGER,
     updated_at                  INTEGER NOT NULL,
-    FOREIGN KEY(card_id) REFERENCES memory_cards(card_id) ON DELETE CASCADE
+    FOREIGN KEY(card_id) REFERENCES memory_cards(record_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_card_continuations_project ON card_continuations(project_key, updated_at DESC);
@@ -273,7 +314,34 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 8 {
+        if memory_cards_has_qmd_path(conn)? {
+            conn.execute_batch(SCHEMA_V8)?;
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)",
+            [],
+        )?;
+    }
+    if current < 9 {
+        let _ = conn.execute_batch(SCHEMA_V9);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+fn memory_cards_has_qmd_path(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA table_info(memory_cards)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == "qmd_path" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
@@ -650,22 +718,22 @@ impl SessionStore for SqliteStore {
 }
 
 impl MemoryStore for SqliteStore {
-    fn upsert_card(&self, card: &MemoryCard) -> Result<()> {
+    fn upsert_card(&self, card: &MemoryRecord) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO memory_cards (
-                card_id, project_key, canonical_hash, simhash, qmd_path,
-                title, summary, body, available, updated_at
+                record_id, project_key, canonical_hash, simhash,
+                title, summary, body, kind, available, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
-                card.card_id,
+                card.record_id,
                 card.project_key,
                 card.canonical_hash,
                 card.simhash,
-                card.qmd_path,
                 card.title,
                 card.summary,
                 card.body,
+                card.kind.as_db_str(),
                 card.available as i64,
                 card.updated_at,
             ],
@@ -673,17 +741,59 @@ impl MemoryStore for SqliteStore {
         Ok(())
     }
 
+    fn upsert_memory_artifact(&self, artifact: &MemoryArtifact) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO memory_artifacts (
+                record_id, backend, artifact_uri, content_hash, updated_at
+            ) VALUES (?, ?, ?, ?, ?)",
+            params![
+                artifact.record_id,
+                artifact.backend,
+                artifact.artifact_uri,
+                artifact.content_hash,
+                artifact.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn artifact_for_record(
+        &self,
+        record_id: &str,
+        backend: &str,
+    ) -> Result<Option<MemoryArtifact>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT record_id, backend, artifact_uri, content_hash, updated_at
+             FROM memory_artifacts
+             WHERE record_id = ? AND backend = ?",
+            params![record_id, backend],
+            |row| {
+                Ok(MemoryArtifact {
+                    record_id: row.get(0)?,
+                    backend: row.get(1)?,
+                    artifact_uri: row.get(2)?,
+                    content_hash: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     fn replace_card_sources(&self, card_id: &str, sources: &[MemorySource]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
-            "DELETE FROM memory_sources WHERE card_id = ?",
+            "DELETE FROM memory_sources WHERE record_id = ?",
             params![card_id],
         )?;
         for source in sources {
             tx.execute(
                 "INSERT OR REPLACE INTO memory_sources (
-                    card_id, agent, session_id, file_path,
+                    record_id, agent, session_id, file_path,
                     line_start, line_end, byte_start, byte_end
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
@@ -755,27 +865,27 @@ impl MemoryStore for SqliteStore {
         agent: &str,
         session_id: &str,
         file_path: &str,
-    ) -> Result<Vec<MemoryCard>> {
+    ) -> Result<Vec<MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT c.card_id, c.project_key, c.canonical_hash, c.simhash, c.qmd_path,
-                    c.title, c.summary, c.body, c.available, c.updated_at
+            "SELECT c.record_id, c.project_key, c.canonical_hash, c.simhash,
+                    c.title, c.summary, c.body, c.kind, c.available, c.updated_at
              FROM memory_cards c
-             JOIN memory_sources s ON s.card_id = c.card_id
+             JOIN memory_sources s ON s.record_id = c.record_id
              WHERE s.agent = ? AND s.session_id = ? AND s.file_path = ?
              ORDER BY c.updated_at DESC",
         )?;
         let cards = stmt
             .query_map(params![agent, session_id, file_path], |row| {
-                Ok(MemoryCard {
-                    card_id: row.get(0)?,
+                Ok(MemoryRecord {
+                    record_id: row.get(0)?,
                     project_key: row.get(1)?,
                     canonical_hash: row.get(2)?,
                     simhash: row.get(3)?,
-                    qmd_path: row.get(4)?,
-                    title: row.get(5)?,
-                    summary: row.get(6)?,
-                    body: row.get(7)?,
+                    title: row.get(4)?,
+                    summary: row.get(5)?,
+                    body: row.get(6)?,
+                    kind: MemoryRecordKind::from_db_str(&row.get::<_, String>(7)?),
                     available: row.get::<_, i64>(8)? != 0,
                     updated_at: row.get(9)?,
                 })
@@ -787,7 +897,7 @@ impl MemoryStore for SqliteStore {
     fn mark_card_unavailable(&self, card_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE memory_cards SET available = 0 WHERE card_id = ?",
+            "UPDATE memory_cards SET available = 0 WHERE record_id = ?",
             params![card_id],
         )?;
         Ok(())
@@ -803,8 +913,8 @@ impl MemoryStore for SqliteStore {
         conn.execute(
             "UPDATE memory_cards
              SET available = 0
-             WHERE card_id IN (
-                SELECT card_id
+             WHERE record_id IN (
+                SELECT record_id
                 FROM memory_sources
                 WHERE agent = ? AND session_id = ? AND file_path = ?
              )",
@@ -813,26 +923,26 @@ impl MemoryStore for SqliteStore {
         Ok(())
     }
 
-    fn list_project_cards(&self, project_key: &str) -> Result<Vec<MemoryCard>> {
+    fn list_project_cards(&self, project_key: &str) -> Result<Vec<MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT card_id, project_key, canonical_hash, simhash, qmd_path,
-                    title, summary, body, available, updated_at
+            "SELECT record_id, project_key, canonical_hash, simhash,
+                    title, summary, body, kind, available, updated_at
              FROM memory_cards
              WHERE project_key = ?
              ORDER BY updated_at DESC",
         )?;
         let cards = stmt
             .query_map(params![project_key], |row| {
-                Ok(MemoryCard {
-                    card_id: row.get(0)?,
+                Ok(MemoryRecord {
+                    record_id: row.get(0)?,
                     project_key: row.get(1)?,
                     canonical_hash: row.get(2)?,
                     simhash: row.get(3)?,
-                    qmd_path: row.get(4)?,
-                    title: row.get(5)?,
-                    summary: row.get(6)?,
-                    body: row.get(7)?,
+                    title: row.get(4)?,
+                    summary: row.get(5)?,
+                    body: row.get(6)?,
+                    kind: MemoryRecordKind::from_db_str(&row.get::<_, String>(7)?),
                     available: row.get::<_, i64>(8)? != 0,
                     updated_at: row.get(9)?,
                 })
@@ -841,25 +951,25 @@ impl MemoryStore for SqliteStore {
         Ok(cards)
     }
 
-    fn card_by_id(&self, card_id: &str) -> Result<Option<MemoryCard>> {
+    fn card_by_id(&self, card_id: &str) -> Result<Option<MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT card_id, project_key, canonical_hash, simhash, qmd_path,
-                    title, summary, body, available, updated_at
+            "SELECT record_id, project_key, canonical_hash, simhash,
+                    title, summary, body, kind, available, updated_at
              FROM memory_cards
-             WHERE card_id = ?",
+             WHERE record_id = ?",
         )?;
         let card = stmt
             .query_row(params![card_id], |row| {
-                Ok(MemoryCard {
-                    card_id: row.get(0)?,
+                Ok(MemoryRecord {
+                    record_id: row.get(0)?,
                     project_key: row.get(1)?,
                     canonical_hash: row.get(2)?,
                     simhash: row.get(3)?,
-                    qmd_path: row.get(4)?,
-                    title: row.get(5)?,
-                    summary: row.get(6)?,
-                    body: row.get(7)?,
+                    title: row.get(4)?,
+                    summary: row.get(5)?,
+                    body: row.get(6)?,
+                    kind: MemoryRecordKind::from_db_str(&row.get::<_, String>(7)?),
                     available: row.get::<_, i64>(8)? != 0,
                     updated_at: row.get(9)?,
                 })
@@ -871,10 +981,10 @@ impl MemoryStore for SqliteStore {
     fn sources_for_card(&self, card_id: &str) -> Result<Vec<MemorySource>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT card_id, agent, session_id, file_path,
+            "SELECT record_id, agent, session_id, file_path,
                     line_start, line_end, byte_start, byte_end
              FROM memory_sources
-             WHERE card_id = ?
+             WHERE record_id = ?
              ORDER BY agent ASC, session_id ASC, line_start ASC",
         )?;
         let sources = stmt
@@ -1184,6 +1294,7 @@ impl MemoryStore for SqliteStore {
     fn record_memory_job(
         &self,
         project_key: &str,
+        backend: &str,
         scope: &str,
         kind: &str,
         status: &str,
@@ -1193,9 +1304,9 @@ impl MemoryStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO memory_jobs (
-                project_key, scope, kind, status, error, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![project_key, scope, kind, status, error, now, now],
+                project_key, backend, scope, kind, status, error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![project_key, backend, scope, kind, status, error, now, now],
         )?;
         Ok(())
     }
@@ -1205,23 +1316,23 @@ impl MemoryStore for SqliteStore {
         let mut jobs = Vec::new();
         if let Some(status) = status {
             let mut stmt = conn.prepare(
-                "SELECT id, project_key, scope, kind, status, error, created_at, updated_at
+                "SELECT id, project_key, backend, scope, kind, status, error, created_at, updated_at
                  FROM memory_jobs
-                 WHERE project_key = ? AND status = ?
+                 WHERE project_key = ? AND backend = ? AND status = ?
                  ORDER BY updated_at DESC",
             )?;
-            let rows = stmt.query_map(params![project_key, status], memory_job_from_row)?;
+            let rows = stmt.query_map(params![project_key, "qmd", status], memory_job_from_row)?;
             for row in rows {
                 jobs.push(row?);
             }
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, project_key, scope, kind, status, error, created_at, updated_at
+                "SELECT id, project_key, backend, scope, kind, status, error, created_at, updated_at
                  FROM memory_jobs
-                 WHERE project_key = ?
+                 WHERE project_key = ? AND backend = ?
                  ORDER BY updated_at DESC",
             )?;
-            let rows = stmt.query_map(params![project_key], memory_job_from_row)?;
+            let rows = stmt.query_map(params![project_key, "qmd"], memory_job_from_row)?;
             for row in rows {
                 jobs.push(row?);
             }
@@ -1234,11 +1345,12 @@ fn memory_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryJob> {
     Ok(MemoryJob {
         id: row.get(0)?,
         project_key: row.get(1)?,
-        scope: row.get(2)?,
-        kind: row.get(3)?,
-        status: row.get(4)?,
-        error: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        backend: row.get(2)?,
+        scope: row.get(3)?,
+        kind: row.get(4)?,
+        status: row.get(5)?,
+        error: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }

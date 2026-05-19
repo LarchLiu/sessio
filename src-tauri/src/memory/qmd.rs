@@ -1,3 +1,8 @@
+use crate::memory::artifacts::MemoryArtifactSink;
+use crate::memory::{
+    MemoryBackendHit, MemoryBackendSearchResult, MemoryBackendStatus, MemoryIndexBackend,
+    MemoryRecord, MemorySearchOptions, MemorySyncReport,
+};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::env;
@@ -44,6 +49,96 @@ pub struct QmdCommandResult {
 pub struct QmdSearchResult {
     pub collection: String,
     pub raw: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct QmdBackend {
+    options: QmdOptions,
+    artifacts_root: PathBuf,
+}
+
+impl QmdBackend {
+    pub fn new(options: QmdOptions, artifacts_root: PathBuf) -> Self {
+        Self {
+            options,
+            artifacts_root,
+        }
+    }
+
+    pub fn options(&self) -> &QmdOptions {
+        &self.options
+    }
+
+    fn project_sessions_root(&self, project_key: &str) -> PathBuf {
+        self.artifacts_root.join(project_key).join("sessions")
+    }
+}
+
+impl MemoryIndexBackend for QmdBackend {
+    fn name(&self) -> &'static str {
+        "qmd"
+    }
+
+    fn status(&self) -> MemoryBackendStatus {
+        let status = qmd_status(self.options.binary.as_deref());
+        MemoryBackendStatus {
+            backend: self.name().to_string(),
+            available: status.available,
+            error: status.error,
+        }
+    }
+
+    fn sync_project(
+        &self,
+        project_key: &str,
+        records: &[MemoryRecord],
+        _artifacts: &dyn MemoryArtifactSink,
+    ) -> Result<MemorySyncReport> {
+        let sessions_root = self.project_sessions_root(project_key);
+        ensure_project_collection(&self.options, project_key, &sessions_root)?;
+        update_index(&self.options)?;
+        Ok(MemorySyncReport {
+            backend: self.name().to_string(),
+            project_key: project_key.to_string(),
+            synced_records: records.iter().filter(|record| record.available).count(),
+            removed_records: records.iter().filter(|record| !record.available).count(),
+            errors: Vec::new(),
+        })
+    }
+
+    fn remove_project(&self, project_key: &str) -> Result<MemorySyncReport> {
+        remove_collection(&self.options, &collection_name(project_key))?;
+        Ok(MemorySyncReport {
+            backend: self.name().to_string(),
+            project_key: project_key.to_string(),
+            synced_records: 0,
+            removed_records: 0,
+            errors: Vec::new(),
+        })
+    }
+
+    fn search(
+        &self,
+        project_key: &str,
+        query: &str,
+        options: MemorySearchOptions,
+    ) -> Result<MemoryBackendSearchResult> {
+        let result = search_project(&self.options, project_key, query)?;
+        let hits = qmd_hit_candidates(&result.raw)
+            .into_iter()
+            .map(|candidate| MemoryBackendHit {
+                record_id: candidate.record_id,
+                artifact_uri: candidate.artifact_uri,
+                score: candidate.score,
+                snippet: candidate.snippet,
+            })
+            .collect();
+        Ok(MemoryBackendSearchResult {
+            backend: self.name().to_string(),
+            hits,
+            raw: options.include_raw.then_some(result.raw),
+        })
+    }
 }
 
 pub fn qmd_status(configured_binary: Option<&str>) -> QmdStatus {
@@ -175,6 +270,81 @@ pub fn search_project(
 
 pub fn collection_name(project_key: &str) -> String {
     format!("sessio-{project_key}")
+}
+
+#[derive(Debug, Default)]
+struct QmdHitCandidate {
+    record_id: Option<String>,
+    artifact_uri: Option<String>,
+    score: Option<f64>,
+    snippet: Option<String>,
+}
+
+fn qmd_hit_candidates(raw: &serde_json::Value) -> Vec<QmdHitCandidate> {
+    let mut out = Vec::new();
+    collect_qmd_hit_candidates(raw, &mut out);
+    out
+}
+
+fn collect_qmd_hit_candidates(value: &serde_json::Value, out: &mut Vec<QmdHitCandidate>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_qmd_hit_candidates(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let path = first_string(map, &["path", "file", "filePath", "filepath", "source"]);
+            let candidate = QmdHitCandidate {
+                record_id: first_string(map, &["recordId", "record_id", "cardId", "card_id", "id"])
+                    .and_then(record_id_from_text)
+                    .or_else(|| path.clone().and_then(record_id_from_text)),
+                artifact_uri: path,
+                score: first_number(map, &["score", "rank", "similarity"]),
+                snippet: first_string(map, &["snippet", "text", "content", "preview"]),
+            };
+            if candidate.record_id.is_some() || candidate.artifact_uri.is_some() {
+                out.push(candidate);
+            }
+            for key in ["results", "hits", "documents", "items", "matches"] {
+                if let Some(child) = map.get(key) {
+                    collect_qmd_hit_candidates(child, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn first_string(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        let Some(value) = map.get(*key) else {
+            continue;
+        };
+        if let Some(s) = value.as_str() {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn first_number(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        if let Some(n) = map.get(*key).and_then(|value| value.as_f64()) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn record_id_from_text(text: String) -> Option<String> {
+    let path = Path::new(&text);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&text);
+    if stem.starts_with("sessio-") {
+        Some(stem.to_string())
+    } else {
+        None
+    }
 }
 
 fn run_qmd_command(options: &QmdOptions, args: &[&str]) -> Result<QmdCommandResult> {

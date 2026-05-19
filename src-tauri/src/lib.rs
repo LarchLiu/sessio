@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod config;
 pub mod indexer;
 pub mod memory;
 pub mod models;

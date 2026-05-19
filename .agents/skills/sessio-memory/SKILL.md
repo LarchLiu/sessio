@@ -95,7 +95,7 @@ sessio memory covered-by --card-id "<card_id>" --json
 - Do not parse agent JSONL directly from this skill.
 - Prefer concise answers that cite card titles, summaries, and source refs when available.
 - Distinguish clearly between "Sessio memory says..." and your own inference.
-- If `backendError` is present, report it briefly and suggest running `sessio qmd status --json` only if the user wants troubleshooting.
+- If `backendError` is present, report it briefly and suggest running `sessio memory status --json` only if the user wants troubleshooting.
 - Do not pass `--include-raw` in normal workflows; it is for debugging the qmd backend.
 - Do not use `--include-source-excerpt` in normal workflows; it is for provenance debugging and can return large payloads.
 - If `continuationSummary` is present, prefer that human-readable summary over unpacking raw `continuation` fields by hand.

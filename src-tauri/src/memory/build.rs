@@ -4,17 +4,18 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::memory::artifacts::{MarkdownArtifactSink, MemoryArtifactSink};
 use crate::memory::cards::{cards_for_source, fingerprints_for_source, safe_id_part};
 use crate::memory::dedupe::{should_suppress_source, DedupeAction, DedupeMatch};
 use crate::memory::normalize::normalize_events;
-use crate::memory::{CardContinuation, MemoryCard, MemoryStore, TurnFingerprint};
+use crate::memory::{CardContinuation, MemoryStore, TurnFingerprint};
 use crate::providers::registry::ProviderRegistry;
 use crate::providers::types::{MessageEvent, MessageRole, SessionSource};
 
 #[derive(Debug, Clone)]
 pub struct MemoryBuildOptions {
     pub project_path: PathBuf,
-    pub output_root: PathBuf,
+    pub artifacts_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,7 +27,7 @@ pub struct MemoryBuildSummary {
     pub sources_built: usize,
     pub sources_skipped: usize,
     pub cards_written: usize,
-    pub output_root: String,
+    pub artifacts_root: String,
     pub errors: Vec<String>,
     pub dependent_source_paths: Vec<PathBuf>,
 }
@@ -44,6 +45,15 @@ pub fn build_project_memory(
     store: &dyn MemoryStore,
     options: &MemoryBuildOptions,
 ) -> Result<MemoryBuildSummary> {
+    build_project_memory_with_backend(registry, store, "qmd", options)
+}
+
+pub fn build_project_memory_with_backend(
+    registry: &ProviderRegistry,
+    store: &dyn MemoryStore,
+    backend: &str,
+    options: &MemoryBuildOptions,
+) -> Result<MemoryBuildSummary> {
     let wanted_project = normalize_path(&options.project_path);
     let mut summary = MemoryBuildSummary {
         project_path: wanted_project.clone(),
@@ -52,11 +62,12 @@ pub fn build_project_memory(
         sources_built: 0,
         sources_skipped: 0,
         cards_written: 0,
-        output_root: options.output_root.to_string_lossy().to_string(),
+        artifacts_root: options.artifacts_root.to_string_lossy().to_string(),
         dependent_source_paths: Vec::new(),
         errors: Vec::new(),
     };
     let mut seen_sources = HashSet::new();
+    let artifact_sink = MarkdownArtifactSink::new(options.artifacts_root.clone());
 
     for provider in registry.providers() {
         let sources = match provider.discover() {
@@ -106,7 +117,7 @@ pub fn build_project_memory(
                         ));
                     }
                     if let Err(remove_error) =
-                        remove_existing_source_card_files(store, &options.output_root, &source)
+                        remove_existing_source_card_files(store, &artifact_sink, backend, &source)
                     {
                         summary.errors.push(format!(
                             "remove source card files {} {} failed: {remove_error}",
@@ -138,7 +149,7 @@ pub fn build_project_memory(
                     ));
                 }
                 if let Err(remove_error) =
-                    remove_existing_source_card_files(store, &options.output_root, &source)
+                    remove_existing_source_card_files(store, &artifact_sink, backend, &source)
                 {
                     summary.errors.push(format!(
                         "remove empty source card files {} {} failed: {remove_error}",
@@ -157,13 +168,8 @@ pub fn build_project_memory(
             }
 
             let fingerprints = fingerprints_for_source(&source, &events);
-            let plan = resolve_dedupe_plan(
-                store,
-                &project.project_key,
-                &source,
-                &events,
-                &fingerprints,
-            )?;
+            let plan =
+                resolve_dedupe_plan(store, &project.project_key, &source, &events, &fingerprints)?;
             let (card_events, card_continuation) = match plan {
                 DedupePlan::Pass => (events.as_slice(), None),
                 DedupePlan::Trim {
@@ -185,7 +191,7 @@ pub fn build_project_memory(
                         ));
                     }
                     if let Err(remove_error) =
-                        remove_existing_source_card_files(store, &options.output_root, &source)
+                        remove_existing_source_card_files(store, &artifact_sink, backend, &source)
                     {
                         summary.errors.push(format!(
                             "remove suppressed source card files {} {} failed: {remove_error}",
@@ -218,7 +224,7 @@ pub fn build_project_memory(
                     ));
                 }
                 if let Err(remove_error) =
-                    remove_existing_source_card_files(store, &options.output_root, &source)
+                    remove_existing_source_card_files(store, &artifact_sink, backend, &source)
                 {
                     summary.errors.push(format!(
                         "remove source without cards files {} {} failed: {remove_error}",
@@ -244,22 +250,20 @@ pub fn build_project_memory(
             )?;
             let dependent_source_paths = invalidate_dependent_continuations(
                 store,
-                &options.output_root,
+                &artifact_sink,
+                backend,
                 source.agent.as_str(),
                 &source.session_id,
                 &mut summary.errors,
             );
             extend_unique_paths(&mut summary.dependent_source_paths, dependent_source_paths);
             for (card, sources) in generated {
-                write_card_markdown(
-                    &options.output_root,
-                    &card.project_key,
-                    &card.card_id,
-                    &card.body,
-                )?;
                 store.upsert_card(&card)?;
-                store.replace_card_sources(&card.card_id, &sources)?;
-                store.replace_card_continuation(&card.card_id, card_continuation.as_ref())?;
+                let artifact =
+                    artifact_sink.write_record_artifact(backend, &card.project_key, &card)?;
+                store.upsert_memory_artifact(&artifact)?;
+                store.replace_card_sources(&card.record_id, &sources)?;
+                store.replace_card_continuation(&card.record_id, card_continuation.as_ref())?;
                 summary.cards_written += 1;
             }
         }
@@ -270,7 +274,7 @@ pub fn build_project_memory(
             if !card.available {
                 continue;
             }
-            let sources = store.sources_for_card(&card.card_id)?;
+            let sources = store.sources_for_card(&card.record_id)?;
             if sources.is_empty() {
                 continue;
             }
@@ -282,8 +286,13 @@ pub fn build_project_memory(
                 ))
             });
             if all_missing {
-                store.mark_card_unavailable(&card.card_id)?;
-                remove_card_markdown(&options.output_root, &card)?;
+                store.mark_card_unavailable(&card.record_id)?;
+                remove_record_artifact(
+                    &artifact_sink,
+                    backend,
+                    &card.project_key,
+                    &card.record_id,
+                )?;
             }
         }
     }
@@ -294,7 +303,17 @@ pub fn build_project_memory(
 pub fn build_source_memory(
     registry: &ProviderRegistry,
     store: &dyn MemoryStore,
-    output_root: &Path,
+    artifacts_root: &Path,
+    source: &SessionSource,
+) -> Result<MemoryBuildSourceResult> {
+    build_source_memory_with_backend(registry, store, "qmd", artifacts_root, source)
+}
+
+pub fn build_source_memory_with_backend(
+    registry: &ProviderRegistry,
+    store: &dyn MemoryStore,
+    backend: &str,
+    artifacts_root: &Path,
     source: &SessionSource,
 ) -> Result<MemoryBuildSourceResult> {
     let Some(project) = &source.project else {
@@ -308,6 +327,7 @@ pub fn build_source_memory(
     let Some(provider) = registry.provider_for_agent(&source.agent) else {
         anyhow::bail!("no provider for agent {}", source.agent.as_str());
     };
+    let artifact_sink = MarkdownArtifactSink::new(artifacts_root.to_path_buf());
 
     let existing = store.list_cards_for_source(
         source.agent.as_str(),
@@ -321,8 +341,13 @@ pub fn build_source_memory(
     if events.is_empty() {
         for card in existing {
             if card.available {
-                store.mark_card_unavailable(&card.card_id)?;
-                remove_card_markdown(output_root, &card)?;
+                store.mark_card_unavailable(&card.record_id)?;
+                remove_record_artifact(
+                    &artifact_sink,
+                    backend,
+                    &card.project_key,
+                    &card.record_id,
+                )?;
                 marked_unavailable += 1;
             }
         }
@@ -346,8 +371,13 @@ pub fn build_source_memory(
         DedupePlan::Suppress { reason: _ } => {
             for card in existing {
                 if card.available {
-                    store.mark_card_unavailable(&card.card_id)?;
-                    remove_card_markdown(output_root, &card)?;
+                    store.mark_card_unavailable(&card.record_id)?;
+                    remove_record_artifact(
+                        &artifact_sink,
+                        backend,
+                        &card.project_key,
+                        &card.record_id,
+                    )?;
                     marked_unavailable += 1;
                 }
             }
@@ -365,8 +395,13 @@ pub fn build_source_memory(
     if generated.is_empty() {
         for card in existing {
             if card.available {
-                store.mark_card_unavailable(&card.card_id)?;
-                remove_card_markdown(output_root, &card)?;
+                store.mark_card_unavailable(&card.record_id)?;
+                remove_record_artifact(
+                    &artifact_sink,
+                    backend,
+                    &card.project_key,
+                    &card.record_id,
+                )?;
                 marked_unavailable += 1;
             }
         }
@@ -381,12 +416,12 @@ pub fn build_source_memory(
 
     let generated_ids = generated
         .iter()
-        .map(|(card, _)| card.card_id.clone())
+        .map(|(card, _)| card.record_id.clone())
         .collect::<std::collections::HashSet<_>>();
     for card in existing {
-        if card.available && !generated_ids.contains(&card.card_id) {
-            store.mark_card_unavailable(&card.card_id)?;
-            remove_card_markdown(output_root, &card)?;
+        if card.available && !generated_ids.contains(&card.record_id) {
+            store.mark_card_unavailable(&card.record_id)?;
+            remove_record_artifact(&artifact_sink, backend, &card.project_key, &card.record_id)?;
             marked_unavailable += 1;
         }
     }
@@ -400,7 +435,8 @@ pub fn build_source_memory(
     let mut invalidation_errors: Vec<String> = Vec::new();
     let dependent_source_paths = invalidate_dependent_continuations(
         store,
-        output_root,
+        &artifact_sink,
+        backend,
         source.agent.as_str(),
         &source.session_id,
         &mut invalidation_errors,
@@ -411,10 +447,11 @@ pub fn build_source_memory(
 
     let mut cards_written = 0;
     for (card, sources) in generated {
-        write_card_markdown(output_root, &card.project_key, &card.card_id, &card.body)?;
         store.upsert_card(&card)?;
-        store.replace_card_sources(&card.card_id, &sources)?;
-        store.replace_card_continuation(&card.card_id, card_continuation.as_ref())?;
+        let artifact = artifact_sink.write_record_artifact(backend, &card.project_key, &card)?;
+        store.upsert_memory_artifact(&artifact)?;
+        store.replace_card_sources(&card.record_id, &sources)?;
+        store.replace_card_continuation(&card.record_id, card_continuation.as_ref())?;
         cards_written += 1;
     }
 
@@ -426,33 +463,26 @@ pub fn build_source_memory(
     })
 }
 
-pub fn default_output_root() -> Result<PathBuf> {
+pub fn default_artifacts_root() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home dir")?;
-    Ok(home.join(".sessio").join("qmd-memory").join("projects"))
-}
-
-fn write_card_markdown(
-    output_root: &Path,
-    project_key: &str,
-    card_id: &str,
-    body: &str,
-) -> Result<PathBuf> {
-    let dir = output_root.join(project_key).join("cards");
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{card_id}.md"));
-    fs::write(&path, body)?;
-    Ok(path)
+    remove_legacy_qmd_memory_root(&home)?;
+    Ok(home
+        .join(".sessio")
+        .join("memory")
+        .join("qmd")
+        .join("projects"))
 }
 
 fn remove_existing_source_card_files(
     store: &dyn MemoryStore,
-    output_root: &Path,
+    artifact_sink: &dyn MemoryArtifactSink,
+    backend: &str,
     source: &SessionSource,
 ) -> Result<()> {
     for card in
         store.list_cards_for_source(source.agent.as_str(), &source.session_id, &source.file_path)?
     {
-        remove_card_markdown(output_root, &card)?;
+        remove_record_artifact(artifact_sink, backend, &card.project_key, &card.record_id)?;
     }
     Ok(())
 }
@@ -481,7 +511,8 @@ fn next_user_block_start(events: &[MessageEvent], suffix_start_turn_index: usize
 // cards unavailable so the next build pass regenerates them from scratch.
 fn invalidate_dependent_continuations(
     store: &dyn MemoryStore,
-    output_root: &Path,
+    artifact_sink: &dyn MemoryArtifactSink,
+    backend: &str,
     base_agent: &str,
     base_session_id: &str,
     errors: &mut Vec<String>,
@@ -491,8 +522,8 @@ fn invalidate_dependent_continuations(
             Ok(continuations) => continuations,
             Err(e) => {
                 errors.push(format!(
-                    "invalidate dependent continuations for {base_agent} {base_session_id} failed: {e}"
-                ));
+                "invalidate dependent continuations for {base_agent} {base_session_id} failed: {e}"
+            ));
                 return Vec::new();
             }
         };
@@ -506,17 +537,22 @@ fn invalidate_dependent_continuations(
         }
         match store.card_by_id(&continuation.card_id) {
             Ok(Some(card)) if card.available => {
-                if let Err(e) = store.mark_card_unavailable(&card.card_id) {
+                if let Err(e) = store.mark_card_unavailable(&card.record_id) {
                     errors.push(format!(
                         "mark dependent card {} unavailable failed: {e}",
-                        card.card_id
+                        card.record_id
                     ));
                     continue;
                 }
-                if let Err(e) = remove_card_markdown(output_root, &card) {
+                if let Err(e) = remove_record_artifact(
+                    artifact_sink,
+                    backend,
+                    &card.project_key,
+                    &card.record_id,
+                ) {
                     errors.push(format!(
                         "remove dependent card markdown {} failed: {e}",
-                        card.card_id
+                        card.record_id
                     ));
                 }
             }
@@ -636,12 +672,23 @@ fn suppress_reason(source: &SessionSource, dedupe_match: &DedupeMatch) -> String
     )
 }
 
-fn remove_card_markdown(output_root: &Path, card: &MemoryCard) -> Result<()> {
-    let path = output_root.join(&card.qmd_path);
-    match fs::remove_file(&path) {
+fn remove_record_artifact(
+    artifact_sink: &dyn MemoryArtifactSink,
+    backend: &str,
+    project_key: &str,
+    record_id: &str,
+) -> Result<()> {
+    artifact_sink.remove_record_artifact(backend, project_key, record_id)
+}
+
+fn remove_legacy_qmd_memory_root(home: &Path) -> Result<()> {
+    let path = home.join(".sessio").join("qmd-memory");
+    match fs::remove_dir_all(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("remove card markdown {}", path.display())),
+        Err(err) => {
+            Err(err).with_context(|| format!("remove legacy qmd memory root {}", path.display()))
+        }
     }
 }
 
@@ -746,7 +793,7 @@ mod tests {
     fn build_source_memory_marks_card_unavailable_and_removes_markdown_when_source_goes_empty() {
         let root = unique_temp_dir("sessio-memory-build");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -780,14 +827,14 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         registry.register(FakeProvider::new(source.clone(), vec![event]));
 
-        let first = build_source_memory(&registry, &store, &cards_root, &source).unwrap();
+        let first = build_source_memory(&registry, &store, &artifacts_root, &source).unwrap();
         assert_eq!(first.cards_written, 1);
         assert_eq!(first.cards_marked_unavailable, 0);
 
         let card_id = "sessio-fake-session-1";
-        let card_path = cards_root
+        let card_path = artifacts_root
             .join("test-project")
-            .join("cards")
+            .join("sessions")
             .join(format!("{card_id}.md"));
         assert!(card_path.exists());
         assert!(store.card_by_id(card_id).unwrap().unwrap().available);
@@ -802,7 +849,8 @@ mod tests {
         let mut empty_registry = ProviderRegistry::new();
         empty_registry.register(FakeProvider::new(source.clone(), Vec::new()));
 
-        let second = build_source_memory(&empty_registry, &store, &cards_root, &source).unwrap();
+        let second =
+            build_source_memory(&empty_registry, &store, &artifacts_root, &source).unwrap();
         assert_eq!(second.cards_written, 0);
         assert_eq!(second.cards_marked_unavailable, 1);
         assert!(!card_path.exists());
@@ -819,7 +867,7 @@ mod tests {
     fn build_source_memory_replaces_fingerprints_when_turns_change() {
         let root = unique_temp_dir("sessio-memory-fingerprints");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -860,7 +908,7 @@ mod tests {
             ],
         ));
 
-        build_source_memory(&registry, &store, &cards_root, &source).unwrap();
+        build_source_memory(&registry, &store, &artifacts_root, &source).unwrap();
         let first = store
             .list_turn_fingerprints("fp-project", "fake", "session-fp")
             .unwrap();
@@ -878,7 +926,7 @@ mod tests {
                 make_event(1, MessageRole::Assistant, "revised answer"),
             ],
         ));
-        build_source_memory(&shrunk_registry, &store, &cards_root, &source).unwrap();
+        build_source_memory(&shrunk_registry, &store, &artifacts_root, &source).unwrap();
         let second = store
             .list_turn_fingerprints("fp-project", "fake", "session-fp")
             .unwrap();
@@ -899,7 +947,7 @@ mod tests {
     fn build_source_memory_trims_continuation_replay_prefix() {
         let root = unique_temp_dir("sessio-memory-continuation-trim");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -971,7 +1019,13 @@ mod tests {
             .collect::<Vec<_>>();
         let mut existing_registry = ProviderRegistry::new();
         existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
-        build_source_memory(&existing_registry, &store, &cards_root, &existing_source).unwrap();
+        build_source_memory(
+            &existing_registry,
+            &store,
+            &artifacts_root,
+            &existing_source,
+        )
+        .unwrap();
 
         let mut continuation_events = replay
             .iter()
@@ -998,15 +1052,15 @@ mod tests {
         let result = build_source_memory(
             &continuation_registry,
             &store,
-            &cards_root,
+            &artifacts_root,
             &continuation_source,
         )
         .unwrap();
         assert_eq!(result.cards_written, 1);
 
-        let card_path = cards_root
+        let card_path = artifacts_root
             .join("continuation-project")
-            .join("cards")
+            .join("sessions")
             .join("sessio-fake-002-continuation.md");
         let body = fs::read_to_string(card_path).unwrap();
         assert!(!body.contains("Explain turn fingerprints in this project"));
@@ -1040,7 +1094,7 @@ mod tests {
     fn build_source_memory_trims_full_confirmed_prefix_beyond_twelve_events() {
         let root = unique_temp_dir("sessio-memory-long-prefix-trim");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -1053,7 +1107,10 @@ mod tests {
             agent: AgentKind::new("fake"),
             session_id: "001-existing-long".to_string(),
             scope: "scope".to_string(),
-            file_path: root.join("existing-long.jsonl").to_string_lossy().to_string(),
+            file_path: root
+                .join("existing-long.jsonl")
+                .to_string_lossy()
+                .to_string(),
             project: Some(project.clone()),
             source_kind: SourceKind::MainSession,
             metadata: Metadata::default(),
@@ -1103,7 +1160,13 @@ mod tests {
             .collect::<Vec<_>>();
         let mut existing_registry = ProviderRegistry::new();
         existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
-        build_source_memory(&existing_registry, &store, &cards_root, &existing_source).unwrap();
+        build_source_memory(
+            &existing_registry,
+            &store,
+            &artifacts_root,
+            &existing_source,
+        )
+        .unwrap();
 
         let mut continuation_events = replay
             .iter()
@@ -1131,15 +1194,15 @@ mod tests {
         let result = build_source_memory(
             &continuation_registry,
             &store,
-            &cards_root,
+            &artifacts_root,
             &continuation_source,
         )
         .unwrap();
         assert_eq!(result.cards_written, 1);
 
-        let card_path = cards_root
+        let card_path = artifacts_root
             .join("continuation-project-long")
-            .join("cards")
+            .join("sessions")
             .join("sessio-fake-002-continuation-long.md");
         let body = fs::read_to_string(card_path).unwrap();
         assert!(!body.contains("shared question 1"));
@@ -1154,7 +1217,7 @@ mod tests {
     fn build_source_memory_does_not_trim_earlier_sibling_back_from_later_one() {
         let root = unique_temp_dir("sessio-memory-sibling-direction");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -1194,10 +1257,7 @@ mod tests {
 
         let replay = vec![
             (MessageRole::User, "shared opening request".to_string()),
-            (
-                MessageRole::Assistant,
-                "shared opening answer".to_string(),
-            ),
+            (MessageRole::Assistant, "shared opening answer".to_string()),
             (MessageRole::User, "shared follow-up".to_string()),
             (
                 MessageRole::Assistant,
@@ -1224,7 +1284,7 @@ mod tests {
         ));
         let mut later_registry = ProviderRegistry::new();
         later_registry.register(FakeProvider::new(later_source.clone(), later_events));
-        build_source_memory(&later_registry, &store, &cards_root, &later_source).unwrap();
+        build_source_memory(&later_registry, &store, &artifacts_root, &later_source).unwrap();
 
         let mut earlier_events = replay
             .iter()
@@ -1245,11 +1305,11 @@ mod tests {
         ));
         let mut earlier_registry = ProviderRegistry::new();
         earlier_registry.register(FakeProvider::new(earlier_source.clone(), earlier_events));
-        build_source_memory(&earlier_registry, &store, &cards_root, &earlier_source).unwrap();
+        build_source_memory(&earlier_registry, &store, &artifacts_root, &earlier_source).unwrap();
 
-        let earlier_card_path = cards_root
+        let earlier_card_path = artifacts_root
             .join("continuation-project-sibling")
-            .join("cards")
+            .join("sessions")
             .join("sessio-claude-07-earlier.md");
         let earlier_body = fs::read_to_string(earlier_card_path).unwrap();
         assert!(earlier_body.contains("shared opening request"));
@@ -1262,7 +1322,7 @@ mod tests {
     fn build_source_memory_trim_prefix_starts_at_next_user_block() {
         let root = unique_temp_dir("sessio-memory-user-block-trim");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -1275,7 +1335,10 @@ mod tests {
             agent: AgentKind::new("fake"),
             session_id: "001-existing-user-block".to_string(),
             scope: "scope".to_string(),
-            file_path: root.join("existing-user-block.jsonl").to_string_lossy().to_string(),
+            file_path: root
+                .join("existing-user-block.jsonl")
+                .to_string_lossy()
+                .to_string(),
             project: Some(project.clone()),
             source_kind: SourceKind::MainSession,
             metadata: Metadata::default(),
@@ -1306,14 +1369,35 @@ mod tests {
         };
 
         let existing_events = vec![
-            make_event(&existing_source, 0, MessageRole::User, "shared opening request"),
+            make_event(
+                &existing_source,
+                0,
+                MessageRole::User,
+                "shared opening request",
+            ),
             make_event(&existing_source, 1, MessageRole::Assistant, "shared answer"),
-            make_event(&existing_source, 2, MessageRole::User, "shared next request"),
-            make_event(&existing_source, 3, MessageRole::Assistant, "shared next answer"),
+            make_event(
+                &existing_source,
+                2,
+                MessageRole::User,
+                "shared next request",
+            ),
+            make_event(
+                &existing_source,
+                3,
+                MessageRole::Assistant,
+                "shared next answer",
+            ),
         ];
         let mut existing_registry = ProviderRegistry::new();
         existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
-        build_source_memory(&existing_registry, &store, &cards_root, &existing_source).unwrap();
+        build_source_memory(
+            &existing_registry,
+            &store,
+            &artifacts_root,
+            &existing_source,
+        )
+        .unwrap();
 
         let continuation_events = vec![
             make_event(
@@ -1322,7 +1406,12 @@ mod tests {
                 MessageRole::User,
                 "shared opening request",
             ),
-            make_event(&continuation_source, 1, MessageRole::Assistant, "shared answer"),
+            make_event(
+                &continuation_source,
+                1,
+                MessageRole::Assistant,
+                "shared answer",
+            ),
             make_event(
                 &continuation_source,
                 2,
@@ -1368,15 +1457,15 @@ mod tests {
         let result = build_source_memory(
             &continuation_registry,
             &store,
-            &cards_root,
+            &artifacts_root,
             &continuation_source,
         )
         .unwrap();
         assert_eq!(result.cards_written, 1);
 
-        let card_path = cards_root
+        let card_path = artifacts_root
             .join("continuation-project-user-block")
-            .join("cards")
+            .join("sessions")
             .join("sessio-fake-002-continuation-user-block.md");
         let body = fs::read_to_string(card_path).unwrap();
         assert!(!body.contains("continuation tool use"));
@@ -1396,7 +1485,7 @@ mod tests {
     fn build_source_memory_trim_without_user_anchor_suppresses_source() {
         let root = unique_temp_dir("sessio-memory-trim-no-anchor");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -1409,7 +1498,10 @@ mod tests {
             agent: AgentKind::new("fake"),
             session_id: "001-existing-no-anchor".to_string(),
             scope: "scope".to_string(),
-            file_path: root.join("existing-no-anchor.jsonl").to_string_lossy().to_string(),
+            file_path: root
+                .join("existing-no-anchor.jsonl")
+                .to_string_lossy()
+                .to_string(),
             project: Some(project.clone()),
             source_kind: SourceKind::MainSession,
             metadata: Metadata::default(),
@@ -1455,7 +1547,13 @@ mod tests {
             .collect::<Vec<_>>();
         let mut existing_registry = ProviderRegistry::new();
         existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
-        build_source_memory(&existing_registry, &store, &cards_root, &existing_source).unwrap();
+        build_source_memory(
+            &existing_registry,
+            &store,
+            &artifacts_root,
+            &existing_source,
+        )
+        .unwrap();
 
         let mut continuation_events = replay
             .iter()
@@ -1477,7 +1575,7 @@ mod tests {
         let result = build_source_memory(
             &continuation_registry,
             &store,
-            &cards_root,
+            &artifacts_root,
             &continuation_source,
         )
         .unwrap();
@@ -1487,9 +1585,9 @@ mod tests {
         );
 
         let candidate_card_id = "sessio-fake-002-continuation-no-anchor";
-        let card_path = cards_root
+        let card_path = artifacts_root
             .join("no-anchor-project")
-            .join("cards")
+            .join("sessions")
             .join(format!("{candidate_card_id}.md"));
         assert!(
             !card_path.exists(),
@@ -1518,7 +1616,7 @@ mod tests {
     fn build_source_memory_dedupes_codex_without_forked_from_id_by_started_at() {
         let root = unique_temp_dir("sessio-memory-codex-no-fork");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -1541,7 +1639,10 @@ mod tests {
             agent: AgentKind::new("codex"),
             session_id: earlier_session_id.clone(),
             scope: "scope".to_string(),
-            file_path: root.join("codex-earlier.jsonl").to_string_lossy().to_string(),
+            file_path: root
+                .join("codex-earlier.jsonl")
+                .to_string_lossy()
+                .to_string(),
             project: Some(project.clone()),
             source_kind: SourceKind::MainSession,
             metadata: earlier_metadata,
@@ -1613,7 +1714,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut earlier_registry = ProviderRegistry::new();
         earlier_registry.register(FakeProvider::new(earlier_source.clone(), earlier_events));
-        build_source_memory(&earlier_registry, &store, &cards_root, &earlier_source).unwrap();
+        build_source_memory(&earlier_registry, &store, &artifacts_root, &earlier_source).unwrap();
 
         let mut later_events = replay
             .iter()
@@ -1634,12 +1735,12 @@ mod tests {
         ));
         let mut later_registry = ProviderRegistry::new();
         later_registry.register(FakeProvider::new(later_source.clone(), later_events));
-        build_source_memory(&later_registry, &store, &cards_root, &later_source).unwrap();
+        build_source_memory(&later_registry, &store, &artifacts_root, &later_source).unwrap();
 
         let later_card_id = format!("sessio-codex-{}", later_session_id);
-        let later_card_path = cards_root
+        let later_card_path = artifacts_root
             .join("codex-no-fork-project")
-            .join("cards")
+            .join("sessions")
             .join(format!("{later_card_id}.md"));
         let later_body = fs::read_to_string(later_card_path).unwrap();
         assert!(
@@ -1648,8 +1749,9 @@ mod tests {
         );
         assert!(later_body.contains("later unique request after the shared prefix"));
         let continuation = store.continuation_for_card(&later_card_id).unwrap();
-        let continuation = continuation
-            .expect("later card must record continuation provenance pointing at the earlier session");
+        let continuation = continuation.expect(
+            "later card must record continuation provenance pointing at the earlier session",
+        );
         assert_eq!(continuation.base_session_id, earlier_session_id);
 
         let _ = fs::remove_dir_all(&root);
@@ -1662,7 +1764,7 @@ mod tests {
     fn build_source_memory_invalidates_continuations_when_base_changes() {
         let root = unique_temp_dir("sessio-memory-base-reindex");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -1704,11 +1806,20 @@ mod tests {
 
         let replay = vec![
             (MessageRole::User, "shared opening request for base reindex"),
-            (MessageRole::Assistant, "shared opening answer for base reindex"),
+            (
+                MessageRole::Assistant,
+                "shared opening answer for base reindex",
+            ),
             (MessageRole::User, "shared follow-up for base reindex"),
-            (MessageRole::Assistant, "shared follow-up answer for base reindex"),
+            (
+                MessageRole::Assistant,
+                "shared follow-up answer for base reindex",
+            ),
             (MessageRole::User, "shared third request for base reindex"),
-            (MessageRole::Assistant, "shared third answer for base reindex"),
+            (
+                MessageRole::Assistant,
+                "shared third answer for base reindex",
+            ),
         ];
         let base_events = replay
             .iter()
@@ -1717,7 +1828,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut base_registry = ProviderRegistry::new();
         base_registry.register(FakeProvider::new(base_source.clone(), base_events.clone()));
-        build_source_memory(&base_registry, &store, &cards_root, &base_source).unwrap();
+        build_source_memory(&base_registry, &store, &artifacts_root, &base_source).unwrap();
 
         let mut candidate_events = replay
             .iter()
@@ -1741,11 +1852,20 @@ mod tests {
             candidate_source.clone(),
             candidate_events,
         ));
-        build_source_memory(&candidate_registry, &store, &cards_root, &candidate_source).unwrap();
+        build_source_memory(
+            &candidate_registry,
+            &store,
+            &artifacts_root,
+            &candidate_source,
+        )
+        .unwrap();
 
         let candidate_card_id = "sessio-fake-002-candidate";
         let continuation_before = store.continuation_for_card(candidate_card_id).unwrap();
-        assert!(continuation_before.is_some(), "candidate must record continuation initially");
+        assert!(
+            continuation_before.is_some(),
+            "candidate must record continuation initially"
+        );
 
         // Reindex the base with extended content; this rewrites
         // base fingerprints and must invalidate the candidate's
@@ -1766,7 +1886,13 @@ mod tests {
         let mut extended_base_registry = ProviderRegistry::new();
         extended_base_registry
             .register(FakeProvider::new(base_source.clone(), extended_base_events));
-        build_source_memory(&extended_base_registry, &store, &cards_root, &base_source).unwrap();
+        build_source_memory(
+            &extended_base_registry,
+            &store,
+            &artifacts_root,
+            &base_source,
+        )
+        .unwrap();
 
         let continuation_after = store.continuation_for_card(candidate_card_id).unwrap();
         assert!(
@@ -1791,7 +1917,7 @@ mod tests {
     fn build_source_memory_propagates_dependents_along_chain() {
         let root = unique_temp_dir("sessio-memory-chain");
         let db_path = root.join("memory.db");
-        let cards_root = root.join("cards-root");
+        let artifacts_root = root.join("artifacts-root");
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
@@ -1855,7 +1981,7 @@ mod tests {
             .collect::<Vec<_>>();
         let mut a_registry = ProviderRegistry::new();
         a_registry.register(FakeProvider::new(a_source.clone(), a_events.clone()));
-        build_source_memory(&a_registry, &store, &cards_root, &a_source).unwrap();
+        build_source_memory(&a_registry, &store, &artifacts_root, &a_source).unwrap();
 
         let mut b_events = a_turns
             .iter()
@@ -1888,7 +2014,7 @@ mod tests {
         ));
         let mut b_registry = ProviderRegistry::new();
         b_registry.register(FakeProvider::new(b_source.clone(), b_events.clone()));
-        build_source_memory(&b_registry, &store, &cards_root, &b_source).unwrap();
+        build_source_memory(&b_registry, &store, &artifacts_root, &b_source).unwrap();
 
         let mut c_events = b_events.clone();
         for event in c_events.iter_mut() {
@@ -1909,7 +2035,7 @@ mod tests {
         ));
         let mut c_registry = ProviderRegistry::new();
         c_registry.register(FakeProvider::new(c_source.clone(), c_events));
-        build_source_memory(&c_registry, &store, &cards_root, &c_source).unwrap();
+        build_source_memory(&c_registry, &store, &artifacts_root, &c_source).unwrap();
 
         let b_card_id = "sessio-fake-002-b";
         let c_card_id = "sessio-fake-003-c";
@@ -1943,7 +2069,7 @@ mod tests {
         let mut extended_a_registry = ProviderRegistry::new();
         extended_a_registry.register(FakeProvider::new(a_source.clone(), extended_a_events));
         let a_result =
-            build_source_memory(&extended_a_registry, &store, &cards_root, &a_source).unwrap();
+            build_source_memory(&extended_a_registry, &store, &artifacts_root, &a_source).unwrap();
         let b_path = PathBuf::from(&b_source.file_path);
         assert!(
             a_result.dependent_source_paths.contains(&b_path),
@@ -1967,7 +2093,7 @@ mod tests {
         let mut b_registry_again = ProviderRegistry::new();
         b_registry_again.register(FakeProvider::new(b_source.clone(), b_events));
         let b_result =
-            build_source_memory(&b_registry_again, &store, &cards_root, &b_source).unwrap();
+            build_source_memory(&b_registry_again, &store, &artifacts_root, &b_source).unwrap();
         let c_path = PathBuf::from(&c_source.file_path);
         assert!(
             b_result.dependent_source_paths.contains(&c_path),

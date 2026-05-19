@@ -411,9 +411,9 @@ sessio memory search --project-key <project_slug> "query text" --json
 sessio memory resolve --card-id <card_id> --json
 sessio memory jobs --project-key <project_slug> --json
 
-sessio qmd status --json
-sessio qmd sync --project-key <project_slug> --cards-root <path> --json
-sessio qmd sync --project-key <project_slug> --cards-root <path> --embed --json
+sessio memory status --json
+sessio memory sync --project-key <project_slug> --artifacts-root <path> --json
+sessio memory sync --project-key <project_slug> --artifacts-root <path> --embed --json
 ```
 
 Skill 主入口应该尽量简单：
@@ -939,7 +939,7 @@ trait MemoryIndexer {
 - `sessio sessions list --json` 输出合法 JSON
 - `sessio sessions messages --json` 能读取 Codex / Claude / Gemini
 - project path 不存在时返回结构化错误
-- qmd 不存在时 `sessio qmd status --json` 返回可读错误
+- qmd 不存在时 `sessio memory status --json` 返回可读错误
 - qmd query 超时时 `sessio memory search --json` 返回空 hits 和 `backendError`
 
 ### Memory

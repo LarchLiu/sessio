@@ -1,5 +1,5 @@
 use crate::memory::hash::{card_hash, content_text, turn_content_hash, turn_content_len};
-use crate::memory::{MemoryCard, MemorySource, TurnFingerprint};
+use crate::memory::{MemoryRecord, MemoryRecordKind, MemorySource, TurnFingerprint};
 use crate::providers::types::{
     MessageContent, MessageEvent, MessageRole, SessionSource, SourceLocation,
 };
@@ -9,7 +9,7 @@ const MAX_SUMMARY_CHARS: usize = 360;
 pub fn cards_for_source(
     source: &SessionSource,
     events: &[MessageEvent],
-) -> Vec<(MemoryCard, Vec<MemorySource>)> {
+) -> Vec<(MemoryRecord, Vec<MemorySource>)> {
     if events.is_empty() {
         return Vec::new();
     }
@@ -27,19 +27,18 @@ pub fn cards_for_source(
     let summary = summarize_events(events);
     let body = card_body(source, events);
     let canonical_hash = card_hash(&project.project_key, &title, &summary, &body);
-    let card_id = format!(
+    let record_id = format!(
         "sessio-{}-{}",
         safe_id_part(source.agent.as_str()),
         safe_id_part(&source.session_id)
     );
-    let qmd_path = format!("{}/cards/{}.md", project.project_key, card_id);
     let updated_at = events
         .iter()
         .filter_map(|event| event.timestamp)
         .max()
         .unwrap_or(0);
     let source_ref = MemorySource {
-        card_id: card_id.clone(),
+        card_id: record_id.clone(),
         agent: source.agent.as_str().to_string(),
         session_id: source.session_id.clone(),
         file_path: source.file_path.clone(),
@@ -47,15 +46,15 @@ pub fn cards_for_source(
     };
 
     vec![(
-        MemoryCard {
-            card_id,
+        MemoryRecord {
+            record_id,
             project_key: project.project_key.clone(),
             canonical_hash,
             simhash: None,
-            qmd_path,
             title,
             summary: Some(summary),
             body,
+            kind: MemoryRecordKind::Session,
             available: true,
             updated_at,
         },
@@ -279,7 +278,7 @@ mod tests {
         let cards = cards_for_source(&source, &[event]);
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].0.project_key, "p_test");
-        assert_eq!(cards[0].0.card_id, "sessio-codex-abc123");
+        assert_eq!(cards[0].0.record_id, "sessio-codex-abc123");
         assert_eq!(cards[0].1[0].session_id, "abc123");
     }
 

@@ -109,7 +109,12 @@ pub fn should_suppress_source(
 
     for candidate in candidates {
         let candidate_time = store.session_time_info(&candidate.agent, &candidate.session_id)?;
-        if !is_allowed_candidate(source, &candidate.agent, &candidate.session_id, candidate_time) {
+        if !is_allowed_candidate(
+            source,
+            &candidate.agent,
+            &candidate.session_id,
+            candidate_time,
+        ) {
             continue;
         }
         let cards = store.list_cards_for_source(

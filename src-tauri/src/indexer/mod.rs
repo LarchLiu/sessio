@@ -10,10 +10,9 @@ use std::time::Duration;
 use anyhow::Result;
 use tauri::{AppHandle, Emitter};
 
-use crate::memory::build::{
-    build_project_memory, build_source_memory, default_output_root, MemoryBuildOptions,
-};
+use crate::memory::build::MemoryBuildOptions;
 use crate::memory::qmd::{self, QmdOptions};
+use crate::memory::service::{MemoryBackendSyncJob, MemoryService};
 use crate::memory::MemoryStore;
 use crate::models::Agent;
 use crate::providers;
@@ -75,7 +74,7 @@ pub fn spawn(
     memory_store: Arc<dyn MemoryStore>,
 ) -> IndexerHandle {
     let (tx, rx) = unbounded::<IndexTask>();
-    let (qmd_tx, qmd_rx) = unbounded::<QmdSyncJob>();
+    let (qmd_tx, qmd_rx) = unbounded::<MemoryBackendSyncJob>();
     let state = Arc::new(IndexerState {
         indexing: AtomicBool::new(false),
         last_error: Mutex::new(None),
@@ -102,7 +101,7 @@ fn run_loop(
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
-    qmd_tx: Sender<QmdSyncJob>,
+    qmd_tx: Sender<MemoryBackendSyncJob>,
     tx: Sender<IndexTask>,
     rx: Receiver<IndexTask>,
     state: Arc<IndexerState>,
@@ -165,7 +164,7 @@ fn run_loop(
         let mut qmd_jobs = HashMap::new();
         let mut deferred_requeues: Vec<PathBuf> = Vec::new();
         for source in affected_sources.values() {
-            match build_source_memory_for_indexer(source, memory_store.as_ref()) {
+            match build_source_memory_for_indexer(source, memory_store.clone()) {
                 Ok(Some(job)) => {
                     deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                     qmd_jobs.insert(job.project_key.clone(), job);
@@ -194,7 +193,7 @@ fn run_loop(
             if already_covered {
                 continue;
             }
-            match build_project_memory_for_indexer(project, memory_store.as_ref()) {
+            match build_project_memory_for_indexer(project, memory_store.clone()) {
                 Ok(Some(job)) => {
                     deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                     qmd_jobs.insert(job.project_key.clone(), job);
@@ -383,14 +382,6 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
 struct TaskOutcome {
     affected_projects: Vec<ProjectRef>,
     affected_sources: Vec<SessionSource>,
-}
-
-#[derive(Debug, Clone)]
-struct QmdSyncJob {
-    project_key: String,
-    project_path: String,
-    cards_root: PathBuf,
-    dependent_source_paths: Vec<PathBuf>,
 }
 
 fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<TaskOutcome> {
@@ -664,25 +655,23 @@ fn refresh_gemini_mappings(store: &dyn SessionStore) -> Result<TaskOutcome> {
 
 fn build_project_memory_for_indexer(
     project: &ProjectRef,
-    store: &dyn MemoryStore,
-) -> Result<Option<QmdSyncJob>> {
+    store: Arc<dyn MemoryStore>,
+) -> Result<Option<MemoryBackendSyncJob>> {
     let Some(project_path) = project.project_path.as_deref() else {
         return Ok(None);
     };
-    let output_root = default_output_root()?;
-    let registry = providers::builtin_providers();
-    let summary = match build_project_memory(
-        &registry,
-        store,
-        &MemoryBuildOptions {
-            project_path: PathBuf::from(project_path),
-            output_root: output_root.clone(),
-        },
-    ) {
+    let service = MemoryService::new(store.clone(), Arc::new(providers::builtin_providers()))?;
+    let backend = service.backend_name().to_string();
+    let artifacts_root = service.backend_artifacts_root()?;
+    let summary = match service.build_project(MemoryBuildOptions {
+        project_path: PathBuf::from(project_path),
+        artifacts_root: artifacts_root.clone(),
+    }) {
         Ok(summary) => summary,
         Err(e) => {
             store.record_memory_job(
                 &project.project_key,
+                &backend,
                 project_path,
                 "memory_build",
                 "retryable_failed",
@@ -703,6 +692,7 @@ fn build_project_memory_for_indexer(
     };
     store.record_memory_job(
         &project.project_key,
+        &backend,
         project_path,
         "memory_build",
         status,
@@ -712,32 +702,35 @@ fn build_project_memory_for_indexer(
     let project_key = summary
         .project_key
         .unwrap_or_else(|| project.project_key.clone());
-    let cards_root = output_root.join(&project_key);
-    Ok(Some(QmdSyncJob {
+    Ok(Some(MemoryBackendSyncJob {
+        backend,
         project_key,
         project_path: project_path.to_string(),
-        cards_root,
+        changed_record_ids: Vec::new(),
+        removed_record_ids: Vec::new(),
         dependent_source_paths: summary.dependent_source_paths,
     }))
 }
 
 fn build_source_memory_for_indexer(
     source: &SessionSource,
-    store: &dyn MemoryStore,
-) -> Result<Option<QmdSyncJob>> {
+    store: Arc<dyn MemoryStore>,
+) -> Result<Option<MemoryBackendSyncJob>> {
     let Some(project) = &source.project else {
         return Ok(None);
     };
     let Some(project_path) = project.project_path.as_deref() else {
         return Ok(None);
     };
-    let output_root = default_output_root()?;
-    let registry = providers::builtin_providers();
-    let result = match build_source_memory(&registry, store, &output_root, source) {
+    let service = MemoryService::new(store.clone(), Arc::new(providers::builtin_providers()))?;
+    let backend = service.backend_name().to_string();
+    let artifacts_root = service.backend_artifacts_root()?;
+    let result = match service.build_source(source, &artifacts_root) {
         Ok(result) => result,
         Err(e) => {
             store.record_memory_job(
                 &project.project_key,
+                &backend,
                 &source.file_path,
                 "memory_build",
                 "retryable_failed",
@@ -748,6 +741,7 @@ fn build_source_memory_for_indexer(
     };
     store.record_memory_job(
         &project.project_key,
+        &backend,
         &source.file_path,
         "memory_build",
         "succeeded",
@@ -757,11 +751,12 @@ fn build_source_memory_for_indexer(
     let project_key = result
         .project_key
         .unwrap_or_else(|| project.project_key.clone());
-    let cards_root = output_root.join(&project_key);
-    Ok(Some(QmdSyncJob {
+    Ok(Some(MemoryBackendSyncJob {
+        backend,
         project_key,
         project_path: project_path.to_string(),
-        cards_root,
+        changed_record_ids: Vec::new(),
+        removed_record_ids: Vec::new(),
         dependent_source_paths: result.dependent_source_paths,
     }))
 }
@@ -827,7 +822,7 @@ fn provider_task_to_index_task(task: ProviderTask) -> Option<IndexTask> {
     }
 }
 
-fn run_qmd_loop(store: Arc<dyn MemoryStore>, rx: Receiver<QmdSyncJob>) {
+fn run_qmd_loop(store: Arc<dyn MemoryStore>, rx: Receiver<MemoryBackendSyncJob>) {
     while let Ok(first) = rx.recv() {
         let mut pending = HashMap::new();
         pending.insert(first.project_key.clone(), first);
@@ -843,7 +838,7 @@ fn run_qmd_loop(store: Arc<dyn MemoryStore>, rx: Receiver<QmdSyncJob>) {
         }
 
         for job in pending.values() {
-            sync_qmd_project(job, store.as_ref());
+            sync_qmd_project(job, store.clone());
         }
         if auto_embed_enabled() {
             sync_qmd_embed(pending.values(), store.as_ref());
@@ -851,14 +846,32 @@ fn run_qmd_loop(store: Arc<dyn MemoryStore>, rx: Receiver<QmdSyncJob>) {
     }
 }
 
-fn sync_qmd_project(job: &QmdSyncJob, store: &dyn MemoryStore) {
-    let qmd_options = QmdOptions::default();
-    match qmd::ensure_project_collection(&qmd_options, &job.project_key, &job.cards_root)
-        .and_then(|_| qmd::update_index(&qmd_options))
+fn sync_qmd_project(job: &MemoryBackendSyncJob, store: Arc<dyn MemoryStore>) {
+    let service = match MemoryService::new(store.clone(), Arc::new(providers::builtin_providers()))
     {
+        Ok(service) => service,
+        Err(e) => {
+            if let Err(store_error) = store.record_memory_job(
+                &job.project_key,
+                &job.backend,
+                &job.project_path,
+                "qmd_update",
+                "retryable_failed",
+                Some(&e.to_string()),
+            ) {
+                log::warn!(
+                    "failed to record qmd failure for {}: {store_error}",
+                    job.project_key
+                );
+            }
+            return;
+        }
+    };
+    match service.sync_backend_job(job) {
         Ok(_) => {
             if let Err(e) = store.record_memory_job(
                 &job.project_key,
+                &job.backend,
                 &job.project_path,
                 "qmd_update",
                 "succeeded",
@@ -870,6 +883,7 @@ fn sync_qmd_project(job: &QmdSyncJob, store: &dyn MemoryStore) {
         Err(e) => {
             if let Err(store_error) = store.record_memory_job(
                 &job.project_key,
+                &job.backend,
                 &job.project_path,
                 "qmd_update",
                 "retryable_failed",
@@ -884,13 +898,17 @@ fn sync_qmd_project(job: &QmdSyncJob, store: &dyn MemoryStore) {
     }
 }
 
-fn sync_qmd_embed<'a>(jobs: impl Iterator<Item = &'a QmdSyncJob> + Clone, store: &dyn MemoryStore) {
+fn sync_qmd_embed<'a>(
+    jobs: impl Iterator<Item = &'a MemoryBackendSyncJob> + Clone,
+    store: &dyn MemoryStore,
+) {
     let qmd_options = QmdOptions::default();
     match qmd::embed_index(&qmd_options) {
         Ok(_) => {
             for job in jobs {
                 if let Err(e) = store.record_memory_job(
                     &job.project_key,
+                    &job.backend,
                     &job.project_path,
                     "qmd_embed",
                     "succeeded",
@@ -908,6 +926,7 @@ fn sync_qmd_embed<'a>(jobs: impl Iterator<Item = &'a QmdSyncJob> + Clone, store:
             for job in jobs {
                 if let Err(store_error) = store.record_memory_job(
                     &job.project_key,
+                    &job.backend,
                     &job.project_path,
                     "qmd_embed",
                     "retryable_failed",
@@ -1005,4 +1024,61 @@ fn group_by<K: std::hash::Hash + Eq, V, F: Fn(&V) -> K>(
         out.entry(k).or_default().push(item);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::types::{AgentKind, ProviderTask, SessionSource};
+
+    fn src(agent: &str, file_path: &str, kind: SourceKind) -> SessionSource {
+        SessionSource {
+            agent: AgentKind::new(agent),
+            session_id: "session-1".to_string(),
+            scope: file_path.to_string(),
+            file_path: file_path.to_string(),
+            project: None,
+            source_kind: kind,
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn watcher_reindex_source_tasks_route_to_memory_rebuild_tasks() {
+        let codex = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "codex",
+            "/tmp/codex/a.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(matches!(codex, Some(IndexTask::ReindexCodexFile(_))));
+
+        let claude = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "claude",
+            "/tmp/claude/project/a.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(matches!(claude, Some(IndexTask::ReindexClaudeFile(_))));
+
+        let gemini = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+            "gemini",
+            "/tmp/gemini/project/logs.json",
+            SourceKind::Logs,
+        )));
+        assert!(matches!(gemini, Some(IndexTask::ReindexGeminiLogs(_))));
+    }
+
+    #[test]
+    fn polling_scope_tasks_route_to_project_memory_rebuild_tasks() {
+        let claude = provider_task_to_index_task(ProviderTask::ReindexScope {
+            agent: AgentKind::new("claude"),
+            scope: "/tmp/claude/project".to_string(),
+        });
+        assert!(matches!(claude, Some(IndexTask::ReindexClaudeProject(_))));
+
+        let gemini = provider_task_to_index_task(ProviderTask::ReindexScope {
+            agent: AgentKind::new("gemini"),
+            scope: "/tmp/gemini/project/logs.json".to_string(),
+        });
+        assert!(matches!(gemini, Some(IndexTask::ReindexGeminiLogs(_))));
+    }
 }

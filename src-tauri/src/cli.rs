@@ -1,7 +1,11 @@
-use crate::memory::build::{build_project_memory, default_output_root, MemoryBuildOptions};
+use crate::memory::build::MemoryBuildOptions;
 use crate::memory::cards::safe_id_part;
 use crate::memory::qmd;
-use crate::memory::{CardContinuation, MemoryCard, MemoryStore};
+use crate::memory::service::MemoryService;
+use crate::memory::{
+    CardContinuation, MemoryBackendHit, MemoryIndexBackend, MemoryRecord, MemorySearchOptions,
+    MemoryStore,
+};
 use crate::models::Agent;
 use crate::providers;
 use crate::providers::shared::convert::project_key_for_path_or_name;
@@ -10,8 +14,8 @@ use crate::store::SessionStore;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::env;
-use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct Cli {
@@ -22,15 +26,26 @@ struct Cli {
 enum Command {
     Sessions(SessionsCommand),
     Memory(MemoryCommand),
-    Qmd(QmdCommand),
     Help,
 }
 
 #[derive(Debug)]
 enum MemoryCommand {
+    Status {
+        binary: Option<String>,
+        json: bool,
+    },
+    Sync {
+        project_key: String,
+        artifacts_root: Option<String>,
+        binary: Option<String>,
+        index: String,
+        embed: bool,
+        json: bool,
+    },
     Build {
         project: String,
-        output_root: Option<String>,
+        artifacts_root: Option<String>,
         db_path: Option<String>,
         json: bool,
     },
@@ -69,22 +84,6 @@ enum MemoryCommand {
 }
 
 #[derive(Debug)]
-enum QmdCommand {
-    Status {
-        binary: Option<String>,
-        json: bool,
-    },
-    Sync {
-        project_key: String,
-        cards_root: String,
-        binary: Option<String>,
-        index: String,
-        embed: bool,
-        json: bool,
-    },
-}
-
-#[derive(Debug)]
 enum SessionsCommand {
     List {
         project: Option<String>,
@@ -111,7 +110,6 @@ struct MemorySearchHit {
     card_id: String,
     title: String,
     summary: Option<String>,
-    qmd_path: String,
     score: Option<f64>,
     snippet: Option<String>,
     sources: Vec<crate::memory::MemorySource>,
@@ -122,7 +120,7 @@ struct MemorySearchHit {
 #[serde(rename_all = "camelCase")]
 struct MemoryBaseHit {
     card_id: String,
-    card: Option<MemoryCard>,
+    card: Option<MemoryRecord>,
     continuation: MemoryContinuationSummary,
 }
 
@@ -130,9 +128,9 @@ struct MemoryBaseHit {
 #[serde(rename_all = "camelCase")]
 struct MemoryCoveredByResult {
     card_id: String,
-    card: MemoryCard,
+    card: MemoryRecord,
     base_card_id: Option<String>,
-    base_card: Option<MemoryCard>,
+    base_card: Option<MemoryRecord>,
     continuation: Option<MemoryContinuationSummary>,
 }
 
@@ -166,7 +164,6 @@ fn run() -> Result<()> {
     match cli.command {
         Command::Sessions(cmd) => run_sessions(cmd),
         Command::Memory(cmd) => run_memory(cmd),
-        Command::Qmd(cmd) => run_qmd(cmd),
         Command::Help => {
             print_help();
             Ok(())
@@ -176,34 +173,119 @@ fn run() -> Result<()> {
 
 fn run_memory(cmd: MemoryCommand) -> Result<()> {
     match cmd {
+        MemoryCommand::Status { binary, json } => {
+            let status = qmd::qmd_status(binary.as_deref());
+            let backend_status = serde_json::json!({
+                "backend": "qmd",
+                "available": status.available,
+                "error": status.error,
+                "binary": status.binary,
+                "version": status.version,
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&backend_status)?);
+            } else if status.available {
+                println!(
+                    "memory backend available: qmd{}",
+                    status
+                        .version
+                        .as_deref()
+                        .map(|v| format!(" ({v})"))
+                        .unwrap_or_default()
+                );
+            } else {
+                println!(
+                    "memory backend unavailable: {}",
+                    status.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+            Ok(())
+        }
+        MemoryCommand::Sync {
+            project_key,
+            artifacts_root,
+            binary,
+            index,
+            embed,
+            json,
+        } => {
+            let artifacts_root = match artifacts_root {
+                Some(path) => PathBuf::from(path),
+                None => crate::config::load_memory_config()?.qmd.artifacts_root,
+            };
+            let options = qmd::QmdOptions { binary, index };
+            let backend = qmd::QmdBackend::new(options.clone(), artifacts_root.clone());
+            let sync = backend.sync_project(
+                &project_key,
+                &[],
+                &crate::memory::artifacts::NoopArtifactSink,
+            )?;
+            let embed_result = if embed {
+                Some(qmd::embed_index(&options)?)
+            } else {
+                None
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "projectKey": project_key,
+                        "artifactsRoot": artifacts_root,
+                        "backend": sync.backend,
+                        "sync": sync,
+                        "embed": embed_result
+                    }))?
+                );
+            } else {
+                println!(
+                    "synced memory backend {} for project {}",
+                    sync.backend, project_key
+                );
+            }
+            Ok(())
+        }
         MemoryCommand::Build {
             project,
-            output_root,
+            artifacts_root,
             db_path,
             json,
         } => {
-            let store = open_store(db_path.as_deref())?;
+            let store = Arc::new(open_store(db_path.as_deref())?);
             store.init()?;
-            let registry = providers::builtin_providers();
-            let output_root = match output_root {
+            let memory_store: Arc<dyn MemoryStore> = store.clone();
+            let service =
+                MemoryService::new(memory_store, Arc::new(providers::builtin_providers()))?;
+            let artifacts_root = match artifacts_root {
                 Some(path) => PathBuf::from(path),
-                None => default_output_root()?,
+                None => service.backend_artifacts_root()?,
             };
-            let summary = build_project_memory(
-                &registry,
-                &store,
-                &MemoryBuildOptions {
-                    project_path: PathBuf::from(project),
-                    output_root,
-                },
-            )?;
+            let (summary, sync_result) = service.build_project_and_sync(MemoryBuildOptions {
+                project_path: PathBuf::from(project),
+                artifacts_root,
+            })?;
+            let (backend_sync, backend_error) = match sync_result {
+                Some(Ok(sync)) => (Some(sync), None),
+                Some(Err(e)) => (None, Some(e.to_string())),
+                None => (None, None),
+            };
             if json {
-                println!("{}", serde_json::to_string_pretty(&summary)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "summary": summary,
+                        "backend": service.backend_name(),
+                        "backendSync": backend_sync,
+                        "backendError": backend_error,
+                    }))?
+                );
             } else {
                 println!(
                     "built {} memory cards from {} sources",
                     summary.cards_written, summary.sources_built
                 );
+                if let Some(error) = backend_error {
+                    println!("memory backend sync unavailable: {error}");
+                }
             }
             Ok(())
         }
@@ -213,11 +295,16 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             include_source_excerpt,
             json,
         } => {
-            let store = open_store(db_path.as_deref())?;
+            let store = Arc::new(open_store(db_path.as_deref())?);
             store.init()?;
-            let card = store.card_by_id(&card_id)?;
-            let sources = store.sources_for_card(&card_id)?;
-            let continuation = store.continuation_for_card(&card_id)?;
+            let memory_store: Arc<dyn MemoryStore> = store.clone();
+            let service = MemoryService::new(
+                memory_store.clone(),
+                Arc::new(providers::builtin_providers()),
+            )?;
+            let card = service.resolve(&card_id)?;
+            let sources = memory_store.sources_for_card(&card_id)?;
+            let continuation = memory_store.continuation_for_card(&card_id)?;
             let payload_sources: Vec<serde_json::Value> = sources
                 .iter()
                 .map(|source| {
@@ -314,12 +401,12 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             let Some(card) = card else {
                 bail!("card not found: {card_id}");
             };
-            let sources = store.sources_for_card(&card.card_id)?;
+            let sources = store.sources_for_card(&card.record_id)?;
             let Some(base_source) = sources.first() else {
                 bail!("base card has no source refs: {card_id}");
             };
-            let continuations = store
-                .continuations_for_base(&base_source.agent, &base_source.session_id)?;
+            let continuations =
+                store.continuations_for_base(&base_source.agent, &base_source.session_id)?;
             let hits: Vec<MemoryBaseHit> = continuations
                 .into_iter()
                 .filter_map(|continuation| {
@@ -337,15 +424,18 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "baseCardId": card.card_id,
+                        "baseCardId": card.record_id,
                         "baseCard": card,
                         "baseSource": base_source,
                         "hits": hits,
                     }))?
                 );
             } else {
-                println!("base card: {}", card.card_id);
-                println!("base source: {} {}", base_source.agent, base_source.session_id);
+                println!("base card: {}", card.record_id);
+                println!(
+                    "base source: {} {}",
+                    base_source.agent, base_source.session_id
+                );
                 for hit in hits {
                     println!(
                         "{}\t{}\t{}",
@@ -368,31 +458,37 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             json,
         } => {
             let project_key = resolve_project_key(project_key, project.as_deref())?;
-            let store = open_store(db_path.as_deref())?;
+            let store = Arc::new(open_store(db_path.as_deref())?);
             store.init()?;
-            let options = qmd::QmdOptions { binary, index };
-            let search_result = qmd::search_project(&options, &project_key, &query);
-            let (collection, raw, hits, backend_error) = match search_result {
+            let memory_store: Arc<dyn MemoryStore> = store.clone();
+            let _ = (binary, index);
+            let service = MemoryService::new(
+                memory_store.clone(),
+                Arc::new(providers::builtin_providers()),
+            )?;
+            let search_result =
+                service.search(&project_key, &query, MemorySearchOptions { include_raw });
+            let (backend_name, raw, hits, backend_error) = match search_result {
                 Ok(result) => {
-                    let hits = map_qmd_hits_to_memory(&store, &project_key, &result.raw)?;
-                    (result.collection, result.raw, hits, None)
+                    let hits = map_backend_hits_to_memory(
+                        memory_store.as_ref(),
+                        &project_key,
+                        &result.backend,
+                        &result.hits,
+                    )?;
+                    (result.backend, result.raw, hits, None)
                 }
-                Err(e) => (
-                    qmd::collection_name(&project_key),
-                    serde_json::Value::Null,
-                    Vec::new(),
-                    Some(e.to_string()),
-                ),
+                Err(e) => ("qmd".to_string(), None, Vec::new(), Some(e.to_string())),
             };
             if json {
                 let mut payload = serde_json::json!({
                     "projectKey": project_key,
                     "query": query,
-                    "collection": collection,
+                    "backend": backend_name,
                     "hits": hits,
                     "backendError": backend_error,
                 });
-                if include_raw {
+                if let Some(raw) = raw {
                     payload
                         .as_object_mut()
                         .expect("payload is a JSON object")
@@ -455,73 +551,6 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                         job.error.unwrap_or_default()
                     );
                 }
-            }
-            Ok(())
-        }
-    }
-}
-
-fn run_qmd(cmd: QmdCommand) -> Result<()> {
-    match cmd {
-        QmdCommand::Status { binary, json } => {
-            let status = qmd::qmd_status(binary.as_deref());
-            if json {
-                println!("{}", serde_json::to_string_pretty(&status)?);
-            } else if status.available {
-                println!(
-                    "qmd available: {}{}",
-                    status.binary.as_deref().unwrap_or("qmd"),
-                    status
-                        .version
-                        .as_deref()
-                        .map(|v| format!(" ({v})"))
-                        .unwrap_or_default()
-                );
-            } else {
-                println!(
-                    "qmd unavailable: {}",
-                    status.error.as_deref().unwrap_or("unknown error")
-                );
-            }
-            Ok(())
-        }
-        QmdCommand::Sync {
-            project_key,
-            cards_root,
-            binary,
-            index,
-            embed,
-            json,
-        } => {
-            let options = qmd::QmdOptions { binary, index };
-            let ensure = qmd::ensure_project_collection(
-                &options,
-                &project_key,
-                &PathBuf::from(&cards_root),
-            )?;
-            let update = qmd::update_index(&options)?;
-            let embed_result = if embed {
-                Some(qmd::embed_index(&options)?)
-            } else {
-                None
-            };
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "projectKey": project_key,
-                        "cardsRoot": cards_root,
-                        "collection": qmd::collection_name(&project_key),
-                        "ensure": ensure,
-                        "update": update,
-                        "embed": embed_result
-                    }))?
-                );
-            } else {
-                println!(
-                    "synced qmd collection {}",
-                    qmd::collection_name(&project_key)
-                );
             }
             Ok(())
         }
@@ -613,7 +642,6 @@ fn parse_args(args: Vec<String>) -> Result<Cli> {
     match args[0].as_str() {
         "sessions" => parse_sessions(&args[1..]),
         "memory" => parse_memory(&args[1..]),
-        "qmd" => parse_qmd(&args[1..]),
         other => bail!("unknown command '{other}'"),
     }
 }
@@ -623,9 +651,79 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
         bail!("missing memory subcommand");
     };
     match subcommand.as_str() {
+        "status" => {
+            let mut binary = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--binary" => {
+                        i += 1;
+                        binary = Some(args.get(i).context("missing value for --binary")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown memory status option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Memory(MemoryCommand::Status { binary, json }),
+            })
+        }
+        "sync" => {
+            let mut project_key = None;
+            let mut artifacts_root = None;
+            let mut binary = None;
+            let mut index = "sessio".to_string();
+            let mut embed = false;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--project-key" => {
+                        i += 1;
+                        project_key = Some(
+                            args.get(i)
+                                .context("missing value for --project-key")?
+                                .clone(),
+                        );
+                    }
+                    "--artifacts-root" | "--cards-root" => {
+                        i += 1;
+                        artifacts_root = Some(
+                            args.get(i)
+                                .context("missing value for --artifacts-root")?
+                                .clone(),
+                        );
+                    }
+                    "--binary" => {
+                        i += 1;
+                        binary = Some(args.get(i).context("missing value for --binary")?.clone());
+                    }
+                    "--index" => {
+                        i += 1;
+                        index = args.get(i).context("missing value for --index")?.clone();
+                    }
+                    "--embed" => embed = true,
+                    "--json" => json = true,
+                    other => bail!("unknown memory sync option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Memory(MemoryCommand::Sync {
+                    project_key: project_key.context("missing --project-key")?,
+                    artifacts_root,
+                    binary,
+                    index,
+                    embed,
+                    json,
+                }),
+            })
+        }
         "build" => {
             let mut project = None;
-            let mut output_root = None;
+            let mut artifacts_root = None;
             let mut db_path = None;
             let mut json = false;
             let mut i = 1;
@@ -635,11 +733,11 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
                         i += 1;
                         project = Some(args.get(i).context("missing value for --project")?.clone());
                     }
-                    "--output-root" => {
+                    "--artifacts-root" | "--output-root" => {
                         i += 1;
-                        output_root = Some(
+                        artifacts_root = Some(
                             args.get(i)
-                                .context("missing value for --output-root")?
+                                .context("missing value for --artifacts-root")?
                                 .clone(),
                         );
                     }
@@ -655,7 +753,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             Ok(Cli {
                 command: Command::Memory(MemoryCommand::Build {
                     project: project.context("missing --project")?,
-                    output_root,
+                    artifacts_root,
                     db_path,
                     json,
                 }),
@@ -849,85 +947,6 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
     }
 }
 
-fn parse_qmd(args: &[String]) -> Result<Cli> {
-    let Some(subcommand) = args.first() else {
-        bail!("missing qmd subcommand");
-    };
-    match subcommand.as_str() {
-        "status" => {
-            let mut binary = None;
-            let mut json = false;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--binary" => {
-                        i += 1;
-                        binary = Some(args.get(i).context("missing value for --binary")?.clone());
-                    }
-                    "--json" => json = true,
-                    other => bail!("unknown qmd status option '{other}'"),
-                }
-                i += 1;
-            }
-            Ok(Cli {
-                command: Command::Qmd(QmdCommand::Status { binary, json }),
-            })
-        }
-        "sync" => {
-            let mut project_key = None;
-            let mut cards_root = None;
-            let mut binary = None;
-            let mut index = "sessio".to_string();
-            let mut embed = false;
-            let mut json = false;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--project-key" => {
-                        i += 1;
-                        project_key = Some(
-                            args.get(i)
-                                .context("missing value for --project-key")?
-                                .clone(),
-                        );
-                    }
-                    "--cards-root" => {
-                        i += 1;
-                        cards_root = Some(
-                            args.get(i)
-                                .context("missing value for --cards-root")?
-                                .clone(),
-                        );
-                    }
-                    "--binary" => {
-                        i += 1;
-                        binary = Some(args.get(i).context("missing value for --binary")?.clone());
-                    }
-                    "--index" => {
-                        i += 1;
-                        index = args.get(i).context("missing value for --index")?.clone();
-                    }
-                    "--embed" => embed = true,
-                    "--json" => json = true,
-                    other => bail!("unknown qmd sync option '{other}'"),
-                }
-                i += 1;
-            }
-            Ok(Cli {
-                command: Command::Qmd(QmdCommand::Sync {
-                    project_key: project_key.context("missing --project-key")?,
-                    cards_root: cards_root.context("missing --cards-root")?,
-                    binary,
-                    index,
-                    embed,
-                    json,
-                }),
-            })
-        }
-        other => bail!("unknown qmd subcommand '{other}'"),
-    }
-}
-
 fn parse_sessions(args: &[String]) -> Result<Cli> {
     let Some(subcommand) = args.first() else {
         bail!("missing sessions subcommand");
@@ -1080,49 +1099,48 @@ fn resolve_project_key(project_key: Option<String>, project: Option<&str>) -> Re
     ))
 }
 
-fn map_qmd_hits_to_memory(
+fn map_backend_hits_to_memory(
     store: &dyn MemoryStore,
     project_key: &str,
-    raw: &serde_json::Value,
+    backend: &str,
+    backend_hits: &[MemoryBackendHit],
 ) -> Result<Vec<MemorySearchHit>> {
-    let cards = store
+    let records = store
         .list_project_cards(project_key)?
         .into_iter()
-        .filter(|card| card.available)
+        .filter(|record| record.available)
         .collect::<Vec<_>>();
-    let candidates = qmd_hit_candidates(raw);
     let mut out = Vec::new();
-    for candidate in candidates {
-        let Some(card) = cards.iter().find(|card| {
+    for candidate in backend_hits {
+        let Some(record) = records.iter().find(|record| {
             candidate
-                .card_id
+                .record_id
                 .as_deref()
-                .map(|id| id == card.card_id)
+                .map(|id| id == record.record_id)
                 .unwrap_or(false)
                 || candidate
-                    .path
+                    .artifact_uri
                     .as_deref()
-                    .map(|path| path_matches_card(path, &card.card_id, &card.qmd_path))
+                    .map(|path| path_matches_record_artifact(path, record, store, backend))
                     .unwrap_or(false)
         }) else {
             continue;
         };
         if out
             .iter()
-            .any(|hit: &MemorySearchHit| hit.card_id == card.card_id)
+            .any(|hit: &MemorySearchHit| hit.card_id == record.record_id)
         {
             continue;
         }
         out.push(MemorySearchHit {
-            card_id: card.card_id.clone(),
-            title: card.title.clone(),
-            summary: card.summary.clone(),
-            qmd_path: card.qmd_path.clone(),
+            card_id: record.record_id.clone(),
+            title: record.title.clone(),
+            summary: record.summary.clone(),
             score: candidate.score,
-            snippet: candidate.snippet,
-            sources: store.sources_for_card(&card.card_id)?,
+            snippet: candidate.snippet.clone(),
+            sources: store.sources_for_card(&record.record_id)?,
             continuation: store
-                .continuation_for_card(&card.card_id)?
+                .continuation_for_card(&record.record_id)?
                 .as_ref()
                 .map(continuation_summary),
         });
@@ -1204,91 +1222,41 @@ fn print_continuation_summary(continuation: &CardContinuation) {
     println!("  candidate file: {}", summary.candidate_file_path);
 }
 
-#[derive(Debug, Default)]
-struct QmdHitCandidate {
-    card_id: Option<String>,
-    path: Option<String>,
-    score: Option<f64>,
-    snippet: Option<String>,
-}
-
-fn qmd_hit_candidates(raw: &serde_json::Value) -> Vec<QmdHitCandidate> {
-    let mut out = Vec::new();
-    collect_qmd_hit_candidates(raw, &mut out);
-    out
-}
-
-fn collect_qmd_hit_candidates(value: &serde_json::Value, out: &mut Vec<QmdHitCandidate>) {
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_qmd_hit_candidates(item, out);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            let candidate = QmdHitCandidate {
-                card_id: first_string(map, &["cardId", "card_id", "id"])
-                    .and_then(card_id_from_text),
-                path: first_string(map, &["path", "file", "filePath", "filepath", "source"]),
-                score: first_number(map, &["score", "rank", "similarity"]),
-                snippet: first_string(map, &["snippet", "text", "content", "preview"]),
-            };
-            if candidate.card_id.is_some() || candidate.path.is_some() {
-                out.push(candidate);
-            }
-            for key in ["results", "hits", "documents", "items", "matches"] {
-                if let Some(child) = map.get(key) {
-                    collect_qmd_hit_candidates(child, out);
-                }
-            }
-        }
-        _ => {}
+fn path_matches_record_artifact(
+    path: &str,
+    record: &MemoryRecord,
+    store: &dyn MemoryStore,
+    backend: &str,
+) -> bool {
+    if path_matches_record_id(path, &record.record_id) {
+        return true;
     }
+    let Ok(Some(artifact)) = store.artifact_for_record(&record.record_id, backend) else {
+        return false;
+    };
+    path_matches_artifact(path, &record.record_id, &artifact.artifact_uri)
 }
 
-fn first_string(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        let Some(value) = map.get(*key) else {
-            continue;
-        };
-        if let Some(s) = value.as_str() {
-            return Some(s.to_string());
-        }
-    }
-    None
-}
-
-fn first_number(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
-    for key in keys {
-        if let Some(n) = map.get(*key).and_then(|value| value.as_f64()) {
-            return Some(n);
-        }
-    }
-    None
-}
-
-fn card_id_from_text(text: String) -> Option<String> {
-    let path = Path::new(&text);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&text);
-    if stem.starts_with("sessio-") {
-        Some(stem.to_string())
-    } else {
-        None
-    }
-}
-
-fn path_matches_card(path: &str, card_id: &str, qmd_path: &str) -> bool {
+fn path_matches_record_id(path: &str, record_id: &str) -> bool {
     let normalized = path.replace('\\', "/");
-    let dashed_card_id = card_id.replace('_', "-");
-    let dashed_qmd_path = qmd_path.replace('_', "-");
-    let slashless_qmd_path = qmd_path.replace('/', "-");
-    normalized.ends_with(&format!("{card_id}.md"))
-        || normalized.ends_with(qmd_path)
-        || normalized.ends_with(&format!("{dashed_card_id}.md"))
-        || normalized.ends_with(&dashed_qmd_path)
-        || normalized.ends_with(&slashless_qmd_path)
-        || normalized.contains(&format!("/cards/{card_id}.md"))
-        || normalized.contains(&format!("/cards/{dashed_card_id}.md"))
+    let dashed_record_id = record_id.replace('_', "-");
+    normalized.ends_with(&format!("{record_id}.md"))
+        || normalized.ends_with(&format!("{dashed_record_id}.md"))
+}
+
+fn path_matches_artifact(path: &str, record_id: &str, artifact_uri: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    let artifact = artifact_uri.replace('\\', "/");
+    let dashed_record_id = record_id.replace('_', "-");
+    let dashed_artifact = artifact.replace('_', "-");
+    let slashless_artifact = artifact.replace('/', "-");
+    normalized.ends_with(&artifact)
+        || normalized.ends_with(&dashed_artifact)
+        || normalized.ends_with(&slashless_artifact)
+        || normalized.contains(&format!("/cards/{record_id}.md"))
+        || normalized.contains(&format!("/cards/{dashed_record_id}.md"))
+        || normalized.contains(&format!("/sessions/{record_id}.md"))
+        || normalized.contains(&format!("/sessions/{dashed_record_id}.md"))
 }
 
 fn print_help() {
@@ -1298,14 +1266,14 @@ fn print_help() {
 Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
   sessio sessions messages --agent <codex|claude|gemini> [--session-id <id>] [--file-path <path>] [--json]
-  sessio memory build --project <path> [--output-root <path>] [--db-path <path>] [--json]
+  sessio memory build --project <path> [--artifacts-root <path>] [--db-path <path>] [--json]
   sessio memory covered-by --card-id <id> [--db-path <path>] [--json]
   sessio memory base --card-id <id> [--db-path <path>] [--json]
+  sessio memory status [--binary <path>] [--json]
+  sessio memory sync --project-key <key> [--artifacts-root <path>] [--index sessio] [--binary <path>] [--embed] [--json]
   sessio memory search (--project <path>|--project-key <key>) <query> [--index sessio] [--binary <path>] [--db-path <path>] [--include-raw] [--json]
   sessio memory resolve --card-id <id> [--db-path <path>] [--include-source-excerpt] [--json]
   sessio memory jobs --project-key <key> [--status <status>] [--db-path <path>] [--json]
-  sessio qmd status [--binary <path>] [--json]
-  sessio qmd sync --project-key <key> --cards-root <path> [--index sessio] [--binary <path>] [--embed] [--json]
 
 Notes:
   --json emits stable machine-readable output for skills and agents.
