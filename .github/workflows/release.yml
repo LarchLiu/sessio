@@ -53,8 +53,8 @@ jobs:
       - name: Lipo universal binary
         run: |
           lipo -create \
-            src-tauri/target/aarch64-apple-darwin/release/Sessio \
-            src-tauri/target/x86_64-apple-darwin/release/Sessio \
+            src-tauri/target/aarch64-apple-darwin/release/sessio \
+            src-tauri/target/x86_64-apple-darwin/release/sessio \
             -output sessio-darwin-universal
           file sessio-darwin-universal
       - uses: actions/upload-artifact@v7
@@ -94,7 +94,7 @@ jobs:
       - name: Build
         run: pnpm ci:build
       - name: Stage asset
-        run: cp src-tauri/target/release/Sessio sessio-linux-x86_64
+        run: cp src-tauri/target/release/sessio sessio-linux-x86_64
       - uses: actions/upload-artifact@v7
         with:
           name: sessio-linux-x86_64
@@ -132,7 +132,7 @@ jobs:
       - name: Build
         run: pnpm ci:build
       - name: Stage asset
-        run: cp src-tauri/target/release/Sessio sessio-linux-arm64
+        run: cp src-tauri/target/release/sessio sessio-linux-arm64
       - uses: actions/upload-artifact@v7
         with:
           name: sessio-linux-arm64
@@ -162,7 +162,7 @@ jobs:
         run: pnpm ci:build
       - name: Stage asset
         shell: pwsh
-        run: Copy-Item src-tauri\target\release\Sessio.exe sessio-windows-x86_64.exe
+        run: Copy-Item src-tauri\target\release\sessio.exe sessio-windows-x86_64.exe
       - uses: actions/upload-artifact@v7
         with:
           name: sessio-windows-x86_64.exe
