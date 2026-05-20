@@ -72,6 +72,7 @@ export default function SessionDetail({ session, viewMode, onClose, onRemoved }:
   const [open, setOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const [copiedPath, setCopiedPath] = useState(false);
   const [confirmState, setConfirmState] = useState<{ pos: { x: number; y: number } } | null>(null);
   const closingRef = useRef(false);
   useEffect(() => {
@@ -88,6 +89,15 @@ export default function SessionDetail({ session, viewMode, onClose, onRemoved }:
     e.stopPropagation();
     if (confirmState) return;
     setConfirmState({ pos: { x: e.clientX, y: e.clientY } });
+  };
+  const handleCopyPath = async () => {
+    try {
+      await navigator.clipboard.writeText(session.filePath);
+      setCopiedPath(true);
+      window.setTimeout(() => setCopiedPath(false), 1200);
+    } catch (err) {
+      console.error("copy session file path failed", err);
+    }
   };
   const confirmPos = confirmState?.pos ?? null;
   const confirmRemove = async () => {
@@ -147,9 +157,19 @@ export default function SessionDetail({ session, viewMode, onClose, onRemoved }:
                 style={{ background: agentTint(session.agent, 0.13), color: AGENT_ACCENT[session.agent] }}
                 icon={<AgentGlyph agent={session.agent} className="w-3 h-3 shrink-0" />}
               />
-              <span className="text-body-sm text-ink/40 truncate font-mono">
-                {session.id}
-              </span>
+              <Tooltip
+                content={copiedPath ? t("list.copied") : session.filePath}
+                placement="top"
+              >
+                <button
+                  type="button"
+                  onClick={handleCopyPath}
+                  className="text-body-sm text-ink/40 hover:text-ink/70 font-mono text-left transition whitespace-normal break-all"
+                  aria-label={session.filePath}
+                >
+                  {session.id}
+                </button>
+              </Tooltip>
               <Tooltip content={removeError ?? t("detail.remove_session")} placement="top">
                 <button
                   type="button"

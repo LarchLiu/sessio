@@ -1291,6 +1291,29 @@ function SessionRow({
 }) {
   const { lang, t } = useI18n();
   const subCount = item.subagents.length;
+  const [copiedProject, setCopiedProject] = useState(false);
+  const projectTimerRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (projectTimerRef.current) window.clearTimeout(projectTimerRef.current);
+    },
+    [],
+  );
+
+  const handleCopyProject = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const text = item.projectPath ?? item.projectName ?? t("list.unknown_project");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedProject(true);
+      if (projectTimerRef.current) window.clearTimeout(projectTimerRef.current);
+      projectTimerRef.current = window.setTimeout(() => setCopiedProject(false), 1500);
+    } catch (err) {
+      console.error("project copy failed", err);
+    }
+  };
+
   return (
     <div className="min-w-0">
       <div
@@ -1306,17 +1329,36 @@ function SessionRow({
       </div>
       <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-ink/40 leading-none">
         {filter.kind !== "project" && (
-          <>
-            <Folder className="w-3.5 h-3.5 shrink-0" />
-            <span className="font-medium truncate text-ink/55">
-              {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
-            </span>
-            <MetaDivider />
-          </>
+          <Tooltip
+            content={
+              copiedProject
+                ? t("list.copied")
+                : item.projectPath ?? item.projectName ?? t("list.unknown_project")
+            }
+            placement="top"
+          >
+            <button
+              type="button"
+              onClick={handleCopyProject}
+              className="inline-flex min-w-0 items-center gap-1 text-left hover:text-ink/75 transition"
+              aria-label={item.projectPath ?? item.projectName ?? t("list.unknown_project")}
+            >
+              <Folder className="w-3.5 h-3.5 shrink-0" />
+              <span className="font-medium truncate text-ink/55 max-w-[220px]">
+                {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
+              </span>
+            </button>
+          </Tooltip>
         )}
-        <span className="shrink-0">
-          {formatTime(item.updatedAt ?? item.startedAt, localeTag(lang))}
-        </span>
+        {filter.kind !== "project" && <MetaDivider />}
+        <Tooltip
+          content={formatFullDateTime(item.updatedAt ?? item.startedAt, localeTag(lang))}
+          placement="top"
+        >
+          <span className="shrink-0">
+            {formatTime(item.updatedAt ?? item.startedAt, localeTag(lang))}
+          </span>
+        </Tooltip>
         <span className="shrink-0">·</span>
         <span className="shrink-0">
           {item.partial && !item.archived ? "~" : ""}
@@ -1675,4 +1717,17 @@ function formatTime(ts: number | null, locale: string): string {
     month: "short",
     day: "numeric",
   });
+}
+
+function formatFullDateTime(ts: number | null, locale: string): string {
+  if (!ts) return "—";
+  return new Intl.DateTimeFormat(locale, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(ts));
 }
