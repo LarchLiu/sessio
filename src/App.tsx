@@ -126,6 +126,7 @@ export default function App() {
   const [memoryBackendStatus, setMemoryBackendStatus] =
     useState<MemoryBackendStatus | null>(null);
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
+  const [memorySearchMounted, setMemorySearchMounted] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const deferredViewMode = useDeferredValue(viewMode);
@@ -391,6 +392,15 @@ export default function App() {
   const memoryBackendMissing =
     memoryBackendStatus !== null && memoryBackendStatus.available === false;
   const projectSearchInitialKey = filter.kind === "project" ? filter.key : projectGroups[0]?.key;
+
+  useEffect(() => {
+    if (memorySearchOpen && projectSearchInitialKey) {
+      setMemorySearchMounted(true);
+    }
+    if (!projectSearchInitialKey) {
+      setMemorySearchMounted(false);
+    }
+  }, [memorySearchOpen, projectSearchInitialKey]);
 
   return (
     <div className="flex h-screen text-body">
@@ -728,12 +738,14 @@ export default function App() {
           />
         )}
 
-        {memorySearchOpen && projectSearchInitialKey && (
+        {memorySearchMounted && projectSearchInitialKey && (
           <ProjectMemorySearchDialog
+            open={memorySearchOpen}
             initialProjectKey={projectSearchInitialKey}
             projects={projectGroups}
             activeProjectKey={filter.kind === "project" ? filter.key : null}
             onClose={() => setMemorySearchOpen(false)}
+            onExited={() => setMemorySearchMounted(false)}
           />
         )}
 
@@ -833,15 +845,19 @@ function StatusDot({
 }
 
 function ProjectMemorySearchDialog({
+  open,
   initialProjectKey,
   projects,
   activeProjectKey,
   onClose,
+  onExited,
 }: {
+  open: boolean;
   initialProjectKey: string;
   projects: Array<{ key: string; label: string }>;
   activeProjectKey: string | null;
   onClose: () => void;
+  onExited: () => void;
 }) {
   const { t } = useI18n();
   const [selectedProjectKey, setSelectedProjectKey] = useState(initialProjectKey);
@@ -856,9 +872,10 @@ function ProjectMemorySearchDialog({
     projects.find((project) => project.key === selectedProjectKey) ?? projects[0];
 
   useEffect(() => {
+    if (!open) return;
     const id = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(id);
-  }, []);
+  }, [open]);
 
   useEffect(() => {
     const nextProjectKey =
@@ -919,11 +936,22 @@ function ProjectMemorySearchDialog({
 
   return (
     <div
-      className="absolute inset-x-0 top-12 bottom-0 z-30 bg-black/35 backdrop-blur-sm flex items-start justify-center pt-10 px-4"
+      className={
+        "project-memory-search-dialog absolute inset-x-0 top-12 bottom-0 z-30 bg-black/35 backdrop-blur-sm flex items-start justify-center pt-10 px-4 " +
+        (open ? "project-memory-search-dialog-in" : "project-memory-search-dialog-out")
+      }
       onClick={onClose}
+      onAnimationEnd={(e) => {
+        if (!open && e.currentTarget === e.target) {
+          onExited();
+        }
+      }}
     >
       <div
-        className="w-full max-w-[680px] bg-surface-panel border border-ink/10 shadow-[0_24px_80px_rgba(0,0,0,0.22)] rounded-lg overflow-hidden"
+        className={
+          "project-memory-search-panel w-full max-w-[680px] bg-surface-panel border border-ink/10 shadow-[0_24px_80px_rgba(0,0,0,0.22)] rounded-lg overflow-hidden " +
+          (open ? "project-memory-search-panel-in" : "project-memory-search-panel-out")
+        }
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 px-3 py-2 border-b border-ink/10">
