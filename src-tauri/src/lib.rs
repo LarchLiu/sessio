@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexer::{IndexTask, IndexerHandle};
+use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{Agent, SessionInfo, SessionMessage};
@@ -204,6 +205,17 @@ struct IndexStatus {
     last_error: Option<String>,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectMemorySearchResult {
+    title: Option<String>,
+    snippet: Option<String>,
+    score: Option<f64>,
+    record_id: Option<String>,
+    artifact_uri: Option<String>,
+    raw: serde_json::Value,
+}
+
 #[tauri::command]
 fn get_index_status(indexer: State<'_, IndexerHandle>) -> IndexStatus {
     let s = indexer.status();
@@ -223,6 +235,112 @@ fn get_memory_backend_status(
     )
     .map_err(|e| e.to_string())?;
     Ok(service.backend_status())
+}
+
+#[tauri::command]
+fn search_project_memory(
+    store: State<'_, Arc<dyn MemoryStore>>,
+    project_key: String,
+    query: String,
+) -> Result<Vec<ProjectMemorySearchResult>, String> {
+    search_project_memory_inner(project_key, query, Some(store.inner().as_ref()))
+        .map_err(|e| e.to_string())
+}
+
+fn search_project_memory_inner(
+    project_key: String,
+    query: String,
+    store: Option<&dyn MemoryStore>,
+) -> anyhow::Result<Vec<ProjectMemorySearchResult>> {
+    let config = config::load_memory_config()?;
+    let memory_project_key = resolve_memory_project_key(&project_key, store)?;
+    let options = QmdOptions {
+        binary: config.qmd.binary.clone(),
+        index: config.qmd.index.clone(),
+        install_command: config.qmd.install_command.clone(),
+    };
+    let result = if config.qmd.auto_embed {
+        query_project(&options, &memory_project_key, &query)
+    } else {
+        search_project(&options, &memory_project_key, &query)
+    }
+    ?;
+    Ok(project_memory_results(&result.raw))
+}
+
+fn resolve_memory_project_key(
+    project_filter_key: &str,
+    store: Option<&dyn MemoryStore>,
+) -> anyhow::Result<String> {
+    if let Some(store) = store {
+        if !store.list_project_records(project_filter_key)?.is_empty() {
+            return Ok(project_filter_key.to_string());
+        }
+    }
+    let slug = providers::shared::convert::project_key_for_path_or_name(Some(project_filter_key), None);
+    if let Some(store) = store {
+        if !store.list_project_records(&slug)?.is_empty() {
+            return Ok(slug);
+        }
+    }
+    Ok(slug)
+}
+
+fn project_memory_results(raw: &serde_json::Value) -> Vec<ProjectMemorySearchResult> {
+    let mut out = Vec::new();
+    collect_project_memory_results(raw, &mut out);
+    out
+}
+
+fn collect_project_memory_results(raw: &serde_json::Value, out: &mut Vec<ProjectMemorySearchResult>) {
+    match raw {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_project_memory_results(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            let title = first_json_string(map, &["title", "name", "heading"]);
+            let snippet = first_json_string(map, &["snippet", "text", "content", "preview"]);
+            let artifact_uri =
+                first_json_string(map, &["path", "file", "filePath", "filepath", "source"]);
+            let record_id = first_json_string(map, &["recordId", "record_id", "id"])
+                .and_then(record_id_from_text)
+                .or_else(|| artifact_uri.clone().and_then(record_id_from_text));
+            if title.is_some() || snippet.is_some() || artifact_uri.is_some() || record_id.is_some() {
+                out.push(ProjectMemorySearchResult {
+                    title,
+                    snippet,
+                    score: first_json_number(map, &["score", "rank", "similarity"]),
+                    record_id,
+                    artifact_uri,
+                    raw: raw.clone(),
+                });
+            }
+            for key in ["results", "hits", "documents", "items", "matches"] {
+                if let Some(child) = map.get(key) {
+                    collect_project_memory_results(child, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn first_json_string(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| map.get(*key).and_then(|value| value.as_str()).map(str::to_string))
+}
+
+fn first_json_number(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| map.get(*key).and_then(|value| value.as_f64()))
+}
+
+fn record_id_from_text(text: String) -> Option<String> {
+    let path = Path::new(&text);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&text);
+    stem.starts_with("sessio-").then(|| stem.to_string())
 }
 
 #[tauri::command]
@@ -505,6 +623,7 @@ pub fn run() {
             rebuild_session_index,
             get_index_status,
             get_memory_backend_status,
+            search_project_memory,
             write_cross_prompt,
             remove_session_files,
             remove_sessions_by_scope

@@ -1,4 +1,11 @@
-import { ReactNode, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ReactNode,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -13,11 +20,13 @@ import {
   getMemoryBackendStatus,
   getSessionMessages,
   MemoryBackendStatus,
+  ProjectMemorySearchResult,
   SessionInfo,
   rebuildSessionIndex,
   listSessions,
   removeSessionsByScope,
   removeSessionFiles,
+  searchProjectMemory,
   type SessionScope,
   writeCrossPrompt,
 } from "./api";
@@ -32,6 +41,7 @@ import SessionDetail from "./components/SessionDetail";
 import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
+import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
 import Tag from "./components/Tag";
 import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
@@ -65,8 +75,8 @@ const IS_MAC =
 
 function refreshMemoryBackendStatus(
   setMemoryBackendStatus: (status: MemoryBackendStatus | null) => void,
-) {
-  getMemoryBackendStatus()
+): Promise<void> {
+  return getMemoryBackendStatus()
     .then(setMemoryBackendStatus)
     .catch((err) => {
       console.error("memory backend status check failed", err);
@@ -115,6 +125,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [memoryBackendStatus, setMemoryBackendStatus] =
     useState<MemoryBackendStatus | null>(null);
+  const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const deferredViewMode = useDeferredValue(viewMode);
@@ -377,10 +388,9 @@ export default function App() {
         : "label" in filter
           ? filter.label
           : filter.key;
-  const qmdMissing =
-    memoryBackendStatus?.backend === "qmd" &&
-    memoryBackendStatus.available === false &&
-    (memoryBackendStatus.error?.toLowerCase().includes("not found") ?? false);
+  const memoryBackendMissing =
+    memoryBackendStatus !== null && memoryBackendStatus.available === false;
+  const projectSearchInitialKey = filter.kind === "project" ? filter.key : projectGroups[0]?.key;
 
   return (
     <div className="flex h-screen text-body">
@@ -578,9 +588,6 @@ export default function App() {
                   />
                 </button>
               </Tooltip>
-              {qmdMissing && (
-                <MemoryBackendMissingButton status={memoryBackendStatus} />
-              )}
               {update.hasUpdate && update.latestVersion && (
                 <Tooltip
                   content={t("sidebar.update_available", {
@@ -664,17 +671,26 @@ export default function App() {
           >
             <ViewModeSwitcher mode={viewMode} onChange={setViewMode} />
           </div>
-          <div className="justify-self-end">
-            <Tooltip content={t("header.search")} placement="bottom">
-              <button
-                type="button"
-                aria-label={t("header.search")}
-                data-tauri-drag-region="false"
-                className="p-1 text-ink/55 hover:text-ink transition rounded-md"
-              >
-                <Search className="w-4 h-4" />
-              </button>
-            </Tooltip>
+          <div className="justify-self-end" data-tauri-drag-region="false">
+            {memoryBackendMissing ? (
+              <MemoryBackendMissingButton
+                status={memoryBackendStatus}
+                placement="bottom"
+                onRefresh={() => refreshMemoryBackendStatus(setMemoryBackendStatus)}
+              />
+            ) : (
+              <Tooltip content={t("header.search")} placement="bottom">
+                <button
+                  type="button"
+                  aria-label={t("header.search")}
+                  onClick={() => setMemorySearchOpen(true)}
+                  disabled={projectGroups.length === 0}
+                  className="p-1 text-ink/55 hover:text-ink disabled:opacity-35 disabled:hover:text-ink/55 transition rounded-md"
+                >
+                  <Search className="w-4 h-4" />
+                </button>
+              </Tooltip>
+            )}
           </div>
           <div className="absolute top-0 right-0 z-20">
             <WindowControls />
@@ -709,6 +725,15 @@ export default function App() {
             viewMode={viewMode}
             onClose={() => setSelected(null)}
             onRemoved={() => setSelected(null)}
+          />
+        )}
+
+        {memorySearchOpen && projectSearchInitialKey && (
+          <ProjectMemorySearchDialog
+            initialProjectKey={projectSearchInitialKey}
+            projects={projectGroups}
+            activeProjectKey={filter.kind === "project" ? filter.key : null}
+            onClose={() => setMemorySearchOpen(false)}
           />
         )}
 
@@ -807,10 +832,211 @@ function StatusDot({
   );
 }
 
+function ProjectMemorySearchDialog({
+  initialProjectKey,
+  projects,
+  activeProjectKey,
+  onClose,
+}: {
+  initialProjectKey: string;
+  projects: Array<{ key: string; label: string }>;
+  activeProjectKey: string | null;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
+  const [selectedProjectKey, setSelectedProjectKey] = useState(initialProjectKey);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<ProjectMemorySearchResult[]>([]);
+  const [searched, setSearched] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const lockedProject = activeProjectKey !== null;
+  const selectedProject =
+    projects.find((project) => project.key === selectedProjectKey) ?? projects[0];
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  useEffect(() => {
+    const nextProjectKey =
+      activeProjectKey ??
+      (projects.some((project) => project.key === selectedProjectKey)
+        ? selectedProjectKey
+        : projects[0]?.key);
+    if (nextProjectKey && nextProjectKey !== selectedProjectKey) {
+      setSelectedProjectKey(nextProjectKey);
+      setResults([]);
+      setError(null);
+      setLoading(false);
+      setSearched(false);
+    }
+  }, [activeProjectKey, projects, selectedProjectKey]);
+
+  const runSearch = () => {
+    const text = query.trim();
+    setError(null);
+    if (!text) {
+      setResults([]);
+      setLoading(false);
+      setSearched(false);
+      return;
+    }
+    setLoading(true);
+    setSearched(true);
+    searchProjectMemory(selectedProjectKey, text)
+      .then((rows) => {
+        setResults(rows);
+      })
+      .catch((err) => {
+        setResults([]);
+        setError(String(err));
+      })
+      .finally(() => setLoading(false));
+  };
+
+  const selectProject = (key: string) => {
+    setSelectedProjectKey(key);
+    setResults([]);
+    setError(null);
+    setLoading(false);
+    setSearched(false);
+  };
+
+  const clearOrClose = () => {
+    if (query.trim()) {
+      setQuery("");
+      setResults([]);
+      setError(null);
+      setLoading(false);
+      setSearched(false);
+      return;
+    }
+    onClose();
+  };
+
+  return (
+    <div
+      className="absolute inset-x-0 top-12 bottom-0 z-30 bg-black/35 backdrop-blur-sm flex items-start justify-center pt-10 px-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-[680px] bg-surface-panel border border-ink/10 shadow-[0_24px_80px_rgba(0,0,0,0.22)] rounded-lg overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-ink/10">
+          {!lockedProject && (
+            <InlineMenuSelect
+              value={selectedProjectKey}
+              options={projects.map(
+                (project): InlineMenuSelectOption => ({
+                  value: project.key,
+                  label: project.label,
+                }),
+              )}
+              onChange={selectProject}
+              menuAlign="parent"
+              placeholder={t("list.unknown_project")}
+              ariaLabel={t("memory_search.project_selector")}
+              className="max-w-[128px]"
+            />
+          )}
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSearched(false);
+              setResults([]);
+              setError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") onClose();
+              if (e.key === "Enter") runSearch();
+            }}
+            placeholder={t("memory_search.placeholder", { project: selectedProject?.label ?? "" })}
+            className="flex-1 min-w-0 bg-transparent outline-none text-body text-ink placeholder:text-ink/35"
+          />
+          <button
+            type="button"
+            aria-label={t("header.search")}
+            onClick={runSearch}
+            disabled={loading || !query.trim()}
+            className="p-1 text-ink/45 hover:text-ink disabled:opacity-35 disabled:hover:text-ink/45 rounded-md transition"
+          >
+            <Search className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            aria-label={query.trim() ? t("list.clear") : t("detail.close")}
+            onClick={clearOrClose}
+            className="p-1 text-ink/45 hover:text-ink rounded-md transition"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <ScrollArea className="max-h-[55vh]">
+          {loading && (
+            <div className="px-4 py-6 text-center text-body-sm text-ink/45">
+              {t("memory_search.searching")}
+            </div>
+          )}
+          {!loading && error && (
+            <div className="m-4 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
+              {error}
+            </div>
+          )}
+          {!loading && !error && searched && query.trim() && results.length === 0 && (
+            <div className="px-4 py-6 text-center text-body-sm text-ink/45">
+              {t("memory_search.empty")}
+            </div>
+          )}
+          {!loading && !error && results.length > 0 && (
+            <ul className="divide-y divide-ink/5">
+              {results.map((result, idx) => (
+                <li key={`${result.recordId ?? result.artifactUri ?? idx}`} className="px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-body-sm font-medium text-ink truncate">
+                        {result.title ?? result.recordId ?? result.artifactUri ?? t("memory_search.result")}
+                      </div>
+                      {result.snippet && (
+                        <div className="mt-1 text-body-sm text-ink/60 overflow-hidden [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">
+                          {result.snippet}
+                        </div>
+                      )}
+                      {(result.recordId || result.artifactUri) && (
+                        <div className="mt-1 text-meta text-ink/35 truncate">
+                          {result.recordId ?? result.artifactUri}
+                        </div>
+                      )}
+                    </div>
+                    {result.score !== null && (
+                      <span className="shrink-0 text-meta tabular-nums text-ink/40">
+                        {result.score.toFixed(3)}
+                      </span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </ScrollArea>
+      </div>
+    </div>
+  );
+}
+
 function MemoryBackendMissingButton({
   status,
+  placement = "top",
+  onRefresh,
 }: {
   status: MemoryBackendStatus | null;
+  placement?: "top" | "bottom";
+  onRefresh?: () => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [state, setState] = useState<"idle" | "copied" | "error">("idle");
@@ -834,12 +1060,15 @@ function MemoryBackendMissingButton({
   };
 
   const handleClick = async () => {
+    let nextState: "copied" | "error" = "copied";
     try {
       await navigator.clipboard.writeText(installCommand);
-      resetSoon("copied");
     } catch (err) {
       console.error("qmd install command copy failed", err);
-      resetSoon("error");
+      nextState = "error";
+    } finally {
+      resetSoon(nextState);
+      void onRefresh?.();
     }
   };
 
@@ -849,17 +1078,22 @@ function MemoryBackendMissingButton({
     ) : state === "error" ? (
       t("list.copy_failed")
     ) : (
-      <div className="flex flex-col gap-1.5 py-0.5">
+      <div className="flex max-w-full flex-col gap-1.5 py-0.5">
         <span>{t("sidebar.memory_backend_required", { backend: backendName })}</span>
-        <code className="font-mono text-[11px] text-ink/85">
+        <code className="block max-w-full truncate whitespace-nowrap font-mono text-[11px] text-ink/85">
           {installCommand}
         </code>
-        <span className="text-ink/55">{t("sidebar.click_to_copy")}</span>
+        <span className="text-ink/55">
+          {t("sidebar.click_to_copy", { backend: backendName })}
+        </span>
+        <span className="text-ink/55">
+          {t("sidebar.click_to_check_backend", { backend: backendName })}
+        </span>
       </div>
     );
 
   return (
-    <Tooltip content={tip} placement="top">
+    <Tooltip content={tip} placement={placement}>
       <button
         type="button"
         onClick={handleClick}

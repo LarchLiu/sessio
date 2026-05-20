@@ -51,6 +51,15 @@ export interface MemoryBackendStatus {
   details?: Record<string, unknown>;
 }
 
+export interface ProjectMemorySearchResult {
+  title: string | null;
+  snippet: string | null;
+  score: number | null;
+  recordId: string | null;
+  artifactUri: string | null;
+  raw: unknown;
+}
+
 export type SessionScope =
   | { kind: "all" }
   | { kind: "agent"; agent: Agent }
@@ -66,6 +75,16 @@ export async function getIndexStatus(): Promise<IndexStatus> {
 
 export async function getMemoryBackendStatus(): Promise<MemoryBackendStatus> {
   return invoke<MemoryBackendStatus>("get_memory_backend_status");
+}
+
+export async function searchProjectMemory(
+  projectKey: string,
+  query: string,
+): Promise<ProjectMemorySearchResult[]> {
+  return invoke<ProjectMemorySearchResult[]>("search_project_memory", {
+    projectKey,
+    query,
+  });
 }
 
 export async function rebuildSessionIndex(): Promise<void> {

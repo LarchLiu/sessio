@@ -139,7 +139,7 @@ export default function Tooltip({
               left: pos?.left ?? -9999,
               visibility: pos ? "visible" : "hidden",
             }}
-            className="z-50 max-w-xs bg-tooltip-bg border border-ink/10 text-tooltip-fg text-body-sm px-2 py-1 rounded-md shadow-lg leading-snug pointer-events-none"
+            className="z-50 w-max max-w-[calc(100vw-16px)] bg-tooltip-bg border border-ink/10 text-tooltip-fg text-body-sm px-2 py-1 rounded-md shadow-lg leading-snug pointer-events-none"
           >
             {content}
           </div>,

@@ -271,13 +271,30 @@ pub fn search_project(
     project_key: &str,
     query: &str,
 ) -> Result<QmdSearchResult> {
+    run_project_lookup(options, project_key, query, "search")
+}
+
+pub fn query_project(
+    options: &QmdOptions,
+    project_key: &str,
+    query: &str,
+) -> Result<QmdSearchResult> {
+    run_project_lookup(options, project_key, query, "query")
+}
+
+fn run_project_lookup(
+    options: &QmdOptions,
+    project_key: &str,
+    query: &str,
+    command: &str,
+) -> Result<QmdSearchResult> {
     let collection = collection_name(project_key);
     let result = run_qmd_command(
         options,
         &[
             "--index",
             options.index.as_str(),
-            "search",
+            command,
             query,
             "-c",
             &collection,
