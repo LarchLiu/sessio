@@ -63,6 +63,53 @@ pub fn read_messages(path: &Path, session_id: &str) -> Result<Vec<SessionMessage
         .collect())
 }
 
+pub fn remove_session_from_logs(
+    path: &Path,
+    session_id: &str,
+    home: &Path,
+    removed_root: &Path,
+) -> Result<bool> {
+    if path.as_os_str().is_empty() || !path.exists() {
+        return Ok(false);
+    }
+    if !path.is_file() {
+        return Err(anyhow::anyhow!("session path is not a file: {}", path.display()));
+    }
+
+    let text = fs::read(path)?;
+    let entries = scan_json_array_entries(&text)?;
+
+    let mut kept = Vec::with_capacity(entries.len());
+    let mut removed = Vec::new();
+    for entry in entries {
+        let item: serde_json::Value = serde_json::from_slice(&text[entry.start..entry.end])?;
+        let sid = item.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
+        if sid == session_id {
+            removed.push(item);
+        } else {
+            kept.push(item);
+        }
+    }
+
+    if removed.is_empty() {
+        return Ok(false);
+    }
+
+    let relative = path.strip_prefix(home).map_err(|_| {
+        anyhow::anyhow!("session file is outside home: {}", path.display())
+    })?;
+    let removed_path = removed_root.join(relative);
+    if let Some(parent) = removed_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut removed_existing = read_json_array(&removed_path).unwrap_or_default();
+    removed_existing.extend(removed);
+    write_json_array(&removed_path, &removed_existing)?;
+    write_json_array(path, &kept)?;
+    Ok(true)
+}
+
 // Gemini stores all sessions under ~/.gemini/tmp/<dir>/logs.json as a single
 // JSON array. We scan the array boundaries and then deserialize each object
 // from its raw byte range so per-message offsets stay precise without a full
@@ -346,7 +393,7 @@ fn scan_json_array_entries(bytes: &[u8]) -> Result<Vec<JsonArrayEntry>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_messages_with_locations, scan_json_array_entries};
+    use super::{read_messages_with_locations, remove_session_from_logs, scan_json_array_entries};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -410,6 +457,85 @@ mod tests {
     fn scan_json_array_entries_rejects_garbage_without_array_opener() {
         assert!(scan_json_array_entries(b"not json").is_err());
     }
+
+    #[test]
+    fn remove_session_from_logs_rewrites_source_and_appends_removed_copy() {
+        let home = unique_tmp("gemini-home");
+        let source = home.join(".gemini").join("tmp").join("project").join("logs.json");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(
+            &source,
+            r#"[
+  {"sessionId":"keep","type":"user","message":"stay","timestamp":"2026-05-19T00:00:00Z"},
+  {"sessionId":"drop","type":"user","message":"gone-1","timestamp":"2026-05-19T00:00:01Z"},
+  {"sessionId":"drop","type":"assistant","message":"gone-2","timestamp":"2026-05-19T00:00:02Z"}
+]
+"#,
+        )
+        .unwrap();
+
+        let removed_root = home.join(".sessio").join("removed-sessions");
+        assert!(remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
+
+        let rewritten = fs::read_to_string(&source).unwrap();
+        assert!(rewritten.contains(r#""sessionId": "keep""#));
+        assert!(!rewritten.contains(r#""sessionId": "drop""#));
+
+        let removed = fs::read_to_string(
+            removed_root
+                .join(".gemini")
+                .join("tmp")
+                .join("project")
+                .join("logs.json"),
+        )
+        .unwrap();
+        assert!(removed.contains(r#""sessionId": "drop""#));
+        assert!(!removed.contains(r#""sessionId": "keep""#));
+
+        assert!(!remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn remove_session_from_logs_appends_to_existing_removed_file() {
+        let home = unique_tmp("gemini-home-append");
+        let source = home.join(".gemini").join("tmp").join("project").join("logs.json");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(
+            &source,
+            r#"[
+  {"sessionId":"one","type":"user","message":"a","timestamp":"2026-05-19T00:00:00Z"},
+  {"sessionId":"two","type":"user","message":"b","timestamp":"2026-05-19T00:00:01Z"},
+  {"sessionId":"one","type":"assistant","message":"c","timestamp":"2026-05-19T00:00:02Z"}
+]
+"#,
+        )
+        .unwrap();
+
+        let removed_path = home
+            .join(".sessio")
+            .join("removed-sessions")
+            .join(".gemini")
+            .join("tmp")
+            .join("project")
+            .join("logs.json");
+        fs::create_dir_all(removed_path.parent().unwrap()).unwrap();
+        fs::write(
+            &removed_path,
+            r#"[{"sessionId":"existing","type":"user","message":"old"}]
+"#,
+        )
+        .unwrap();
+
+        let removed_root = home.join(".sessio").join("removed-sessions");
+        assert!(remove_session_from_logs(&source, "one", &home, &removed_root).unwrap());
+
+        let removed = fs::read_to_string(&removed_path).unwrap();
+        assert!(removed.contains(r#""sessionId": "existing""#));
+        assert!(removed.contains(r#""sessionId": "one""#));
+
+        let _ = fs::remove_dir_all(&home);
+    }
 }
 
 #[derive(Default)]
@@ -424,4 +550,26 @@ fn parse_iso(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.timestamp_millis())
+}
+
+fn read_json_array(path: &Path) -> Result<Vec<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read(path)?;
+    let entries = scan_json_array_entries(&text)?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        out.push(serde_json::from_slice(&text[entry.start..entry.end])?);
+    }
+    Ok(out)
+}
+
+fn write_json_array(path: &Path, values: &[serde_json::Value]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(values)?;
+    fs::write(path, format!("{text}\n"))?;
+    Ok(())
 }

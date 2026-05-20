@@ -8,7 +8,7 @@ pub mod providers;
 pub mod store;
 pub mod watch;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexer::{IndexTask, IndexerHandle};
@@ -33,6 +33,167 @@ fn rebuild_session_index(indexer: State<'_, IndexerHandle>) -> Result<(), String
     indexer
         .submit(IndexTask::FullRebuild)
         .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase", tag = "kind")]
+enum SessionScope {
+    All,
+    Agent { agent: Agent },
+    Project { key: String },
+}
+
+#[tauri::command]
+fn remove_session_files(session: SessionInfo) -> Result<(), String> {
+    remove_session_files_inner(session).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_sessions_by_scope(
+    scope: SessionScope,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    let sessions = store.list_sessions().map_err(|e| e.to_string())?;
+    for session in sessions.iter().filter(|s| {
+        s.available
+            && !is_subagent_only(s)
+            && matches_scope(&scope, s)
+    }) {
+        remove_session_files_inner(session.clone()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn is_subagent_only(session: &SessionInfo) -> bool {
+    session.archived && session.message_count == 0 && !session.subagents.is_empty()
+}
+
+fn matches_scope(scope: &SessionScope, session: &SessionInfo) -> bool {
+    match scope {
+        SessionScope::All => true,
+        SessionScope::Agent { agent } => session.agent == *agent,
+        SessionScope::Project { key } => {
+            let session_key = session
+                .project_path
+                .clone()
+                .unwrap_or_else(|| format!("__unknown__:{}", session.agent.as_str()));
+            session_key == *key
+        }
+    }
+}
+
+fn remove_session_files_inner(session: SessionInfo) -> anyhow::Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
+    let removed_root = home.join(".sessio").join("removed-sessions");
+
+    if session.agent == Agent::Gemini {
+        if providers::gemini::parser::remove_session_from_logs(
+            Path::new(&session.file_path),
+            &session.id,
+            &home,
+            &removed_root,
+        )? {
+            for subagent in &session.subagents {
+                let _ = providers::gemini::parser::remove_session_from_logs(
+                    Path::new(&subagent.file_path),
+                    &subagent.id,
+                    &home,
+                    &removed_root,
+                )?;
+            }
+        }
+        return Ok(());
+    }
+
+    move_session_file(&session.file_path, &home, &removed_root)?;
+
+    for subagent in &session.subagents {
+        move_session_file(&subagent.file_path, &home, &removed_root)?;
+        move_claude_subagent_meta_file(&subagent.file_path, &home, &removed_root)?;
+    }
+
+    Ok(())
+}
+
+fn move_claude_subagent_meta_file(
+    file_path: &str,
+    home: &Path,
+    removed_root: &Path,
+) -> anyhow::Result<bool> {
+    if file_path.is_empty() {
+        return Ok(false);
+    }
+    let meta_path = PathBuf::from(file_path).with_extension("meta.json");
+    move_session_file(&meta_path.to_string_lossy(), home, removed_root)
+}
+
+fn move_session_file(file_path: &str, home: &Path, removed_root: &Path) -> anyhow::Result<bool> {
+    if file_path.is_empty() {
+        return Ok(false);
+    }
+    let src = PathBuf::from(file_path);
+    if !src.exists() {
+        return Ok(false);
+    }
+    if !src.is_file() {
+        anyhow::bail!("session path is not a file: {}", src.display());
+    }
+
+    let relative = src
+        .strip_prefix(home)
+        .map_err(|_| anyhow::anyhow!("session file is outside home: {}", src.display()))?;
+    let dst = removed_root.join(relative);
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let dst = available_removed_path(dst);
+    move_file(&src, &dst)?;
+    Ok(true)
+}
+
+fn available_removed_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session".to_string());
+    for i in 1.. {
+        let candidate = parent.join(format!("{file_name}.{i}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn move_file(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            std::fs::copy(src, dst).map_err(|copy_err| {
+                anyhow::anyhow!(
+                    "move {} to {} failed: rename: {}; copy fallback: {}",
+                    src.display(),
+                    dst.display(),
+                    rename_err,
+                    copy_err
+                )
+            })?;
+            std::fs::remove_file(src).map_err(|remove_err| {
+                let _ = std::fs::remove_file(dst);
+                anyhow::anyhow!(
+                    "remove original after copying {} to {} failed: {}",
+                    src.display(),
+                    dst.display(),
+                    remove_err
+                )
+            })?;
+            Ok(())
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -329,7 +490,9 @@ pub fn run() {
             get_system_appearance,
             rebuild_session_index,
             get_index_status,
-            write_cross_prompt
+            write_cross_prompt,
+            remove_session_files,
+            remove_sessions_by_scope
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

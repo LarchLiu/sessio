@@ -310,17 +310,23 @@ fn poll_gemini(
         let scope = logs.to_string_lossy().into_owned();
         present_scopes.insert(scope.clone());
         let rows = by_scope.remove(&scope).unwrap_or_default();
-        let needs_reindex = rows.is_empty()
-            || rows
+        let live_rows: Vec<&IndexedSessionRecord> =
+            rows.iter().filter_map(|row| row.available.then_some(*row)).collect();
+        let needs_reindex = !live_rows.is_empty()
+            && live_rows
                 .iter()
-                .any(|row| !row.available || file_changed(&logs, row.file_size, row.file_mtime));
+                .any(|row| file_changed(&logs, row.file_size, row.file_mtime));
         if needs_reindex {
+            let changed = live_rows
+                .iter()
+                .any(|row| file_changed(&logs, row.file_size, row.file_mtime));
             log::info!(
-                "polling: submit {:?} for {} (rows={}, available_mismatch_or_file_changed={})",
+                "polling: submit {:?} for {} (rows={}, live_rows={}, file_changed={})",
                 IndexTask::ReindexGeminiLogs(logs.clone()),
                 scope,
                 rows.len(),
-                true
+                live_rows.len(),
+                changed
             );
             indexer.submit(IndexTask::ReindexGeminiLogs(logs))?;
         }
@@ -375,5 +381,95 @@ fn file_changed(path: &Path, indexed_size: u64, indexed_mtime: Option<i64>) -> b
     match current_file_meta(path) {
         Some((size, mtime)) => size != indexed_size || mtime != indexed_mtime,
         None => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_tmp(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("{prefix}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn gemini_poll_should_ignore_unavailable_rows_if_live_row_matches_file() {
+        let dir = unique_tmp("gemini-poll");
+        let path = dir.join("logs.json");
+        fs::write(&path, "[]\n").unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(providers::system_time_to_millis);
+        let indexed = vec![IndexedSessionRecord {
+            agent: Agent::Gemini,
+            session_id: "live".to_string(),
+            scope: path.to_string_lossy().to_string(),
+            file_path: path.to_string_lossy().to_string(),
+            file_size: meta.len(),
+            file_mtime: mtime,
+            last_indexed_at: 1,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        }, IndexedSessionRecord {
+            agent: Agent::Gemini,
+            session_id: "old".to_string(),
+            scope: path.to_string_lossy().to_string(),
+            file_path: path.to_string_lossy().to_string(),
+            file_size: meta.len(),
+            file_mtime: mtime,
+            last_indexed_at: 1,
+            available: false,
+            archived: false,
+            subagents: Vec::new(),
+        }];
+
+        let mut by_scope: HashMap<String, Vec<&IndexedSessionRecord>> = HashMap::new();
+        for row in indexed.iter() {
+            by_scope.entry(row.scope.clone()).or_default().push(row);
+        }
+
+        let rows = by_scope.remove(&path.to_string_lossy().to_string()).unwrap_or_default();
+        let live_rows: Vec<&IndexedSessionRecord> = rows.iter().copied().filter(|row| row.available).collect();
+        assert!(!rows.is_empty());
+        assert!(!live_rows.is_empty());
+        assert!(live_rows.iter().any(|row| !file_changed(&path, row.file_size, row.file_mtime)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gemini_poll_should_not_reindex_when_only_unavailable_rows_remain() {
+        let dir = unique_tmp("gemini-poll-unavailable");
+        let path = dir.join("logs.json");
+        fs::write(&path, "[]\n").unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(providers::system_time_to_millis);
+        let rows = vec![IndexedSessionRecord {
+            agent: Agent::Gemini,
+            session_id: "gone".to_string(),
+            scope: path.to_string_lossy().to_string(),
+            file_path: path.to_string_lossy().to_string(),
+            file_size: meta.len() + 42,
+            file_mtime: mtime.map(|v| v - 1000),
+            last_indexed_at: 1,
+            available: false,
+            archived: false,
+            subagents: Vec::new(),
+        }];
+        assert!(rows.iter().all(|row| !row.available));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

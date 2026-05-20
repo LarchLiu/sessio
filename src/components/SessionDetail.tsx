@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
@@ -8,8 +8,10 @@ import {
   SubagentInfo,
   agentTint,
   getSessionMessages,
+  removeSessionFiles,
 } from "../api";
 import { AgentGlyph } from "./AgentIcon";
+import ConfirmPopover from "./ConfirmPopover";
 import Tag from "./Tag";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
@@ -20,6 +22,7 @@ interface Props {
   session: SessionInfo;
   viewMode: ViewMode;
   onClose: () => void;
+  onRemoved: () => void;
 }
 
 // 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
@@ -49,7 +52,7 @@ type Tab =
   | { kind: "main" }
   | { kind: "sub"; sub: SubagentInfo };
 
-export default function SessionDetail({ session, viewMode, onClose }: Props) {
+export default function SessionDetail({ session, viewMode, onClose, onRemoved }: Props) {
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
     () =>
@@ -67,6 +70,9 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
   }, [defaultTab]);
 
   const [open, setOpen] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<{ pos: { x: number; y: number } } | null>(null);
   const closingRef = useRef(false);
   useEffect(() => {
     const id = requestAnimationFrame(() => setOpen(true));
@@ -77,6 +83,25 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
     closingRef.current = true;
     setOpen(false);
     window.setTimeout(onClose, 300);
+  };
+  const handleRemove = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (confirmState) return;
+    setConfirmState({ pos: { x: e.clientX, y: e.clientY } });
+  };
+  const confirmPos = confirmState?.pos ?? null;
+  const confirmRemove = async () => {
+    if (removing) return;
+    setConfirmState(null);
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      await removeSessionFiles(session);
+      onRemoved();
+    } catch (err) {
+      setRemoveError(String(err));
+      setRemoving(false);
+    }
   };
 
   return (
@@ -125,6 +150,17 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
               <span className="text-body-sm text-ink/40 truncate font-mono">
                 {session.id}
               </span>
+              <Tooltip content={removeError ?? t("detail.remove_session")} placement="top">
+                <button
+                  type="button"
+                  onClick={handleRemove}
+                  disabled={removing}
+                  className="p-1 rounded text-ink/35 hover:text-status-error hover:bg-status-error/10 transition-colors disabled:opacity-50 disabled:hover:text-ink/35 disabled:hover:bg-transparent"
+                  aria-label={t("detail.remove_session")}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
               {session.archived && (
                 <Tag
                   label={t("list.archived")}
@@ -137,6 +173,11 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
                 />
               )}
             </div>
+            {removeError && (
+              <div className="text-status-error text-body-sm mt-1">
+                {removeError}
+              </div>
+            )}
           </div>
           <button
             onClick={handleClose}
@@ -190,6 +231,18 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
           subagentDesc={tab.kind === "sub" ? tab.sub.description : null}
           viewMode={viewMode}
         />
+
+        {confirmPos && (
+          <ConfirmPopover
+            title={t("delete.title")}
+            body={t("delete.session_body")}
+            pos={confirmPos}
+            onCancel={() => setConfirmState(null)}
+            onConfirm={() => {
+              void confirmRemove();
+            }}
+          />
+        )}
       </div>
     </div>
   );

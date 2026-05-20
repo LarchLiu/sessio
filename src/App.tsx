@@ -1,6 +1,10 @@
 import { ReactNode, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
+import { Menu } from "@tauri-apps/api/menu/menu";
+import { MenuItem } from "@tauri-apps/api/menu/menuItem";
+import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   AGENT_LABEL,
   Agent,
@@ -10,6 +14,9 @@ import {
   SessionInfo,
   rebuildSessionIndex,
   listSessions,
+  removeSessionsByScope,
+  removeSessionFiles,
+  type SessionScope,
   writeCrossPrompt,
 } from "./api";
 import {
@@ -22,6 +29,7 @@ import { syncTrayMenu } from "./tray";
 import SessionDetail from "./components/SessionDetail";
 import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
+import ConfirmPopover from "./components/ConfirmPopover";
 import Tag from "./components/Tag";
 import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
@@ -30,9 +38,13 @@ import { Lang, localeTag, useI18n } from "./i18n";
 import { useUpdateCheck, openReleasePage } from "./updater";
 
 type Filter =
-  | { kind: "all" }
-  | { kind: "agent"; agent: Agent }
+  | SessionScope
   | { kind: "project"; key: string; label: string };
+
+function scopeForFilter(filter: Filter): SessionScope {
+  if (filter.kind === "project") return { kind: "project", key: filter.key };
+  return filter;
+}
 
 export type ViewMode = "native" | "cross";
 
@@ -53,6 +65,12 @@ function projectKey(s: SessionInfo): string {
   return s.projectPath ?? `__unknown__:${s.agent}`;
 }
 
+function matchesScope(scope: SessionScope, session: SessionInfo): boolean {
+  if (scope.kind === "all") return true;
+  if (scope.kind === "agent") return session.agent === scope.agent;
+  return projectKey(session) === scope.key;
+}
+
 function sessionKey(s: SessionInfo): string {
   return `${s.agent}:${s.filePath}:${s.id}`;
 }
@@ -60,6 +78,10 @@ function sessionKey(s: SessionInfo): string {
 function sessionIdTail(id: string): string {
   return id.length <= 4 ? id : id.slice(-4);
 }
+
+type DeleteTarget =
+  | { kind: "session"; session: SessionInfo; pos: { x: number; y: number } }
+  | { kind: "scope"; scope: SessionScope; pos: { x: number; y: number } };
 
 // Orphan main session that only exists to carry subagents (Claude cleaned
 // the main jsonl, no index entry either). Don't count it as a "real" session
@@ -79,6 +101,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const deferredViewMode = useDeferredValue(viewMode);
   const { mode, setMode } = useTheme();
   const { lang, setLang, t } = useI18n();
@@ -243,6 +266,79 @@ export default function App() {
     });
   }, [recentForMenu, t]);
 
+  const removeSessionsInScope = async (scope: SessionScope) => {
+    const targets = availableSessions.filter(
+      (s) => !isSubagentOnly(s) && matchesScope(scope, s),
+    );
+    if (targets.length === 0) return;
+    await removeSessionsByScope(scope);
+    if (selected && targets.some((s) => sessionKey(s) === sessionKey(selected))) {
+      setSelected(null);
+    }
+  };
+
+  const getMenuClickPos = async (): Promise<{ x: number; y: number }> => {
+    const window = getCurrentWindow();
+    const [cursor, inner, scale] = await Promise.all([
+      cursorPosition(),
+      window.innerPosition(),
+      window.scaleFactor(),
+    ]);
+    return {
+      x: (cursor.x - inner.x) / scale,
+      y: (cursor.y - inner.y) / scale,
+    };
+  };
+
+  const confirmDelete = async () => {
+    const target = deleteTarget;
+    if (!target) return;
+    try {
+      if (target.kind === "session") {
+        await removeSessionFiles(target.session);
+        if (selected && sessionKey(selected) === sessionKey(target.session)) {
+          setSelected(null);
+        }
+      } else {
+        await removeSessionsInScope(target.scope);
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setDeleteTarget(null);
+    }
+  };
+
+  const openDeleteMenu = async (
+    pos: { x: number; y: number },
+    onDelete: (pos: { x: number; y: number }) => void,
+  ) => {
+    try {
+      const removeItem = await MenuItem.new({
+        id: "delete",
+        text: t("sidebar.remove"),
+        action: async () => onDelete(await getMenuClickPos()),
+      });
+      const menu = await Menu.new({
+        items: [removeItem],
+      });
+      await menu.popup(
+        new LogicalPosition(pos.x + 1, pos.y),
+        getCurrentWindow(),
+      );
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const openScopeMenu = async (scope: SessionScope, pos: { x: number; y: number }) => {
+    await openDeleteMenu(pos, (clickPos) => setDeleteTarget({ kind: "scope", scope, pos: clickPos }));
+  };
+
+  const openSessionMenu = async (session: SessionInfo, pos: { x: number; y: number }) => {
+    await openDeleteMenu(pos, (clickPos) => setDeleteTarget({ kind: "session", session, pos: clickPos }));
+  };
+
   const visible = useMemo(() => {
     return availableSessions.filter((s) => {
       if (filter.kind === "agent" && s.agent !== filter.agent) return false;
@@ -261,7 +357,9 @@ export default function App() {
       ? t("sidebar.all_sessions")
       : filter.kind === "agent"
         ? AGENT_LABEL[filter.agent]
-        : filter.label;
+        : "label" in filter
+          ? filter.label
+          : filter.key;
 
   return (
     <div className="flex h-screen text-body">
@@ -300,6 +398,13 @@ export default function App() {
               count={totalRealSessions}
               active={filter.kind === "all"}
               onClick={() => setFilter({ kind: "all" })}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    void openScopeMenu(
+                      { kind: "all" },
+                      { x: e.clientX, y: e.clientY },
+                    );
+                  }}
               icon={<BotMessageSquare className="w-3.5 h-3.5 shrink-0 text-ink/55" />}
             />
 
@@ -316,6 +421,13 @@ export default function App() {
                   count={count}
                   active={filter.kind === "agent" && filter.agent === agent}
                   onClick={() => setFilter({ kind: "agent", agent })}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    void openScopeMenu(
+                      { kind: "agent", agent },
+                      { x: e.clientX, y: e.clientY },
+                    );
+                  }}
                   icon={<AgentBadge agent={agent} className="w-3.5 h-3.5" />}
                 />
               ))}
@@ -341,6 +453,13 @@ export default function App() {
                   onClick={() =>
                     setFilter({ kind: "project", key: p.key, label: p.label })
                   }
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    void openScopeMenu(
+                      scopeForFilter({ kind: "project", key: p.key, label: p.label }),
+                      { x: e.clientX, y: e.clientY },
+                    );
+                  }}
                   icon={<Folder className="w-3.5 h-3.5 shrink-0 text-ink/55" />}
                   title={p.path ?? p.label}
                 />
@@ -544,6 +663,7 @@ export default function App() {
               error={error}
               indexing={indexing}
               onSelect={setSelected}
+              onDelete={openSessionMenu}
             />
           ) : (
             <CrossSessionList
@@ -552,6 +672,7 @@ export default function App() {
               error={error}
               indexing={indexing}
               onSelect={setSelected}
+              onDelete={openSessionMenu}
             />
           )}
         </ScrollArea>
@@ -561,6 +682,23 @@ export default function App() {
             session={selected}
             viewMode={viewMode}
             onClose={() => setSelected(null)}
+            onRemoved={() => setSelected(null)}
+          />
+        )}
+
+        {deleteTarget && (
+          <ConfirmPopover
+            title={t("delete.title")}
+            body={
+              deleteTarget.kind === "session"
+                ? t("delete.session_body")
+                : t("delete.scope_body")
+            }
+            pos={deleteTarget.pos}
+            onCancel={() => setDeleteTarget(null)}
+            onConfirm={() => {
+              void confirmDelete();
+            }}
           />
         )}
       </main>
@@ -679,6 +817,7 @@ function SidebarItem({
   count,
   active,
   onClick,
+  onContextMenu,
   icon,
   title,
 }: {
@@ -686,12 +825,14 @@ function SidebarItem({
   count: number;
   active: boolean;
   onClick: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
   icon?: ReactNode;
   title?: string;
 }) {
   return (
     <button
       onClick={onClick}
+      onContextMenu={onContextMenu}
       title={title}
       className={
         "flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left text-body transition " +
@@ -717,12 +858,14 @@ function NativeSessionList({
   error,
   indexing,
   onSelect,
+  onDelete,
 }: {
   visible: SessionInfo[];
   filter: Filter;
   error: string | null;
   indexing: boolean;
   onSelect: (s: SessionInfo) => void;
+  onDelete: (s: SessionInfo, pos: { x: number; y: number }) => void;
 }) {
   const { t } = useI18n();
   return (
@@ -742,6 +885,10 @@ function NativeSessionList({
           <li
             key={`${s.agent}:${s.filePath}:${s.id}`}
             className="px-5 py-3.5 hover:bg-ink/[0.03] transition"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              onDelete(s, { x: e.clientX, y: e.clientY });
+            }}
           >
             <SessionRow
               item={s}
@@ -761,12 +908,14 @@ function CrossSessionList({
   error,
   indexing,
   onSelect,
+  onDelete,
 }: {
   visible: SessionInfo[];
   filter: Filter;
   error: string | null;
   indexing: boolean;
   onSelect: (s: SessionInfo) => void;
+  onDelete: (s: SessionInfo, pos: { x: number; y: number }) => void;
 }) {
   const { t } = useI18n();
   return (
@@ -786,6 +935,10 @@ function CrossSessionList({
           <li
             key={`${s.agent}:${s.filePath}:${s.id}`}
             className="px-5 py-3.5 hover:bg-ink/[0.03] transition"
+            onContextMenu={(e) => {
+              e.preventDefault();
+              onDelete(s, { x: e.clientX, y: e.clientY });
+            }}
           >
             <SessionRow
               item={s}
@@ -911,9 +1064,9 @@ function SessionIdCopyButton({ id }: { id: string }) {
         type="button"
         onClick={handleClick}
         aria-label={id}
-        className="appearance-none p-0 bg-transparent border-0 rounded transition-colors text-ink/30 hover:text-ink/60 hover:bg-ink/5 focus-visible:text-ink/60 focus-visible:bg-ink/5 focus-visible:outline-none"
+        className="appearance-none px-1 py-0.5 -mx-1 -my-0.5 bg-transparent border-0 rounded font-mono text-ink/45 transition-colors hover:text-ink hover:bg-ink/10 focus-visible:text-ink focus-visible:bg-ink/10 focus-visible:outline-none"
       >
-        <span className="shrink-0 font-mono">
+        <span className="shrink-0">
           {sessionIdTail(id)}
         </span>
       </button>
@@ -994,12 +1147,13 @@ function CrossAgentButton({
         onClick={handleClick}
         disabled={state === "loading"}
         aria-label={t("list.copy_cross_to", { agent: AGENT_LABEL[targetAgent] })}
-        className="appearance-none p-0 bg-transparent border-0 rounded transition-colors hover:bg-ink/5 focus-visible:bg-ink/5 focus-visible:outline-none disabled:opacity-50"
+        className="group appearance-none p-0 bg-transparent border-0 rounded transition hover:bg-ink/10 hover:brightness-110 focus-visible:bg-ink/10 focus-visible:brightness-110 focus-visible:outline-none disabled:opacity-50"
       >
         <Tag
           label={AGENT_LABEL[targetAgent]}
           color={agentColorVar(targetAgent)}
           icon={<AgentGlyph agent={targetAgent} className="w-3.5 h-3.5 shrink-0" />}
+          className="transition-transform group-hover:scale-105"
         />
       </button>
     </Tooltip>
@@ -1038,12 +1192,13 @@ function ResumeAgentButton({ item }: { item: SessionInfo }) {
         type="button"
         onClick={handleClick}
         aria-label={t("list.copy_resume")}
-        className="appearance-none p-0 bg-transparent border-0 rounded transition-colors hover:bg-ink/5 focus-visible:bg-ink/5 focus-visible:outline-none"
+        className="group appearance-none p-0 bg-transparent border-0 rounded transition hover:bg-ink/10 hover:brightness-110 focus-visible:bg-ink/10 focus-visible:brightness-110 focus-visible:outline-none"
       >
         <Tag
           label={AGENT_LABEL[item.agent]}
           color={agentColorVar(item.agent)}
           icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
+          className="transition-transform group-hover:scale-105"
         />
       </button>
     </Tooltip>

@@ -1,6 +1,3 @@
-import { createElement, type ComponentType } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { flushSync } from "react-dom";
 import { Claude, Codex, Gemini } from "@lobehub/icons";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
@@ -13,29 +10,17 @@ import {
   Agent,
   SessionInfo,
 } from "./api";
+import { getMenuIconBytes, type MenuIconComponent } from "./menuIcon";
 import {
   RESUME_CMD,
   buildCrossCommandForSession,
 } from "./cross";
 
-type AgentIconComponent = ComponentType<{
-  size?: number | string;
-  className?: string;
-}>;
-
-const AGENT_ICONS: Record<Agent, AgentIconComponent> = {
-  codex: Codex.Color as AgentIconComponent,
-  claude: Claude.Color as AgentIconComponent,
-  gemini: Gemini.Color as AgentIconComponent,
+const AGENT_ICONS: Record<Agent, MenuIconComponent> = {
+  codex: Codex.Color as MenuIconComponent,
+  claude: Claude.Color as MenuIconComponent,
+  gemini: Gemini.Color as MenuIconComponent,
 };
-
-// muda hard-pins macOS menu image height to 18pt regardless of source
-// (muda/src/platform_impl/macos/mod.rs:1163). To get a visually smaller
-// glyph we render into a padded canvas — the agent SVG occupies only the
-// centre patch, so the muda downscale leaves whitespace around it.
-const SVG_RENDER_PX = 64;
-const ICON_CANVAS_PX = 32;
-const ICON_INNER_PX = 22;
 
 // NSMenu sizes its width to the widest item, so CJK titles end up much
 // wider than ASCII for the same char count. Cap by measured pixel width
@@ -46,72 +31,8 @@ const TITLE_MEASURE_FONT =
 
 const TRAY_ID = "main";
 
-const iconCache = new Map<Agent, Promise<Uint8Array>>();
-
-async function renderAgentIcon(agent: Agent): Promise<Uint8Array> {
-  const container = document.createElement("div");
-  container.style.cssText =
-    "position:absolute;left:-9999px;top:0;width:0;height:0;overflow:hidden;pointer-events:none";
-  document.body.appendChild(container);
-  let root: Root | null = null;
-  try {
-    root = createRoot(container);
-    const Icon = AGENT_ICONS[agent];
-    flushSync(() => {
-      root!.render(createElement(Icon, { size: SVG_RENDER_PX }));
-    });
-    const svg = container.querySelector("svg");
-    if (!svg) throw new Error(`agent svg missing for ${agent}`);
-    svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-    if (!svg.getAttribute("width")) svg.setAttribute("width", String(SVG_RENDER_PX));
-    if (!svg.getAttribute("height"))
-      svg.setAttribute("height", String(SVG_RENDER_PX));
-    const svgString = new XMLSerializer().serializeToString(svg);
-
-    const utf8 = new TextEncoder().encode(svgString);
-    let bin = "";
-    for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
-    const dataUrl = "data:image/svg+xml;base64," + btoa(bin);
-
-    const img = new globalThis.Image();
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error(`agent icon load failed: ${agent}`));
-      img.src = dataUrl;
-    });
-
-    const canvas = document.createElement("canvas");
-    canvas.width = ICON_CANVAS_PX;
-    canvas.height = ICON_CANVAS_PX;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("canvas 2d context unavailable");
-    ctx.clearRect(0, 0, ICON_CANVAS_PX, ICON_CANVAS_PX);
-    const pad = (ICON_CANVAS_PX - ICON_INNER_PX) / 2;
-    ctx.drawImage(img, pad, pad, ICON_INNER_PX, ICON_INNER_PX);
-
-    const blob: Blob = await new Promise((resolve, reject) =>
-      canvas.toBlob(
-        (b) => (b ? resolve(b) : reject(new Error("png encode failed"))),
-        "image/png",
-      ),
-    );
-    return new Uint8Array(await blob.arrayBuffer());
-  } finally {
-    if (root) root.unmount();
-    container.remove();
-  }
-}
-
 async function getAgentIcon(agent: Agent): Promise<Uint8Array> {
-  let p = iconCache.get(agent);
-  if (!p) {
-    p = renderAgentIcon(agent).catch((err) => {
-      iconCache.delete(agent);
-      throw err;
-    });
-    iconCache.set(agent, p);
-  }
-  return p;
+  return getMenuIconBytes(AGENT_ICONS[agent]);
 }
 
 let measureCtx: CanvasRenderingContext2D | null = null;

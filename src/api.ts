@@ -44,6 +44,11 @@ export interface IndexStatus {
   lastError: string | null;
 }
 
+export type SessionScope =
+  | { kind: "all" }
+  | { kind: "agent"; agent: Agent }
+  | { kind: "project"; key: string };
+
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
 }
@@ -54,6 +59,14 @@ export async function getIndexStatus(): Promise<IndexStatus> {
 
 export async function rebuildSessionIndex(): Promise<void> {
   return invoke<void>("rebuild_session_index");
+}
+
+export async function removeSessionFiles(session: SessionInfo): Promise<void> {
+  return invoke<void>("remove_session_files", { session });
+}
+
+export async function removeSessionsByScope(scope: SessionScope): Promise<void> {
+  return invoke<void>("remove_sessions_by_scope", { scope });
 }
 
 export async function getSessionMessages(
