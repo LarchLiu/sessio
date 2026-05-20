@@ -7,6 +7,8 @@ description: Search and resolve project-level Sessio session memory. Use this wh
 
 Use Sessio as the source of truth for project session memory. Sessio stores compact project memory records and source references; raw JSONL remains outside this skill and should only be accessed through Sessio commands.
 
+Sessio configuration lives at `~/.sessio/config.toml`. The app/CLI creates this file with defaults the first time config is loaded if it does not already exist. Treat the config file as the persistent source of truth for memory backend settings; avoid using transient environment overrides except for one-off debugging.
+
 ## Default Workflow
 
 1. Determine the project path. Prefer the current working directory when the user asks about the current project.
@@ -37,6 +39,7 @@ sessio memory base --record-id "<record_id>" --json
 ```
 
 8. If search returns no hits, an empty result, or a non-null `backendError`, say that Sessio memory did not return a usable match. Do not invent historical context.
+9. When troubleshooting backend availability, inspect the configured backend and install command through Sessio config/status instead of hard-coding backend names or commands.
 
 When a hit, resolved record, or `covered-by`/`base` result contains continuation metadata:
 
@@ -64,6 +67,26 @@ Inspect background memory/qmd job state when search fails unexpectedly:
 ```bash
 sessio memory jobs --project-key "<project_key>" --json
 ```
+
+Inspect memory backend availability:
+
+```bash
+sessio memory status --json
+```
+
+Inspect the persisted Sessio config:
+
+```bash
+sessio config show --json
+```
+
+Persist memory backend settings to `~/.sessio/config.toml`:
+
+```bash
+sessio config memory set --binary "/path/to/backend" --index "sessio" --artifacts-root "~/.sessio/memory" --auto-embed false --install-command "npm install -g @tobilu/qmd"
+```
+
+Only include flags the user wants to change. `config memory set` writes the resulting memory backend config back to `~/.sessio/config.toml`.
 
 Resolve sources for a record:
 
@@ -93,9 +116,11 @@ sessio memory covered-by --record-id "<record_id>" --json
 
 - Do not call `qmd` directly from this skill.
 - Do not parse agent JSONL directly from this skill.
+- Do not hard-code the memory backend install command in answers. Read it from `sessio config show --json` or `sessio memory status --json` details when needed.
+- Say "memory backend" when discussing backend availability; use the concrete backend name only when it comes from Sessio status/config.
 - Prefer concise answers that cite record titles, summaries, and source refs when available.
 - Distinguish clearly between "Sessio memory says..." and your own inference.
-- If `backendError` is present, report it briefly and suggest running `sessio memory status --json` only if the user wants troubleshooting.
+- If `backendError` is present, report it briefly. For troubleshooting, run `sessio memory status --json` and `sessio config show --json`; if the backend is missing, mention the configured install command and that clicking the app's memory backend missing button copies the same command.
 - Do not pass `--include-raw` in normal workflows; it is for debugging the qmd backend.
 - Do not use `--include-source-excerpt` in normal workflows; it is for provenance debugging and can return large payloads.
 - If `continuationSummary` is present, prefer that human-readable summary over unpacking raw `continuation` fields by hand.

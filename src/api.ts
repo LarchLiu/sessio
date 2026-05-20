@@ -44,6 +44,13 @@ export interface IndexStatus {
   lastError: string | null;
 }
 
+export interface MemoryBackendStatus {
+  backend: string;
+  available: boolean;
+  error: string | null;
+  details?: Record<string, unknown>;
+}
+
 export type SessionScope =
   | { kind: "all" }
   | { kind: "agent"; agent: Agent }
@@ -55,6 +62,10 @@ export async function listSessions(): Promise<SessionInfo[]> {
 
 export async function getIndexStatus(): Promise<IndexStatus> {
   return invoke<IndexStatus>("get_index_status");
+}
+
+export async function getMemoryBackendStatus(): Promise<MemoryBackendStatus> {
+  return invoke<MemoryBackendStatus>("get_memory_backend_status");
 }
 
 export async function rebuildSessionIndex(): Promise<void> {

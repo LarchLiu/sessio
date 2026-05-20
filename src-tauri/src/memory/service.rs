@@ -74,6 +74,7 @@ impl MemoryService {
                 QmdOptions {
                     binary: config.qmd.binary.clone(),
                     index: config.qmd.index.clone(),
+                    install_command: config.qmd.install_command.clone(),
                 },
                 config.qmd.artifacts_root.clone(),
             )

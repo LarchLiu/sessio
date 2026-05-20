@@ -24,6 +24,7 @@ pub struct QmdStatus {
 pub struct QmdOptions {
     pub binary: Option<String>,
     pub index: String,
+    pub install_command: String,
 }
 
 impl Default for QmdOptions {
@@ -31,6 +32,7 @@ impl Default for QmdOptions {
         Self {
             binary: None,
             index: "sessio".to_string(),
+            install_command: "npm install -g @tobilu/qmd".to_string(),
         }
     }
 }
@@ -95,6 +97,7 @@ impl MemoryIndexBackend for QmdBackend {
         let details = serde_json::json!({
             "binary": status.binary,
             "version": status.version,
+            "installCommand": self.options.install_command,
         });
         MemoryBackendStatus {
             backend: self.name().to_string(),

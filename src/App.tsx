@@ -1,5 +1,5 @@
 import { ReactNode, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
@@ -10,7 +10,9 @@ import {
   Agent,
   agentColorVar,
   getIndexStatus,
+  getMemoryBackendStatus,
   getSessionMessages,
+  MemoryBackendStatus,
   SessionInfo,
   rebuildSessionIndex,
   listSessions,
@@ -61,6 +63,17 @@ const AGENT_ORDER: Agent[] = ["codex", "claude", "gemini"];
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
+function refreshMemoryBackendStatus(
+  setMemoryBackendStatus: (status: MemoryBackendStatus | null) => void,
+) {
+  getMemoryBackendStatus()
+    .then(setMemoryBackendStatus)
+    .catch((err) => {
+      console.error("memory backend status check failed", err);
+      setMemoryBackendStatus(null);
+    });
+}
+
 function projectKey(s: SessionInfo): string {
   return s.projectPath ?? `__unknown__:${s.agent}`;
 }
@@ -100,6 +113,8 @@ export default function App() {
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [memoryBackendStatus, setMemoryBackendStatus] =
+    useState<MemoryBackendStatus | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const deferredViewMode = useDeferredValue(viewMode);
@@ -163,12 +178,14 @@ export default function App() {
         if (status.lastError) setError(status.lastError);
       })
       .catch(() => {});
+    refreshMemoryBackendStatus(setMemoryBackendStatus);
 
     const unlisten = listen("sessions_index_updated", () => {
       setIndexing(false);
       listSessions()
         .then((rows) => setSessions(rows.filter((s) => s.available)))
         .catch(() => {});
+      refreshMemoryBackendStatus(setMemoryBackendStatus);
     });
     const statusUnlisten = listen("sessions_index_status", (event) => {
       const payload = event.payload as { indexing?: boolean; lastError?: string | null };
@@ -360,6 +377,10 @@ export default function App() {
         : "label" in filter
           ? filter.label
           : filter.key;
+  const qmdMissing =
+    memoryBackendStatus?.backend === "qmd" &&
+    memoryBackendStatus.available === false &&
+    (memoryBackendStatus.error?.toLowerCase().includes("not found") ?? false);
 
   return (
     <div className="flex h-screen text-body">
@@ -527,6 +548,8 @@ export default function App() {
                       rebuildSessionIndex().catch((err) => {
                         setError(String(err));
                         setIndexing(false);
+                      }).finally(() => {
+                        refreshMemoryBackendStatus(setMemoryBackendStatus);
                       });
                     }}
                     className="p-1 -m-1 text-ink/55 transition hover:text-ink rounded-md"
@@ -555,6 +578,9 @@ export default function App() {
                   />
                 </button>
               </Tooltip>
+              {qmdMissing && (
+                <MemoryBackendMissingButton status={memoryBackendStatus} />
+              )}
               {update.hasUpdate && update.latestVersion && (
                 <Tooltip
                   content={t("sidebar.update_available", {
@@ -778,6 +804,71 @@ function StatusDot({
         style={{ background: "rgb(var(--color-emerald))" }}
       />
     </span>
+  );
+}
+
+function MemoryBackendMissingButton({
+  status,
+}: {
+  status: MemoryBackendStatus | null;
+}) {
+  const { t } = useI18n();
+  const [state, setState] = useState<"idle" | "copied" | "error">("idle");
+  const timerRef = useRef<number | null>(null);
+  const installCommand =
+    (status?.details as { installCommand?: string } | undefined)?.installCommand ??
+    "";
+  const backendName = status?.backend ?? "memory backend";
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const resetSoon = (next: "copied" | "error") => {
+    setState(next);
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setState("idle"), 1500);
+  };
+
+  const handleClick = async () => {
+    try {
+      await navigator.clipboard.writeText(installCommand);
+      resetSoon("copied");
+    } catch (err) {
+      console.error("qmd install command copy failed", err);
+      resetSoon("error");
+    }
+  };
+
+  const tip =
+    state === "copied" ? (
+      t("list.copied")
+    ) : state === "error" ? (
+      t("list.copy_failed")
+    ) : (
+      <div className="flex flex-col gap-1.5 py-0.5">
+        <span>{t("sidebar.memory_backend_required", { backend: backendName })}</span>
+        <code className="font-mono text-[11px] text-ink/85">
+          {installCommand}
+        </code>
+        <span className="text-ink/55">{t("sidebar.click_to_copy")}</span>
+      </div>
+    );
+
+  return (
+    <Tooltip content={tip} placement="top">
+      <button
+        type="button"
+        onClick={handleClick}
+        aria-label={t("sidebar.copy_memory_backend_install")}
+        className="inline-flex p-1 text-ink/55 hover:text-status-error hover:bg-status-error/10 focus-visible:text-status-error focus-visible:bg-status-error/10 focus-visible:outline-none transition rounded-md"
+      >
+        <Skull className="w-4 h-4" />
+      </button>
+    </Tooltip>
   );
 }
 

@@ -3,6 +3,7 @@ use crate::memory::qmd;
 use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
+use crate::config;
 use crate::models::Agent;
 use crate::providers;
 use crate::providers::shared::convert::project_key_for_path_or_name;
@@ -23,7 +24,23 @@ struct Cli {
 enum Command {
     Sessions(SessionsCommand),
     Memory(MemoryCommand),
+    Config(ConfigCommand),
     Help,
+}
+
+#[derive(Debug)]
+enum ConfigCommand {
+    Show {
+        json: bool,
+    },
+    MemorySet {
+        binary: Option<String>,
+        index: Option<String>,
+        artifacts_root: Option<String>,
+        auto_embed: Option<bool>,
+        install_command: Option<String>,
+        json: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -159,8 +176,55 @@ fn run() -> Result<()> {
     match cli.command {
         Command::Sessions(cmd) => run_sessions(cmd),
         Command::Memory(cmd) => run_memory(cmd),
+        Command::Config(cmd) => run_config(cmd),
         Command::Help => {
             print_help();
+            Ok(())
+        }
+    }
+}
+
+fn run_config(cmd: ConfigCommand) -> Result<()> {
+    match cmd {
+        ConfigCommand::Show { json } => {
+            let config = config::load_config()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&config)?);
+            } else {
+                println!("{}", serialize_app_config(&config));
+            }
+            Ok(())
+        }
+        ConfigCommand::MemorySet {
+            binary,
+            index,
+            artifacts_root,
+            auto_embed,
+            install_command,
+            json,
+        } => {
+            let mut memory = config::load_memory_config()?;
+            if let Some(binary) = binary {
+                memory.qmd.binary = Some(binary);
+            }
+            if let Some(index) = index {
+                memory.qmd.index = index;
+            }
+            if let Some(artifacts_root) = artifacts_root {
+                memory.qmd.artifacts_root = config::expand_path(&artifacts_root)?;
+            }
+            if let Some(auto_embed) = auto_embed {
+                memory.qmd.auto_embed = auto_embed;
+            }
+            if let Some(install_command) = install_command {
+                memory.qmd.install_command = install_command;
+            }
+            config::save_memory_config(&memory)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&memory)?);
+            } else {
+                println!("saved memory config to ~/.sessio/config.toml");
+            }
             Ok(())
         }
     }
@@ -223,6 +287,10 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                         .ok()
                         .filter(|v| !v.is_empty())
                         .unwrap_or_else(|| "sessio".to_string()),
+                    install_command: std::env::var("SESSIO_QMD_INSTALL_COMMAND")
+                        .ok()
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| "npm install -g @tobilu/qmd".to_string()),
                 })?)
             } else {
                 None
@@ -634,7 +702,95 @@ fn parse_args(args: Vec<String>) -> Result<Cli> {
     match args[0].as_str() {
         "sessions" => parse_sessions(&args[1..]),
         "memory" => parse_memory(&args[1..]),
+        "config" => parse_config(&args[1..]),
         other => bail!("unknown command '{other}'"),
+    }
+}
+
+fn parse_config(args: &[String]) -> Result<Cli> {
+    let Some(subcommand) = args.first() else {
+        bail!("missing config subcommand");
+    };
+    match subcommand.as_str() {
+        "show" => {
+            let mut json = false;
+            for arg in &args[1..] {
+                match arg.as_str() {
+                    "--json" => json = true,
+                    other => bail!("unknown config show option '{other}'"),
+                }
+            }
+            Ok(Cli {
+                command: Command::Config(ConfigCommand::Show { json }),
+            })
+        }
+        "memory" => parse_config_memory(&args[1..]),
+        other => bail!("unknown config subcommand '{other}'"),
+    }
+}
+
+fn parse_config_memory(args: &[String]) -> Result<Cli> {
+    let Some(subcommand) = args.first() else {
+        bail!("missing config memory subcommand");
+    };
+    match subcommand.as_str() {
+        "set" => {
+            let mut binary = None;
+            let mut index = None;
+            let mut artifacts_root = None;
+            let mut auto_embed = None;
+            let mut install_command = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--binary" => {
+                        i += 1;
+                        binary = Some(args.get(i).context("missing value for --binary")?.clone());
+                    }
+                    "--index" => {
+                        i += 1;
+                        index = Some(args.get(i).context("missing value for --index")?.clone());
+                    }
+                    "--artifacts-root" => {
+                        i += 1;
+                        artifacts_root = Some(
+                            args.get(i)
+                                .context("missing value for --artifacts-root")?
+                                .clone(),
+                        );
+                    }
+                    "--auto-embed" => {
+                        i += 1;
+                        auto_embed = Some(parse_config_bool(
+                            args.get(i).context("missing value for --auto-embed")?,
+                        )?);
+                    }
+                    "--install-command" => {
+                        i += 1;
+                        install_command = Some(
+                            args.get(i)
+                                .context("missing value for --install-command")?
+                                .clone(),
+                        );
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown config memory set option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Config(ConfigCommand::MemorySet {
+                    binary,
+                    index,
+                    artifacts_root,
+                    auto_embed,
+                    install_command,
+                    json,
+                }),
+            })
+        }
+        other => bail!("unknown config memory subcommand '{other}'"),
     }
 }
 
@@ -939,6 +1095,14 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
     }
 }
 
+fn parse_config_bool(value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => bail!("invalid boolean value: {other}"),
+    }
+}
+
 fn parse_sessions(args: &[String]) -> Result<Cli> {
     let Some(subcommand) = args.first() else {
         bail!("missing sessions subcommand");
@@ -1179,6 +1343,8 @@ fn print_help() {
 Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
   sessio sessions messages --agent <codex|claude|gemini> [--session-id <id>] [--file-path <path>] [--json]
+  sessio config show [--json]
+  sessio config memory set [--binary <path>] [--index <name>] [--artifacts-root <path>] [--auto-embed <bool>] [--install-command <cmd>] [--json]
   sessio memory build --project <path> [--artifacts-root <path>] [--db-path <path>] [--json]
   sessio memory covered-by --record-id <id> [--db-path <path>] [--json]
   sessio memory base --record-id <id> [--db-path <path>] [--json]
@@ -1198,4 +1364,8 @@ Notes:
   memory base lists records covered by a given base record via record_continuations.
 "#
     );
+}
+
+fn serialize_app_config(config: &config::AppConfig) -> String {
+    config::serialize_app_config(config)
 }

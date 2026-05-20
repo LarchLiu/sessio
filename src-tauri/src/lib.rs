@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexer::{IndexTask, IndexerHandle};
-use memory::MemoryStore;
+use memory::service::MemoryService;
+use memory::{MemoryBackendStatus, MemoryStore};
 use models::{Agent, SessionInfo, SessionMessage};
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -210,6 +211,18 @@ fn get_index_status(indexer: State<'_, IndexerHandle>) -> IndexStatus {
         indexing: s.indexing,
         last_error: s.last_error,
     }
+}
+
+#[tauri::command]
+fn get_memory_backend_status(
+    store: State<'_, Arc<dyn MemoryStore>>,
+) -> Result<MemoryBackendStatus, String> {
+    let service = MemoryService::new(
+        store.inner().clone(),
+        Arc::new(providers::builtin_providers()),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(service.backend_status())
 }
 
 #[tauri::command]
@@ -440,6 +453,7 @@ pub fn run() {
                 Err(e) => log::warn!("watcher failed to start: {e}"),
             }
             app.manage(store);
+            app.manage(memory_store);
             app.manage(indexer_handle);
 
             install_appearance_observer(app.handle().clone());
@@ -490,6 +504,7 @@ pub fn run() {
             get_system_appearance,
             rebuild_session_index,
             get_index_status,
+            get_memory_backend_status,
             write_cross_prompt,
             remove_session_files,
             remove_sessions_by_scope

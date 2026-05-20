@@ -2,26 +2,28 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 
 use crate::memory::build::default_artifacts_root;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
     pub memory: MemoryConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MemoryConfig {
     pub backend: String,
     pub qmd: QmdBackendConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct QmdBackendConfig {
     pub binary: Option<String>,
     pub index: String,
     pub artifacts_root: PathBuf,
     pub auto_embed: bool,
+    pub install_command: String,
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +48,7 @@ struct RawQmdBackendConfig {
     index: Option<String>,
     artifacts_root: Option<String>,
     auto_embed: Option<bool>,
+    install_command: Option<String>,
 }
 
 pub fn load_config() -> Result<AppConfig> {
@@ -59,9 +62,30 @@ pub fn load_memory_config() -> Result<MemoryConfig> {
     resolve_memory_config(raw)
 }
 
+pub fn save_memory_config(config: &MemoryConfig) -> Result<()> {
+    let path = config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create config dir {}", parent.display()))?;
+    }
+    fs::write(&path, serialize_memory_config(config))
+        .with_context(|| format!("write config {}", path.display()))
+}
+
+pub fn expand_path(value: &str) -> Result<PathBuf> {
+    if let Some(rest) = value.strip_prefix("~/") {
+        let home = dirs::home_dir().context("no home dir")?;
+        return Ok(home.join(rest));
+    }
+    if value == "~" {
+        return dirs::home_dir().context("no home dir");
+    }
+    Ok(Path::new(value).to_path_buf())
+}
+
 fn load_raw_config() -> Result<RawConfig> {
     let path = config_path()?;
     if !path.exists() {
+        write_default_config_file(&path)?;
         return Ok(RawConfig::default());
     }
     let contents =
@@ -102,6 +126,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "auto_embed" => {
                     raw.memory.backends.qmd.auto_embed = value.map(parse_bool).transpose()?
                 }
+                "install_command" => raw.memory.backends.qmd.install_command = value,
                 other => bail!("unknown key in [memory.backends.qmd]: {other}"),
             },
             Section::Root | Section::Ignored => {}
@@ -220,6 +245,9 @@ fn resolve_memory_config(raw: RawConfig) -> Result<MemoryConfig> {
             .transpose()?
             .unwrap_or(default_artifacts_root()?),
         auto_embed: qmd.auto_embed.unwrap_or(false),
+        install_command: qmd
+            .install_command
+            .unwrap_or_else(|| "npm install -g @tobilu/qmd".to_string()),
     };
     if let Ok(binary) = std::env::var("SESSIO_QMD_BINARY") {
         config.binary = Some(binary);
@@ -238,6 +266,11 @@ fn resolve_memory_config(raw: RawConfig) -> Result<MemoryConfig> {
             "1" | "true" | "yes" | "on"
         );
     }
+    if let Ok(command) = std::env::var("SESSIO_QMD_INSTALL_COMMAND") {
+        if !command.is_empty() {
+            config.install_command = command;
+        }
+    }
 
     Ok(MemoryConfig {
         backend,
@@ -250,15 +283,62 @@ fn config_path() -> Result<PathBuf> {
     Ok(home.join(".sessio").join("config.toml"))
 }
 
-fn expand_path(value: &str) -> Result<PathBuf> {
-    if let Some(rest) = value.strip_prefix("~/") {
-        let home = dirs::home_dir().context("no home dir")?;
-        return Ok(home.join(rest));
+fn write_default_config_file(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create config dir {}", parent.display()))?;
     }
-    if value == "~" {
-        return dirs::home_dir().context("no home dir");
+    let config = default_memory_config()?;
+    fs::write(path, serialize_memory_config(&config))
+        .with_context(|| format!("write config {}", path.display()))
+}
+
+fn default_memory_config() -> Result<MemoryConfig> {
+    Ok(MemoryConfig {
+        backend: "qmd".to_string(),
+        qmd: QmdBackendConfig {
+            binary: None,
+            index: "sessio".to_string(),
+            artifacts_root: default_artifacts_root()?,
+            auto_embed: false,
+            install_command: "npm install -g @tobilu/qmd".to_string(),
+        },
+    })
+}
+
+fn serialize_memory_config(config: &MemoryConfig) -> String {
+    let mut out = String::new();
+    out.push_str("[memory]\n");
+    out.push_str("backend = ");
+    out.push_str(&toml_string(&config.backend));
+    out.push_str("\n\n[memory.backends.qmd]\n");
+    if let Some(binary) = &config.qmd.binary {
+        out.push_str("binary = ");
+        out.push_str(&toml_string(binary));
+        out.push('\n');
     }
-    Ok(Path::new(value).to_path_buf())
+    out.push_str("index = ");
+    out.push_str(&toml_string(&config.qmd.index));
+    out.push('\n');
+    out.push_str("artifacts_root = ");
+    out.push_str(&toml_string(&config.qmd.artifacts_root.to_string_lossy()));
+    out.push('\n');
+    out.push_str("auto_embed = ");
+    out.push_str(if config.qmd.auto_embed { "true" } else { "false" });
+    out.push('\n');
+    out.push_str("install_command = ");
+    out.push_str(&toml_string(&config.qmd.install_command));
+    out.push('\n');
+    out
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serialize config string")
+}
+
+pub fn serialize_app_config(config: &AppConfig) -> String {
+    let mut out = String::new();
+    out.push_str(&serialize_memory_config(&config.memory));
+    out
 }
 
 #[cfg(test)]
