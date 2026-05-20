@@ -57,6 +57,10 @@ function sessionKey(s: SessionInfo): string {
   return `${s.agent}:${s.filePath}:${s.id}`;
 }
 
+function sessionIdTail(id: string): string {
+  return id.length <= 4 ? id : id.slice(-4);
+}
+
 // Orphan main session that only exists to carry subagents (Claude cleaned
 // the main jsonl, no index entry either). Don't count it as a "real" session
 // but still show it in the list so subagents stay reachable.
@@ -840,6 +844,8 @@ function SessionRow({
           {item.partial && !item.archived ? "~" : ""}
           {t("list.msgs", { count: item.messageCount })}
         </span>
+        <span className="shrink-0">·</span>
+        <SessionIdCopyButton id={item.id} />
         {subCount > 0 && (
           <Tag
             label={t("list.subagent_count", {
@@ -872,6 +878,46 @@ function SessionRow({
           : <ResumeAgentButton item={item} />}
       </div>
     </div>
+  );
+}
+
+function SessionIdCopyButton({ id }: { id: string }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const handleClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(id);
+      setCopied(true);
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      console.error("session id copy failed", err);
+    }
+  };
+
+  return (
+    <Tooltip content={copied ? t("list.copied") : id} placement="top">
+      <button
+        type="button"
+        onClick={handleClick}
+        aria-label={id}
+        className="appearance-none p-0 bg-transparent border-0 rounded transition-colors text-ink/30 hover:text-ink/60 hover:bg-ink/5 focus-visible:text-ink/60 focus-visible:bg-ink/5 focus-visible:outline-none"
+      >
+        <span className="shrink-0 font-mono">
+          {sessionIdTail(id)}
+        </span>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -948,7 +994,7 @@ function CrossAgentButton({
         onClick={handleClick}
         disabled={state === "loading"}
         aria-label={t("list.copy_cross_to", { agent: AGENT_LABEL[targetAgent] })}
-        className="appearance-none p-0 bg-transparent border-0 rounded transition hover:opacity-70 disabled:opacity-50"
+        className="appearance-none p-0 bg-transparent border-0 rounded transition-colors hover:bg-ink/5 focus-visible:bg-ink/5 focus-visible:outline-none disabled:opacity-50"
       >
         <Tag
           label={AGENT_LABEL[targetAgent]}
@@ -992,7 +1038,7 @@ function ResumeAgentButton({ item }: { item: SessionInfo }) {
         type="button"
         onClick={handleClick}
         aria-label={t("list.copy_resume")}
-        className="appearance-none p-0 bg-transparent border-0 rounded transition hover:opacity-70"
+        className="appearance-none p-0 bg-transparent border-0 rounded transition-colors hover:bg-ink/5 focus-visible:bg-ink/5 focus-visible:outline-none"
       >
         <Tag
           label={AGENT_LABEL[item.agent]}
