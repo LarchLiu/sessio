@@ -5,10 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::memory::artifacts::{MarkdownArtifactSink, MemoryArtifactSink};
-use crate::memory::cards::{cards_for_source, fingerprints_for_source, record_id_for_source};
 use crate::memory::dedupe::{should_suppress_source, DedupeAction, DedupeMatch};
 use crate::memory::normalize::normalize_events;
-use crate::memory::{RecordContinuation, MemoryStore, TurnFingerprint};
+use crate::memory::records::{fingerprints_for_source, record_id_for_source, records_for_source};
+use crate::memory::{MemoryStore, RecordContinuation, TurnFingerprint};
 use crate::providers::registry::ProviderRegistry;
 use crate::providers::types::{MessageEvent, MessageRole, SessionSource};
 
@@ -26,7 +26,7 @@ pub struct MemoryBuildSummary {
     pub sources_seen: usize,
     pub sources_built: usize,
     pub sources_skipped: usize,
-    pub cards_written: usize,
+    pub records_written: usize,
     pub artifacts_root: String,
     pub errors: Vec<String>,
     pub dependent_source_paths: Vec<PathBuf>,
@@ -35,8 +35,8 @@ pub struct MemoryBuildSummary {
 #[derive(Debug, Clone)]
 pub struct MemoryBuildSourceResult {
     pub project_key: Option<String>,
-    pub cards_written: usize,
-    pub cards_marked_unavailable: usize,
+    pub records_written: usize,
+    pub records_marked_unavailable: usize,
     pub dependent_source_paths: Vec<PathBuf>,
 }
 
@@ -63,7 +63,7 @@ pub fn build_project_memory_with_backend(
         sources_seen: 0,
         sources_built: 0,
         sources_skipped: 0,
-        cards_written: 0,
+        records_written: 0,
         artifacts_root: options.artifacts_root.to_string_lossy().to_string(),
         dependent_source_paths: Vec::new(),
         errors: Vec::new(),
@@ -131,7 +131,7 @@ pub fn build_project_memory_with_backend(
             let fingerprints = fingerprints_for_source(&source, &events);
             let plan =
                 resolve_dedupe_plan(store, &project.project_key, &source, &events, &fingerprints)?;
-            let (card_events, card_continuation) = match plan {
+            let (record_events, record_continuation) = match plan {
                 DedupePlan::Pass => (events.as_slice(), None),
                 DedupePlan::Trim {
                     offset,
@@ -151,7 +151,7 @@ pub fn build_project_memory_with_backend(
                 }
             };
 
-            let generated = cards_for_source(&source, card_events);
+            let generated = records_for_source(&source, record_events);
             if generated.is_empty() {
                 finalize_source_unavailable(
                     store,
@@ -178,24 +178,25 @@ pub fn build_project_memory_with_backend(
                 &mut summary.errors,
             );
             extend_unique_paths(&mut summary.dependent_source_paths, dependent_source_paths);
-            for (card, sources) in generated {
-                store.upsert_record(&card)?;
+            for (record, sources) in generated {
+                store.upsert_record(&record)?;
                 let artifact =
-                    artifact_sink.write_record_artifact(backend, &card.project_key, &card)?;
+                    artifact_sink.write_record_artifact(backend, &record.project_key, &record)?;
                 store.upsert_memory_artifact(&artifact)?;
-                store.replace_record_sources(&card.record_id, &sources)?;
-                store.replace_record_continuation(&card.record_id, card_continuation.as_ref())?;
-                summary.cards_written += 1;
+                store.replace_record_sources(&record.record_id, &sources)?;
+                store
+                    .replace_record_continuation(&record.record_id, record_continuation.as_ref())?;
+                summary.records_written += 1;
             }
         }
     }
 
     if let Some(project_key) = summary.project_key.as_deref() {
-        for card in store.list_project_records(project_key)? {
-            if !card.available {
+        for record in store.list_project_records(project_key)? {
+            if !record.available {
                 continue;
             }
-            let sources = store.sources_for_record(&card.record_id)?;
+            let sources = store.sources_for_record(&record.record_id)?;
             if sources.is_empty() {
                 continue;
             }
@@ -207,7 +208,7 @@ pub fn build_project_memory_with_backend(
                 ))
             });
             if all_missing {
-                finalize_record_unavailable(store, artifact_sink, backend, &card)?;
+                finalize_record_unavailable(store, artifact_sink, backend, &record)?;
             }
         }
     }
@@ -235,8 +236,8 @@ pub fn build_source_memory_with_backend(
     let Some(project) = &source.project else {
         return Ok(MemoryBuildSourceResult {
             project_key: None,
-            cards_written: 0,
-            cards_marked_unavailable: 0,
+            records_written: 0,
+            records_marked_unavailable: 0,
             dependent_source_paths: Vec::new(),
         });
     };
@@ -254,70 +255,70 @@ pub fn build_source_memory_with_backend(
     let events = provider.read_messages(source)?;
     let events = normalize_events(events);
     if events.is_empty() {
-        for card in existing {
-            if card.available {
-                finalize_record_unavailable(store, artifact_sink, backend, &card)?;
+        for record in existing {
+            if record.available {
+                finalize_record_unavailable(store, artifact_sink, backend, &record)?;
                 marked_unavailable += 1;
             }
         }
         clear_source_fingerprints(store, source)?;
         return Ok(MemoryBuildSourceResult {
             project_key: Some(project.project_key.clone()),
-            cards_written: 0,
-            cards_marked_unavailable: marked_unavailable,
+            records_written: 0,
+            records_marked_unavailable: marked_unavailable,
             dependent_source_paths: Vec::new(),
         });
     }
 
     let fingerprints = fingerprints_for_source(source, &events);
     let plan = resolve_dedupe_plan(store, &project.project_key, source, &events, &fingerprints)?;
-    let (card_events, card_continuation) = match plan {
+    let (record_events, record_continuation) = match plan {
         DedupePlan::Pass => (events.as_slice(), None),
         DedupePlan::Trim {
             offset,
             continuation,
         } => (&events[offset..], Some(continuation)),
         DedupePlan::Suppress { reason: _ } => {
-            for card in existing {
-                if card.available {
-                    finalize_record_unavailable(store, artifact_sink, backend, &card)?;
+            for record in existing {
+                if record.available {
+                    finalize_record_unavailable(store, artifact_sink, backend, &record)?;
                     marked_unavailable += 1;
                 }
             }
             clear_source_fingerprints(store, source)?;
             return Ok(MemoryBuildSourceResult {
                 project_key: Some(project.project_key.clone()),
-                cards_written: 0,
-                cards_marked_unavailable: marked_unavailable,
+                records_written: 0,
+                records_marked_unavailable: marked_unavailable,
                 dependent_source_paths: Vec::new(),
             });
         }
     };
 
-    let generated = cards_for_source(source, card_events);
+    let generated = records_for_source(source, record_events);
     if generated.is_empty() {
-        for card in existing {
-            if card.available {
-                finalize_record_unavailable(store, artifact_sink, backend, &card)?;
+        for record in existing {
+            if record.available {
+                finalize_record_unavailable(store, artifact_sink, backend, &record)?;
                 marked_unavailable += 1;
             }
         }
         clear_source_fingerprints(store, source)?;
         return Ok(MemoryBuildSourceResult {
             project_key: Some(project.project_key.clone()),
-            cards_written: 0,
-            cards_marked_unavailable: marked_unavailable,
+            records_written: 0,
+            records_marked_unavailable: marked_unavailable,
             dependent_source_paths: Vec::new(),
         });
     }
 
     let generated_ids = generated
         .iter()
-        .map(|(card, _)| card.record_id.clone())
+        .map(|(record, _)| record.record_id.clone())
         .collect::<std::collections::HashSet<_>>();
-    for card in existing {
-        if card.available && !generated_ids.contains(&card.record_id) {
-            finalize_record_unavailable(store, artifact_sink, backend, &card)?;
+    for record in existing {
+        if record.available && !generated_ids.contains(&record.record_id) {
+            finalize_record_unavailable(store, artifact_sink, backend, &record)?;
             marked_unavailable += 1;
         }
     }
@@ -341,20 +342,21 @@ pub fn build_source_memory_with_backend(
         log::warn!("{error}");
     }
 
-    let mut cards_written = 0;
-    for (card, sources) in generated {
-        store.upsert_record(&card)?;
-        let artifact = artifact_sink.write_record_artifact(backend, &card.project_key, &card)?;
+    let mut records_written = 0;
+    for (record, sources) in generated {
+        store.upsert_record(&record)?;
+        let artifact =
+            artifact_sink.write_record_artifact(backend, &record.project_key, &record)?;
         store.upsert_memory_artifact(&artifact)?;
-        store.replace_record_sources(&card.record_id, &sources)?;
-        store.replace_record_continuation(&card.record_id, card_continuation.as_ref())?;
-        cards_written += 1;
+        store.replace_record_sources(&record.record_id, &sources)?;
+        store.replace_record_continuation(&record.record_id, record_continuation.as_ref())?;
+        records_written += 1;
     }
 
     Ok(MemoryBuildSourceResult {
         project_key: Some(project.project_key.clone()),
-        cards_written,
-        cards_marked_unavailable: marked_unavailable,
+        records_written,
+        records_marked_unavailable: marked_unavailable,
         dependent_source_paths,
     })
 }
@@ -362,11 +364,7 @@ pub fn build_source_memory_with_backend(
 pub fn default_artifacts_root() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home dir")?;
     remove_legacy_qmd_memory_root(&home)?;
-    Ok(home
-        .join(".sessio")
-        .join("memory")
-        .join("qmd")
-        .join("projects"))
+    Ok(home.join(".sessio").join("memory"))
 }
 
 fn finalize_record_unavailable(
@@ -381,7 +379,7 @@ fn finalize_record_unavailable(
     Ok(())
 }
 
-// All five "no card to produce here" branches in build_project / build_source
+// All five "no record to produce here" branches in build_project / build_source
 // do the same three things: mark the source's records unavailable, drop
 // their artifacts (file + store row), and clear the source's turn
 // fingerprints so future passes don't keep matching against stale hashes.
@@ -464,9 +462,9 @@ fn next_user_block_start(events: &[MessageEvent], suffix_start_turn_index: usize
 }
 
 // When a base session's turn fingerprints change, the byte/line ranges
-// recorded in card_continuations rows that point at it may no longer be
+// recorded in record_continuations rows that point at it may no longer be
 // valid. Drop those continuation rows and mark the dependent candidate
-// cards unavailable so the next build pass regenerates them from scratch.
+// records unavailable so the next build pass regenerates them from scratch.
 fn invalidate_dependent_continuations(
     store: &dyn MemoryStore,
     artifact_sink: &dyn MemoryArtifactSink,
@@ -494,19 +492,18 @@ fn invalidate_dependent_continuations(
             dependent_source_paths.push(path);
         }
         match store.record_by_id(&continuation.record_id) {
-            Ok(Some(card)) if card.available => {
-                if let Err(e) =
-                    finalize_record_unavailable(store, artifact_sink, backend, &card)
+            Ok(Some(record)) if record.available => {
+                if let Err(e) = finalize_record_unavailable(store, artifact_sink, backend, &record)
                 {
                     errors.push(format!(
-                        "finalize dependent card {} unavailable failed: {e}",
-                        card.record_id
+                        "finalize dependent record {} unavailable failed: {e}",
+                        record.record_id
                     ));
                 }
             }
             Ok(_) => {}
             Err(e) => errors.push(format!(
-                "load dependent card {} failed: {e}",
+                "load dependent record {} failed: {e}",
                 continuation.record_id
             )),
         }
@@ -562,7 +559,7 @@ fn resolve_dedupe_plan(
                 // sits after the replay is either empty, dangling tool work,
                 // or assistant noise without a follow-up question. Treat the
                 // whole source as covered by the base instead of writing a
-                // card that re-states the prefix.
+                // record that re-states the prefix.
                 return Ok(DedupePlan::Suppress {
                     reason: suppress_reason(source, &dedupe_match),
                 });
@@ -725,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn build_source_memory_marks_card_unavailable_and_removes_markdown_when_source_goes_empty() {
+    fn build_source_memory_marks_record_unavailable_and_removes_markdown_when_source_goes_empty() {
         let root = unique_temp_dir("sessio-memory-build");
         let db_path = root.join("memory.db");
         let artifacts_root = root.join("artifacts-root");
@@ -763,16 +760,18 @@ mod tests {
         registry.register(FakeProvider::new(source.clone(), vec![event]));
 
         let first = build_source_memory(&registry, &store, &artifacts_root, &source).unwrap();
-        assert_eq!(first.cards_written, 1);
-        assert_eq!(first.cards_marked_unavailable, 0);
+        assert_eq!(first.records_written, 1);
+        assert_eq!(first.records_marked_unavailable, 0);
 
-        let card_id = "sessio-fake-session-1";
-        let card_path = artifacts_root.join("qmd")
+        let record_id = "sessio-fake-session-1";
+        let record_path = artifacts_root
+            .join("qmd")
+            .join("projects")
             .join("test-project")
             .join("sessions")
-            .join(format!("{card_id}.md"));
-        assert!(card_path.exists());
-        assert!(store.record_by_id(card_id).unwrap().unwrap().available);
+            .join(format!("{record_id}.md"));
+        assert!(record_path.exists());
+        assert!(store.record_by_id(record_id).unwrap().unwrap().available);
         let fingerprints_before = store
             .list_turn_fingerprints("test-project", "fake", "session-1")
             .unwrap();
@@ -786,10 +785,10 @@ mod tests {
 
         let second =
             build_source_memory(&empty_registry, &store, &artifacts_root, &source).unwrap();
-        assert_eq!(second.cards_written, 0);
-        assert_eq!(second.cards_marked_unavailable, 1);
-        assert!(!card_path.exists());
-        assert!(!store.record_by_id(card_id).unwrap().unwrap().available);
+        assert_eq!(second.records_written, 0);
+        assert_eq!(second.records_marked_unavailable, 1);
+        assert!(!record_path.exists());
+        assert!(!store.record_by_id(record_id).unwrap().unwrap().available);
         let fingerprints_after = store
             .list_turn_fingerprints("test-project", "fake", "session-1")
             .unwrap();
@@ -977,7 +976,7 @@ mod tests {
             &continuation_source,
             7,
             MessageRole::Assistant,
-            "I will generate the continuation card from suffix events only",
+            "I will generate the continuation record from suffix events only",
         ));
         let mut continuation_registry = ProviderRegistry::new();
         continuation_registry.register(FakeProvider::new(
@@ -991,17 +990,19 @@ mod tests {
             &continuation_source,
         )
         .unwrap();
-        assert_eq!(result.cards_written, 1);
+        assert_eq!(result.records_written, 1);
 
-        let card_path = artifacts_root.join("qmd")
+        let record_path = artifacts_root
+            .join("qmd")
+            .join("projects")
             .join("continuation-project")
             .join("sessions")
             .join("sessio-fake-002-continuation.md");
-        let body = fs::read_to_string(card_path).unwrap();
+        let body = fs::read_to_string(record_path).unwrap();
         assert!(!body.contains("Explain turn fingerprints in this project"));
         assert!(!body.contains("They are generated from role and canonical event text"));
         assert!(body.contains("Please implement prefix trim now"));
-        assert!(body.contains("I will generate the continuation card from suffix events only"));
+        assert!(body.contains("I will generate the continuation record from suffix events only"));
         assert!(!body.contains("shared prefix covered by:"));
 
         let continuation = store
@@ -1133,13 +1134,15 @@ mod tests {
             &continuation_source,
         )
         .unwrap();
-        assert_eq!(result.cards_written, 1);
+        assert_eq!(result.records_written, 1);
 
-        let card_path = artifacts_root.join("qmd")
+        let record_path = artifacts_root
+            .join("qmd")
+            .join("projects")
             .join("continuation-project-long")
             .join("sessions")
             .join("sessio-fake-002-continuation-long.md");
-        let body = fs::read_to_string(card_path).unwrap();
+        let body = fs::read_to_string(record_path).unwrap();
         assert!(!body.contains("shared question 1"));
         assert!(!body.contains("shared answer 7"));
         assert!(body.contains("new branch request"));
@@ -1242,11 +1245,13 @@ mod tests {
         earlier_registry.register(FakeProvider::new(earlier_source.clone(), earlier_events));
         build_source_memory(&earlier_registry, &store, &artifacts_root, &earlier_source).unwrap();
 
-        let earlier_card_path = artifacts_root.join("qmd")
+        let earlier_record_path = artifacts_root
+            .join("qmd")
+            .join("projects")
             .join("continuation-project-sibling")
             .join("sessions")
             .join("sessio-claude-07-earlier.md");
-        let earlier_body = fs::read_to_string(earlier_card_path).unwrap();
+        let earlier_body = fs::read_to_string(earlier_record_path).unwrap();
         assert!(earlier_body.contains("shared opening request"));
         assert!(earlier_body.contains("earlier unique request"));
 
@@ -1396,13 +1401,15 @@ mod tests {
             &continuation_source,
         )
         .unwrap();
-        assert_eq!(result.cards_written, 1);
+        assert_eq!(result.records_written, 1);
 
-        let card_path = artifacts_root.join("qmd")
+        let record_path = artifacts_root
+            .join("qmd")
+            .join("projects")
             .join("continuation-project-user-block")
             .join("sessions")
             .join("sessio-fake-002-continuation-user-block.md");
-        let body = fs::read_to_string(card_path).unwrap();
+        let body = fs::read_to_string(record_path).unwrap();
         assert!(!body.contains("continuation tool use"));
         assert!(!body.contains("continuation tool result"));
         assert!(body.contains("new user request after tool work"));
@@ -1515,28 +1522,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            result.cards_written, 0,
-            "continuation without a fresh user block should not produce a card"
+            result.records_written, 0,
+            "continuation without a fresh user block should not produce a record"
         );
 
-        let candidate_card_id = "sessio-fake-002-continuation-no-anchor";
-        let card_path = artifacts_root.join("qmd")
+        let candidate_record_id = "sessio-fake-002-continuation-no-anchor";
+        let record_path = artifacts_root
+            .join("qmd")
+            .join("projects")
             .join("no-anchor-project")
             .join("sessions")
-            .join(format!("{candidate_card_id}.md"));
+            .join(format!("{candidate_record_id}.md"));
         assert!(
-            !card_path.exists(),
-            "no card markdown should remain for a fully-covered continuation"
+            !record_path.exists(),
+            "no record markdown should remain for a fully-covered continuation"
         );
-        let continuation = store.continuation_for_record(candidate_card_id).unwrap();
+        let continuation = store.continuation_for_record(candidate_record_id).unwrap();
         assert!(
             continuation.is_none(),
             "suppressed source should not record continuation provenance"
         );
-        let card = store.record_by_id(candidate_card_id).unwrap();
+        let record = store.record_by_id(candidate_record_id).unwrap();
         assert!(
-            card.is_none_or(|c| !c.available),
-            "any pre-existing candidate card must be marked unavailable"
+            record.is_none_or(|c| !c.available),
+            "any pre-existing candidate record must be marked unavailable"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -1672,20 +1681,22 @@ mod tests {
         later_registry.register(FakeProvider::new(later_source.clone(), later_events));
         build_source_memory(&later_registry, &store, &artifacts_root, &later_source).unwrap();
 
-        let later_card_id = format!("sessio-codex-{}", later_session_id);
-        let later_card_path = artifacts_root.join("qmd")
+        let later_record_id = format!("sessio-codex-{}", later_session_id);
+        let later_record_path = artifacts_root
+            .join("qmd")
+            .join("projects")
             .join("codex-no-fork-project")
             .join("sessions")
-            .join(format!("{later_card_id}.md"));
-        let later_body = fs::read_to_string(later_card_path).unwrap();
+            .join(format!("{later_record_id}.md"));
+        let later_body = fs::read_to_string(later_record_path).unwrap();
         assert!(
             !later_body.contains("shared codex opening request"),
-            "later codex card should have the shared prefix trimmed"
+            "later codex record should have the shared prefix trimmed"
         );
         assert!(later_body.contains("later unique request after the shared prefix"));
-        let continuation = store.continuation_for_record(&later_card_id).unwrap();
+        let continuation = store.continuation_for_record(&later_record_id).unwrap();
         let continuation = continuation.expect(
-            "later card must record continuation provenance pointing at the earlier session",
+            "later record must record continuation provenance pointing at the earlier session",
         );
         assert_eq!(continuation.base_session_id, earlier_session_id);
 
@@ -1693,8 +1704,8 @@ mod tests {
     }
 
     // Regression: when a base session is reindexed and its turn
-    // fingerprints change, dependent card_continuations rows must be
-    // dropped and dependent cards marked unavailable so they get rebuilt.
+    // fingerprints change, dependent record_continuations rows must be
+    // dropped and dependent records marked unavailable so they get rebuilt.
     #[test]
     fn build_source_memory_invalidates_continuations_when_base_changes() {
         let root = unique_temp_dir("sessio-memory-base-reindex");
@@ -1795,8 +1806,8 @@ mod tests {
         )
         .unwrap();
 
-        let candidate_card_id = "sessio-fake-002-candidate";
-        let continuation_before = store.continuation_for_record(candidate_card_id).unwrap();
+        let candidate_record_id = "sessio-fake-002-candidate";
+        let continuation_before = store.continuation_for_record(candidate_record_id).unwrap();
         assert!(
             continuation_before.is_some(),
             "candidate must record continuation initially"
@@ -1804,7 +1815,7 @@ mod tests {
 
         // Reindex the base with extended content; this rewrites
         // base fingerprints and must invalidate the candidate's
-        // continuation row + mark its card unavailable.
+        // continuation row + mark its record unavailable.
         let mut extended_base_events = base_events;
         extended_base_events.push(make_event(
             &base_source,
@@ -1829,15 +1840,15 @@ mod tests {
         )
         .unwrap();
 
-        let continuation_after = store.continuation_for_record(candidate_card_id).unwrap();
+        let continuation_after = store.continuation_for_record(candidate_record_id).unwrap();
         assert!(
             continuation_after.is_none(),
             "candidate continuation row must be invalidated when base fingerprints change"
         );
-        let card = store.record_by_id(candidate_card_id).unwrap().unwrap();
+        let record = store.record_by_id(candidate_record_id).unwrap().unwrap();
         assert!(
-            !card.available,
-            "candidate card must be marked unavailable after its base was reindexed"
+            !record.available,
+            "candidate record must be marked unavailable after its base was reindexed"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -1972,15 +1983,15 @@ mod tests {
         c_registry.register(FakeProvider::new(c_source.clone(), c_events));
         build_source_memory(&c_registry, &store, &artifacts_root, &c_source).unwrap();
 
-        let b_card_id = "sessio-fake-002-b";
-        let c_card_id = "sessio-fake-003-c";
+        let b_record_id = "sessio-fake-002-b";
+        let c_record_id = "sessio-fake-003-c";
         let b_continuation_before = store
-            .continuation_for_record(b_card_id)
+            .continuation_for_record(b_record_id)
             .unwrap()
             .expect("B must record continuation pointing at A");
         assert_eq!(b_continuation_before.base_session_id, a_source.session_id);
         let c_continuation_before = store
-            .continuation_for_record(c_card_id)
+            .continuation_for_record(c_record_id)
             .unwrap()
             .expect("C must record continuation pointing at B");
         assert_eq!(c_continuation_before.base_session_id, b_source.session_id);
@@ -2018,7 +2029,7 @@ mod tests {
             "C is not a direct dependent of A; it should not appear in A's first-hop result"
         );
 
-        let b_continuation_after_a = store.continuation_for_record(b_card_id).unwrap();
+        let b_continuation_after_a = store.continuation_for_record(b_record_id).unwrap();
         assert!(
             b_continuation_after_a.is_none(),
             "B's continuation row must be invalidated when its base A changes"
@@ -2035,7 +2046,7 @@ mod tests {
             "rebuilding B must surface C as a dependent (got {:?})",
             b_result.dependent_source_paths
         );
-        let c_continuation_after_b = store.continuation_for_record(c_card_id).unwrap();
+        let c_continuation_after_b = store.continuation_for_record(c_record_id).unwrap();
         assert!(
             c_continuation_after_b.is_none(),
             "C's continuation row must be invalidated once B has been rebuilt"

@@ -47,6 +47,7 @@ impl MarkdownArtifactSink {
     fn artifact_path(&self, project_key: &str, record_id: &str) -> PathBuf {
         self.root
             .join(&self.backend)
+            .join("projects")
             .join(project_key)
             .join("sessions")
             .join(format!("{record_id}.md"))
@@ -214,6 +215,7 @@ mod tests {
             .unwrap();
         let path = root
             .join("qmd")
+            .join("projects")
             .join("project-key")
             .join("sessions")
             .join("sessio-codex-abc.md");

@@ -18,7 +18,7 @@ This is a design plan only. Do not implement it until the current qmd-backed v1 
 The current implementation has several useful pieces, but their boundaries are too qmd-shaped:
 
 - `src-tauri/src/memory/mod.rs` mixes domain models, repository interfaces, and job concepts.
-- `src-tauri/src/memory/build.rs` generates memory cards, persists metadata, writes markdown files, and returns paths needed by backend sync.
+- `src-tauri/src/memory/build.rs` generates memory records, persists metadata, writes markdown files, and returns paths needed by backend sync.
 - `src-tauri/src/memory/qmd.rs` is a concrete command wrapper, but callers import it directly.
 - `src-tauri/src/indexer/mod.rs` queues qmd-specific jobs and records qmd-specific job kinds.
 - CLI commands expose `qmd` as a first-class namespace, which is still useful for diagnostics but should not be the only memory backend path.
@@ -63,7 +63,7 @@ No backend should depend on provider internals. No provider should know about me
 
 Use these names consistently:
 
-- `MemoryRecord`: the backend-indexable unit. Replaces `MemoryCard` outright — no transitional alias.
+- `MemoryRecord`: the backend-indexable unit. Use this name instead of the legacy `MemoryCard` term.
 - `MemoryRepository`: Sessio-owned structured persistence for records, source refs, fingerprints, continuations, and jobs.
 - `MemoryIndexBackend`: replaceable retrieval/index backend.
 - `MemoryArtifactSink`: optional file/object writer used by backends that need external artifacts, such as qmd markdown files.
@@ -73,9 +73,9 @@ The abstraction must not name any backend-neutral field `qmd_path`.
 
 ## Core Data Model Changes
 
-Replace `MemoryCard` with `MemoryRecord`. The `qmd_path` column on `memory_cards` is dropped — artifact location is no longer part of record identity.
+Rename the legacy `MemoryCard` model to `MemoryRecord`. The `qmd_path` column on `memory_records` is dropped — artifact location is no longer part of record identity.
 
-Current shape:
+Legacy shape:
 
 ```rust
 pub struct MemoryCard {
@@ -146,9 +146,11 @@ For example:
 ~/.sessio/memory/qmd/projects/-Users-alex-Work-cloudgeek-sessio/sessions/sessio-codex-019e2730-....md
 ```
 
-The old layout `~/.sessio/qmd-memory/projects/<project_key>/cards/*.md` is removed entirely. There is no compatibility shim — existing artifacts are wiped and rebuilt from SQLite (which is the source of truth). The CLI flag previously named `--cards-root` becomes `--artifacts-root`, and the default is derived from backend config.
+The old qmd-memory project layout is removed entirely. There is no compatibility shim — existing artifacts are wiped and rebuilt from SQLite (which is the source of truth). The CLI flag previously named `--cards-root` becomes `--artifacts-root`, and the default is derived from backend config.
 
 Including `<backend>` in the path lets multiple backends coexist without overwriting each other's artifacts. `sessions/` reflects that one record corresponds to one session's memory, not an opaque "card".
+
+`artifacts_root` itself should stay at the backend base directory, for example `~/.sessio/memory`, and not already include `qmd/projects`. The sink/backends append `/<backend>/projects/<project_key>/sessions/` themselves.
 
 ## Repository Boundary
 
@@ -163,7 +165,7 @@ pub trait MemoryRepository: Send + Sync {
     fn replace_record_continuation(
         &self,
         record_id: &str,
-        continuation: Option<&CardContinuation>,
+        continuation: Option<&RecordContinuation>,
     ) -> Result<()>;
 
     fn list_records_for_source(
@@ -336,7 +338,7 @@ backend = "qmd"
 [memory.backends.qmd]
 binary = null              # null = auto-discover via PATH
 index = "sessio"
-artifacts_root = "~/.sessio/memory/qmd/projects"
+artifacts_root = "~/.sessio/memory"
 ```
 
 Defaults if the file or section is missing:
@@ -344,7 +346,7 @@ Defaults if the file or section is missing:
 - `memory.backend = "qmd"`
 - `memory.backends.qmd.binary = null` (auto-discover)
 - `memory.backends.qmd.index = "sessio"`
-- `memory.backends.qmd.artifacts_root = "~/.sessio/memory/qmd/projects"`
+- `memory.backends.qmd.artifacts_root = "~/.sessio/memory"`
 
 Environment overrides (highest precedence, for CLI testing and developer workflows):
 
@@ -365,7 +367,7 @@ Keep stable commands:
 ```bash
 sessio memory build --project <path> --json
 sessio memory search --project <path> "<query>" --json
-sessio memory resolve --card-id <id> --json
+sessio memory resolve --record-id <id> --json
 sessio memory jobs --project-key <key> --json
 ```
 
@@ -381,7 +383,7 @@ Response shape stays backend-neutral:
   "backendError": null,
   "hits": [
     {
-      "cardId": "sessio-codex-...",
+      "recordId": "sessio-codex-...",
       "title": "Memory backend abstraction",
       "summary": "Sessio should treat qmd as one backend behind a MemoryIndexBackend trait.",
       "score": 0.82,
@@ -434,15 +436,15 @@ Backend-internal debounce (e.g. qmd batching update+embed) lives inside `QmdBack
 
 ### Phase B: Backend-Neutral Types And Schema
 
-- Rename `MemoryCard` → `MemoryRecord` outright (no alias).
-- Drop the `memory_cards.qmd_path` column.
+- Rename legacy `MemoryCard` → `MemoryRecord` outright (no alias).
+- Drop the `memory_records.qmd_path` column.
 - Add the `memory_artifacts` table.
 - Add `MemoryBackendStatus`, `MemorySearchOptions`, `MemoryBackendHit`, `MemorySyncReport`.
 - Tests around backend-neutral search response mapping.
 
 ### Phase C: Path Layout And Artifact Sink
 
-- Move artifact root from `~/.sessio/qmd-memory/projects/<key>/cards/` to `~/.sessio/memory/<backend>/projects/<key>/sessions/`.
+- Move artifact root from the old qmd-memory project layout to `~/.sessio/memory/<backend>/projects/<key>/sessions/`.
 - Delete the old root on first run; rebuild artifacts from SQLite.
 - Move markdown writing/removal out of `memory/build.rs` into `MarkdownArtifactSink`.
 - Rename CLI `--cards-root` → `--artifacts-root`.
@@ -493,7 +495,7 @@ Regression checks:
 - `cargo test`
 - `cargo check`
 - `sessio memory search --project <repo> <query> --json`
-- `sessio memory resolve --card-id <id> --json`
+- `sessio memory resolve --record-id <id> --json`
 
 ## Non-Goals
 
@@ -508,7 +510,7 @@ Regression checks:
 
 The Open Questions previously listed have been resolved:
 
-- **`MemoryRecord` vs `MemoryCard`**: replace outright, no transitional alias.
+- **`MemoryCard` vs `MemoryRecord`**: rename legacy `MemoryCard` to `MemoryRecord`, no transitional alias.
 - **Artifact metadata storage**: `memory_artifacts` table in SQLite from Phase B. Backends do not stat the filesystem to find their own artifacts, and remote/object-store backends would not be able to derive paths deterministically anyway.
 - **CLI sync vs async**: CLI and indexer share one path. CLI mode blocks on the relevant `MemoryBackendSyncJob` via a oneshot signal rather than running a parallel synchronous pipeline.
 - **`embed` placement**: not part of `MemoryIndexBackend`. How a backend implements retrieval (BM25 / vector / hybrid / local / remote) is opaque to the service layer; `qmd embed` stays as a qmd-internal/diagnostic concern.

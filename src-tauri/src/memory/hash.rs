@@ -34,7 +34,7 @@ pub fn turn_content_len(event: &MessageEvent) -> usize {
         .count()
 }
 
-pub fn card_hash(project_key: &str, title: &str, summary: &str, body: &str) -> String {
+pub fn record_hash(project_key: &str, title: &str, summary: &str, body: &str) -> String {
     let title = canonical_text(title);
     let summary = canonical_text(summary);
     let body = canonical_text(body);

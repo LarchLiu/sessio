@@ -62,7 +62,7 @@ export function buildCrossPrompt(
   }
   if (startIdx >= filtered.length) return "";
   const meta = source
-    ? `<!-- sessio-cross:start source_agent="${htmlAttr(
+    ? `\n\n<!-- sessio-cross:start source_agent="${htmlAttr(
         source.sourceAgent,
       )}" source_session_id="${htmlAttr(source.sourceSessionId)}"${
         source.sourceFilePath

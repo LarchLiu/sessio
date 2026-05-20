@@ -1,4 +1,4 @@
-use crate::memory::hash::{card_hash, content_text, turn_content_hash, turn_content_len};
+use crate::memory::hash::{content_text, record_hash, turn_content_hash, turn_content_len};
 use crate::memory::{MemoryRecord, MemoryRecordKind, MemorySource, TurnFingerprint};
 use crate::providers::types::{
     MessageContent, MessageEvent, MessageRole, SessionSource, SourceLocation,
@@ -6,7 +6,7 @@ use crate::providers::types::{
 
 const MAX_SUMMARY_CHARS: usize = 360;
 
-pub fn cards_for_source(
+pub fn records_for_source(
     source: &SessionSource,
     events: &[MessageEvent],
 ) -> Vec<(MemoryRecord, Vec<MemorySource>)> {
@@ -25,8 +25,8 @@ pub fn cards_for_source(
         )
     });
     let summary = summarize_events(events);
-    let body = card_body(source, events);
-    let canonical_hash = card_hash(&project.project_key, &title, &summary, &body);
+    let body = record_body(source, events);
+    let canonical_hash = record_hash(&project.project_key, &title, &summary, &body);
     let record_id = record_id_for_source(source);
     let updated_at = events
         .iter()
@@ -79,7 +79,7 @@ fn summarize_events(events: &[MessageEvent]) -> String {
     })
 }
 
-fn card_body(source: &SessionSource, events: &[MessageEvent]) -> String {
+fn record_body(source: &SessionSource, events: &[MessageEvent]) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
         "# {}",
@@ -128,8 +128,8 @@ pub fn fingerprints_for_source(
 }
 
 // Aggregate the line/byte span covered by all events into a single
-// SourceLocation that can sit on the card-level MemorySource. The resulting
-// location lets `memory resolve` map a card back to the contiguous raw-JSONL
+// SourceLocation that can sit on the record-level MemorySource. The resulting
+// location lets `memory resolve` map a record back to the contiguous raw-JSONL
 // range it summarizes. Falls back to a session-level pointer when none of
 // the events carry offset info (e.g. Gemini until v2 follow-up).
 fn events_span_location(file_path: &str, events: &[MessageEvent]) -> SourceLocation {
@@ -246,14 +246,14 @@ pub fn safe_id_part(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cards_for_source;
+    use super::records_for_source;
     use crate::providers::types::{
         AgentKind, MessageContent, MessageEvent, MessageRole, ProjectRef, SessionSource,
         SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
     };
 
     #[test]
-    fn creates_card_for_project_source() {
+    fn creates_record_for_project_source() {
         let source = SessionSource {
             agent: AgentKind::new("codex"),
             session_id: "abc123".to_string(),
@@ -279,15 +279,15 @@ mod tests {
             location: SourceLocation::file("/tmp/session.jsonl"),
             metadata: Default::default(),
         };
-        let cards = cards_for_source(&source, &[event]);
-        assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].0.project_key, "p_test");
-        assert_eq!(cards[0].0.record_id, "sessio-codex-abc123");
-        assert_eq!(cards[0].1[0].session_id, "abc123");
+        let records = records_for_source(&source, &[event]);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0.project_key, "p_test");
+        assert_eq!(records[0].0.record_id, "sessio-codex-abc123");
+        assert_eq!(records[0].1[0].session_id, "abc123");
     }
 
     #[test]
-    fn card_body_keeps_tool_events_in_flow_without_hash_noise() {
+    fn record_body_keeps_tool_events_in_flow_without_hash_noise() {
         let source = SessionSource {
             agent: AgentKind::new("codex"),
             session_id: "flow-test".to_string(),
@@ -338,7 +338,7 @@ mod tests {
                         tool_name: Some("rg".to_string()),
                         exit_code: Some(0),
                         success: Some(true),
-                        text: "src-tauri/src/memory/cards.rs: Flow generation".to_string(),
+                        text: "src-tauri/src/memory/records.rs: Flow generation".to_string(),
                         output_hash: Some("0123456789abcdef".to_string()),
                     },
                 },
@@ -347,13 +347,13 @@ mod tests {
                 3,
                 MessageRole::Assistant,
                 MessageContent::Text {
-                    text: "The card builder lives in memory/cards.rs.".to_string(),
+                    text: "The record builder lives in memory/records.rs.".to_string(),
                 },
             ),
         ];
 
-        let cards = cards_for_source(&source, &events);
-        let body = &cards[0].0.body;
+        let records = records_for_source(&source, &events);
+        let body = &records[0].0.body;
 
         assert!(body.contains("Flow:"));
         assert!(!body.contains("Key turns:"));
@@ -363,10 +363,10 @@ mod tests {
         let user_pos = body.find("- user: Find qmd memory code").unwrap();
         let use_pos = body.find("- use rg: qmd memory").unwrap();
         let result_pos = body
-            .find("- result: src-tauri/src/memory/cards.rs: Flow generation")
+            .find("- result: src-tauri/src/memory/records.rs: Flow generation")
             .unwrap();
         let assistant_pos = body
-            .find("- assistant: The card builder lives in memory/cards.rs.")
+            .find("- assistant: The record builder lives in memory/records.rs.")
             .unwrap();
         assert!(user_pos < use_pos);
         assert!(use_pos < result_pos);

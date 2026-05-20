@@ -21,7 +21,7 @@
 - Copies native `resume` commands for each agent
 - Generates cross-agent continuation commands
 - Exposes a CLI for listing sessions and working with project memory
-- Builds, searches, and resolves project memory cards
+- Builds, searches, and resolves project memory records
 - Provides a tray menu for quick access to recent sessions
 - Supports English and Chinese, plus light / dark / system themes
 - Checks GitHub for the latest release in production builds

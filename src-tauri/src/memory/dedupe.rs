@@ -117,12 +117,12 @@ pub fn should_suppress_source(
         ) {
             continue;
         }
-        let cards = store.list_records_for_source(
+        let records = store.list_records_for_source(
             &candidate.agent,
             &candidate.session_id,
             &candidate.file_path,
         )?;
-        if !cards.iter().any(|card| card.available) {
+        if !records.iter().any(|record| record.available) {
             continue;
         }
 

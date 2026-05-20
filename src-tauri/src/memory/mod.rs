@@ -1,10 +1,10 @@
 pub mod artifacts;
 pub mod build;
-pub mod cards;
 pub mod dedupe;
 pub mod hash;
 pub mod normalize;
 pub mod qmd;
+pub mod records;
 pub mod resolve;
 pub mod service;
 

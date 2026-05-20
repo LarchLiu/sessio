@@ -1,6 +1,6 @@
 use crate::memory::build::MemoryBuildOptions;
-use crate::memory::cards::safe_id_part;
 use crate::memory::qmd;
+use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
 use crate::models::Agent;
@@ -47,18 +47,18 @@ enum MemoryCommand {
         json: bool,
     },
     Resolve {
-        card_id: String,
+        record_id: String,
         db_path: Option<String>,
         include_source_excerpt: bool,
         json: bool,
     },
     CoveredBy {
-        card_id: String,
+        record_id: String,
         db_path: Option<String>,
         json: bool,
     },
     Base {
-        card_id: String,
+        record_id: String,
         db_path: Option<String>,
         json: bool,
     },
@@ -279,7 +279,7 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             } else {
                 println!(
                     "built {} memory records from {} sources",
-                    summary.cards_written, summary.sources_built
+                    summary.records_written, summary.sources_built
                 );
                 if let Some(error) = backend_error {
                     println!("memory backend sync unavailable: {error}");
@@ -288,13 +288,13 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             Ok(())
         }
         MemoryCommand::Resolve {
-            card_id,
+            record_id,
             db_path,
             include_source_excerpt,
             json,
         } => {
             let service = build_cli_service(db_path.as_deref())?;
-            let response = service.resolve_full(&card_id)?;
+            let response = service.resolve_full(&record_id)?;
             let payload_sources: Vec<serde_json::Value> = response
                 .sources
                 .iter()
@@ -345,14 +345,14 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             Ok(())
         }
         MemoryCommand::CoveredBy {
-            card_id,
+            record_id,
             db_path,
             json,
         } => {
             let service = build_cli_service(db_path.as_deref())?;
-            let resolved = service.resolve_full(&card_id)?;
+            let resolved = service.resolve_full(&record_id)?;
             let Some(record) = resolved.record else {
-                bail!("record not found: {card_id}");
+                bail!("record not found: {record_id}");
             };
             let continuation = resolved.continuation;
             let base_record_id = continuation.as_ref().map(base_record_id_for_continuation);
@@ -381,18 +381,18 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
             Ok(())
         }
         MemoryCommand::Base {
-            card_id,
+            record_id,
             db_path,
             json,
         } => {
             let store = open_store(db_path.as_deref())?;
             store.init()?;
-            let Some(record) = store.record_by_id(&card_id)? else {
-                bail!("record not found: {card_id}");
+            let Some(record) = store.record_by_id(&record_id)? else {
+                bail!("record not found: {record_id}");
             };
             let sources = store.sources_for_record(&record.record_id)?;
             let Some(base_source) = sources.first() else {
-                bail!("base record has no source refs: {card_id}");
+                bail!("base record has no source refs: {record_id}");
             };
             let continuations =
                 store.continuations_for_base(&base_source.agent, &base_source.session_id)?;
@@ -462,10 +462,7 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
                             score: hit.score,
                             snippet: hit.snippet,
                             sources: hit.sources,
-                            continuation: hit
-                                .continuation
-                                .as_ref()
-                                .map(continuation_summary),
+                            continuation: hit.continuation.as_ref().map(continuation_summary),
                         })
                         .collect::<Vec<_>>(),
                     None,
@@ -755,15 +752,19 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             })
         }
         "base" => {
-            let mut card_id = None;
+            let mut record_id = None;
             let mut db_path = None;
             let mut json = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--card-id" | "--record-id" => {
+                    "--record-id" => {
                         i += 1;
-                        card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
+                        record_id = Some(
+                            args.get(i)
+                                .context("missing value for --record-id")?
+                                .clone(),
+                        );
                     }
                     "--db-path" => {
                         i += 1;
@@ -776,23 +777,27 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             }
             Ok(Cli {
                 command: Command::Memory(MemoryCommand::Base {
-                    card_id: card_id.context("missing --card-id")?,
+                    record_id: record_id.context("missing --record-id")?,
                     db_path,
                     json,
                 }),
             })
         }
         "resolve" => {
-            let mut card_id = None;
+            let mut record_id = None;
             let mut db_path = None;
             let mut include_source_excerpt = false;
             let mut json = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--card-id" | "--record-id" => {
+                    "--record-id" => {
                         i += 1;
-                        card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
+                        record_id = Some(
+                            args.get(i)
+                                .context("missing value for --record-id")?
+                                .clone(),
+                        );
                     }
                     "--db-path" => {
                         i += 1;
@@ -806,7 +811,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             }
             Ok(Cli {
                 command: Command::Memory(MemoryCommand::Resolve {
-                    card_id: card_id.context("missing --card-id")?,
+                    record_id: record_id.context("missing --record-id")?,
                     db_path,
                     include_source_excerpt,
                     json,
@@ -814,15 +819,19 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             })
         }
         "covered-by" => {
-            let mut card_id = None;
+            let mut record_id = None;
             let mut db_path = None;
             let mut json = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--card-id" | "--record-id" => {
+                    "--record-id" => {
                         i += 1;
-                        card_id = Some(args.get(i).context("missing value for --card-id")?.clone());
+                        record_id = Some(
+                            args.get(i)
+                                .context("missing value for --record-id")?
+                                .clone(),
+                        );
                     }
                     "--db-path" => {
                         i += 1;
@@ -835,7 +844,7 @@ fn parse_memory(args: &[String]) -> Result<Cli> {
             }
             Ok(Cli {
                 command: Command::Memory(MemoryCommand::CoveredBy {
-                    card_id: card_id.context("missing --card-id")?,
+                    record_id: record_id.context("missing --record-id")?,
                     db_path,
                     json,
                 }),
@@ -1181,7 +1190,6 @@ Usage:
 
 Notes:
   --json emits stable machine-readable output for skills and agents.
-  --card-id is accepted as a deprecated alias for --record-id.
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
   memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at (Codex / Claude today; Gemini is session-level only).

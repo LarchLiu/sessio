@@ -99,7 +99,6 @@ sessio memory covered-by --record-id "<record_id>" --json
 - Do not pass `--include-raw` in normal workflows; it is for debugging the qmd backend.
 - Do not use `--include-source-excerpt` in normal workflows; it is for provenance debugging and can return large payloads.
 - If `continuationSummary` is present, prefer that human-readable summary over unpacking raw `continuation` fields by hand.
-- The CLI accepts `--card-id` as a deprecated alias for `--record-id`. Always use `--record-id` in new commands.
 
 ## No-Hit Behavior
 

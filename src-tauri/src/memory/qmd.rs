@@ -79,6 +79,7 @@ impl QmdBackend {
     fn project_sessions_root(&self, project_key: &str) -> PathBuf {
         self.artifacts_root
             .join(self.name())
+            .join("projects")
             .join(project_key)
             .join("sessions")
     }
@@ -204,7 +205,7 @@ pub fn qmd_status(configured_binary: Option<&str>) -> QmdStatus {
 pub fn ensure_project_collection(
     options: &QmdOptions,
     project_key: &str,
-    cards_root: &Path,
+    records_root: &Path,
 ) -> Result<QmdCommandResult> {
     let collection = collection_name(project_key);
     let add = run_qmd_command_allow_existing(
@@ -214,7 +215,7 @@ pub fn ensure_project_collection(
             options.index.as_str(),
             "collection",
             "add",
-            &cards_root.to_string_lossy(),
+            &records_root.to_string_lossy(),
             "--name",
             &collection,
             "--mask",
@@ -230,7 +231,7 @@ pub fn ensure_project_collection(
                 options.index.as_str(),
                 "collection",
                 "add",
-                &cards_root.to_string_lossy(),
+                &records_root.to_string_lossy(),
                 "--name",
                 &collection,
                 "--mask",
@@ -317,7 +318,7 @@ fn collect_qmd_hit_candidates(value: &serde_json::Value, out: &mut Vec<QmdHitCan
         serde_json::Value::Object(map) => {
             let path = first_string(map, &["path", "file", "filePath", "filepath", "source"]);
             let candidate = QmdHitCandidate {
-                record_id: first_string(map, &["recordId", "record_id", "cardId", "card_id", "id"])
+                record_id: first_string(map, &["recordId", "record_id", "id"])
                     .and_then(record_id_from_text)
                     .or_else(|| path.clone().and_then(record_id_from_text)),
                 artifact_uri: path,
