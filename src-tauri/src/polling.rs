@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::indexer::{IndexTask, IndexerHandle};
+use crate::indexer::{IndexPhase, IndexTask, IndexerHandle};
 use crate::models::Agent;
 use crate::providers;
 use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
@@ -26,7 +26,7 @@ pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
             // saw would look "not yet indexed" and we'd submit redundant
             // per-file reindex tasks whose outcomes re-trigger the heavy
             // memory work. The next tick (10s later) will catch real changes.
-            if indexer.status().indexing {
+            if !matches!(indexer.status().phase, IndexPhase::Idle) {
                 continue;
             }
             if let Err(e) = poll_once(

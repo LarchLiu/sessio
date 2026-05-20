@@ -17,6 +17,7 @@ import {
   Agent,
   agentColorVar,
   getIndexStatus,
+  IndexPhase,
   getMemoryBackendStatus,
   getSessionMessages,
   MemoryBackendStatus,
@@ -115,7 +116,7 @@ function isSubagentOnly(s: SessionInfo): boolean {
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [indexing, setIndexing] = useState(true);
+  const [indexPhase, setIndexPhase] = useState<IndexPhase>("indexing");
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [selected, setSelected] = useState<SessionInfo | null>(null);
@@ -134,6 +135,8 @@ export default function App() {
   const { lang, setLang, t } = useI18n();
   const update = useUpdateCheck(__APP_VERSION__);
   const listScrollRef = useRef<HTMLDivElement>(null);
+  const indexing = indexPhase !== "idle";
+  const rebuilding = indexPhase === "rebuilding";
 
   const availableSessions = useMemo(
     () => sessions.filter((s) => s.available),
@@ -186,22 +189,25 @@ export default function App() {
   useEffect(() => {
     getIndexStatus()
       .then((status) => {
-        setIndexing(status.indexing);
+        setIndexPhase(status.phase);
         if (status.lastError) setError(status.lastError);
       })
       .catch(() => {});
     refreshMemoryBackendStatus(setMemoryBackendStatus);
 
     const unlisten = listen("sessions_index_updated", () => {
-      setIndexing(false);
+      setIndexPhase("idle");
       listSessions()
         .then((rows) => setSessions(rows.filter((s) => s.available)))
         .catch(() => {});
       refreshMemoryBackendStatus(setMemoryBackendStatus);
     });
     const statusUnlisten = listen("sessions_index_status", (event) => {
-      const payload = event.payload as { indexing?: boolean; lastError?: string | null };
-      if (typeof payload.indexing === "boolean") setIndexing(payload.indexing);
+      const payload = event.payload as {
+        phase?: IndexPhase;
+        lastError?: string | null;
+      };
+      if (payload.phase) setIndexPhase(payload.phase);
       if (payload.lastError !== undefined) setError(payload.lastError);
     });
     return () => {
@@ -564,17 +570,15 @@ export default function App() {
                     type="button"
                     aria-label={t("sidebar.rebuild_index")}
                     onClick={() => {
-                      setIndexing(true);
                       rebuildSessionIndex().catch((err) => {
                         setError(String(err));
-                        setIndexing(false);
                       }).finally(() => {
                         refreshMemoryBackendStatus(setMemoryBackendStatus);
                       });
                     }}
                     className="p-1 -m-1 text-ink/55 transition hover:text-ink rounded-md"
                   >
-                    <RefreshCw className={"w-4 h-4 shrink-0 " + (indexing ? "animate-spin" : "")} />
+                    <RefreshCw className={"w-4 h-4 shrink-0 " + (rebuilding ? "animate-spin" : "")} />
                   </button>
                 </div>
               </div>

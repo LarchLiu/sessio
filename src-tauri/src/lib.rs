@@ -201,7 +201,7 @@ fn move_file(src: &Path, dst: &Path) -> anyhow::Result<()> {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct IndexStatus {
-    indexing: bool,
+    phase: indexer::IndexPhase,
     last_error: Option<String>,
 }
 
@@ -220,7 +220,7 @@ struct ProjectMemorySearchResult {
 fn get_index_status(indexer: State<'_, IndexerHandle>) -> IndexStatus {
     let s = indexer.status();
     IndexStatus {
-        indexing: s.indexing,
+        phase: s.phase,
         last_error: s.last_error,
     }
 }

@@ -1,7 +1,6 @@
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -34,9 +33,17 @@ pub enum IndexTask {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexPhase {
+    Idle,
+    Indexing,
+    Rebuilding,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStatus {
-    pub indexing: bool,
+    pub phase: IndexPhase,
     pub last_error: Option<String>,
 }
 
@@ -47,7 +54,7 @@ pub struct IndexerHandle {
 }
 
 struct IndexerState {
-    indexing: AtomicBool,
+    phase: Mutex<IndexPhase>,
     last_error: Mutex<Option<String>>,
 }
 
@@ -60,7 +67,7 @@ impl IndexerHandle {
 
     pub fn status(&self) -> IndexStatus {
         IndexStatus {
-            indexing: self.state.indexing.load(Ordering::SeqCst),
+            phase: self.state.phase.lock().unwrap().clone(),
             last_error: self.state.last_error.lock().unwrap().clone(),
         }
     }
@@ -74,7 +81,7 @@ pub fn spawn(
     let (tx, rx) = unbounded::<IndexTask>();
     let (backend_sync_tx, backend_sync_rx) = unbounded::<MemoryBackendSyncJob>();
     let state = Arc::new(IndexerState {
-        indexing: AtomicBool::new(false),
+        phase: Mutex::new(IndexPhase::Idle),
         last_error: Mutex::new(None),
     });
     let handle = IndexerHandle {
@@ -133,7 +140,7 @@ struct IndexLoopContext {
 
 fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask>) {
     while let Ok(first) = rx.recv() {
-        ctx.state.indexing.store(true, Ordering::SeqCst);
+        set_phase(&ctx.state, IndexPhase::Indexing);
         {
             let mut slot = ctx.state.last_error.lock().unwrap();
             *slot = None;
@@ -150,6 +157,12 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
         let had_full_rebuild = coalesced
             .iter()
             .any(|t| matches!(t, IndexTask::FullRebuild));
+        if had_full_rebuild {
+            set_phase(&ctx.state, IndexPhase::Rebuilding);
+            let _ = ctx
+                .app
+                .emit("sessions_index_status", current_status(&ctx.state));
+        }
         log::info!("indexer: received tasks {:?}", coalesced);
         let mut had_error = false;
         let mut last_error = None;
@@ -324,7 +337,7 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
             let mut slot = ctx.state.last_error.lock().unwrap();
             *slot = last_error;
         }
-        ctx.state.indexing.store(false, Ordering::SeqCst);
+        set_phase(&ctx.state, IndexPhase::Idle);
         let _ = ctx
             .app
             .emit("sessions_index_status", current_status(&ctx.state));
@@ -336,9 +349,13 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
 
 fn current_status(state: &IndexerState) -> IndexStatus {
     IndexStatus {
-        indexing: state.indexing.load(Ordering::SeqCst),
+        phase: state.phase.lock().unwrap().clone(),
         last_error: state.last_error.lock().unwrap().clone(),
     }
+}
+
+fn set_phase(state: &IndexerState, phase: IndexPhase) {
+    *state.phase.lock().unwrap() = phase;
 }
 
 fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {

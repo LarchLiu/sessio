@@ -39,8 +39,10 @@ export interface SessionMessage {
   timestamp: number | null;
 }
 
+export type IndexPhase = "idle" | "indexing" | "rebuilding";
+
 export interface IndexStatus {
-  indexing: boolean;
+  phase: IndexPhase;
   lastError: string | null;
 }
 
