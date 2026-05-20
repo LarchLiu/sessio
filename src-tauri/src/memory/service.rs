@@ -212,11 +212,18 @@ impl MemoryService {
             .collect::<Vec<_>>();
         let mut hits: Vec<MemorySearchHit> = Vec::new();
         for candidate in &backend_result.hits {
-            let Some(record) = match_record(&records, candidate, self.repository.as_ref(), &backend_result.backend)
-            else {
+            let Some(record) = match_record(
+                &records,
+                candidate,
+                self.repository.as_ref(),
+                &backend_result.backend,
+            ) else {
                 continue;
             };
-            if hits.iter().any(|hit| hit.record.record_id == record.record_id) {
+            if hits
+                .iter()
+                .any(|hit| hit.record.record_id == record.record_id)
+            {
                 continue;
             }
             let sources = self.repository.sources_for_record(&record.record_id)?;
@@ -301,8 +308,7 @@ fn path_matches_record_artifact(
     };
     let normalized = path.replace('\\', "/");
     let artifact_uri = artifact.artifact_uri.replace('\\', "/");
-    normalized.ends_with(&artifact_uri)
-        || normalized.ends_with(&artifact_uri.replace('_', "-"))
+    normalized.ends_with(&artifact_uri) || normalized.ends_with(&artifact_uri.replace('_', "-"))
 }
 
 fn path_matches_record_id(path: &str, record_id: &str) -> bool {

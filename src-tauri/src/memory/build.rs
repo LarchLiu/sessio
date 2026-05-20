@@ -136,7 +136,7 @@ pub fn build_project_memory_with_backend(
                 DedupePlan::Trim {
                     offset,
                     continuation,
-                } => (&events[offset..], Some(continuation)),
+                } => (&events[offset..], Some(*continuation)),
                 DedupePlan::Suppress { reason } => {
                     summary.sources_skipped += 1;
                     summary.errors.push(reason);
@@ -277,7 +277,7 @@ pub fn build_source_memory_with_backend(
         DedupePlan::Trim {
             offset,
             continuation,
-        } => (&events[offset..], Some(continuation)),
+        } => (&events[offset..], Some(*continuation)),
         DedupePlan::Suppress { reason: _ } => {
             for record in existing {
                 if record.available {
@@ -533,7 +533,7 @@ enum DedupePlan {
     },
     Trim {
         offset: usize,
-        continuation: RecordContinuation,
+        continuation: Box<RecordContinuation>,
     },
 }
 
@@ -594,7 +594,7 @@ fn resolve_dedupe_plan(
             };
             Ok(DedupePlan::Trim {
                 offset: trim_at,
-                continuation,
+                continuation: Box::new(continuation),
             })
         }
     }
@@ -698,6 +698,7 @@ mod tests {
                 started_at: None,
                 updated_at: None,
                 message_count: self.events.lock().unwrap().len(),
+                title: None,
                 first_user_message: None,
                 file_size: 0,
                 file_mtime: None,
@@ -1621,6 +1622,7 @@ mod tests {
                     started_at: Some(1_000),
                     updated_at: Some(1_500),
                     message_count: 0,
+                    title: None,
                     first_user_message: None,
                     file_path: earlier_source.file_path.clone(),
                     file_size: 0,

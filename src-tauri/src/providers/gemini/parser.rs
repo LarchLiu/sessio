@@ -227,6 +227,7 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
 
     let mut out = Vec::with_capacity(groups.len());
     for (sid, agg) in groups {
+        let title = gemini_session_title(&sid).or_else(|| agg.first_user.clone());
         out.push(SessionInfo {
             id: sid,
             agent: Agent::Gemini,
@@ -236,6 +237,7 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
             started_at: agg.earliest,
             updated_at: agg.latest.or(file_mtime),
             message_count: agg.count,
+            title,
             first_user_message: agg.first_user,
             file_path: file_path.clone(),
             file_size,
@@ -246,6 +248,10 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
         });
     }
     Ok(out)
+}
+
+fn gemini_session_title(_session_id: &str) -> Option<String> {
+    None
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -270,15 +276,12 @@ fn scan_json_array_entries(bytes: &[u8]) -> Result<Vec<JsonArrayEntry>> {
 
     while i < len {
         let b = bytes[i];
-        match b {
-            b'\n' => {
-                line += 1;
-                if !in_string && depth == 0 {
-                    i += 1;
-                    continue;
-                }
+        if b == b'\n' {
+            line += 1;
+            if !in_string && depth == 0 {
+                i += 1;
+                continue;
             }
-            _ => {}
         }
         if in_string {
             if escaped {
@@ -315,18 +318,16 @@ fn scan_json_array_entries(bytes: &[u8]) -> Result<Vec<JsonArrayEntry>> {
                 }
                 depth += 1;
             }
-            b'}' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 1 {
-                        if let Some(start) = current_start.take() {
-                            out.push(JsonArrayEntry {
-                                start,
-                                end: i + 1,
-                                line_start: entry_line_start,
-                                line_end: line,
-                            });
-                        }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 1 {
+                    if let Some(start) = current_start.take() {
+                        out.push(JsonArrayEntry {
+                            start,
+                            end: i + 1,
+                            line_start: entry_line_start,
+                            line_end: line,
+                        });
                     }
                 }
             }

@@ -108,29 +108,39 @@ pub fn spawn(
 
     let loop_tx = tx.clone();
     thread::spawn(move || {
-        run_loop(app, store, memory_store, service, backend_sync_tx, loop_tx, rx, state);
+        let ctx = IndexLoopContext {
+            app,
+            store,
+            memory_store,
+            service,
+            backend_sync_tx,
+            state,
+        };
+        run_loop(ctx, loop_tx, rx);
     });
 
     handle
 }
 
-fn run_loop(
+struct IndexLoopContext {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
     service: Arc<MemoryService>,
     backend_sync_tx: Sender<MemoryBackendSyncJob>,
-    tx: Sender<IndexTask>,
-    rx: Receiver<IndexTask>,
     state: Arc<IndexerState>,
-) {
+}
+
+fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask>) {
     while let Ok(first) = rx.recv() {
-        state.indexing.store(true, Ordering::SeqCst);
+        ctx.state.indexing.store(true, Ordering::SeqCst);
         {
-            let mut slot = state.last_error.lock().unwrap();
+            let mut slot = ctx.state.last_error.lock().unwrap();
             *slot = None;
         }
-        let _ = app.emit("sessions_index_status", current_status(&state));
+        let _ = ctx
+            .app
+            .emit("sessions_index_status", current_status(&ctx.state));
         let mut batch = vec![first];
         thread::sleep(Duration::from_millis(50));
         while let Ok(t) = rx.try_recv() {
@@ -147,7 +157,7 @@ fn run_loop(
         let mut affected_sources = HashMap::new();
         for task in coalesced {
             log::info!("indexer: executing task {:?}", task);
-            match execute(&task, store.as_ref()) {
+            match execute(&task, ctx.store.as_ref()) {
                 Ok(outcome) => {
                     if !outcome.affected_projects.is_empty() || !outcome.affected_sources.is_empty()
                     {
@@ -182,12 +192,16 @@ fn run_loop(
         let mut backend_sync_jobs: HashMap<String, MemoryBackendSyncJob> = HashMap::new();
         let mut deferred_requeues: Vec<PathBuf> = Vec::new();
         for source in affected_sources.values() {
-            match build_source_memory_for_indexer(source, memory_store.as_ref(), service.as_ref()) {
+            match build_source_memory_for_indexer(
+                source,
+                ctx.memory_store.as_ref(),
+                ctx.service.as_ref(),
+            ) {
                 Ok(Some(job)) => {
                     deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                     backend_sync_jobs.insert(job.project_key.clone(), job);
                     if let Some(project) = &source.project {
-                        let _ = app.emit("memory_index_updated", project);
+                        let _ = ctx.app.emit("memory_index_updated", project);
                     }
                 }
                 Ok(None) => {}
@@ -211,11 +225,15 @@ fn run_loop(
             if already_covered {
                 continue;
             }
-            match build_project_memory_for_indexer(project, memory_store.as_ref(), service.as_ref()) {
+            match build_project_memory_for_indexer(
+                project,
+                ctx.memory_store.as_ref(),
+                ctx.service.as_ref(),
+            ) {
                 Ok(Some(job)) => {
                     deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                     backend_sync_jobs.insert(job.project_key.clone(), job);
-                    let _ = app.emit("memory_index_updated", project);
+                    let _ = ctx.app.emit("memory_index_updated", project);
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -227,7 +245,7 @@ fn run_loop(
             }
         }
         for job in backend_sync_jobs.into_values() {
-            if let Err(e) = backend_sync_tx.send(job) {
+            if let Err(e) = ctx.backend_sync_tx.send(job) {
                 log::warn!("memory backend sync queue closed: {e}");
             }
         }
@@ -303,13 +321,15 @@ fn run_loop(
             }
         }
         {
-            let mut slot = state.last_error.lock().unwrap();
+            let mut slot = ctx.state.last_error.lock().unwrap();
             *slot = last_error;
         }
-        state.indexing.store(false, Ordering::SeqCst);
-        let _ = app.emit("sessions_index_status", current_status(&state));
+        ctx.state.indexing.store(false, Ordering::SeqCst);
+        let _ = ctx
+            .app
+            .emit("sessions_index_status", current_status(&ctx.state));
         if !had_error {
-            let _ = app.emit("sessions_index_updated", ());
+            let _ = ctx.app.emit("sessions_index_updated", ());
         }
     }
 }

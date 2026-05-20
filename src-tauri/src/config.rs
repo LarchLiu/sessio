@@ -99,7 +99,9 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "binary" => raw.memory.backends.qmd.binary = value,
                 "index" => raw.memory.backends.qmd.index = value,
                 "artifacts_root" => raw.memory.backends.qmd.artifacts_root = value,
-                "auto_embed" => raw.memory.backends.qmd.auto_embed = value.map(parse_bool).transpose()?,
+                "auto_embed" => {
+                    raw.memory.backends.qmd.auto_embed = value.map(parse_bool).transpose()?
+                }
                 other => bail!("unknown key in [memory.backends.qmd]: {other}"),
             },
             Section::Root | Section::Ignored => {}

@@ -818,7 +818,7 @@ function SessionRow({
           (item.archived ? " text-ink/55" : " text-ink/90")
         }
       >
-        {item.firstUserMessage ?? (
+        {item.title ?? item.firstUserMessage ?? (
           <span className="text-ink/30">{t("list.no_user_message")}</span>
         )}
       </div>

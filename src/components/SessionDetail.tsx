@@ -106,7 +106,7 @@ export default function SessionDetail({ session, viewMode, onClose }: Props) {
                 color="var(--color-muted)"
               />
               <div className="text-subtitle font-medium truncate">
-                {session.firstUserMessage ?? (
+                {session.title ?? session.firstUserMessage ?? (
                   <span className="text-ink/30">{t("list.no_user_message")}</span>
                 )}
               </div>

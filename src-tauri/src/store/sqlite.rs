@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     started_at         INTEGER,
     updated_at         INTEGER,
     message_count      INTEGER NOT NULL DEFAULT 0,
+    title              TEXT,
     first_user_message TEXT,
     file_size          INTEGER NOT NULL DEFAULT 0,
     file_mtime         INTEGER,
@@ -206,6 +207,10 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, backend, status);
 "#;
 
+const SCHEMA_V4: &str = r#"
+ALTER TABLE sessions ADD COLUMN title TEXT;
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -248,6 +253,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 4 {
+        let _ = conn.execute_batch(SCHEMA_V4);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -257,11 +269,11 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             agent, session_id, scope, file_path,
             project_path, project_name,
             started_at, updated_at,
-            message_count, first_user_message,
+            message_count, title, first_user_message,
             file_size, file_mtime,
             partial, available, archived,
             last_indexed_at, forked_from_id
-        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?, ?,?, ?,?,?, ?,?)",
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?, ?,?, ?,?,?, ?,?)",
         params![
             s.agent.as_str(),
             s.id,
@@ -272,6 +284,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             s.started_at,
             s.updated_at,
             s.message_count as i64,
+            s.title,
             s.first_user_message,
             s.file_size as i64,
             file_mtime_for(&s.file_path),
@@ -466,7 +479,7 @@ impl SessionStore for SqliteStore {
         let mut subs_by_parent = load_all_subagents_grouped(&conn)?;
         let mut stmt = conn.prepare(
             "SELECT agent, session_id, file_path, project_path, project_name,
-                    started_at, updated_at, message_count, first_user_message,
+                    started_at, updated_at, message_count, title, first_user_message,
                     file_size, partial, available, archived, forked_from_id
              FROM sessions
              ORDER BY updated_at DESC",
@@ -478,18 +491,19 @@ impl SessionStore for SqliteStore {
                 Ok(SessionInfo {
                     id: row.get(1)?,
                     agent,
-                    forked_from_id: row.get(13)?,
+                    forked_from_id: row.get(14)?,
                     file_path: row.get(2)?,
                     project_path: row.get(3)?,
                     project_name: row.get(4)?,
                     started_at: row.get(5)?,
                     updated_at: row.get(6)?,
                     message_count: row.get::<_, i64>(7)? as usize,
-                    first_user_message: row.get(8)?,
-                    file_size: row.get::<_, i64>(9)? as u64,
-                    partial: row.get::<_, i64>(10)? != 0,
-                    available: row.get::<_, i64>(11)? != 0,
-                    archived: row.get::<_, i64>(12)? != 0,
+                    title: row.get(8)?,
+                    first_user_message: row.get(9)?,
+                    file_size: row.get::<_, i64>(10)? as u64,
+                    partial: row.get::<_, i64>(11)? != 0,
+                    available: row.get::<_, i64>(12)? != 0,
+                    archived: row.get::<_, i64>(13)? != 0,
                     subagents: Vec::new(),
                 })
             })?
@@ -1314,6 +1328,7 @@ mod migration_tests {
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
         assert!(session_columns.contains(&"forked_from_id".to_string()));
+        assert!(session_columns.contains(&"title".to_string()));
 
         let artifact_table: i64 = conn
             .query_row(
@@ -1360,6 +1375,7 @@ mod migration_tests {
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
         assert!(session_columns.contains(&"forked_from_id".to_string()));
+        assert!(session_columns.contains(&"title".to_string()));
 
         // memory_artifacts table exists from V3 already.
         let artifact_table: i64 = conn

@@ -29,6 +29,7 @@ pub struct SessionInfo {
     pub started_at: Option<i64>,
     pub updated_at: Option<i64>,
     pub message_count: usize,
+    pub title: Option<String>,
     pub first_user_message: Option<String>,
     pub file_path: String,
     pub file_size: u64,

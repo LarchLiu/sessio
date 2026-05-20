@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -13,8 +14,9 @@ use crate::providers::types::SourceLocation;
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let mut out = Vec::new();
     let (live, archived) = roots()?;
-    scan_dir(&live, false, &mut out);
-    scan_dir(&archived, true, &mut out);
+    let titles = load_session_index_titles();
+    scan_dir(&live, false, &titles, &mut out);
+    scan_dir(&archived, true, &titles, &mut out);
     Ok(out)
 }
 
@@ -27,14 +29,20 @@ pub fn roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
 }
 
 pub fn parse_one_file(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
-    parse_session(path, archived)
+    let titles = load_session_index_titles();
+    parse_session(path, archived, &titles)
 }
 
 pub fn path_is_archived(path: &Path, archived_root: &Path) -> bool {
     path.starts_with(archived_root)
 }
 
-fn scan_dir(root: &Path, archived: bool, out: &mut Vec<SessionInfo>) {
+fn scan_dir(
+    root: &Path,
+    archived: bool,
+    titles: &HashMap<String, String>,
+    out: &mut Vec<SessionInfo>,
+) {
     if !root.exists() {
         return;
     }
@@ -49,7 +57,7 @@ fn scan_dir(root: &Path, archived: bool, out: &mut Vec<SessionInfo>) {
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
-        match parse_session(path, archived) {
+        match parse_session(path, archived, titles) {
             Ok(Some(info)) => out.push(info),
             Ok(None) => {}
             Err(e) => log::warn!("codex parse {} failed: {e}", path.display()),
@@ -186,7 +194,11 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
     }
 }
 
-fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
+fn parse_session(
+    path: &Path,
+    archived: bool,
+    session_index_titles: &HashMap<String, String>,
+) -> Result<Option<SessionInfo>> {
     let scan = jsonl_scan::scan(path)?;
 
     let mut id: Option<String> = None;
@@ -276,12 +288,18 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
             .map(String::from)
     });
 
+    let id = id.unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let title = session_index_titles
+        .get(&id)
+        .cloned()
+        .or_else(|| first_user_message.clone());
+
     Ok(Some(SessionInfo {
-        id: id.unwrap_or_else(|| {
-            path.file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        }),
+        id,
         agent: Agent::Codex,
         forked_from_id,
         project_path: cwd,
@@ -289,6 +307,7 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
         started_at,
         updated_at,
         message_count: scan.message_count,
+        title,
         first_user_message,
         file_path: path.to_string_lossy().into_owned(),
         file_size: scan.file_size,
@@ -297,6 +316,34 @@ fn parse_session(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
         archived,
         subagents: Vec::new(),
     }))
+}
+
+fn load_session_index_titles() -> HashMap<String, String> {
+    let Some(home) = dirs::home_dir() else {
+        return HashMap::new();
+    };
+    let path = home.join(".codex").join("session_index.jsonl");
+    let Ok(file) = File::open(&path) else {
+        return HashMap::new();
+    };
+    let reader = BufReader::new(file);
+    let mut titles = HashMap::new();
+    for line in reader.lines().map_while(|line| line.ok()) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(id) = v.get("id").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let Some(thread_name) = v.get("thread_name").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if id.is_empty() || thread_name.trim().is_empty() {
+            continue;
+        }
+        titles.insert(id.to_string(), normalize_preview(thread_name));
+    }
+    titles
 }
 
 fn extract_message_text(payload: &serde_json::Value) -> Option<String> {

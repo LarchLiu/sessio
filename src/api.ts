@@ -10,6 +10,7 @@ export interface SessionInfo {
   startedAt: number | null;
   updatedAt: number | null;
   messageCount: number;
+  title: string | null;
   firstUserMessage: string | null;
   filePath: string;
   fileSize: number;

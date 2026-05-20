@@ -197,7 +197,7 @@ async function buildSessionSubmenu(
     });
     subItems.push(item);
   }
-  const titleSource = s.firstUserMessage ?? texts.noMessage;
+  const titleSource = s.title ?? s.firstUserMessage ?? texts.noMessage;
   const text = fitTitle(titleSource) || texts.noMessage;
   const icon = await Image.fromBytes(iconBytes[s.agent]);
   return Submenu.new({

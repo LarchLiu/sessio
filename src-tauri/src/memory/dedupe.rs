@@ -305,10 +305,10 @@ fn align_from_prefix_start(
         // the ranges are recomputed — the rebinding doesn't affect the range
         // currently being iterated.
         #[allow(clippy::mut_range_bound)]
-        'search: for next_a in ai..a_end {
-            for next_b in bi..b_end {
-                if existing[next_a].role == candidate[next_b].role
-                    && existing[next_a].canonical_hash == candidate[next_b].canonical_hash
+        'search: for (next_a, existing_item) in existing.iter().enumerate().take(a_end).skip(ai) {
+            for (next_b, candidate_item) in candidate.iter().enumerate().take(b_end).skip(bi) {
+                if existing_item.role == candidate_item.role
+                    && existing_item.canonical_hash == candidate_item.canonical_hash
                 {
                     ai = next_a;
                     bi = next_b;

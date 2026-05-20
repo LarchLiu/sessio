@@ -108,6 +108,7 @@ pub fn scan_project_dir(project_dir: &Path) -> Result<Vec<SessionInfo>> {
             started_at: earliest,
             updated_at: latest,
             message_count: 0,
+            title: None,
             first_user_message: None,
             file_path: String::new(),
             file_size: 0,
@@ -423,6 +424,8 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
     let scan = jsonl_scan::scan(path)?;
 
     let mut cwd: Option<String> = None;
+    let mut ai_title: Option<String> =
+        ai_title_from_lines(scan.head.iter().chain(scan.tail.iter()));
     let mut first_user_message: Option<String> = None;
     let mut earliest_ts: Option<i64> = None;
     let mut latest_ts: Option<i64> = None;
@@ -432,6 +435,9 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
             Ok(v) => v,
             Err(_) => continue,
         };
+        if ai_title.is_none() {
+            ai_title = ai_title_from_value(&v);
+        }
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
                 if !c.is_empty() {
@@ -466,6 +472,9 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
             Ok(v) => v,
             Err(_) => continue,
         };
+        if ai_title.is_none() {
+            ai_title = ai_title_from_value(&v);
+        }
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
                 if !c.is_empty() {
@@ -499,6 +508,9 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
             .and_then(|s| s.to_str())
             .map(String::from)
     });
+    let title = ai_title
+        .or_else(|| ai_title_from_file(path).ok().flatten())
+        .or_else(|| first_user_message.clone());
 
     Ok(Some(SessionInfo {
         id,
@@ -509,6 +521,7 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
         started_at: earliest_ts,
         updated_at,
         message_count: scan.message_count,
+        title,
         first_user_message,
         file_path: path.to_string_lossy().into_owned(),
         file_size: scan.file_size,
@@ -552,6 +565,44 @@ fn extract_message_text(message: &serde_json::Value) -> String {
         return parts.join("\n");
     }
     String::new()
+}
+
+fn ai_title_from_lines<'a>(lines: impl Iterator<Item = &'a String>) -> Option<String> {
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(title) = ai_title_from_value(&v) {
+            return Some(title);
+        }
+    }
+    None
+}
+
+fn ai_title_from_value(v: &serde_json::Value) -> Option<String> {
+    if v.get("type").and_then(|x| x.as_str()) != Some("ai-title") {
+        return None;
+    }
+    v.get("aiTitle")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_preview)
+}
+
+fn ai_title_from_file(path: &Path) -> Result<Option<String>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(title) = ai_title_from_value(&v) {
+            return Ok(Some(title));
+        }
+    }
+    Ok(None)
 }
 
 fn parse_iso(s: &str) -> Option<i64> {
@@ -768,6 +819,7 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
         started_at,
         updated_at,
         message_count: entry.message_count.unwrap_or(0),
+        title: preview.clone(),
         first_user_message: preview,
         file_path,
         file_size,
