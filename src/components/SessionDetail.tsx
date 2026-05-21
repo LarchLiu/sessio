@@ -70,6 +70,8 @@ type Tab =
   | { kind: "main" }
   | { kind: "sub"; sub: SubagentInfo };
 
+const ROLE_NAV_SHOW_DELAY_MS = 1000;
+
 export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
@@ -372,7 +374,7 @@ function MessageStream({
       <ScrollArea
         ref={viewportRef}
         className="flex-1 min-h-0"
-        viewportClassName="px-5 py-4"
+        viewportClassName="px-10 py-4"
       >
         {subagentDesc && (
           <div className="text-body-sm text-accent-purple bg-accent-purple/[0.08] border border-accent-purple/20 rounded p-3 mb-4 leading-relaxed">
@@ -398,7 +400,7 @@ function MessageStream({
         {!loading && !error && available && displayItems.length === 0 && (
           <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
         )}
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-2">
           {displayItems.map((item, i) => (
             <div
               key={item.key}
@@ -416,7 +418,16 @@ function MessageStream({
           ))}
         </div>
       </ScrollArea>
-      <UserNav
+      <RoleNav
+        role="assistant"
+        side="left"
+        messages={displayItems.map((d) => d.message)}
+        refs={bubbleRefs}
+        viewportRef={viewportRef}
+      />
+      <RoleNav
+        role="user"
+        side="right"
         messages={displayItems.map((d) => d.message)}
         refs={bubbleRefs}
         viewportRef={viewportRef}
@@ -425,31 +436,45 @@ function MessageStream({
   );
 }
 
-function UserNav({
+function RoleNav({
+  role,
+  side,
   messages,
   refs,
   viewportRef,
 }: {
+  role: "assistant" | "user";
+  side: "left" | "right";
   messages: SessionMessage[];
   refs: React.RefObject<(HTMLDivElement | null)[]>;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const { t } = useI18n();
-  const userIndices = useMemo(
+  const showTimerRef = useRef<number | undefined>(undefined);
+  const roleIndices = useMemo(
     () =>
       messages
-        .map((m, i) => (m.role === "user" ? i : -1))
+        .map((m, i) => (m.role === role ? i : -1))
         .filter((i) => i >= 0),
-    [messages],
+    [messages, role],
   );
 
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
   const activeRef = useRef<number | null>(null);
   const [positions, setPositions] = useState<Map<number, number>>(new Map());
+  const [navVisible, setNavVisible] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (showTimerRef.current !== undefined) {
+        window.clearTimeout(showTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const vp = viewportRef.current;
-    if (!vp || userIndices.length === 0) {
+    if (!vp || roleIndices.length === 0) {
       setActiveIdx(null);
       activeRef.current = null;
       setPositions(new Map());
@@ -468,39 +493,39 @@ function UserNav({
       const atTop = vp.scrollTop <= 0;
 
       let active = activeRef.current;
-      if (active === null || !userIndices.includes(active)) {
+      if (active === null || !roleIndices.includes(active)) {
         // 初始化沿用单线规则:取顶端已越过 enter 线的最后一条
         let init: number | null = null;
-        for (const idx of userIndices) {
+        for (const idx of roleIndices) {
           const el = refs.current[idx];
           if (!el) continue;
           if (el.getBoundingClientRect().top <= enter) init = idx;
           else break;
         }
-        active = init ?? userIndices[0];
+        active = init ?? roleIndices[0];
       } else {
         // 向下推进:跳跃式滚动可能一次跨过多条
-        const pos = userIndices.indexOf(active);
-        for (let i = pos + 1; i < userIndices.length; i++) {
-          const el = refs.current[userIndices[i]];
+        const pos = roleIndices.indexOf(active);
+        for (let i = pos + 1; i < roleIndices.length; i++) {
+          const el = refs.current[roleIndices[i]];
           if (!el) break;
-          if (el.getBoundingClientRect().top <= enter) active = userIndices[i];
+          if (el.getBoundingClientRect().top <= enter) active = roleIndices[i];
           else break;
         }
         // 向上回退:同样支持连续回退多条
         while (true) {
-          const i = userIndices.indexOf(active);
+          const i = roleIndices.indexOf(active);
           if (i <= 0) break;
           const el = refs.current[active];
           if (!el) break;
-          if (el.getBoundingClientRect().top > exit) active = userIndices[i - 1];
+          if (el.getBoundingClientRect().top > exit) active = roleIndices[i - 1];
           else break;
         }
       }
       // 已经滚到底部:最后一条若因后续内容不足无法越过 enter,强制置为 active
-      if (atBottom) active = userIndices[userIndices.length - 1];
+      if (atBottom) active = roleIndices[roleIndices.length - 1];
       // 已经滚到顶部:第一条若因前面内容不足无法把第二条挤出 exit,强制置为 active
-      if (atTop) active = userIndices[0];
+      if (atTop) active = roleIndices[0];
       activeRef.current = active;
       setActiveIdx(active);
     };
@@ -510,7 +535,7 @@ function UserNav({
       if (sh <= 0) return;
       const vpRect = vp.getBoundingClientRect();
       const m = new Map<number, number>();
-      for (const idx of userIndices) {
+      for (const idx of roleIndices) {
         const el = refs.current[idx];
         if (!el) continue;
         const r = el.getBoundingClientRect();
@@ -533,16 +558,53 @@ function UserNav({
       vp.removeEventListener("scroll", computeActive);
       ro.disconnect();
     };
-  }, [viewportRef, refs, userIndices]);
+  }, [viewportRef, refs, roleIndices]);
 
-  if (userIndices.length === 0) return null;
+  if (roleIndices.length === 0) return null;
+  const isLeft = side === "left";
+  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    event.preventDefault();
+    const unit =
+      event.deltaMode === 1
+        ? 16
+        : event.deltaMode === 2
+          ? vp.clientHeight
+          : 1;
+    vp.scrollTop += event.deltaY * unit;
+    vp.scrollLeft += event.deltaX * unit;
+  };
+  const handleMouseEnter = () => {
+    if (showTimerRef.current !== undefined) {
+      window.clearTimeout(showTimerRef.current);
+    }
+    showTimerRef.current = window.setTimeout(() => {
+      showTimerRef.current = undefined;
+      setNavVisible(true);
+    }, ROLE_NAV_SHOW_DELAY_MS);
+  };
+  const handleMouseLeave = () => {
+    if (showTimerRef.current !== undefined) {
+      window.clearTimeout(showTimerRef.current);
+      showTimerRef.current = undefined;
+    }
+    setNavVisible(false);
+  };
   return (
-    <div className="absolute right-0.5 top-2 bottom-2 z-10 w-5">
-      {userIndices.map((idx) => {
+    <div
+      onWheel={handleWheel}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      className={
+        "group/role-nav absolute top-2 bottom-2 z-10 w-10 " +
+        (isLeft ? "left-0" : "right-0")
+      }
+    >
+      {roleIndices.map((idx) => {
         const ratio = positions.get(idx);
         if (ratio === undefined) return null;
-        const text = messages[idx].text;
-        const cleaned = stripInjectedContext(text);
+        const cleaned = previewTextForRole(messages[idx]);
         const preview = cleaned.replace(/\s+/g, " ").trim().slice(0, 200);
         const tip = (
           <div
@@ -559,7 +621,13 @@ function UserNav({
           </div>
         );
         return (
-          <Tooltip key={idx} content={tip} placement="left" offset={12}>
+          <Tooltip
+            key={idx}
+            content={tip}
+            placement={isLeft ? "right" : "left"}
+            offset={12}
+            delayMs={250}
+          >
             <button
               type="button"
               onClick={() =>
@@ -569,15 +637,32 @@ function UserNav({
                 })
               }
               style={{ top: `${ratio * 100}%`, transform: "translateY(-50%)" }}
-              className="group absolute right-0 cursor-pointer p-1.5"
-              aria-label={t("detail.jump_to_user_msg", { n: idx + 1 })}
+              className={
+                "group absolute cursor-pointer p-1.5 transition-opacity duration-150 focus-visible:opacity-100 " +
+                (navVisible ? "opacity-100 " : "pointer-events-none opacity-0 ") +
+                (isLeft ? "left-1.5" : "right-1.5")
+              }
+              aria-label={t(
+                role === "assistant"
+                  ? "detail.jump_to_assistant_msg"
+                  : "detail.jump_to_user_msg",
+                { n: idx + 1 },
+              )}
             >
               <span
                 className={
-                  "block w-1.5 h-1.5 rounded-full transition " +
+                  "block w-1.5 h-1.5 rounded-full transition-[background-color,transform,opacity] duration-150 ease-out group-focus-visible:translate-x-0 " +
+                  (navVisible
+                    ? "translate-x-0 "
+                    : isLeft
+                      ? "-translate-x-1 "
+                      : "translate-x-1 ") +
+                  " " +
                   (idx === activeIdx
-                    ? "bg-ink scale-125"
-                    : "bg-ink/25 group-hover:bg-ink")
+                    ? "bg-ink scale-100 group-focus-visible:scale-125 " +
+                      (navVisible ? "scale-125" : "")
+                    : "bg-ink/25 group-hover:bg-ink group-focus-visible:scale-100 " +
+                      (navVisible ? "scale-100" : "scale-75"))
                 }
               />
             </button>
@@ -586,6 +671,12 @@ function UserNav({
       })}
     </div>
   );
+}
+
+function previewTextForRole(message: SessionMessage): string {
+  return message.role === "user"
+    ? stripInjectedContext(message.text)
+    : stripImagePlaceholders(message.text);
 }
 
 function MessageBubble({
@@ -600,16 +691,21 @@ function MessageBubble({
   const { lang } = useI18n();
   const LONG_TOOL_THRESHOLD = 500;
   const thinkingCollapsible = msg.role === "thinking";
+  const todoCollapsible = msg.role === "todo";
   const collapseText = msg.text + (toolResult?.text ?? "");
   const pairedToolCollapsible = Boolean(toolResult);
   const longCollapsible =
     !pairedToolCollapsible &&
     !thinkingCollapsible &&
+    !todoCollapsible &&
     msg.role !== "user" &&
     msg.role !== "assistant" &&
-    msg.role !== "todo" &&
     collapseText.length > LONG_TOOL_THRESHOLD;
-  const collapsible = thinkingCollapsible || longCollapsible || pairedToolCollapsible;
+  const collapsible =
+    thinkingCollapsible ||
+    todoCollapsible ||
+    longCollapsible ||
+    pairedToolCollapsible;
   const [collapsed, setCollapsed] = useState(collapsible);
   const previewSource =
     msg.role === "user" ? stripInjectedContext(msg.text) : msg.text;
@@ -701,7 +797,7 @@ function MessageBubble({
       <div
         className={
           "flex items-center gap-2 leading-none " +
-          (meta.compact ? "mb-1" : "mb-2 ") +
+          (meta.compact ? "mb-1 " : "mb-2 ") +
           (collapsible
             ? "hover:text-ink/70"
             : "")
@@ -734,7 +830,7 @@ function MessageBubble({
             {toolSummary.description}
           </span>
         )}
-        {thinkingCollapsible && (
+        {(thinkingCollapsible || todoCollapsible) && (
           collapsed ? (
             <ChevronRight className="w-3.5 h-3.5 text-ink/35" />
           ) : (
@@ -755,6 +851,7 @@ function MessageBubble({
       <div
         className={
           contentClass +
+          (meta.compact ? " ml-3.5" : "") +
           (meta.compact && !renderText.trim() ? " hidden" : "")
         }
       >
@@ -763,7 +860,7 @@ function MessageBubble({
             {preview}
             {previewSource.length > 200 ? "…" : ""}
           </span>
-        ) : thinkingCollapsible && collapsed ? null : (
+        ) : (thinkingCollapsible || todoCollapsible) && collapsed ? null : (
           <>
             {userMedia && userMedia.images.length > 0 && (
               <MarkdownImageStrip

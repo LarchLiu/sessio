@@ -18,6 +18,7 @@ interface TooltipProps {
   content: ReactNode;
   placement?: Placement;
   offset?: number;
+  delayMs?: number;
   children: ReactElement<any>;
 }
 
@@ -27,12 +28,14 @@ export default function Tooltip({
   content,
   placement = "top",
   offset = 8,
+  delayMs = 500,
   children,
 }: TooltipProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const anchorRef = useRef<HTMLElement | null>(null);
   const tipRef = useRef<HTMLDivElement>(null);
+  const openTimerRef = useRef<number | undefined>(undefined);
 
   const updatePosition = useCallback(() => {
     const anchor = anchorRef.current;
@@ -88,6 +91,14 @@ export default function Tooltip({
     };
   }, [open, updatePosition]);
 
+  useEffect(() => {
+    return () => {
+      if (openTimerRef.current !== undefined) {
+        window.clearTimeout(openTimerRef.current);
+      }
+    };
+  }, []);
+
   if (!isValidElement(children)) return children;
 
   const setAnchor = (el: HTMLElement | null) => {
@@ -106,15 +117,38 @@ export default function Tooltip({
     onBlur?: (e: React.FocusEvent) => void;
   };
 
+  const clearOpenTimer = () => {
+    if (openTimerRef.current === undefined) return;
+    window.clearTimeout(openTimerRef.current);
+    openTimerRef.current = undefined;
+  };
+
+  const openWithDelay = () => {
+    clearOpenTimer();
+    if (delayMs <= 0) {
+      setOpen(true);
+      return;
+    }
+    openTimerRef.current = window.setTimeout(() => {
+      openTimerRef.current = undefined;
+      setOpen(true);
+    }, delayMs);
+  };
+
+  const closeNow = () => {
+    clearOpenTimer();
+    setOpen(false);
+  };
+
   const merged = cloneElement(children, {
     ref: setAnchor,
     onMouseEnter: (e: React.MouseEvent) => {
       childProps.onMouseEnter?.(e);
-      setOpen(true);
+      openWithDelay();
     },
     onMouseLeave: (e: React.MouseEvent) => {
       childProps.onMouseLeave?.(e);
-      setOpen(false);
+      closeNow();
     },
     onFocus: (e: React.FocusEvent) => {
       childProps.onFocus?.(e);
@@ -122,7 +156,7 @@ export default function Tooltip({
     },
     onBlur: (e: React.FocusEvent) => {
       childProps.onBlur?.(e);
-      setOpen(false);
+      closeNow();
     },
   } as Partial<typeof children.props>);
 
