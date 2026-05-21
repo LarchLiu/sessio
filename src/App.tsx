@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
@@ -123,6 +124,7 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const { mode, setMode } = useTheme();
+  const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
   const update = useUpdateCheck(__APP_VERSION__);
   const listScrollRef = useRef<HTMLDivElement>(null);
@@ -218,6 +220,24 @@ export default function App() {
       setSelected(next);
     }
   }, [availableSessions, selected]);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<string>("get_system_appearance")
+      .then((value) => {
+        if (!cancelled) {
+          setSystemAppearance(value === "dark" ? "dark" : "light");
+        }
+      })
+      .catch(() => {});
+    const unlisten = listen<string>("system_appearance_changed", (event) => {
+      setSystemAppearance(event.payload === "dark" ? "dark" : "light");
+    });
+    return () => {
+      cancelled = true;
+      unlisten.then((f) => f()).catch(() => {});
+    };
+  }, []);
 
   useEffect(() => {
     if (selected || availableSessions.length === 0) return;
@@ -351,8 +371,8 @@ export default function App() {
       resumeCommand: t("menubar.resume_command"),
       crossCommand: t("menubar.cross_command"),
       crossPromptPlaceholder: t("list.cross_prompt_placeholder"),
-    });
-  }, [recentForMenu, t]);
+    }, systemAppearance);
+  }, [recentForMenu, t, systemAppearance]);
 
   const removeSessionsInScope = async (scope: SessionScope) => {
     const targets = availableSessions.filter(

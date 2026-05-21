@@ -14,12 +14,20 @@ export interface MenuIconRenderOptions {
   svgPx?: number;
   canvasPx?: number;
   innerPx?: number;
+  color?: string;
 }
 
-const DEFAULT_OPTIONS: Required<MenuIconRenderOptions> = {
+type NormalizedMenuIconRenderOptions = Required<
+  Omit<MenuIconRenderOptions, "color">
+> & {
+  color: string | null;
+};
+
+const DEFAULT_OPTIONS: NormalizedMenuIconRenderOptions = {
   svgPx: 64,
   canvasPx: 32,
   innerPx: 22,
+  color: null,
 };
 
 const iconCache = new WeakMap<
@@ -27,13 +35,13 @@ const iconCache = new WeakMap<
   Map<string, Promise<Uint8Array>>
 >();
 
-function optionsKey(options: Required<MenuIconRenderOptions>): string {
-  return `${options.svgPx}:${options.canvasPx}:${options.innerPx}`;
+function optionsKey(options: NormalizedMenuIconRenderOptions): string {
+  return `${options.svgPx}:${options.canvasPx}:${options.innerPx}:${options.color ?? ""}`;
 }
 
 async function renderIconBytes(
   Icon: MenuIconComponent,
-  options: Required<MenuIconRenderOptions>,
+  options: NormalizedMenuIconRenderOptions,
 ): Promise<Uint8Array> {
   const container = document.createElement("div");
   container.style.cssText =
@@ -43,7 +51,7 @@ async function renderIconBytes(
   try {
     root = createRoot(container);
     flushSync(() => {
-      root!.render(createElement(Icon, { size: options.svgPx }));
+      root!.render(createElement(Icon, { color: options.color ?? undefined, size: options.svgPx }));
     });
     const svg = container.querySelector("svg");
     if (!svg) throw new Error("menu icon svg missing");
@@ -90,10 +98,11 @@ export async function getMenuIconBytes(
   Icon: MenuIconComponent,
   options: MenuIconRenderOptions = {},
 ): Promise<Uint8Array> {
-  const normalized: Required<MenuIconRenderOptions> = {
+  const normalized: NormalizedMenuIconRenderOptions = {
     svgPx: options.svgPx ?? DEFAULT_OPTIONS.svgPx,
     canvasPx: options.canvasPx ?? DEFAULT_OPTIONS.canvasPx,
     innerPx: options.innerPx ?? DEFAULT_OPTIONS.innerPx,
+    color: options.color ?? DEFAULT_OPTIONS.color,
   };
   let byOptions = iconCache.get(Icon);
   if (!byOptions) {

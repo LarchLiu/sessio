@@ -132,7 +132,7 @@ export const AGENT_LABEL: Record<Agent, string> = {
 };
 
 const AGENT_COLOR_VAR: Record<Agent, string> = {
-  codex: "--color-emerald",
+  codex: "--color-fg",
   claude: "--color-orange",
   gemini: "--color-blue",
 };

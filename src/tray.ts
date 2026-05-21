@@ -1,4 +1,4 @@
-import { Claude, Codex, Gemini } from "@lobehub/icons";
+import { Claude, OpenAI, Gemini } from "@lobehub/icons";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
 import { PredefinedMenuItem } from "@tauri-apps/api/menu/predefinedMenuItem";
@@ -17,7 +17,7 @@ import {
 } from "./cross";
 
 const AGENT_ICONS: Record<Agent, MenuIconComponent> = {
-  codex: Codex.Color as MenuIconComponent,
+  codex: OpenAI as MenuIconComponent,
   claude: Claude.Color as MenuIconComponent,
   gemini: Gemini.Color as MenuIconComponent,
 };
@@ -31,8 +31,17 @@ const TITLE_MEASURE_FONT =
 
 const TRAY_ID = "main";
 
-async function getAgentIcon(agent: Agent): Promise<Uint8Array> {
-  return getMenuIconBytes(AGENT_ICONS[agent]);
+type TrayTheme = "light" | "dark";
+
+function themedAgentIconColor(agent: Agent, theme: TrayTheme): string | undefined {
+  if (agent !== "codex") return undefined;
+  return theme === "dark" ? "#ffffff" : "#1c1c20";
+}
+
+async function getAgentIcon(agent: Agent, theme: TrayTheme): Promise<Uint8Array> {
+  return getMenuIconBytes(AGENT_ICONS[agent], {
+    color: themedAgentIconColor(agent, theme),
+  });
 }
 
 let measureCtx: CanvasRenderingContext2D | null = null;
@@ -132,11 +141,12 @@ async function buildSessionSubmenu(
 async function buildMenu(
   recent: SessionInfo[],
   texts: TrayTexts,
+  theme: TrayTheme,
 ): Promise<Menu> {
   const iconBytes: Record<Agent, Uint8Array> = {
-    codex: await getAgentIcon("codex"),
-    claude: await getAgentIcon("claude"),
-    gemini: await getAgentIcon("gemini"),
+    codex: await getAgentIcon("codex", theme),
+    claude: await getAgentIcon("claude", theme),
+    gemini: await getAgentIcon("gemini", theme),
   };
 
   const items: ItemHandle[] = [];
@@ -165,6 +175,7 @@ async function buildMenu(
 export async function syncTrayMenu(
   recent: SessionInfo[],
   texts: TrayTexts,
+  theme: TrayTheme,
 ): Promise<void> {
   const token = ++currentToken;
   // Serialize against any in-flight sync so we never race two setMenu calls.
@@ -173,7 +184,7 @@ export async function syncTrayMenu(
     try {
       const tray = await TrayIcon.getById(TRAY_ID);
       if (!tray) return;
-      const menu = await buildMenu(recent, texts);
+      const menu = await buildMenu(recent, texts, theme);
       if (token !== currentToken) {
         await menu.close();
         return;
