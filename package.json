@@ -4,7 +4,7 @@
   "version": "0.4.1",
   "packageManager": "pnpm@11.1.0",
   "engines": {
-    "node": "24.x"
+    "node": ">=24"
   },
   "type": "module",
   "changelogithub": {
@@ -27,6 +27,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "check": "pnpm typecheck",
     "ci:build": "tauri build --no-bundle",
     "tauri": "tauri",
     "release": "run-script-os",

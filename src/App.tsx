@@ -100,7 +100,7 @@ function sessionKey(s: SessionInfo): string {
 }
 
 function sessionIdTail(id: string): string {
-  return id.length <= 4 ? id : id.slice(-4);
+  return id.length <= 5 ? id : id.slice(-5);
 }
 
 type DeleteTarget =
@@ -1372,11 +1372,11 @@ function SessionRow({
             <button
               type="button"
               onClick={handleCopyProject}
-              className="inline-flex min-w-0 items-center gap-1 text-left hover:text-ink/75 transition"
+              className="group inline-flex min-w-0 items-center gap-1 text-left text-ink/45 hover:text-ink/75"
               aria-label={item.projectPath ?? item.projectName ?? t("list.unknown_project")}
             >
               <Folder className="w-3.5 h-3.5 shrink-0" />
-              <span className="font-medium truncate text-ink/55 max-w-[220px]">
+              <span className="font-medium truncate text-ink/55 group-hover:text-ink/75 max-w-[220px]">
                 {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
               </span>
             </button>
