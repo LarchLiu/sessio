@@ -192,6 +192,7 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
     let mut buf = Vec::new();
     let mut byte_offset: u64 = 0;
     let mut line_number: u64 = 0;
+    let mut cwd: Option<String> = None;
 
     loop {
         buf.clear();
@@ -213,11 +214,12 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line_str) else {
             continue;
         };
+        update_codex_cwd(&v, &mut cwd);
         let ts = v
             .get("timestamp")
             .and_then(|t| t.as_str())
             .and_then(parse_iso);
-        let messages = interpret_record(&v, ts);
+        let messages = interpret_record(&v, ts, cwd.as_deref());
         if messages.is_empty() {
             continue;
         }
@@ -235,12 +237,72 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
     Ok(out)
 }
 
-fn interpret_record(v: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
+fn interpret_record(
+    v: &serde_json::Value,
+    ts: Option<i64>,
+    cwd: Option<&str>,
+) -> Vec<SessionMessage> {
     match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
         "response_item" => match v.get("payload") {
             Some(payload) => interpret_payload(payload, ts),
             None => Vec::new(),
         },
+        "event_msg" => match v.get("payload") {
+            Some(payload) => interpret_event_payload(payload, ts, cwd),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+fn update_codex_cwd(v: &serde_json::Value, cwd: &mut Option<String>) {
+    let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    if t != "session_meta" && t != "turn_context" {
+        return;
+    }
+    if let Some(c) = v
+        .get("payload")
+        .and_then(|p| p.get("cwd"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        *cwd = Some(c.to_string());
+    }
+}
+
+fn interpret_event_payload(
+    payload: &serde_json::Value,
+    ts: Option<i64>,
+    cwd: Option<&str>,
+) -> Vec<SessionMessage> {
+    match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "patch_apply_end" => {
+            if payload.get("success").and_then(|x| x.as_bool()) != Some(true) {
+                return Vec::new();
+            }
+            let Some(changes) = payload.get("changes").and_then(|x| x.as_object()) else {
+                return Vec::new();
+            };
+            let edits: Vec<serde_json::Value> = changes
+                .iter()
+                .map(|(path, change)| {
+                    let kind = change
+                        .get("type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("update");
+                    let (additions, deletions, detail) = codex_change_summary(kind, change);
+                    serde_json::json!({
+                        "path": path,
+                        "displayPath": display_path(path, cwd),
+                        "kind": kind,
+                        "additions": additions,
+                        "deletions": deletions,
+                        "detail": detail,
+                    })
+                })
+                .collect();
+            file_edit_message("codex", edits, ts).into_iter().collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -699,6 +761,92 @@ fn looks_like_image_src(s: &str) -> bool {
         || s.starts_with('/')
 }
 
+fn file_edit_message(
+    source: &str,
+    edits: Vec<serde_json::Value>,
+    ts: Option<i64>,
+) -> Option<SessionMessage> {
+    if edits.is_empty() {
+        return None;
+    }
+    let additions: i64 = edits
+        .iter()
+        .filter_map(|e| e.get("additions").and_then(|x| x.as_i64()))
+        .sum();
+    let deletions: i64 = edits
+        .iter()
+        .filter_map(|e| e.get("deletions").and_then(|x| x.as_i64()))
+        .sum();
+    let text = serde_json::json!({
+        "source": source,
+        "files": edits.len(),
+        "additions": additions,
+        "deletions": deletions,
+        "edits": edits,
+    })
+    .to_string();
+    Some(SessionMessage {
+        role: "file_edit".to_string(),
+        text,
+        timestamp: ts,
+        tool_call_id: None,
+    })
+}
+
+fn display_path(path: &str, cwd: Option<&str>) -> String {
+    let Some(cwd) = cwd else {
+        return path.to_string();
+    };
+    let prefix = if cwd.ends_with('/') {
+        cwd.to_string()
+    } else {
+        format!("{cwd}/")
+    };
+    path.strip_prefix(&prefix).unwrap_or(path).to_string()
+}
+
+fn codex_change_summary(kind: &str, change: &serde_json::Value) -> (usize, usize, String) {
+    if let Some(diff) = change.get("unified_diff").and_then(|x| x.as_str()) {
+        let (additions, deletions) = unified_diff_counts(diff);
+        return (additions, deletions, diff.to_string());
+    }
+
+    let content = change
+        .get("content")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let line_count = line_count(content);
+    match kind {
+        "add" => (line_count, 0, format!("+++ added content\n{content}")),
+        "delete" => (0, line_count, format!("--- deleted content\n{content}")),
+        _ => (0, 0, content.to_string()),
+    }
+}
+
+fn line_count(s: &str) -> usize {
+    if s.is_empty() {
+        0
+    } else {
+        s.lines().count().max(1)
+    }
+}
+
+fn unified_diff_counts(diff: &str) -> (usize, usize) {
+    let mut additions = 0;
+    let mut deletions = 0;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            additions += 1;
+        } else if line.starts_with('-') {
+            deletions += 1;
+        }
+    }
+    (additions, deletions)
+}
+
 fn image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String> {
     let url = item
         .get("image_url")
@@ -899,6 +1047,95 @@ mod tests {
             .text
             .contains("![Generated Image](data:image/png;base64,abc123)"));
         assert_eq!(events[0].1.line_start, events[1].1.line_start);
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_keeps_patch_apply_edit_summary() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-file-edit-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let meta = r#"{"timestamp":"2026-05-18T05:09:14.000Z","type":"session_meta","payload":{"id":"abc","timestamp":"2026-05-18T05:09:14.000Z","cwd":"/tmp/project"}}"#;
+        let patch = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"event_msg","payload":{"type":"patch_apply_end","success":true,"call_id":"call_1","changes":{"/tmp/project/src/app.rs":{"type":"update","unified_diff":"@@ -1,2 +1,3 @@\n use a;\n-old\n+new\n+more\n","move_path":null}}}}"#;
+        fs::write(&path, format!("{meta}\n{patch}\n")).unwrap();
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0.role, "file_edit");
+        let value: serde_json::Value = serde_json::from_str(&events[0].0.text).unwrap();
+        assert_eq!(value.get("files").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(value.get("additions").and_then(|x| x.as_u64()), Some(2));
+        assert_eq!(value.get("deletions").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(
+            value
+                .get("edits")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.first())
+                .and_then(|e| e.get("displayPath"))
+                .and_then(|x| x.as_str()),
+            Some("src/app.rs")
+        );
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_counts_content_only_add_and_delete_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-file-rewrite-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let meta = r#"{"timestamp":"2026-05-18T05:09:14.000Z","type":"session_meta","payload":{"id":"abc","timestamp":"2026-05-18T05:09:14.000Z","cwd":"/tmp/project"}}"#;
+        let delete = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"event_msg","payload":{"type":"patch_apply_end","success":true,"call_id":"call_1","changes":{"/tmp/project/src/app.rs":{"type":"delete","content":"old\nfile\n"}}}}"#;
+        let add = r#"{"timestamp":"2026-05-18T05:09:16.000Z","type":"event_msg","payload":{"type":"patch_apply_end","success":true,"call_id":"call_2","changes":{"/tmp/project/src/app.rs":{"type":"add","content":"new\nfile\nmore\n"}}}}"#;
+        fs::write(&path, format!("{meta}\n{delete}\n{add}\n")).unwrap();
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 2);
+
+        let deleted: serde_json::Value = serde_json::from_str(&events[0].0.text).unwrap();
+        assert_eq!(deleted.get("additions").and_then(|x| x.as_u64()), Some(0));
+        assert_eq!(deleted.get("deletions").and_then(|x| x.as_u64()), Some(2));
+        assert!(
+            deleted
+                .get("edits")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.first())
+                .and_then(|e| e.get("detail"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .starts_with("--- deleted content\nold")
+        );
+
+        let added: serde_json::Value = serde_json::from_str(&events[1].0.text).unwrap();
+        assert_eq!(added.get("additions").and_then(|x| x.as_u64()), Some(3));
+        assert_eq!(added.get("deletions").and_then(|x| x.as_u64()), Some(0));
+        assert!(
+            added
+                .get("edits")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.first())
+                .and_then(|e| e.get("detail"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .starts_with("+++ added content\nnew")
+        );
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();

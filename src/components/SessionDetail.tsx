@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, ChevronRight, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, FilePenLine, Trash2 } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -364,7 +364,7 @@ function MessageStream({
       viewMode === "native"
         ? all
         : all.filter(({ m }) => isConversationRole(m.role));
-    return pairToolMessages(filtered);
+    return moveFileEditsToTurnEnd(pairToolMessages(filtered));
   }, [messages, viewMode]);
 
   bubbleRefs.current.length = displayItems.length;
@@ -780,6 +780,14 @@ function MessageBubble({
   const contentClass =
     toolResult && isToolCallRole(msg.role) ? "text-body-sm" : meta.contentClass;
 
+  if (msg.role === "file_edit") {
+    return (
+      <div ref={bubbleRef} className="text-body leading-relaxed break-words py-1">
+        <FileEditContent text={msg.text} />
+      </div>
+    );
+  }
+
   return (
     <div
       ref={bubbleRef}
@@ -876,6 +884,8 @@ function MessageBubble({
                 collapsed={collapsed}
                 onPreviewImage={onPreviewImage}
               />
+            ) : meta.renderMode === "file_edit" ? (
+              <FileEditContent text={renderText} />
             ) : meta.renderMode === "todo" ? (
               <TodoContent text={renderText} />
             ) : meta.renderMode === "plain" ? (
@@ -898,6 +908,7 @@ function isConversationRole(role: string): boolean {
     "user",
     "assistant",
     "thinking",
+    "file_edit",
     "tool",
     "tool_call",
     "tool_use",
@@ -948,6 +959,71 @@ function pairToolMessages(
   return items;
 }
 
+function moveFileEditsToTurnEnd(items: MessageRenderItem[]): MessageRenderItem[] {
+  const out: MessageRenderItem[] = [];
+  let turn: MessageRenderItem[] = [];
+  const flush = () => {
+    if (turn.length === 0) return;
+    const edits = turn.filter((item) => item.message.role === "file_edit");
+    const rest = turn.filter((item) => item.message.role !== "file_edit");
+    const mergedEdit = mergeFileEditItems(edits);
+    out.push(...rest);
+    if (mergedEdit) out.push(mergedEdit);
+    turn = [];
+  };
+  for (const item of items) {
+    if (item.message.role === "user" && turn.length > 0) {
+      flush();
+    }
+    turn.push(item);
+  }
+  flush();
+  return out;
+}
+
+function mergeFileEditItems(items: MessageRenderItem[]): MessageRenderItem | null {
+  if (items.length === 0) return null;
+  const summaries = items
+    .map((item) => parseFileEditSummary(item.message.text))
+    .filter((summary): summary is FileEditSummary => Boolean(summary));
+  if (summaries.length === 0) return items[items.length - 1];
+  const byPath = new Map<string, FileEditItem>();
+  for (const summary of summaries) {
+    for (const edit of summary.edits ?? []) {
+      const key = edit.path || edit.displayPath || "(unknown file)";
+      const existing = byPath.get(key);
+      if (existing) {
+        existing.additions = (existing.additions ?? 0) + (edit.additions ?? 0);
+        existing.deletions = (existing.deletions ?? 0) + (edit.deletions ?? 0);
+        existing.kind = existing.kind === edit.kind ? existing.kind : "mixed";
+        existing.detail = mergeEditDetail(existing.detail, edit.detail);
+      } else {
+        byPath.set(key, { ...edit });
+      }
+    }
+  }
+  const edits = Array.from(byPath.values());
+  const first = items[0].message;
+  const last = items[items.length - 1].message;
+  const source = summaries.find((summary) => summary.source)?.source ?? "session";
+  const text = JSON.stringify({
+    source,
+    files: edits.length,
+    additions: sumEditNumber(edits, "additions"),
+    deletions: sumEditNumber(edits, "deletions"),
+    edits,
+  });
+  return {
+    key: `${items[0].key}:merged-file-edits`,
+    message: {
+      ...first,
+      role: "file_edit",
+      text,
+      timestamp: last.timestamp ?? first.timestamp,
+    },
+  };
+}
+
 function findToolResultIndex(
   entries: { m: SessionMessage; srcIdx: number }[],
   callIndex: number,
@@ -985,9 +1061,19 @@ function messageMeta(msg: SessionMessage): {
   compact: boolean;
   contentClass: string;
   tone: "normal" | "thinking" | "tool";
-  renderMode: "markdown" | "plain" | "todo";
+  renderMode: "markdown" | "plain" | "todo" | "file_edit";
 } {
   const role = msg.role;
+  if (role === "file_edit") {
+    return {
+      label: "Edited Files",
+      bodyText: msg.text,
+      compact: false,
+      contentClass: "text-ink/70 text-body-sm",
+      tone: "tool",
+      renderMode: "file_edit",
+    };
+  }
   if (role === "user") {
     return {
       label: role,
@@ -1071,6 +1157,195 @@ function parseToolSummary(text: string): { description: string | null } {
     // Non-JSON tool calls are still valid; they just do not have a summary.
   }
   return { description: null };
+}
+
+interface FileEditSummary {
+  source?: string;
+  files?: number;
+  additions?: number;
+  deletions?: number;
+  edits?: FileEditItem[];
+}
+
+interface FileEditItem {
+  path?: string;
+  displayPath?: string;
+  kind?: string;
+  additions?: number;
+  deletions?: number;
+  detail?: string;
+}
+
+function FileEditContent({ text }: { text: string }) {
+  const summary = parseFileEditSummary(text);
+  if (!summary) return <PlainTextContent text={text} />;
+  const edits = summary.edits ?? [];
+  const fileCount = summary.files ?? edits.length;
+  const additions = summary.additions ?? sumEditNumber(edits, "additions");
+  const deletions = summary.deletions ?? sumEditNumber(edits, "deletions");
+  const [expanded, setExpanded] = useState(edits.length <= 3);
+  const [openDetails, setOpenDetails] = useState<Set<string>>(() => new Set());
+  const visibleEdits = expanded ? edits : edits.slice(0, 3);
+  const hiddenCount = Math.max(0, edits.length - visibleEdits.length);
+  const toggleDetail = (key: string) => {
+    setOpenDetails((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+  return (
+    <div className="overflow-hidden rounded-md bg-ink/[0.035]">
+      <div className="flex items-center justify-between gap-3 px-2.5 py-2">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-bg-panel text-ink/70">
+            <FilePenLine className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <div className="text-body-sm font-medium text-ink/80">
+              Edited {fileCount} {fileCount === 1 ? "file" : "files"}
+            </div>
+            <div className="font-mono text-caption leading-tight">
+              <span className="text-[rgb(var(--color-emerald))]">
+                +{additions}
+              </span>
+              <span className="text-ink/25"> </span>
+              <span className="text-status-error">-{deletions}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      {edits.length > 0 && (
+        <div className="border-t border-ink/[0.07]">
+          {visibleEdits.map((edit, i) => {
+            const label = edit.displayPath || edit.path || "(unknown file)";
+            const detailKey = edit.path || edit.displayPath || `${label}-${i}`;
+            const detail = typeof edit.detail === "string" ? edit.detail : "";
+            const hasDetail = Boolean(detail.trim());
+            const detailOpen = openDetails.has(detailKey);
+            const rowContent = (
+              <>
+                <span className="min-w-0 truncate text-ink/80">
+                  {label}
+                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="font-mono text-caption">
+                    <span className="text-[rgb(var(--color-emerald))]">
+                      +{edit.additions ?? 0}
+                    </span>
+                    <span className="text-ink/25"> </span>
+                    <span className="text-status-error">
+                      -{edit.deletions ?? 0}
+                    </span>
+                  </span>
+                  {hasDetail && (
+                    <ChevronDown
+                      className={
+                        "h-3.5 w-3.5 text-ink/55 transition-transform " +
+                        (detailOpen ? "rotate-180" : "")
+                      }
+                    />
+                  )}
+                </div>
+              </>
+            );
+            return (
+              <div key={`${label}-${i}`}>
+                {hasDetail ? (
+                  <button
+                    type="button"
+                    className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-left text-body-sm hover:bg-ink/[0.04]"
+                    data-no-toggle
+                    aria-expanded={detailOpen}
+                    aria-label={
+                      detailOpen
+                        ? `Hide changes for ${label}`
+                        : `Show changes for ${label}`
+                    }
+                    onClick={() => toggleDetail(detailKey)}
+                  >
+                    {rowContent}
+                  </button>
+                ) : (
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-body-sm">
+                    {rowContent}
+                  </div>
+                )}
+                {detailOpen && hasDetail && (
+                  <ScrollArea
+                    className="mx-2.5 mb-2 max-h-56 rounded bg-bg-panel-alt"
+                    viewportClassName="px-2.5 py-2"
+                    orientation="both"
+                    persistScrollbars
+                  >
+                    <pre className="min-w-max font-mono text-caption leading-relaxed text-ink/75">
+                      <code>{detail}</code>
+                    </pre>
+                  </ScrollArea>
+                )}
+              </div>
+            );
+          })}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              className="flex w-full items-center gap-1 px-2.5 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
+              data-no-toggle
+              onClick={() => setExpanded(true)}
+            >
+              <span>
+                Show {hiddenCount} more {hiddenCount === 1 ? "file" : "files"}
+              </span>
+              <ChevronDown className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {expanded && edits.length > 3 && (
+            <button
+              type="button"
+              className="flex w-full items-center gap-1 px-2.5 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
+              data-no-toggle
+              onClick={() => setExpanded(false)}
+            >
+              <span>Collapse files</span>
+              <ChevronDown className="h-3.5 w-3.5 rotate-180" />
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parseFileEditSummary(text: string): FileEditSummary | null {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const record = parsed as FileEditSummary;
+    return Array.isArray(record.edits) ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+function sumEditNumber(edits: FileEditItem[], key: "additions" | "deletions"): number {
+  return edits.reduce((sum, edit) => {
+    const value = edit[key];
+    return sum + (typeof value === "number" ? value : 0);
+  }, 0);
+}
+
+function mergeEditDetail(a?: string, b?: string): string | undefined {
+  const left = typeof a === "string" ? a.trim() : "";
+  const right = typeof b === "string" ? b.trim() : "";
+  if (!left) return right || undefined;
+  if (!right) return left;
+  return `${left}\n\n${right}`;
 }
 
 interface MarkdownImage {

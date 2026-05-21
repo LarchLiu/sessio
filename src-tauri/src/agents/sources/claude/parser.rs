@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -214,6 +214,7 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
     let mut buf = Vec::new();
     let mut byte_offset: u64 = 0;
     let mut line_number: u64 = 0;
+    let mut edit_tools: HashMap<String, ClaudeEditTool> = HashMap::new();
 
     loop {
         buf.clear();
@@ -258,7 +259,8 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
             byte_start: Some(line_start_byte),
             byte_end: Some(line_end_byte),
         };
-        for sm in expand_message(&role_raw, msg, ts) {
+        let tool_result_meta = v.get("toolUseResult");
+        for sm in expand_message(&role_raw, msg, ts, &mut edit_tools, tool_result_meta) {
             out.push((sm, location.clone()));
         }
     }
@@ -270,7 +272,19 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
 // - assistant tool_use -> {role:"tool_call"}
 // - user tool_result -> {role:"tool_result"}
 // - user text -> {role:"user"}
-fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
+#[derive(Debug, Clone)]
+struct ClaudeEditTool {
+    name: String,
+    input: serde_json::Value,
+}
+
+fn expand_message(
+    role_raw: &str,
+    msg: &serde_json::Value,
+    ts: Option<i64>,
+    edit_tools: &mut HashMap<String, ClaudeEditTool>,
+    tool_result_meta: Option<&serde_json::Value>,
+) -> Vec<SessionMessage> {
     let content = match msg.get("content") {
         Some(c) => c,
         None => return Vec::new(),
@@ -352,6 +366,17 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                     text_parts.clear();
                 }
                 let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+                if matches!(name, "Write" | "Edit" | "MultiEdit") {
+                    if let Some(id) = item.get("id").and_then(|x| x.as_str()) {
+                        edit_tools.insert(
+                            id.to_string(),
+                            ClaudeEditTool {
+                                name: name.to_string(),
+                                input: item.get("input").cloned().unwrap_or_default(),
+                            },
+                        );
+                    }
+                }
                 if name == "TodoWrite" {
                     if let Some(todos) = item.get("input").and_then(|i| i.get("todos")) {
                         if let Ok(text) = serde_json::to_string(todos) {
@@ -400,15 +425,25 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                 }
                 let body = extract_tool_result_text(item);
                 if !body.trim().is_empty() {
+                    let tool_use_id = item
+                        .get("tool_use_id")
+                        .and_then(|x| x.as_str())
+                        .map(String::from);
                     out.push(SessionMessage {
                         role: "tool_result".to_string(),
                         text: body,
                         timestamp: ts,
-                        tool_call_id: item
-                            .get("tool_use_id")
-                            .and_then(|x| x.as_str())
-                            .map(String::from),
+                        tool_call_id: tool_use_id.clone(),
                     });
+                    if let Some(id) = tool_use_id {
+                        if let Some(edit) = edit_tools.remove(&id) {
+                            if let Some(summary) =
+                                claude_file_edit_message(&edit, ts, tool_result_meta)
+                            {
+                                out.push(summary);
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -473,6 +508,242 @@ fn claude_image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option
             Some(format!("![Image #{idx}]({url})"))
         }
         _ => None,
+    }
+}
+
+fn claude_file_edit_message(
+    edit: &ClaudeEditTool,
+    ts: Option<i64>,
+    tool_result_meta: Option<&serde_json::Value>,
+) -> Option<SessionMessage> {
+    let edits = if let Some(meta_edit) = claude_meta_edit(tool_result_meta) {
+        vec![meta_edit]
+    } else {
+        match edit.name.as_str() {
+            "Write" => claude_write_edits(&edit.input),
+            "Edit" => claude_edit_edits(&edit.input),
+            "MultiEdit" => claude_multi_edit_edits(&edit.input),
+            _ => Vec::new(),
+        }
+    };
+    file_edit_message("claude", edits, ts)
+}
+
+fn claude_meta_edit(tool_result_meta: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let meta = tool_result_meta?;
+    let path = meta
+        .get("filePath")
+        .or_else(|| meta.get("file_path"))
+        .and_then(|x| x.as_str())?;
+    let hunks = claude_structured_patch_hunks(meta);
+    if hunks.is_empty() {
+        return None;
+    }
+    let additions: usize = hunks
+        .iter()
+        .filter_map(|h| h.get("additions").and_then(|x| x.as_u64()))
+        .map(|x| x as usize)
+        .sum();
+    let deletions: usize = hunks
+        .iter()
+        .filter_map(|h| h.get("deletions").and_then(|x| x.as_u64()))
+        .map(|x| x as usize)
+        .sum();
+    let detail = hunks
+        .iter()
+        .filter_map(|h| h.get("detail").and_then(|x| x.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(serde_json::json!({
+        "path": path,
+        "displayPath": path,
+        "kind": "edit",
+        "additions": additions,
+        "deletions": deletions,
+        "detail": detail,
+        "hunks": hunks,
+    }))
+}
+
+fn claude_structured_patch_hunks(meta: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(patches) = meta.get("structuredPatch").and_then(|x| x.as_array()) else {
+        return Vec::new();
+    };
+    patches
+        .iter()
+        .filter_map(|patch| {
+            let lines = patch.get("lines").and_then(|x| x.as_array())?;
+            let detail_lines: Vec<String> = lines
+                .iter()
+                .filter_map(|line| line.as_str().map(String::from))
+                .collect();
+            let additions = detail_lines
+                .iter()
+                .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+                .count();
+            let deletions = detail_lines
+                .iter()
+                .filter(|line| line.starts_with('-') && !line.starts_with("---"))
+                .count();
+            let old_start = patch.get("oldStart").and_then(|x| x.as_u64());
+            let old_lines = patch.get("oldLines").and_then(|x| x.as_u64());
+            let new_start = patch.get("newStart").and_then(|x| x.as_u64());
+            let new_lines = patch.get("newLines").and_then(|x| x.as_u64());
+            let header = format!(
+                "@@ -{},{} +{},{} @@",
+                old_start.unwrap_or(0),
+                old_lines.unwrap_or(0),
+                new_start.unwrap_or(0),
+                new_lines.unwrap_or(0)
+            );
+            let detail = if detail_lines.is_empty() {
+                header
+            } else {
+                format!("{header}\n{}", detail_lines.join("\n"))
+            };
+            Some(serde_json::json!({
+                "oldStart": old_start,
+                "oldLines": old_lines,
+                "newStart": new_start,
+                "newLines": new_lines,
+                "additions": additions,
+                "deletions": deletions,
+                "detail": detail,
+            }))
+        })
+        .collect()
+}
+
+fn claude_write_edits(input: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(path) = input.get("file_path").and_then(|x| x.as_str()) else {
+        return Vec::new();
+    };
+    let content = input.get("content").and_then(|x| x.as_str()).unwrap_or("");
+    vec![serde_json::json!({
+        "path": path,
+        "displayPath": path,
+        "kind": "write",
+        "additions": line_count(content),
+        "deletions": 0,
+        "detail": content,
+    })]
+}
+
+fn claude_edit_edits(input: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(path) = input.get("file_path").and_then(|x| x.as_str()) else {
+        return Vec::new();
+    };
+    let old_string = input
+        .get("old_string")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let new_string = input
+        .get("new_string")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    vec![serde_json::json!({
+        "path": path,
+        "displayPath": path,
+        "kind": "edit",
+        "additions": line_count(new_string),
+        "deletions": line_count(old_string),
+        "detail": format!("--- old\n{old_string}\n+++ new\n{new_string}"),
+    })]
+}
+
+fn claude_multi_edit_edits(input: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(path) = input.get("file_path").and_then(|x| x.as_str()) else {
+        return Vec::new();
+    };
+    let Some(edits) = input.get("edits").and_then(|x| x.as_array()) else {
+        return Vec::new();
+    };
+    let additions: usize = edits
+        .iter()
+        .map(|edit| {
+            edit.get("new_string")
+                .and_then(|x| x.as_str())
+                .map(line_count)
+                .unwrap_or(0)
+        })
+        .sum();
+    let deletions: usize = edits
+        .iter()
+        .map(|edit| {
+            edit.get("old_string")
+                .and_then(|x| x.as_str())
+                .map(line_count)
+                .unwrap_or(0)
+        })
+        .sum();
+    let detail = edits
+        .iter()
+        .enumerate()
+        .map(|(idx, edit)| {
+            let old_string = edit
+                .get("old_string")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let new_string = edit
+                .get("new_string")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            format!(
+                "Edit {}\n--- old\n{}\n+++ new\n{}",
+                idx + 1,
+                old_string,
+                new_string
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    vec![serde_json::json!({
+        "path": path,
+        "displayPath": path,
+        "kind": "multi_edit",
+        "additions": additions,
+        "deletions": deletions,
+        "detail": detail,
+    })]
+}
+
+fn file_edit_message(
+    source: &str,
+    edits: Vec<serde_json::Value>,
+    ts: Option<i64>,
+) -> Option<SessionMessage> {
+    if edits.is_empty() {
+        return None;
+    }
+    let additions: i64 = edits
+        .iter()
+        .filter_map(|e| e.get("additions").and_then(|x| x.as_i64()))
+        .sum();
+    let deletions: i64 = edits
+        .iter()
+        .filter_map(|e| e.get("deletions").and_then(|x| x.as_i64()))
+        .sum();
+    let text = serde_json::json!({
+        "source": source,
+        "files": edits.len(),
+        "additions": additions,
+        "deletions": deletions,
+        "edits": edits,
+    })
+    .to_string();
+    Some(SessionMessage {
+        role: "file_edit".to_string(),
+        text,
+        timestamp: ts,
+        tool_call_id: None,
+    })
+}
+
+fn line_count(s: &str) -> usize {
+    if s.is_empty() {
+        0
+    } else {
+        s.lines().count().max(1)
     }
 }
 
@@ -968,7 +1239,14 @@ mod tests {
             ]
         });
 
-        let out = expand_message("assistant", &msg, Some(1_700_000_000_000));
+        let mut edits = HashMap::new();
+        let out = expand_message(
+            "assistant",
+            &msg,
+            Some(1_700_000_000_000),
+            &mut edits,
+            None,
+        );
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].role, "todo");
@@ -1020,5 +1298,86 @@ mod tests {
         fs::remove_file(last_prompt_path).ok();
         fs::remove_file(ai_title_path).ok();
         fs::remove_dir(dir).ok();
+    }
+
+    #[test]
+    fn expand_message_adds_file_edit_summary_after_successful_edit_result() {
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_edit",
+                    "name": "Edit",
+                    "input": {
+                        "file_path": "/tmp/project/src/app.rs",
+                        "old_string": "old\nline",
+                        "new_string": "new\nline\nmore",
+                        "replace_all": false
+                    }
+                }
+            ]
+        });
+        let result = serde_json::json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_edit",
+                    "content": "The file /tmp/project/src/app.rs has been updated successfully."
+                }
+            ]
+        });
+        let mut edits = HashMap::new();
+        let tool_events = expand_message("assistant", &msg, Some(1), &mut edits, None);
+        assert_eq!(tool_events.len(), 1);
+        assert_eq!(tool_events[0].role, "tool_call");
+
+        let meta = serde_json::json!({
+            "filePath": "/tmp/project/src/app.rs",
+            "oldString": "old\nline",
+            "newString": "new\nline\nmore",
+            "structuredPatch": [
+                {
+                    "oldStart": 10,
+                    "oldLines": 2,
+                    "newStart": 10,
+                    "newLines": 3,
+                    "lines": [
+                        "-old",
+                        "-line",
+                        "+new",
+                        "+line",
+                        "+more"
+                    ]
+                }
+            ]
+        });
+        let result_events = expand_message("user", &result, Some(2), &mut edits, Some(&meta));
+        assert_eq!(result_events.len(), 2);
+        assert_eq!(result_events[0].role, "tool_result");
+        assert_eq!(result_events[1].role, "file_edit");
+        let value: serde_json::Value = serde_json::from_str(&result_events[1].text).unwrap();
+        assert_eq!(value.get("additions").and_then(|x| x.as_u64()), Some(3));
+        assert_eq!(value.get("deletions").and_then(|x| x.as_u64()), Some(2));
+        let edit = value
+            .get("edits")
+            .and_then(|x| x.as_array())
+            .and_then(|a| a.first())
+            .unwrap();
+        assert_eq!(
+            edit.get("hunks")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.first())
+                .and_then(|h| h.get("oldStart"))
+                .and_then(|x| x.as_u64()),
+            Some(10)
+        );
+        assert!(
+            edit.get("detail")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .starts_with("@@ -10,2 +10,3 @@")
+        );
     }
 }
