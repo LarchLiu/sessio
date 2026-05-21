@@ -402,8 +402,7 @@ fn read_local_image_data_url(path: String) -> Result<String, String> {
     if !path_buf.is_absolute() {
         return Err("Only absolute image paths can be loaded".to_string());
     }
-    let mime = local_image_mime(&path_buf)
-        .ok_or_else(|| "Unsupported image type".to_string())?;
+    let mime = local_image_mime(&path_buf).ok_or_else(|| "Unsupported image type".to_string())?;
     let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
     const MAX_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
     if meta.len() > MAX_IMAGE_BYTES {

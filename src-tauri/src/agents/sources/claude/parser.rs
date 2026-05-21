@@ -482,6 +482,8 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
     let mut cwd: Option<String> = None;
     let mut ai_title: Option<String> =
         ai_title_from_lines(scan.head.iter().chain(scan.tail.iter()));
+    let mut last_prompt: Option<String> =
+        last_prompt_from_lines(scan.head.iter().chain(scan.tail.iter()));
     let mut first_user_message: Option<String> = None;
     let mut earliest_ts: Option<i64> = None;
     let mut latest_ts: Option<i64> = None;
@@ -493,6 +495,9 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
         };
         if ai_title.is_none() {
             ai_title = ai_title_from_value(&v);
+        }
+        if last_prompt.is_none() {
+            last_prompt = last_prompt_from_value(&v);
         }
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
@@ -531,6 +536,9 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
         if ai_title.is_none() {
             ai_title = ai_title_from_value(&v);
         }
+        if last_prompt.is_none() {
+            last_prompt = last_prompt_from_value(&v);
+        }
         if cwd.is_none() {
             if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
                 if !c.is_empty() {
@@ -566,6 +574,8 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
     });
     let title = ai_title
         .or_else(|| ai_title_from_file(path).ok().flatten())
+        .or_else(|| last_prompt_from_file(path).ok().flatten())
+        .or(last_prompt)
         .or_else(|| first_user_message.clone());
 
     Ok(Some(SessionInfo {
@@ -659,6 +669,46 @@ fn ai_title_from_file(path: &Path) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+fn last_prompt_from_lines<'a>(lines: impl Iterator<Item = &'a String>) -> Option<String> {
+    let mut last_prompt = None;
+    for line in lines {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(prompt) = last_prompt_from_value(&v) {
+            last_prompt = Some(prompt);
+        }
+    }
+    last_prompt
+}
+
+fn last_prompt_from_value(v: &serde_json::Value) -> Option<String> {
+    if v.get("type").and_then(|x| x.as_str()) != Some("last-prompt") {
+        return None;
+    }
+    v.get("lastPrompt")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_preview)
+}
+
+fn last_prompt_from_file(path: &Path) -> Result<Option<String>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut last_prompt = None;
+    for line in reader.lines() {
+        let line = line?;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(prompt) = last_prompt_from_value(&v) {
+            last_prompt = Some(prompt);
+        }
+    }
+    Ok(last_prompt)
 }
 
 fn parse_iso(s: &str) -> Option<i64> {
@@ -889,6 +939,7 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn expand_message_converts_todo_write_to_todo_role() {
@@ -925,5 +976,49 @@ mod tests {
         assert_eq!(out[0].tool_call_id.as_deref(), Some("toolu_todos"));
         assert!(out[0].text.contains("Verify parser todo rendering"));
         assert!(out[0].text.contains("\"status\":\"completed\""));
+    }
+
+    #[test]
+    fn parse_session_title_prefers_ai_title_then_last_prompt_then_first_user_message() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-parser-title-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let last_prompt_path = dir.join("last-prompt-session.jsonl");
+        fs::write(
+            &last_prompt_path,
+            r#"{"type":"user","timestamp":"2026-05-18T05:09:15.000Z","cwd":"/tmp/project","message":{"role":"user","content":"first user"}}
+{"type":"last-prompt","lastPrompt":"last prompt title","leafUuid":"leaf","sessionId":"last-prompt-session"}
+"#,
+        )
+        .unwrap();
+        let last_prompt_info = parse_session(&last_prompt_path).unwrap().unwrap();
+        assert_eq!(last_prompt_info.title.as_deref(), Some("last prompt title"));
+        assert_eq!(
+            last_prompt_info.first_user_message.as_deref(),
+            Some("first user")
+        );
+
+        let ai_title_path = dir.join("ai-title-session.jsonl");
+        fs::write(
+            &ai_title_path,
+            r#"{"type":"user","timestamp":"2026-05-18T05:09:15.000Z","cwd":"/tmp/project","message":{"role":"user","content":"first user"}}
+{"type":"last-prompt","lastPrompt":"last prompt title","leafUuid":"leaf","sessionId":"ai-title-session"}
+{"type":"ai-title","aiTitle":"ai title wins"}
+"#,
+        )
+        .unwrap();
+        let ai_title_info = parse_session(&ai_title_path).unwrap().unwrap();
+        assert_eq!(ai_title_info.title.as_deref(), Some("ai title wins"));
+
+        fs::remove_file(last_prompt_path).ok();
+        fs::remove_file(ai_title_path).ok();
+        fs::remove_dir(dir).ok();
     }
 }

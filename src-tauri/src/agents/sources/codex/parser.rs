@@ -181,9 +181,9 @@ pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
 }
 
 // Same as read_messages but also returns the SourceLocation (line + byte
-// range) of the JSONL line each message was parsed from. One Codex line
-// produces at most one SessionMessage, so line_start == line_end and the
-// byte range covers the full line including its trailing newline.
+// range) of the JSONL line each message was parsed from. Some Codex lines can
+// expand into multiple SessionMessage entries (e.g. image_generation_call as
+// tool call + result), all sharing the originating line location.
 pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, SourceLocation)>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
@@ -217,9 +217,10 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
             .get("timestamp")
             .and_then(|t| t.as_str())
             .and_then(parse_iso);
-        let Some(message) = interpret_record(&v, ts) else {
+        let messages = interpret_record(&v, ts);
+        if messages.is_empty() {
             continue;
-        };
+        }
         let location = SourceLocation {
             file_path: file_path.clone(),
             line_start: Some(line_number),
@@ -227,19 +228,24 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
             byte_start: Some(line_start_byte),
             byte_end: Some(line_end_byte),
         };
-        out.push((message, location));
+        for message in messages {
+            out.push((message, location.clone()));
+        }
     }
     Ok(out)
 }
 
-fn interpret_record(v: &serde_json::Value, ts: Option<i64>) -> Option<SessionMessage> {
+fn interpret_record(v: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
     match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-        "response_item" => interpret_payload(v.get("payload")?, ts),
-        _ => None,
+        "response_item" => match v.get("payload") {
+            Some(payload) => interpret_payload(payload, ts),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
     }
 }
 
-fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<SessionMessage> {
+fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
     let kind = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match kind {
         "message" => {
@@ -249,21 +255,21 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
                 .unwrap_or("")
                 .to_string();
             if role == "developer" {
-                return None;
+                return Vec::new();
             }
             let text = extract_message_text(payload).unwrap_or_default();
             if text.trim().is_empty() {
-                return None;
+                return Vec::new();
             }
             if role == "user" && is_system_noise(&text) {
-                return None;
+                return Vec::new();
             }
-            Some(SessionMessage {
+            vec![SessionMessage {
                 role,
                 text,
                 timestamp: ts,
                 tool_call_id: None,
-            })
+            }]
         }
         "function_call" => {
             let name = payload
@@ -283,7 +289,7 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
             } else {
                 format!("[{name}]\n{args_pretty}")
             };
-            Some(SessionMessage {
+            vec![SessionMessage {
                 role: "tool_call".to_string(),
                 text,
                 timestamp: ts,
@@ -291,14 +297,14 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
                     .get("call_id")
                     .and_then(|x| x.as_str())
                     .map(String::from),
-            })
+            }]
         }
         "function_call_output" => {
             let output = extract_function_call_output_text(payload);
             if output.trim().is_empty() {
-                return None;
+                return Vec::new();
             }
-            Some(SessionMessage {
+            vec![SessionMessage {
                 role: "tool_result".to_string(),
                 text: output,
                 timestamp: ts,
@@ -306,21 +312,22 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
                     .get("call_id")
                     .and_then(|x| x.as_str())
                     .map(String::from),
-            })
+            }]
         }
         "reasoning" => {
             let text = extract_reasoning_text(payload);
             if text.trim().is_empty() {
-                return None;
+                return Vec::new();
             }
-            Some(SessionMessage {
+            vec![SessionMessage {
                 role: "thinking".to_string(),
                 text,
                 timestamp: ts,
                 tool_call_id: None,
-            })
+            }]
         }
-        _ => None,
+        "image_generation_call" => interpret_image_generation_call(payload, ts),
+        _ => Vec::new(),
     }
 }
 
@@ -598,6 +605,100 @@ fn extract_reasoning_text(payload: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
+fn interpret_image_generation_call(
+    payload: &serde_json::Value,
+    ts: Option<i64>,
+) -> Vec<SessionMessage> {
+    let call_id = payload.get("id").and_then(|x| x.as_str()).map(String::from);
+    let mut args = serde_json::Map::new();
+    if let Some(status) = payload.get("status").and_then(|x| x.as_str()) {
+        args.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+    }
+    if let Some(phase) = payload.get("phase").and_then(|x| x.as_str()) {
+        args.insert(
+            "phase".to_string(),
+            serde_json::Value::String(phase.to_string()),
+        );
+    }
+    if let Some(prompt) = payload
+        .get("revised_prompt")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        args.insert(
+            "revised_prompt".to_string(),
+            serde_json::Value::String(prompt.to_string()),
+        );
+    }
+    let args_pretty = serde_json::to_string_pretty(&serde_json::Value::Object(args))
+        .unwrap_or_else(|_| "{}".to_string());
+    let mut out = vec![SessionMessage {
+        role: "tool_call".to_string(),
+        text: format!("[image_generation]\n{args_pretty}"),
+        timestamp: ts,
+        tool_call_id: call_id.clone(),
+    }];
+    if let Some(result) = payload
+        .get("result")
+        .and_then(image_generation_result_to_markdown)
+    {
+        out.push(SessionMessage {
+            role: "tool_result".to_string(),
+            text: result,
+            timestamp: ts,
+            tool_call_id: call_id,
+        });
+    }
+    out
+}
+
+fn image_generation_result_to_markdown(result: &serde_json::Value) -> Option<String> {
+    if let Some(s) = result.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        let src = if looks_like_image_src(s) {
+            s.to_string()
+        } else {
+            format!("data:image/png;base64,{s}")
+        };
+        return Some(format!("![Generated Image]({src})"));
+    }
+    if let Some(arr) = result.as_array() {
+        let images: Vec<String> = arr
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                item.as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        let src = if looks_like_image_src(s) {
+                            s.to_string()
+                        } else {
+                            format!("data:image/png;base64,{s}")
+                        };
+                        format!("![Generated Image #{}]({src})", idx + 1)
+                    })
+            })
+            .collect();
+        if !images.is_empty() {
+            return Some(images.join("\n"));
+        }
+    }
+    None
+}
+
+fn looks_like_image_src(s: &str) -> bool {
+    s.starts_with("data:")
+        || s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.starts_with("asset:")
+        || s.starts_with("blob:")
+        || s.starts_with('/')
+}
+
 fn image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String> {
     let url = item
         .get("image_url")
@@ -765,6 +866,39 @@ mod tests {
             .0
             .text
             .contains("![Image #1](data:image/png;base64,def)"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_keeps_image_generation_results() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-image-generation-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let image_generation = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"draw a small icon","result":"abc123"}}"#;
+        fs::write(&path, format!("{image_generation}\n")).unwrap();
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0.role, "tool_call");
+        assert_eq!(events[0].0.tool_call_id.as_deref(), Some("ig_1"));
+        assert!(events[0].0.text.contains("[image_generation]"));
+        assert!(events[0].0.text.contains("draw a small icon"));
+        assert_eq!(events[1].0.role, "tool_result");
+        assert_eq!(events[1].0.tool_call_id.as_deref(), Some("ig_1"));
+        assert!(events[1]
+            .0
+            .text
+            .contains("![Generated Image](data:image/png;base64,abc123)"));
+        assert_eq!(events[0].1.line_start, events[1].1.line_start);
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
