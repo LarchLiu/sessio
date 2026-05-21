@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, ChevronRight, FilePenLine, Trash2 } from "lucide-react";
+import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
+import { ChevronDown, ChevronRight, FileDiff, Trash2 } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -70,7 +71,7 @@ type Tab =
   | { kind: "main" }
   | { kind: "sub"; sub: SubagentInfo };
 
-const ROLE_NAV_SHOW_DELAY_MS = 1000;
+const ROLE_NAV_SHOW_DELAY_MS = 800;
 
 export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
   const { t } = useI18n();
@@ -626,7 +627,7 @@ function RoleNav({
             content={tip}
             placement={isLeft ? "right" : "left"}
             offset={12}
-            delayMs={250}
+            delayMs={100}
           >
             <button
               type="button"
@@ -997,6 +998,17 @@ function mergeFileEditItems(items: MessageRenderItem[]): MessageRenderItem | nul
         existing.deletions = (existing.deletions ?? 0) + (edit.deletions ?? 0);
         existing.kind = existing.kind === edit.kind ? existing.kind : "mixed";
         existing.detail = mergeEditDetail(existing.detail, edit.detail);
+        existing.patches = [
+          ...normalizeEditPatches(existing),
+          ...normalizeEditPatches(edit),
+        ];
+        existing.patch = undefined;
+        existing.contentDiffs = [
+          ...normalizeContentDiffs(existing),
+          ...normalizeContentDiffs(edit),
+        ];
+        existing.oldContent = undefined;
+        existing.newContent = undefined;
       } else {
         byPath.set(key, { ...edit });
       }
@@ -1174,6 +1186,16 @@ interface FileEditItem {
   additions?: number;
   deletions?: number;
   detail?: string;
+  patch?: string | null;
+  patches?: string[];
+  oldContent?: string | null;
+  newContent?: string | null;
+  contentDiffs?: FileEditContentDiff[];
+}
+
+interface FileEditContentDiff {
+  oldContent?: string | null;
+  newContent?: string | null;
 }
 
 function FileEditContent({ text }: { text: string }) {
@@ -1203,7 +1225,7 @@ function FileEditContent({ text }: { text: string }) {
       <div className="flex items-center justify-between gap-3 px-2.5 py-2">
         <div className="flex min-w-0 items-center gap-2.5">
           <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-bg-panel text-ink/70">
-            <FilePenLine className="h-4 w-4" />
+            <FileDiff className="h-4 w-4" />
           </span>
           <div className="min-w-0">
             <div className="text-body-sm font-medium text-ink/80">
@@ -1225,7 +1247,7 @@ function FileEditContent({ text }: { text: string }) {
             const label = edit.displayPath || edit.path || "(unknown file)";
             const detailKey = edit.path || edit.displayPath || `${label}-${i}`;
             const detail = typeof edit.detail === "string" ? edit.detail : "";
-            const hasDetail = Boolean(detail.trim());
+            const hasDetail = hasRenderableEditDetail(edit);
             const detailOpen = openDetails.has(detailKey);
             const rowContent = (
               <>
@@ -1276,16 +1298,7 @@ function FileEditContent({ text }: { text: string }) {
                   </div>
                 )}
                 {detailOpen && hasDetail && (
-                  <ScrollArea
-                    className="mx-2.5 mb-2 max-h-56 rounded bg-bg-panel-alt"
-                    viewportClassName="px-2.5 py-2"
-                    orientation="both"
-                    persistScrollbars
-                  >
-                    <pre className="min-w-max font-mono text-caption leading-relaxed text-ink/75">
-                      <code>{detail}</code>
-                    </pre>
-                  </ScrollArea>
+                  <DiffPreview edit={edit} fallback={detail} />
                 )}
               </div>
             );
@@ -1338,6 +1351,138 @@ function sumEditNumber(edits: FileEditItem[], key: "additions" | "deletions"): n
     const value = edit[key];
     return sum + (typeof value === "number" ? value : 0);
   }, 0);
+}
+
+function hasRenderableEditDetail(edit: FileEditItem): boolean {
+  return Boolean(
+    (typeof edit.patch === "string" && edit.patch.trim()) ||
+      normalizeEditPatches(edit).length > 0 ||
+      (typeof edit.detail === "string" && edit.detail.trim()) ||
+      normalizeContentDiffs(edit).length > 0 ||
+      typeof edit.oldContent === "string" ||
+      typeof edit.newContent === "string",
+  );
+}
+
+function diffPreviewOptions(themeType: "light" | "dark") {
+  return {
+  diffStyle: "unified" as const,
+  overflow: "scroll" as const,
+  theme: {
+    dark: "github-dark",
+    light: "github-light",
+  },
+    themeType,
+  disableFileHeader: true,
+  hunkSeparators: "line-info-basic" as const,
+  lineDiffType: "word" as const,
+  };
+}
+
+function DiffPreview({
+  edit,
+  fallback,
+}: {
+  edit: FileEditItem;
+  fallback: string;
+}) {
+  const name = edit.displayPath || edit.path || "file";
+  const themeType = useEffectiveThemeType();
+  const options = useMemo(() => diffPreviewOptions(themeType), [themeType]);
+  const contentDiffs = normalizeContentDiffs(edit);
+  const patch = typeof edit.patch === "string" ? edit.patch : "";
+  const patches = normalizeEditPatches(edit);
+  return (
+    <ScrollArea
+      className="mx-2.5 mb-2 max-h-72 rounded bg-bg-panel-alt"
+      viewportClassName="p-0"
+      orientation="both"
+      persistScrollbars
+    >
+      <div className="min-w-max text-caption sessio-diff-preview">
+        {patches.length > 0 || patch.trim() ? (
+          <>
+            {(patches.length > 0 ? patches : [patch]).map((patchItem, i) => (
+              <PatchDiff
+                key={i}
+                patch={patchItem}
+                options={options}
+                disableWorkerPool
+              />
+            ))}
+          </>
+        ) : contentDiffs.length > 0 ? (
+          <>
+            {contentDiffs.map((contentDiff, i) => (
+              <MultiFileDiff
+                key={i}
+                oldFile={{ name, contents: contentDiff.oldContent ?? "" }}
+                newFile={{ name, contents: contentDiff.newContent ?? "" }}
+                options={options}
+                disableWorkerPool
+              />
+            ))}
+          </>
+        ) : (
+          <pre className="px-2.5 py-2 font-mono text-caption leading-relaxed text-ink/75">
+            <code>{fallback}</code>
+          </pre>
+        )}
+      </div>
+    </ScrollArea>
+  );
+}
+
+function normalizeEditPatches(edit: FileEditItem): string[] {
+  const patches = Array.isArray(edit.patches)
+    ? edit.patches.filter((item): item is string => Boolean(item.trim()))
+    : [];
+  if (typeof edit.patch === "string" && edit.patch.trim()) {
+    patches.push(edit.patch);
+  }
+  return patches;
+}
+
+function normalizeContentDiffs(edit: FileEditItem): FileEditContentDiff[] {
+  const diffs = Array.isArray(edit.contentDiffs)
+    ? edit.contentDiffs.filter(
+        (item) =>
+          typeof item.oldContent === "string" ||
+          typeof item.newContent === "string",
+      )
+    : [];
+  if (
+    typeof edit.oldContent === "string" ||
+    typeof edit.newContent === "string"
+  ) {
+    diffs.push({
+      oldContent: edit.oldContent,
+      newContent: edit.newContent,
+    });
+  }
+  return diffs;
+}
+
+function useEffectiveThemeType(): "light" | "dark" {
+  const [themeType, setThemeType] = useState<"light" | "dark">(() =>
+    document.documentElement.getAttribute("data-theme") === "light"
+      ? "light"
+      : "dark",
+  );
+  useEffect(() => {
+    const root = document.documentElement;
+    const update = () => {
+      setThemeType(root.getAttribute("data-theme") === "light" ? "light" : "dark");
+    };
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(root, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    return () => observer.disconnect();
+  }, []);
+  return themeType;
 }
 
 function mergeEditDetail(a?: string, b?: string): string | undefined {

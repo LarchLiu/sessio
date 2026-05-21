@@ -290,14 +290,17 @@ fn interpret_event_payload(
                         .get("type")
                         .and_then(|x| x.as_str())
                         .unwrap_or("update");
-                    let (additions, deletions, detail) = codex_change_summary(kind, change);
+                    let summary = codex_change_summary(kind, path, change);
                     serde_json::json!({
                         "path": path,
                         "displayPath": display_path(path, cwd),
                         "kind": kind,
-                        "additions": additions,
-                        "deletions": deletions,
-                        "detail": detail,
+                        "additions": summary.additions,
+                        "deletions": summary.deletions,
+                        "detail": summary.detail,
+                        "patch": summary.patch,
+                        "oldContent": summary.old_content,
+                        "newContent": summary.new_content,
                     })
                 })
                 .collect();
@@ -805,10 +808,30 @@ fn display_path(path: &str, cwd: Option<&str>) -> String {
     path.strip_prefix(&prefix).unwrap_or(path).to_string()
 }
 
-fn codex_change_summary(kind: &str, change: &serde_json::Value) -> (usize, usize, String) {
+struct CodexChangeSummary {
+    additions: usize,
+    deletions: usize,
+    detail: String,
+    patch: Option<String>,
+    old_content: Option<String>,
+    new_content: Option<String>,
+}
+
+fn codex_change_summary(
+    kind: &str,
+    path: &str,
+    change: &serde_json::Value,
+) -> CodexChangeSummary {
     if let Some(diff) = change.get("unified_diff").and_then(|x| x.as_str()) {
         let (additions, deletions) = unified_diff_counts(diff);
-        return (additions, deletions, diff.to_string());
+        return CodexChangeSummary {
+            additions,
+            deletions,
+            detail: diff.to_string(),
+            patch: Some(unified_diff_to_file_patch(path, diff)),
+            old_content: None,
+            new_content: None,
+        };
     }
 
     let content = change
@@ -817,10 +840,36 @@ fn codex_change_summary(kind: &str, change: &serde_json::Value) -> (usize, usize
         .unwrap_or("");
     let line_count = line_count(content);
     match kind {
-        "add" => (line_count, 0, format!("+++ added content\n{content}")),
-        "delete" => (0, line_count, format!("--- deleted content\n{content}")),
-        _ => (0, 0, content.to_string()),
+        "add" => CodexChangeSummary {
+            additions: line_count,
+            deletions: 0,
+            detail: format!("+++ added content\n{content}"),
+            patch: None,
+            old_content: None,
+            new_content: Some(content.to_string()),
+        },
+        "delete" => CodexChangeSummary {
+            additions: 0,
+            deletions: line_count,
+            detail: format!("--- deleted content\n{content}"),
+            patch: None,
+            old_content: Some(content.to_string()),
+            new_content: None,
+        },
+        _ => CodexChangeSummary {
+            additions: 0,
+            deletions: 0,
+            detail: content.to_string(),
+            patch: None,
+            old_content: None,
+            new_content: None,
+        },
     }
+}
+
+fn unified_diff_to_file_patch(path: &str, diff: &str) -> String {
+    let normalized = path.trim_start_matches('/');
+    format!("diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{diff}")
 }
 
 fn line_count(s: &str) -> usize {

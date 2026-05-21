@@ -554,6 +554,15 @@ fn claude_meta_edit(tool_result_meta: Option<&serde_json::Value>) -> Option<serd
         .filter_map(|h| h.get("detail").and_then(|x| x.as_str()))
         .collect::<Vec<_>>()
         .join("\n\n");
+    let patch = claude_meta_patch(path, &hunks);
+    let old_content = meta
+        .get("oldString")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    let new_content = meta
+        .get("newString")
+        .and_then(|x| x.as_str())
+        .map(String::from);
     Some(serde_json::json!({
         "path": path,
         "displayPath": path,
@@ -561,6 +570,9 @@ fn claude_meta_edit(tool_result_meta: Option<&serde_json::Value>) -> Option<serd
         "additions": additions,
         "deletions": deletions,
         "detail": detail,
+        "patch": patch,
+        "oldContent": old_content,
+        "newContent": new_content,
         "hunks": hunks,
     }))
 }
@@ -614,6 +626,16 @@ fn claude_structured_patch_hunks(meta: &serde_json::Value) -> Vec<serde_json::Va
         .collect()
 }
 
+fn claude_meta_patch(path: &str, hunks: &[serde_json::Value]) -> String {
+    let normalized = path.trim_start_matches('/');
+    let body = hunks
+        .iter()
+        .filter_map(|h| h.get("detail").and_then(|x| x.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{body}\n")
+}
+
 fn claude_write_edits(input: &serde_json::Value) -> Vec<serde_json::Value> {
     let Some(path) = input.get("file_path").and_then(|x| x.as_str()) else {
         return Vec::new();
@@ -626,6 +648,7 @@ fn claude_write_edits(input: &serde_json::Value) -> Vec<serde_json::Value> {
         "additions": line_count(content),
         "deletions": 0,
         "detail": content,
+        "newContent": content,
     })]
 }
 
@@ -648,6 +671,8 @@ fn claude_edit_edits(input: &serde_json::Value) -> Vec<serde_json::Value> {
         "additions": line_count(new_string),
         "deletions": line_count(old_string),
         "detail": format!("--- old\n{old_string}\n+++ new\n{new_string}"),
+        "oldContent": old_string,
+        "newContent": new_string,
     })]
 }
 
@@ -1378,6 +1403,14 @@ mod tests {
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .starts_with("@@ -10,2 +10,3 @@")
+        );
+        assert_eq!(
+            edit.get("oldContent").and_then(|x| x.as_str()),
+            Some("old\nline")
+        );
+        assert_eq!(
+            edit.get("newContent").and_then(|x| x.as_str()),
+            Some("new\nline\nmore")
         );
     }
 }

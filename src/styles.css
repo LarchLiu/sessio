@@ -64,6 +64,19 @@ body {
   display: none;
 }
 
+.sessio-diff-preview {
+  background: rgb(var(--color-bg-panel-alt));
+  color: rgb(var(--color-fg) / 0.82);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  line-height: 1.55;
+}
+
+.sessio-diff-preview pre {
+  margin: 0;
+  background: transparent !important;
+}
+
 .markdown-content .katex-display {
   margin: 0.75rem 0;
   overflow-x: auto;

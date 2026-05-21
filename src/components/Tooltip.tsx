@@ -28,7 +28,7 @@ export default function Tooltip({
   content,
   placement = "top",
   offset = 8,
-  delayMs = 500,
+  delayMs = 800,
   children,
 }: TooltipProps) {
   const [open, setOpen] = useState(false);

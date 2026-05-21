@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@lobehub/icons": "^5.8.0",
+    "@pierre/diffs": "^1.1.22",
     "@tauri-apps/api": "^2.4.0",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "katex": "^0.16.47",
