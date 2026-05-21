@@ -3,8 +3,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::agents::sources::types::SourceLocation;
 use crate::memory::MemorySource;
-use crate::providers::types::SourceLocation;
 
 // Resolve a MemorySource back to the raw text snippet it points at.
 //
@@ -69,8 +69,8 @@ fn read_line_range(path: &Path, location: &SourceLocation) -> Result<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::read_source_excerpt;
+    use crate::agents::sources::types::SourceLocation;
     use crate::memory::MemorySource;
-    use crate::providers::types::SourceLocation;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

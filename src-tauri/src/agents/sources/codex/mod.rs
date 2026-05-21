@@ -3,19 +3,19 @@ pub mod parser;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::models::Agent;
-use crate::providers::registry::AgentProvider;
-use crate::providers::shared::convert::{
+use crate::agents::sources::registry::AgentSource;
+use crate::agents::sources::shared::convert::{
     agent_kind, message_events_from_messages, session_record_from_info, session_source_from_info,
 };
-use crate::providers::types::{
-    AgentKind, MessageEvent, PathEvent, PathEventKind, ProviderTask, SessionRecord, SessionSource,
-    SourceKind, WatchPurpose, WatchRoot,
+use crate::agents::sources::types::{
+    AgentKind, MessageEvent, PathEvent, PathEventKind, SessionRecord, SessionSource,
+    SourceIndexTask, SourceKind, WatchPurpose, WatchRoot,
 };
+use crate::models::Agent;
 
-pub struct CodexProvider;
+pub struct CodexSource;
 
-impl AgentProvider for CodexProvider {
+impl AgentSource for CodexSource {
     fn agent(&self) -> AgentKind {
         agent_kind(Agent::Codex)
     }
@@ -63,7 +63,7 @@ impl AgentProvider for CodexProvider {
         Ok(message_events_from_messages(source, messages))
     }
 
-    fn classify_path_event(&self, event: &PathEvent) -> Option<ProviderTask> {
+    fn classify_path_event(&self, event: &PathEvent) -> Option<SourceIndexTask> {
         if event.path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             return None;
         }
@@ -86,9 +86,9 @@ impl AgentProvider for CodexProvider {
             metadata: Default::default(),
         };
         if matches!(event.kind, PathEventKind::Remove) {
-            Some(ProviderTask::MarkSourceUnavailable(source))
+            Some(SourceIndexTask::MarkSourceUnavailable(source))
         } else {
-            Some(ProviderTask::ReindexSource(source))
+            Some(SourceIndexTask::ReindexSource(source))
         }
     }
 }

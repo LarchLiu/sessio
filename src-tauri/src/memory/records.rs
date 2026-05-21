@@ -1,8 +1,8 @@
-use crate::memory::hash::{content_text, record_hash, turn_content_hash, turn_content_len};
-use crate::memory::{MemoryRecord, MemoryRecordKind, MemorySource, TurnFingerprint};
-use crate::providers::types::{
+use crate::agents::sources::types::{
     MessageContent, MessageEvent, MessageRole, SessionSource, SourceLocation,
 };
+use crate::memory::hash::{content_text, record_hash, turn_content_hash, turn_content_len};
+use crate::memory::{MemoryRecord, MemoryRecordKind, MemorySource, TurnFingerprint};
 
 const MAX_SUMMARY_CHARS: usize = 360;
 
@@ -247,7 +247,7 @@ pub fn safe_id_part(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::records_for_source;
-    use crate::providers::types::{
+    use crate::agents::sources::types::{
         AgentKind, MessageContent, MessageEvent, MessageRole, ProjectRef, SessionSource,
         SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
     };

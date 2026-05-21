@@ -22,7 +22,7 @@ Sessio 下一阶段目标是把桌面应用背后的会话索引、消息提取�
 ```text
 Codex / Claude / Gemini JSONL
   ↓
-providers
+agents/sources
   ↓
 indexer
   ├─ sessions / subagents metadata -> sessio-index.db
@@ -63,12 +63,12 @@ qmd 自己的 SQLite index 仍由 qmd 管理，可以使用 qmd 默认目录，�
 
 ## Layering And Extensibility
 
-为了后续添加新的 agent provider，Sessio 应把 provider、indexer、memory、qmd、CLI 做成清晰分层。除 provider 层外，其他层不应该关心 Codex / Claude / Gemini 的原始文件格式。
+为了后续添加新的 agent source，Sessio 应把 agents/sources、indexer、memory、qmd、CLI 做成清晰分层。除 source 层外，其他层不应该关心 Codex / Claude / Gemini 的原始文件格式。
 
 建议分层：
 
 ```text
-agent provider layer
+agent source layer
   只负责识别和解析各 agent 的磁盘格式
   输出统一 SessionRecord / MessageEvent / SourceRef
 
@@ -89,25 +89,25 @@ qmd backend layer
 
 CLI / skill layer
   只暴露稳定 JSON API
-  不暴露内部 provider 差异
+  不暴露内部 source 差异
 ```
 
 依赖方向必须单向：
 
 ```text
-CLI/UI -> indexer/store/memory -> providers
+CLI/UI -> indexer/store/memory -> agents/sources
 memory -> qmd backend
-qmd backend 不反向依赖 providers/store 之外的 agent 细节
+qmd backend 不反向依赖 agents/sources/store 之外的 agent 细节
 ```
 
 ### Agent Provider Interface
 
-每个 agent provider 应实现同一个 trait。新增 agent 时只需要实现 provider 和 watch path 规则，不改 memory/qmd/CLI。
+每个 agent source 应实现同一个 trait。新增 agent 时只需要实现 source 和 watch path 规则，不改 memory/qmd/CLI。
 
 建议接口：
 
 ```rust
-trait AgentProvider: Send + Sync {
+trait AgentSource: Send + Sync {
     fn agent(&self) -> AgentKind;
     fn display_name(&self) -> &'static str;
 
@@ -116,14 +116,14 @@ trait AgentProvider: Send + Sync {
     fn parse_source(&self, source: &SessionSource) -> Result<ParsedSession>;
     fn read_messages(&self, source: &SessionSource) -> Result<Vec<MessageEvent>>;
 
-    fn classify_path_event(&self, event: &PathEvent) -> Option<ProviderTask>;
+    fn classify_path_event(&self, event: &PathEvent) -> Option<SourceIndexTask>;
 }
 ```
 
 统一 task：
 
 ```rust
-enum ProviderTask {
+enum SourceIndexTask {
     ReindexSource(SessionSource),
     ReindexScope(SourceScope),
     MarkSourceUnavailable(SessionSource),
@@ -142,7 +142,7 @@ struct WatchRoot {
 }
 ```
 
-这样 watcher/polling 只负责收集文件事件并询问 provider 如何分类，不把 Claude / Gemini 的路径规则写死在上层。
+这样 watcher/polling 只负责收集文件事件并询问 source 如何分类，不把 Claude / Gemini 的路径规则写死在上层。
 
 ### Unified Data Model
 
@@ -176,7 +176,7 @@ enum SourceKind {
 }
 ```
 
-provider 输出的 session 元数据：
+source 输出的 session 元数据：
 
 ```rust
 struct SessionRecord {
@@ -233,7 +233,7 @@ struct SourceLocation {
 }
 ```
 
-memory pipeline 只接收 `MessageEvent`，因此新增 agent 的 tool 格式、消息格式都在 provider 内部归一化。
+memory pipeline 只接收 `MessageEvent`，因此新增 agent 的 tool 格式、消息格式都在 source 内部归一化。
 
 ### Store Interfaces
 
@@ -272,36 +272,36 @@ trait MemoryStore {
 
 这意味着 continuation 的精确证据已经是 DB 一等数据，而不是只存在 markdown 文本里。
 
-### Provider Registry
+### Agent Source Registry
 
 建议新增 registry，集中管理可用 provider：
 
 ```rust
-struct ProviderRegistry {
-    providers: Vec<Box<dyn AgentProvider>>,
+struct AgentSourceRegistry {
+    sources: Vec<Box<dyn AgentSource>>,
 }
 
-impl ProviderRegistry {
+impl AgentSourceRegistry {
     fn discover_all(&self) -> Result<Vec<SessionSource>>;
-    fn provider_for_agent(&self, agent: &AgentKind) -> Option<&dyn AgentProvider>;
-    fn classify_path_event(&self, event: &PathEvent) -> Vec<ProviderTask>;
+    fn source_for_agent(&self, agent: &AgentKind) -> Option<&dyn AgentSource>;
+    fn classify_path_event(&self, event: &PathEvent) -> Vec<SourceIndexTask>;
     fn watch_roots(&self) -> Result<Vec<WatchRoot>>;
 }
 ```
 
-当前内置 provider：
+当前内置 source：
 
 ```text
-codex provider
-claude provider
-gemini provider
+codex source
+claude source
+gemini source
 ```
 
-未来新增 provider 时：
+未来新增 source 时：
 
-1. 新增 `src-tauri/src/providers/<agent>/parser.rs`
-2. 实现 `AgentProvider`
-3. 注册到 `ProviderRegistry`
+1. 新增 `src-tauri/src/agents/sources/<agent>/parser.rs`
+2. 实现 `AgentSource`
+3. 注册到 `AgentSourceRegistry`
 4. 增加 parser 测试和 sample fixtures
 5. 不修改 memory/qmd/CLI 的核心逻辑
 
@@ -309,8 +309,8 @@ gemini provider
 
 必须保持以下边界：
 
-- provider 可以知道 agent 原始格式
-- indexer 不可以解析 JSONL 内容，只调 provider
+- source 可以知道 agent 原始格式
+- indexer 不可以解析 JSONL 内容，只调 source
 - memory 不可以读取 agent 特有 JSON 字段，只处理 `MessageEvent`
 - qmd backend 不可以读取原始 session 文件，只处理 record artifacts
 - CLI 不可以暴露 agent 特有字段，除非放在 `metadata` map 中
@@ -330,7 +330,7 @@ type Metadata = BTreeMap<String, serde_json::Value>;
 
 ```mermaid
 flowchart TD
-    Raw["Agent raw sessions<br/>Codex / Claude / Gemini JSONL"] --> Readers["Sessio providers<br/>parse sessions and messages"]
+    Raw["Agent raw sessions<br/>Codex / Claude / Gemini JSONL"] --> Readers["Sessio agent sources<br/>parse sessions and messages"]
     Readers --> Indexer["Sessio indexer<br/>full rebuild / file task"]
     Indexer --> SessionDB[("sessio-index.db<br/>sessions / subagents")]
     Indexer --> Changed["Changed session sources<br/>project + agent + session + file"]
@@ -398,7 +398,7 @@ CLI 是给 skill 和其他 agent 用的稳定接口。第一版命令建议放�
 src-tauri/src/bin/sessio.rs
 ```
 
-CLI 复用现有 `app_lib::providers`、`store`、`indexer` 模块。后续如果 GUI 和 CLI 共享逻辑变多，可以抽出 `core` 模块。
+CLI 复用现有 `app_lib::agents::sources`、`store`、`indexer` 模块。后续如果 GUI 和 CLI 共享逻辑变多，可以抽出 `core` 模块。
 
 已实现命令：
 
@@ -505,7 +505,7 @@ Skill 说明里应强调：
 
 ### Normalization
 
-Session 处理管线应复用现有 providers，但需要比 UI 展示多保留来源定位信息。
+Session 处理管线应复用现有 agents/sources，但需要比 UI 展示多保留来源定位信息。
 
 建议新增内部结构：
 
@@ -901,7 +901,7 @@ trait MemoryIndexer {
 ### Phase 2: Memory Record Pipeline
 
 - 新增 memory tables
-- 从现有 providers 生成 normalized turns
+- 从现有 agents/sources 生成 normalized turns
 - 删除 `sessio-cross` replay block
 - 压缩 tool use / tool result
 - 生成 project memory records

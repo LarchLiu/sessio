@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 fn main() {
-    let sessions = app_lib::providers::list_all();
+    let sessions = app_lib::agents::sources::list_all();
     println!("Total sessions: {}", sessions.len());
 
     let mut by_agent: BTreeMap<&str, usize> = BTreeMap::new();

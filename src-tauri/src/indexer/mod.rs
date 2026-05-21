@@ -8,15 +8,14 @@ use std::time::Duration;
 use anyhow::Result;
 use tauri::{AppHandle, Emitter};
 
+use crate::agents::sources::shared::convert::session_source_from_info;
+use crate::agents::sources::types::{
+    PathEvent, PathEventKind, ProjectRef, SessionSource, SourceIndexTask, SourceKind,
+};
 use crate::memory::build::MemoryBuildOptions;
 use crate::memory::service::{MemoryBackendSyncJob, MemoryService};
 use crate::memory::MemoryStore;
 use crate::models::Agent;
-use crate::providers;
-use crate::providers::shared::convert::session_source_from_info;
-use crate::providers::types::{
-    PathEvent, PathEventKind, ProjectRef, ProviderTask, SessionSource, SourceKind,
-};
 use crate::store::SessionStore;
 
 #[derive(Debug, Clone)]
@@ -91,11 +90,11 @@ pub fn spawn(
 
     // Build MemoryService once at startup. Cloning the Arc lets the backend
     // sync worker, the main indexer loop, and per-source builds all share the
-    // same backend / artifact sink / provider registry instead of paying
-    // config-load + ProviderRegistry construction on every task.
+    // same backend / artifact sink / source registry instead of paying
+    // config-load + AgentSourceRegistry construction on every task.
     let service = match MemoryService::new(
         memory_store.clone(),
-        Arc::new(providers::builtin_providers()),
+        Arc::new(crate::agents::sources::builtin_agent_sources()),
     ) {
         Ok(service) => Arc::new(service),
         Err(e) => {
@@ -290,7 +289,7 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
             }
         }
         if !deferred_requeues.is_empty() {
-            let registry = providers::builtin_providers();
+            let registry = crate::agents::sources::builtin_agent_sources();
             // Seed with paths already in this batch's affected_sources so we
             // don't re-queue a build we're about to do anyway. Both sides
             // canonicalize to PathBuf for set equality.
@@ -308,8 +307,8 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
                     kind: PathEventKind::Modify,
                 };
                 let mut routed = false;
-                for provider_task in registry.classify_path_event(&event) {
-                    let Some(task) = provider_task_to_index_task(provider_task) else {
+                for source_task in registry.classify_path_event(&event) {
+                    let Some(task) = source_task_to_index_task(source_task) else {
                         continue;
                     };
                     if let Err(e) = tx.send(task) {
@@ -324,7 +323,7 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
                 }
                 if !routed {
                     log::warn!(
-                        "indexer: dependent source {} not routed by any provider",
+                        "indexer: dependent source {} not routed by any source",
                         path.display()
                     );
                 }
@@ -461,7 +460,7 @@ fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<TaskOutcome> {
 
 fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
     let mut affected_projects = HashMap::new();
-    let (codex_live, codex_archived) = providers::codex::parser::roots()?;
+    let (codex_live, codex_archived) = crate::agents::sources::codex::parser::roots()?;
     let mut codex_scopes: HashSet<String> = HashSet::new();
     for (root, archived) in [
         (codex_live.as_path(), false),
@@ -481,7 +480,7 @@ fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
             if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
                 continue;
             }
-            match providers::codex::parser::parse_one_file(path, archived) {
+            match crate::agents::sources::codex::parser::parse_one_file(path, archived) {
                 Ok(Some(info)) => {
                     insert_session_project(&mut affected_projects, &info);
                     let scope = info.file_path.clone();
@@ -496,7 +495,7 @@ fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
     store.mark_missing_scopes_unavailable(Agent::Codex, &codex_scopes)?;
 
     let mut claude_scopes: HashSet<String> = HashSet::new();
-    if let Some(root) = providers::claude::parser::root_dir()? {
+    if let Some(root) = crate::agents::sources::claude::parser::root_dir()? {
         for entry in std::fs::read_dir(&root)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -504,7 +503,7 @@ fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
             }
             let dir = entry.path();
             let scope = dir.to_string_lossy().into_owned();
-            match providers::claude::parser::scan_project_dir(&dir) {
+            match crate::agents::sources::claude::parser::scan_project_dir(&dir) {
                 Ok(sessions) => {
                     for session in &sessions {
                         insert_session_project(&mut affected_projects, session);
@@ -526,7 +525,7 @@ fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
     store.mark_missing_scopes_unavailable(Agent::Claude, &claude_scopes)?;
 
     let mut gemini_scopes: HashSet<String> = HashSet::new();
-    let (gemini_tmp, _) = providers::gemini::parser::paths()?;
+    let (gemini_tmp, _) = crate::agents::sources::gemini::parser::paths()?;
     if gemini_tmp.exists() {
         for entry in std::fs::read_dir(&gemini_tmp)? {
             let entry = entry?;
@@ -538,7 +537,7 @@ fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
                 continue;
             }
             let scope = logs.to_string_lossy().into_owned();
-            match providers::gemini::parser::parse_logs_file(&logs) {
+            match crate::agents::sources::gemini::parser::parse_logs_file(&logs) {
                 Ok(sessions) => {
                     for session in &sessions {
                         insert_session_project(&mut affected_projects, session);
@@ -563,10 +562,10 @@ fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutco
         store.mark_file_path_unavailable(&path.to_string_lossy())?;
         return Ok(TaskOutcome::default());
     }
-    let (_, archived_root) = providers::codex::parser::roots()?;
+    let (_, archived_root) = crate::agents::sources::codex::parser::roots()?;
     let archived = path.starts_with(&archived_root);
     let mut outcome = TaskOutcome::default();
-    match providers::codex::parser::parse_one_file(path, archived)? {
+    match crate::agents::sources::codex::parser::parse_one_file(path, archived)? {
         Some(info) => {
             push_session_project(&mut outcome, &info);
             push_session_source(&mut outcome, &info);
@@ -586,7 +585,7 @@ fn reindex_claude_project(dir: &Path, store: &dyn SessionStore) -> Result<TaskOu
         store.replace_by_scope(&scope, Agent::Claude, &[])?;
         return Ok(TaskOutcome::default());
     }
-    let sessions = providers::claude::parser::scan_project_dir(dir)?;
+    let sessions = crate::agents::sources::claude::parser::scan_project_dir(dir)?;
     let mut outcome = TaskOutcome::default();
     for session in &sessions {
         push_session_project(&mut outcome, session);
@@ -613,7 +612,7 @@ fn reindex_claude_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutc
         return Ok(TaskOutcome::default());
     };
     let mut outcome = TaskOutcome::default();
-    match providers::claude::parser::parse_single_file(path)? {
+    match crate::agents::sources::claude::parser::parse_single_file(path)? {
         Some(info) => {
             push_session_project(&mut outcome, &info);
             push_session_source(&mut outcome, &info);
@@ -647,7 +646,7 @@ fn reindex_claude_subagent_file(path: &Path, store: &dyn SessionStore) -> Result
     };
     let scope = project_dir.to_string_lossy().into_owned();
     let mut outcome = TaskOutcome::default();
-    match providers::claude::parser::parse_single_subagent_file(path)? {
+    match crate::agents::sources::claude::parser::parse_single_subagent_file(path)? {
         Some((parent_session_id, info)) => {
             push_project_path(&mut outcome, Some(scope.clone()), None);
             store.upsert_subagent(Agent::Claude, &scope, &parent_session_id, &info)?;
@@ -665,7 +664,7 @@ fn reindex_gemini_logs(path: &Path, store: &dyn SessionStore) -> Result<TaskOutc
         store.replace_by_scope(&scope, Agent::Gemini, &[])?;
         return Ok(TaskOutcome::default());
     }
-    let sessions = providers::gemini::parser::parse_logs_file(path)?;
+    let sessions = crate::agents::sources::gemini::parser::parse_logs_file(path)?;
     let mut outcome = TaskOutcome::default();
     for session in &sessions {
         push_session_project(&mut outcome, session);
@@ -677,7 +676,7 @@ fn reindex_gemini_logs(path: &Path, store: &dyn SessionStore) -> Result<TaskOutc
 }
 
 fn refresh_gemini_mappings(store: &dyn SessionStore) -> Result<TaskOutcome> {
-    let (tmp_dir, _) = providers::gemini::parser::paths()?;
+    let (tmp_dir, _) = crate::agents::sources::gemini::parser::paths()?;
     if !tmp_dir.exists() {
         return Ok(TaskOutcome::default());
     }
@@ -693,7 +692,7 @@ fn refresh_gemini_mappings(store: &dyn SessionStore) -> Result<TaskOutcome> {
             continue;
         }
         let scope = logs.to_string_lossy().into_owned();
-        match providers::gemini::parser::parse_logs_file(&logs) {
+        match crate::agents::sources::gemini::parser::parse_logs_file(&logs) {
             Ok(sessions) => {
                 for session in &sessions {
                     push_session_project(&mut outcome, session);
@@ -812,9 +811,9 @@ fn build_source_memory_for_indexer(
     }))
 }
 
-fn provider_task_to_index_task(task: ProviderTask) -> Option<IndexTask> {
+fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
     match task {
-        ProviderTask::ReindexSource(source) => {
+        SourceIndexTask::ReindexSource(source) => {
             let path = PathBuf::from(&source.file_path);
             let mapped = match source.agent.as_str() {
                 "codex" => Some(IndexTask::ReindexCodexFile(path)),
@@ -834,7 +833,7 @@ fn provider_task_to_index_task(task: ProviderTask) -> Option<IndexTask> {
             }
             mapped
         }
-        ProviderTask::ReindexScope { agent, scope } => {
+        SourceIndexTask::ReindexScope { agent, scope } => {
             let path = PathBuf::from(&scope);
             let mapped = match agent.as_str() {
                 "claude" => Some(IndexTask::ReindexClaudeProject(path)),
@@ -850,14 +849,14 @@ fn provider_task_to_index_task(task: ProviderTask) -> Option<IndexTask> {
             }
             mapped
         }
-        ProviderTask::MarkSourceUnavailable(source) => {
+        SourceIndexTask::MarkSourceUnavailable(source) => {
             let path = PathBuf::from(&source.file_path);
             match source.source_kind {
                 SourceKind::Subagent => Some(IndexTask::DeleteSubagentFile(path)),
                 _ => Some(IndexTask::DeleteFile(path)),
             }
         }
-        ProviderTask::RefreshProjectMappings { agent } => {
+        SourceIndexTask::RefreshProjectMappings { agent } => {
             let mapped = match agent.as_str() {
                 "gemini" => Some(IndexTask::RefreshGeminiProjectMappings),
                 _ => None,
@@ -965,7 +964,7 @@ fn push_project_path(
     let Some(project_path) = project_path else {
         return;
     };
-    let project_key = providers::shared::convert::project_key_for_path_or_name(
+    let project_key = crate::agents::sources::shared::convert::project_key_for_path_or_name(
         Some(&project_path),
         project_name.as_deref(),
     );
@@ -990,7 +989,7 @@ fn insert_session_project(
     let Some(project_path) = session.project_path.clone() else {
         return;
     };
-    let project_key = providers::shared::convert::project_key_for_path_or_name(
+    let project_key = crate::agents::sources::shared::convert::project_key_for_path_or_name(
         Some(&project_path),
         session.project_name.as_deref(),
     );
@@ -1017,7 +1016,7 @@ fn group_by<K: std::hash::Hash + Eq, V, F: Fn(&V) -> K>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::types::{AgentKind, ProviderTask, SessionSource};
+    use crate::agents::sources::types::{AgentKind, SessionSource, SourceIndexTask};
 
     fn src(agent: &str, file_path: &str, kind: SourceKind) -> SessionSource {
         SessionSource {
@@ -1033,21 +1032,21 @@ mod tests {
 
     #[test]
     fn watcher_reindex_source_tasks_route_to_memory_rebuild_tasks() {
-        let codex = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+        let codex = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
             "codex",
             "/tmp/codex/a.jsonl",
             SourceKind::MainSession,
         )));
         assert!(matches!(codex, Some(IndexTask::ReindexCodexFile(_))));
 
-        let claude = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+        let claude = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
             "claude",
             "/tmp/claude/project/a.jsonl",
             SourceKind::MainSession,
         )));
         assert!(matches!(claude, Some(IndexTask::ReindexClaudeFile(_))));
 
-        let gemini = provider_task_to_index_task(ProviderTask::ReindexSource(src(
+        let gemini = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
             "gemini",
             "/tmp/gemini/project/logs.json",
             SourceKind::Logs,
@@ -1057,13 +1056,13 @@ mod tests {
 
     #[test]
     fn polling_scope_tasks_route_to_project_memory_rebuild_tasks() {
-        let claude = provider_task_to_index_task(ProviderTask::ReindexScope {
+        let claude = source_task_to_index_task(SourceIndexTask::ReindexScope {
             agent: AgentKind::new("claude"),
             scope: "/tmp/claude/project".to_string(),
         });
         assert!(matches!(claude, Some(IndexTask::ReindexClaudeProject(_))));
 
-        let gemini = provider_task_to_index_task(ProviderTask::ReindexScope {
+        let gemini = source_task_to_index_task(SourceIndexTask::ReindexScope {
             agent: AgentKind::new("gemini"),
             scope: "/tmp/gemini/project/logs.json".to_string(),
         });

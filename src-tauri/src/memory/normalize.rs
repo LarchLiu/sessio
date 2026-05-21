@@ -1,5 +1,5 @@
+use crate::agents::sources::types::{MessageContent, MessageEvent};
 use crate::models::strip_injected_context;
-use crate::providers::types::{MessageContent, MessageEvent};
 
 const CROSS_START: &str = "<!-- sessio-cross:start";
 const CROSS_END: &str = "<!-- sessio-cross:end -->";

@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
+use crate::agents::sources::registry::AgentSourceRegistry;
+use crate::agents::sources::types::SessionSource;
 use crate::config::MemoryConfig;
 use crate::memory::artifacts::{MarkdownArtifactSink, MemoryArtifactSink};
 use crate::memory::build::{
@@ -14,8 +16,6 @@ use crate::memory::{
     MemoryRecord, MemorySearchOptions, MemorySource, MemoryStore, MemorySyncReport,
     RecordContinuation,
 };
-use crate::providers::registry::ProviderRegistry;
-use crate::providers::types::SessionSource;
 
 #[derive(Debug, Clone)]
 pub struct MemoryBackendSyncJob {
@@ -52,21 +52,24 @@ pub struct MemoryResolveResponse {
 
 pub struct MemoryService {
     repository: Arc<dyn MemoryStore>,
-    registry: Arc<ProviderRegistry>,
+    registry: Arc<AgentSourceRegistry>,
     backend: Arc<dyn MemoryIndexBackend>,
     artifact_sink: Arc<dyn MemoryArtifactSink>,
     artifacts_root: PathBuf,
 }
 
 impl MemoryService {
-    pub fn new(repository: Arc<dyn MemoryStore>, registry: Arc<ProviderRegistry>) -> Result<Self> {
+    pub fn new(
+        repository: Arc<dyn MemoryStore>,
+        registry: Arc<AgentSourceRegistry>,
+    ) -> Result<Self> {
         let config = crate::config::load_memory_config()?;
         Self::from_config(repository, registry, &config)
     }
 
     pub fn from_config(
         repository: Arc<dyn MemoryStore>,
-        registry: Arc<ProviderRegistry>,
+        registry: Arc<AgentSourceRegistry>,
         config: &MemoryConfig,
     ) -> Result<Self> {
         let backend = Arc::new(
@@ -96,7 +99,7 @@ impl MemoryService {
 
     pub fn with_backend(
         repository: Arc<dyn MemoryStore>,
-        registry: Arc<ProviderRegistry>,
+        registry: Arc<AgentSourceRegistry>,
         backend: Arc<dyn MemoryIndexBackend>,
         artifact_sink: Arc<dyn MemoryArtifactSink>,
         artifacts_root: PathBuf,
@@ -324,9 +327,9 @@ fn path_matches_record_id(path: &str, record_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::sources::registry::AgentSourceRegistry;
     use crate::memory::artifacts::NoopArtifactSink;
     use crate::memory::{MemoryBackendHit, MemoryRecordKind};
-    use crate::providers::registry::ProviderRegistry;
     use std::sync::Mutex;
 
     // A fake backend that returns a fixed search result so we can verify
@@ -424,7 +427,7 @@ mod tests {
         });
         let service = MemoryService::with_backend(
             memory_store,
-            Arc::new(ProviderRegistry::new()),
+            Arc::new(AgentSourceRegistry::new()),
             backend,
             Arc::new(NoopArtifactSink),
             std::env::temp_dir(),

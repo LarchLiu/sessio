@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
+use crate::agents::sources::types::SessionSource;
 use crate::memory::{MemoryStore, SessionTimeInfo, TurnFingerprint};
-use crate::providers::types::SessionSource;
 
 const MIN_SHARED_HASHES: usize = 3;
 const MAX_SKIP_A: usize = 2;

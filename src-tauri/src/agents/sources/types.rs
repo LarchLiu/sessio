@@ -177,7 +177,7 @@ pub enum PathEventKind {
 }
 
 #[derive(Debug, Clone)]
-pub enum ProviderTask {
+pub enum SourceIndexTask {
     ReindexSource(SessionSource),
     ReindexScope { agent: AgentKind, scope: String },
     MarkSourceUnavailable(SessionSource),

@@ -1,11 +1,11 @@
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-use crate::models::{Agent, SessionInfo, SessionMessage};
-use crate::providers::types::{
+use crate::agents::sources::types::{
     AgentKind, MessageContent, MessageEvent, MessageRole, Metadata, ProjectRef, SessionRecord,
     SessionSource, SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
 };
+use crate::models::{Agent, SessionInfo, SessionMessage};
 
 const TOOL_RESULT_PREVIEW_CHARS: usize = 1200;
 
@@ -265,10 +265,10 @@ fn scope_for_info(info: &SessionInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::{message_events_from_messages, project_key_for_path_or_name};
-    use crate::models::SessionMessage;
-    use crate::providers::types::{
+    use crate::agents::sources::types::{
         AgentKind, MessageContent, ProjectRef, SessionSource, SourceKind, SourceLocation,
     };
+    use crate::models::SessionMessage;
 
     #[test]
     fn converts_tool_messages_to_structured_content() {

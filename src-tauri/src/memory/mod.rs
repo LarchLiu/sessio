@@ -12,7 +12,7 @@ use crate::memory::artifacts::MemoryArtifactSink;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::providers::types::SourceLocation;
+use crate::agents::sources::types::SourceLocation;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

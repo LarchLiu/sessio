@@ -4,13 +4,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::agents::sources::registry::AgentSourceRegistry;
+use crate::agents::sources::types::{MessageEvent, MessageRole, SessionSource};
 use crate::memory::artifacts::{MarkdownArtifactSink, MemoryArtifactSink};
 use crate::memory::dedupe::{should_suppress_source, DedupeAction, DedupeMatch};
 use crate::memory::normalize::normalize_events;
 use crate::memory::records::{fingerprints_for_source, record_id_for_source, records_for_source};
 use crate::memory::{MemoryStore, RecordContinuation, TurnFingerprint};
-use crate::providers::registry::ProviderRegistry;
-use crate::providers::types::{MessageEvent, MessageRole, SessionSource};
 
 #[derive(Debug, Clone)]
 pub struct MemoryBuildOptions {
@@ -41,7 +41,7 @@ pub struct MemoryBuildSourceResult {
 }
 
 pub fn build_project_memory(
-    registry: &ProviderRegistry,
+    registry: &AgentSourceRegistry,
     store: &dyn MemoryStore,
     options: &MemoryBuildOptions,
 ) -> Result<MemoryBuildSummary> {
@@ -50,7 +50,7 @@ pub fn build_project_memory(
 }
 
 pub fn build_project_memory_with_backend(
-    registry: &ProviderRegistry,
+    registry: &AgentSourceRegistry,
     store: &dyn MemoryStore,
     backend: &str,
     artifact_sink: &dyn MemoryArtifactSink,
@@ -70,14 +70,14 @@ pub fn build_project_memory_with_backend(
     };
     let mut seen_sources = HashSet::new();
 
-    for provider in registry.providers() {
-        let sources = match provider.discover() {
+    for agent_source in registry.sources() {
+        let sources = match agent_source.discover() {
             Ok(sources) => sources,
             Err(e) => {
                 summary.sources_skipped += 1;
                 summary.errors.push(format!(
                     "discover {} sources failed: {e}",
-                    provider.display_name()
+                    agent_source.display_name()
                 ));
                 continue;
             }
@@ -96,7 +96,7 @@ pub fn build_project_memory_with_backend(
 
             summary.project_key = Some(project.project_key.clone());
             seen_sources.insert(source_key(&source));
-            let events = match provider.read_messages(&source) {
+            let events = match agent_source.read_messages(&source) {
                 Ok(events) => events,
                 Err(e) => {
                     summary.sources_skipped += 1;
@@ -217,7 +217,7 @@ pub fn build_project_memory_with_backend(
 }
 
 pub fn build_source_memory(
-    registry: &ProviderRegistry,
+    registry: &AgentSourceRegistry,
     store: &dyn MemoryStore,
     artifacts_root: &Path,
     source: &SessionSource,
@@ -227,7 +227,7 @@ pub fn build_source_memory(
 }
 
 pub fn build_source_memory_with_backend(
-    registry: &ProviderRegistry,
+    registry: &AgentSourceRegistry,
     store: &dyn MemoryStore,
     backend: &str,
     artifact_sink: &dyn MemoryArtifactSink,
@@ -241,8 +241,8 @@ pub fn build_source_memory_with_backend(
             dependent_source_paths: Vec::new(),
         });
     };
-    let Some(provider) = registry.provider_for_agent(&source.agent) else {
-        anyhow::bail!("no provider for agent {}", source.agent.as_str());
+    let Some(agent_source) = registry.source_for_agent(&source.agent) else {
+        anyhow::bail!("no source for agent {}", source.agent.as_str());
     };
 
     let existing = store.list_records_for_source(
@@ -252,7 +252,7 @@ pub fn build_source_memory_with_backend(
     )?;
     let mut marked_unavailable = 0;
 
-    let events = provider.read_messages(source)?;
+    let events = agent_source.read_messages(source)?;
     let events = normalize_events(events);
     if events.is_empty() {
         for record in existing {
@@ -646,13 +646,13 @@ fn normalize_path(path: impl AsRef<Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::build_source_memory;
-    use crate::memory::MemoryStore;
-    use crate::models::{Agent, SessionInfo};
-    use crate::providers::registry::{AgentProvider, ProviderRegistry};
-    use crate::providers::types::{
+    use crate::agents::sources::registry::{AgentSource, AgentSourceRegistry};
+    use crate::agents::sources::types::{
         AgentKind, MessageContent, MessageEvent, MessageRole, Metadata, PathEvent, ProjectRef,
         SessionRecord, SessionSource, SourceKind, SourceLocation, WatchRoot,
     };
+    use crate::memory::MemoryStore;
+    use crate::models::{Agent, SessionInfo};
     use crate::store::sqlite::SqliteStore;
     use crate::store::SessionStore;
     use anyhow::Result;
@@ -661,12 +661,12 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    struct FakeProvider {
+    struct FakeSource {
         source: SessionSource,
         events: Mutex<Vec<MessageEvent>>,
     }
 
-    impl FakeProvider {
+    impl FakeSource {
         fn new(source: SessionSource, events: Vec<MessageEvent>) -> Self {
             Self {
                 source,
@@ -675,7 +675,7 @@ mod tests {
         }
     }
 
-    impl AgentProvider for FakeProvider {
+    impl AgentSource for FakeSource {
         fn agent(&self) -> AgentKind {
             self.source.agent.clone()
         }
@@ -717,7 +717,7 @@ mod tests {
         fn classify_path_event(
             &self,
             _event: &PathEvent,
-        ) -> Option<crate::providers::types::ProviderTask> {
+        ) -> Option<crate::agents::sources::types::SourceIndexTask> {
             None
         }
     }
@@ -757,8 +757,8 @@ mod tests {
             metadata: Metadata::default(),
         };
 
-        let mut registry = ProviderRegistry::new();
-        registry.register(FakeProvider::new(source.clone(), vec![event]));
+        let mut registry = AgentSourceRegistry::new();
+        registry.register(FakeSource::new(source.clone(), vec![event]));
 
         let first = build_source_memory(&registry, &store, &artifacts_root, &source).unwrap();
         assert_eq!(first.records_written, 1);
@@ -781,8 +781,8 @@ mod tests {
         assert_eq!(fingerprints_before[0].role, "user");
         assert!(!fingerprints_before[0].canonical_hash.is_empty());
 
-        let mut empty_registry = ProviderRegistry::new();
-        empty_registry.register(FakeProvider::new(source.clone(), Vec::new()));
+        let mut empty_registry = AgentSourceRegistry::new();
+        empty_registry.register(FakeSource::new(source.clone(), Vec::new()));
 
         let second =
             build_source_memory(&empty_registry, &store, &artifacts_root, &source).unwrap();
@@ -833,8 +833,8 @@ mod tests {
             metadata: Metadata::default(),
         };
 
-        let mut registry = ProviderRegistry::new();
-        registry.register(FakeProvider::new(
+        let mut registry = AgentSourceRegistry::new();
+        registry.register(FakeSource::new(
             source.clone(),
             vec![
                 make_event(0, MessageRole::User, "first question"),
@@ -853,8 +853,8 @@ mod tests {
         assert_eq!(first[2].turn_index, 2);
         let initial_hash_for_turn_2 = first[2].canonical_hash.clone();
 
-        let mut shrunk_registry = ProviderRegistry::new();
-        shrunk_registry.register(FakeProvider::new(
+        let mut shrunk_registry = AgentSourceRegistry::new();
+        shrunk_registry.register(FakeSource::new(
             source.clone(),
             vec![
                 make_event(0, MessageRole::User, "first question"),
@@ -952,8 +952,8 @@ mod tests {
             .enumerate()
             .map(|(idx, (role, text))| make_event(&existing_source, idx, *role, text))
             .collect::<Vec<_>>();
-        let mut existing_registry = ProviderRegistry::new();
-        existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
+        let mut existing_registry = AgentSourceRegistry::new();
+        existing_registry.register(FakeSource::new(existing_source.clone(), existing_events));
         build_source_memory(
             &existing_registry,
             &store,
@@ -979,8 +979,8 @@ mod tests {
             MessageRole::Assistant,
             "I will generate the continuation record from suffix events only",
         ));
-        let mut continuation_registry = ProviderRegistry::new();
-        continuation_registry.register(FakeProvider::new(
+        let mut continuation_registry = AgentSourceRegistry::new();
+        continuation_registry.register(FakeSource::new(
             continuation_source.clone(),
             continuation_events,
         ));
@@ -1095,8 +1095,8 @@ mod tests {
             .enumerate()
             .map(|(idx, (role, text))| make_event(&existing_source, idx, *role, text.clone()))
             .collect::<Vec<_>>();
-        let mut existing_registry = ProviderRegistry::new();
-        existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
+        let mut existing_registry = AgentSourceRegistry::new();
+        existing_registry.register(FakeSource::new(existing_source.clone(), existing_events));
         build_source_memory(
             &existing_registry,
             &store,
@@ -1123,8 +1123,8 @@ mod tests {
             "new branch answer".to_string(),
         ));
 
-        let mut continuation_registry = ProviderRegistry::new();
-        continuation_registry.register(FakeProvider::new(
+        let mut continuation_registry = AgentSourceRegistry::new();
+        continuation_registry.register(FakeSource::new(
             continuation_source.clone(),
             continuation_events,
         ));
@@ -1221,8 +1221,8 @@ mod tests {
             MessageRole::Assistant,
             "later unique answer".to_string(),
         ));
-        let mut later_registry = ProviderRegistry::new();
-        later_registry.register(FakeProvider::new(later_source.clone(), later_events));
+        let mut later_registry = AgentSourceRegistry::new();
+        later_registry.register(FakeSource::new(later_source.clone(), later_events));
         build_source_memory(&later_registry, &store, &artifacts_root, &later_source).unwrap();
 
         let mut earlier_events = replay
@@ -1242,8 +1242,8 @@ mod tests {
             MessageRole::Assistant,
             "earlier unique answer".to_string(),
         ));
-        let mut earlier_registry = ProviderRegistry::new();
-        earlier_registry.register(FakeProvider::new(earlier_source.clone(), earlier_events));
+        let mut earlier_registry = AgentSourceRegistry::new();
+        earlier_registry.register(FakeSource::new(earlier_source.clone(), earlier_events));
         build_source_memory(&earlier_registry, &store, &artifacts_root, &earlier_source).unwrap();
 
         let earlier_record_path = artifacts_root
@@ -1330,8 +1330,8 @@ mod tests {
                 "shared next answer",
             ),
         ];
-        let mut existing_registry = ProviderRegistry::new();
-        existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
+        let mut existing_registry = AgentSourceRegistry::new();
+        existing_registry.register(FakeSource::new(existing_source.clone(), existing_events));
         build_source_memory(
             &existing_registry,
             &store,
@@ -1390,8 +1390,8 @@ mod tests {
                 "new answer after user request",
             ),
         ];
-        let mut continuation_registry = ProviderRegistry::new();
-        continuation_registry.register(FakeProvider::new(
+        let mut continuation_registry = AgentSourceRegistry::new();
+        continuation_registry.register(FakeSource::new(
             continuation_source.clone(),
             continuation_events,
         ));
@@ -1488,8 +1488,8 @@ mod tests {
             .enumerate()
             .map(|(idx, (role, text))| make_event(&existing_source, idx, *role, text))
             .collect::<Vec<_>>();
-        let mut existing_registry = ProviderRegistry::new();
-        existing_registry.register(FakeProvider::new(existing_source.clone(), existing_events));
+        let mut existing_registry = AgentSourceRegistry::new();
+        existing_registry.register(FakeSource::new(existing_source.clone(), existing_events));
         build_source_memory(
             &existing_registry,
             &store,
@@ -1510,8 +1510,8 @@ mod tests {
             "tail-only assistant message with no following user turn",
         ));
 
-        let mut continuation_registry = ProviderRegistry::new();
-        continuation_registry.register(FakeProvider::new(
+        let mut continuation_registry = AgentSourceRegistry::new();
+        continuation_registry.register(FakeSource::new(
             continuation_source.clone(),
             continuation_events,
         ));
@@ -1658,8 +1658,8 @@ mod tests {
             .enumerate()
             .map(|(idx, (role, text))| make_event(&earlier_source, idx, *role, text))
             .collect::<Vec<_>>();
-        let mut earlier_registry = ProviderRegistry::new();
-        earlier_registry.register(FakeProvider::new(earlier_source.clone(), earlier_events));
+        let mut earlier_registry = AgentSourceRegistry::new();
+        earlier_registry.register(FakeSource::new(earlier_source.clone(), earlier_events));
         build_source_memory(&earlier_registry, &store, &artifacts_root, &earlier_source).unwrap();
 
         let mut later_events = replay
@@ -1679,8 +1679,8 @@ mod tests {
             MessageRole::Assistant,
             "later unique answer that extends the conversation further",
         ));
-        let mut later_registry = ProviderRegistry::new();
-        later_registry.register(FakeProvider::new(later_source.clone(), later_events));
+        let mut later_registry = AgentSourceRegistry::new();
+        later_registry.register(FakeSource::new(later_source.clone(), later_events));
         build_source_memory(&later_registry, &store, &artifacts_root, &later_source).unwrap();
 
         let later_record_id = format!("sessio-codex-{}", later_session_id);
@@ -1774,8 +1774,8 @@ mod tests {
             .enumerate()
             .map(|(idx, (role, text))| make_event(&base_source, idx, *role, text))
             .collect::<Vec<_>>();
-        let mut base_registry = ProviderRegistry::new();
-        base_registry.register(FakeProvider::new(base_source.clone(), base_events.clone()));
+        let mut base_registry = AgentSourceRegistry::new();
+        base_registry.register(FakeSource::new(base_source.clone(), base_events.clone()));
         build_source_memory(&base_registry, &store, &artifacts_root, &base_source).unwrap();
 
         let mut candidate_events = replay
@@ -1795,11 +1795,8 @@ mod tests {
             MessageRole::Assistant,
             "candidate unique answer is long enough",
         ));
-        let mut candidate_registry = ProviderRegistry::new();
-        candidate_registry.register(FakeProvider::new(
-            candidate_source.clone(),
-            candidate_events,
-        ));
+        let mut candidate_registry = AgentSourceRegistry::new();
+        candidate_registry.register(FakeSource::new(candidate_source.clone(), candidate_events));
         build_source_memory(
             &candidate_registry,
             &store,
@@ -1831,9 +1828,8 @@ mod tests {
             MessageRole::Assistant,
             "base extension answer",
         ));
-        let mut extended_base_registry = ProviderRegistry::new();
-        extended_base_registry
-            .register(FakeProvider::new(base_source.clone(), extended_base_events));
+        let mut extended_base_registry = AgentSourceRegistry::new();
+        extended_base_registry.register(FakeSource::new(base_source.clone(), extended_base_events));
         build_source_memory(
             &extended_base_registry,
             &store,
@@ -1927,8 +1923,8 @@ mod tests {
             .enumerate()
             .map(|(idx, (role, text))| make_event(&a_source, idx, *role, text))
             .collect::<Vec<_>>();
-        let mut a_registry = ProviderRegistry::new();
-        a_registry.register(FakeProvider::new(a_source.clone(), a_events.clone()));
+        let mut a_registry = AgentSourceRegistry::new();
+        a_registry.register(FakeSource::new(a_source.clone(), a_events.clone()));
         build_source_memory(&a_registry, &store, &artifacts_root, &a_source).unwrap();
 
         let mut b_events = a_turns
@@ -1960,8 +1956,8 @@ mod tests {
             MessageRole::Assistant,
             "chain b second unique answer that is long enough",
         ));
-        let mut b_registry = ProviderRegistry::new();
-        b_registry.register(FakeProvider::new(b_source.clone(), b_events.clone()));
+        let mut b_registry = AgentSourceRegistry::new();
+        b_registry.register(FakeSource::new(b_source.clone(), b_events.clone()));
         build_source_memory(&b_registry, &store, &artifacts_root, &b_source).unwrap();
 
         let mut c_events = b_events.clone();
@@ -1981,8 +1977,8 @@ mod tests {
             MessageRole::Assistant,
             "chain c unique tail answer that is long enough",
         ));
-        let mut c_registry = ProviderRegistry::new();
-        c_registry.register(FakeProvider::new(c_source.clone(), c_events));
+        let mut c_registry = AgentSourceRegistry::new();
+        c_registry.register(FakeSource::new(c_source.clone(), c_events));
         build_source_memory(&c_registry, &store, &artifacts_root, &c_source).unwrap();
 
         let b_record_id = "sessio-fake-002-b";
@@ -2014,8 +2010,8 @@ mod tests {
             MessageRole::Assistant,
             "chain a extension answer",
         ));
-        let mut extended_a_registry = ProviderRegistry::new();
-        extended_a_registry.register(FakeProvider::new(a_source.clone(), extended_a_events));
+        let mut extended_a_registry = AgentSourceRegistry::new();
+        extended_a_registry.register(FakeSource::new(a_source.clone(), extended_a_events));
         let a_result =
             build_source_memory(&extended_a_registry, &store, &artifacts_root, &a_source).unwrap();
         let b_path = PathBuf::from(&b_source.file_path);
@@ -2038,8 +2034,8 @@ mod tests {
         );
 
         // Simulate the indexer requeueing B. Building B must now surface C.
-        let mut b_registry_again = ProviderRegistry::new();
-        b_registry_again.register(FakeProvider::new(b_source.clone(), b_events));
+        let mut b_registry_again = AgentSourceRegistry::new();
+        b_registry_again.register(FakeSource::new(b_source.clone(), b_events));
         let b_result =
             build_source_memory(&b_registry_again, &store, &artifacts_root, &b_source).unwrap();
         let c_path = PathBuf::from(&c_source.file_path);

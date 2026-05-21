@@ -6,7 +6,7 @@
 - [x] Prefer small vertical slices that can be tested from the CLI.
 - [x] Keep Sessio SQLite as the source-of-truth metadata index.
 - [x] Treat qmd as a replaceable search backend over generated memory records.
-- [x] Keep provider-specific parsing behind a common provider/data model boundary.
+- [x] Keep source-specific parsing behind a common agent source/data model boundary.
 
 ## Phase 1: CLI Read APIs
 
@@ -19,19 +19,19 @@
 - [x] Allow `sessions messages` to resolve by `--file-path` when supplied.
 - [x] Add smoke tests or documented verification commands for CLI read APIs.
 
-## Phase 2: Provider/Data Layer Abstraction
+## Phase 2: Agent Source/Data Layer Abstraction
 
-- [x] Introduce unified provider-facing types: `AgentKind`, `ProjectRef`, `SessionSource`, `SourceLocation`.
+- [x] Introduce unified source-facing types: `AgentKind`, `ProjectRef`, `SessionSource`, `SourceLocation`.
 - [x] Introduce unified message event types: `MessageEvent`, `MessageRole`, `MessageContent`.
-- [x] Introduce `AgentProvider` trait.
-- [x] Introduce `ProviderRegistry`.
-- [x] Adapt Codex provider to the unified interface.
+- [x] Introduce `AgentSource` trait.
+- [x] Introduce `AgentSourceRegistry`.
+- [x] Adapt Codex source to the unified interface.
 - [x] Make Codex forked rollout session ids use the first `session_meta.payload.id` instead of replayed metadata from the parent session.
-- [x] Adapt Claude provider to the unified interface.
-- [x] Adapt Gemini provider to the unified interface.
+- [x] Adapt Claude source to the unified interface.
+- [x] Adapt Gemini source to the unified interface.
 - [x] Keep current UI APIs backward compatible while the new abstraction lands.
-- [x] Rename the abstraction from reader to provider.
-- [x] Move provider-owned parsers under `src-tauri/src/providers/<agent>/parser.rs`.
+- [x] Rename the abstraction from reader to source.
+- [x] Move source-owned parsers under `src-tauri/src/agents/sources/<agent>/parser.rs`.
 
 ## Phase 3: Memory Card Pipeline
 
@@ -112,13 +112,13 @@
 ## Completed Verification Log
 
 - [x] `cargo check` passed in `src-tauri`.
-- [x] `cargo check` passed after adding provider data model and registry.
-- [x] `cargo check` passed after adding built-in provider adapters.
-- [x] `cargo check` passed after renaming reader abstraction to provider abstraction.
-- [x] `cargo check` passed after moving parsers under `providers/`.
-- [x] `cargo check --example dump` passed after provider directory migration.
-- [x] `pnpm run typecheck` passed after provider directory migration.
-- [x] CLI smoke test passed after provider directory migration.
+- [x] `cargo check` passed after adding source data model and registry.
+- [x] `cargo check` passed after adding built-in source adapters.
+- [x] `cargo check` passed after renaming reader abstraction to source abstraction.
+- [x] `cargo check` passed after moving parsers under `agents/sources/`.
+- [x] `cargo check --example dump` passed after source directory migration.
+- [x] `pnpm run typecheck` passed after source directory migration.
+- [x] CLI smoke test passed after source directory migration.
 - [x] `cargo check` passed after adding memory schema and `MemoryStore`.
 - [x] `cargo test memory::normalize` passed for cross replay stripping.
 - [x] `cargo check` passed after adding memory normalization.
@@ -164,7 +164,7 @@
 - [x] `cargo check` passed after caching Gemini `projects.json` mtime in polling so idle polling no longer flips the indexing indicator every 10s.
 - [x] `cargo check` passed after gating polling on `indexer.status().indexing` and draining post-`FullRebuild` per-file reindex tasks from the indexer channel.
 - [x] `cargo check` passed after short-circuiting empty-DB polling ticks to `FullRebuild`.
-- [x] `cargo test` (27 tests) passed after routing watcher events through `ProviderRegistry::classify_path_event` and replacing byte-slice `short_id`/`short_hash` in cards with `chars().take(12)`.
+- [x] `cargo test` (27 tests) passed after routing watcher events through `AgentSourceRegistry::classify_path_event` and replacing byte-slice `short_id`/`short_hash` in cards with `chars().take(12)`.
 - [x] `cargo test` (32 tests) passed after Codex/Claude parsers started returning per-message line/byte ranges, cards aggregated those into `memory_sources`, and `sessio memory resolve --include-source-excerpt` started returning raw JSONL excerpts.
 - [x] `cargo test` (38 tests) passed after adding continuation dedupe, user-block trim boundaries, `record_continuations`, and human-readable continuation summaries in CLI resolve/search output.
 - [x] `cargo test` (41 tests) passed after tightening codex dedupe direction (forked_from_id-then-time fallback), persisting `forked_from_id` in the sessions table, requiring real `text_len` fingerprints, invalidating dependent `record_continuations` on base reindex, and extracting the dedupe plan helper.
@@ -177,8 +177,8 @@
 - [x] Renamed the Cargo package/bin target to lowercase `sessio` and removed `default-run`.
 - [x] `cargo run --bin sessio -- sessions list --project /Users/alex/Work/cloudgeek/sessio --json` returned valid JSON session data.
 - [x] `cargo run --bin sessio -- sessions messages --agent nope --json` returned structured JSON error output.
-- [x] `pnpm run typecheck` passed after CLI and provider abstraction changes.
-- [x] `cargo run --bin sessio -- sessions list --project /Users/alex/Work/cloudgeek/sessio --json` still worked after provider adapters were added.
+- [x] `pnpm run typecheck` passed after CLI and source abstraction changes.
+- [x] `cargo run --bin sessio -- sessions list --project /Users/alex/Work/cloudgeek/sessio --json` still worked after source adapters were added.
 
 ## Phase 7 v2 Roadmap (deferred)
 
@@ -264,7 +264,7 @@ Goal: close the gaps between "the abstraction was introduced" and "every call si
 ### Phase 8H1 — Make `MemoryService` the only orchestration path
 
 - [x] Replace `MemoryService::sync_backend_job_oneshot` with a real shared queue. The CLI must enqueue onto the same `MemoryBackendSyncJob` channel the indexer drains, then block on a oneshot signal until the relevant job for `project_key` completes (or fails with a structured `backendError`). Today's `thread::spawn` + `mpsc::channel` + immediate `recv()` is the "parallel synchronous pipeline" the design doc forbids.
-- [x] Cache the `Arc<MemoryService>` once at indexer/CLI startup and clone it into workers. Stop calling `MemoryService::new(...)` per source/per job (currently re-reads config and rebuilds `ProviderRegistry` + `QmdBackend` + `MarkdownArtifactSink` on every `build_source_memory_for_indexer` / `build_project_memory_for_indexer` / `sync_qmd_project`).
+- [x] Cache the `Arc<MemoryService>` once at indexer/CLI startup and clone it into workers. Stop calling `MemoryService::new(...)` per source/per job (currently re-reads config and rebuilds `AgentSourceRegistry` + `QmdBackend` + `MarkdownArtifactSink` on every `build_source_memory_for_indexer` / `build_project_memory_for_indexer` / `sync_qmd_project`).
 - [x] Route `sessio memory status` and `sessio memory sync` through `MemoryService` instead of `QmdBackend::new(...)` and `qmd::qmd_status(...)` directly. Phase 8E said CLI must depend on `MemoryService`.
 - [x] Move `map_backend_hits_to_memory` and the resolve `(card + sources + continuation + optional excerpt)` assembly out of `cli.rs` and into `MemoryService::search_full` / `MemoryService::resolve_full`. CLI should be a thin printer, not an orchestrator.
 - [x] Add a `MemoryService` unit test that exercises build → enqueue → sync via an in-memory `MemoryIndexBackend` mock so this seam stays intact when a second backend lands.

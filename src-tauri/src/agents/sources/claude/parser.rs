@@ -4,13 +4,13 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+use crate::agents::sources::shared::jsonl_scan;
+use crate::agents::sources::system_time_to_millis;
+use crate::agents::sources::types::SourceLocation;
 use crate::models::{
     is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
     SubagentInfo,
 };
-use crate::providers::shared::jsonl_scan;
-use crate::providers::system_time_to_millis;
-use crate::providers::types::SourceLocation;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let root = match root_dir()? {

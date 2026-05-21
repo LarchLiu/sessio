@@ -4,12 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::agents::sources::types::SourceLocation;
 use crate::memory::{
     MemoryArtifact, MemoryJob, MemoryRecord, MemoryRecordKind, MemorySource, MemoryStore,
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{Agent, SessionInfo, SubagentInfo};
-use crate::providers::types::SourceLocation;
 use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
 
 pub struct SqliteStore {

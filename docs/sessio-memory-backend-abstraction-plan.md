@@ -30,7 +30,7 @@ The main issue is not that qmd exists. The issue is that the build pipeline's ou
 Split memory into four logical layers:
 
 ```text
-providers
+agents/sources
   parse agent-specific sources into SessionSource + MessageEvent
 
 memory-core
@@ -57,7 +57,7 @@ CLI/UI/indexer
           -> qmd/sqlite/vector/remote implementations
 ```
 
-No backend should depend on provider internals. No provider should know about memory backends.
+No backend should depend on source internals. No source should know about memory backends.
 
 ## Terminology
 
@@ -358,7 +358,7 @@ SESSIO_QMD_ARTIFACTS_ROOT=/tmp/sessio-qmd-test
 
 `SESSIO_MEMORY_BACKEND` and a CLI `--backend` flag are intentionally not exposed yet — qmd is the only valid value, so adding the switch would be noise. The internal `MemoryService` resolves the backend by reading `[memory].backend` from config, but only `"qmd"` is accepted; any other value is a config error.
 
-Backend configuration must not leak into provider parsing or memory record generation.
+Backend configuration must not leak into source parsing or memory record generation.
 
 ## CLI Contract
 
@@ -377,7 +377,7 @@ Response shape stays backend-neutral:
 
 ```json
 {
-  "query": "provider abstraction",
+  "query": "source abstraction",
   "projectKey": "-Users-alex-Work-cloudgeek-sessio",
   "backend": "qmd",
   "backendError": null,
@@ -499,7 +499,7 @@ Regression checks:
 
 ## Non-Goals
 
-- Do not redesign provider parsing as part of this refactor.
+- Do not redesign source parsing as part of this refactor.
 - Do not change record generation quality in the same change set.
 - Do not remove qmd diagnostic commands.
 - Do not add a second backend (SQLite FTS, vector, remote) in this iteration.

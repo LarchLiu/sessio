@@ -3,19 +3,19 @@ pub mod parser;
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use crate::models::Agent;
-use crate::providers::registry::AgentProvider;
-use crate::providers::shared::convert::{
+use crate::agents::sources::registry::AgentSource;
+use crate::agents::sources::shared::convert::{
     agent_kind, message_events_from_messages, session_record_from_info, session_source_from_info,
 };
-use crate::providers::types::{
-    AgentKind, MessageEvent, PathEvent, ProviderTask, SessionRecord, SessionSource, WatchPurpose,
-    WatchRoot,
+use crate::agents::sources::types::{
+    AgentKind, MessageEvent, PathEvent, SessionRecord, SessionSource, SourceIndexTask,
+    WatchPurpose, WatchRoot,
 };
+use crate::models::Agent;
 
-pub struct GeminiProvider;
+pub struct GeminiSource;
 
-impl AgentProvider for GeminiProvider {
+impl AgentSource for GeminiSource {
     fn agent(&self) -> AgentKind {
         agent_kind(Agent::Gemini)
     }
@@ -69,7 +69,7 @@ impl AgentProvider for GeminiProvider {
         Ok(message_events_from_messages(source, messages))
     }
 
-    fn classify_path_event(&self, event: &PathEvent) -> Option<ProviderTask> {
+    fn classify_path_event(&self, event: &PathEvent) -> Option<SourceIndexTask> {
         let (tmp_dir, projects_json) = parser::paths().ok()?;
         let file_name = event
             .path
@@ -82,7 +82,7 @@ impl AgentProvider for GeminiProvider {
         // and exact path keeps this stable across Gemini versions that move
         // the file around.
         if event.path == projects_json || file_name == "projects.json" {
-            return Some(ProviderTask::RefreshProjectMappings {
+            return Some(SourceIndexTask::RefreshProjectMappings {
                 agent: self.agent(),
             });
         }
@@ -91,7 +91,7 @@ impl AgentProvider for GeminiProvider {
             return None;
         }
 
-        Some(ProviderTask::ReindexScope {
+        Some(SourceIndexTask::ReindexScope {
             agent: self.agent(),
             scope: event.path.to_string_lossy().to_string(),
         })

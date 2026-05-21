@@ -37,7 +37,7 @@ This is a better fit for Sessio because the runtime can preserve agent-native co
 
 ## Architecture
 
-Add an `agent-runtime` layer beside the existing provider/indexer/memory layers:
+Add an `agent-runtime` layer beside the existing agents/sources, indexer, and memory layers:
 
 ```text
 Sessio UI
@@ -49,14 +49,14 @@ agent-runtime
       ↓
 Codex / Claude / Gemini
 
-providers
+agents/sources
   parse historical session files
 
 indexer + memory
   maintain searchable project history
 ```
 
-The current provider layer should not become responsible for live runs. Providers parse historical sources; runtimes drive active agent processes.
+The current source layer should not become responsible for live runs. Agent sources parse historical sessions; runtimes drive active agent processes.
 
 ### Runtime Interface
 
@@ -171,7 +171,7 @@ Persist only runtime metadata needed for recovery and linking:
 - `status`
 - `source_session_id` when created from an indexed historical session
 
-Do not duplicate full live transcripts into Sessio's runtime tables. Historical truth should still come from agent session files and the existing provider/indexer pipeline. Runtime metadata exists to reconnect UI state to agent-owned sessions.
+Do not duplicate full live transcripts into Sessio's runtime tables. Historical truth should still come from agent session files and the existing agents/sources and indexer pipeline. Runtime metadata exists to reconnect UI state to agent-owned sessions.
 
 ## Implementation Phases
 
@@ -197,7 +197,7 @@ Do not duplicate full live transcripts into Sessio's runtime tables. Historical 
 
 - Connect cross prompt generation to `start_agent_session`.
 - Allow memory search results to be injected into new sessions.
-- Link runtime sessions back to indexed session records after providers observe the new files.
+- Link runtime sessions back to indexed session records after agent sources observe the new files.
 
 ## Testing
 

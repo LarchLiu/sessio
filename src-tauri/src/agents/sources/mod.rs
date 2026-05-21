@@ -19,7 +19,7 @@ pub fn list_all() -> Vec<SessionInfo> {
     ] {
         match f() {
             Ok(mut v) => out.append(&mut v),
-            Err(e) => log::warn!("provider parser failed: {e}"),
+            Err(e) => log::warn!("source parser failed: {e}"),
         }
     }
     out
@@ -31,10 +31,10 @@ pub fn system_time_to_millis(t: SystemTime) -> Option<i64> {
         .map(|d| d.as_millis() as i64)
 }
 
-pub fn builtin_providers() -> registry::ProviderRegistry {
-    let mut registry = registry::ProviderRegistry::new();
-    registry.register(codex::CodexProvider);
-    registry.register(claude::ClaudeProvider);
-    registry.register(gemini::GeminiProvider);
+pub fn builtin_agent_sources() -> registry::AgentSourceRegistry {
+    let mut registry = registry::AgentSourceRegistry::new();
+    registry.register(codex::CodexSource);
+    registry.register(claude::ClaudeSource);
+    registry.register(gemini::GeminiSource);
     registry
 }

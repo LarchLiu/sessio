@@ -1,12 +1,11 @@
+use crate::agents::sources::shared::convert::project_key_for_path_or_name;
+use crate::config;
 use crate::memory::build::MemoryBuildOptions;
 use crate::memory::qmd;
 use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
-use crate::config;
 use crate::models::Agent;
-use crate::providers;
-use crate::providers::shared::convert::project_key_for_path_or_name;
 use crate::store::sqlite::SqliteStore;
 use crate::store::SessionStore;
 use anyhow::{bail, Context, Result};
@@ -662,9 +661,9 @@ fn run_sessions(cmd: SessionsCommand) -> Result<()> {
             };
             let path = PathBuf::from(&file_path);
             let messages = match agent {
-                Agent::Codex => providers::codex::parser::read_messages(&path)?,
-                Agent::Claude => providers::claude::parser::read_messages(&path)?,
-                Agent::Gemini => providers::gemini::parser::read_messages(
+                Agent::Codex => crate::agents::sources::codex::parser::read_messages(&path)?,
+                Agent::Claude => crate::agents::sources::claude::parser::read_messages(&path)?,
+                Agent::Gemini => crate::agents::sources::gemini::parser::read_messages(
                     &path,
                     session_id
                         .as_deref()
@@ -685,7 +684,7 @@ fn run_sessions(cmd: SessionsCommand) -> Result<()> {
 
 fn resolve_session_file(agent: Agent, session_id: Option<&str>) -> Result<String> {
     let session_id = session_id.context("missing --session-id or --file-path")?;
-    providers::list_all()
+    crate::agents::sources::list_all()
         .into_iter()
         .find(|s| s.agent == agent && s.id == session_id)
         .map(|s| s.file_path)
@@ -1216,7 +1215,10 @@ fn build_cli_service(db_path: Option<&str>) -> Result<MemoryService> {
     let store = Arc::new(open_store(db_path)?);
     store.init()?;
     let memory_store: Arc<dyn MemoryStore> = store;
-    MemoryService::new(memory_store, Arc::new(providers::builtin_providers()))
+    MemoryService::new(
+        memory_store,
+        Arc::new(crate::agents::sources::builtin_agent_sources()),
+    )
 }
 
 fn load_sessions_from_store_or_scan(
@@ -1231,11 +1233,11 @@ fn load_sessions_from_store_or_scan(
                         "sessio: session index is empty, falling back to filesystem scan. \
                      Run the Sessio desktop app (or rebuild the index) for faster lookups."
                     );
-                    Ok(providers::list_all())
+                    Ok(crate::agents::sources::list_all())
                 }
                 Err(e) => {
                     eprintln!("sessio: failed to read session index ({e}), falling back to filesystem scan.");
-                    Ok(providers::list_all())
+                    Ok(crate::agents::sources::list_all())
                 }
             }
         }
@@ -1243,7 +1245,7 @@ fn load_sessions_from_store_or_scan(
             eprintln!(
                 "sessio: failed to open session index ({e}), falling back to filesystem scan."
             );
-            Ok(providers::list_all())
+            Ok(crate::agents::sources::list_all())
         }
     }
 }

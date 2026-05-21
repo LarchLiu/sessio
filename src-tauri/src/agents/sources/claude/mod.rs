@@ -3,19 +3,19 @@ pub mod parser;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::models::Agent;
-use crate::providers::registry::AgentProvider;
-use crate::providers::shared::convert::{
+use crate::agents::sources::registry::AgentSource;
+use crate::agents::sources::shared::convert::{
     agent_kind, message_events_from_messages, session_record_from_info, session_source_from_info,
 };
-use crate::providers::types::{
-    AgentKind, MessageEvent, PathEvent, PathEventKind, ProviderTask, SessionRecord, SessionSource,
-    SourceKind, WatchPurpose, WatchRoot,
+use crate::agents::sources::types::{
+    AgentKind, MessageEvent, PathEvent, PathEventKind, SessionRecord, SessionSource,
+    SourceIndexTask, SourceKind, WatchPurpose, WatchRoot,
 };
+use crate::models::Agent;
 
-pub struct ClaudeProvider;
+pub struct ClaudeSource;
 
-impl AgentProvider for ClaudeProvider {
+impl AgentSource for ClaudeSource {
     fn agent(&self) -> AgentKind {
         agent_kind(Agent::Claude)
     }
@@ -55,13 +55,17 @@ impl AgentProvider for ClaudeProvider {
         Ok(message_events_from_messages(source, messages))
     }
 
-    fn classify_path_event(&self, event: &PathEvent) -> Option<ProviderTask> {
+    fn classify_path_event(&self, event: &PathEvent) -> Option<SourceIndexTask> {
         let root = parser::root_dir().ok().flatten()?;
         classify_claude_event(&root, self.agent(), event)
     }
 }
 
-fn classify_claude_event(root: &Path, agent: AgentKind, event: &PathEvent) -> Option<ProviderTask> {
+fn classify_claude_event(
+    root: &Path,
+    agent: AgentKind,
+    event: &PathEvent,
+) -> Option<SourceIndexTask> {
     let rel = event.path.strip_prefix(root).ok()?;
     let file_name = event
         .path
@@ -73,7 +77,7 @@ fn classify_claude_event(root: &Path, agent: AgentKind, event: &PathEvent) -> Op
     // archived rows that no jsonl on disk would surface.
     if file_name == "sessions-index.json" {
         let project_dir = event.path.parent()?;
-        return Some(ProviderTask::ReindexScope {
+        return Some(SourceIndexTask::ReindexScope {
             agent,
             scope: project_dir.to_string_lossy().to_string(),
         });
@@ -116,16 +120,16 @@ fn classify_claude_event(root: &Path, agent: AgentKind, event: &PathEvent) -> Op
     };
 
     if matches!(event.kind, PathEventKind::Remove) {
-        Some(ProviderTask::MarkSourceUnavailable(source))
+        Some(SourceIndexTask::MarkSourceUnavailable(source))
     } else {
-        Some(ProviderTask::ReindexSource(source))
+        Some(SourceIndexTask::ReindexSource(source))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{classify_claude_event, AgentKind};
-    use crate::providers::types::{PathEvent, PathEventKind, ProviderTask, SourceKind};
+    use crate::agents::sources::types::{PathEvent, PathEventKind, SourceIndexTask, SourceKind};
     use std::path::{Path, PathBuf};
 
     fn evt(path: impl Into<PathBuf>, kind: PathEventKind) -> PathEvent {
@@ -148,7 +152,7 @@ mod tests {
         )
         .expect("emits a task");
         match task {
-            ProviderTask::ReindexScope { agent, scope } => {
+            SourceIndexTask::ReindexScope { agent, scope } => {
                 assert_eq!(agent.as_str(), "claude");
                 assert_eq!(scope, "/tmp/claude/projects/proj-A");
             }
@@ -169,7 +173,7 @@ mod tests {
         )
         .expect("emits a task");
         match task {
-            ProviderTask::ReindexSource(source) => {
+            SourceIndexTask::ReindexSource(source) => {
                 assert_eq!(source.source_kind, SourceKind::MainSession);
                 assert_eq!(source.scope, "/tmp/claude/projects/proj-A");
                 assert_eq!(
@@ -194,7 +198,7 @@ mod tests {
         )
         .expect("emits a task");
         match task {
-            ProviderTask::ReindexSource(source) => {
+            SourceIndexTask::ReindexSource(source) => {
                 assert_eq!(source.source_kind, SourceKind::Subagent);
                 assert_eq!(source.scope, "/tmp/claude/projects/proj-A");
             }
@@ -215,7 +219,7 @@ mod tests {
         )
         .expect("emits a task");
         match main {
-            ProviderTask::MarkSourceUnavailable(source) => {
+            SourceIndexTask::MarkSourceUnavailable(source) => {
                 assert_eq!(source.source_kind, SourceKind::MainSession);
             }
             other => panic!("expected MarkSourceUnavailable, got {other:?}"),
@@ -231,7 +235,7 @@ mod tests {
         )
         .expect("emits a task");
         match sub {
-            ProviderTask::MarkSourceUnavailable(source) => {
+            SourceIndexTask::MarkSourceUnavailable(source) => {
                 assert_eq!(source.source_kind, SourceKind::Subagent);
             }
             other => panic!("expected MarkSourceUnavailable, got {other:?}"),

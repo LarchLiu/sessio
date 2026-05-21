@@ -1,10 +1,10 @@
+pub mod agents;
 pub mod cli;
 pub mod config;
 pub mod indexer;
 pub mod memory;
 pub mod models;
 pub mod polling;
-pub mod providers;
 pub mod store;
 pub mod watch;
 
@@ -56,11 +56,10 @@ fn remove_sessions_by_scope(
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<(), String> {
     let sessions = store.list_sessions().map_err(|e| e.to_string())?;
-    for session in sessions.iter().filter(|s| {
-        s.available
-            && !is_subagent_only(s)
-            && matches_scope(&scope, s)
-    }) {
+    for session in sessions
+        .iter()
+        .filter(|s| s.available && !is_subagent_only(s) && matches_scope(&scope, s))
+    {
         remove_session_files_inner(session.clone()).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -89,14 +88,14 @@ fn remove_session_files_inner(session: SessionInfo) -> anyhow::Result<()> {
     let removed_root = home.join(".sessio").join("removed-sessions");
 
     if session.agent == Agent::Gemini {
-        if providers::gemini::parser::remove_session_from_logs(
+        if crate::agents::sources::gemini::parser::remove_session_from_logs(
             Path::new(&session.file_path),
             &session.id,
             &home,
             &removed_root,
         )? {
             for subagent in &session.subagents {
-                let _ = providers::gemini::parser::remove_session_from_logs(
+                let _ = crate::agents::sources::gemini::parser::remove_session_from_logs(
                     Path::new(&subagent.file_path),
                     &subagent.id,
                     &home,
@@ -231,7 +230,7 @@ fn get_memory_backend_status(
 ) -> Result<MemoryBackendStatus, String> {
     let service = MemoryService::new(
         store.inner().clone(),
-        Arc::new(providers::builtin_providers()),
+        Arc::new(crate::agents::sources::builtin_agent_sources()),
     )
     .map_err(|e| e.to_string())?;
     Ok(service.backend_status())
@@ -263,8 +262,7 @@ fn search_project_memory_inner(
         query_project(&options, &memory_project_key, &query)
     } else {
         search_project(&options, &memory_project_key, &query)
-    }
-    ?;
+    }?;
     Ok(project_memory_results(&result.raw))
 }
 
@@ -277,7 +275,10 @@ fn resolve_memory_project_key(
             return Ok(project_filter_key.to_string());
         }
     }
-    let slug = providers::shared::convert::project_key_for_path_or_name(Some(project_filter_key), None);
+    let slug = crate::agents::sources::shared::convert::project_key_for_path_or_name(
+        Some(project_filter_key),
+        None,
+    );
     if let Some(store) = store {
         if !store.list_project_records(&slug)?.is_empty() {
             return Ok(slug);
@@ -292,7 +293,10 @@ fn project_memory_results(raw: &serde_json::Value) -> Vec<ProjectMemorySearchRes
     out
 }
 
-fn collect_project_memory_results(raw: &serde_json::Value, out: &mut Vec<ProjectMemorySearchResult>) {
+fn collect_project_memory_results(
+    raw: &serde_json::Value,
+    out: &mut Vec<ProjectMemorySearchResult>,
+) {
     match raw {
         serde_json::Value::Array(items) => {
             for item in items {
@@ -307,7 +311,8 @@ fn collect_project_memory_results(raw: &serde_json::Value, out: &mut Vec<Project
             let record_id = first_json_string(map, &["recordId", "record_id", "id"])
                 .and_then(record_id_from_text)
                 .or_else(|| artifact_uri.clone().and_then(record_id_from_text));
-            if title.is_some() || snippet.is_some() || artifact_uri.is_some() || record_id.is_some() {
+            if title.is_some() || snippet.is_some() || artifact_uri.is_some() || record_id.is_some()
+            {
                 out.push(ProjectMemorySearchResult {
                     title,
                     snippet,
@@ -327,12 +332,21 @@ fn collect_project_memory_results(raw: &serde_json::Value, out: &mut Vec<Project
     }
 }
 
-fn first_json_string(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| map.get(*key).and_then(|value| value.as_str()).map(str::to_string))
+fn first_json_string(
+    map: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter().find_map(|key| {
+        map.get(*key)
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+    })
 }
 
-fn first_json_number(map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<f64> {
+fn first_json_number(
+    map: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<f64> {
     keys.iter()
         .find_map(|key| map.get(*key).and_then(|value| value.as_f64()))
 }
@@ -366,11 +380,16 @@ fn get_session_messages(
         ));
     }
     match agent {
-        Agent::Codex => providers::codex::parser::read_messages(&path).map_err(|e| e.to_string()),
-        Agent::Claude => providers::claude::parser::read_messages(&path).map_err(|e| e.to_string()),
+        Agent::Codex => {
+            crate::agents::sources::codex::parser::read_messages(&path).map_err(|e| e.to_string())
+        }
+        Agent::Claude => {
+            crate::agents::sources::claude::parser::read_messages(&path).map_err(|e| e.to_string())
+        }
         Agent::Gemini => {
             let sid = session_id.unwrap_or_default();
-            providers::gemini::parser::read_messages(&path, &sid).map_err(|e| e.to_string())
+            crate::agents::sources::gemini::parser::read_messages(&path, &sid)
+                .map_err(|e| e.to_string())
         }
     }
 }

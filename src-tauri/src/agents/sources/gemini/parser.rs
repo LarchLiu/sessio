@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use crate::agents::sources::system_time_to_millis;
 use crate::models::{is_system_noise, normalize_preview, Agent, SessionInfo, SessionMessage};
-use crate::providers::system_time_to_millis;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let (tmp_dir, projects_json) = paths()?;
@@ -73,7 +73,10 @@ pub fn remove_session_from_logs(
         return Ok(false);
     }
     if !path.is_file() {
-        return Err(anyhow::anyhow!("session path is not a file: {}", path.display()));
+        return Err(anyhow::anyhow!(
+            "session path is not a file: {}",
+            path.display()
+        ));
     }
 
     let text = fs::read(path)?;
@@ -95,9 +98,9 @@ pub fn remove_session_from_logs(
         return Ok(false);
     }
 
-    let relative = path.strip_prefix(home).map_err(|_| {
-        anyhow::anyhow!("session file is outside home: {}", path.display())
-    })?;
+    let relative = path
+        .strip_prefix(home)
+        .map_err(|_| anyhow::anyhow!("session file is outside home: {}", path.display()))?;
     let removed_path = removed_root.join(relative);
     if let Some(parent) = removed_path.parent() {
         fs::create_dir_all(parent)?;
@@ -117,7 +120,12 @@ pub fn remove_session_from_logs(
 pub fn read_messages_with_locations(
     path: &Path,
     session_id: &str,
-) -> Result<Vec<(SessionMessage, crate::providers::types::SourceLocation)>> {
+) -> Result<
+    Vec<(
+        SessionMessage,
+        crate::agents::sources::types::SourceLocation,
+    )>,
+> {
     let text = fs::read(path)?;
     let entries = scan_json_array_entries(&text)?;
     let mut out = Vec::new();
@@ -151,7 +159,7 @@ pub fn read_messages_with_locations(
                 text,
                 timestamp: ts,
             },
-            crate::providers::types::SourceLocation {
+            crate::agents::sources::types::SourceLocation {
                 file_path: file_path.clone(),
                 line_start: Some(entry.line_start),
                 line_end: Some(entry.line_end),
@@ -461,7 +469,11 @@ mod tests {
     #[test]
     fn remove_session_from_logs_rewrites_source_and_appends_removed_copy() {
         let home = unique_tmp("gemini-home");
-        let source = home.join(".gemini").join("tmp").join("project").join("logs.json");
+        let source = home
+            .join(".gemini")
+            .join("tmp")
+            .join("project")
+            .join("logs.json");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(
             &source,
@@ -499,7 +511,11 @@ mod tests {
     #[test]
     fn remove_session_from_logs_appends_to_existing_removed_file() {
         let home = unique_tmp("gemini-home-append");
-        let source = home.join(".gemini").join("tmp").join("project").join("logs.json");
+        let source = home
+            .join(".gemini")
+            .join("tmp")
+            .join("project")
+            .join("logs.json");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(
             &source,

@@ -1,6 +1,6 @@
 use sha2::{Digest, Sha256};
 
-use crate::providers::types::{MessageContent, MessageEvent};
+use crate::agents::sources::types::{MessageContent, MessageEvent};
 
 pub fn canonical_text(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -65,7 +65,7 @@ pub fn content_text(content: &MessageContent) -> String {
 #[cfg(test)]
 mod tests {
     use super::{canonical_text, sha256_hex, turn_content_hash};
-    use crate::providers::types::{
+    use crate::agents::sources::types::{
         AgentKind, MessageContent, MessageEvent, MessageRole, ProjectRef, SessionSource,
         SourceKind, SourceLocation,
     };
