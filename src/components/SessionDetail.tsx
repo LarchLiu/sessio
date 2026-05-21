@@ -21,7 +21,6 @@ import type { ViewMode } from "../App";
 interface Props {
   session: SessionInfo;
   viewMode: ViewMode;
-  onClose: () => void;
   onRemoved: () => void;
 }
 
@@ -52,7 +51,7 @@ type Tab =
   | { kind: "main" }
   | { kind: "sub"; sub: SubagentInfo };
 
-export default function SessionDetail({ session, viewMode, onClose, onRemoved }: Props) {
+export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
     () =>
@@ -69,22 +68,10 @@ export default function SessionDetail({ session, viewMode, onClose, onRemoved }:
     setTab(defaultTab);
   }, [defaultTab]);
 
-  const [open, setOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
   const [confirmState, setConfirmState] = useState<{ pos: { x: number; y: number } } | null>(null);
-  const closingRef = useRef(false);
-  useEffect(() => {
-    const id = requestAnimationFrame(() => setOpen(true));
-    return () => cancelAnimationFrame(id);
-  }, []);
-  const handleClose = () => {
-    if (closingRef.current) return;
-    closingRef.current = true;
-    setOpen(false);
-    window.setTimeout(onClose, 300);
-  };
   const handleRemove = async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (confirmState) return;
@@ -115,20 +102,7 @@ export default function SessionDetail({ session, viewMode, onClose, onRemoved }:
   };
 
   return (
-    <div
-      className={
-        "absolute inset-x-0 top-12 bottom-0 bg-black/40 backdrop-blur-sm flex items-stretch justify-end z-10 transition-opacity duration-300 ease-out " +
-        (open ? "opacity-100" : "opacity-0")
-      }
-      onClick={handleClose}
-    >
-      <div
-        className={
-          "w-[720px] max-w-[85vw] h-full bg-surface-panel border-l border-ink/10 flex flex-col will-change-transform transition-transform duration-300 ease-out " +
-          (open ? "translate-x-0" : "translate-x-full")
-        }
-        onClick={(e) => e.stopPropagation()}
-      >
+    <div className="h-full min-h-0 bg-surface-panel flex flex-col">
         <header className="px-5 py-4 border-b border-ink/15 flex items-start gap-3">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
@@ -199,13 +173,6 @@ export default function SessionDetail({ session, viewMode, onClose, onRemoved }:
               </div>
             )}
           </div>
-          <button
-            onClick={handleClose}
-            className="text-ink/40 hover:text-ink text-2xl leading-none px-2"
-            aria-label={t("detail.close")}
-          >
-            ×
-          </button>
         </header>
 
         {session.subagents.length > 0 && (
@@ -263,7 +230,6 @@ export default function SessionDetail({ session, viewMode, onClose, onRemoved }:
             }}
           />
         )}
-      </div>
     </div>
   );
 }

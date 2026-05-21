@@ -1,12 +1,11 @@
 import {
   ReactNode,
-  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
@@ -15,11 +14,9 @@ import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   AGENT_LABEL,
   Agent,
-  agentColorVar,
   getIndexStatus,
   IndexPhase,
   getMemoryBackendStatus,
-  getSessionMessages,
   MemoryBackendStatus,
   ProjectMemorySearchResult,
   SessionInfo,
@@ -29,25 +26,17 @@ import {
   removeSessionFiles,
   searchProjectMemory,
   type SessionScope,
-  writeCrossPrompt,
 } from "./api";
-import {
-  IS_WIN,
-  RESUME_CMD,
-  buildCrossCommand,
-  buildCrossPrompt,
-} from "./cross";
 import { syncTrayMenu } from "./tray";
 import SessionDetail from "./components/SessionDetail";
 import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
-import Tag from "./components/Tag";
 import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
 import { ThemeMode, useTheme } from "./theme";
-import { Lang, localeTag, useI18n } from "./i18n";
+import { Lang, useI18n } from "./i18n";
 import { useUpdateCheck, openReleasePage } from "./updater";
 
 type Filter =
@@ -70,6 +59,7 @@ function readViewMode(): ViewMode {
 }
 
 const AGENT_ORDER: Agent[] = ["codex", "claude", "gemini"];
+const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
@@ -99,10 +89,6 @@ function sessionKey(s: SessionInfo): string {
   return `${s.agent}:${s.filePath}:${s.id}`;
 }
 
-function sessionIdTail(id: string): string {
-  return id.length <= 5 ? id : id.slice(-5);
-}
-
 type DeleteTarget =
   | { kind: "session"; session: SessionInfo; pos: { x: number; y: number } }
   | { kind: "scope"; scope: SessionScope; pos: { x: number; y: number } };
@@ -122,6 +108,12 @@ export default function App() {
   const [selected, setSelected] = useState<SessionInfo | null>(null);
   const [expandAgent, setExpandAgent] = useState(true);
   const [expandProject, setExpandProject] = useState(true);
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [expandedProjectSessions, setExpandedProjectSessions] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [memoryBackendStatus, setMemoryBackendStatus] =
@@ -130,7 +122,6 @@ export default function App() {
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  const deferredViewMode = useDeferredValue(viewMode);
   const { mode, setMode } = useTheme();
   const { lang, setLang, t } = useI18n();
   const update = useUpdateCheck(__APP_VERSION__);
@@ -228,6 +219,12 @@ export default function App() {
     }
   }, [availableSessions, selected]);
 
+  useEffect(() => {
+    if (selected || availableSessions.length === 0) return;
+    const next = availableSessions.find((s) => !isSubagentOnly(s));
+    if (next) setSelected(next);
+  }, [availableSessions, selected]);
+
   const agentStats = useMemo(() => {
     const m: Record<Agent, { count: number; latest: number }> = {
       codex: { count: 0, latest: 0 },
@@ -254,7 +251,13 @@ export default function App() {
   const projectGroups = useMemo(() => {
     const m = new Map<
       string,
-      { label: string; count: number; path: string | null; latest: number }
+      {
+        label: string;
+        count: number;
+        path: string | null;
+        latest: number;
+        sessions: SessionInfo[];
+      }
     >();
     const unknown = t("list.unknown_project");
     for (const s of availableSessions) {
@@ -265,19 +268,67 @@ export default function App() {
       if (e) {
         e.count += 1;
         if (ts > e.latest) e.latest = ts;
+        e.sessions.push(s);
       } else {
         m.set(key, {
           label: s.projectName ?? s.projectPath ?? unknown,
           count: 1,
           path: s.projectPath,
           latest: ts,
+          sessions: [s],
         });
       }
     }
     return [...m.entries()]
-      .map(([key, v]) => ({ key, ...v }))
+      .map(([key, v]) => ({
+        key,
+        ...v,
+        sessions: v.sessions.sort(
+          (a, b) =>
+            (b.updatedAt ?? b.startedAt ?? 0) -
+            (a.updatedAt ?? a.startedAt ?? 0),
+        ),
+      }))
       .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label));
   }, [availableSessions, t]);
+
+  useEffect(() => {
+    setExpandedProjects((prev) => {
+      const keys = new Set(projectGroups.map((p) => p.key));
+      let changed = false;
+      const next = new Set<string>();
+      for (const key of prev) {
+        if (keys.has(key)) next.add(key);
+        else changed = true;
+      }
+      if (next.size === 0 && projectGroups[0]) {
+        next.add(projectGroups[0].key);
+        changed = true;
+      }
+      if (
+        selected &&
+        keys.has(projectKey(selected)) &&
+        !next.has(projectKey(selected))
+      ) {
+        next.add(projectKey(selected));
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [projectGroups, selected]);
+
+  useEffect(() => {
+    setExpandedProjectSessions((prev) => {
+      const keys = new Set(projectGroups.map((p) => p.key));
+      let changed = false;
+      const next = new Set<string>();
+      for (const key of prev) {
+        if (keys.has(key)) next.add(key);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [projectGroups]);
 
   const totalRealSessions = useMemo(
     () => availableSessions.filter((s) => !isSubagentOnly(s)).length,
@@ -288,6 +339,8 @@ export default function App() {
     () => availableSessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
     [availableSessions]
   );
+
+  const selectedKey = selected ? sessionKey(selected) : null;
 
   useEffect(() => {
     syncTrayMenu(recentForMenu, {
@@ -489,28 +542,51 @@ export default function App() {
           {expandProject && (
             <ScrollArea
               className="flex-1 min-h-0 -mr-2"
-              viewportClassName="pr-3 flex flex-col gap-0.5"
+              viewportClassName="pr-3 flex flex-col gap-1"
             >
-              {projectGroups.map((p) => (
-                <SidebarItem
-                  key={p.key}
-                  label={p.label}
-                  count={p.count}
-                  active={filter.kind === "project" && filter.key === p.key}
-                  onClick={() =>
-                    setFilter({ kind: "project", key: p.key, label: p.label })
-                  }
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    void openScopeMenu(
-                      scopeForFilter({ kind: "project", key: p.key, label: p.label }),
-                      { x: e.clientX, y: e.clientY },
-                    );
-                  }}
-                  icon={<Folder className="w-3.5 h-3.5 shrink-0 text-ink/55" />}
-                  title={p.path ?? p.label}
-                />
-              ))}
+              {projectGroups.map((p) => {
+                const expanded = expandedProjects.has(p.key);
+                return (
+                  <ProjectSidebarGroup
+                    key={p.key}
+                    project={p}
+                    expanded={expanded}
+                    sessionsExpanded={expandedProjectSessions.has(p.key)}
+                    selectedKey={selectedKey}
+                    onSelectProject={() => {
+                      setFilter({ kind: "project", key: p.key, label: p.label });
+                      setExpandedProjects((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(p.key)) next.delete(p.key);
+                        else next.add(p.key);
+                        return next;
+                      });
+                    }}
+                    onSelectSession={(session) => {
+                      setFilter({ kind: "project", key: p.key, label: p.label });
+                      setSelected(session);
+                    }}
+                    onToggleSessionLimit={() => {
+                      setExpandedProjectSessions((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(p.key)) next.delete(p.key);
+                        else next.add(p.key);
+                        return next;
+                      });
+                    }}
+                    onProjectContextMenu={(e) => {
+                      e.preventDefault();
+                      void openScopeMenu(
+                        scopeForFilter({ kind: "project", key: p.key, label: p.label }),
+                        { x: e.clientX, y: e.clientY },
+                      );
+                    }}
+                    onSessionContextMenu={(session, pos) =>
+                      void openSessionMenu(session, pos)
+                    }
+                  />
+                );
+              })}
             </ScrollArea>
           )}
         </nav>
@@ -711,35 +787,23 @@ export default function App() {
           </div>
         </div>
 
-        <ScrollArea ref={listScrollRef} className="flex-1 min-h-0">
-          {deferredViewMode === "native" ? (
-            <NativeSessionList
-              visible={visible}
-              filter={filter}
-              error={error}
-              indexing={indexing}
-              onSelect={setSelected}
-              onDelete={openSessionMenu}
-            />
-          ) : (
-            <CrossSessionList
-              visible={visible}
-              filter={filter}
-              error={error}
-              indexing={indexing}
-              onSelect={setSelected}
-              onDelete={openSessionMenu}
-            />
-          )}
-        </ScrollArea>
-
-        {selected && (
+        {error ? (
+          <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
+            {error}
+          </div>
+        ) : selected ? (
           <SessionDetail
             session={selected}
             viewMode={viewMode}
-            onClose={() => setSelected(null)}
             onRemoved={() => setSelected(null)}
           />
+        ) : (
+          <ScrollArea ref={listScrollRef} className="flex-1 min-h-0">
+            <EmptyDetailState
+              indexing={indexing}
+              visibleCount={visibleCount}
+            />
+          </ScrollArea>
         )}
 
         {memorySearchMounted && projectSearchInitialKey && (
@@ -1209,398 +1273,201 @@ function SidebarItem({
   );
 }
 
-function NativeSessionList({
-  visible,
-  filter,
-  error,
-  indexing,
-  onSelect,
-  onDelete,
+type ProjectGroup = {
+  key: string;
+  label: string;
+  count: number;
+  path: string | null;
+  latest: number;
+  sessions: SessionInfo[];
+};
+
+function ProjectSidebarGroup({
+  project,
+  expanded,
+  sessionsExpanded,
+  selectedKey,
+  onSelectProject,
+  onSelectSession,
+  onToggleSessionLimit,
+  onProjectContextMenu,
+  onSessionContextMenu,
 }: {
-  visible: SessionInfo[];
-  filter: Filter;
-  error: string | null;
-  indexing: boolean;
-  onSelect: (s: SessionInfo) => void;
-  onDelete: (s: SessionInfo, pos: { x: number; y: number }) => void;
+  project: ProjectGroup;
+  expanded: boolean;
+  sessionsExpanded: boolean;
+  selectedKey: string | null;
+  onSelectProject: () => void;
+  onSelectSession: (session: SessionInfo) => void;
+  onToggleSessionLimit: () => void;
+  onProjectContextMenu: (e: React.MouseEvent) => void;
+  onSessionContextMenu: (
+    session: SessionInfo,
+    pos: { x: number; y: number },
+  ) => void;
 }) {
   const { t } = useI18n();
-  return (
-    <>
-      {error && (
-        <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
-          {error}
-        </div>
-      )}
-      {!error && !indexing && visible.length === 0 && (
-        <div className="p-10 text-center text-ink/40 text-body">
-          {t("list.empty")}
-        </div>
-      )}
-      <ul className="divide-y divide-ink/5">
-        {visible.map((s) => (
-          <li
-            key={`${s.agent}:${s.filePath}:${s.id}`}
-            className="px-5 py-3.5 hover:bg-ink/[0.03] transition"
-            onContextMenu={(e) => {
-              e.preventDefault();
-              onDelete(s, { x: e.clientX, y: e.clientY });
-            }}
-          >
-            <SessionRow
-              item={s}
-              filter={filter}
-              onOpenDetail={() => onSelect(s)}
-            />
-          </li>
-        ))}
-      </ul>
-    </>
-  );
-}
-
-function CrossSessionList({
-  visible,
-  filter,
-  error,
-  indexing,
-  onSelect,
-  onDelete,
-}: {
-  visible: SessionInfo[];
-  filter: Filter;
-  error: string | null;
-  indexing: boolean;
-  onSelect: (s: SessionInfo) => void;
-  onDelete: (s: SessionInfo, pos: { x: number; y: number }) => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <>
-      {error && (
-        <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
-          {error}
-        </div>
-      )}
-      {!error && !indexing && visible.length === 0 && (
-        <div className="p-10 text-center text-ink/40 text-body">
-          {t("list.empty")}
-        </div>
-      )}
-      <ul className="divide-y divide-ink/5">
-        {visible.map((s) => (
-          <li
-            key={`${s.agent}:${s.filePath}:${s.id}`}
-            className="px-5 py-3.5 hover:bg-ink/[0.03] transition"
-            onContextMenu={(e) => {
-              e.preventDefault();
-              onDelete(s, { x: e.clientX, y: e.clientY });
-            }}
-          >
-            <SessionRow
-              item={s}
-              filter={filter}
-              showOtherAgents
-              onOpenDetail={() => onSelect(s)}
-            />
-          </li>
-        ))}
-      </ul>
-    </>
-  );
-}
-
-function SessionRow({
-  item,
-  filter,
-  showOtherAgents,
-  onOpenDetail,
-}: {
-  item: SessionInfo;
-  filter: Filter;
-  showOtherAgents?: boolean;
-  onOpenDetail?: () => void;
-}) {
-  const { lang, t } = useI18n();
-  const subCount = item.subagents.length;
-  const [copiedProject, setCopiedProject] = useState(false);
-  const projectTimerRef = useRef<number | null>(null);
-
-  useEffect(
-    () => () => {
-      if (projectTimerRef.current) window.clearTimeout(projectTimerRef.current);
-    },
-    [],
-  );
-
-  const handleCopyProject = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    const text = item.projectPath ?? item.projectName ?? t("list.unknown_project");
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedProject(true);
-      if (projectTimerRef.current) window.clearTimeout(projectTimerRef.current);
-      projectTimerRef.current = window.setTimeout(() => setCopiedProject(false), 1500);
-    } catch (err) {
-      console.error("project copy failed", err);
+  const projectButtonRef = useRef<HTMLButtonElement>(null);
+  const FolderIcon = expanded ? FolderOpen : Folder;
+  const visibleSessions = sessionsExpanded
+    ? project.sessions
+    : project.sessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+  const canToggleSessionLimit =
+    project.sessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+  const toggleSessionLimit = () => {
+    const collapsing = sessionsExpanded;
+    onToggleSessionLimit();
+    if (collapsing) {
+      requestAnimationFrame(() => {
+        projectButtonRef.current?.scrollIntoView({ block: "nearest" });
+      });
     }
   };
-
   return (
-    <div className="min-w-0">
-      <div
-        onClick={onOpenDetail}
+    <div>
+      <button
+        ref={projectButtonRef}
+        type="button"
+        onClick={onSelectProject}
+        title={project.path ?? project.label}
         className={
-          "pl-4 text-body line-clamp-3 cursor-pointer" +
-          (item.archived ? " text-ink/55" : " text-ink/90")
+          "group flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-ink/70 transition hover:bg-ink/5 hover:text-ink"
+        }
+        onContextMenu={onProjectContextMenu}
+      >
+        <FolderIcon
+          className={
+            "w-3.5 h-3.5 shrink-0 text-ink/55 transition-transform duration-200 " +
+            (expanded ? "scale-105" : "scale-100")
+          }
+        />
+        <span className="flex-1 truncate text-body">{project.label}</span>
+        <span className="text-meta text-ink/40 tabular-nums">{project.count}</span>
+      </button>
+      <div
+        className={
+          "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out " +
+          (expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")
         }
       >
-        {item.title ?? item.firstUserMessage ?? (
-          <span className="text-ink/30">{t("list.no_user_message")}</span>
-        )}
-      </div>
-      <div className="pl-4 mt-1.5 flex items-center gap-2 text-meta text-ink/40 leading-none">
-        {filter.kind !== "project" && (
-          <Tooltip
-            content={
-              copiedProject
-                ? t("list.copied")
-                : item.projectPath ?? item.projectName ?? t("list.unknown_project")
+        <div className="min-h-0 overflow-hidden">
+          <div
+            className={
+              "mt-0.5 flex flex-col gap-0.5 transition-transform duration-200 ease-out " +
+              (expanded ? "translate-y-0" : "-translate-y-1")
             }
-            placement="top"
           >
+            {visibleSessions.map((session) => (
+              <SidebarSessionItem
+                key={sessionKey(session)}
+                item={session}
+                active={selectedKey === sessionKey(session)}
+                onSelect={() => onSelectSession(session)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onSessionContextMenu(session, { x: e.clientX, y: e.clientY });
+                }}
+              />
+            ))}
+          </div>
+          {canToggleSessionLimit && (
             <button
               type="button"
-              onClick={handleCopyProject}
-              className="group inline-flex min-w-0 items-center gap-1 text-left text-ink/45 hover:text-ink/75"
-              aria-label={item.projectPath ?? item.projectName ?? t("list.unknown_project")}
+              onClick={toggleSessionLimit}
+              className="mt-0.5 ml-7 px-1 py-1 text-left text-body-sm text-ink/40 transition hover:text-ink/65"
             >
-              <Folder className="w-3.5 h-3.5 shrink-0" />
-              <span className="font-medium truncate text-ink/55 group-hover:text-ink/75 max-w-[220px]">
-                {item.projectName ?? item.projectPath ?? t("list.unknown_project")}
-              </span>
+              {t(sessionsExpanded ? "list.show_less" : "list.show_more")}
             </button>
-          </Tooltip>
-        )}
-        {filter.kind !== "project" && <MetaDivider />}
-        <Tooltip
-          content={formatFullDateTime(item.updatedAt ?? item.startedAt, localeTag(lang))}
-          placement="top"
-        >
-          <span className="shrink-0">
-            {formatTime(item.updatedAt ?? item.startedAt, localeTag(lang))}
-          </span>
-        </Tooltip>
-        <span className="shrink-0">·</span>
-        <span className="shrink-0">
-          {item.partial && !item.archived ? "~" : ""}
-          {t("list.msgs", { count: item.messageCount })}
-        </span>
-        <span className="shrink-0">·</span>
-        <SessionIdCopyButton id={item.id} />
-        {subCount > 0 && (
-          <Tag
-            label={t("list.subagent_count", {
-              count: subCount,
-              s: subCount > 1 ? "s" : "",
-            })}
-            color="var(--color-accent-purple)"
-            title={t("list.subagent_tooltip", {
-              count: subCount,
-              s: subCount > 1 ? "s" : "",
-            })}
-          />
-        )}
-        {item.archived && (
-          <Tag
-            label={t("list.archived")}
-            color="var(--color-muted)"
-            title={t(
-              item.available
-                ? "list.archived_tooltip_by_user"
-                : "list.archived_tooltip"
-            )}
-          />
-        )}
-        <MetaDivider />
-        {showOtherAgents
-          ? AGENT_ORDER.filter((a) => a !== item.agent).map((a) => (
-              <CrossAgentButton key={a} item={item} targetAgent={a} />
-            ))
-          : <ResumeAgentButton item={item} />}
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function SessionIdCopyButton({ id }: { id: string }) {
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(
-    () => () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-    },
-    [],
-  );
-
-  const handleClick = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(id);
-      setCopied(true);
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => setCopied(false), 1500);
-    } catch (err) {
-      console.error("session id copy failed", err);
-    }
-  };
-
-  return (
-    <Tooltip content={copied ? t("list.copied") : id} placement="top">
-      <button
-        type="button"
-        onClick={handleClick}
-        aria-label={id}
-        className="appearance-none px-1 py-0.5 -mx-1 -my-0.5 bg-transparent border-0 rounded font-mono text-ink/45 transition-colors hover:text-ink hover:bg-ink/10 focus-visible:text-ink focus-visible:bg-ink/10 focus-visible:outline-none"
-      >
-        <span className="shrink-0">
-          {sessionIdTail(id)}
-        </span>
-      </button>
-    </Tooltip>
-  );
-}
-
-function MetaDivider() {
-  return <span aria-hidden className="shrink-0 w-px h-3 bg-ink/15" />;
-}
-
-function CrossAgentButton({
+function SidebarSessionItem({
   item,
-  targetAgent,
+  active,
+  onSelect,
+  onContextMenu,
 }: {
   item: SessionInfo;
-  targetAgent: Agent;
+  active: boolean;
+  onSelect: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const { t } = useI18n();
-  const [state, setState] = useState<"idle" | "loading" | "copied" | "error">(
-    "idle",
-  );
-  const timerRef = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-    },
-    [],
-  );
-
-  const handleClick = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (state === "loading") return;
-    setState("loading");
-    try {
-      const messages = await getSessionMessages(item.agent, item.filePath, item.id);
-      const prompt = buildCrossPrompt(messages, {
-        sourceAgent: item.agent,
-        sourceSessionId: item.id,
-        sourceFilePath: item.filePath,
-      });
-      if (!prompt) {
-        setState("error");
-        if (timerRef.current) window.clearTimeout(timerRef.current);
-        timerRef.current = window.setTimeout(() => setState("idle"), 1500);
-        return;
-      }
-      const path = await writeCrossPrompt(item.id, prompt);
-      await navigator.clipboard.writeText(
-        buildCrossCommand(targetAgent, path, t("list.cross_prompt_placeholder")),
-      );
-      setState("copied");
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => setState("idle"), 1500);
-    } catch (err) {
-      console.error("cross copy failed", err);
-      setState("error");
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => setState("idle"), 1500);
-    }
-  };
-
-  const tipText =
-    state === "loading"
-      ? t("list.copying")
-      : state === "copied"
-        ? IS_WIN
-          ? t("list.copied_powershell")
-          : t("list.copied")
-        : state === "error"
-          ? t("list.copy_failed")
-          : t("list.copy_cross_to", { agent: AGENT_LABEL[targetAgent] });
-
+  const title = item.title ?? item.firstUserMessage ?? t("list.no_user_message");
+  const relativeTime = formatShortRelativeTime(item.updatedAt ?? item.startedAt, t);
   return (
-    <Tooltip content={tipText} placement="top">
-      <button
-        type="button"
-        onClick={handleClick}
-        disabled={state === "loading"}
-        aria-label={t("list.copy_cross_to", { agent: AGENT_LABEL[targetAgent] })}
-        className="group appearance-none p-0 bg-transparent border-0 rounded transition hover:bg-ink/10 hover:brightness-110 focus-visible:bg-ink/10 focus-visible:brightness-110 focus-visible:outline-none disabled:opacity-50"
+    <button
+      type="button"
+      onClick={onSelect}
+      onContextMenu={onContextMenu}
+      title={title}
+      className={
+        "group flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
+        (active
+          ? "bg-ink/10 text-ink"
+          : "text-ink/65 hover:bg-ink/5 hover:text-ink")
+      }
+    >
+      <AgentGlyph agent={item.agent} className="h-3.5 w-3.5 shrink-0" />
+      <span
+        className={
+          "min-w-0 flex-1 truncate text-body-sm leading-snug " +
+          (item.archived ? "text-ink/45" : "text-inherit")
+        }
       >
-        <Tag
-          label={AGENT_LABEL[targetAgent]}
-          color={agentColorVar(targetAgent)}
-          icon={<AgentGlyph agent={targetAgent} className="w-3.5 h-3.5 shrink-0" />}
-          className="transition-transform group-hover:scale-105"
-        />
-      </button>
-    </Tooltip>
+        {item.title ?? item.firstUserMessage ?? (
+          <span className="text-ink/30">{t("list.no_user_message")}</span>
+        )}
+      </span>
+      <span className="shrink-0 text-meta tabular-nums text-ink/35">
+        {relativeTime}
+      </span>
+    </button>
   );
 }
 
-function ResumeAgentButton({ item }: { item: SessionInfo }) {
+function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Record<string, string | number>) => string): string {
+  if (!ts) return "";
+  const diffMs = Math.max(0, Date.now() - ts);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  const week = 7 * day;
+  const month = 30 * day;
+  if (diffMs < hour) {
+    return t("time.minute", { count: Math.max(1, Math.floor(diffMs / minute)) });
+  }
+  if (diffMs < day) return t("time.hour", { count: Math.floor(diffMs / hour) });
+  if (diffMs < week) return t("time.day", { count: Math.floor(diffMs / day) });
+  if (diffMs < month) return t("time.week", { count: Math.floor(diffMs / week) });
+  return t("time.month", { count: Math.floor(diffMs / month) });
+}
+
+function EmptyDetailState({
+  indexing,
+  visibleCount,
+}: {
+  indexing: boolean;
+  visibleCount: number;
+}) {
   const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const timerRef = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-    },
-    [],
-  );
-
-  const handleClick = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      await navigator.clipboard.writeText(RESUME_CMD[item.agent](item.id));
-      setCopied(true);
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => setCopied(false), 1500);
-    } catch (err) {
-      console.error("clipboard write failed", err);
-    }
-  };
-
   return (
-    <Tooltip
-      content={copied ? t("list.copied") : t("list.copy_resume")}
-      placement="top"
-    >
-      <button
-        type="button"
-        onClick={handleClick}
-        aria-label={t("list.copy_resume")}
-        className="group appearance-none p-0 bg-transparent border-0 rounded transition hover:bg-ink/10 hover:brightness-110 focus-visible:bg-ink/10 focus-visible:brightness-110 focus-visible:outline-none"
-      >
-        <Tag
-          label={AGENT_LABEL[item.agent]}
-          color={agentColorVar(item.agent)}
-          icon={<AgentGlyph agent={item.agent} className="w-3.5 h-3.5 shrink-0" />}
-          className="transition-transform group-hover:scale-105"
-        />
-      </button>
-    </Tooltip>
+    <div className="flex min-h-full items-center justify-center p-10 text-center text-body text-ink/40">
+      {indexing ? (
+        <div className="flex items-center gap-2">
+          <StatusDot ripple />
+          <span>{t("sidebar.status_indexing")}</span>
+        </div>
+      ) : visibleCount === 0 ? (
+        t("list.empty")
+      ) : (
+        t("list.select_session")
+      )}
+    </div>
   );
 }
 
@@ -1728,38 +1595,4 @@ function LanguageSwitcher({
       })}
     </div>
   );
-}
-
-function formatTime(ts: number | null, locale: string): string {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  if (sameDay) {
-    return d.toLocaleTimeString(locale, {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
-  return d.toLocaleDateString(locale, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function formatFullDateTime(ts: number | null, locale: string): string {
-  if (!ts) return "—";
-  return new Intl.DateTimeFormat(locale, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(ts));
 }
