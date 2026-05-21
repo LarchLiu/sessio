@@ -1,5 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Trash2 } from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { ChevronDown, ChevronRight, Trash2 } from "lucide-react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import type { Options as SanitizeSchema } from "rehype-sanitize";
+import "katex/dist/katex.min.css";
 import {
   AGENT_ACCENT,
   AGENT_LABEL,
@@ -8,6 +18,7 @@ import {
   SubagentInfo,
   agentTint,
   getSessionMessages,
+  readLocalImageDataUrl,
   removeSessionFiles,
 } from "../api";
 import { AgentGlyph } from "./AgentIcon";
@@ -44,7 +55,15 @@ function stripInjectedContext(s: string): string {
   const MARKER = "## My request for Codex:";
   const idx = text.indexOf(MARKER);
   if (idx >= 0) text = text.slice(idx + MARKER.length);
-  return text.trim();
+  return stripImagePlaceholders(text).trim();
+}
+
+function stripImagePlaceholders(s: string): string {
+  return s
+    .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, "")
+    .replace(/^\s*<image\b[^>]*>\s*$/gim, "")
+    .replace(/^\s*<\/image>\s*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 type Tab =
@@ -71,6 +90,7 @@ export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [copiedPath, setCopiedPath] = useState(false);
+  const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
   const [confirmState, setConfirmState] = useState<{ pos: { x: number; y: number } } | null>(null);
   const handleRemove = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -193,10 +213,14 @@ export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
                 key={s.id}
                 active={tab.kind === "sub" && tab.sub.id === s.id}
                 onClick={() => setTab({ kind: "sub", sub: s })}
-                label={s.agentType ?? t("detail.default_subagent_type")}
+                label={
+                  s.description ??
+                  s.agentType ??
+                  t("detail.default_subagent_type")
+                }
                 sub={t("detail.msgs", { count: s.messageCount })}
                 accent="rgb(var(--color-accent-purple))"
-                tooltip={s.description ?? s.id}
+                tooltip={s.agentType ? `${s.agentType} · ${s.id}` : s.id}
               />
             ))}
           </div>
@@ -217,7 +241,15 @@ export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
           }
           subagentDesc={tab.kind === "sub" ? tab.sub.description : null}
           viewMode={viewMode}
+          onPreviewImage={setPreviewImage}
         />
+
+        {previewImage && (
+          <ImagePreviewOverlay
+            image={previewImage}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
 
         {confirmPos && (
           <ConfirmPopover
@@ -286,6 +318,7 @@ function MessageStream({
   emptyHint,
   subagentDesc,
   viewMode,
+  onPreviewImage,
 }: {
   agent: SessionInfo["agent"];
   filePath: string;
@@ -294,6 +327,7 @@ function MessageStream({
   emptyHint: string;
   subagentDesc: string | null;
   viewMode: ViewMode;
+  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const { t } = useI18n();
   const [messages, setMessages] = useState<SessionMessage[]>([]);
@@ -322,16 +356,16 @@ function MessageStream({
     };
   }, [agent, filePath, sessionId, available]);
 
-  const displayMessages = useMemo(() => {
+  const displayItems = useMemo(() => {
     const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
-    if (viewMode === "native") return all;
-    return all.filter(
-      ({ m }) =>
-        m.role === "user" || m.role === "thinking" || m.role === "assistant",
-    );
+    const filtered =
+      viewMode === "native"
+        ? all
+        : all.filter(({ m }) => isConversationRole(m.role));
+    return pairToolMessages(filtered);
   }, [messages, viewMode]);
 
-  bubbleRefs.current.length = displayMessages.length;
+  bubbleRefs.current.length = displayItems.length;
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
@@ -361,25 +395,29 @@ function MessageStream({
             {error}
           </div>
         )}
-        {!loading && !error && available && displayMessages.length === 0 && (
+        {!loading && !error && available && displayItems.length === 0 && (
           <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
         )}
         <div className="flex flex-col gap-4">
-          {displayMessages.map(({ m, srcIdx }, i) => (
+          {displayItems.map((item, i) => (
             <div
-              key={srcIdx}
+              key={item.key}
               ref={(el) => {
                 bubbleRefs.current[i] = el;
               }}
-              className={m.role === "user" ? "ml-12" : ""}
+              className={item.message.role === "user" ? "flex justify-end" : ""}
             >
-              <MessageBubble msg={m} />
+              <MessageBubble
+                msg={item.message}
+                toolResult={item.toolResult}
+                onPreviewImage={onPreviewImage}
+              />
             </div>
           ))}
         </div>
       </ScrollArea>
       <UserNav
-        messages={displayMessages.map((d) => d.m)}
+        messages={displayItems.map((d) => d.message)}
         refs={bubbleRefs}
         viewportRef={viewportRef}
       />
@@ -550,10 +588,28 @@ function UserNav({
   );
 }
 
-function MessageBubble({ msg }: { msg: SessionMessage }) {
-  const { lang, t } = useI18n();
+function MessageBubble({
+  msg,
+  toolResult,
+  onPreviewImage,
+}: {
+  msg: SessionMessage;
+  toolResult?: SessionMessage;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const { lang } = useI18n();
   const LONG_TOOL_THRESHOLD = 500;
-  const collapsible = msg.text.length > LONG_TOOL_THRESHOLD;
+  const thinkingCollapsible = msg.role === "thinking";
+  const collapseText = msg.text + (toolResult?.text ?? "");
+  const pairedToolCollapsible = Boolean(toolResult);
+  const longCollapsible =
+    !pairedToolCollapsible &&
+    !thinkingCollapsible &&
+    msg.role !== "user" &&
+    msg.role !== "assistant" &&
+    msg.role !== "todo" &&
+    collapseText.length > LONG_TOOL_THRESHOLD;
+  const collapsible = thinkingCollapsible || longCollapsible || pairedToolCollapsible;
   const [collapsed, setCollapsed] = useState(collapsible);
   const previewSource =
     msg.role === "user" ? stripInjectedContext(msg.text) : msg.text;
@@ -562,6 +618,10 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
     : "";
   const bubbleRef = useRef<HTMLDivElement>(null);
   const anchorTopRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setCollapsed(collapsible);
+  }, [collapsible, msg.role, msg.text]);
 
   function findScroller(el: HTMLElement | null): HTMLElement | null {
     let node = el?.parentElement ?? null;
@@ -584,6 +644,19 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
     setCollapsed((v) => !v);
   };
 
+  const handleBlockClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!collapsible) return;
+    const target = event.target as HTMLElement | null;
+    if (
+      target?.closest(
+        "button,a,input,textarea,select,summary,label,[data-no-toggle]",
+      )
+    ) {
+      return;
+    }
+    toggle();
+  };
+
   useLayoutEffect(() => {
     const before = anchorTopRef.current;
     if (before === null) return;
@@ -600,25 +673,74 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
     if (delta !== 0) scroller.scrollTop += delta;
   }, [collapsed]);
 
+  const meta = messageMeta(msg);
+  const toolSummary = isToolCallRole(msg.role) ? parseToolSummary(msg.text) : null;
+  const bodyText = meta.bodyText;
+  const userMedia = useMemo(
+    () => (msg.role === "user" ? splitMarkdownImages(bodyText) : null),
+    [bodyText, msg.role],
+  );
+  const renderText = userMedia?.text ?? bodyText;
+  const contentClass =
+    toolResult && isToolCallRole(msg.role) ? "text-body-sm" : meta.contentClass;
+
   return (
     <div
       ref={bubbleRef}
-      className="rounded-lg px-4 py-3 text-body leading-relaxed whitespace-pre-wrap break-words bg-ink/[0.06] border border-ink/[0.04]"
+      onClick={handleBlockClick}
+      className={
+        "text-body leading-relaxed break-words " +
+        (msg.role === "user"
+          ? "w-fit max-w-[75%] rounded-lg px-4 py-3 bg-ink/[0.06] border border-ink/[0.04]"
+          : meta.compact
+            ? "py-1.5"
+            : "px-0 py-1")
+        + (collapsible ? " cursor-pointer select-none" : "")
+      }
     >
       <div
         className={
-          "flex items-center gap-2 mb-2 " +
+          "flex items-center gap-2 leading-none " +
+          (meta.compact ? "mb-1" : "mb-2 ") +
           (collapsible
-            ? "cursor-pointer select-none hover:text-ink/70"
+            ? "hover:text-ink/70"
             : "")
         }
-        onClick={collapsible ? toggle : undefined}
         role={collapsible ? "button" : undefined}
         aria-expanded={collapsible ? !collapsed : undefined}
       >
-        <span className="text-caption uppercase text-ink/40 font-medium">
-          {msg.role}
+        {meta.compact && (
+          <span
+            className={
+              "h-1.5 w-1.5 shrink-0 rounded-full " +
+              (meta.tone === "tool"
+                ? "bg-[rgb(var(--color-emerald)/0.7)]"
+                : "bg-ink/45")
+            }
+          />
+        )}
+        <span
+          className={
+            "text-caption font-medium " +
+            (meta.compact
+              ? "normal-case text-ink/65"
+              : "uppercase text-ink/40")
+          }
+        >
+          {meta.label}
         </span>
+        {toolSummary?.description && (
+          <span className="text-caption text-ink/45">
+            {toolSummary.description}
+          </span>
+        )}
+        {thinkingCollapsible && (
+          collapsed ? (
+            <ChevronRight className="w-3.5 h-3.5 text-ink/35" />
+          ) : (
+            <ChevronDown className="w-3.5 h-3.5 text-ink/35" />
+          )
+        )}
         {msg.timestamp && (
           <span className="text-caption text-ink/30">
             {new Date(msg.timestamp).toLocaleString(localeTag(lang), {
@@ -630,32 +752,721 @@ function MessageBubble({ msg }: { msg: SessionMessage }) {
           </span>
         )}
       </div>
-      <div className="text-ink/85">
-        {collapsible && collapsed ? (
+      <div
+        className={
+          contentClass +
+          (meta.compact && !renderText.trim() ? " hidden" : "")
+        }
+      >
+        {longCollapsible && collapsed ? (
           <span className="text-ink/60">
             {preview}
             {previewSource.length > 200 ? "…" : ""}
           </span>
-        ) : (
-          msg.text
+        ) : thinkingCollapsible && collapsed ? null : (
+          <>
+            {userMedia && userMedia.images.length > 0 && (
+              <MarkdownImageStrip
+                images={userMedia.images}
+                align="right"
+                onPreviewImage={onPreviewImage}
+              />
+            )}
+            {toolResult ? (
+              <ToolPairContent
+                input={renderText}
+                output={toolResult.text}
+                collapsed={collapsed}
+                onPreviewImage={onPreviewImage}
+              />
+            ) : meta.renderMode === "todo" ? (
+              <TodoContent text={renderText} />
+            ) : meta.renderMode === "plain" ? (
+              <PlainTextContent text={renderText} />
+            ) : (
+              <MarkdownContent
+                text={renderText}
+                onPreviewImage={onPreviewImage}
+              />
+            )}
+          </>
         )}
       </div>
-      {collapsible && (
-        <div className="mt-2 flex justify-center">
-          <button
-            type="button"
-            onClick={toggle}
-            aria-label={collapsed ? t("detail.expand") : t("detail.collapse")}
-            className="text-ink/70 hover:text-ink leading-none px-4 py-1 rounded hover:bg-ink/5 transition"
-          >
-            {collapsed ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronUp className="w-4 h-4" />
-            )}
-          </button>
-        </div>
-      )}
     </div>
   );
+}
+
+function isConversationRole(role: string): boolean {
+  return [
+    "user",
+    "assistant",
+    "thinking",
+    "tool",
+    "tool_call",
+    "tool_use",
+    "function_call",
+    "tool_result",
+    "function_call_output",
+    "todo",
+  ].includes(role);
+}
+
+interface MessageRenderItem {
+  key: string;
+  message: SessionMessage;
+  toolResult?: SessionMessage;
+}
+
+function pairToolMessages(
+  entries: { m: SessionMessage; srcIdx: number }[],
+): MessageRenderItem[] {
+  const consumedResults = new Set<number>();
+  const items: MessageRenderItem[] = [];
+
+  for (let i = 0; i < entries.length; i += 1) {
+    const { m, srcIdx } = entries[i];
+    if (isToolCallRole(m.role)) {
+      const resultIdx = findToolResultIndex(entries, i);
+      if (resultIdx !== null) {
+        consumedResults.add(resultIdx);
+      }
+      items.push({
+        key: `${srcIdx}:${m.toolCallId ?? "tool"}`,
+        message: m,
+        toolResult: resultIdx !== null ? entries[resultIdx].m : undefined,
+      });
+      continue;
+    }
+    if (isToolResultRole(m.role)) {
+      if (consumedResults.has(i)) continue;
+      items.push({
+        key: `${srcIdx}:${m.toolCallId ?? "result"}`,
+        message: m,
+      });
+      continue;
+    }
+    items.push({ key: String(srcIdx), message: m });
+  }
+
+  return items;
+}
+
+function findToolResultIndex(
+  entries: { m: SessionMessage; srcIdx: number }[],
+  callIndex: number,
+): number | null {
+  const call = entries[callIndex].m;
+  if (call.toolCallId) {
+    for (let i = callIndex + 1; i < entries.length; i += 1) {
+      const candidate = entries[i].m;
+      if (isToolResultRole(candidate.role) && candidate.toolCallId === call.toolCallId) {
+        return i;
+      }
+      if (isToolCallRole(candidate.role) && candidate.toolCallId === call.toolCallId) {
+        break;
+      }
+    }
+    return null;
+  }
+  const next = entries[callIndex + 1]?.m;
+  return next && isToolResultRole(next.role) && !next.toolCallId
+    ? callIndex + 1
+    : null;
+}
+
+function isToolCallRole(role: string): boolean {
+  return ["tool", "tool_call", "tool_use", "function_call"].includes(role);
+}
+
+function isToolResultRole(role: string): boolean {
+  return ["tool_result", "function_call_output"].includes(role);
+}
+
+function messageMeta(msg: SessionMessage): {
+  label: string;
+  bodyText: string;
+  compact: boolean;
+  contentClass: string;
+  tone: "normal" | "thinking" | "tool";
+  renderMode: "markdown" | "plain" | "todo";
+} {
+  const role = msg.role;
+  if (role === "user") {
+    return {
+      label: role,
+      bodyText: stripInjectedContext(msg.text),
+      compact: false,
+      contentClass: "text-ink/85",
+      tone: "normal",
+      renderMode: "markdown",
+    };
+  }
+  if (role === "thinking") {
+    return {
+      label: "Thinking",
+      bodyText: msg.text,
+      compact: true,
+      contentClass: "text-ink/55 text-body-sm",
+      tone: "thinking",
+      renderMode: "markdown",
+    };
+  }
+  if (["tool", "tool_call", "tool_use", "function_call"].includes(role)) {
+    const parsed = parseToolCall(msg.text);
+    return {
+      label: parsed.name,
+      bodyText: parsed.body,
+      compact: true,
+      contentClass:
+        "text-ink/80 text-body-sm bg-ink/[0.055] border border-ink/[0.08] rounded-md px-3 py-2 overflow-hidden",
+      tone: "tool",
+      renderMode: "plain",
+    };
+  }
+  if (["tool_result", "function_call_output"].includes(role)) {
+    return {
+      label: "Tool Result",
+      bodyText: msg.text,
+      compact: true,
+      contentClass:
+        "text-ink/70 text-body-sm bg-ink/[0.04] border border-ink/[0.06] rounded-md px-3 py-2 overflow-hidden",
+      tone: "tool",
+      renderMode: "plain",
+    };
+  }
+  if (role === "todo") {
+    return {
+      label: "Update Todos",
+      bodyText: msg.text,
+      compact: true,
+      contentClass: "text-ink/45 text-body-sm",
+      tone: "tool",
+      renderMode: "todo",
+    };
+  }
+  return {
+    label: role,
+    bodyText: msg.text,
+    compact: false,
+    contentClass: "text-ink/85",
+    tone: "normal",
+    renderMode: "markdown",
+  };
+}
+
+function parseToolCall(text: string): { name: string; body: string } {
+  const m = text.match(/^\[([^\]\n]+)\]\s*\n?([\s\S]*)$/);
+  if (!m) return { name: "Tool Use", body: text };
+  return { name: m[1], body: m[2] ?? "" };
+}
+
+function parseToolSummary(text: string): { description: string | null } {
+  const parsed = parseToolCall(text);
+  try {
+    const value = JSON.parse(parsed.body) as unknown;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const description = (value as Record<string, unknown>).description;
+      if (typeof description === "string" && description.trim()) {
+        return { description };
+      }
+    }
+  } catch {
+    // Non-JSON tool calls are still valid; they just do not have a summary.
+  }
+  return { description: null };
+}
+
+interface MarkdownImage {
+  alt: string;
+  src: string;
+}
+
+function PlainTextContent({ text }: { text: string }) {
+  if (!text.trim()) return null;
+  return (
+    <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-caption leading-relaxed">
+      <code>{text}</code>
+    </pre>
+  );
+}
+
+function ToolPairContent({
+  input,
+  output,
+  collapsed,
+  onPreviewImage,
+}: {
+  input: string;
+  output: string;
+  collapsed: boolean;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-bg-panel-alt">
+      <ToolPairRow
+        label="IN"
+        text={formatToolInput(input)}
+        collapsed={collapsed}
+        onPreviewImage={onPreviewImage}
+      />
+      <div className="border-t border-ink/[0.07]" />
+      <ToolPairRow
+        label="OUT"
+        text={output}
+        collapsed={collapsed}
+        onPreviewImage={onPreviewImage}
+      />
+    </div>
+  );
+}
+
+function ToolPairRow({
+  label,
+  text,
+  collapsed,
+  onPreviewImage,
+}: {
+  label: string;
+  text: string;
+  collapsed: boolean;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const media = splitMarkdownImages(text);
+  return (
+    <div className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2 px-3 py-2">
+      <div className="font-mono text-[10px] leading-relaxed text-ink/35">
+        {label}
+      </div>
+      <div className="min-w-0">
+        {media.images.length > 0 && (
+          <div className="mb-1.5 flex flex-wrap gap-2">
+            {media.images.map((image, i) => (
+              <MarkdownImageButton
+                key={`${image.src}-${i}`}
+                image={image}
+                onPreviewImage={onPreviewImage}
+              />
+            ))}
+          </div>
+        )}
+        {media.text.trim() && (
+          <pre
+            className={
+              "min-w-0 overflow-x-auto whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75 " +
+              (collapsed ? "line-clamp-3" : "")
+            }
+          >
+            <code>{media.text}</code>
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatToolInput(text: string): string {
+  const parsed = parseToolCall(text);
+  const body = parsed.body.trim();
+  if (!body) return "";
+  try {
+    const value = JSON.parse(body) as unknown;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const record = value as Record<string, unknown>;
+      const command = record.command ?? record.cmd;
+      if (typeof command === "string" && command.trim()) {
+        return command;
+      }
+      const filePath = record.file_path ?? record.path;
+      if (typeof filePath === "string" && filePath.trim()) {
+        return filePath;
+      }
+    }
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return body;
+  }
+}
+
+type TodoStatus = "pending" | "in_progress" | "completed";
+
+interface ClaudeTodo {
+  content: string;
+  activeForm?: string;
+  status: TodoStatus | string;
+}
+
+function TodoContent({ text }: { text: string }) {
+  const todos = parseTodos(text);
+  if (todos.length === 0) return <PlainTextContent text={text} />;
+  return (
+    <ul className="mt-2 space-y-1.5">
+      {todos.map((todo, i) => {
+        const completed = todo.status === "completed";
+        const active = todo.status === "in_progress";
+        return (
+          <li
+            key={`${todo.content}-${i}`}
+            className={
+              "flex items-start gap-2 text-caption leading-relaxed " +
+              (completed
+                ? "text-ink/35 line-through decoration-ink/30"
+                : active
+                  ? "text-ink/65"
+                  : "text-ink/45")
+            }
+          >
+            <span
+              className={
+                "mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border text-[10px] leading-none " +
+                (completed
+                  ? "border-ink/20 bg-ink/[0.035] text-ink/35"
+                  : active
+                    ? "border-[rgb(var(--color-emerald)/0.45)] bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald))]"
+                    : "border-ink/18 bg-bg-panel-alt text-transparent")
+              }
+              aria-hidden="true"
+            >
+              {completed ? "✓" : active ? "•" : ""}
+            </span>
+            <span>{todo.content}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function parseTodos(text: string): ClaudeTodo[] {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap<ClaudeTodo>((item) => {
+      if (!item || typeof item !== "object") return [];
+      const record = item as Record<string, unknown>;
+      const content = record.content;
+      if (typeof content !== "string" || !content.trim()) return [];
+      const todo: ClaudeTodo = {
+        content,
+        status: typeof record.status === "string" ? record.status : "pending",
+      };
+      if (typeof record.activeForm === "string") {
+        todo.activeForm = record.activeForm;
+      }
+      return [todo];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function MarkdownContent({
+  text,
+  onPreviewImage,
+}: {
+  text: string;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const safeText = stripImagePlaceholders(text);
+  if (!safeText.trim()) return null;
+  const media = splitMarkdownImages(safeText);
+  const components = useMemo(
+    () => createMarkdownComponents(onPreviewImage),
+    [onPreviewImage],
+  );
+  return (
+    <div className="markdown-content">
+      {media.images.length > 0 && (
+        <MarkdownImageStrip
+          images={media.images}
+          onPreviewImage={onPreviewImage}
+        />
+      )}
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], rehypeKatex]}
+        components={components}
+        urlTransform={markdownUrlTransform}
+      >
+        {media.text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+const markdownSanitizeSchema: SanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    "details",
+    "summary",
+    "input",
+    "section",
+    "article",
+  ],
+  attributes: {
+    ...defaultSchema.attributes,
+    "*": [
+      ...(defaultSchema.attributes?.["*"] ?? []),
+      "className",
+      "data*",
+      "ariaLabel",
+      "ariaHidden",
+    ],
+    a: [
+      ...(defaultSchema.attributes?.a ?? []),
+      "href",
+      "title",
+      "target",
+      "rel",
+    ],
+    img: [
+      ...(defaultSchema.attributes?.img ?? []),
+      "alt",
+      "src",
+      "title",
+      "width",
+      "height",
+    ],
+    input: [["type", "checkbox"], "checked", "disabled"],
+    code: [...(defaultSchema.attributes?.code ?? []), "className"],
+    pre: [...(defaultSchema.attributes?.pre ?? []), "className"],
+    span: [...(defaultSchema.attributes?.span ?? []), "className"],
+    div: [...(defaultSchema.attributes?.div ?? []), "className"],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: ["http", "https", "mailto"],
+    src: ["http", "https", "data", "asset", "blob"],
+  },
+};
+
+function createMarkdownComponents(
+  onPreviewImage: (image: MarkdownImage) => void,
+): Components {
+  return {
+    p: ({ children }) => <p className="my-2 first:mt-0 last:mb-0">{children}</p>,
+    h1: ({ children }) => (
+      <h1 className="font-semibold text-ink mt-3 mb-1 first:mt-0">{children}</h1>
+    ),
+    h2: ({ children }) => (
+      <h2 className="font-semibold text-ink mt-3 mb-1 first:mt-0">{children}</h2>
+    ),
+    h3: ({ children }) => (
+      <h3 className="font-semibold text-ink mt-3 mb-1 first:mt-0">{children}</h3>
+    ),
+    h4: ({ children }) => (
+      <h4 className="font-semibold text-ink mt-3 mb-1 first:mt-0">{children}</h4>
+    ),
+    blockquote: ({ children }) => (
+      <blockquote className="border-l-2 border-ink/20 pl-3 my-2 text-ink/65">
+        {children}
+      </blockquote>
+    ),
+    ul: ({ children }) => <ul className="list-disc pl-5 my-2 space-y-1">{children}</ul>,
+    ol: ({ children }) => <ol className="list-decimal pl-5 my-2 space-y-1">{children}</ol>,
+    li: ({ children }) => <li>{children}</li>,
+    hr: () => <hr className="border-ink/10 my-3" />,
+    pre: ({ children }) => (
+      <pre className="overflow-x-auto rounded-md bg-bg-panel-alt border border-ink/[0.08] px-3 py-2 text-caption leading-relaxed my-2">
+        {children}
+      </pre>
+    ),
+    code: ({ children, className }) => {
+      if (className) {
+        return <code className={className}>{children}</code>;
+      }
+      return (
+        <code className="rounded bg-ink/[0.08] px-1 py-0.5 font-mono text-[0.92em] text-ink">
+          {children}
+        </code>
+      );
+    },
+    a: ({ children, href }) => {
+      const safe = safeHref(href ?? "");
+      if (!safe) return <>{children}</>;
+      return (
+        <a
+          href={safe}
+          target="_blank"
+          rel="noreferrer"
+          className="text-[rgb(var(--color-blue))] underline underline-offset-2"
+        >
+          {children}
+        </a>
+      );
+    },
+    img: ({ src, alt }) => (
+      <MarkdownImageButton
+        image={{ src: src ?? "", alt: alt ?? "image" }}
+        onPreviewImage={onPreviewImage}
+      />
+    ),
+  };
+}
+
+function MarkdownImageStrip({
+  images,
+  align,
+  onPreviewImage,
+}: {
+  images: MarkdownImage[];
+  align?: "left" | "right";
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  return (
+    <div
+      className={
+        "mb-3 flex flex-wrap gap-2 " +
+        (align === "right" ? "justify-end" : "")
+      }
+    >
+      {images.map((image, i) => (
+        <MarkdownImageButton
+          key={`${image.src}-${i}`}
+          image={image}
+          onPreviewImage={onPreviewImage}
+        />
+      ))}
+    </div>
+  );
+}
+
+function MarkdownImageButton({
+  image,
+  onPreviewImage,
+}: {
+  image: MarkdownImage;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const resolvedSrc = useResolvedImageSrc(image.src);
+  const previewImage = useMemo(
+    () => ({ ...image, src: resolvedSrc }),
+    [image, resolvedSrc],
+  );
+  return (
+    <button
+      type="button"
+      onClick={() => onPreviewImage(previewImage)}
+      className="my-1 block overflow-hidden rounded-md border border-ink/10 bg-bg-panel-alt hover:border-ink/25 focus:outline-none focus:ring-2 focus:ring-ink/20 transition"
+      title={image.alt}
+    >
+      <img
+        src={resolvedSrc}
+        alt={image.alt}
+        className="h-28 w-36 object-contain"
+        loading="lazy"
+      />
+    </button>
+  );
+}
+
+function ImagePreviewOverlay({
+  image,
+  onClose,
+}: {
+  image: MarkdownImage;
+  onClose: () => void;
+}) {
+  const src = useResolvedImageSrc(image.src);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="max-h-full max-w-full" onClick={(e) => e.stopPropagation()}>
+        <img
+          src={src}
+          alt={image.alt}
+          className="max-h-[calc(100vh-48px)] max-w-[calc(100vw-48px)] rounded-md bg-bg-panel-alt object-contain shadow-2xl"
+        />
+      </div>
+    </div>
+  );
+}
+
+function splitMarkdownImages(text: string): { text: string; images: MarkdownImage[] } {
+  const images: MarkdownImage[] = [];
+  const stripped = stripImagePlaceholders(text)
+    .split(/\r?\n/)
+    .filter((line) => {
+      const image = parseStandaloneMarkdownImage(line);
+      if (!image) return true;
+      images.push(image);
+      return false;
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { text: stripped, images };
+}
+
+function parseStandaloneMarkdownImage(line: string): MarkdownImage | null {
+  const trimmed = line.trim();
+  const match = trimmed.match(/^!\[([^\]]*)\]\((.+)\)$/);
+  if (!match) return null;
+  const rawSrc = match[2].trim();
+  const withoutTitle = rawSrc.replace(/\s+"[^"]*"$/, "").trim();
+  const src = withoutTitle.replace(/^<|>$/g, "");
+  if (!src) return null;
+  return { alt: match[1] || "image", src };
+}
+
+function markdownUrlTransform(url: string): string {
+  const raw = url.trim().replace(/^<|>$/g, "");
+  if (/^(https?:|mailto:|data:|asset:|blob:)/i.test(raw)) return raw;
+  if (/^\/|^[A-Za-z]:[\\/]/.test(raw)) return convertFileSrc(raw);
+  return "";
+}
+
+function useResolvedImageSrc(rawSrc: string): string {
+  const fallback = useMemo(() => resolveImageSrc(rawSrc), [rawSrc]);
+  const [src, setSrc] = useState(fallback);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSrc(fallback);
+    const localPath = localImagePath(rawSrc);
+    if (!localPath) return;
+    readLocalImageDataUrl(localPath)
+      .then((dataUrl) => {
+        if (!cancelled) setSrc(dataUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setSrc(fallback);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fallback, rawSrc]);
+
+  return src;
+}
+
+function resolveImageSrc(rawSrc: string): string {
+  const src = rawSrc.trim().replace(/^<|>$/g, "");
+  if (/^(https?:|data:|asset:|blob:)/i.test(src)) return src;
+  if (/^\/|^[A-Za-z]:[\\/]/.test(src)) return convertFileSrc(src);
+  return src;
+}
+
+function localImagePath(rawSrc: string): string | null {
+  const src = rawSrc.trim().replace(/^<|>$/g, "");
+  if (/^\/|^[A-Za-z]:[\\/]/.test(src)) return src;
+  return null;
+}
+
+function safeHref(rawHref: string): string | null {
+  const href = rawHref.trim().replace(/^<|>$/g, "");
+  if (/^(https?:|mailto:)/i.test(href)) return href;
+  return null;
 }

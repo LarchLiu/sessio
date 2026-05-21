@@ -65,7 +65,8 @@ pub fn load_memory_config() -> Result<MemoryConfig> {
 pub fn save_memory_config(config: &MemoryConfig) -> Result<()> {
     let path = config_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create config dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create config dir {}", parent.display()))?;
     }
     fs::write(&path, serialize_memory_config(config))
         .with_context(|| format!("write config {}", path.display()))
@@ -285,7 +286,8 @@ fn config_path() -> Result<PathBuf> {
 
 fn write_default_config_file(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create config dir {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create config dir {}", parent.display()))?;
     }
     let config = default_memory_config()?;
     fs::write(path, serialize_memory_config(&config))
@@ -323,7 +325,11 @@ fn serialize_memory_config(config: &MemoryConfig) -> String {
     out.push_str(&toml_string(&config.qmd.artifacts_root.to_string_lossy()));
     out.push('\n');
     out.push_str("auto_embed = ");
-    out.push_str(if config.qmd.auto_embed { "true" } else { "false" });
+    out.push_str(if config.qmd.auto_embed {
+        "true"
+    } else {
+        "false"
+    });
     out.push('\n');
     out.push_str("install_command = ");
     out.push_str(&toml_string(&config.qmd.install_command));

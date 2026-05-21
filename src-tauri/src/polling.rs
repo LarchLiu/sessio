@@ -65,11 +65,19 @@ fn poll_once(
 
 fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Result<()> {
     let (live_root, archived_root) = crate::agents::sources::codex::parser::roots()?;
-    let mut known: HashMap<String, &IndexedSessionRecord> = indexed
+    let mut known_main: HashMap<String, &IndexedSessionRecord> = indexed
         .iter()
         .filter(|s| s.agent == Agent::Codex && !s.file_path.is_empty())
         .map(|s| (s.file_path.clone(), s))
         .collect();
+    let mut known_sub: HashMap<String, &IndexedSubagentRecord> = HashMap::new();
+    for row in indexed.iter().filter(|s| s.agent == Agent::Codex) {
+        for sub in &row.subagents {
+            if !sub.file_path.is_empty() {
+                known_sub.insert(sub.file_path.clone(), sub);
+            }
+        }
+    }
 
     for root in [&live_root, &archived_root] {
         if !root.exists() {
@@ -89,15 +97,28 @@ fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Resu
             let path_str = path.to_string_lossy().into_owned();
             let archived =
                 crate::agents::sources::codex::parser::path_is_archived(path, &archived_root);
-            let needs_reindex = match known.remove(&path_str) {
-                // File reappeared after a previous soft-delete, or it changed,
-                // or it switched between live/archived: re-parse it.
-                Some(row) => {
-                    !row.available
-                        || file_changed(path, row.file_size, row.file_mtime)
-                        || row.archived != archived
+            let parsed_subagent =
+                crate::agents::sources::codex::parser::parse_one_subagent_file(path, archived)
+                    .unwrap_or(None)
+                    .is_some();
+            let needs_reindex = if parsed_subagent {
+                match known_sub.remove(&path_str) {
+                    Some(row) => {
+                        !row.available || file_changed(path, row.file_size, row.file_mtime)
+                    }
+                    None => true,
                 }
-                None => true,
+            } else {
+                match known_main.remove(&path_str) {
+                    // File reappeared after a previous soft-delete, or it changed,
+                    // or it switched between live/archived: re-parse it.
+                    Some(row) => {
+                        !row.available
+                            || file_changed(path, row.file_size, row.file_mtime)
+                            || row.archived != archived
+                    }
+                    None => true,
+                }
             };
             if needs_reindex {
                 indexer.submit(IndexTask::ReindexCodexFile(path.to_path_buf()))?;
@@ -105,11 +126,18 @@ fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Resu
         }
     }
 
-    // Whatever remains in `known` is indexed but absent on disk. Skip rows
+    // Whatever remains in `known_*` is indexed but absent on disk. Skip rows
     // already marked unavailable to avoid pointless writes through the cache.
-    for stale in known.into_values() {
+    for stale in known_main.into_values() {
         if stale.available {
             indexer.submit(IndexTask::DeleteFile(PathBuf::from(&stale.file_path)))?;
+        }
+    }
+    for stale in known_sub.into_values() {
+        if stale.available {
+            indexer.submit(IndexTask::DeleteSubagentFile(PathBuf::from(
+                &stale.file_path,
+            )))?;
         }
     }
 

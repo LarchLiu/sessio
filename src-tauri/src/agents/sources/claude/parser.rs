@@ -287,6 +287,7 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
             role: role_raw.to_string(),
             text: s.to_string(),
             timestamp: ts,
+            tool_call_id: None,
         }];
     }
 
@@ -306,6 +307,11 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                     text_parts.push(t.to_string());
                 }
             }
+            "image" => {
+                if let Some(markdown) = claude_image_item_to_markdown(item, text_parts.len() + 1) {
+                    text_parts.push(markdown);
+                }
+            }
             "thinking" => {
                 if !text_parts.is_empty() {
                     let joined = text_parts.join("\n");
@@ -315,6 +321,7 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                             role: role_raw.to_string(),
                             text: joined,
                             timestamp: ts,
+                            tool_call_id: None,
                         });
                     }
                     text_parts.clear();
@@ -325,6 +332,7 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                             role: "thinking".to_string(),
                             text: t.to_string(),
                             timestamp: ts,
+                            tool_call_id: None,
                         });
                     }
                 }
@@ -338,11 +346,28 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                             role: role_raw.to_string(),
                             text: joined,
                             timestamp: ts,
+                            tool_call_id: None,
                         });
                     }
                     text_parts.clear();
                 }
                 let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+                if name == "TodoWrite" {
+                    if let Some(todos) = item.get("input").and_then(|i| i.get("todos")) {
+                        if let Ok(text) = serde_json::to_string(todos) {
+                            out.push(SessionMessage {
+                                role: "todo".to_string(),
+                                text,
+                                timestamp: ts,
+                                tool_call_id: item
+                                    .get("id")
+                                    .and_then(|x| x.as_str())
+                                    .map(String::from),
+                            });
+                            continue;
+                        }
+                    }
+                }
                 let input_pretty = item
                     .get("input")
                     .and_then(|i| serde_json::to_string_pretty(i).ok())
@@ -356,6 +381,7 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                     role: "tool_call".to_string(),
                     text,
                     timestamp: ts,
+                    tool_call_id: item.get("id").and_then(|x| x.as_str()).map(String::from),
                 });
             }
             "tool_result" => {
@@ -367,6 +393,7 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                             role: role_raw.to_string(),
                             text: joined,
                             timestamp: ts,
+                            tool_call_id: None,
                         });
                     }
                     text_parts.clear();
@@ -377,6 +404,10 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                         role: "tool_result".to_string(),
                         text: body,
                         timestamp: ts,
+                        tool_call_id: item
+                            .get("tool_use_id")
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
                     });
                 }
             }
@@ -391,6 +422,7 @@ fn expand_message(role_raw: &str, msg: &serde_json::Value, ts: Option<i64>) -> V
                 role: role_raw.to_string(),
                 text: joined,
                 timestamp: ts,
+                tool_call_id: None,
             });
         }
     }
@@ -408,16 +440,40 @@ fn extract_tool_result_text(item: &serde_json::Value) -> String {
     }
     if let Some(arr) = content.as_array() {
         let mut parts = Vec::new();
-        for sub in arr {
+        for (idx, sub) in arr.iter().enumerate() {
             if sub.get("type").and_then(|x| x.as_str()) == Some("text") {
                 if let Some(t) = sub.get("text").and_then(|x| x.as_str()) {
                     parts.push(t.to_string());
+                }
+            } else if sub.get("type").and_then(|x| x.as_str()) == Some("image") {
+                if let Some(markdown) = claude_image_item_to_markdown(sub, idx + 1) {
+                    parts.push(markdown);
                 }
             }
         }
         return parts.join("\n");
     }
     String::new()
+}
+
+fn claude_image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String> {
+    let source = item.get("source")?;
+    let source_type = source.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    match source_type {
+        "base64" => {
+            let media_type = source
+                .get("media_type")
+                .and_then(|x| x.as_str())
+                .unwrap_or("image/png");
+            let data = source.get("data").and_then(|x| x.as_str())?;
+            Some(format!("![Image #{idx}](data:{media_type};base64,{data})"))
+        }
+        "url" => {
+            let url = source.get("url").and_then(|x| x.as_str())?;
+            Some(format!("![Image #{idx}]({url})"))
+        }
+        _ => None,
+    }
 }
 
 fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
@@ -828,4 +884,46 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
         archived: !available,
         subagents,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_message_converts_todo_write_to_todo_role() {
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_todos",
+                    "name": "TodoWrite",
+                    "input": {
+                        "todos": [
+                            {
+                                "content": "Verify parser todo rendering",
+                                "activeForm": "Verifying parser",
+                                "status": "completed"
+                            },
+                            {
+                                "content": "Style todos in session detail",
+                                "activeForm": "Styling todos",
+                                "status": "in_progress"
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let out = expand_message("assistant", &msg, Some(1_700_000_000_000));
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "todo");
+        assert_eq!(out[0].timestamp, Some(1_700_000_000_000));
+        assert_eq!(out[0].tool_call_id.as_deref(), Some("toolu_todos"));
+        assert!(out[0].text.contains("Verify parser todo rendering"));
+        assert!(out[0].text.contains("\"status\":\"completed\""));
+    }
 }

@@ -121,7 +121,7 @@ fn message_role(role: &str) -> MessageRole {
         "user" => MessageRole::User,
         "assistant" => MessageRole::Assistant,
         "thinking" => MessageRole::Thinking,
-        "tool" | "tool_use" | "function_call" | "tool_call" => MessageRole::ToolUse,
+        "tool" | "tool_use" | "function_call" | "tool_call" | "todo" => MessageRole::ToolUse,
         "tool_result" | "function_call_output" => MessageRole::ToolResult,
         "system" => MessageRole::System,
         _ => MessageRole::Unknown,
@@ -131,7 +131,11 @@ fn message_role(role: &str) -> MessageRole {
 fn message_content(role: &str, text: &str) -> MessageContent {
     match message_role(role) {
         MessageRole::ToolUse => {
-            let (name, raw) = parse_tool_call_text(text);
+            let (name, raw) = if role == "todo" {
+                ("TodoWrite".to_string(), Some(text.to_string()))
+            } else {
+                parse_tool_call_text(text)
+            };
             MessageContent::ToolUse {
                 tool: ToolUseEvent {
                     name,
@@ -293,6 +297,7 @@ mod tests {
                         role: "tool_call".to_string(),
                         text: "[shell]\n{\"cmd\":\"cargo check\"}".to_string(),
                         timestamp: None,
+                        tool_call_id: None,
                     },
                     SourceLocation::file("/tmp/session.jsonl"),
                 ),
@@ -301,6 +306,7 @@ mod tests {
                         role: "tool_result".to_string(),
                         text: "ok ".repeat(1000),
                         timestamp: None,
+                        tool_call_id: None,
                     },
                     SourceLocation::file("/tmp/session.jsonl"),
                 ),

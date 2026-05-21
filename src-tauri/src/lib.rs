@@ -395,6 +395,43 @@ fn get_session_messages(
 }
 
 #[tauri::command]
+fn read_local_image_data_url(path: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_absolute() {
+        return Err("Only absolute image paths can be loaded".to_string());
+    }
+    let mime = local_image_mime(&path_buf)
+        .ok_or_else(|| "Unsupported image type".to_string())?;
+    let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
+    const MAX_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Err("Image is too large to preview".to_string());
+    }
+    let bytes = std::fs::read(&path_buf).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{encoded}"))
+}
+
+fn local_image_mime(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        Some("svg") => Some("image/svg+xml"),
+        Some("bmp") => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
 fn write_cross_prompt(session_id: String, content: String) -> Result<String, String> {
     let safe_id: String = session_id
         .chars()
@@ -637,6 +674,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             get_session_messages,
+            read_local_image_data_url,
             set_window_appearance,
             get_system_appearance,
             rebuild_session_index,

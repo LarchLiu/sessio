@@ -67,6 +67,8 @@ pub struct SessionMessage {
     pub role: String,
     pub text: String,
     pub timestamp: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 pub fn normalize_preview(s: &str) -> String {

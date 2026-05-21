@@ -37,6 +37,7 @@ export interface SessionMessage {
   role: string;
   text: string;
   timestamp: number | null;
+  toolCallId?: string | null;
 }
 
 export type IndexPhase = "idle" | "indexing" | "rebuilding";
@@ -111,6 +112,10 @@ export async function getSessionMessages(
     filePath,
     sessionId: sessionId ?? null,
   });
+}
+
+export async function readLocalImageDataUrl(path: string): Promise<string> {
+  return invoke<string>("read_local_image_data_url", { path });
 }
 
 export async function writeCrossPrompt(

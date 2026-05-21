@@ -158,6 +158,7 @@ pub fn read_messages_with_locations(
                 role,
                 text,
                 timestamp: ts,
+                tool_call_id: None,
             },
             crate::agents::sources::types::SourceLocation {
                 file_path: file_path.clone(),

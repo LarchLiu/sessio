@@ -72,17 +72,27 @@ impl AgentSource for CodexSource {
         if !event.path.starts_with(&live) && !is_archived {
             return None;
         }
+        let source_kind = if is_archived {
+            SourceKind::Archive
+        } else if matches!(event.kind, PathEventKind::Remove) {
+            SourceKind::MainSession
+        } else {
+            match parser::parse_one_subagent_file(&event.path, is_archived) {
+                Ok(Some(_)) => SourceKind::Subagent,
+                Ok(None) => SourceKind::MainSession,
+                Err(e) => {
+                    log::warn!("codex classify {} failed: {e}", event.path.display());
+                    SourceKind::MainSession
+                }
+            }
+        };
         let source = SessionSource {
             agent: self.agent(),
             session_id: String::new(),
             scope: event.path.to_string_lossy().to_string(),
             file_path: event.path.to_string_lossy().to_string(),
             project: None,
-            source_kind: if is_archived {
-                SourceKind::Archive
-            } else {
-                SourceKind::MainSession
-            },
+            source_kind,
             metadata: Default::default(),
         };
         if matches!(event.kind, PathEventKind::Remove) {

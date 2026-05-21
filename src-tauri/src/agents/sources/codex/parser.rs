@@ -9,15 +9,16 @@ use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::SourceLocation;
 use crate::models::{
     is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
+    SubagentInfo,
 };
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
-    let mut out = Vec::new();
+    let mut parsed = Vec::new();
     let (live, archived) = roots()?;
     let titles = load_session_index_titles();
-    scan_dir(&live, false, &titles, &mut out);
-    scan_dir(&archived, true, &titles, &mut out);
-    Ok(out)
+    scan_dir(&live, false, &titles, &mut parsed);
+    scan_dir(&archived, true, &titles, &mut parsed);
+    Ok(group_codex_sessions(parsed))
 }
 
 pub fn roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
@@ -30,7 +31,60 @@ pub fn roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
 
 pub fn parse_one_file(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
     let titles = load_session_index_titles();
+    Ok(parse_session(path, archived, &titles)?.map(|p| p.info))
+}
+
+pub fn parse_one_file_with_relation(
+    path: &Path,
+    archived: bool,
+) -> Result<Option<CodexParsedSession>> {
+    let titles = load_session_index_titles();
     parse_session(path, archived, &titles)
+}
+
+pub fn parse_one_subagent_file(path: &Path, archived: bool) -> Result<Option<CodexParsedSubagent>> {
+    let Some(parsed) = parse_one_file_with_relation(path, archived)? else {
+        return Ok(None);
+    };
+    let Some(parent_thread_id) = parsed.parent_thread_id.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(CodexParsedSubagent {
+        parent_thread_id,
+        info: parsed.into_subagent(),
+    }))
+}
+
+pub fn find_session_file_by_id(session_id: &str) -> Result<Option<(std::path::PathBuf, bool)>> {
+    let (live, archived) = roots()?;
+    let titles = load_session_index_titles();
+    for (root, is_archived) in [(live.as_path(), false), (archived.as_path(), true)] {
+        if !root.exists() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            match parse_session(path, is_archived, &titles) {
+                Ok(Some(parsed))
+                    if parsed.parent_thread_id.is_none() && parsed.info.id == session_id =>
+                {
+                    return Ok(Some((path.to_path_buf(), is_archived)));
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("codex parse {} failed: {e}", path.display()),
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn path_is_archived(path: &Path, archived_root: &Path) -> bool {
@@ -41,7 +95,7 @@ fn scan_dir(
     root: &Path,
     archived: bool,
     titles: &HashMap<String, String>,
-    out: &mut Vec<SessionInfo>,
+    out: &mut Vec<CodexParsedSession>,
 ) {
     if !root.exists() {
         return;
@@ -63,6 +117,60 @@ fn scan_dir(
             Err(e) => log::warn!("codex parse {} failed: {e}", path.display()),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexParsedSession {
+    pub info: SessionInfo,
+    pub parent_thread_id: Option<String>,
+    pub agent_nickname: Option<String>,
+    pub agent_role: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexParsedSubagent {
+    pub parent_thread_id: String,
+    pub info: SubagentInfo,
+}
+
+impl CodexParsedSession {
+    pub fn into_subagent(self) -> SubagentInfo {
+        SubagentInfo {
+            id: self.info.id,
+            agent_type: self.agent_role,
+            description: self.agent_nickname,
+            started_at: self.info.started_at,
+            updated_at: self.info.updated_at,
+            message_count: self.info.message_count,
+            first_user_message: self.info.first_user_message,
+            file_path: self.info.file_path,
+            file_size: self.info.file_size,
+            partial: self.info.partial,
+            available: self.info.available,
+        }
+    }
+}
+
+fn group_codex_sessions(parsed: Vec<CodexParsedSession>) -> Vec<SessionInfo> {
+    let mut top_level = Vec::new();
+    let mut subagents_by_parent: HashMap<String, Vec<SubagentInfo>> = HashMap::new();
+    for item in parsed {
+        if let Some(parent_thread_id) = item.parent_thread_id.clone() {
+            subagents_by_parent
+                .entry(parent_thread_id)
+                .or_default()
+                .push(item.into_subagent());
+        } else {
+            top_level.push(item.info);
+        }
+    }
+    for session in top_level.iter_mut() {
+        if let Some(mut subagents) = subagents_by_parent.remove(&session.id) {
+            subagents.sort_by_key(|s| s.started_at);
+            session.subagents = subagents;
+        }
+    }
+    top_level
 }
 
 pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
@@ -109,13 +217,7 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
             .get("timestamp")
             .and_then(|t| t.as_str())
             .and_then(parse_iso);
-        if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
-            continue;
-        }
-        let Some(payload) = v.get("payload") else {
-            continue;
-        };
-        let Some(message) = interpret_payload(payload, ts) else {
+        let Some(message) = interpret_record(&v, ts) else {
             continue;
         };
         let location = SourceLocation {
@@ -128,6 +230,13 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
         out.push((message, location));
     }
     Ok(out)
+}
+
+fn interpret_record(v: &serde_json::Value, ts: Option<i64>) -> Option<SessionMessage> {
+    match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        "response_item" => interpret_payload(v.get("payload")?, ts),
+        _ => None,
+    }
 }
 
 fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<SessionMessage> {
@@ -153,6 +262,7 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
                 role,
                 text,
                 timestamp: ts,
+                tool_call_id: None,
             })
         }
         "function_call" => {
@@ -177,17 +287,37 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Option<Ses
                 role: "tool_call".to_string(),
                 text,
                 timestamp: ts,
+                tool_call_id: payload
+                    .get("call_id")
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
             })
         }
         "function_call_output" => {
-            let output = payload.get("output").and_then(|x| x.as_str()).unwrap_or("");
+            let output = extract_function_call_output_text(payload);
             if output.trim().is_empty() {
                 return None;
             }
             Some(SessionMessage {
                 role: "tool_result".to_string(),
-                text: output.to_string(),
+                text: output,
                 timestamp: ts,
+                tool_call_id: payload
+                    .get("call_id")
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+            })
+        }
+        "reasoning" => {
+            let text = extract_reasoning_text(payload);
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(SessionMessage {
+                role: "thinking".to_string(),
+                text,
+                timestamp: ts,
+                tool_call_id: None,
             })
         }
         _ => None,
@@ -198,13 +328,16 @@ fn parse_session(
     path: &Path,
     archived: bool,
     session_index_titles: &HashMap<String, String>,
-) -> Result<Option<SessionInfo>> {
+) -> Result<Option<CodexParsedSession>> {
     let scan = jsonl_scan::scan(path)?;
 
     let mut id: Option<String> = None;
     let mut forked_from_id: Option<String> = None;
     let mut started_at: Option<i64> = None;
     let mut cwd: Option<String> = None;
+    let mut parent_thread_id: Option<String> = None;
+    let mut agent_nickname: Option<String> = None;
+    let mut agent_role: Option<String> = None;
     let mut first_user_message: Option<String> = None;
     let mut latest_ts: Option<i64> = None;
 
@@ -242,6 +375,37 @@ fn parse_session(
                 cwd = payload
                     .get("cwd")
                     .and_then(|x| x.as_str())
+                    .map(String::from);
+            }
+            if parent_thread_id.is_none() {
+                parent_thread_id = codex_parent_thread_id(&payload);
+            }
+            if agent_nickname.is_none() {
+                agent_nickname = payload
+                    .get("agent_nickname")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| {
+                        payload
+                            .get("source")
+                            .and_then(|x| x.get("subagent"))
+                            .and_then(|x| x.get("thread_spawn"))
+                            .and_then(|x| x.get("agent_nickname"))
+                            .and_then(|x| x.as_str())
+                    })
+                    .map(String::from);
+            }
+            if agent_role.is_none() {
+                agent_role = payload
+                    .get("agent_role")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| {
+                        payload
+                            .get("source")
+                            .and_then(|x| x.get("subagent"))
+                            .and_then(|x| x.get("thread_spawn"))
+                            .and_then(|x| x.get("agent_role"))
+                            .and_then(|x| x.as_str())
+                    })
                     .map(String::from);
             }
         } else if t == "response_item" && first_user_message.is_none() {
@@ -298,7 +462,7 @@ fn parse_session(
         .cloned()
         .or_else(|| first_user_message.clone());
 
-    Ok(Some(SessionInfo {
+    let info = SessionInfo {
         id,
         agent: Agent::Codex,
         forked_from_id,
@@ -315,7 +479,23 @@ fn parse_session(
         available: true,
         archived,
         subagents: Vec::new(),
+    };
+    Ok(Some(CodexParsedSession {
+        info,
+        parent_thread_id,
+        agent_nickname,
+        agent_role,
     }))
+}
+
+fn codex_parent_thread_id(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .get("source")
+        .and_then(|x| x.get("subagent"))
+        .and_then(|x| x.get("thread_spawn"))
+        .and_then(|x| x.get("parent_thread_id"))
+        .and_then(|x| x.as_str())
+        .map(String::from)
 }
 
 fn load_session_index_titles() -> HashMap<String, String> {
@@ -353,7 +533,14 @@ fn extract_message_text(payload: &serde_json::Value) -> Option<String> {
         let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
         if matches!(kind, "input_text" | "text" | "output_text") {
             if let Some(text) = item.get("text").and_then(|x| x.as_str()) {
-                parts.push(text);
+                let cleaned = strip_image_placeholder_tags(text);
+                if !cleaned.trim().is_empty() {
+                    parts.push(cleaned);
+                }
+            }
+        } else if matches!(kind, "input_image" | "image_url") {
+            if let Some(markdown) = image_item_to_markdown(item, parts.len() + 1) {
+                parts.push(markdown);
             }
         }
     }
@@ -362,6 +549,72 @@ fn extract_message_text(payload: &serde_json::Value) -> Option<String> {
     } else {
         Some(parts.join("\n"))
     }
+}
+
+fn extract_function_call_output_text(payload: &serde_json::Value) -> String {
+    let Some(output) = payload.get("output") else {
+        return String::new();
+    };
+    if let Some(s) = output.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = output.as_array() {
+        let mut parts = Vec::new();
+        for (idx, item) in arr.iter().enumerate() {
+            let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            if matches!(kind, "text" | "input_text" | "output_text") {
+                if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
+                    parts.push(t.to_string());
+                }
+            } else if matches!(kind, "input_image" | "image_url") {
+                if let Some(markdown) = image_item_to_markdown(item, idx + 1) {
+                    parts.push(markdown);
+                }
+            }
+        }
+        return parts.join("\n");
+    }
+    serde_json::to_string_pretty(output).unwrap_or_default()
+}
+
+fn extract_reasoning_text(payload: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(arr) = payload.get("summary").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(text) = item.get("text").and_then(|x| x.as_str()) {
+                parts.push(text.to_string());
+            } else if let Some(text) = item.as_str() {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    if let Some(arr) = payload.get("content").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(text) = item.get("text").and_then(|x| x.as_str()) {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String> {
+    let url = item
+        .get("image_url")
+        .and_then(|x| x.as_str())
+        .or_else(|| item.get("url").and_then(|x| x.as_str()))
+        .or_else(|| item.get("path").and_then(|x| x.as_str()))?;
+    Some(format!("![Image #{idx}]({url})"))
+}
+
+fn strip_image_placeholder_tags(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !(trimmed.starts_with("<image ") && trimmed.ends_with(">")) && trimmed != "</image>"
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn parse_iso(s: &str) -> Option<i64> {
@@ -476,5 +729,144 @@ mod tests {
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_keeps_reasoning_and_images_as_displayable_markdown() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-rich-message-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let user = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"look\n<image name=[Image #1]>\n</image>"},{"type":"input_image","image_url":"data:image/png;base64,abc"}]}}"#;
+        let reasoning = r#"{"timestamp":"2026-05-18T05:09:16.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"text":"checking the screenshot"}],"content":null}}"#;
+        let tool_output = r#"{"timestamp":"2026-05-18T05:09:17.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"data:image/png;base64,def","detail":"original"}]}}"#;
+        fs::write(&path, format!("{user}\n{reasoning}\n{tool_output}\n")).unwrap();
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].0.role, "user");
+        assert!(!events[0].0.text.contains("<image"));
+        assert!(!events[0].0.text.contains("</image>"));
+        assert!(events[0]
+            .0
+            .text
+            .contains("![Image #2](data:image/png;base64,abc)"));
+        assert_eq!(events[1].0.role, "thinking");
+        assert_eq!(events[1].0.text, "checking the screenshot");
+        assert_eq!(events[2].0.role, "tool_result");
+        assert_eq!(events[2].0.tool_call_id.as_deref(), Some("call_1"));
+        assert!(events[2]
+            .0
+            .text
+            .contains("![Image #1](data:image/png;base64,def)"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn codex_subagent_metadata_parses_from_thread_spawn() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-subagent-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("subagent.jsonl");
+        let meta = r#"{"timestamp":"2026-05-20T16:31:20.060Z","type":"session_meta","payload":{"id":"child-thread","timestamp":"2026-05-20T16:31:19.702Z","cwd":"/tmp/project","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-thread","depth":1,"agent_nickname":"Beauvoir","agent_role":"worker"}}},"thread_source":"subagent","agent_nickname":"Beauvoir","agent_role":"worker"}}"#;
+        let user = r#"{"timestamp":"2026-05-20T16:31:21.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"do the side quest"}]}}"#;
+        fs::write(&path, format!("{meta}\n{user}\n")).unwrap();
+
+        let parsed = super::parse_one_file_with_relation(&path, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.info.id, "child-thread");
+        assert_eq!(parsed.parent_thread_id.as_deref(), Some("parent-thread"));
+        assert_eq!(parsed.agent_nickname.as_deref(), Some("Beauvoir"));
+        assert_eq!(parsed.agent_role.as_deref(), Some("worker"));
+
+        let sub = super::parse_one_subagent_file(&path, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sub.parent_thread_id, "parent-thread");
+        assert_eq!(sub.info.id, "child-thread");
+        assert_eq!(sub.info.agent_type.as_deref(), Some("worker"));
+        assert_eq!(sub.info.description.as_deref(), Some("Beauvoir"));
+        assert_eq!(
+            sub.info.first_user_message.as_deref(),
+            Some("do the side quest")
+        );
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn codex_grouping_attaches_subagents_and_hides_child_sessions() {
+        let parent = super::CodexParsedSession {
+            info: crate::models::SessionInfo {
+                id: "parent".to_string(),
+                agent: crate::models::Agent::Codex,
+                forked_from_id: None,
+                project_path: Some("/tmp/project".to_string()),
+                project_name: Some("project".to_string()),
+                started_at: Some(1),
+                updated_at: Some(3),
+                message_count: 1,
+                title: None,
+                first_user_message: Some("main".to_string()),
+                file_path: "/tmp/parent.jsonl".to_string(),
+                file_size: 1,
+                partial: false,
+                available: true,
+                archived: false,
+                subagents: Vec::new(),
+            },
+            parent_thread_id: None,
+            agent_nickname: None,
+            agent_role: None,
+        };
+        let child = super::CodexParsedSession {
+            info: crate::models::SessionInfo {
+                id: "child".to_string(),
+                agent: crate::models::Agent::Codex,
+                forked_from_id: None,
+                project_path: Some("/tmp/project".to_string()),
+                project_name: Some("project".to_string()),
+                started_at: Some(2),
+                updated_at: Some(4),
+                message_count: 1,
+                title: None,
+                first_user_message: Some("side".to_string()),
+                file_path: "/tmp/child.jsonl".to_string(),
+                file_size: 1,
+                partial: false,
+                available: true,
+                archived: false,
+                subagents: Vec::new(),
+            },
+            parent_thread_id: Some("parent".to_string()),
+            agent_nickname: Some("Ada".to_string()),
+            agent_role: Some("worker".to_string()),
+        };
+
+        let grouped = super::group_codex_sessions(vec![child, parent]);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].id, "parent");
+        assert_eq!(grouped[0].subagents.len(), 1);
+        assert_eq!(grouped[0].subagents[0].id, "child");
+        assert_eq!(
+            grouped[0].subagents[0].agent_type.as_deref(),
+            Some("worker")
+        );
     }
 }

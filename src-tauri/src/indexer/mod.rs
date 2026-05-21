@@ -448,7 +448,9 @@ fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<TaskOutcome> {
         IndexTask::ReindexGeminiLogs(path) => reindex_gemini_logs(path, store),
         IndexTask::RefreshGeminiProjectMappings => refresh_gemini_mappings(store),
         IndexTask::DeleteFile(path) => {
-            store.mark_file_path_unavailable(&path.to_string_lossy())?;
+            let path_str = path.to_string_lossy();
+            store.mark_file_path_unavailable(&path_str)?;
+            store.mark_subagent_file_unavailable(&path_str)?;
             Ok(TaskOutcome::default())
         }
         IndexTask::DeleteSubagentFile(path) => {
@@ -460,37 +462,20 @@ fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<TaskOutcome> {
 
 fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
     let mut affected_projects = HashMap::new();
-    let (codex_live, codex_archived) = crate::agents::sources::codex::parser::roots()?;
     let mut codex_scopes: HashSet<String> = HashSet::new();
-    for (root, archived) in [
-        (codex_live.as_path(), false),
-        (codex_archived.as_path(), true),
-    ] {
-        if !root.exists() {
-            continue;
-        }
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-            match crate::agents::sources::codex::parser::parse_one_file(path, archived) {
-                Ok(Some(info)) => {
-                    insert_session_project(&mut affected_projects, &info);
-                    let scope = info.file_path.clone();
-                    store.replace_by_scope(&scope, Agent::Codex, &[info])?;
-                    codex_scopes.insert(scope);
+    match crate::agents::sources::codex::parser::list_sessions() {
+        Ok(sessions) => {
+            for info in sessions {
+                insert_session_project(&mut affected_projects, &info);
+                let scope = info.file_path.clone();
+                store.replace_by_scope(&scope, Agent::Codex, std::slice::from_ref(&info))?;
+                for sub in &info.subagents {
+                    store.upsert_subagent(Agent::Codex, &scope, &info.id, sub)?;
                 }
-                Ok(None) => {}
-                Err(e) => log::warn!("codex parse {} failed: {e}", path.display()),
+                codex_scopes.insert(scope);
             }
         }
+        Err(e) => log::warn!("codex list sessions failed: {e}"),
     }
     store.mark_missing_scopes_unavailable(Agent::Codex, &codex_scopes)?;
 
@@ -559,21 +544,49 @@ fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
 
 fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome> {
     if !path.exists() {
-        store.mark_file_path_unavailable(&path.to_string_lossy())?;
+        let path_str = path.to_string_lossy();
+        store.mark_file_path_unavailable(&path_str)?;
+        store.mark_subagent_file_unavailable(&path_str)?;
         return Ok(TaskOutcome::default());
     }
     let (_, archived_root) = crate::agents::sources::codex::parser::roots()?;
     let archived = path.starts_with(&archived_root);
     let mut outcome = TaskOutcome::default();
-    match crate::agents::sources::codex::parser::parse_one_file(path, archived)? {
-        Some(info) => {
-            push_session_project(&mut outcome, &info);
-            push_session_source(&mut outcome, &info);
-            let scope = info.file_path.clone();
-            store.replace_by_scope(&scope, Agent::Codex, &[info])?;
+    match crate::agents::sources::codex::parser::parse_one_file_with_relation(path, archived)? {
+        Some(parsed) => {
+            if let Some(parent_thread_id) = parsed.parent_thread_id.clone() {
+                let path_str = path.to_string_lossy();
+                store.mark_file_path_unavailable(&path_str)?;
+                let subagent = parsed.into_subagent();
+                if let Some((parent_file, _)) =
+                    crate::agents::sources::codex::parser::find_session_file_by_id(
+                        &parent_thread_id,
+                    )?
+                {
+                    let scope = parent_file.to_string_lossy().into_owned();
+                    store.upsert_subagent(Agent::Codex, &scope, &parent_thread_id, &subagent)?;
+                } else {
+                    log::warn!(
+                        "codex subagent {} parent {} not found",
+                        path.display(),
+                        parent_thread_id
+                    );
+                }
+            } else {
+                let info = parsed.info;
+                push_session_project(&mut outcome, &info);
+                push_session_source(&mut outcome, &info);
+                let scope = info.file_path.clone();
+                store.replace_by_scope(&scope, Agent::Codex, std::slice::from_ref(&info))?;
+                for sub in &info.subagents {
+                    store.upsert_subagent(Agent::Codex, &scope, &info.id, sub)?;
+                }
+            }
         }
         None => {
-            store.mark_file_path_unavailable(&path.to_string_lossy())?;
+            let path_str = path.to_string_lossy();
+            store.mark_file_path_unavailable(&path_str)?;
+            store.mark_subagent_file_unavailable(&path_str)?;
         }
     }
     Ok(outcome)
