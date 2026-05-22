@@ -64,6 +64,11 @@ body {
   display: none;
 }
 
+.message-render-contain {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
+}
+
 .sessio-diff-preview {
   background: rgb(var(--color-bg-panel-alt));
   color: rgb(var(--color-fg) / 0.82);

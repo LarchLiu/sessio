@@ -377,7 +377,10 @@ function MessageStream({
               ref={(el) => {
                 bubbleRefs.current[i] = el;
               }}
-              className={item.message.role === "user" ? "flex justify-end" : ""}
+              className={
+                "message-render-contain " +
+                (item.message.role === "user" ? "flex justify-end" : "")
+              }
             >
               <MessageBubble
                 msg={item.message}
@@ -450,6 +453,7 @@ function RoleNav({
       setPositions(new Map());
       return;
     }
+    let measureFrame: number | null = null;
 
     // 滞回判定:进入线在视口顶部下方 1/4,退出线在 3/4,中间为死区
     // 向下滚:下一条顶端越过 1/4 → 切到下一条(此时它已占视口 ≈ 3/4)
@@ -518,14 +522,22 @@ function RoleNav({
     computePositions();
     computeActive();
     vp.addEventListener("scroll", computeActive, { passive: true });
+    const scheduleMeasure = () => {
+      if (measureFrame !== null) return;
+      measureFrame = window.requestAnimationFrame(() => {
+        measureFrame = null;
+        computePositions();
+        computeActive();
+      });
+    };
     const ro = new ResizeObserver(() => {
-      computePositions();
-      computeActive();
+      scheduleMeasure();
     });
     ro.observe(vp);
     for (const child of Array.from(vp.children)) ro.observe(child);
     return () => {
       vp.removeEventListener("scroll", computeActive);
+      if (measureFrame !== null) window.cancelAnimationFrame(measureFrame);
       ro.disconnect();
     };
   }, [viewportRef, refs, roleIndices]);

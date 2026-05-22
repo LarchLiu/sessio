@@ -43,6 +43,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
   const horizontalThumbRef = useRef<HTMLDivElement>(null);
   const hideTimerRef = useRef<number | undefined>(undefined);
   const dragStateRef = useRef<DragState | null>(null);
+  const updateFrameRef = useRef<number | null>(null);
 
   const [visible, setVisible] = useState(false);
   const [hasVerticalOverflow, setHasVerticalOverflow] = useState(false);
@@ -101,6 +102,14 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
     flashVisible();
   }, [updateThumbs, flashVisible]);
 
+  const scheduleUpdateThumbs = useCallback(() => {
+    if (updateFrameRef.current !== null) return;
+    updateFrameRef.current = window.requestAnimationFrame(() => {
+      updateFrameRef.current = null;
+      updateThumbs();
+    });
+  }, [updateThumbs]);
+
   useLayoutEffect(() => {
     updateThumbs();
   });
@@ -108,16 +117,18 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
-    const ro = new ResizeObserver(() => updateThumbs());
+    const ro = new ResizeObserver(() => scheduleUpdateThumbs());
     ro.observe(vp);
     for (const child of Array.from(vp.children)) ro.observe(child);
     return () => ro.disconnect();
-  }, [updateThumbs]);
+  }, [scheduleUpdateThumbs]);
 
   useEffect(() => {
     return () => {
       if (hideTimerRef.current !== undefined)
         window.clearTimeout(hideTimerRef.current);
+      if (updateFrameRef.current !== null)
+        window.cancelAnimationFrame(updateFrameRef.current);
     };
   }, []);
 
