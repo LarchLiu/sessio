@@ -127,6 +127,7 @@ export default function App() {
   const [viewMode] = useState<ViewMode>(() => readViewMode());
   const [detailMode, setDetailMode] = useState<DetailMode>("chat");
   const [metaPopoverOpen, setMetaPopoverOpen] = useState(false);
+  const [metaPopoverMounted, setMetaPopoverMounted] = useState(false);
   const [activeMessageMeta, setActiveMessageMeta] =
     useState<ActiveMessageMeta | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
@@ -297,6 +298,15 @@ export default function App() {
   useEffect(() => {
     setMetaPopoverOpen(false);
   }, [selected?.id]);
+
+  useEffect(() => {
+    if (metaPopoverOpen && selected) {
+      setMetaPopoverMounted(true);
+    }
+    if (!selected) {
+      setMetaPopoverMounted(false);
+    }
+  }, [metaPopoverOpen, selected]);
 
   const agentStats = useMemo(() => {
     const m: Record<Agent, { count: number; latest: number }> = {
@@ -876,18 +886,29 @@ export default function App() {
           </div>
         </div>
 
-        {selected && metaPopoverOpen && (
+        {selected && metaPopoverMounted && (
           <>
             <button
               type="button"
               data-tauri-drag-region="false"
               aria-label="Close metadata"
-              className="absolute inset-x-0 top-12 bottom-0 z-30 bg-bg/35 backdrop-blur-sm"
+              className={
+                "absolute inset-x-0 top-12 bottom-0 z-30 bg-bg/35 backdrop-blur-sm transition-opacity duration-150 " +
+                (metaPopoverOpen ? "opacity-100" : "opacity-0")
+              }
               onClick={() => setMetaPopoverOpen(false)}
+              onTransitionEnd={(e) => {
+                if (!metaPopoverOpen && e.currentTarget === e.target) {
+                  setMetaPopoverMounted(false);
+                }
+              }}
             />
             <div
               data-tauri-drag-region="false"
-              className="absolute left-1/2 top-12 z-40 w-[520px] max-w-[calc(100vw-80px)] -translate-x-1/2 transition"
+              className={
+                "absolute left-1/2 top-12 z-40 w-[520px] max-w-[calc(100vw-80px)] -translate-x-1/2 transition-[opacity,transform] duration-150 ease-out " +
+                (metaPopoverOpen ? "translate-y-0 opacity-100" : "-translate-y-3 opacity-0")
+              }
             >
               <SessionMetaList session={selected} />
             </div>
