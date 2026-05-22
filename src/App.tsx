@@ -831,7 +831,7 @@ export default function App() {
                 >
                   <div
                     data-tauri-drag-region
-                    className="truncate text-body font-medium text-ink/85"
+                    className="truncate text-body font-medium leading-tight text-ink/85"
                   >
                     {detailTitle}
                   </div>
@@ -1616,7 +1616,7 @@ function HeaderMessageMetaButton({
       className={
         "inline-flex items-center gap-1.5 " +
         (compact
-          ? "mt-0.5 text-caption text-ink/40"
+          ? "text-caption text-ink/40"
           : "text-body font-medium text-ink/45")
       }
     >
@@ -1661,7 +1661,7 @@ function HeaderModeTabs({
     <div className="relative flex items-center rounded-md bg-ink/[0.14] p-0.5">
       <div
         aria-hidden
-        className="absolute top-0.5 left-0.5 h-[26px] rounded bg-surface shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
+        className="absolute top-0.5 left-0.5 h-[26px] rounded bg-surface shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-transform duration-300 ease-out"
         style={{
           width: `${BTN_W}px`,
           transform: `translateX(${activeIndex * BTN_W}px)`,
