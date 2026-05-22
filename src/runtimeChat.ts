@@ -7,6 +7,33 @@ import type {
   RuntimeTurnStatus,
 } from "./api";
 
+export type LiveRuntimeAction =
+  | { type: "runtime-event"; event: AgentRuntimeEvent }
+  | {
+      type: "ensure-session";
+      session: LiveRuntimeSession;
+    }
+  | {
+      type: "optimistic-user-message";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      text: string;
+      timestamp: number;
+    }
+  | {
+      type: "replace-turn-id";
+      sessioRuntimeSessionId: string;
+      from: string;
+      to: string;
+    }
+  | {
+      type: "turn-error";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      error: RuntimeError;
+      timestamp: number;
+    };
+
 export interface LiveRuntimeState {
   sessions: Record<string, LiveRuntimeSession>;
   lastSequence: number;
@@ -71,6 +98,92 @@ export const emptyLiveRuntimeState: LiveRuntimeState = {
   lastSequence: 0,
 };
 
+export function normalizeAgentRuntimeEvent(raw: unknown): AgentRuntimeEvent {
+  return camelizeKeys(raw) as AgentRuntimeEvent;
+}
+
+export function applyRuntimeAction(
+  state: LiveRuntimeState,
+  action: LiveRuntimeAction,
+): LiveRuntimeState {
+  if (action.type === "runtime-event") {
+    return applyRuntimeEvent(state, action.event);
+  }
+
+  if (action.type === "ensure-session") {
+    return {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        [action.session.sessioRuntimeSessionId]:
+          state.sessions[action.session.sessioRuntimeSessionId] ?? action.session,
+      },
+    };
+  }
+
+  if (action.type === "replace-turn-id") {
+    const session = state.sessions[action.sessioRuntimeSessionId];
+    if (!session) return state;
+    const turns = session.turns.map((turn) =>
+      turn.turnId === action.from ? { ...cloneTurn(turn), turnId: action.to } : turn,
+    );
+    return {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        [session.sessioRuntimeSessionId]: { ...session, turns },
+      },
+    };
+  }
+
+  const session = state.sessions[action.sessioRuntimeSessionId];
+  if (!session) return state;
+  const turns = session.turns.slice();
+  const existingIndex = turns.findIndex((turn) => turn.turnId === action.turnId);
+  const turn =
+    existingIndex >= 0
+      ? cloneTurn(turns[existingIndex])
+      : newTurn(action.turnId, action.timestamp);
+
+  if (action.type === "optimistic-user-message") {
+    turn.userText = action.text;
+    turn.status = "streaming";
+    turn.updatedAt = action.timestamp;
+    if (!turn.parts.some((part) => part.kind === "user" && part.text === action.text)) {
+      turn.parts.push({ kind: "user", text: action.text });
+    }
+  } else {
+    turn.status = "failed";
+    turn.error = action.error;
+    turn.updatedAt = action.timestamp;
+    turn.parts.push({ kind: "error", error: action.error });
+  }
+
+  if (existingIndex >= 0) turns[existingIndex] = turn;
+  else turns.push(turn);
+  return {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      [session.sessioRuntimeSessionId]: { ...session, turns },
+    },
+  };
+}
+
+function camelizeKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(camelizeKeys);
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    out[snakeToCamel(key)] = camelizeKeys(child);
+  }
+  return out;
+}
+
+function snakeToCamel(value: string): string {
+  return value.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase());
+}
+
 export function applyRuntimeEvent(
   state: LiveRuntimeState,
   event: AgentRuntimeEvent,
@@ -105,7 +218,7 @@ export function applyRuntimeEvent(
   }
 
   const turns = session.turns.slice();
-  const existingIndex =
+  let existingIndex =
     "turnId" in event ? turns.findIndex((turn) => turn.turnId === event.turnId) : -1;
   const turn =
     existingIndex >= 0
@@ -120,10 +233,6 @@ export function applyRuntimeEvent(
   switch (event.kind) {
     case "turnStarted":
       turn.status = "streaming";
-      break;
-    case "userMessage":
-      turn.userText = event.text;
-      turn.parts.push({ kind: "user", text: event.text });
       break;
     case "textDelta":
       turn.assistantText += event.text;

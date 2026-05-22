@@ -73,6 +73,28 @@ body {
   overflow-anchor: none;
 }
 
+.chat-composer-textarea {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--color-fg) / 0.3) transparent;
+}
+
+.chat-composer-textarea::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-composer-textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-composer-textarea::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgb(var(--color-fg) / 0.3);
+}
+
+.chat-composer-textarea::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--color-fg) / 0.5);
+}
+
 .sessio-diff-preview {
   background: rgb(var(--color-bg-panel-alt));
   color: rgb(var(--color-fg) / 0.82);

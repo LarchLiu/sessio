@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod fake;
 pub mod manager;
 pub mod registry;

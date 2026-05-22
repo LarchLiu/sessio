@@ -1,16 +1,19 @@
 import {
   startTransition,
+  forwardRef,
   memo,
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ChevronDown, ChevronRight, FileDiff } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronRight, FileDiff, Plus } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -25,13 +28,22 @@ import {
   SessionMessage,
   SubagentInfo,
   getSessionMessages,
+  loadAgentSession,
   readLocalImageDataUrl,
+  sendAgentInput,
   updateSessionMessageCount,
 } from "../api";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
 import { localeTag, useI18n } from "../i18n";
 import type { ViewMode } from "../App";
+import {
+  applyRuntimeAction,
+  emptyLiveRuntimeState,
+  normalizeAgentRuntimeEvent,
+  type LiveRuntimeSession,
+  type LiveTurn,
+} from "../runtimeChat";
 
 interface Props {
   session: SessionInfo;
@@ -213,6 +225,7 @@ export default function SessionDetail({
           onPreviewImage={setPreviewImage}
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
+          workspacePath={session.projectPath}
         />
 
         {previewImage && (
@@ -276,6 +289,7 @@ function MessageStream({
   onPreviewImage,
   onMessageCount,
   messageCount,
+  workspacePath,
 }: {
   agent: SessionInfo["agent"];
   filePath: string;
@@ -286,6 +300,7 @@ function MessageStream({
   onPreviewImage: (image: MarkdownImage) => void;
   onMessageCount: (filePath: string, count: number) => boolean;
   messageCount: number;
+  workspacePath: string | null;
 }) {
   const { t } = useI18n();
   const sourceKey = messageSourceKey(agent, filePath, sessionId);
@@ -297,10 +312,24 @@ function MessageStream({
   );
   const [loading, setLoading] = useState(() => !isFreshCache);
   const [error, setError] = useState<string | null>(null);
+  const [liveState, dispatchLiveEvent] = useReducer(
+    applyRuntimeAction,
+    emptyLiveRuntimeState,
+  );
+  const runtimeSessionId = sessionId;
+  const [composerText, setComposerText] = useState("");
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const followLiveStreamRef = useRef(false);
+  const liveStreamingRef = useRef(false);
   const pendingInitialPositionRef = useRef<"bottom" | "restore" | null>(null);
   const initialPositionAppliedRef = useRef(false);
+  const liveSession = runtimeSessionId
+    ? liveState.sessions[runtimeSessionId]
+    : null;
 
   useLayoutEffect(() => {
     if (!available || !filePath) {
@@ -373,14 +402,61 @@ function MessageStream({
     };
   }, [agent, filePath, sessionId, available, messageCount, onMessageCount, sourceKey]);
 
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    listen<unknown>("agent-runtime-event", (event) => {
+      if (!cancelled) {
+        const payload = normalizeAgentRuntimeEvent(event.payload);
+        console.info("[sessio-runtime:frontend:event]", payload);
+        dispatchLiveEvent({ type: "runtime-event", event: payload });
+      }
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch((err) => {
+        if (!cancelled) setComposerError(String(err));
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   const displayItems = useMemo(() => {
     const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
     const filtered =
       viewMode === "native"
         ? all
         : all.filter(({ m }) => isConversationRole(m.role));
-    return moveFileEditsToTurnEnd(pairToolMessages(filtered));
-  }, [messages, viewMode]);
+    const historical = moveFileEditsToTurnEnd(pairToolMessages(filtered));
+    if (!liveSession) return historical;
+    return [...historical, ...liveTurnsToRenderItems(liveSession.turns)];
+  }, [liveSession, messages, viewMode]);
+  const liveStreamingKey = useMemo(() => {
+    if (!liveSession) return "";
+    return liveSession.turns
+      .filter((turn) => turn.status === "streaming")
+      .map((turn) => `${turn.turnId}:${turn.assistantText.length}:${turn.reasoningText.length}`)
+      .join("|");
+  }, [liveSession]);
+  liveStreamingRef.current = Boolean(liveStreamingKey);
+
+  const scrollChatToBottom = useCallback(() => {
+    const scroll = () => {
+      const vp = viewportRef.current;
+      if (!vp) return;
+      vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+    };
+    scroll();
+    window.requestAnimationFrame(() => {
+      scroll();
+      window.requestAnimationFrame(scroll);
+    });
+    window.setTimeout(scroll, 80);
+  }, []);
 
   bubbleRefs.current.length = displayItems.length;
 
@@ -427,6 +503,9 @@ function MessageStream({
         anchor,
         atBottom,
       });
+      if (!liveStreamingRef.current) {
+        followLiveStreamRef.current = atBottom;
+      }
     },
     [available, filePath, displayItems, sourceKey],
   );
@@ -440,7 +519,7 @@ function MessageStream({
   useLayoutEffect(() => {
     const vp = viewportRef.current;
     const mode = pendingInitialPositionRef.current;
-    if (!vp || mode === null || loading || messages.length === 0) return;
+    if (!vp || mode === null || loading || displayItems.length === 0) return;
     const snapshot = scrollCache.get(sourceKey);
     if (mode === "restore" && snapshot?.anchor) {
       const idx = displayItems.findIndex((item) => item.key === snapshot.anchor?.key);
@@ -460,16 +539,96 @@ function MessageStream({
         Math.min(snapshot.scrollTop, vp.scrollHeight - vp.clientHeight),
       );
     } else {
-      const last = bubbleRefs.current[displayItems.length - 1];
-      if (last) {
-        last.scrollIntoView({ block: "end" });
-      } else {
-        vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
-      }
+      followLiveStreamRef.current = true;
+      scrollChatToBottom();
     }
     pendingInitialPositionRef.current = null;
     initialPositionAppliedRef.current = true;
-  }, [displayItems, loading, messages.length, sourceKey]);
+  }, [displayItems, loading, scrollChatToBottom, sourceKey]);
+
+  useLayoutEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp || displayItems.length === 0 || !initialPositionAppliedRef.current) {
+      return;
+    }
+    const snapshot = scrollCache.get(sourceKey);
+    if (snapshot && !snapshot.atBottom && !followLiveStreamRef.current) return;
+    scrollChatToBottom();
+  }, [displayItems, scrollChatToBottom, sourceKey]);
+
+  useEffect(() => {
+    if (!liveStreamingKey || !followLiveStreamRef.current) return;
+    scrollChatToBottom();
+  }, [liveStreamingKey, scrollChatToBottom]);
+
+  const handleSend = useCallback(async () => {
+    const text = composerText.trim();
+    if (!text || sending) return;
+    if (!workspacePath) {
+      setComposerError("This session has no workspace path, so live chat cannot start yet.");
+      return;
+    }
+    setSending(true);
+    setComposerError(null);
+    followLiveStreamRef.current = true;
+    const timestamp = Date.now();
+    const optimisticTurnId = `local-turn-${timestamp}`;
+    const optimisticSessionId = runtimeSessionId;
+    let pendingRuntimeSessionId = optimisticSessionId;
+    console.info("[sessio-runtime:frontend:send]", {
+      text,
+      runtimeSessionId,
+      optimisticSessionId,
+      workspacePath,
+      sourceSessionId: sessionId,
+    });
+    if (!liveState.sessions[optimisticSessionId]) {
+      dispatchLiveEvent({
+        type: "ensure-session",
+        session: pendingLiveSession({
+          sessioRuntimeSessionId: optimisticSessionId,
+          agent,
+          workspacePath: workspacePath ?? "",
+        }),
+      });
+    }
+    dispatchLiveEvent({
+      type: "optimistic-user-message",
+      sessioRuntimeSessionId: optimisticSessionId,
+      turnId: optimisticTurnId,
+      text,
+      timestamp,
+    });
+    scrollChatToBottom();
+    try {
+      await loadAgentSession(agent, runtimeSessionId, workspacePath);
+      pendingRuntimeSessionId = runtimeSessionId;
+      const turn = await sendAgentInput(runtimeSessionId, { text });
+      dispatchLiveEvent({
+        type: "replace-turn-id",
+        sessioRuntimeSessionId: runtimeSessionId,
+        from: optimisticTurnId,
+        to: turn.turnId,
+      });
+      setComposerText("");
+      window.requestAnimationFrame(() => composerRef.current?.focus());
+    } catch (err) {
+      const message = String(err);
+      setComposerError(message);
+      const failedRuntimeSessionId = pendingRuntimeSessionId;
+      if (failedRuntimeSessionId) {
+        dispatchLiveEvent({
+          type: "turn-error",
+          sessioRuntimeSessionId: failedRuntimeSessionId,
+          turnId: optimisticTurnId,
+          error: { code: "send_failed", message, data: null },
+          timestamp: Date.now(),
+        });
+      }
+    } finally {
+      setSending(false);
+    }
+  }, [agent, composerText, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
@@ -513,6 +672,17 @@ function MessageStream({
           ))}
         </div>
       </ScrollArea>
+      <ChatComposer
+        ref={composerRef}
+        value={composerText}
+        disabled={sending}
+        sending={sending}
+        error={composerError}
+        contextLabel="52% used"
+        placeholder="Ask, Search or Chat..."
+        onChange={setComposerText}
+        onSend={handleSend}
+      />
       <RoleNav
         role="assistant"
         side="left"
@@ -529,6 +699,30 @@ function MessageStream({
       />
     </div>
   );
+}
+
+function pendingLiveSession(handle: {
+  sessioRuntimeSessionId: string;
+  agent: SessionInfo["agent"];
+  workspacePath: string;
+}): LiveRuntimeSession {
+  return {
+    sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+    agent: handle.agent,
+    agentRuntimeSessionId: "pending",
+    transport: "fake",
+    workspacePath: handle.workspacePath,
+    capabilities: {
+      supportsCancel: true,
+      supportsPermissions: true,
+      supportsToolDeltas: true,
+      supportsResume: true,
+      supportsAttachments: false,
+      supportsModes: false,
+    },
+    turns: [],
+    ended: false,
+  };
 }
 
 function RoleNav({
@@ -775,6 +969,131 @@ function RoleNav({
       })}
     </div>
   );
+}
+
+const ChatComposer = forwardRef<HTMLTextAreaElement, {
+  value: string;
+  disabled: boolean;
+  sending: boolean;
+  error: string | null;
+  contextLabel: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+  onSend: () => void;
+}>(function ChatComposer(
+  {
+    value,
+    disabled,
+    sending,
+    error,
+    contextLabel,
+    placeholder,
+    onChange,
+  onSend,
+  },
+  ref,
+) {
+  const canSend = value.trim().length > 0 && !disabled && !sending;
+  const disabledTitle = disabled ? "Select a project-backed session to chat" : undefined;
+  const innerRef = useRef<HTMLTextAreaElement | null>(null);
+  useLayoutEffect(() => {
+    if (innerRef.current) resizeTextareaToContent(innerRef.current);
+  }, [value]);
+  const setTextareaRef = (el: HTMLTextAreaElement | null) => {
+    innerRef.current = el;
+    if (typeof ref === "function") {
+      ref(el);
+    } else if (ref) {
+      ref.current = el;
+    }
+    if (el) resizeTextareaToContent(el);
+  };
+  return (
+    <div className="shrink-0 px-10 pb-4 pt-2 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80">
+      <div className="w-full">
+        {error && (
+          <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
+            {error}
+          </div>
+        )}
+        <div
+          className={
+            "rounded-lg border bg-ink/[0.045] transition-colors " +
+            (error
+              ? "border-status-error/35"
+              : "border-ink/10 focus-within:border-ink/24")
+          }
+          title={disabledTitle}
+        >
+          <textarea
+            ref={setTextareaRef}
+            value={value}
+            disabled={disabled}
+            placeholder={placeholder}
+            rows={2}
+            onChange={(event) => {
+              resizeTextareaToContent(event.currentTarget);
+              onChange(event.target.value);
+            }}
+            onInput={(event) => resizeTextareaToContent(event.currentTarget)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+                return;
+              }
+              event.preventDefault();
+              if (canSend) onSend();
+            }}
+            className="chat-composer-textarea block w-full resize-none bg-transparent px-3 py-3 text-body leading-5 text-ink/85 placeholder:text-ink/45 outline-none disabled:cursor-not-allowed disabled:opacity-55"
+          />
+          <div className="flex h-11 items-center justify-between gap-3 px-2.5 pb-2">
+            <div className="flex min-w-0 items-center gap-3">
+              <Tooltip content="Add context" placement="top">
+                <button
+                  type="button"
+                  disabled={disabled}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-ink/20 text-ink/55 transition hover:border-ink/35 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+                  aria-label="Add context"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              </Tooltip>
+              <button
+                type="button"
+                disabled={disabled}
+                className="text-body-sm font-medium text-ink/62 transition hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Auto
+              </button>
+            </div>
+            <div className="flex shrink-0 items-center gap-3">
+              <span className="text-body-sm font-medium text-ink/50">
+                {contextLabel}
+              </span>
+              <button
+                type="button"
+                disabled={!canSend}
+                onClick={onSend}
+                className="flex h-6 w-6 items-center justify-center rounded-full bg-ink text-[rgb(var(--color-bg-panel))] transition hover:bg-ink/85 disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
+                aria-label={sending ? "Sending" : "Send"}
+              >
+                <ArrowUp className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+function resizeTextareaToContent(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
+  const minHeight = lineHeight * 2;
+  const maxHeight = lineHeight * 6;
+  const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
+  el.style.height = `${nextHeight}px`;
+  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 function previewTextForRole(message: SessionMessage): string {
@@ -1053,6 +1372,75 @@ interface MessageRenderItem {
   key: string;
   message: SessionMessage;
   toolResult?: SessionMessage;
+}
+
+function liveTurnsToRenderItems(turns: LiveTurn[]): MessageRenderItem[] {
+  const items: MessageRenderItem[] = [];
+  for (const turn of turns) {
+    if (turn.userText.trim()) {
+      items.push({
+        key: `live:${turn.turnId}:user`,
+        message: {
+          role: "user",
+          text: turn.userText,
+          timestamp: turn.startedAt,
+        },
+      });
+    }
+    if (turn.reasoningText.trim()) {
+      items.push({
+        key: `live:${turn.turnId}:reasoning`,
+        message: {
+          role: "thinking",
+          text: turn.reasoningText,
+          timestamp: turn.startedAt,
+        },
+      });
+    }
+    for (const tool of turn.tools) {
+      const inputText =
+        tool.inputText ||
+        (tool.input === null ? "" : JSON.stringify(tool.input, null, 2));
+      items.push({
+        key: `live:${turn.turnId}:tool:${tool.toolId}`,
+        message: {
+          role: "tool_call",
+          text: `[${tool.name}]\n${inputText}`,
+          timestamp: turn.updatedAt,
+          toolCallId: tool.toolId,
+        },
+        toolResult: tool.outputText
+          ? {
+              role: "tool_result",
+              text: tool.outputText,
+              timestamp: turn.updatedAt,
+              toolCallId: tool.toolId,
+            }
+          : undefined,
+      });
+    }
+    if (turn.assistantText.trim()) {
+      items.push({
+        key: `live:${turn.turnId}:assistant`,
+        message: {
+          role: "assistant",
+          text: turn.assistantText,
+          timestamp: turn.updatedAt,
+        },
+      });
+    }
+    if (turn.error) {
+      items.push({
+        key: `live:${turn.turnId}:error`,
+        message: {
+          role: "tool_result",
+          text: turn.error.message,
+          timestamp: turn.updatedAt,
+        },
+      });
+    }
+  }
+  return items;
 }
 
 function pairToolMessages(

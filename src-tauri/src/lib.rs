@@ -518,11 +518,28 @@ fn start_agent_session(
 }
 
 #[tauri::command]
+fn load_agent_session(
+    agent: Agent,
+    runtime_session_id: String,
+    workspace_path: String,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<AgentSessionHandle, String> {
+    runtime
+        .load_session(agent, runtime_session_id, workspace_path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn send_agent_input(
     sessio_runtime_session_id: String,
     input: AgentInput,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentTurnHandle, String> {
+    log::info!(
+        "[sessio-runtime:backend:send] session={} text={:?}",
+        sessio_runtime_session_id,
+        input.text
+    );
     runtime
         .send_input(&sessio_runtime_session_id, input)
         .map_err(|e| e.to_string())
@@ -777,6 +794,7 @@ pub fn run() {
             write_cross_prompt,
             get_agent_runtime_status,
             start_agent_session,
+            load_agent_session,
             send_agent_input,
             cancel_agent_turn,
             remove_session_files,

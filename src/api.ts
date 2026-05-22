@@ -159,7 +159,6 @@ export type AgentRuntimeEventPayload =
       capabilities: RuntimeCapabilitySet;
     }
   | { kind: "turnStarted"; sessioRuntimeSessionId: string; turnId: string }
-  | { kind: "userMessage"; sessioRuntimeSessionId: string; turnId: string; text: string }
   | { kind: "textDelta"; sessioRuntimeSessionId: string; turnId: string; text: string }
   | { kind: "reasoningDelta"; sessioRuntimeSessionId: string; turnId: string; text: string }
   | {
@@ -303,6 +302,18 @@ export async function startAgentSession(
   req: StartAgentSessionRequest,
 ): Promise<AgentSessionHandle> {
   return invoke<AgentSessionHandle>("start_agent_session", { req });
+}
+
+export async function loadAgentSession(
+  agent: Agent,
+  runtimeSessionId: string,
+  workspacePath: string,
+): Promise<AgentSessionHandle> {
+  return invoke<AgentSessionHandle>("load_agent_session", {
+    agent,
+    runtimeSessionId,
+    workspacePath,
+  });
 }
 
 export async function sendAgentInput(

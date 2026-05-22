@@ -158,11 +158,6 @@ pub enum AgentRuntimeEventPayload {
         sessio_runtime_session_id: String,
         turn_id: String,
     },
-    UserMessage {
-        sessio_runtime_session_id: String,
-        turn_id: String,
-        text: String,
-    },
     TextDelta {
         sessio_runtime_session_id: String,
         turn_id: String,

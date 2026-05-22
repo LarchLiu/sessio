@@ -122,6 +122,69 @@ impl RuntimeManager {
         Ok(handle)
     }
 
+    pub fn load_session(
+        &self,
+        agent: Agent,
+        agent_runtime_session_id: String,
+        workspace_path: String,
+    ) -> Result<AgentSessionHandle> {
+        if agent_runtime_session_id.trim().is_empty() {
+            bail!("runtime session id is required");
+        }
+        if workspace_path.trim().is_empty() {
+            bail!("workspace_path is required");
+        }
+        let workspace = Path::new(&workspace_path);
+        if !workspace.is_absolute() {
+            bail!("workspace_path must be absolute: {}", workspace_path);
+        }
+        if !workspace.exists() {
+            bail!("workspace_path does not exist: {}", workspace_path);
+        }
+
+        let handle = AgentSessionHandle {
+            sessio_runtime_session_id: agent_runtime_session_id.clone(),
+            agent,
+            transport: RuntimeTransportKind::Fake,
+            agent_runtime_session_id,
+            workspace_path,
+            status: RuntimeSessionStatus::Idle,
+            capabilities: RuntimeCapabilitySet::fake(),
+        };
+
+        let inserted = {
+            let mut sessions = self
+                .inner
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+            if let Some(existing) = sessions.get(&handle.sessio_runtime_session_id) {
+                return Ok(existing.handle.clone());
+            }
+            sessions.insert(
+                handle.sessio_runtime_session_id.clone(),
+                RuntimeSessionState {
+                    handle: handle.clone(),
+                    active_turn_id: None,
+                },
+            );
+            true
+        };
+
+        if inserted {
+            self.emit(AgentRuntimeEventPayload::SessionStarted {
+                agent: handle.agent,
+                sessio_runtime_session_id: handle.sessio_runtime_session_id.clone(),
+                agent_runtime_session_id: handle.agent_runtime_session_id.clone(),
+                transport: handle.transport,
+                workspace_path: handle.workspace_path.clone(),
+                capabilities: handle.capabilities.clone(),
+            })?;
+        }
+
+        Ok(handle)
+    }
+
     pub fn send_input(
         &self,
         sessio_runtime_session_id: &str,
@@ -151,11 +214,6 @@ impl RuntimeManager {
         self.emit(AgentRuntimeEventPayload::TurnStarted {
             sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
             turn_id: turn_id.clone(),
-        })?;
-        self.emit(AgentRuntimeEventPayload::UserMessage {
-            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-            turn_id: turn_id.clone(),
-            text: input.text.clone(),
         })?;
 
         fake::spawn_stream(self.clone(), sessio_runtime_session_id.to_string(), turn_id.clone(), input);
@@ -256,6 +314,7 @@ impl RuntimeManager {
     }
 
     pub(crate) fn emit(&self, payload: AgentRuntimeEventPayload) -> Result<()> {
+        log::info!("[sessio-runtime:backend:event] {:?}", payload);
         let event = AgentRuntimeEvent {
             sequence: self.inner.sequence.fetch_add(1, Ordering::Relaxed),
             timestamp: now_ms(),

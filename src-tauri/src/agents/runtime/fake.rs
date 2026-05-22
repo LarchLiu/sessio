@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use super::acp::{convert_session_update, fake_session_update, AcpFakeUpdate};
 use super::manager::RuntimeManager;
-use super::types::{AgentInput, AgentRuntimeEventPayload, RuntimeError};
+use super::types::{AgentInput, RuntimeError};
 
 pub fn spawn_stream(
     manager: RuntimeManager,
@@ -29,43 +30,67 @@ async fn stream_fake_response(
     input: AgentInput,
 ) -> anyhow::Result<()> {
         sleep(120);
-    manager.emit(AgentRuntimeEventPayload::ReasoningDelta {
-        sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-        turn_id: turn_id.to_string(),
-        text: "Inspecting the request and preparing a streamed reply.\n".to_string(),
-    })?;
+    emit_fake_acp(
+        manager,
+        sessio_runtime_session_id,
+        turn_id,
+        AcpFakeUpdate::ThoughtChunk {
+            content: "Inspecting the request and preparing a streamed reply.\n".to_string(),
+        },
+    )?;
 
     if input.text.to_ascii_lowercase().contains("tool") {
         let tool_id = format!("{turn_id}-tool-1");
         sleep(160);
-        manager.emit(AgentRuntimeEventPayload::ToolStarted {
-            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            tool_id: tool_id.clone(),
-            name: "fake_lookup".to_string(),
-            input: Some(json!({ "query": input.text })),
-        })?;
+        emit_fake_acp(
+            manager,
+            sessio_runtime_session_id,
+            turn_id,
+            AcpFakeUpdate::ToolCall {
+                id: tool_id.clone(),
+                title: "fake_lookup".to_string(),
+                input: json!({ "query": input.text }),
+            },
+        )?;
         sleep(140);
-        manager.emit(AgentRuntimeEventPayload::ToolOutputDelta {
-            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            tool_id,
-            delta: "fake lookup completed\n".to_string(),
-        })?;
+        emit_fake_acp(
+            manager,
+            sessio_runtime_session_id,
+            turn_id,
+            AcpFakeUpdate::ToolCallOutput {
+                id: tool_id,
+                output: "fake lookup completed\n".to_string(),
+            },
+        )?;
     }
 
     let response = fake_response_text(&input.text);
     for chunk in chunk_text(&response, 18) {
         sleep(45);
-        manager.emit(AgentRuntimeEventPayload::TextDelta {
-            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-            turn_id: turn_id.to_string(),
-            text: chunk,
-        })?;
+        emit_fake_acp(
+            manager,
+            sessio_runtime_session_id,
+            turn_id,
+            AcpFakeUpdate::AgentMessageChunk { content: chunk },
+        )?;
     }
 
     sleep(80);
     manager.complete_turn(sessio_runtime_session_id, turn_id)
+}
+
+fn emit_fake_acp(
+    manager: &RuntimeManager,
+    sessio_runtime_session_id: &str,
+    turn_id: &str,
+    update: AcpFakeUpdate,
+) -> anyhow::Result<()> {
+    let raw = fake_session_update(update);
+    log::info!("[sessio-runtime:fake-acp:raw] {}", raw);
+    if let Some(event) = convert_session_update(&raw, sessio_runtime_session_id, turn_id)? {
+        manager.emit(event)?;
+    }
+    Ok(())
 }
 
 fn fake_response_text(input: &str) -> String {

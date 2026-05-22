@@ -227,6 +227,9 @@ Important rules:
 - A new assistant bubble should be created on `TurnStarted` or the first assistant delta, then mutated in place as `TextDelta` arrives.
 - Tool, reasoning, and permission updates should attach to the current turn rather than becoming unrelated top-level messages unless the UX intentionally separates them.
 - Auto-scroll should follow the stream only when the user is already near the bottom; reading older content should not be interrupted by incoming deltas.
+- Auto-scroll has two separate timing hazards:
+  - Initial session load cannot rely on a single `scrollIntoView` call because Markdown, code blocks, and media can change height after the first layout. Use a shared "scroll to bottom" helper that retries across animation frames and a short timeout.
+  - Live streaming cannot let programmatic scroll events disable follow mode. Setting `scrollTop` also fires `onScroll`, so the live/streaming flag must be updated synchronously with render state before scroll handlers run; otherwise an intermediate non-bottom position can set `followLiveStream=false` and stop user/fake/agent messages from following the bottom.
 - Once the indexer observes the persisted agent transcript, reconciliation should dedupe by runtime metadata and source refs so completed live bubbles do not appear twice.
 - If ACP disconnects before the transcript is indexed, the live overlay should remain visible as a recovered/disconnected runtime turn.
 
@@ -322,6 +325,8 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [x] Add Tauri commands and `agent-runtime-event` dispatch behind the manager without changing current list/detail/memory commands.
 - [x] Add frontend API types in `src/api.ts` that mirror the Rust event model, but keep UI changes minimal for this phase.
 - [x] Add a frontend runtime reducer that consumes `agent-runtime-event`, appends deltas to existing live turns, and emits immutable state updates for React rendering.
+- [ ] Make runtime commands return only short-lived acknowledgements/handles; all long-running prompt progress, completion, and errors must be delivered through `agent-runtime-event`, not through pending invoke callbacks.
+- [ ] Add command/request ids to runtime events so the frontend can correlate start/send acknowledgements with event-stream state without keeping long invoke callbacks alive.
 
 ### Phase 2: Runtime Persistence
 
@@ -339,6 +344,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [ ] Implement stdio JSON-RPC framing, request id allocation, response correlation, notification dispatch, and graceful shutdown.
 - [ ] Implement ACP `initialize` and capability negotiation before exposing a runtime as ready.
 - [ ] Implement `session/new`, `session/load` when supported, `session/prompt`, and `session/cancel`.
+- [ ] Start ACP prompt work in a detached runtime task after `send_agent_input` has returned an `AgentTurnHandle`, so hot reloads cannot strand Tauri invoke callback ids while the agent is still streaming.
 - [ ] Treat `session/cancel` as fire-and-follow-up: send the notification, mark local turn cancelling, answer pending permission requests as cancelled, and wait for prompt completion or timeout.
 - [ ] Implement `session/request_permission` routing through the runtime manager and Tauri event stream; ensure every request receives exactly one approve/reject/cancel response.
 - [ ] Convert ACP `session/update` notifications into `AgentRuntimeEvent` at the transport boundary.
@@ -365,31 +371,32 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 
 ### Phase 6: UI Integration
 
-- [ ] Add a bottom chat composer to the existing chat view, visually matching the compact rounded panel: placeholder `Ask, Search or Chat...`, left mode button, `Auto` mode label, context usage label, and circular send button.
-- [ ] Make the composer support multiline input, submit-on-enter, newline-on-shift-enter, disabled/loading states, and pending send feedback.
-- [ ] Add a mode selector for `Auto` and future modes without blocking the v1 ACP path on implementing every mode.
-- [ ] Wire composer submit to `start_agent_session` when no live runtime session exists for the selected workspace, otherwise to `send_agent_input`.
-- [ ] Keep the composer fixed to the bottom of the chat pane while the message timeline scrolls behind/above it with enough bottom padding.
-- [ ] Add a runtime panel or composer controller that can start a live session from a workspace and stream events.
-- [ ] Compose rendered chat items from indexed `SessionMessage[]` plus live runtime overlay turns in timestamp/sequence order.
-- [ ] Render streaming assistant text by mutating/appending to the current assistant bubble instead of inserting one message per delta.
-- [ ] Reuse the existing Markdown renderer for streamed assistant text, but tolerate incomplete Markdown fences, tables, lists, and math while the turn is in progress.
-- [ ] Add a subtle streaming cursor or pending indicator inside the active assistant bubble.
+- [x] Add a bottom chat composer to the existing chat view, visually matching the compact rounded panel: placeholder `Ask, Search or Chat...`, left mode button, `Auto` mode label, context usage label, and circular send button.
+- [x] Make the composer support multiline input, submit-on-enter, newline-on-shift-enter, disabled/loading states, and pending send feedback.
+- [x] Add a mode selector for `Auto` and future modes without blocking the v1 ACP path on implementing every mode.
+- [x] Wire composer submit to `start_agent_session` when no live runtime session exists for the selected workspace, otherwise to `send_agent_input`.
+- [x] Keep the composer fixed to the bottom of the chat pane while the message timeline scrolls behind/above it with enough bottom padding.
+- [x] Add a runtime panel or composer controller that can start a live session from a workspace and stream events.
+- [x] Compose rendered chat items from indexed `SessionMessage[]` plus live runtime overlay turns in timestamp/sequence order.
+- [x] Render streaming assistant text by mutating/appending to the current assistant bubble instead of inserting one message per delta.
+- [x] Reuse the existing Markdown renderer for streamed assistant text, but tolerate incomplete Markdown fences, tables, lists, and math while the turn is in progress.
+- [x] Add a subtle streaming cursor or pending indicator inside the active assistant bubble.
 - [ ] Render reasoning, tool calls, tool output, permission requests, errors, and cancellation state as nested turn blocks that can update while streaming.
 - [ ] Add turn state rendering for pending, streaming, cancelling, completed, failed, and disconnected turns.
 - [ ] Add permission prompt UI with approve, reject, and cancel paths.
 - [ ] Disable or hide unsupported controls based on runtime capability flags.
-- [ ] Add near-bottom auto-scroll behavior for live streams and preserve manual scroll position when the user scrolls up.
-- [ ] Add context usage display, initially backed by runtime status or a placeholder value when the transport cannot report token/context usage.
+- [x] Add near-bottom auto-scroll behavior for live streams and preserve manual scroll position when the user scrolls up.
+- [x] Add context usage display, initially backed by runtime status or a placeholder value when the transport cannot report token/context usage.
 - [ ] Connect existing cross-agent continuation generation to `start_agent_session` as an optional launch path.
 - [ ] Add explicit memory injection controls for v1 instead of automatic background injection.
 - [ ] Show the link between a live runtime session and its indexed historical session after reconciliation succeeds.
-- [ ] Add empty/no-selection behavior for the composer: disabled with explanation when no project/workspace can be resolved, enabled when a workspace is selected.
-- [ ] Add keyboard focus behavior so opening a live chat session focuses the composer without stealing focus during streaming.
+- [x] Add empty/no-selection behavior for the composer: disabled with explanation when no project/workspace can be resolved, enabled when a workspace is selected.
+- [x] Add keyboard focus behavior so opening a live chat session focuses the composer without stealing focus during streaming.
 
 ### Phase 7: Testing and Verification
 
 - [ ] Unit-test runtime manager ordering, active-turn locking, cancellation state, and permission response routing.
+- [ ] Test that start/send commands return promptly while the fake/ACP runtime continues to emit stream events after the invoke callback has completed.
 - [ ] Unit-test the frontend runtime reducer for delta append, duplicate event ignore, out-of-order sequence handling, completion, cancellation, and permission response updates.
 - [ ] Unit-test live/historical reconciliation so completed live messages do not duplicate after indexed messages reload.
 - [ ] Unit-test ACP JSON-RPC request/response matching, unknown notification handling, malformed payload handling, and request timeout behavior.
@@ -397,6 +404,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [ ] Integration-test fake ACP server flows: start, prompt, deltas, tool calls, permission approve/reject, cancellation, process exit, and load existing session.
 - [ ] Integration-test fake structured CLI binaries for Claude/Gemini-style stream-json fallback.
 - [ ] Add component tests or Playwright checks for composer layout at narrow and wide widths, streaming text append, auto-scroll, and manual scroll preservation.
+- [ ] Add regression coverage for chat auto-scroll timing: initial historical load with late content height changes, optimistic user message append, streamed fake/agent deltas, and manual scroll-up preservation.
 - [ ] Verify streaming Markdown does not break the chat window while code fences, tables, math, or lists are incomplete.
 - [ ] Test runtime persistence recovery after app restart with active, errored, disconnected, and ended sessions.
 - [ ] Verify `cargo test`, `cargo check`, and `pnpm run typecheck` after each vertical slice.
@@ -407,6 +415,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [x] `cargo check` passed after adding the fake agent runtime shell, Tauri runtime commands, and `agent-runtime-event` dispatch.
 - [x] `cargo test` passed after adding fake runtime unit coverage.
 - [x] `pnpm run typecheck` passed after adding runtime API types and the frontend live runtime reducer.
+- [x] `cargo check`, `pnpm run typecheck`, and `pnpm run build` passed after wiring the bottom composer to fake runtime streaming and live chat overlay rendering.
 
 ### Deferred
 
