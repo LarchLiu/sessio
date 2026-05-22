@@ -313,15 +313,15 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 
 ### Phase 1: Runtime Shell
 
-- [ ] Add `src-tauri/src/agents/runtime/` with `types.rs`, `registry.rs`, `fake.rs`, and transport-specific modules.
-- [ ] Define serializable request/response types: `StartAgentSession`, `AgentSessionHandle`, `AgentInput`, `AgentTurnHandle`, `RuntimeStatus`, `RuntimeCapabilitySet`, and `RuntimeError`.
-- [ ] Define `AgentRuntimeEvent` with enough metadata for UI ordering: monotonic sequence number, wall-clock timestamp, runtime session id, agent session id, and optional turn/tool ids.
-- [ ] Define frontend-facing live chat entities: `LiveRuntimeSession`, `LiveTurn`, `LiveMessagePart`, `LiveToolCall`, `LivePermissionRequest`, and `LiveRuntimeStatus`.
-- [ ] Add a `RuntimeManager` that owns active sessions, dispatches events, serializes sends per session, and prevents two active prompt turns on the same runtime session unless a transport explicitly supports it.
-- [ ] Add an in-process fake runtime that can script deltas, tool calls, permission requests, errors, cancellation, and process exits.
-- [ ] Add Tauri commands and `agent-runtime-event` dispatch behind the manager without changing current list/detail/memory commands.
-- [ ] Add frontend API types in `src/api.ts` that mirror the Rust event model, but keep UI changes minimal for this phase.
-- [ ] Add a frontend runtime reducer that consumes `agent-runtime-event`, appends deltas to existing live turns, and emits immutable state updates for React rendering.
+- [x] Add `src-tauri/src/agents/runtime/` with `types.rs`, `registry.rs`, `fake.rs`, and transport-specific modules.
+- [x] Define serializable request/response types: `StartAgentSession`, `AgentSessionHandle`, `AgentInput`, `AgentTurnHandle`, `RuntimeStatus`, `RuntimeCapabilitySet`, and `RuntimeError`.
+- [x] Define `AgentRuntimeEvent` with enough metadata for UI ordering: monotonic sequence number, wall-clock timestamp, runtime session id, agent session id, and optional turn/tool ids.
+- [x] Define frontend-facing live chat entities: `LiveRuntimeSession`, `LiveTurn`, `LiveMessagePart`, `LiveToolCall`, `LivePermissionRequest`, and `LiveRuntimeStatus`.
+- [x] Add a `RuntimeManager` that owns active sessions, dispatches events, serializes sends per session, and prevents two active prompt turns on the same runtime session unless a transport explicitly supports it.
+- [x] Add an in-process fake runtime that can script deltas, tool calls, permission requests, errors, cancellation, and process exits.
+- [x] Add Tauri commands and `agent-runtime-event` dispatch behind the manager without changing current list/detail/memory commands.
+- [x] Add frontend API types in `src/api.ts` that mirror the Rust event model, but keep UI changes minimal for this phase.
+- [x] Add a frontend runtime reducer that consumes `agent-runtime-event`, appends deltas to existing live turns, and emits immutable state updates for React rendering.
 
 ### Phase 2: Runtime Persistence
 
@@ -401,6 +401,12 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [ ] Test runtime persistence recovery after app restart with active, errored, disconnected, and ended sessions.
 - [ ] Verify `cargo test`, `cargo check`, and `pnpm run typecheck` after each vertical slice.
 - [ ] Add manual smoke commands or scripts for starting one real agent session from a local workspace once a real transport lands.
+
+### Completed Verification Log
+
+- [x] `cargo check` passed after adding the fake agent runtime shell, Tauri runtime commands, and `agent-runtime-event` dispatch.
+- [x] `cargo test` passed after adding fake runtime unit coverage.
+- [x] `pnpm run typecheck` passed after adding runtime API types and the frontend live runtime reducer.
 
 ### Deferred
 

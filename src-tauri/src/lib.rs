@@ -12,6 +12,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agents::runtime::types::{
+    AgentInput, AgentSessionHandle, AgentTurnHandle, RuntimeStatus, StartAgentSession,
+};
+use agents::runtime::RuntimeManager;
 use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
@@ -498,6 +502,44 @@ fn write_cross_prompt(session_id: String, content: String) -> Result<String, Str
 }
 
 #[tauri::command]
+fn get_agent_runtime_status(
+    agent: Agent,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<RuntimeStatus, String> {
+    Ok(runtime.status(agent))
+}
+
+#[tauri::command]
+fn start_agent_session(
+    req: StartAgentSession,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<AgentSessionHandle, String> {
+    runtime.start_session(req).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn send_agent_input(
+    sessio_runtime_session_id: String,
+    input: AgentInput,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<AgentTurnHandle, String> {
+    runtime
+        .send_input(&sessio_runtime_session_id, input)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cancel_agent_turn(
+    sessio_runtime_session_id: String,
+    turn_id: String,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<(), String> {
+    runtime
+        .cancel_turn(&sessio_runtime_session_id, &turn_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_window_appearance(window: tauri::Window, theme: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -678,6 +720,7 @@ pub fn run() {
             app.manage(store);
             app.manage(memory_store);
             app.manage(indexer_handle);
+            app.manage(RuntimeManager::new(app.handle().clone()));
 
             install_appearance_observer(app.handle().clone());
 
@@ -732,6 +775,10 @@ pub fn run() {
             get_memory_backend_status,
             search_project_memory,
             write_cross_prompt,
+            get_agent_runtime_status,
+            start_agent_session,
+            send_agent_input,
+            cancel_agent_turn,
             remove_session_files,
             remove_sessions_by_scope
         ])

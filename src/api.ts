@@ -68,6 +68,157 @@ export interface ProjectMemorySearchResult {
   raw: unknown;
 }
 
+export type RuntimeTransportKind = "acp" | "cliStreamJson" | "plainCli" | "fake";
+
+export type RuntimeSessionStatus =
+  | "starting"
+  | "active"
+  | "idle"
+  | "cancelling"
+  | "completed"
+  | "errored"
+  | "disconnected"
+  | "ended";
+
+export type RuntimeTurnStatus =
+  | "pending"
+  | "streaming"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface RuntimeCapabilitySet {
+  supportsCancel: boolean;
+  supportsPermissions: boolean;
+  supportsToolDeltas: boolean;
+  supportsResume: boolean;
+  supportsAttachments: boolean;
+  supportsModes: boolean;
+}
+
+export interface RuntimeStatus {
+  agent: Agent;
+  transport: RuntimeTransportKind;
+  available: boolean;
+  status: RuntimeSessionStatus;
+  capabilities: RuntimeCapabilitySet;
+  error: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface StartAgentSessionRequest {
+  agent: Agent;
+  workspacePath: string;
+  initialPrompt?: string | null;
+  sourceSessionId?: string | null;
+  options?: Record<string, unknown>;
+}
+
+export interface AgentSessionHandle {
+  sessioRuntimeSessionId: string;
+  agent: Agent;
+  transport: RuntimeTransportKind;
+  agentRuntimeSessionId: string;
+  workspacePath: string;
+  status: RuntimeSessionStatus;
+  capabilities: RuntimeCapabilitySet;
+}
+
+export interface AgentAttachment {
+  path: string;
+  mimeType: string | null;
+}
+
+export interface AgentInput {
+  text: string;
+  attachments?: AgentAttachment[];
+  options?: Record<string, unknown>;
+}
+
+export interface AgentTurnHandle {
+  sessioRuntimeSessionId: string;
+  turnId: string;
+  status: RuntimeTurnStatus;
+}
+
+export interface RuntimeError {
+  code: string;
+  message: string;
+  data: unknown | null;
+}
+
+export type AgentRuntimeEventPayload =
+  | {
+      kind: "sessionStarted";
+      agent: Agent;
+      sessioRuntimeSessionId: string;
+      agentRuntimeSessionId: string;
+      transport: RuntimeTransportKind;
+      workspacePath: string;
+      capabilities: RuntimeCapabilitySet;
+    }
+  | { kind: "turnStarted"; sessioRuntimeSessionId: string; turnId: string }
+  | { kind: "userMessage"; sessioRuntimeSessionId: string; turnId: string; text: string }
+  | { kind: "textDelta"; sessioRuntimeSessionId: string; turnId: string; text: string }
+  | { kind: "reasoningDelta"; sessioRuntimeSessionId: string; turnId: string; text: string }
+  | {
+      kind: "toolStarted";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      toolId: string;
+      name: string;
+      input: unknown | null;
+    }
+  | {
+      kind: "toolInputDelta";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      toolId: string;
+      delta: string;
+    }
+  | {
+      kind: "toolOutputDelta";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      toolId: string;
+      delta: string;
+    }
+  | {
+      kind: "permissionRequested";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      requestId: string;
+      toolName: string;
+      input: unknown | null;
+    }
+  | {
+      kind: "permissionResolved";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      requestId: string;
+      approved: boolean;
+    }
+  | {
+      kind: "turnCompleted";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      result: unknown | null;
+    }
+  | {
+      kind: "turnError";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      error: RuntimeError;
+    }
+  | { kind: "turnCancelled"; sessioRuntimeSessionId: string; turnId: string }
+  | { kind: "sessionEnded"; sessioRuntimeSessionId: string };
+
+export type AgentRuntimeEvent = AgentRuntimeEventPayload & {
+  sequence: number;
+  timestamp: number;
+};
+
 export type SessionScope =
   | { kind: "all" }
   | { kind: "agent"; agent: Agent }
@@ -142,6 +293,36 @@ export async function writeCrossPrompt(
   content: string,
 ): Promise<string> {
   return invoke<string>("write_cross_prompt", { sessionId, content });
+}
+
+export async function getAgentRuntimeStatus(agent: Agent): Promise<RuntimeStatus> {
+  return invoke<RuntimeStatus>("get_agent_runtime_status", { agent });
+}
+
+export async function startAgentSession(
+  req: StartAgentSessionRequest,
+): Promise<AgentSessionHandle> {
+  return invoke<AgentSessionHandle>("start_agent_session", { req });
+}
+
+export async function sendAgentInput(
+  sessioRuntimeSessionId: string,
+  input: AgentInput,
+): Promise<AgentTurnHandle> {
+  return invoke<AgentTurnHandle>("send_agent_input", {
+    sessioRuntimeSessionId,
+    input,
+  });
+}
+
+export async function cancelAgentTurn(
+  sessioRuntimeSessionId: string,
+  turnId: string,
+): Promise<void> {
+  return invoke<void>("cancel_agent_turn", {
+    sessioRuntimeSessionId,
+    turnId,
+  });
 }
 
 export const AGENT_LABEL: Record<Agent, string> = {
