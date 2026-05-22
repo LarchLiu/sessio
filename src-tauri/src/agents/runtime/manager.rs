@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc, Mutex,
 };
 
 use anyhow::{bail, Context, Result};
@@ -32,6 +32,8 @@ struct RuntimeManagerInner {
 struct RuntimeSessionState {
     handle: AgentSessionHandle,
     active_turn_id: Option<String>,
+    turn_cancellations: HashMap<String, Arc<AtomicBool>>,
+    permission_waiters: HashMap<String, mpsc::Sender<bool>>,
 }
 
 impl RuntimeManager {
@@ -93,6 +95,8 @@ impl RuntimeManager {
                 RuntimeSessionState {
                     handle: handle.clone(),
                     active_turn_id: None,
+                    turn_cancellations: HashMap::new(),
+                    permission_waiters: HashMap::new(),
                 },
             );
         }
@@ -166,6 +170,8 @@ impl RuntimeManager {
                 RuntimeSessionState {
                     handle: handle.clone(),
                     active_turn_id: None,
+                    turn_cancellations: HashMap::new(),
+                    permission_waiters: HashMap::new(),
                 },
             );
             true
@@ -195,6 +201,7 @@ impl RuntimeManager {
         }
 
         let turn_id = self.next_id("turn");
+        let cancel_token = Arc::new(AtomicBool::new(false));
         {
             let mut sessions = self
                 .inner
@@ -208,6 +215,9 @@ impl RuntimeManager {
                 bail!("runtime session already has active turn: {active}");
             }
             state.active_turn_id = Some(turn_id.clone());
+            state
+                .turn_cancellations
+                .insert(turn_id.clone(), cancel_token.clone());
             state.handle.status = RuntimeSessionStatus::Active;
         }
 
@@ -216,7 +226,13 @@ impl RuntimeManager {
             turn_id: turn_id.clone(),
         })?;
 
-        fake::spawn_stream(self.clone(), sessio_runtime_session_id.to_string(), turn_id.clone(), input);
+        fake::spawn_stream(
+            self.clone(),
+            sessio_runtime_session_id.to_string(),
+            turn_id.clone(),
+            input,
+            cancel_token,
+        );
 
         Ok(AgentTurnHandle {
             sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
@@ -242,6 +258,12 @@ impl RuntimeManager {
             match state.active_turn_id.as_deref() {
                 Some(active) if active == turn_id => {
                     state.active_turn_id = None;
+                    if let Some(token) = state.turn_cancellations.get(turn_id) {
+                        token.store(true, Ordering::Relaxed);
+                    }
+                    for (_, sender) in state.permission_waiters.drain() {
+                        let _ = sender.send(false);
+                    }
                     state.handle.status = RuntimeSessionStatus::Idle;
                 }
                 Some(active) => bail!("active turn is {active}, not {turn_id}"),
@@ -253,6 +275,72 @@ impl RuntimeManager {
             sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
             turn_id: turn_id.to_string(),
         })
+    }
+
+    pub fn respond_permission(
+        &self,
+        sessio_runtime_session_id: &str,
+        request_id: &str,
+        approved: bool,
+    ) -> Result<()> {
+        let sender = {
+            let mut sessions = self
+                .inner
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+            let state = sessions
+                .get_mut(sessio_runtime_session_id)
+                .with_context(|| format!("unknown runtime session: {sessio_runtime_session_id}"))?;
+            state
+                .permission_waiters
+                .remove(request_id)
+                .with_context(|| format!("unknown permission request: {request_id}"))?
+        };
+        sender
+            .send(approved)
+            .map_err(|_| anyhow::anyhow!("permission request is no longer active"))
+    }
+
+    pub(crate) fn request_permission(
+        &self,
+        sessio_runtime_session_id: &str,
+        turn_id: &str,
+        request_id: &str,
+        tool_name: &str,
+        input: Option<serde_json::Value>,
+    ) -> Result<bool> {
+        let (sender, receiver) = mpsc::channel();
+        {
+            let mut sessions = self
+                .inner
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+            let state = sessions
+                .get_mut(sessio_runtime_session_id)
+                .with_context(|| format!("unknown runtime session: {sessio_runtime_session_id}"))?;
+            state
+                .permission_waiters
+                .insert(request_id.to_string(), sender);
+        }
+        self.emit(AgentRuntimeEventPayload::PermissionRequested {
+            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            request_id: request_id.to_string(),
+            tool_name: tool_name.to_string(),
+            input,
+        })?;
+        let approved = receiver
+            .recv()
+            .map_err(|_| anyhow::anyhow!("permission response channel closed"))?;
+        self.emit(AgentRuntimeEventPayload::PermissionResolved {
+            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            request_id: request_id.to_string(),
+            approved,
+        })?;
+        Ok(approved)
     }
 
     pub(crate) fn complete_turn(
@@ -273,6 +361,7 @@ impl RuntimeManager {
                 false
             } else {
                 state.active_turn_id = None;
+                state.turn_cancellations.remove(turn_id);
                 state.handle.status = RuntimeSessionStatus::Idle;
                 true
             }
@@ -302,6 +391,7 @@ impl RuntimeManager {
             if let Some(state) = sessions.get_mut(sessio_runtime_session_id) {
                 if state.active_turn_id.as_deref() == Some(turn_id) {
                     state.active_turn_id = None;
+                    state.turn_cancellations.remove(turn_id);
                     state.handle.status = RuntimeSessionStatus::Errored;
                 }
             }

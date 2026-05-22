@@ -17,6 +17,12 @@ pub fn fake_session_update(delta: AcpFakeUpdate) -> Value {
         AcpFakeUpdate::ToolCallOutput { id, output } => {
             json!({ "sessionId": delta_session_id_placeholder(), "update": { "kind": "tool_call_update", "toolCallId": id, "content": { "type": "text", "text": output } } })
         }
+        AcpFakeUpdate::PermissionRequest { id, tool_name, input } => {
+            json!({ "sessionId": delta_session_id_placeholder(), "update": { "kind": "permission_request", "permissionRequestId": id, "toolName": tool_name, "input": input } })
+        }
+        AcpFakeUpdate::PermissionResponse { id, approved } => {
+            json!({ "sessionId": delta_session_id_placeholder(), "update": { "kind": "permission_response", "permissionRequestId": id, "approved": approved } })
+        }
         AcpFakeUpdate::Error { message } => {
             json!({ "sessionId": delta_session_id_placeholder(), "update": { "kind": "error", "message": message } })
         }
@@ -43,6 +49,15 @@ pub enum AcpFakeUpdate {
     ToolCallOutput {
         id: String,
         output: String,
+    },
+    PermissionRequest {
+        id: String,
+        tool_name: String,
+        input: Value,
+    },
+    PermissionResponse {
+        id: String,
+        approved: bool,
     },
     Error {
         message: String,
@@ -108,6 +123,29 @@ pub fn convert_session_update(
                 .to_string(),
             delta: text_content(update)?,
         },
+        "permission_request" => AgentRuntimeEventPayload::PermissionRequested {
+            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            request_id: permission_request_id(update),
+            tool_name: update
+                .get("toolName")
+                .or_else(|| update.get("tool_name"))
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_string(),
+            input: update.get("input").cloned(),
+        },
+        "permission_response" | "permission_resolved" => {
+            AgentRuntimeEventPayload::PermissionResolved {
+                sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                request_id: permission_request_id(update),
+                approved: update
+                    .get("approved")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }
+        }
         "error" => AgentRuntimeEventPayload::TurnError {
             sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
             turn_id: turn_id.to_string(),
@@ -149,6 +187,17 @@ fn text_content(update: &Value) -> Result<String> {
     bail!("ACP content is not text")
 }
 
+fn permission_request_id(update: &Value) -> String {
+    update
+        .get("permissionRequestId")
+        .or_else(|| update.get("permission_request_id"))
+        .or_else(|| update.get("requestId"))
+        .or_else(|| update.get("request_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("permission")
+        .to_string()
+}
+
 fn delta_session_id_placeholder() -> &'static str {
     "fake-acp-session"
 }
@@ -167,6 +216,50 @@ mod tests {
             .unwrap();
         match event {
             AgentRuntimeEventPayload::TextDelta { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn converts_permission_request_and_response() {
+        let raw = fake_session_update(AcpFakeUpdate::PermissionRequest {
+            id: "perm-1".to_string(),
+            tool_name: "fake_write".to_string(),
+            input: json!({ "path": "example.txt" }),
+        });
+        let event = convert_session_update(&raw, "sess", "turn")
+            .unwrap()
+            .unwrap();
+        match event {
+            AgentRuntimeEventPayload::PermissionRequested {
+                request_id,
+                tool_name,
+                input,
+                ..
+            } => {
+                assert_eq!(request_id, "perm-1");
+                assert_eq!(tool_name, "fake_write");
+                assert_eq!(input, Some(json!({ "path": "example.txt" })));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let raw = fake_session_update(AcpFakeUpdate::PermissionResponse {
+            id: "perm-1".to_string(),
+            approved: true,
+        });
+        let event = convert_session_update(&raw, "sess", "turn")
+            .unwrap()
+            .unwrap();
+        match event {
+            AgentRuntimeEventPayload::PermissionResolved {
+                request_id,
+                approved,
+                ..
+            } => {
+                assert_eq!(request_id, "perm-1");
+                assert!(approved);
+            }
             other => panic!("unexpected event: {other:?}"),
         }
     }

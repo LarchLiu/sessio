@@ -336,6 +336,18 @@ export async function cancelAgentTurn(
   });
 }
 
+export async function respondAgentPermission(
+  sessioRuntimeSessionId: string,
+  requestId: string,
+  approved: boolean,
+): Promise<void> {
+  return invoke<void>("respond_agent_permission", {
+    sessioRuntimeSessionId,
+    requestId,
+    approved,
+  });
+}
+
 export const AGENT_LABEL: Record<Agent, string> = {
   codex: "Codex",
   claude: "Claude Code",

@@ -124,9 +124,16 @@ export function applyRuntimeAction(
   if (action.type === "replace-turn-id") {
     const session = state.sessions[action.sessioRuntimeSessionId];
     if (!session) return state;
-    const turns = session.turns.map((turn) =>
-      turn.turnId === action.from ? { ...cloneTurn(turn), turnId: action.to } : turn,
-    );
+    const fromIndex = session.turns.findIndex((turn) => turn.turnId === action.from);
+    if (fromIndex < 0) return state;
+    const toIndex = session.turns.findIndex((turn) => turn.turnId === action.to);
+    const turns = session.turns.map(cloneTurn);
+    if (toIndex >= 0 && toIndex !== fromIndex) {
+      turns[toIndex] = mergeTurns(turns[fromIndex], turns[toIndex], action.to);
+      turns.splice(fromIndex, 1);
+    } else {
+      turns[fromIndex] = { ...turns[fromIndex], turnId: action.to };
+    }
     return {
       ...state,
       sessions: {
@@ -322,6 +329,52 @@ function cloneTurn(turn: LiveTurn): LiveTurn {
     tools: turn.tools.map((tool) => ({ ...tool })),
     permissions: turn.permissions.map((permission) => ({ ...permission })),
   };
+}
+
+function mergeTurns(localTurn: LiveTurn, runtimeTurn: LiveTurn, turnId: string): LiveTurn {
+  return {
+    ...runtimeTurn,
+    turnId,
+    status: runtimeTurn.status === "pending" ? localTurn.status : runtimeTurn.status,
+    userText: localTurn.userText || runtimeTurn.userText,
+    assistantText: localTurn.assistantText + runtimeTurn.assistantText,
+    reasoningText: localTurn.reasoningText + runtimeTurn.reasoningText,
+    parts: [...localTurn.parts, ...runtimeTurn.parts],
+    tools: mergeTools(localTurn.tools, runtimeTurn.tools),
+    permissions: mergePermissions(localTurn.permissions, runtimeTurn.permissions),
+    error: runtimeTurn.error ?? localTurn.error,
+    startedAt: Math.min(localTurn.startedAt, runtimeTurn.startedAt),
+    updatedAt: Math.max(localTurn.updatedAt, runtimeTurn.updatedAt),
+  };
+}
+
+function mergeTools(localTools: LiveToolCall[], runtimeTools: LiveToolCall[]): LiveToolCall[] {
+  const merged = localTools.map((tool) => ({ ...tool }));
+  for (const tool of runtimeTools) {
+    const index = merged.findIndex((item) => item.toolId === tool.toolId);
+    if (index >= 0) {
+      merged[index] = { ...merged[index], ...tool };
+    } else {
+      merged.push({ ...tool });
+    }
+  }
+  return merged;
+}
+
+function mergePermissions(
+  localPermissions: LivePermissionRequest[],
+  runtimePermissions: LivePermissionRequest[],
+): LivePermissionRequest[] {
+  const merged = localPermissions.map((permission) => ({ ...permission }));
+  for (const permission of runtimePermissions) {
+    const index = merged.findIndex((item) => item.requestId === permission.requestId);
+    if (index >= 0) {
+      merged[index] = { ...merged[index], ...permission };
+    } else {
+      merged.push({ ...permission });
+    }
+  }
+  return merged;
 }
 
 function appendTextPart(

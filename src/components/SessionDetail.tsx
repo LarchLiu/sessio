@@ -13,7 +13,7 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowUp, ChevronDown, ChevronRight, FileDiff, Plus } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronRight, FileDiff, Plus, Square } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -30,6 +30,8 @@ import {
   getSessionMessages,
   loadAgentSession,
   readLocalImageDataUrl,
+  cancelAgentTurn,
+  respondAgentPermission,
   sendAgentInput,
   updateSessionMessageCount,
 } from "../api";
@@ -320,11 +322,13 @@ function MessageStream({
   const [composerText, setComposerText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const viewportRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const followLiveStreamRef = useRef(false);
   const liveStreamingRef = useRef(false);
+  const activeRuntimeTurnIdRef = useRef<string | null>(null);
   const pendingInitialPositionRef = useRef<"bottom" | "restore" | null>(null);
   const initialPositionAppliedRef = useRef(false);
   const liveSession = runtimeSessionId
@@ -433,8 +437,15 @@ function MessageStream({
         : all.filter(({ m }) => isConversationRole(m.role));
     const historical = moveFileEditsToTurnEnd(pairToolMessages(filtered));
     if (!liveSession) return historical;
-    return [...historical, ...liveTurnsToRenderItems(liveSession.turns)];
-  }, [liveSession, messages, viewMode]);
+    return [
+      ...historical,
+      ...liveTurnsToRenderItems(
+        liveSession.sessioRuntimeSessionId,
+        liveSession.turns,
+        runtimeNow,
+      ),
+    ];
+  }, [liveSession, messages, runtimeNow, viewMode]);
   const liveStreamingKey = useMemo(() => {
     if (!liveSession) return "";
     return liveSession.turns
@@ -442,7 +453,33 @@ function MessageStream({
       .map((turn) => `${turn.turnId}:${turn.assistantText.length}:${turn.reasoningText.length}`)
       .join("|");
   }, [liveSession]);
+  const liveActiveKey = useMemo(() => {
+    if (!liveSession) return "";
+    return liveSession.turns
+      .filter((turn) => turn.status === "pending" || turn.status === "streaming" || turn.status === "cancelling")
+      .map((turn) => turn.turnId)
+      .join("|");
+  }, [liveSession]);
+  const activeTurnId = useMemo(() => {
+    if (!liveSession) return null;
+    return liveSession.turns.find((turn) =>
+      turn.status === "pending" ||
+      turn.status === "streaming" ||
+      turn.status === "cancelling"
+    )?.turnId ?? null;
+  }, [liveSession]);
   liveStreamingRef.current = Boolean(liveStreamingKey);
+
+  useEffect(() => {
+    if (!liveActiveKey) return;
+    setRuntimeNow(Date.now());
+    const timer = window.setInterval(() => setRuntimeNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [liveActiveKey]);
+
+  useEffect(() => {
+    if (!activeTurnId) activeRuntimeTurnIdRef.current = null;
+  }, [activeTurnId]);
 
   const scrollChatToBottom = useCallback(() => {
     const scroll = () => {
@@ -570,6 +607,7 @@ function MessageStream({
     }
     setSending(true);
     setComposerError(null);
+    activeRuntimeTurnIdRef.current = null;
     followLiveStreamRef.current = true;
     const timestamp = Date.now();
     const optimisticTurnId = `local-turn-${timestamp}`;
@@ -604,6 +642,7 @@ function MessageStream({
       await loadAgentSession(agent, runtimeSessionId, workspacePath);
       pendingRuntimeSessionId = runtimeSessionId;
       const turn = await sendAgentInput(runtimeSessionId, { text });
+      activeRuntimeTurnIdRef.current = turn.turnId;
       dispatchLiveEvent({
         type: "replace-turn-id",
         sessioRuntimeSessionId: runtimeSessionId,
@@ -629,6 +668,18 @@ function MessageStream({
       setSending(false);
     }
   }, [agent, composerText, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+
+  const handleCancelTurn = useCallback(async () => {
+    if (!activeTurnId) return;
+    const turnId = activeRuntimeTurnIdRef.current ?? activeTurnId;
+    setComposerError(null);
+    try {
+      await cancelAgentTurn(runtimeSessionId, turnId);
+      activeRuntimeTurnIdRef.current = null;
+    } catch (err) {
+      setComposerError(String(err));
+    }
+  }, [activeTurnId, runtimeSessionId]);
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
@@ -667,6 +718,7 @@ function MessageStream({
                 msg={item.message}
                 toolResult={item.toolResult}
                 onPreviewImage={onPreviewImage}
+                onPermissionResponse={respondAgentPermission}
               />
             </div>
           ))}
@@ -676,12 +728,14 @@ function MessageStream({
         ref={composerRef}
         value={composerText}
         disabled={sending}
+        active={Boolean(activeTurnId)}
         sending={sending}
         error={composerError}
         contextLabel="52% used"
         placeholder="Ask, Search or Chat..."
         onChange={setComposerText}
         onSend={handleSend}
+        onCancel={handleCancelTurn}
       />
       <RoleNav
         role="assistant"
@@ -974,26 +1028,31 @@ function RoleNav({
 const ChatComposer = forwardRef<HTMLTextAreaElement, {
   value: string;
   disabled: boolean;
+  active: boolean;
   sending: boolean;
   error: string | null;
   contextLabel: string;
   placeholder: string;
   onChange: (value: string) => void;
   onSend: () => void;
+  onCancel: () => void;
 }>(function ChatComposer(
   {
     value,
     disabled,
+    active,
     sending,
     error,
     contextLabel,
     placeholder,
     onChange,
-  onSend,
+    onSend,
+    onCancel,
   },
   ref,
 ) {
-  const canSend = value.trim().length > 0 && !disabled && !sending;
+  const canSend = value.trim().length > 0 && !disabled && !sending && !active;
+  const canCancel = active && !disabled && !sending;
   const disabledTitle = disabled ? "Select a project-backed session to chat" : undefined;
   const innerRef = useRef<HTMLTextAreaElement | null>(null);
   useLayoutEffect(() => {
@@ -1071,12 +1130,12 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
               </span>
               <button
                 type="button"
-                disabled={!canSend}
-                onClick={onSend}
+                disabled={active ? !canCancel : !canSend}
+                onClick={active ? onCancel : onSend}
                 className="flex h-6 w-6 items-center justify-center rounded-full bg-ink text-[rgb(var(--color-bg-panel))] transition hover:bg-ink/85 disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
-                aria-label={sending ? "Sending" : "Send"}
+                aria-label={active ? "Stop" : sending ? "Sending" : "Send"}
               >
-                <ArrowUp className="h-4 w-4" />
+                {active ? <Square className="h-3 w-3 fill-current" /> : <ArrowUp className="h-4 w-4" />}
               </button>
             </div>
           </div>
@@ -1116,10 +1175,16 @@ const MessageBubble = memo(function MessageBubble({
   msg,
   toolResult,
   onPreviewImage,
+  onPermissionResponse,
 }: {
   msg: SessionMessage;
   toolResult?: SessionMessage;
   onPreviewImage: (image: MarkdownImage) => void;
+  onPermissionResponse: (
+    sessioRuntimeSessionId: string,
+    requestId: string,
+    approved: boolean,
+  ) => Promise<void>;
 }) {
   const { lang, t } = useI18n();
   const LONG_TOOL_THRESHOLD = 500;
@@ -1160,6 +1225,7 @@ const MessageBubble = memo(function MessageBubble({
     : "";
   const bubbleRef = useRef<HTMLDivElement>(null);
   const anchorTopRef = useRef<number | null>(null);
+  const showHeader = meta.label.length > 0 || msg.timestamp;
 
   useEffect(() => {
     setCollapsed(collapsible);
@@ -1221,6 +1287,22 @@ const MessageBubble = memo(function MessageBubble({
     );
   }
 
+  if (msg.role === "runtime_status") {
+    return (
+      <div ref={bubbleRef} className="py-1">
+        <RuntimeStatusContent text={msg.text} />
+      </div>
+    );
+  }
+
+  if (msg.role === "turn_note") {
+    return (
+      <div ref={bubbleRef} className="py-1">
+        <TurnNoteContent msg={msg} locale={localeTag(lang)} />
+      </div>
+    );
+  }
+
   return (
     <div
       ref={bubbleRef}
@@ -1235,60 +1317,64 @@ const MessageBubble = memo(function MessageBubble({
         + (collapsible ? " cursor-pointer select-none" : "")
       }
     >
-      <div
-        className={
-          "flex items-center gap-2 leading-none " +
-          (meta.compact ? "mb-1 " : "mb-2 ") +
-          (collapsible
-            ? "hover:text-ink/70"
-            : "")
-        }
-        role={collapsible ? "button" : undefined}
-        aria-expanded={collapsible ? !collapsed : undefined}
-      >
-        {meta.compact && (
-          <span
-            className={
-              "h-1.5 w-1.5 shrink-0 rounded-full " +
-              (meta.tone === "tool"
-                ? "bg-[rgb(var(--color-emerald)/0.7)]"
-                : "bg-ink/45")
-            }
-          />
-        )}
-        <span
+      {showHeader && (
+        <div
           className={
-            "text-caption font-medium " +
-            (meta.compact
-              ? "normal-case text-ink/65"
-              : "uppercase text-ink/40")
+            "flex items-center gap-2 leading-none " +
+            (meta.compact ? "mb-1 " : "mb-2 ") +
+            (collapsible
+              ? "hover:text-ink/70"
+              : "")
           }
+          role={collapsible ? "button" : undefined}
+          aria-expanded={collapsible ? !collapsed : undefined}
         >
-          {meta.label}
-        </span>
-        {toolSummary?.description && (
-          <span className="text-caption text-ink/45">
-            {toolSummary.description}
-          </span>
-        )}
-        {(thinkingCollapsible || todoCollapsible) && (
-          collapsed ? (
-            <ChevronRight className="w-3.5 h-3.5 text-ink/35" />
-          ) : (
-            <ChevronDown className="w-3.5 h-3.5 text-ink/35" />
-          )
-        )}
-        {msg.timestamp && (
-          <span className="text-caption text-ink/30">
-            {new Date(msg.timestamp).toLocaleString(localeTag(lang), {
-              hour: "2-digit",
-              minute: "2-digit",
-              month: "short",
-              day: "numeric",
-            })}
-          </span>
-        )}
-      </div>
+          {meta.compact && meta.label && (
+            <span
+              className={
+                "h-1.5 w-1.5 shrink-0 rounded-full " +
+                (meta.tone === "tool"
+                  ? "bg-[rgb(var(--color-emerald)/0.7)]"
+                  : "bg-ink/45")
+              }
+            />
+          )}
+          {meta.label && (
+            <span
+              className={
+                "text-caption font-medium " +
+                (meta.compact
+                  ? "normal-case text-ink/65"
+                  : "uppercase text-ink/40")
+              }
+            >
+              {meta.label}
+            </span>
+          )}
+          {toolSummary?.description && (
+            <span className="text-caption text-ink/45">
+              {toolSummary.description}
+            </span>
+          )}
+          {(thinkingCollapsible || todoCollapsible) && (
+            collapsed ? (
+              <ChevronRight className="w-3.5 h-3.5 text-ink/35" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 text-ink/35" />
+            )
+          )}
+          {msg.timestamp && (
+            <span className="text-caption text-ink/30">
+              {new Date(msg.timestamp).toLocaleString(localeTag(lang), {
+                hour: "2-digit",
+                minute: "2-digit",
+                month: "short",
+                day: "numeric",
+              })}
+            </span>
+          )}
+        </div>
+      )}
       <div
         className={
           contentClass +
@@ -1321,6 +1407,14 @@ const MessageBubble = memo(function MessageBubble({
               <FileEditContent text={visibleRenderText} />
             ) : meta.renderMode === "todo" ? (
               <TodoContent text={visibleRenderText} />
+            ) : meta.renderMode === "runtime_status" ? (
+              <RuntimeStatusContent text={visibleRenderText} />
+            ) : meta.renderMode === "permission" ? (
+              <PermissionRequestContent
+                text={visibleRenderText}
+                metadata={msg.toolCallId ?? null}
+                onRespond={onPermissionResponse}
+              />
             ) : meta.renderMode === "plain" ? (
               <PlainTextContent text={visibleRenderText} />
             ) : (
@@ -1365,6 +1459,9 @@ function isConversationRole(role: string): boolean {
     "tool_result",
     "function_call_output",
     "todo",
+    "runtime_status",
+    "permission_request",
+    "turn_note",
   ].includes(role);
 }
 
@@ -1374,7 +1471,11 @@ interface MessageRenderItem {
   toolResult?: SessionMessage;
 }
 
-function liveTurnsToRenderItems(turns: LiveTurn[]): MessageRenderItem[] {
+function liveTurnsToRenderItems(
+  sessioRuntimeSessionId: string,
+  turns: LiveTurn[],
+  now: number,
+): MessageRenderItem[] {
   const items: MessageRenderItem[] = [];
   for (const turn of turns) {
     if (turn.userText.trim()) {
@@ -1387,6 +1488,14 @@ function liveTurnsToRenderItems(turns: LiveTurn[]): MessageRenderItem[] {
         },
       });
     }
+    items.push({
+      key: `live:${turn.turnId}:status`,
+      message: {
+        role: "runtime_status",
+        text: liveTurnStatusText(turn, now),
+        timestamp: null,
+      },
+    });
     if (turn.reasoningText.trim()) {
       items.push({
         key: `live:${turn.turnId}:reasoning`,
@@ -1419,6 +1528,25 @@ function liveTurnsToRenderItems(turns: LiveTurn[]): MessageRenderItem[] {
           : undefined,
       });
     }
+    for (const permission of turn.permissions) {
+      const inputText =
+        permission.input === null ? "" : JSON.stringify(permission.input, null, 2);
+      const status =
+        permission.approved === null
+          ? "Waiting for permission"
+          : permission.approved
+            ? "Approved"
+            : "Rejected";
+      items.push({
+        key: `live:${turn.turnId}:permission:${permission.requestId}`,
+        message: {
+          role: "permission_request",
+          text: `[${permission.toolName}] ${status}${inputText ? `\n${inputText}` : ""}`,
+          timestamp: turn.updatedAt,
+          toolCallId: `permission:${sessioRuntimeSessionId}:${permission.requestId}:${permission.approved === null ? "pending" : "resolved"}`,
+        },
+      });
+    }
     if (turn.assistantText.trim()) {
       items.push({
         key: `live:${turn.turnId}:assistant`,
@@ -1439,8 +1567,35 @@ function liveTurnsToRenderItems(turns: LiveTurn[]): MessageRenderItem[] {
         },
       });
     }
+    if (turn.status === "cancelled") {
+      items.push({
+        key: `live:${turn.turnId}:interrupted`,
+        message: {
+          role: "turn_note",
+          text: "interrupted by user",
+          timestamp: turn.updatedAt,
+        },
+      });
+    }
   }
   return items;
+}
+
+function liveTurnStatusText(turn: LiveTurn, now: number): string {
+  const running =
+    turn.status === "pending" ||
+    turn.status === "streaming" ||
+    turn.status === "cancelling";
+  const elapsedMs = Math.max(0, (running ? now : turn.updatedAt) - turn.startedAt);
+  return `${running ? "running" : "done"}|${formatDuration(elapsedMs)}`;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
 }
 
 function pairToolMessages(
@@ -1590,7 +1745,7 @@ function messageMeta(msg: SessionMessage): {
   compact: boolean;
   contentClass: string;
   tone: "normal" | "thinking" | "tool";
-  renderMode: "markdown" | "plain" | "todo" | "file_edit";
+  renderMode: "markdown" | "plain" | "todo" | "file_edit" | "runtime_status" | "permission";
 } {
   const role = msg.role;
   if (role === "file_edit") {
@@ -1621,6 +1776,38 @@ function messageMeta(msg: SessionMessage): {
       contentClass: "text-ink/55 text-body-sm",
       tone: "thinking",
       renderMode: "markdown",
+    };
+  }
+  if (role === "runtime_status") {
+    return {
+      label: "",
+      bodyText: msg.text,
+      compact: true,
+      contentClass: "text-ink/45 text-body-sm",
+      tone: "thinking",
+      renderMode: "runtime_status",
+    };
+  }
+  if (role === "turn_note") {
+    return {
+      label: "",
+      bodyText: msg.text,
+      compact: true,
+      contentClass: "text-ink/40 text-body-sm italic",
+      tone: "thinking",
+      renderMode: "plain",
+    };
+  }
+  if (role === "permission_request") {
+    const parsed = parseToolCall(msg.text);
+    return {
+      label: `Permission · ${parsed.name}`,
+      bodyText: parsed.body,
+      compact: true,
+      contentClass:
+        "text-ink/75 text-body-sm bg-ink/[0.045] border border-ink/[0.08] rounded-md px-3 py-2 overflow-hidden",
+      tone: "tool",
+      renderMode: "permission",
     };
   }
   if (["tool", "tool_call", "tool_use", "function_call"].includes(role)) {
@@ -2075,6 +2262,110 @@ function PlainTextContent({ text }: { text: string }) {
       <code>{text}</code>
     </pre>
   );
+}
+
+function RuntimeStatusContent({ text }: { text: string }) {
+  const [state = "running", duration = "0s"] = text.split("|");
+  const running = state === "running";
+  return (
+    <div className="flex items-center gap-2 text-body-sm text-ink/50">
+      <span
+        className={
+          "h-1.5 w-1.5 shrink-0 rounded-full " +
+          (running ? "bg-[rgb(var(--color-emerald))]" : "bg-ink/30")
+        }
+      />
+      <span>{running ? "Working for" : "Worked for"} {duration}</span>
+    </div>
+  );
+}
+
+function TurnNoteContent({
+  msg,
+  locale,
+}: {
+  msg: SessionMessage;
+  locale: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-body-sm italic text-ink/40">
+      <span>{msg.text}</span>
+      {msg.timestamp && (
+        <span className="text-caption not-italic text-ink/30">
+          {new Date(msg.timestamp).toLocaleString(locale, {
+            hour: "2-digit",
+            minute: "2-digit",
+            month: "short",
+            day: "numeric",
+          })}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function PermissionRequestContent({
+  text,
+  metadata,
+  onRespond,
+}: {
+  text: string;
+  metadata: string | null;
+  onRespond: (
+    sessioRuntimeSessionId: string,
+    requestId: string,
+    approved: boolean,
+  ) => Promise<void>;
+}) {
+  const parsed = parseToolCall(text);
+  const meta = parsePermissionMetadata(metadata);
+  const [pendingChoice, setPendingChoice] = useState<"allow" | "reject" | null>(null);
+  const canRespond = Boolean(meta && meta.pending && !pendingChoice);
+  const respond = (approved: boolean) => {
+    if (!meta || !canRespond) return;
+    setPendingChoice(approved ? "allow" : "reject");
+    onRespond(meta.sessioRuntimeSessionId, meta.requestId, approved).catch((err) => {
+      console.warn("respond permission failed", err);
+      setPendingChoice(null);
+    });
+  };
+  return (
+    <div className="space-y-2">
+      {parsed.body.trim() && <PlainTextContent text={parsed.body} />}
+      {meta?.pending && (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={!canRespond}
+            onClick={() => respond(true)}
+            className="rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-2.5 py-1 text-caption font-medium text-[rgb(var(--color-emerald))] transition hover:bg-[rgb(var(--color-emerald)/0.18)] disabled:cursor-not-allowed disabled:opacity-55"
+          >
+            {pendingChoice === "allow" ? "Allowing..." : "Allow"}
+          </button>
+          <button
+            type="button"
+            disabled={!canRespond}
+            onClick={() => respond(false)}
+            className="rounded-md border border-ink/12 bg-ink/[0.04] px-2.5 py-1 text-caption font-medium text-ink/60 transition hover:bg-ink/[0.07] hover:text-ink/80 disabled:cursor-not-allowed disabled:opacity-55"
+          >
+            {pendingChoice === "reject" ? "Rejecting..." : "Reject"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function parsePermissionMetadata(metadata: string | null):
+  | { sessioRuntimeSessionId: string; requestId: string; pending: boolean }
+  | null {
+  const parts = metadata?.split(":") ?? [];
+  if (parts[0] !== "permission" || parts.length < 4) return null;
+  return {
+    sessioRuntimeSessionId: parts[1],
+    requestId: parts[2],
+    pending: parts[3] === "pending",
+  };
 }
 
 function ToolPairContent({

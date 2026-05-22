@@ -1,3 +1,7 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use serde_json::json;
@@ -11,9 +15,21 @@ pub fn spawn_stream(
     sessio_runtime_session_id: String,
     turn_id: String,
     input: AgentInput,
+    cancel_token: Arc<AtomicBool>,
 ) {
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = stream_fake_response(&manager, &sessio_runtime_session_id, &turn_id, input).await {
+        if let Err(error) = stream_fake_response(
+            &manager,
+            &sessio_runtime_session_id,
+            &turn_id,
+            input,
+            &cancel_token,
+        )
+        .await
+        {
+            if cancel_token.load(Ordering::Relaxed) {
+                return;
+            }
             let _ = manager.fail_turn(
                 &sessio_runtime_session_id,
                 &turn_id,
@@ -28,8 +44,12 @@ async fn stream_fake_response(
     sessio_runtime_session_id: &str,
     turn_id: &str,
     input: AgentInput,
+    cancel_token: &AtomicBool,
 ) -> anyhow::Result<()> {
-        sleep(120);
+    sleep(2000);
+    if is_cancelled(cancel_token) {
+        return Ok(());
+    }
     emit_fake_acp(
         manager,
         sessio_runtime_session_id,
@@ -42,6 +62,9 @@ async fn stream_fake_response(
     if input.text.to_ascii_lowercase().contains("tool") {
         let tool_id = format!("{turn_id}-tool-1");
         sleep(160);
+        if is_cancelled(cancel_token) {
+            return Ok(());
+        }
         emit_fake_acp(
             manager,
             sessio_runtime_session_id,
@@ -53,6 +76,9 @@ async fn stream_fake_response(
             },
         )?;
         sleep(140);
+        if is_cancelled(cancel_token) {
+            return Ok(());
+        }
         emit_fake_acp(
             manager,
             sessio_runtime_session_id,
@@ -64,9 +90,43 @@ async fn stream_fake_response(
         )?;
     }
 
+    if input.text.to_ascii_lowercase().contains("permission") {
+        let request_id = format!("{turn_id}-permission-1");
+        sleep(120);
+        if is_cancelled(cancel_token) {
+            return Ok(());
+        }
+        let approved = manager.request_permission(
+            sessio_runtime_session_id,
+            turn_id,
+            &request_id,
+            "fake_write",
+            Some(json!({ "path": "example.txt", "reason": input.text })),
+        )?;
+        if is_cancelled(cancel_token) {
+            return Ok(());
+        }
+        let branch = if approved {
+            "Permission approved. Continuing with the allowed fake write path.\n\n"
+        } else {
+            "Permission rejected. Continuing without the protected fake write path.\n\n"
+        };
+        emit_fake_acp(
+            manager,
+            sessio_runtime_session_id,
+            turn_id,
+            AcpFakeUpdate::AgentMessageChunk {
+                content: branch.to_string(),
+            },
+        )?;
+    }
+
     let response = fake_response_text(&input.text);
     for chunk in chunk_text(&response, 18) {
         sleep(45);
+        if is_cancelled(cancel_token) {
+            return Ok(());
+        }
         emit_fake_acp(
             manager,
             sessio_runtime_session_id,
@@ -76,7 +136,14 @@ async fn stream_fake_response(
     }
 
     sleep(80);
+    if is_cancelled(cancel_token) {
+        return Ok(());
+    }
     manager.complete_turn(sessio_runtime_session_id, turn_id)
+}
+
+fn is_cancelled(cancel_token: &AtomicBool) -> bool {
+    cancel_token.load(Ordering::Relaxed)
 }
 
 fn emit_fake_acp(

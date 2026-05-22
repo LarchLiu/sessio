@@ -309,7 +309,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 
 - [ ] Pin the ACP schema/version used by Sessio and record the source URL or vendored schema location.
 - [ ] Verify current ACP capabilities for Codex, Claude, and Gemini installations: native ACP, wrapper needed, structured CLI only, or plain CLI only.
-- [ ] Map ACP update variants into `AgentRuntimeEvent`, including agent message chunks, thought/reasoning chunks, tool call lifecycle, plan updates, mode updates, and permission requests.
+- [ ] Map ACP update variants into `AgentRuntimeEvent`, including agent message chunks, thought/reasoning chunks, tool call lifecycle, plan updates, mode updates, and permission requests. Initial fake ACP mapping covers message chunks, thought chunks, tool calls, tool output, errors, and permission request/response events.
 - [ ] Decide how Sessio exposes runtime capabilities to the UI, for example `supportsCancel`, `supportsPermissions`, `supportsToolDeltas`, `supportsResume`, `supportsAttachments`, and `supportsModes`.
 - [ ] Define a stable id strategy: Sessio runtime session id, ACP session id, turn id, tool id, and permission request id must be separate fields.
 - [ ] Decide whether `AgentKind` from `agents/sources/types.rs` should become the runtime-facing agent id immediately, or whether runtime v1 should bridge from the existing `models::Agent` enum.
@@ -346,7 +346,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [ ] Implement `session/new`, `session/load` when supported, `session/prompt`, and `session/cancel`.
 - [ ] Start ACP prompt work in a detached runtime task after `send_agent_input` has returned an `AgentTurnHandle`, so hot reloads cannot strand Tauri invoke callback ids while the agent is still streaming.
 - [ ] Treat `session/cancel` as fire-and-follow-up: send the notification, mark local turn cancelling, answer pending permission requests as cancelled, and wait for prompt completion or timeout.
-- [ ] Implement `session/request_permission` routing through the runtime manager and Tauri event stream; ensure every request receives exactly one approve/reject/cancel response.
+- [ ] Implement `session/request_permission` routing through the runtime manager and Tauri event stream; ensure every request receives exactly one approve/reject/cancel response. The fake runtime now exercises approve/reject UI responses through a manager-side permission waiter; real ACP routing, cancellation, and timeout handling remain.
 - [ ] Convert ACP `session/update` notifications into `AgentRuntimeEvent` at the transport boundary.
 - [ ] Handle agent-side JSON-RPC errors with structured `RuntimeError` values that preserve code, message, and optional data.
 - [ ] Add process supervision: startup timeout, prompt timeout, idle timeout, unexpected exit handling, restart policy, and reconnect/load behavior.
@@ -380,10 +380,10 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [x] Compose rendered chat items from indexed `SessionMessage[]` plus live runtime overlay turns in timestamp/sequence order.
 - [x] Render streaming assistant text by mutating/appending to the current assistant bubble instead of inserting one message per delta.
 - [x] Reuse the existing Markdown renderer for streamed assistant text, but tolerate incomplete Markdown fences, tables, lists, and math while the turn is in progress.
-- [x] Add a subtle streaming cursor or pending indicator inside the active assistant bubble.
-- [ ] Render reasoning, tool calls, tool output, permission requests, errors, and cancellation state as nested turn blocks that can update while streaming.
-- [ ] Add turn state rendering for pending, streaming, cancelling, completed, failed, and disconnected turns.
-- [ ] Add permission prompt UI with approve, reject, and cancel paths.
+- [x] Add a subtle pending indicator for active runtime turns before assistant text arrives.
+- [ ] Render reasoning, tool calls, tool output, permission requests, errors, and cancellation state as nested turn blocks that can update while streaming. Initial live overlay rendering covers reasoning, tool call/result pairs, permission request status, runtime status, and errors.
+- [x] Add turn state rendering for pending, streaming-before-text, cancelling, failed, and cancelled turns.
+- [ ] Add permission prompt UI with approve, reject, and cancel paths. Initial live overlay supports approve/reject for fake runtime permission requests; explicit cancel/timeout states remain.
 - [ ] Disable or hide unsupported controls based on runtime capability flags.
 - [x] Add near-bottom auto-scroll behavior for live streams and preserve manual scroll position when the user scrolls up.
 - [x] Add context usage display, initially backed by runtime status or a placeholder value when the transport cannot report token/context usage.

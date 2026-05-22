@@ -557,6 +557,18 @@ fn cancel_agent_turn(
 }
 
 #[tauri::command]
+fn respond_agent_permission(
+    sessio_runtime_session_id: String,
+    request_id: String,
+    approved: bool,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<(), String> {
+    runtime
+        .respond_permission(&sessio_runtime_session_id, &request_id, approved)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_window_appearance(window: tauri::Window, theme: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -797,6 +809,7 @@ pub fn run() {
             load_agent_session,
             send_agent_input,
             cancel_agent_turn,
+            respond_agent_permission,
             remove_session_files,
             remove_sessions_by_scope
         ])
