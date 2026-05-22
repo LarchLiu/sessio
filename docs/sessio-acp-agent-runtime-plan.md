@@ -58,6 +58,25 @@ indexer + memory
 
 The current source layer should not become responsible for live runs. Agent sources parse historical sessions; runtimes drive active agent processes.
 
+## Design Review
+
+The overall implementation direction is sound. The most important boundary is already correct: historical `agents/sources` keep owning file discovery and parsing, while the new runtime layer owns live process control and streaming interaction. This matches Sessio's current architecture, where SQLite and memory records are the searchable source-of-truth metadata layer, not a replacement for agent-owned transcripts.
+
+The plan is reasonable if the first implementation is kept intentionally narrow:
+
+- Start with runtime infrastructure, fake runtime tests, and one real transport slice.
+- Keep ACP as a protocol adapter, not as Sessio's public frontend model.
+- Persist recovery/linking metadata only; let the existing source/indexer pipeline discover transcripts after the agent writes them.
+- Treat CLI fallbacks as capability-reduced adapters, not as equivalent ACP implementations.
+
+The main risks are around protocol drift, process lifecycle, and state reconciliation:
+
+- ACP method names, capabilities, and update payloads must be generated from or checked against the official schema before implementation, rather than copied from examples.
+- `session/cancel` is an ACP notification. `cancel_turn` can still return `Result<()>`, but that result should mean Sessio successfully sent cancellation and updated local state; completion is confirmed later by the pending `session/prompt` response or terminal runtime state.
+- A single Sessio runtime session id should be distinct from the agent/ACP session id. Otherwise UI state, SQLite rows, and agent-native ids will become hard to reconcile.
+- Permission requests are client-side ACP methods. The runtime manager needs to route them through Tauri/UI and reply exactly once, including cancelled/expired cases.
+- Fallback transports cannot reliably emit all fine-grained events. The UI should surface capability flags so unsupported features do not look broken.
+
 ### Runtime Interface
 
 Define one runtime trait around Sessio's concepts, not ACP's exact wire schema:
@@ -157,6 +176,60 @@ agent-runtime-event
 
 The existing commands such as `list_sessions`, `get_session_messages`, `search_project_memory`, and `write_cross_prompt` should remain read/index APIs.
 
+## Chat UI Data Flow
+
+The chat view should become a composed timeline: historical messages still come from indexed agent session files, while live runtime turns are appended from Sessio-owned runtime events until the indexer catches up.
+
+```text
+Chat composer
+  submit text / attachments / options
+    ↓
+frontend runtime controller
+  optimistic user message
+  call start_agent_session or send_agent_input
+    ↓ Tauri command
+RuntimeManager
+  creates/loads Sessio runtime session
+  selects ACP transport
+  writes runtime metadata
+    ↓
+AcpTransport
+  session/new or session/load
+  session/prompt
+    ↓ JSON-RPC over stdio/socket
+Agent ACP server
+    ↓ session/update notifications + prompt response
+AcpTransport
+  converts ACP updates to AgentRuntimeEvent
+    ↓ Tauri event: agent-runtime-event
+frontend runtime reducer
+  appends text deltas to the active assistant bubble
+  appends reasoning/tool/permission state to the same turn
+  finalizes turn on completion/error/cancel
+    ↓
+Chat window
+  renders historical messages + live overlay
+    ↓ later
+agents/sources + indexer
+  observes agent-owned transcript file
+  updates historical SessionDetail data
+    ↓
+frontend reconciliation
+  replaces matching live completed turns with indexed messages
+  keeps any still-live turns in the overlay
+```
+
+Important rules:
+
+- The composer should never write directly into historical session files.
+- Streaming deltas should update an in-memory live message buffer keyed by Sessio runtime session id and turn id.
+- The renderer should support incremental Markdown text without requiring every partial delta to be valid complete Markdown.
+- A new assistant bubble should be created on `TurnStarted` or the first assistant delta, then mutated in place as `TextDelta` arrives.
+- Tool, reasoning, and permission updates should attach to the current turn rather than becoming unrelated top-level messages unless the UX intentionally separates them.
+- Auto-scroll should follow the stream only when the user is already near the bottom; reading older content should not be interrupted by incoming deltas.
+- Once the indexer observes the persisted agent transcript, reconciliation should dedupe by runtime metadata and source refs so completed live bubbles do not appear twice.
+- If ACP disconnects before the transcript is indexed, the live overlay should remain visible as a recovered/disconnected runtime turn.
+
 ## Persistence
 
 Persist only runtime metadata needed for recovery and linking:
@@ -226,3 +299,113 @@ Required scenarios:
 - How much memory context should Sessio inject automatically versus only on explicit user action?
 
 The recommended default is ACP-first with CLI stream-json fallback, runtime metadata in the existing SQLite store, and explicit memory injection for the first version.
+
+## Implementation TODOs
+
+### Phase 0: Protocol and Capability Spike
+
+- [ ] Pin the ACP schema/version used by Sessio and record the source URL or vendored schema location.
+- [ ] Verify current ACP capabilities for Codex, Claude, and Gemini installations: native ACP, wrapper needed, structured CLI only, or plain CLI only.
+- [ ] Map ACP update variants into `AgentRuntimeEvent`, including agent message chunks, thought/reasoning chunks, tool call lifecycle, plan updates, mode updates, and permission requests.
+- [ ] Decide how Sessio exposes runtime capabilities to the UI, for example `supportsCancel`, `supportsPermissions`, `supportsToolDeltas`, `supportsResume`, `supportsAttachments`, and `supportsModes`.
+- [ ] Define a stable id strategy: Sessio runtime session id, ACP session id, turn id, tool id, and permission request id must be separate fields.
+- [ ] Decide whether `AgentKind` from `agents/sources/types.rs` should become the runtime-facing agent id immediately, or whether runtime v1 should bridge from the existing `models::Agent` enum.
+
+### Phase 1: Runtime Shell
+
+- [ ] Add `src-tauri/src/agents/runtime/` with `types.rs`, `registry.rs`, `fake.rs`, and transport-specific modules.
+- [ ] Define serializable request/response types: `StartAgentSession`, `AgentSessionHandle`, `AgentInput`, `AgentTurnHandle`, `RuntimeStatus`, `RuntimeCapabilitySet`, and `RuntimeError`.
+- [ ] Define `AgentRuntimeEvent` with enough metadata for UI ordering: monotonic sequence number, wall-clock timestamp, runtime session id, agent session id, and optional turn/tool ids.
+- [ ] Define frontend-facing live chat entities: `LiveRuntimeSession`, `LiveTurn`, `LiveMessagePart`, `LiveToolCall`, `LivePermissionRequest`, and `LiveRuntimeStatus`.
+- [ ] Add a `RuntimeManager` that owns active sessions, dispatches events, serializes sends per session, and prevents two active prompt turns on the same runtime session unless a transport explicitly supports it.
+- [ ] Add an in-process fake runtime that can script deltas, tool calls, permission requests, errors, cancellation, and process exits.
+- [ ] Add Tauri commands and `agent-runtime-event` dispatch behind the manager without changing current list/detail/memory commands.
+- [ ] Add frontend API types in `src/api.ts` that mirror the Rust event model, but keep UI changes minimal for this phase.
+- [ ] Add a frontend runtime reducer that consumes `agent-runtime-event`, appends deltas to existing live turns, and emits immutable state updates for React rendering.
+
+### Phase 2: Runtime Persistence
+
+- [ ] Add SQLite migration for `runtime_sessions` with `sessio_runtime_session_id`, `agent`, `transport_kind`, `agent_runtime_session_id`, `workspace_path`, `source_session_id`, `status`, timestamps, and last error.
+- [ ] Add optional reconciliation fields for `indexed_agent`, `indexed_session_id`, `indexed_file_path`, and `indexed_at` once the source/indexer finds the transcript.
+- [ ] Add a `RuntimeStore` trait rather than folding runtime writes into `SessionStore`.
+- [ ] Persist status transitions for starting, active, idle, cancelling, errored, disconnected, and ended states.
+- [ ] Store only recovery/linking metadata; do not store full transcript text in runtime tables.
+- [ ] Add cleanup rules for stale active sessions found on app startup.
+- [ ] Add a reconciliation task that links runtime sessions to indexed `sessions` rows after the source/indexer observes the agent's persisted transcript.
+- [ ] Add frontend reconciliation logic that hides completed live turns once their indexed equivalents are loaded into `SessionDetail`.
+
+### Phase 3: ACP Transport
+
+- [ ] Implement stdio JSON-RPC framing, request id allocation, response correlation, notification dispatch, and graceful shutdown.
+- [ ] Implement ACP `initialize` and capability negotiation before exposing a runtime as ready.
+- [ ] Implement `session/new`, `session/load` when supported, `session/prompt`, and `session/cancel`.
+- [ ] Treat `session/cancel` as fire-and-follow-up: send the notification, mark local turn cancelling, answer pending permission requests as cancelled, and wait for prompt completion or timeout.
+- [ ] Implement `session/request_permission` routing through the runtime manager and Tauri event stream; ensure every request receives exactly one approve/reject/cancel response.
+- [ ] Convert ACP `session/update` notifications into `AgentRuntimeEvent` at the transport boundary.
+- [ ] Handle agent-side JSON-RPC errors with structured `RuntimeError` values that preserve code, message, and optional data.
+- [ ] Add process supervision: startup timeout, prompt timeout, idle timeout, unexpected exit handling, restart policy, and reconnect/load behavior.
+- [ ] Add logging with redaction for prompts, environment variables, file contents, and permission payloads.
+
+### Phase 4: Agent Runtime Config
+
+- [ ] Extend `~/.sessio/config.toml` with an `[agents.runtime.<agent>]` shape for binary path, args, environment, cwd/workspace behavior, preferred transport, and disabled transports.
+- [ ] Add binary discovery/status checks for each built-in agent.
+- [ ] Make workspace paths absolute and validate they are allowed before launching any runtime process.
+- [ ] Define per-agent default launch commands separately from user overrides.
+- [ ] Add status diagnostics that explain why ACP is unavailable and which fallback, if any, will be used.
+- [ ] Keep runtime config independent from memory backend config.
+
+### Phase 5: CLI Stream Fallbacks
+
+- [ ] Implement `CliStreamJsonTransport` only for agents with stable machine-readable streaming output.
+- [ ] Define a per-agent parser contract for stream-json events and map unsupported fields to capability flags.
+- [ ] Implement `PlainCliTransport` as text/error only, with no permission/tool guarantees.
+- [ ] Add fallback selection rules: configured transport first, ACP if available, structured stream-json next, plain CLI only when explicitly allowed or when the UI accepts reduced capability.
+- [ ] Add tests proving fallback transports emit the same required envelope fields even when they omit fine-grained event variants.
+
+### Phase 6: UI Integration
+
+- [ ] Add a bottom chat composer to the existing chat view, visually matching the compact rounded panel: placeholder `Ask, Search or Chat...`, left mode button, `Auto` mode label, context usage label, and circular send button.
+- [ ] Make the composer support multiline input, submit-on-enter, newline-on-shift-enter, disabled/loading states, and pending send feedback.
+- [ ] Add a mode selector for `Auto` and future modes without blocking the v1 ACP path on implementing every mode.
+- [ ] Wire composer submit to `start_agent_session` when no live runtime session exists for the selected workspace, otherwise to `send_agent_input`.
+- [ ] Keep the composer fixed to the bottom of the chat pane while the message timeline scrolls behind/above it with enough bottom padding.
+- [ ] Add a runtime panel or composer controller that can start a live session from a workspace and stream events.
+- [ ] Compose rendered chat items from indexed `SessionMessage[]` plus live runtime overlay turns in timestamp/sequence order.
+- [ ] Render streaming assistant text by mutating/appending to the current assistant bubble instead of inserting one message per delta.
+- [ ] Reuse the existing Markdown renderer for streamed assistant text, but tolerate incomplete Markdown fences, tables, lists, and math while the turn is in progress.
+- [ ] Add a subtle streaming cursor or pending indicator inside the active assistant bubble.
+- [ ] Render reasoning, tool calls, tool output, permission requests, errors, and cancellation state as nested turn blocks that can update while streaming.
+- [ ] Add turn state rendering for pending, streaming, cancelling, completed, failed, and disconnected turns.
+- [ ] Add permission prompt UI with approve, reject, and cancel paths.
+- [ ] Disable or hide unsupported controls based on runtime capability flags.
+- [ ] Add near-bottom auto-scroll behavior for live streams and preserve manual scroll position when the user scrolls up.
+- [ ] Add context usage display, initially backed by runtime status or a placeholder value when the transport cannot report token/context usage.
+- [ ] Connect existing cross-agent continuation generation to `start_agent_session` as an optional launch path.
+- [ ] Add explicit memory injection controls for v1 instead of automatic background injection.
+- [ ] Show the link between a live runtime session and its indexed historical session after reconciliation succeeds.
+- [ ] Add empty/no-selection behavior for the composer: disabled with explanation when no project/workspace can be resolved, enabled when a workspace is selected.
+- [ ] Add keyboard focus behavior so opening a live chat session focuses the composer without stealing focus during streaming.
+
+### Phase 7: Testing and Verification
+
+- [ ] Unit-test runtime manager ordering, active-turn locking, cancellation state, and permission response routing.
+- [ ] Unit-test the frontend runtime reducer for delta append, duplicate event ignore, out-of-order sequence handling, completion, cancellation, and permission response updates.
+- [ ] Unit-test live/historical reconciliation so completed live messages do not duplicate after indexed messages reload.
+- [ ] Unit-test ACP JSON-RPC request/response matching, unknown notification handling, malformed payload handling, and request timeout behavior.
+- [ ] Unit-test ACP update-to-event conversion using schema-derived or official example payloads.
+- [ ] Integration-test fake ACP server flows: start, prompt, deltas, tool calls, permission approve/reject, cancellation, process exit, and load existing session.
+- [ ] Integration-test fake structured CLI binaries for Claude/Gemini-style stream-json fallback.
+- [ ] Add component tests or Playwright checks for composer layout at narrow and wide widths, streaming text append, auto-scroll, and manual scroll preservation.
+- [ ] Verify streaming Markdown does not break the chat window while code fences, tables, math, or lists are incomplete.
+- [ ] Test runtime persistence recovery after app restart with active, errored, disconnected, and ended sessions.
+- [ ] Verify `cargo test`, `cargo check`, and `pnpm run typecheck` after each vertical slice.
+- [ ] Add manual smoke commands or scripts for starting one real agent session from a local workspace once a real transport lands.
+
+### Deferred
+
+- [ ] Multi-agent simultaneous orchestration from one UI workflow.
+- [ ] Automatic memory/context injection policy beyond explicit user action.
+- [ ] Runtime transcript mirroring or independent transcript search before the source/indexer observes agent-owned files.
+- [ ] Dynamic third-party agent runtime plugins.
+- [ ] Cross-device or remote runtime execution.
