@@ -198,6 +198,17 @@ impl SessionStore for CachedStore {
         Ok(())
     }
 
+    fn update_message_count(
+        &self,
+        agent: Agent,
+        session_id: Option<&str>,
+        file_path: &str,
+        message_count: usize,
+    ) -> Result<()> {
+        self.inner
+            .update_message_count(agent, session_id, file_path, message_count)
+    }
+
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()> {
         self.inner.mark_file_path_unavailable(file_path)?;
         let mut snap = self.snapshot.write().unwrap();

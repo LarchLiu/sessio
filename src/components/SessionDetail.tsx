@@ -1,7 +1,15 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ChevronDown, ChevronRight, FileDiff, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, FileDiff } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -12,19 +20,13 @@ import remarkMath from "remark-math";
 import type { Options as SanitizeSchema } from "rehype-sanitize";
 import "katex/dist/katex.min.css";
 import {
-  AGENT_ACCENT,
-  AGENT_LABEL,
   SessionInfo,
   SessionMessage,
   SubagentInfo,
-  agentTint,
   getSessionMessages,
   readLocalImageDataUrl,
-  removeSessionFiles,
+  updateSessionMessageCount,
 } from "../api";
-import { AgentGlyph } from "./AgentIcon";
-import ConfirmPopover from "./ConfirmPopover";
-import Tag from "./Tag";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
 import { localeTag, useI18n } from "../i18n";
@@ -33,7 +35,14 @@ import type { ViewMode } from "../App";
 interface Props {
   session: SessionInfo;
   viewMode: ViewMode;
-  onRemoved: () => void;
+  onMessageCount: (filePath: string, count: number) => boolean;
+  onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
+}
+
+export interface ActiveMessageMeta {
+  filePath: string;
+  count: number;
+  partial: boolean;
 }
 
 // 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
@@ -72,8 +81,15 @@ type Tab =
   | { kind: "sub"; sub: SubagentInfo };
 
 const ROLE_NAV_SHOW_DELAY_MS = 800;
+const INITIAL_MESSAGE_RENDER_COUNT = 48;
+const MESSAGE_RENDER_BATCH_SIZE = 96;
 
-export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
+export default function SessionDetail({
+  session,
+  viewMode,
+  onMessageCount,
+  onActiveMessageMeta,
+}: Props) {
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
     () =>
@@ -82,155 +98,83 @@ export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
         : session.subagents.length > 0
           ? { kind: "sub", sub: session.subagents[0] }
           : { kind: "main" },
-    [session.available, session.subagents]
+    [session.available, session.id]
   );
   const [tab, setTab] = useState<Tab>(defaultTab);
 
   useEffect(() => {
-    setTab(defaultTab);
-  }, [defaultTab]);
+    setTab((current) => {
+      if (current.kind === "main") {
+        return session.available ? current : defaultTab;
+      }
+      const nextSub = session.subagents.find((s) => s.id === current.sub.id);
+      return nextSub ? { kind: "sub", sub: nextSub } : defaultTab;
+    });
+  }, [defaultTab, session.available, session.subagents]);
 
-  const [removing, setRemoving] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
-  const [copiedPath, setCopiedPath] = useState(false);
   const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
-  const [confirmState, setConfirmState] = useState<{ pos: { x: number; y: number } } | null>(null);
-  const handleRemove = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (confirmState) return;
-    setConfirmState({ pos: { x: e.clientX, y: e.clientY } });
-  };
-  const handleCopyPath = async () => {
-    try {
-      await navigator.clipboard.writeText(session.filePath);
-      setCopiedPath(true);
-      window.setTimeout(() => setCopiedPath(false), 1200);
-    } catch (err) {
-      console.error("copy session file path failed", err);
-    }
-  };
-  const confirmPos = confirmState?.pos ?? null;
-  const confirmRemove = async () => {
-    if (removing) return;
-    setConfirmState(null);
-    setRemoving(true);
-    setRemoveError(null);
-    try {
-      await removeSessionFiles(session);
-      onRemoved();
-    } catch (err) {
-      setRemoveError(String(err));
-      setRemoving(false);
-    }
-  };
+  const activeMessageMeta =
+    tab.kind === "main"
+      ? {
+          filePath: session.filePath,
+          count: session.messageCount,
+          partial: session.partial,
+        }
+      : {
+          filePath: tab.sub.filePath,
+          count: tab.sub.messageCount,
+          partial: tab.sub.partial,
+        };
+
+  useEffect(() => {
+    onActiveMessageMeta(activeMessageMeta);
+  }, [
+    activeMessageMeta.filePath,
+    activeMessageMeta.count,
+    activeMessageMeta.partial,
+    onActiveMessageMeta,
+  ]);
 
   return (
     <div className="h-full min-h-0 bg-surface-panel flex flex-col">
-        <header className="px-5 py-4 border-b border-ink/15 flex items-start gap-3">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <Tag
-                label={
-                  viewMode === "native"
-                    ? t("header.mode_native")
-                    : t("header.mode_cross")
-                }
-                color="var(--color-muted)"
-              />
-              <div className="text-subtitle font-medium truncate">
-                {session.title ?? session.firstUserMessage ?? (
-                  <span className="text-ink/30">{t("list.no_user_message")}</span>
-                )}
-              </div>
-            </div>
-            {session.projectPath && (
-              <div className="text-meta font-mono text-ink/30 truncate mt-0.5">
-                {session.projectPath}
-              </div>
-            )}
-            <div className="flex items-center gap-2 mt-1.5">
-              <Tag
-                label={AGENT_LABEL[session.agent]}
-                style={{ background: agentTint(session.agent, 0.13), color: AGENT_ACCENT[session.agent] }}
-                icon={<AgentGlyph agent={session.agent} className="w-3 h-3 shrink-0" />}
-              />
-              <Tooltip
-                content={copiedPath ? t("list.copied") : session.filePath}
-                placement="top"
-              >
-                <button
-                  type="button"
-                  onClick={handleCopyPath}
-                  className="text-body-sm text-ink/40 hover:text-ink/70 font-mono text-left transition whitespace-normal break-all"
-                  aria-label={session.filePath}
-                >
-                  {session.id}
-                </button>
-              </Tooltip>
-              <Tooltip content={removeError ?? t("detail.remove_session")} placement="top">
-                <button
-                  type="button"
-                  onClick={handleRemove}
-                  disabled={removing}
-                  className="p-1 rounded text-ink/35 hover:text-status-error hover:bg-status-error/10 transition-colors disabled:opacity-50 disabled:hover:text-ink/35 disabled:hover:bg-transparent"
-                  aria-label={t("detail.remove_session")}
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </Tooltip>
-              {session.archived && (
-                <Tag
-                  label={t("list.archived")}
-                  color="var(--color-muted)"
-                  title={t(
-                    session.available
-                      ? "list.archived_tooltip_by_user"
-                      : "list.archived_tooltip"
-                  )}
-                />
-              )}
-            </div>
-            {removeError && (
-              <div className="text-status-error text-body-sm mt-1">
-                {removeError}
-              </div>
-            )}
-          </div>
-        </header>
-
         {session.subagents.length > 0 && (
-          <div className="px-3 py-2 border-b border-ink/5 flex gap-1 overflow-x-auto bg-surface-panel-alt">
-            <TabButton
-              active={tab.kind === "main"}
-              disabled={!session.available}
-              onClick={() => setTab({ kind: "main" })}
-              label={t("detail.main")}
-              sub={
-                session.available
-                  ? `${session.partial ? "~" : ""}${t("detail.msgs", { count: session.messageCount })}`
-                  : t("detail.no_jsonl")
-              }
-            />
-            {session.subagents.map((s) => (
+          <ScrollArea
+            className="shrink-0 border-b border-ink/5 bg-surface-panel-alt"
+            viewportClassName="px-3 pt-1 pb-px"
+            orientation="horizontal"
+            persistScrollbars
+          >
+            <div className="flex min-w-max gap-1">
               <TabButton
-                key={s.id}
-                active={tab.kind === "sub" && tab.sub.id === s.id}
-                onClick={() => setTab({ kind: "sub", sub: s })}
-                label={
-                  s.description ??
-                  s.agentType ??
-                  t("detail.default_subagent_type")
-                }
-                sub={t("detail.msgs", { count: s.messageCount })}
-                accent="rgb(var(--color-accent-purple))"
-                tooltip={s.agentType ? `${s.agentType} · ${s.id}` : s.id}
+                active={tab.kind === "main"}
+                disabled={!session.available}
+                onClick={() => setTab({ kind: "main" })}
+                label={t("detail.main")}
               />
-            ))}
-          </div>
+              {session.subagents.map((s) => (
+                <TabButton
+                  key={s.id}
+                  active={tab.kind === "sub" && tab.sub.id === s.id}
+                  onClick={() => setTab({ kind: "sub", sub: s })}
+                  label={
+                    s.description ??
+                    s.agentType ??
+                    t("detail.default_subagent_type")
+                  }
+                  accent="rgb(var(--color-accent-purple))"
+                  tooltip={s.agentType ? `${s.agentType} · ${s.id}` : s.id}
+                />
+              ))}
+            </div>
+          </ScrollArea>
         )}
 
         <MessageStream
-          key={tab.kind === "main" ? "main" : tab.sub.id}
+          key={
+            tab.kind === "main"
+              ? `main:${session.filePath}`
+              : `sub:${tab.sub.id}:${tab.sub.filePath}`
+          }
           agent={session.agent}
           filePath={tab.kind === "main" ? session.filePath : tab.sub.filePath}
           sessionId={session.id}
@@ -242,27 +186,15 @@ export default function SessionDetail({ session, viewMode, onRemoved }: Props) {
               ? t("detail.session_archived")
               : t("detail.subagent_unreadable")
           }
-          subagentDesc={tab.kind === "sub" ? tab.sub.description : null}
           viewMode={viewMode}
           onPreviewImage={setPreviewImage}
+          onMessageCount={onMessageCount}
         />
 
         {previewImage && (
           <ImagePreviewOverlay
             image={previewImage}
             onClose={() => setPreviewImage(null)}
-          />
-        )}
-
-        {confirmPos && (
-          <ConfirmPopover
-            title={t("delete.title")}
-            body={t("delete.session_body")}
-            pos={confirmPos}
-            onCancel={() => setConfirmState(null)}
-            onConfirm={() => {
-              void confirmRemove();
-            }}
           />
         )}
     </div>
@@ -274,7 +206,6 @@ function TabButton({
   disabled,
   onClick,
   label,
-  sub,
   accent,
   tooltip,
 }: {
@@ -282,7 +213,6 @@ function TabButton({
   disabled?: boolean;
   onClick: () => void;
   label: string;
-  sub: string;
   accent?: string;
   tooltip?: string;
 }) {
@@ -293,12 +223,12 @@ function TabButton({
       onClick={onClick}
       title={tooltip}
       className={
-        "shrink-0 px-3 py-2 rounded-md text-left text-body-sm transition border " +
+        "relative shrink-0 px-3 py-1 text-left text-body-sm transition border-b-2 " +
         (active
-          ? "bg-ink/[0.08] border-ink/15"
+          ? "border-ink/55 text-ink"
           : disabled
-            ? "bg-transparent border-transparent text-ink/25 cursor-not-allowed"
-            : "bg-transparent border-transparent text-ink/60 hover:bg-ink/5 hover:text-ink")
+            ? "border-transparent text-ink/25 cursor-not-allowed"
+            : "border-transparent text-ink/60 hover:text-ink")
       }
     >
       <div className="flex items-center gap-1.5">
@@ -308,7 +238,6 @@ function TabButton({
         />
         <span className="font-medium">{label}</span>
       </div>
-      <div className="text-caption text-ink/40 mt-0.5">{sub}</div>
     </button>
   );
 }
@@ -319,21 +248,24 @@ function MessageStream({
   sessionId,
   available,
   emptyHint,
-  subagentDesc,
   viewMode,
   onPreviewImage,
+  onMessageCount,
 }: {
   agent: SessionInfo["agent"];
   filePath: string;
   sessionId: string;
   available: boolean;
   emptyHint: string;
-  subagentDesc: string | null;
   viewMode: ViewMode;
   onPreviewImage: (image: MarkdownImage) => void;
+  onMessageCount: (filePath: string, count: number) => boolean;
 }) {
   const { t } = useI18n();
   const [messages, setMessages] = useState<SessionMessage[]>([]);
+  const [visibleMessageCount, setVisibleMessageCount] = useState(
+    INITIAL_MESSAGE_RENDER_COUNT,
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -341,32 +273,80 @@ function MessageStream({
 
   useEffect(() => {
     let cancelled = false;
+    let frameId: number | null = null;
+    let timerId: number | null = null;
     if (!available || !filePath) {
       setMessages([]);
+      setVisibleMessageCount(INITIAL_MESSAGE_RENDER_COUNT);
       setLoading(false);
       setError(null);
       return;
     }
     setLoading(true);
     setError(null);
-    setMessages([]);
-    getSessionMessages(agent, filePath, sessionId)
-      .then((rows) => !cancelled && setMessages(rows))
-      .catch((err) => !cancelled && setError(String(err)))
-      .finally(() => !cancelled && setLoading(false));
+    frameId = window.requestAnimationFrame(() => {
+      timerId = window.setTimeout(() => {
+        getSessionMessages(agent, filePath, sessionId)
+          .then((result) => {
+            if (cancelled) return;
+            startTransition(() => {
+              setMessages(result.messages);
+              setVisibleMessageCount(INITIAL_MESSAGE_RENDER_COUNT);
+              setLoading(false);
+            });
+            if (!onMessageCount(filePath, result.messageCount)) return;
+            window.setTimeout(() => {
+              updateSessionMessageCount(agent, filePath, result.messageCount, sessionId).catch(
+                (err) => console.warn("update message count failed", err),
+              );
+            }, 0);
+          })
+          .catch((err) => {
+            if (cancelled) return;
+            setError(String(err));
+            setLoading(false);
+          });
+      }, 0);
+    });
     return () => {
       cancelled = true;
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [agent, filePath, sessionId, available]);
+  }, [agent, filePath, sessionId, available, onMessageCount]);
+
+  useEffect(() => {
+    if (visibleMessageCount >= messages.length) return;
+    let cancelled = false;
+    let frameId: number | null = null;
+    const showNextBatch = () => {
+      frameId = window.requestAnimationFrame(() => {
+        if (cancelled) return;
+        startTransition(() => {
+          setVisibleMessageCount((count) =>
+            Math.min(count + MESSAGE_RENDER_BATCH_SIZE, messages.length),
+          );
+        });
+        if (!cancelled) showNextBatch();
+      });
+    };
+    showNextBatch();
+    return () => {
+      cancelled = true;
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+    };
+  }, [messages.length, visibleMessageCount]);
 
   const displayItems = useMemo(() => {
-    const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
+    const all = messages
+      .slice(0, visibleMessageCount)
+      .map((m, srcIdx) => ({ m, srcIdx }));
     const filtered =
       viewMode === "native"
         ? all
         : all.filter(({ m }) => isConversationRole(m.role));
     return moveFileEditsToTurnEnd(pairToolMessages(filtered));
-  }, [messages, viewMode]);
+  }, [messages, visibleMessageCount, viewMode]);
 
   bubbleRefs.current.length = displayItems.length;
 
@@ -377,21 +357,10 @@ function MessageStream({
         className="flex-1 min-h-0"
         viewportClassName="px-10 py-4"
       >
-        {subagentDesc && (
-          <div className="text-body-sm text-accent-purple bg-accent-purple/[0.08] border border-accent-purple/20 rounded p-3 mb-4 leading-relaxed">
-            <span className="text-accent-purple/70 uppercase text-caption mr-2 font-medium">
-              {t("detail.task")}
-            </span>
-            {subagentDesc}
-          </div>
-        )}
         {!available && (
           <div className="text-status-warn text-body bg-status-warn/[0.10] border border-status-warn/30 rounded p-3 leading-relaxed">
             {emptyHint}
           </div>
-        )}
-        {loading && (
-          <div className="text-ink/40 text-body">{t("detail.loading_messages")}</div>
         )}
         {error && (
           <div className="text-status-error text-body-sm bg-status-error/10 rounded p-3">
@@ -680,7 +649,17 @@ function previewTextForRole(message: SessionMessage): string {
     : stripImagePlaceholders(message.text);
 }
 
-function MessageBubble({
+function findScroller(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const oy = getComputedStyle(node).overflowY;
+    if (oy === "auto" || oy === "scroll") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+const MessageBubble = memo(function MessageBubble({
   msg,
   toolResult,
   onPreviewImage,
@@ -689,10 +668,22 @@ function MessageBubble({
   toolResult?: SessionMessage;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
-  const { lang } = useI18n();
+  const { lang, t } = useI18n();
   const LONG_TOOL_THRESHOLD = 500;
+  const MESSAGE_LINE_LIMIT = 20;
   const thinkingCollapsible = msg.role === "thinking";
   const todoCollapsible = msg.role === "todo";
+  const meta = messageMeta(msg);
+  const bodyText = meta.bodyText;
+  const userMedia = useMemo(
+    () => (msg.role === "user" ? splitMarkdownImages(bodyText) : null),
+    [bodyText, msg.role],
+  );
+  const renderText = userMedia?.text ?? bodyText;
+  const renderLines = useMemo(() => renderText.split(/\r?\n/), [renderText]);
+  const conversationLineCollapsible =
+    (msg.role === "user" || msg.role === "assistant") &&
+    renderLines.length > MESSAGE_LINE_LIMIT;
   const collapseText = msg.text + (toolResult?.text ?? "");
   const pairedToolCollapsible = Boolean(toolResult);
   const longCollapsible =
@@ -705,6 +696,7 @@ function MessageBubble({
   const collapsible =
     thinkingCollapsible ||
     todoCollapsible ||
+    conversationLineCollapsible ||
     longCollapsible ||
     pairedToolCollapsible;
   const [collapsed, setCollapsed] = useState(collapsible);
@@ -719,16 +711,6 @@ function MessageBubble({
   useEffect(() => {
     setCollapsed(collapsible);
   }, [collapsible, msg.role, msg.text]);
-
-  function findScroller(el: HTMLElement | null): HTMLElement | null {
-    let node = el?.parentElement ?? null;
-    while (node) {
-      const oy = getComputedStyle(node).overflowY;
-      if (oy === "auto" || oy === "scroll") return node;
-      node = node.parentElement;
-    }
-    return null;
-  }
 
   const toggle = () => {
     const bubble = bubbleRef.current;
@@ -770,14 +752,11 @@ function MessageBubble({
     if (delta !== 0) scroller.scrollTop += delta;
   }, [collapsed]);
 
-  const meta = messageMeta(msg);
   const toolSummary = isToolCallRole(msg.role) ? parseToolSummary(msg.text) : null;
-  const bodyText = meta.bodyText;
-  const userMedia = useMemo(
-    () => (msg.role === "user" ? splitMarkdownImages(bodyText) : null),
-    [bodyText, msg.role],
-  );
-  const renderText = userMedia?.text ?? bodyText;
+  const visibleRenderText =
+    conversationLineCollapsible && collapsed
+      ? renderLines.slice(0, MESSAGE_LINE_LIMIT).join("\n")
+      : renderText;
   const contentClass =
     toolResult && isToolCallRole(msg.role) ? "text-body-sm" : meta.contentClass;
 
@@ -886,23 +865,39 @@ function MessageBubble({
                 onPreviewImage={onPreviewImage}
               />
             ) : meta.renderMode === "file_edit" ? (
-              <FileEditContent text={renderText} />
+              <FileEditContent text={visibleRenderText} />
             ) : meta.renderMode === "todo" ? (
-              <TodoContent text={renderText} />
+              <TodoContent text={visibleRenderText} />
             ) : meta.renderMode === "plain" ? (
-              <PlainTextContent text={renderText} />
+              <PlainTextContent text={visibleRenderText} />
             ) : (
               <MarkdownContent
-                text={renderText}
+                text={visibleRenderText}
                 onPreviewImage={onPreviewImage}
               />
+            )}
+            {conversationLineCollapsible && (
+              <button
+                type="button"
+                className="mt-2 flex items-center gap-1 text-left text-body-sm text-ink/60 hover:text-ink/85"
+                data-no-toggle
+                onClick={toggle}
+              >
+                <span>{t(collapsed ? "detail.expand" : "detail.collapse")}</span>
+                <ChevronDown
+                  className={
+                    "h-3.5 w-3.5 transition-transform " +
+                    (collapsed ? "" : "rotate-180")
+                  }
+                />
+              </button>
             )}
           </>
         )}
       </div>
     </div>
   );
-}
+});
 
 function isConversationRole(role: string): boolean {
   return [
@@ -1205,21 +1200,64 @@ function FileEditContent({ text }: { text: string }) {
   const fileCount = summary.files ?? edits.length;
   const additions = summary.additions ?? sumEditNumber(edits, "additions");
   const deletions = summary.deletions ?? sumEditNumber(edits, "deletions");
-  const [expanded, setExpanded] = useState(edits.length <= 3);
+  const [expandedState, setExpandedState] = useState(() => ({
+    text,
+    expanded: edits.length <= 3,
+  }));
+  const expanded =
+    expandedState.text === text ? expandedState.expanded : edits.length <= 3;
   const [openDetails, setOpenDetails] = useState<Set<string>>(() => new Set());
+  const pendingScrollKeyRef = useRef<string | null>(null);
+  const detailRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const visibleEdits = expanded ? edits : edits.slice(0, 3);
   const hiddenCount = Math.max(0, edits.length - visibleEdits.length);
+  const setExpanded = (nextExpanded: boolean) => {
+    setExpandedState({ text, expanded: nextExpanded });
+  };
+
+  useEffect(() => {
+    setOpenDetails(new Set());
+    pendingScrollKeyRef.current = null;
+    detailRefs.current.clear();
+  }, [text]);
+
   const toggleDetail = (key: string) => {
     setOpenDetails((prev) => {
       const next = new Set(prev);
       if (next.has(key)) {
         next.delete(key);
       } else {
+        pendingScrollKeyRef.current = key;
         next.add(key);
       }
       return next;
     });
   };
+
+  useLayoutEffect(() => {
+    const key = pendingScrollKeyRef.current;
+    if (!key || !openDetails.has(key)) return;
+    pendingScrollKeyRef.current = null;
+    const node = detailRefs.current.get(key);
+    if (!node) return;
+    window.requestAnimationFrame(() => {
+      const scroller = findScroller(node);
+      if (!scroller) {
+        node.scrollIntoView({ block: "end", behavior: "smooth" });
+        return;
+      }
+      const nodeBottom = node.getBoundingClientRect().bottom;
+      const scrollerBottom = scroller.getBoundingClientRect().bottom;
+      const delta = nodeBottom - scrollerBottom + 12;
+      if (delta > 0) {
+        scroller.scrollTo({
+          top: scroller.scrollTop + delta,
+          behavior: "smooth",
+        });
+      }
+    });
+  }, [openDetails]);
+
   return (
     <div className="overflow-hidden rounded-md bg-ink/[0.035]">
       <div className="flex items-center justify-between gap-3 px-2.5 py-2">
@@ -1298,7 +1336,17 @@ function FileEditContent({ text }: { text: string }) {
                   </div>
                 )}
                 {detailOpen && hasDetail && (
-                  <DiffPreview edit={edit} fallback={detail} />
+                  <div
+                    ref={(node) => {
+                      if (node) {
+                        detailRefs.current.set(detailKey, node);
+                      } else {
+                        detailRefs.current.delete(detailKey);
+                      }
+                    }}
+                  >
+                    <DiffPreview edit={edit} fallback={detail} />
+                  </div>
                 )}
               </div>
             );

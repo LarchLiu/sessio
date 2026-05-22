@@ -8,6 +8,7 @@ pub mod polling;
 pub mod store;
 pub mod watch;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,6 +25,13 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Manager, State, WindowEvent,
 };
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMessagesResult {
+    messages: Vec<SessionMessage>,
+    message_count: usize,
+}
 
 #[tauri::command]
 fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionInfo>, String> {
@@ -362,7 +370,7 @@ fn get_session_messages(
     agent: Agent,
     file_path: String,
     session_id: Option<String>,
-) -> Result<Vec<SessionMessage>, String> {
+) -> Result<SessionMessagesResult, String> {
     let path = PathBuf::from(&file_path);
     if file_path.is_empty() || !path.exists() {
         return Err(format!(
@@ -379,19 +387,61 @@ fn get_session_messages(
             }
         ));
     }
-    match agent {
+    let (messages, message_count) = match agent {
         Agent::Codex => {
-            crate::agents::sources::codex::parser::read_messages(&path).map_err(|e| e.to_string())
+            let rows = crate::agents::sources::codex::parser::read_messages_with_locations(&path)
+                .map_err(|e| e.to_string())?;
+            let count = count_source_lines(&rows);
+            let messages = rows.into_iter().map(|(m, _)| m).collect();
+            (messages, count)
         }
         Agent::Claude => {
-            crate::agents::sources::claude::parser::read_messages(&path).map_err(|e| e.to_string())
+            let rows = crate::agents::sources::claude::parser::read_messages_with_locations(&path)
+                .map_err(|e| e.to_string())?;
+            let count = count_source_lines(&rows);
+            let messages = rows.into_iter().map(|(m, _)| m).collect();
+            (messages, count)
         }
         Agent::Gemini => {
-            let sid = session_id.unwrap_or_default();
-            crate::agents::sources::gemini::parser::read_messages(&path, &sid)
-                .map_err(|e| e.to_string())
+            let sid = session_id.clone().unwrap_or_default();
+            let messages = crate::agents::sources::gemini::parser::read_messages(&path, &sid)
+                .map_err(|e| e.to_string())?;
+            let count = messages.len();
+            (messages, count)
+        }
+    };
+    Ok(SessionMessagesResult {
+        messages,
+        message_count,
+    })
+}
+
+#[tauri::command]
+fn update_session_message_count(
+    agent: Agent,
+    file_path: String,
+    session_id: Option<String>,
+    message_count: usize,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .update_message_count(agent, session_id.as_deref(), &file_path, message_count)
+        .map_err(|e| e.to_string())
+}
+
+fn count_source_lines(
+    rows: &[(
+        SessionMessage,
+        crate::agents::sources::types::SourceLocation,
+    )],
+) -> usize {
+    let mut lines = HashSet::new();
+    for (_, location) in rows {
+        if let Some(line) = location.line_start {
+            lines.insert(line);
         }
     }
+    lines.len()
 }
 
 #[tauri::command]
@@ -673,6 +723,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             get_session_messages,
+            update_session_message_count,
             read_local_image_data_url,
             set_window_appearance,
             get_system_appearance,

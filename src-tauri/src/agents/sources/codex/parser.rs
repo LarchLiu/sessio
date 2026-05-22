@@ -1,16 +1,17 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::agents::sources::shared::jsonl_scan;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::SourceLocation;
 use crate::models::{
     is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
     SubagentInfo,
 };
+
+const REVERSE_TIMESTAMP_CHUNK_SIZE: u64 = 16 * 1024;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let mut parsed = Vec::new();
@@ -401,8 +402,6 @@ fn parse_session(
     archived: bool,
     session_index_titles: &HashMap<String, String>,
 ) -> Result<Option<CodexParsedSession>> {
-    let scan = jsonl_scan::scan(path)?;
-
     let mut id: Option<String> = None;
     let mut forked_from_id: Option<String> = None;
     let mut started_at: Option<i64> = None;
@@ -411,20 +410,20 @@ fn parse_session(
     let mut agent_nickname: Option<String> = None;
     let mut agent_role: Option<String> = None;
     let mut first_user_message: Option<String> = None;
-    let mut latest_ts: Option<i64> = None;
+    let reverse_ts = latest_timestamp_from_file(path).ok().flatten();
 
-    for line in &scan.head {
-        let v: serde_json::Value = match serde_json::from_str(line) {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let ts = v
-            .get("timestamp")
-            .and_then(|t| t.as_str())
-            .and_then(parse_iso);
-        if let Some(t) = ts {
-            latest_ts = Some(latest_ts.map_or(t, |e| e.max(t)));
-        }
         let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if t == "session_meta" {
             let payload = v.get("payload").cloned().unwrap_or_default();
@@ -496,27 +495,26 @@ fn parse_session(
                 }
             }
         }
-    }
-
-    for line in &scan.tail {
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(t) = v
-            .get("timestamp")
-            .and_then(|t| t.as_str())
-            .and_then(parse_iso)
+        let current_id = id.as_deref();
+        let has_index_title = current_id
+            .and_then(|session_id| session_index_titles.get(session_id))
+            .is_some();
+        if id.is_some()
+            && started_at.is_some()
+            && cwd.is_some()
+            && (has_index_title || first_user_message.is_some())
         {
-            latest_ts = Some(latest_ts.map_or(t, |e| e.max(t)));
+            break;
         }
     }
 
-    let updated_at = std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(system_time_to_millis)
-        .or(latest_ts);
+    let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let updated_at = reverse_ts.or_else(|| {
+        fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(system_time_to_millis)
+    });
     let project_name = cwd.as_ref().and_then(|p| {
         Path::new(p)
             .file_name()
@@ -542,12 +540,12 @@ fn parse_session(
         project_name,
         started_at,
         updated_at,
-        message_count: scan.message_count,
+        message_count: 0,
         title,
         first_user_message,
         file_path: path.to_string_lossy().into_owned(),
-        file_size: scan.file_size,
-        partial: scan.partial,
+        file_size,
+        partial: false,
         available: true,
         archived,
         subagents: Vec::new(),
@@ -596,6 +594,57 @@ fn load_session_index_titles() -> HashMap<String, String> {
         titles.insert(id.to_string(), normalize_preview(thread_name));
     }
     titles
+}
+
+fn latest_timestamp_from_file(path: &Path) -> Result<Option<i64>> {
+    let mut file = File::open(path)?;
+    let mut offset = file.metadata()?.len();
+    let mut carry = Vec::new();
+    while offset > 0 {
+        let read_size = REVERSE_TIMESTAMP_CHUNK_SIZE.min(offset);
+        offset -= read_size;
+        file.seek(SeekFrom::Start(offset))?;
+
+        let mut chunk = vec![0; read_size as usize];
+        file.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&carry);
+
+        let complete = if offset > 0 {
+            match chunk.iter().position(|b| *b == b'\n') {
+                Some(pos) => {
+                    carry = chunk[..pos].to_vec();
+                    &chunk[pos + 1..]
+                }
+                None => {
+                    carry = chunk;
+                    continue;
+                }
+            }
+        } else {
+            carry.clear();
+            &chunk[..]
+        };
+
+        for line in complete.split(|b| *b == b'\n').rev() {
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(line) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+                continue;
+            };
+            if let Some(t) = v
+                .get("timestamp")
+                .and_then(|x| x.as_str())
+                .and_then(parse_iso)
+            {
+                return Ok(Some(t));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn extract_message_text(payload: &serde_json::Value) -> Option<String> {

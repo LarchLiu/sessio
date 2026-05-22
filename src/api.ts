@@ -40,6 +40,11 @@ export interface SessionMessage {
   toolCallId?: string | null;
 }
 
+export interface SessionMessagesResult {
+  messages: SessionMessage[];
+  messageCount: number;
+}
+
 export type IndexPhase = "idle" | "indexing" | "rebuilding";
 
 export interface IndexStatus {
@@ -106,11 +111,25 @@ export async function getSessionMessages(
   agent: Agent,
   filePath: string,
   sessionId?: string
-): Promise<SessionMessage[]> {
-  return invoke<SessionMessage[]>("get_session_messages", {
+): Promise<SessionMessagesResult> {
+  return invoke<SessionMessagesResult>("get_session_messages", {
     agent,
     filePath,
     sessionId: sessionId ?? null,
+  });
+}
+
+export async function updateSessionMessageCount(
+  agent: Agent,
+  filePath: string,
+  messageCount: number,
+  sessionId?: string
+): Promise<void> {
+  return invoke<void>("update_session_message_count", {
+    agent,
+    filePath,
+    sessionId: sessionId ?? null,
+    messageCount,
   });
 }
 

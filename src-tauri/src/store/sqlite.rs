@@ -263,7 +263,46 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn existing_session_count_state(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+    scope: &str,
+) -> Result<Option<(i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT message_count, partial FROM sessions
+         WHERE agent = ? AND session_id = ? AND scope = ?",
+    )?;
+    let state = stmt
+        .query_row(params![agent.as_str(), session_id, scope], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
+    Ok(state)
+}
+
+fn existing_subagent_count_state(
+    conn: &Connection,
+    parent_agent: Agent,
+    parent_session_id: &str,
+    subagent_id: &str,
+) -> Result<Option<(i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT message_count, partial FROM subagents
+         WHERE parent_agent = ? AND parent_session_id = ? AND subagent_id = ?",
+    )?;
+    let state = stmt
+        .query_row(
+            params![parent_agent.as_str(), parent_session_id, subagent_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(state)
+}
+
 fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
+    let (message_count, partial) = existing_session_count_state(conn, s.agent, &s.id, scope)?
+        .unwrap_or((s.message_count as i64, s.partial as i64));
     conn.execute(
         "INSERT OR REPLACE INTO sessions (
             agent, session_id, scope, file_path,
@@ -283,12 +322,12 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             s.project_name,
             s.started_at,
             s.updated_at,
-            s.message_count as i64,
+            message_count,
             s.title,
             s.first_user_message,
             s.file_size as i64,
             file_mtime_for(&s.file_path),
-            s.partial as i64,
+            partial,
             s.available as i64,
             s.archived as i64,
             now_ms(),
@@ -339,6 +378,9 @@ fn upsert_subagent_inner(
     parent_session_id: &str,
     sub: &SubagentInfo,
 ) -> Result<()> {
+    let (message_count, partial) =
+        existing_subagent_count_state(conn, parent_agent, parent_session_id, &sub.id)?
+            .unwrap_or((sub.message_count as i64, sub.partial as i64));
     conn.execute(
         "INSERT OR REPLACE INTO subagents (
             parent_agent, parent_session_id, subagent_id, file_path,
@@ -356,11 +398,11 @@ fn upsert_subagent_inner(
             sub.description,
             sub.started_at,
             sub.updated_at,
-            sub.message_count as i64,
+            message_count,
             sub.first_user_message,
             sub.file_size as i64,
             file_mtime_for(&sub.file_path),
-            sub.partial as i64,
+            partial,
             sub.available as i64,
         ],
     )?;
@@ -608,6 +650,49 @@ impl SessionStore for SqliteStore {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         upsert_subagent_inner(&conn, parent_agent, parent_session_id, subagent)
+    }
+
+    fn update_message_count(
+        &self,
+        agent: Agent,
+        session_id: Option<&str>,
+        file_path: &str,
+        message_count: usize,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = if let Some(parent_session_id) = session_id {
+            conn.execute(
+                "UPDATE subagents
+                 SET message_count = ?
+                 WHERE parent_agent = ? AND parent_session_id = ? AND file_path = ?",
+                params![
+                    message_count as i64,
+                    agent.as_str(),
+                    parent_session_id,
+                    file_path,
+                ],
+            )?
+        } else {
+            0
+        };
+        if changed == 0 {
+            if let Some(session_id) = session_id {
+                conn.execute(
+                    "UPDATE sessions
+                     SET message_count = ?
+                     WHERE agent = ? AND session_id = ? AND file_path = ?",
+                    params![message_count as i64, agent.as_str(), session_id, file_path],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE sessions
+                     SET message_count = ?
+                     WHERE agent = ? AND file_path = ?",
+                    params![message_count as i64, agent.as_str(), file_path],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn mark_subagent_file_unavailable(&self, file_path: &str) -> Result<()> {

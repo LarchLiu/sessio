@@ -45,6 +45,13 @@ pub trait SessionStore: Send + Sync {
         parent_session_id: &str,
         subagent: &SubagentInfo,
     ) -> Result<()>;
+    fn update_message_count(
+        &self,
+        agent: Agent,
+        session_id: Option<&str>,
+        file_path: &str,
+        message_count: usize,
+    ) -> Result<()>;
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()>;
     fn mark_subagent_file_unavailable(&self, file_path: &str) -> Result<()>;
     fn mark_missing_scopes_unavailable(

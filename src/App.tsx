@@ -1,11 +1,12 @@
 import {
   ReactNode,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull, ListChevronsDownUp, ListChevronsUpDown } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -29,7 +30,8 @@ import {
   type SessionScope,
 } from "./api";
 import { syncTrayMenu } from "./tray";
-import SessionDetail from "./components/SessionDetail";
+import SessionDetail, { type ActiveMessageMeta } from "./components/SessionDetail";
+import SessionMemory, { SessionMetaList } from "./components/SessionMemory";
 import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
@@ -50,6 +52,7 @@ function scopeForFilter(filter: Filter): SessionScope {
 }
 
 export type ViewMode = "native" | "cross";
+type DetailMode = "chat" | "memory";
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 
@@ -121,13 +124,18 @@ export default function App() {
     useState<MemoryBackendStatus | null>(null);
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode());
+  const [viewMode] = useState<ViewMode>(() => readViewMode());
+  const [detailMode, setDetailMode] = useState<DetailMode>("chat");
+  const [metaPopoverOpen, setMetaPopoverOpen] = useState(false);
+  const [activeMessageMeta, setActiveMessageMeta] =
+    useState<ActiveMessageMeta | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
   const update = useUpdateCheck(__APP_VERSION__);
   const listScrollRef = useRef<HTMLDivElement>(null);
+  const messageCountByPathRef = useRef<Map<string, number>>(new Map());
   const indexing = indexPhase !== "idle";
   const rebuilding = indexPhase === "rebuilding";
 
@@ -135,6 +143,17 @@ export default function App() {
     () => sessions.filter((s) => s.available),
     [sessions]
   );
+
+  useEffect(() => {
+    const next = new Map<string, number>();
+    for (const session of sessions) {
+      next.set(session.filePath, session.messageCount);
+      for (const subagent of session.subagents) {
+        next.set(subagent.filePath, subagent.messageCount);
+      }
+    }
+    messageCountByPathRef.current = next;
+  }, [sessions]);
 
   useEffect(() => {
     listScrollRef.current?.scrollTo(0, 0);
@@ -221,6 +240,31 @@ export default function App() {
     }
   }, [availableSessions, selected]);
 
+  const handleMessageCount = useCallback((filePath: string, count: number) => {
+    if (messageCountByPathRef.current.get(filePath) === count) return false;
+    messageCountByPathRef.current.set(filePath, count);
+
+    const patchSession = (session: SessionInfo): SessionInfo => {
+      if (session.filePath === filePath) {
+        return { ...session, messageCount: count };
+      }
+      let changed = false;
+      const subagents = session.subagents.map((sub) => {
+        if (sub.filePath !== filePath) return sub;
+        changed = true;
+        return { ...sub, messageCount: count };
+      });
+      return changed ? { ...session, subagents } : session;
+    };
+
+    setSessions((prev) => prev.map(patchSession));
+    setSelected((prev) => (prev ? patchSession(prev) : prev));
+    setActiveMessageMeta((prev) =>
+      prev && prev.filePath === filePath ? { ...prev, count } : prev,
+    );
+    return true;
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     invoke<string>("get_system_appearance")
@@ -244,6 +288,15 @@ export default function App() {
     const next = availableSessions.find((s) => !isSubagentOnly(s));
     if (next) setSelected(next);
   }, [availableSessions, selected]);
+
+  useEffect(() => {
+    if (selected) return;
+    setActiveMessageMeta(null);
+  }, [selected]);
+
+  useEffect(() => {
+    setMetaPopoverOpen(false);
+  }, [selected?.id]);
 
   const agentStats = useMemo(() => {
     const m: Record<Agent, { count: number; latest: number }> = {
@@ -459,15 +512,11 @@ export default function App() {
     () => visible.filter((s) => !isSubagentOnly(s)).length,
     [visible]
   );
+  const detailTitle =
+    selected?.title ??
+    selected?.firstUserMessage ??
+    t("list.no_user_message");
 
-  const headerLabel =
-    filter.kind === "all"
-      ? t("sidebar.all_sessions")
-      : filter.kind === "agent"
-        ? AGENT_LABEL[filter.agent]
-        : "label" in filter
-          ? filter.label
-          : filter.key;
   const memoryBackendMissing =
     memoryBackendStatus !== null && memoryBackendStatus.available === false;
   const projectSearchInitialKey = filter.kind === "project" ? filter.key : projectGroups[0]?.key;
@@ -752,34 +801,54 @@ export default function App() {
             </button>
           </Tooltip>
           <div
+            data-tauri-drag-region
             className={
-              "flex items-center gap-2 min-w-0 pointer-events-none " +
+              "flex items-center gap-2 min-w-0 " +
               (sidebarOpen ? "" : IS_MAC ? "pl-[112px] " : "pl-9 ")
             }
           >
-            {!sidebarOpen && (
+            {selected && activeMessageMeta && sidebarOpen && (
+              <HeaderMessageMetaButton
+                label={`${activeMessageMeta.partial ? "~" : ""}${t("header.messages_count", { count: activeMessageMeta.count })}`}
+                open={metaPopoverOpen}
+                onToggle={() => setMetaPopoverOpen((open) => !open)}
+              />
+            )}
+            {selected && !sidebarOpen && (
               <>
-                {filter.kind === "all" && (
-                  <BotMessageSquare className="w-5 h-5 shrink-0 text-ink/55" />
-                )}
-                {filter.kind === "agent" && (
-                  <AgentBadge agent={filter.agent} className="w-5 h-5" />
-                )}
-                {filter.kind === "project" && (
-                  <Folder className="w-5 h-5 shrink-0 text-ink/55" />
-                )}
-                <div className="text-title font-medium truncate">{headerLabel}</div>
+                <span
+                  data-tauri-drag-region
+                  className="flex h-5 w-5 shrink-0"
+                >
+                  <AgentGlyph
+                    agent={selected.agent}
+                    className="h-5 w-5 pointer-events-none"
+                  />
+                </span>
+                <div
+                  data-tauri-drag-region
+                  className="min-w-0 max-w-[min(42vw,520px)]"
+                >
+                  <div
+                    data-tauri-drag-region
+                    className="truncate text-body font-medium text-ink/85"
+                  >
+                    {detailTitle}
+                  </div>
+                  {activeMessageMeta && (
+                    <HeaderMessageMetaButton
+                      label={`${activeMessageMeta.partial ? "~" : ""}${t("header.messages_count", { count: activeMessageMeta.count })}`}
+                      open={metaPopoverOpen}
+                      onToggle={() => setMetaPopoverOpen((open) => !open)}
+                      compact
+                    />
+                  )}
+                </div>
               </>
             )}
-            <span className="text-ink/40 text-body-sm tabular-nums shrink-0">
-              {t("header.sessions_count", { count: visibleCount })}
-            </span>
           </div>
-          <div
-            data-tauri-drag-region="false"
-            className="justify-self-center"
-          >
-            <ViewModeSwitcher mode={viewMode} onChange={setViewMode} />
+          <div data-tauri-drag-region="false" className="justify-self-center">
+            <HeaderModeTabs mode={detailMode} onChange={setDetailMode} />
           </div>
           <div className="justify-self-end" data-tauri-drag-region="false">
             {memoryBackendMissing ? (
@@ -807,16 +876,39 @@ export default function App() {
           </div>
         </div>
 
+        {selected && metaPopoverOpen && (
+          <>
+            <button
+              type="button"
+              data-tauri-drag-region="false"
+              aria-label="Close metadata"
+              className="absolute inset-x-0 top-12 bottom-0 z-30 bg-bg/35 backdrop-blur-sm"
+              onClick={() => setMetaPopoverOpen(false)}
+            />
+            <div
+              data-tauri-drag-region="false"
+              className="absolute left-1/2 top-12 z-40 w-[520px] max-w-[calc(100vw-80px)] -translate-x-1/2 transition"
+            >
+              <SessionMetaList session={selected} />
+            </div>
+          </>
+        )}
+
         {error ? (
           <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
             {error}
           </div>
         ) : selected ? (
-          <SessionDetail
-            session={selected}
-            viewMode={viewMode}
-            onRemoved={() => setSelected(null)}
-          />
+          detailMode === "chat" ? (
+            <SessionDetail
+              session={selected}
+              viewMode={viewMode}
+              onMessageCount={handleMessageCount}
+              onActiveMessageMeta={setActiveMessageMeta}
+            />
+          ) : (
+            <SessionMemory session={selected} />
+          )
         ) : (
           <ScrollArea ref={listScrollRef} className="flex-1 min-h-0">
             <EmptyDetailState
@@ -1491,41 +1583,82 @@ function EmptyDetailState({
   );
 }
 
-function ViewModeSwitcher({
+function HeaderMessageMetaButton({
+  label,
+  open,
+  onToggle,
+  compact = false,
+}: {
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  compact?: boolean;
+}) {
+  const Icon = open ? ListChevronsDownUp : ListChevronsUpDown;
+  return (
+    <div
+      data-tauri-drag-region
+      className={
+        "inline-flex items-center gap-1.5 " +
+        (compact
+          ? "mt-0.5 text-caption text-ink/40"
+          : "text-body font-medium text-ink/45")
+      }
+    >
+      <span data-tauri-drag-region className="tabular-nums leading-tight">
+        {label}
+      </span>
+      <button
+        type="button"
+        data-tauri-drag-region="false"
+        onClick={onToggle}
+        className="group -m-1 rounded-md p-1 text-ink/35 transition-colors hover:bg-ink/[0.05] hover:text-ink/65"
+      >
+        <Icon
+          className={
+            "shrink-0 transition-[transform,opacity] duration-200 " +
+            (compact ? "h-3.5 w-3.5" : "h-4 w-4") +
+            (open ? " rotate-0 scale-110" : " rotate-0 scale-100")
+          }
+        />
+      </button>
+    </div>
+  );
+}
+
+function HeaderModeTabs({
   mode,
   onChange,
 }: {
-  mode: ViewMode;
-  onChange: (m: ViewMode) => void;
+  mode: DetailMode;
+  onChange: (mode: DetailMode) => void;
 }) {
-  const { t } = useI18n();
-  const items: { value: ViewMode; label: string }[] = [
-    { value: "native", label: t("header.mode_native") },
-    { value: "cross", label: t("header.mode_cross") },
+  const items: { value: DetailMode; label: string }[] = [
+    { value: "chat", label: "Chat" },
+    { value: "memory", label: "Memory" },
   ];
   const activeIndex = Math.max(
     0,
-    items.findIndex((it) => it.value === mode),
+    items.findIndex((item) => item.value === mode),
   );
   const BTN_W = 72;
   return (
     <div className="relative flex items-center rounded-md bg-ink/[0.14] p-0.5">
       <div
         aria-hidden
-        className="absolute top-0.5 left-0.5 h-[26px] rounded bg-surface shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-transform duration-200 ease-out"
+        className="absolute top-0.5 left-0.5 h-[26px] rounded bg-surface shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
         style={{
           width: `${BTN_W}px`,
           transform: `translateX(${activeIndex * BTN_W}px)`,
         }}
       />
-      {items.map(({ value, label }) => {
-        const active = mode === value;
+      {items.map(({ value, label }, index) => {
+        const active = index === activeIndex;
         return (
           <button
-            key={value}
+            key={label}
             type="button"
             onClick={() => onChange(value)}
-            data-tauri-drag-region="false"
             style={{ width: `${BTN_W}px` }}
             className={
               "relative z-10 h-[26px] flex items-center justify-center rounded text-body-sm leading-none transition-colors duration-150 " +

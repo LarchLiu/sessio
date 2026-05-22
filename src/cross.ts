@@ -102,7 +102,7 @@ export async function buildCrossCommandForSession(
   filePath: string,
   placeholder: string,
 ): Promise<string | null> {
-  const messages = await getSessionMessages(sourceAgent, filePath, sessionId);
+  const { messages } = await getSessionMessages(sourceAgent, filePath, sessionId);
   const prompt = buildCrossPrompt(messages, {
     sourceAgent,
     sourceSessionId: sessionId,
