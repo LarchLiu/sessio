@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agents::runtime::types::{
-    AgentInput, AgentSessionHandle, AgentTurnHandle, RuntimeStatus, StartAgentSession,
+    AgentInput, AgentSessionHandle, AgentTurnHandle, EnsureAgentRuntimeSession, RuntimeStatus,
+    StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
 use indexer::{IndexTask, IndexerHandle};
@@ -518,6 +519,14 @@ fn start_agent_session(
 }
 
 #[tauri::command]
+fn ensure_agent_runtime_session(
+    req: EnsureAgentRuntimeSession,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<AgentSessionHandle, String> {
+    runtime.ensure_session(req).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn load_agent_session(
     agent: Agent,
     runtime_session_id: String,
@@ -525,7 +534,12 @@ fn load_agent_session(
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     runtime
-        .load_session(agent, runtime_session_id, workspace_path)
+        .ensure_session(EnsureAgentRuntimeSession {
+            agent,
+            sessio_runtime_session_id: runtime_session_id,
+            workspace_path,
+            agent_runtime_session_id: None,
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -806,6 +820,7 @@ pub fn run() {
             write_cross_prompt,
             get_agent_runtime_status,
             start_agent_session,
+            ensure_agent_runtime_session,
             load_agent_session,
             send_agent_input,
             cancel_agent_turn,

@@ -27,8 +27,8 @@ import {
   SessionInfo,
   SessionMessage,
   SubagentInfo,
+  ensureAgentRuntimeSession,
   getSessionMessages,
-  loadAgentSession,
   readLocalImageDataUrl,
   cancelAgentTurn,
   respondAgentPermission,
@@ -639,7 +639,12 @@ function MessageStream({
     });
     scrollChatToBottom();
     try {
-      await loadAgentSession(agent, runtimeSessionId, workspacePath);
+      await ensureAgentRuntimeSession({
+        agent,
+        sessioRuntimeSessionId: runtimeSessionId,
+        workspacePath,
+        agentRuntimeSessionId: sessionId,
+      });
       pendingRuntimeSessionId = runtimeSessionId;
       const turn = await sendAgentInput(runtimeSessionId, { text });
       activeRuntimeTurnIdRef.current = turn.turnId;

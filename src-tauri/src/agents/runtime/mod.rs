@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod acp_transport;
 pub mod fake;
 pub mod manager;
 pub mod registry;

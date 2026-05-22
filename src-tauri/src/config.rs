@@ -5,10 +5,40 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::memory::build::default_artifacts_root;
+use crate::models::Agent;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
     pub memory: MemoryConfig,
+    pub agents: AgentsConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentsConfig {
+    pub runtime: RuntimeAgentsConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RuntimeAgentsConfig {
+    pub codex: AgentRuntimeConfig,
+    pub claude: AgentRuntimeConfig,
+    pub gemini: AgentRuntimeConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentRuntimeConfig {
+    pub transport: Option<String>,
+    pub command: Option<String>,
+}
+
+impl RuntimeAgentsConfig {
+    pub fn get(&self, agent: Agent) -> &AgentRuntimeConfig {
+        match agent {
+            Agent::Codex => &self.codex,
+            Agent::Claude => &self.claude,
+            Agent::Gemini => &self.gemini,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,23 +56,42 @@ pub struct QmdBackendConfig {
     pub install_command: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RawConfig {
     memory: RawMemoryConfig,
+    agents: RawAgentsConfig,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
+struct RawAgentsConfig {
+    runtime: RawRuntimeAgentsConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawRuntimeAgentsConfig {
+    codex: RawAgentRuntimeConfig,
+    claude: RawAgentRuntimeConfig,
+    gemini: RawAgentRuntimeConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawAgentRuntimeConfig {
+    transport: Option<String>,
+    command: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 struct RawMemoryConfig {
     backend: Option<String>,
     backends: RawMemoryBackends,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RawMemoryBackends {
     qmd: RawQmdBackendConfig,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RawQmdBackendConfig {
     binary: Option<String>,
     index: Option<String>,
@@ -52,8 +101,10 @@ struct RawQmdBackendConfig {
 }
 
 pub fn load_config() -> Result<AppConfig> {
+    let raw = load_raw_config()?;
     Ok(AppConfig {
-        memory: load_memory_config()?,
+        memory: resolve_memory_config(raw.clone())?,
+        agents: resolve_agents_config(raw)?,
     })
 }
 
@@ -130,6 +181,17 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "install_command" => raw.memory.backends.qmd.install_command = value,
                 other => bail!("unknown key in [memory.backends.qmd]: {other}"),
             },
+            Section::AgentRuntime(agent) => {
+                let target = raw_runtime_agent_mut(&mut raw, agent);
+                match key {
+                    "transport" => target.transport = value,
+                    "command" => target.command = value,
+                    other => bail!(
+                        "unknown key in [agents.runtime.{}]: {other}",
+                        agent.as_str()
+                    ),
+                }
+            }
             Section::Root | Section::Ignored => {}
         }
     }
@@ -142,6 +204,7 @@ enum Section {
     Root,
     Memory,
     MemoryBackendsQmd,
+    AgentRuntime(Agent),
     Ignored,
 }
 
@@ -162,6 +225,12 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
     Ok(Some(match parts.as_slice() {
         [a] if a == "memory" => Section::Memory,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
+        [a, b, c] if a == "agents" && b == "runtime" => match c.as_str() {
+            "codex" => Section::AgentRuntime(Agent::Codex),
+            "claude" => Section::AgentRuntime(Agent::Claude),
+            "gemini" => Section::AgentRuntime(Agent::Gemini),
+            _ => Section::Ignored,
+        },
         _ => Section::Ignored,
     }))
 }
@@ -279,6 +348,38 @@ fn resolve_memory_config(raw: RawConfig) -> Result<MemoryConfig> {
     })
 }
 
+fn resolve_agents_config(raw: RawConfig) -> Result<AgentsConfig> {
+    Ok(AgentsConfig {
+        runtime: RuntimeAgentsConfig {
+            codex: resolve_agent_runtime_config(raw.agents.runtime.codex)?,
+            claude: resolve_agent_runtime_config(raw.agents.runtime.claude)?,
+            gemini: resolve_agent_runtime_config(raw.agents.runtime.gemini)?,
+        },
+    })
+}
+
+fn resolve_agent_runtime_config(raw: RawAgentRuntimeConfig) -> Result<AgentRuntimeConfig> {
+    let transport = raw.transport.filter(|value| !value.trim().is_empty());
+    if let Some(transport) = &transport {
+        match transport.as_str() {
+            "fake" | "acp" | "cliStreamJson" | "plainCli" => {}
+            other => bail!("unsupported runtime transport in config: {other}"),
+        }
+    }
+    Ok(AgentRuntimeConfig {
+        transport,
+        command: raw.command.filter(|value| !value.trim().is_empty()),
+    })
+}
+
+fn raw_runtime_agent_mut(raw: &mut RawConfig, agent: Agent) -> &mut RawAgentRuntimeConfig {
+    match agent {
+        Agent::Codex => &mut raw.agents.runtime.codex,
+        Agent::Claude => &mut raw.agents.runtime.claude,
+        Agent::Gemini => &mut raw.agents.runtime.gemini,
+    }
+}
+
 fn config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home dir")?;
     Ok(home.join(".sessio").join("config.toml"))
@@ -344,12 +445,42 @@ fn toml_string(value: &str) -> String {
 pub fn serialize_app_config(config: &AppConfig) -> String {
     let mut out = String::new();
     out.push_str(&serialize_memory_config(&config.memory));
+    out.push('\n');
+    out.push_str(&serialize_agents_config(&config.agents));
+    out
+}
+
+fn serialize_agents_config(config: &AgentsConfig) -> String {
+    let mut out = String::new();
+    for (name, runtime) in [
+        ("codex", &config.runtime.codex),
+        ("claude", &config.runtime.claude),
+        ("gemini", &config.runtime.gemini),
+    ] {
+        if runtime.transport.is_none() && runtime.command.is_none() {
+            continue;
+        }
+        out.push_str("[agents.runtime.");
+        out.push_str(name);
+        out.push_str("]\n");
+        if let Some(transport) = &runtime.transport {
+            out.push_str("transport = ");
+            out.push_str(&toml_string(transport));
+            out.push('\n');
+        }
+        if let Some(command) = &runtime.command {
+            out.push_str("command = ");
+            out.push_str(&toml_string(command));
+            out.push('\n');
+        }
+        out.push('\n');
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_raw_config, resolve_memory_config};
+    use super::{parse_raw_config, resolve_agents_config, resolve_memory_config};
 
     #[test]
     fn parses_memory_qmd_config() {
@@ -441,5 +572,24 @@ mod tests {
         .unwrap();
         let config = resolve_memory_config(raw).unwrap();
         assert_eq!(config.qmd.binary.as_deref(), Some("/path/with#hash/qmd"));
+    }
+
+    #[test]
+    fn parses_agent_runtime_config() {
+        let raw = parse_raw_config(
+            r#"
+            [agents.runtime.codex]
+            transport = "acp"
+            command = "npx -y @zed-industries/codex-acp@latest"
+            "#,
+        )
+        .unwrap();
+        let config = resolve_agents_config(raw).unwrap();
+
+        assert_eq!(config.runtime.codex.transport.as_deref(), Some("acp"));
+        assert_eq!(
+            config.runtime.codex.command.as_deref(),
+            Some("npx -y @zed-industries/codex-acp@latest")
+        );
     }
 }

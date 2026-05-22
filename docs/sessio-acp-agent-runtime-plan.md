@@ -71,7 +71,8 @@ The plan is reasonable if the first implementation is kept intentionally narrow:
 
 The main risks are around protocol drift, process lifecycle, and state reconciliation:
 
-- ACP method names, capabilities, and update payloads must be generated from or checked against the official schema before implementation, rather than copied from examples.
+- ACP method names, capabilities, and update payloads must come from the official Rust SDK/schema (`agent-client-protocol`), rather than copied from examples or hand-written JSON-RPC structs.
+- `agent-client-protocol-tokio` is not required for the current SDK slice: `agent-client-protocol 0.12.1` already exposes `AcpAgent`/`Stdio` subprocess transports, while the separate tokio helper crate currently tracks older SDK versions and could introduce duplicate protocol types.
 - `session/cancel` is an ACP notification. `cancel_turn` can still return `Result<()>`, but that result should mean Sessio successfully sent cancellation and updated local state; completion is confirmed later by the pending `session/prompt` response or terminal runtime state.
 - A single Sessio runtime session id should be distinct from the agent/ACP session id. Otherwise UI state, SQLite rows, and agent-native ids will become hard to reconcile.
 - Permission requests are client-side ACP methods. The runtime manager needs to route them through Tauri/UI and reply exactly once, including cancelled/expired cases.
@@ -87,9 +88,10 @@ trait AgentRuntime: Send + Sync {
     fn transport_kind(&self) -> RuntimeTransportKind;
     async fn status(&self) -> Result<RuntimeStatus>;
     async fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle>;
+    async fn ensure_session(&self, req: EnsureAgentRuntimeSession) -> Result<AgentSessionHandle>;
     async fn send_input(&self, session_id: &str, req: AgentInput) -> Result<AgentTurnHandle>;
     async fn cancel_turn(&self, session_id: &str, turn_id: &str) -> Result<()>;
-    async fn load_session(&self, session_id: &str) -> Result<AgentSessionHandle>;
+    async fn load_agent_native_session(&self, session_id: &str) -> Result<AgentSessionHandle>;
 }
 ```
 
@@ -164,9 +166,17 @@ Add runtime commands without changing existing session index commands:
 start_agent_session(agent, workspace_path, initial_prompt?, options?) -> AgentSessionHandle
 send_agent_input(session_id, text, attachments?, options?) -> AgentTurnHandle
 cancel_agent_turn(session_id, turn_id) -> void
-load_agent_session(agent, runtime_session_id, workspace_path) -> AgentSessionHandle
+ensure_agent_runtime_session(agent, sessio_runtime_session_id, workspace_path, agent_runtime_session_id?) -> AgentSessionHandle
+load_agent_session(agent, runtime_session_id, workspace_path) -> AgentSessionHandle  # compatibility wrapper for ensure without ACP-native load
 get_agent_runtime_status(agent) -> RuntimeStatus
 ```
+
+`ensure_agent_runtime_session` is intentionally not the same as ACP `session/load`.
+It binds an existing Sessio chat window/session id to an active runtime worker. When an
+ACP-native `agent_runtime_session_id` is provided, the ACP worker may start with
+`session/load`; otherwise it starts a fresh ACP `session/new` under the existing Sessio
+runtime id. This keeps the UI id stable while avoiding the earlier ambiguity where
+`load_agent_session` sounded like it always loaded agent-owned history.
 
 Runtime events should be pushed with Tauri events, for example:
 
@@ -307,11 +317,12 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 
 ### Phase 0: Protocol and Capability Spike
 
-- [ ] Pin the ACP schema/version used by Sessio and record the source URL or vendored schema location.
+- [x] Pin the ACP SDK/schema version used by Sessio and record the source URL or vendored schema location. Sessio now depends on `agent-client-protocol = 0.12.1`, which uses `agent-client-protocol-schema = 0.13.2`; source: https://github.com/agentclientprotocol/rust-sdk.
 - [ ] Verify current ACP capabilities for Codex, Claude, and Gemini installations: native ACP, wrapper needed, structured CLI only, or plain CLI only.
-- [ ] Map ACP update variants into `AgentRuntimeEvent`, including agent message chunks, thought/reasoning chunks, tool call lifecycle, plan updates, mode updates, and permission requests. Initial fake ACP mapping covers message chunks, thought chunks, tool calls, tool output, errors, and permission request/response events.
+- [ ] Map ACP update variants into `AgentRuntimeEvent`, including agent message chunks, thought/reasoning chunks, tool call lifecycle, plan updates, mode updates, and permission requests. Initial SDK-backed mapping covers `SessionNotification` message chunks, thought chunks, tool calls, tool output, and `RequestPermissionRequest`; fake runtime now emits SDK schema types instead of hand-written ACP JSON.
 - [ ] Decide how Sessio exposes runtime capabilities to the UI, for example `supportsCancel`, `supportsPermissions`, `supportsToolDeltas`, `supportsResume`, `supportsAttachments`, and `supportsModes`.
 - [ ] Define a stable id strategy: Sessio runtime session id, ACP session id, turn id, tool id, and permission request id must be separate fields.
+- [x] Split current-window runtime binding from ACP-native session loading. `ensure_agent_runtime_session` owns the Sessio runtime id binding, while ACP `session/load` is only attempted when a distinct agent runtime session id is supplied.
 - [ ] Decide whether `AgentKind` from `agents/sources/types.rs` should become the runtime-facing agent id immediately, or whether runtime v1 should bridge from the existing `models::Agent` enum.
 
 ### Phase 1: Runtime Shell
@@ -341,13 +352,16 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 
 ### Phase 3: ACP Transport
 
-- [ ] Implement stdio JSON-RPC framing, request id allocation, response correlation, notification dispatch, and graceful shutdown.
-- [ ] Implement ACP `initialize` and capability negotiation before exposing a runtime as ready.
-- [ ] Implement `session/new`, `session/load` when supported, `session/prompt`, and `session/cancel`.
-- [ ] Start ACP prompt work in a detached runtime task after `send_agent_input` has returned an `AgentTurnHandle`, so hot reloads cannot strand Tauri invoke callback ids while the agent is still streaming.
-- [ ] Treat `session/cancel` as fire-and-follow-up: send the notification, mark local turn cancelling, answer pending permission requests as cancelled, and wait for prompt completion or timeout.
-- [ ] Implement `session/request_permission` routing through the runtime manager and Tauri event stream; ensure every request receives exactly one approve/reject/cancel response. The fake runtime now exercises approve/reject UI responses through a manager-side permission waiter; real ACP routing, cancellation, and timeout handling remain.
-- [ ] Convert ACP `session/update` notifications into `AgentRuntimeEvent` at the transport boundary.
+- [x] Add the official Rust SDK dependency and avoid hand-written ACP JSON-RPC framing, request id allocation, response correlation, and notification dispatch.
+- [x] Add an SDK-backed ACP worker scaffold using `AcpAgent`, `Client.builder()`, typed `InitializeRequest`, `NewSessionRequest`, `PromptRequest`, `CancelNotification`, `SessionNotification`, and `RequestPermissionRequest`.
+- [x] Keep `agent-client-protocol-tokio` out for now because the main SDK crate provides the needed subprocess/stdin/stdout transport and the separate tokio helper crate is version-skewed with `agent-client-protocol 0.12.1`.
+- [x] Implement ACP `initialize` and capability negotiation before exposing a runtime as ready for explicitly requested ACP sessions.
+- [x] Implement the ACP worker start-mode split for `session/new` versus `session/load`; `session/load` checks the SDK-reported `agent_capabilities.load_session` flag and returns a startup error when unsupported.
+- [ ] Persist and pass real agent-native session ids from indexed/history records so existing historical sessions can choose ACP `session/load` instead of starting `session/new`.
+- [x] Start ACP prompt work in a detached runtime task after `send_agent_input` has returned an `AgentTurnHandle`, so hot reloads cannot strand Tauri invoke callback ids while the agent is still streaming.
+- [x] Treat `session/cancel` as fire-and-follow-up: send the typed SDK `CancelNotification`, mark local turn cancelled, answer pending permission requests as cancelled, and let prompt completion reconcile final state.
+- [x] Implement `session/request_permission` routing through the runtime manager and Tauri event stream; ensure every request receives exactly one approve/reject/cancel response. Fake and real ACP paths share the same manager-side permission waiter.
+- [x] Convert ACP `session/update` notifications into `AgentRuntimeEvent` at the transport boundary using SDK `SessionNotification` / `SessionUpdate` types.
 - [ ] Handle agent-side JSON-RPC errors with structured `RuntimeError` values that preserve code, message, and optional data.
 - [ ] Add process supervision: startup timeout, prompt timeout, idle timeout, unexpected exit handling, restart policy, and reconnect/load behavior.
 - [ ] Add logging with redaction for prompts, environment variables, file contents, and permission payloads.
@@ -355,6 +369,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 ### Phase 4: Agent Runtime Config
 
 - [ ] Extend `~/.sessio/config.toml` with an `[agents.runtime.<agent>]` shape for binary path, args, environment, cwd/workspace behavior, preferred transport, and disabled transports.
+- [x] Add initial `[agents.runtime.<agent>]` config parsing for explicit `transport` and `command`, with per-call runtime options still able to override config.
 - [ ] Add binary discovery/status checks for each built-in agent.
 - [ ] Make workspace paths absolute and validate they are allowed before launching any runtime process.
 - [ ] Define per-agent default launch commands separately from user overrides.
@@ -399,8 +414,8 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [ ] Test that start/send commands return promptly while the fake/ACP runtime continues to emit stream events after the invoke callback has completed.
 - [ ] Unit-test the frontend runtime reducer for delta append, duplicate event ignore, out-of-order sequence handling, completion, cancellation, and permission response updates.
 - [ ] Unit-test live/historical reconciliation so completed live messages do not duplicate after indexed messages reload.
-- [ ] Unit-test ACP JSON-RPC request/response matching, unknown notification handling, malformed payload handling, and request timeout behavior.
-- [ ] Unit-test ACP update-to-event conversion using schema-derived or official example payloads.
+- [ ] Rely on the Rust SDK for ACP JSON-RPC request/response matching and add Sessio tests for worker startup timeout, unknown notification handling, malformed payload handling, and request timeout behavior.
+- [x] Unit-test ACP update-to-event conversion using SDK schema types for message chunks, tool calls, tool output, and permission requests.
 - [ ] Integration-test fake ACP server flows: start, prompt, deltas, tool calls, permission approve/reject, cancellation, process exit, and load existing session.
 - [ ] Integration-test fake structured CLI binaries for Claude/Gemini-style stream-json fallback.
 - [ ] Add component tests or Playwright checks for composer layout at narrow and wide widths, streaming text append, auto-scroll, and manual scroll preservation.

@@ -23,6 +23,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
+agent-client-protocol = "0.12.1"
 walkdir = "2.5"
 sha2 = "0.10"
 hex = "0.4"

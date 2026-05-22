@@ -79,6 +79,16 @@ pub struct StartAgentSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EnsureAgentRuntimeSession {
+    pub agent: Agent,
+    pub sessio_runtime_session_id: String,
+    pub workspace_path: String,
+    #[serde(default)]
+    pub agent_runtime_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentSessionHandle {
     pub sessio_runtime_session_id: String,
     pub agent: Agent,

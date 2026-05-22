@@ -115,6 +115,13 @@ export interface StartAgentSessionRequest {
   options?: Record<string, unknown>;
 }
 
+export interface EnsureAgentRuntimeSessionRequest {
+  agent: Agent;
+  sessioRuntimeSessionId: string;
+  workspacePath: string;
+  agentRuntimeSessionId?: string | null;
+}
+
 export interface AgentSessionHandle {
   sessioRuntimeSessionId: string;
   agent: Agent;
@@ -314,6 +321,12 @@ export async function loadAgentSession(
     runtimeSessionId,
     workspacePath,
   });
+}
+
+export async function ensureAgentRuntimeSession(
+  req: EnsureAgentRuntimeSessionRequest,
+): Promise<AgentSessionHandle> {
+  return invoke<AgentSessionHandle>("ensure_agent_runtime_session", { req });
 }
 
 export async function sendAgentInput(
