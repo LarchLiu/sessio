@@ -26,6 +26,7 @@ type Props = {
   children: ReactNode;
   persistScrollbars?: boolean;
   orientation?: "vertical" | "horizontal" | "both";
+  onScroll?: (viewport: HTMLDivElement) => void;
 };
 
 const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
@@ -35,6 +36,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
     children,
     persistScrollbars = false,
     orientation = "vertical",
+    onScroll,
   },
   ref,
 ) {
@@ -100,7 +102,9 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
   const handleScroll = useCallback(() => {
     updateThumbs();
     flashVisible();
-  }, [updateThumbs, flashVisible]);
+    const vp = viewportRef.current;
+    if (vp) onScroll?.(vp);
+  }, [updateThumbs, flashVisible, onScroll]);
 
   const scheduleUpdateThumbs = useCallback(() => {
     if (updateFrameRef.current !== null) return;

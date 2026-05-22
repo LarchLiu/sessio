@@ -1,6 +1,7 @@
 import {
   startTransition,
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -81,8 +82,30 @@ type Tab =
   | { kind: "sub"; sub: SubagentInfo };
 
 const ROLE_NAV_SHOW_DELAY_MS = 800;
-const INITIAL_MESSAGE_RENDER_COUNT = 48;
-const MESSAGE_RENDER_BATCH_SIZE = 96;
+
+interface MessageCacheEntry {
+  messages: SessionMessage[];
+  messageCount: number;
+  loadedAt: number;
+}
+
+interface ScrollAnchor {
+  key: string;
+  offset: number;
+}
+
+interface ScrollCacheEntry {
+  scrollTop: number;
+  anchor: ScrollAnchor | null;
+  atBottom: boolean;
+}
+
+const messageCache = new Map<string, MessageCacheEntry>();
+const scrollCache = new Map<string, ScrollCacheEntry>();
+
+function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
+  return `${agent}:${sessionId}:${filePath}`;
+}
 
 export default function SessionDetail({
   session,
@@ -172,8 +195,8 @@ export default function SessionDetail({
         <MessageStream
           key={
             tab.kind === "main"
-              ? `main:${session.filePath}`
-              : `sub:${tab.sub.id}:${tab.sub.filePath}`
+              ? messageSourceKey(session.agent, session.filePath, session.id)
+              : messageSourceKey(session.agent, tab.sub.filePath, `${session.id}:${tab.sub.id}`)
           }
           agent={session.agent}
           filePath={tab.kind === "main" ? session.filePath : tab.sub.filePath}
@@ -189,6 +212,7 @@ export default function SessionDetail({
           viewMode={viewMode}
           onPreviewImage={setPreviewImage}
           onMessageCount={onMessageCount}
+          messageCount={activeMessageMeta.count}
         />
 
         {previewImage && (
@@ -251,6 +275,7 @@ function MessageStream({
   viewMode,
   onPreviewImage,
   onMessageCount,
+  messageCount,
 }: {
   agent: SessionInfo["agent"];
   filePath: string;
@@ -260,45 +285,78 @@ function MessageStream({
   viewMode: ViewMode;
   onPreviewImage: (image: MarkdownImage) => void;
   onMessageCount: (filePath: string, count: number) => boolean;
+  messageCount: number;
 }) {
   const { t } = useI18n();
-  const [messages, setMessages] = useState<SessionMessage[]>([]);
-  const [visibleMessageCount, setVisibleMessageCount] = useState(
-    INITIAL_MESSAGE_RENDER_COUNT,
+  const sourceKey = messageSourceKey(agent, filePath, sessionId);
+  const cachedEntry = messageCache.get(sourceKey);
+  const isFreshCache =
+    Boolean(cachedEntry) && cachedEntry?.messageCount === messageCount;
+  const [messages, setMessages] = useState<SessionMessage[]>(
+    cachedEntry?.messages ?? [],
   );
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !isFreshCache);
   const [error, setError] = useState<string | null>(null);
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const pendingInitialPositionRef = useRef<"bottom" | "restore" | null>(null);
+  const initialPositionAppliedRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!available || !filePath) {
+      setMessages([]);
+      setLoading(false);
+      setError(null);
+      pendingInitialPositionRef.current = null;
+      initialPositionAppliedRef.current = false;
+      return;
+    }
+    const cached = messageCache.get(sourceKey);
+    if (cached) {
+      setMessages(cached.messages);
+      setLoading(cached.messageCount !== messageCount);
+      setError(null);
+    } else {
+      setMessages([]);
+      setLoading(true);
+      setError(null);
+    }
+    pendingInitialPositionRef.current = scrollCache.has(sourceKey)
+      ? "restore"
+      : "bottom";
+    initialPositionAppliedRef.current = false;
+  }, [available, filePath, messageCount, sourceKey]);
 
   useEffect(() => {
+    if (!available || !filePath) return;
+    const cached = messageCache.get(sourceKey);
+    if (cached && cached.messageCount === messageCount) return;
+
     let cancelled = false;
     let frameId: number | null = null;
     let timerId: number | null = null;
-    if (!available || !filePath) {
-      setMessages([]);
-      setVisibleMessageCount(INITIAL_MESSAGE_RENDER_COUNT);
-      setLoading(false);
-      setError(null);
-      return;
-    }
-    setLoading(true);
-    setError(null);
     frameId = window.requestAnimationFrame(() => {
       timerId = window.setTimeout(() => {
         getSessionMessages(agent, filePath, sessionId)
           .then((result) => {
             if (cancelled) return;
+            messageCache.set(sourceKey, {
+              messages: result.messages,
+              messageCount: result.messageCount,
+              loadedAt: Date.now(),
+            });
             startTransition(() => {
               setMessages(result.messages);
-              setVisibleMessageCount(INITIAL_MESSAGE_RENDER_COUNT);
               setLoading(false);
             });
             if (!onMessageCount(filePath, result.messageCount)) return;
             window.setTimeout(() => {
-              updateSessionMessageCount(agent, filePath, result.messageCount, sessionId).catch(
-                (err) => console.warn("update message count failed", err),
-              );
+              updateSessionMessageCount(
+                agent,
+                filePath,
+                result.messageCount,
+                sessionId,
+              ).catch((err) => console.warn("update message count failed", err));
             }, 0);
           })
           .catch((err) => {
@@ -313,49 +371,113 @@ function MessageStream({
       if (frameId !== null) window.cancelAnimationFrame(frameId);
       if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [agent, filePath, sessionId, available, onMessageCount]);
-
-  useEffect(() => {
-    if (visibleMessageCount >= messages.length) return;
-    let cancelled = false;
-    let frameId: number | null = null;
-    const showNextBatch = () => {
-      frameId = window.requestAnimationFrame(() => {
-        if (cancelled) return;
-        startTransition(() => {
-          setVisibleMessageCount((count) =>
-            Math.min(count + MESSAGE_RENDER_BATCH_SIZE, messages.length),
-          );
-        });
-        if (!cancelled) showNextBatch();
-      });
-    };
-    showNextBatch();
-    return () => {
-      cancelled = true;
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
-    };
-  }, [messages.length, visibleMessageCount]);
+  }, [agent, filePath, sessionId, available, messageCount, onMessageCount, sourceKey]);
 
   const displayItems = useMemo(() => {
-    const all = messages
-      .slice(0, visibleMessageCount)
-      .map((m, srcIdx) => ({ m, srcIdx }));
+    const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
     const filtered =
       viewMode === "native"
         ? all
         : all.filter(({ m }) => isConversationRole(m.role));
     return moveFileEditsToTurnEnd(pairToolMessages(filtered));
-  }, [messages, visibleMessageCount, viewMode]);
+  }, [messages, viewMode]);
 
   bubbleRefs.current.length = displayItems.length;
+
+  const saveScrollSnapshot = useCallback(
+    (vp: HTMLDivElement | null = viewportRef.current) => {
+      if (
+        !vp ||
+        !available ||
+        !filePath ||
+        !initialPositionAppliedRef.current
+      ) {
+        return;
+      }
+      const atBottom = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 1;
+      let anchor: ScrollAnchor | null = null;
+      if (!atBottom && displayItems.length > 0) {
+        const vpRect = vp.getBoundingClientRect();
+        let bestIdx = -1;
+        let bestOffset = Number.NEGATIVE_INFINITY;
+        let fallbackIdx = -1;
+        let fallbackOffset = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < displayItems.length; i += 1) {
+          const el = bubbleRefs.current[i];
+          if (!el) continue;
+          const offset = el.getBoundingClientRect().top - vpRect.top;
+          if (offset <= 0 && offset > bestOffset) {
+            bestOffset = offset;
+            bestIdx = i;
+          }
+          if (offset >= 0 && offset < fallbackOffset) {
+            fallbackOffset = offset;
+            fallbackIdx = i;
+          }
+        }
+        const idx = bestIdx >= 0 ? bestIdx : fallbackIdx;
+        const el = idx >= 0 ? bubbleRefs.current[idx] : null;
+        if (el) {
+          const offset = el.getBoundingClientRect().top - vpRect.top;
+          anchor = { key: displayItems[idx].key, offset };
+        }
+      }
+      scrollCache.set(sourceKey, {
+        scrollTop: vp.scrollTop,
+        anchor,
+        atBottom,
+      });
+    },
+    [available, filePath, displayItems, sourceKey],
+  );
+
+  useLayoutEffect(() => {
+    return () => {
+      if (initialPositionAppliedRef.current) saveScrollSnapshot();
+    };
+  }, [saveScrollSnapshot]);
+
+  useLayoutEffect(() => {
+    const vp = viewportRef.current;
+    const mode = pendingInitialPositionRef.current;
+    if (!vp || mode === null || loading || messages.length === 0) return;
+    const snapshot = scrollCache.get(sourceKey);
+    if (mode === "restore" && snapshot?.anchor) {
+      const idx = displayItems.findIndex((item) => item.key === snapshot.anchor?.key);
+      const el = idx >= 0 ? bubbleRefs.current[idx] : null;
+      if (el) {
+        const vpRect = vp.getBoundingClientRect();
+        const top = el.getBoundingClientRect().top - vpRect.top + vp.scrollTop;
+        vp.scrollTop = Math.max(0, top - snapshot.anchor.offset);
+        pendingInitialPositionRef.current = null;
+        initialPositionAppliedRef.current = true;
+        return;
+      }
+    }
+    if (mode === "restore" && snapshot) {
+      vp.scrollTop = Math.max(
+        0,
+        Math.min(snapshot.scrollTop, vp.scrollHeight - vp.clientHeight),
+      );
+    } else {
+      const last = bubbleRefs.current[displayItems.length - 1];
+      if (last) {
+        last.scrollIntoView({ block: "end" });
+      } else {
+        vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+      }
+    }
+    pendingInitialPositionRef.current = null;
+    initialPositionAppliedRef.current = true;
+  }, [displayItems, loading, messages.length, sourceKey]);
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
       <ScrollArea
         ref={viewportRef}
         className="flex-1 min-h-0"
-        viewportClassName="px-10 py-4"
+        viewportClassName="px-10 py-4 session-chat-scroll-viewport"
+        onScroll={saveScrollSnapshot}
       >
         {!available && (
           <div className="text-status-warn text-body bg-status-warn/[0.10] border border-status-warn/30 rounded p-3 leading-relaxed">

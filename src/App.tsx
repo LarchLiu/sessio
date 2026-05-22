@@ -899,16 +899,31 @@ export default function App() {
             {error}
           </div>
         ) : selected ? (
-          detailMode === "chat" ? (
-            <SessionDetail
-              session={selected}
-              viewMode={viewMode}
-              onMessageCount={handleMessageCount}
-              onActiveMessageMeta={setActiveMessageMeta}
-            />
-          ) : (
-            <SessionMemory session={selected} />
-          )
+          <div className="relative flex-1 min-h-0">
+            <div
+              className={
+                "absolute inset-0 " +
+                (detailMode === "chat" ? "visible" : "invisible pointer-events-none")
+              }
+              aria-hidden={detailMode !== "chat"}
+            >
+              <SessionDetail
+                session={selected}
+                viewMode={viewMode}
+                onMessageCount={handleMessageCount}
+                onActiveMessageMeta={setActiveMessageMeta}
+              />
+            </div>
+            <div
+              className={
+                "absolute inset-0 " +
+                (detailMode === "memory" ? "visible" : "invisible pointer-events-none")
+              }
+              aria-hidden={detailMode !== "memory"}
+            >
+              <SessionMemory session={selected} />
+            </div>
+          </div>
         ) : (
           <ScrollArea ref={listScrollRef} className="flex-1 min-h-0">
             <EmptyDetailState

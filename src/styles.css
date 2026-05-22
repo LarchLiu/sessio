@@ -69,6 +69,10 @@ body {
   contain-intrinsic-size: auto 220px;
 }
 
+.session-chat-scroll-viewport {
+  overflow-anchor: none;
+}
+
 .sessio-diff-preview {
   background: rgb(var(--color-bg-panel-alt));
   color: rgb(var(--color-fg) / 0.82);
