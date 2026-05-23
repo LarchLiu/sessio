@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -41,6 +42,14 @@ import WindowControls from "./components/WindowControls";
 import { ThemeMode, useTheme } from "./theme";
 import { Lang, useI18n } from "./i18n";
 import { useUpdateCheck, openReleasePage } from "./updater";
+import {
+  applyRuntimeAction,
+  emptyLiveRuntimeState,
+  liveSessionActivity,
+  liveSessionUpdatedAt,
+  normalizeAgentRuntimeEvent,
+  type LiveRuntimeState,
+} from "./runtimeChat";
 
 type Filter =
   | SessionScope
@@ -131,6 +140,10 @@ export default function App() {
   const [activeMessageMeta, setActiveMessageMeta] =
     useState<ActiveMessageMeta | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [liveRuntimeState, dispatchLiveRuntimeEvent] = useReducer(
+    applyRuntimeAction,
+    emptyLiveRuntimeState,
+  );
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
@@ -226,6 +239,26 @@ export default function App() {
     return () => {
       unlisten.then((f) => f()).catch(() => {});
       statusUnlisten.then((f) => f()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    listen<unknown>("agent-runtime-event", (event) => {
+      if (cancelled) return;
+      const payload = normalizeAgentRuntimeEvent(event.payload);
+      console.info("[sessio-runtime:frontend:event]", payload);
+      dispatchLiveRuntimeEvent({ type: "runtime-event", event: payload });
+    })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch((err) => setError(String(err)));
+    return () => {
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 
@@ -366,14 +399,17 @@ export default function App() {
       .map(([key, v]) => ({
         key,
         ...v,
-        sessions: v.sessions.sort(
-          (a, b) =>
-            (b.updatedAt ?? b.startedAt ?? 0) -
-            (a.updatedAt ?? a.startedAt ?? 0),
-        ),
+        sessions: v.sessions.sort((a, b) => {
+          const aLive = liveSessionUpdatedAt(liveRuntimeState.sessions[a.id]) ?? 0;
+          const bLive = liveSessionUpdatedAt(liveRuntimeState.sessions[b.id]) ?? 0;
+          return (
+            Math.max(b.updatedAt ?? b.startedAt ?? 0, bLive) -
+            Math.max(a.updatedAt ?? a.startedAt ?? 0, aLive)
+          );
+        }),
       }))
       .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label));
-  }, [availableSessions, t]);
+  }, [availableSessions, liveRuntimeState.sessions, t]);
 
   useEffect(() => {
     setExpandedProjects((prev) => {
@@ -632,6 +668,7 @@ export default function App() {
                     expanded={expanded}
                     sessionsExpanded={expandedProjectSessions.has(p.key)}
                     selectedKey={selectedKey}
+                    liveState={liveRuntimeState}
                     onSelectProject={() => {
                       setFilter({ kind: "project", key: p.key, label: p.label });
                       setExpandedProjects((prev) => {
@@ -931,6 +968,8 @@ export default function App() {
               <SessionDetail
                 session={selected}
                 viewMode={viewMode}
+                liveState={liveRuntimeState}
+                dispatchLiveEvent={dispatchLiveRuntimeEvent}
                 onMessageCount={handleMessageCount}
                 onActiveMessageMeta={setActiveMessageMeta}
               />
@@ -1435,6 +1474,7 @@ function ProjectSidebarGroup({
   expanded,
   sessionsExpanded,
   selectedKey,
+  liveState,
   onSelectProject,
   onSelectSession,
   onToggleSessionLimit,
@@ -1445,6 +1485,7 @@ function ProjectSidebarGroup({
   expanded: boolean;
   sessionsExpanded: boolean;
   selectedKey: string | null;
+  liveState: LiveRuntimeState;
   onSelectProject: () => void;
   onSelectSession: (session: SessionInfo) => void;
   onToggleSessionLimit: () => void;
@@ -1510,6 +1551,7 @@ function ProjectSidebarGroup({
                 key={sessionKey(session)}
                 item={session}
                 active={selectedKey === sessionKey(session)}
+                liveActivity={liveSessionActivity(liveState.sessions[session.id])}
                 onSelect={() => onSelectSession(session)}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -1536,11 +1578,13 @@ function ProjectSidebarGroup({
 function SidebarSessionItem({
   item,
   active,
+  liveActivity,
   onSelect,
   onContextMenu,
 }: {
   item: SessionInfo;
   active: boolean;
+  liveActivity: ReturnType<typeof liveSessionActivity>;
   onSelect: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
@@ -1560,7 +1604,10 @@ function SidebarSessionItem({
           : "text-ink/65 hover:bg-ink/5 hover:text-ink")
       }
     >
-      <AgentGlyph agent={item.agent} className="h-3.5 w-3.5 shrink-0" />
+      <span className="relative flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+        <AgentGlyph agent={item.agent} className="h-3.5 w-3.5" />
+        <LiveSessionDot activity={liveActivity} />
+      </span>
       <span
         className={
           "min-w-0 flex-1 truncate text-body-sm leading-snug " +
@@ -1575,6 +1622,30 @@ function SidebarSessionItem({
         {relativeTime}
       </span>
     </button>
+  );
+}
+
+function LiveSessionDot({
+  activity,
+}: {
+  activity: ReturnType<typeof liveSessionActivity>;
+}) {
+  if (activity === "idle") return null;
+  const cls =
+    activity === "running"
+      ? "bg-status-success animate-pulse"
+      : activity === "failed"
+        ? "bg-status-error"
+        : activity === "cancelled"
+          ? "bg-ink/35"
+          : "bg-accent-purple";
+  return (
+    <span
+      className={
+        "absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-surface-sidebar " +
+        cls
+      }
+    />
   );
 }
 

@@ -404,7 +404,9 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [x] Add context usage display, initially backed by runtime status or a placeholder value when the transport cannot report token/context usage.
 - [ ] Connect existing cross-agent continuation generation to `start_agent_session` as an optional launch path.
 - [ ] Add explicit memory injection controls for v1 instead of automatic background injection.
-- [ ] Show the link between a live runtime session and its indexed historical session after reconciliation succeeds.
+- [x] Keep live runtime state at app scope instead of `SessionDetail` scope, so multiple sessions can receive runtime events while only one detail view is mounted.
+- [x] Surface live runtime activity in the session sidebar, including running, failed, cancelled, and updated sessions.
+- [ ] Show the link between a live runtime session and its indexed historical session after reconciliation succeeds. A first frontend-only reconciliation pass now removes completed live overlay turns once indexed messages catch up.
 - [x] Add empty/no-selection behavior for the composer: disabled with explanation when no project/workspace can be resolved, enabled when a workspace is selected.
 - [x] Add keyboard focus behavior so opening a live chat session focuses the composer without stealing focus during streaming.
 
@@ -413,7 +415,7 @@ The recommended default is ACP-first with CLI stream-json fallback, runtime meta
 - [ ] Unit-test runtime manager ordering, active-turn locking, cancellation state, and permission response routing.
 - [ ] Test that start/send commands return promptly while the fake/ACP runtime continues to emit stream events after the invoke callback has completed.
 - [ ] Unit-test the frontend runtime reducer for delta append, duplicate event ignore, out-of-order sequence handling, completion, cancellation, and permission response updates.
-- [ ] Unit-test live/historical reconciliation so completed live messages do not duplicate after indexed messages reload.
+- [ ] Unit-test live/historical reconciliation so completed live messages do not duplicate after indexed messages reload. Initial app-level live state now reconciles completed live turns after indexed transcript messages cover their update time.
 - [ ] Rely on the Rust SDK for ACP JSON-RPC request/response matching and add Sessio tests for worker startup timeout, unknown notification handling, malformed payload handling, and request timeout behavior.
 - [x] Unit-test ACP update-to-event conversion using SDK schema types for message chunks, tool calls, tool output, and permission requests.
 - [ ] Integration-test fake ACP server flows: start, prompt, deltas, tool calls, permission approve/reject, cancellation, process exit, and load existing session.

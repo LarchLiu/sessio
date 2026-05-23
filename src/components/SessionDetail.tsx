@@ -6,12 +6,10 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
-  useReducer,
   useRef,
   useState,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
 import { ArrowUp, ChevronDown, ChevronRight, FileDiff, Plus, Square } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -40,9 +38,8 @@ import Tooltip from "./Tooltip";
 import { localeTag, useI18n } from "../i18n";
 import type { ViewMode } from "../App";
 import {
-  applyRuntimeAction,
-  emptyLiveRuntimeState,
-  normalizeAgentRuntimeEvent,
+  type LiveRuntimeAction,
+  type LiveRuntimeState,
   type LiveRuntimeSession,
   type LiveTurn,
 } from "../runtimeChat";
@@ -50,6 +47,8 @@ import {
 interface Props {
   session: SessionInfo;
   viewMode: ViewMode;
+  liveState: LiveRuntimeState;
+  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onMessageCount: (filePath: string, count: number) => boolean;
   onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
 }
@@ -101,6 +100,7 @@ interface MessageCacheEntry {
   messages: SessionMessage[];
   messageCount: number;
   loadedAt: number;
+  liveItems: MessageRenderItem[];
 }
 
 interface ScrollAnchor {
@@ -124,6 +124,8 @@ function messageSourceKey(agent: SessionInfo["agent"], filePath: string, session
 export default function SessionDetail({
   session,
   viewMode,
+  liveState,
+  dispatchLiveEvent,
   onMessageCount,
   onActiveMessageMeta,
 }: Props) {
@@ -224,6 +226,8 @@ export default function SessionDetail({
               : t("detail.subagent_unreadable")
           }
           viewMode={viewMode}
+          liveState={liveState}
+          dispatchLiveEvent={dispatchLiveEvent}
           onPreviewImage={setPreviewImage}
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
@@ -288,6 +292,8 @@ function MessageStream({
   available,
   emptyHint,
   viewMode,
+  liveState,
+  dispatchLiveEvent,
   onPreviewImage,
   onMessageCount,
   messageCount,
@@ -299,6 +305,8 @@ function MessageStream({
   available: boolean;
   emptyHint: string;
   viewMode: ViewMode;
+  liveState: LiveRuntimeState;
+  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onPreviewImage: (image: MarkdownImage) => void;
   onMessageCount: (filePath: string, count: number) => boolean;
   messageCount: number;
@@ -312,12 +320,11 @@ function MessageStream({
   const [messages, setMessages] = useState<SessionMessage[]>(
     cachedEntry?.messages ?? [],
   );
+  const [cachedLiveItems, setCachedLiveItems] = useState<MessageRenderItem[]>(
+    cachedEntry?.liveItems ?? [],
+  );
   const [loading, setLoading] = useState(() => !isFreshCache);
   const [error, setError] = useState<string | null>(null);
-  const [liveState, dispatchLiveEvent] = useReducer(
-    applyRuntimeAction,
-    emptyLiveRuntimeState,
-  );
   const runtimeSessionId = sessionId;
   const [composerText, setComposerText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -338,6 +345,7 @@ function MessageStream({
   useLayoutEffect(() => {
     if (!available || !filePath) {
       setMessages([]);
+      setCachedLiveItems([]);
       setLoading(false);
       setError(null);
       pendingInitialPositionRef.current = null;
@@ -347,10 +355,12 @@ function MessageStream({
     const cached = messageCache.get(sourceKey);
     if (cached) {
       setMessages(cached.messages);
+      setCachedLiveItems(cached.liveItems);
       setLoading(cached.messageCount !== messageCount);
       setError(null);
     } else {
       setMessages([]);
+      setCachedLiveItems([]);
       setLoading(true);
       setError(null);
     }
@@ -377,11 +387,20 @@ function MessageStream({
               messages: result.messages,
               messageCount: result.messageCount,
               loadedAt: Date.now(),
+              liveItems: messageCache.get(sourceKey)?.liveItems ?? [],
             });
             startTransition(() => {
               setMessages(result.messages);
               setLoading(false);
             });
+            const indexedThrough = latestMessageTimestamp(result.messages);
+            if (indexedThrough !== null) {
+              dispatchLiveEvent({
+                type: "reconcile-indexed-session",
+                sessioRuntimeSessionId: runtimeSessionId,
+                indexedThrough,
+              });
+            }
             if (!onMessageCount(filePath, result.messageCount)) return;
             window.setTimeout(() => {
               updateSessionMessageCount(
@@ -404,30 +423,17 @@ function MessageStream({
       if (frameId !== null) window.cancelAnimationFrame(frameId);
       if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [agent, filePath, sessionId, available, messageCount, onMessageCount, sourceKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-    listen<unknown>("agent-runtime-event", (event) => {
-      if (!cancelled) {
-        const payload = normalizeAgentRuntimeEvent(event.payload);
-        console.info("[sessio-runtime:frontend:event]", payload);
-        dispatchLiveEvent({ type: "runtime-event", event: payload });
-      }
-    })
-      .then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      })
-      .catch((err) => {
-        if (!cancelled) setComposerError(String(err));
-      });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
+  }, [
+    agent,
+    filePath,
+    sessionId,
+    available,
+    messageCount,
+    onMessageCount,
+    sourceKey,
+    dispatchLiveEvent,
+    runtimeSessionId,
+  ]);
 
   const displayItems = useMemo(() => {
     const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
@@ -436,16 +442,16 @@ function MessageStream({
         ? all
         : all.filter(({ m }) => isConversationRole(m.role));
     const historical = moveFileEditsToTurnEnd(pairToolMessages(filtered));
-    if (!liveSession) return historical;
-    return [
-      ...historical,
-      ...liveTurnsToRenderItems(
+    const liveItems = liveSession
+      ? liveTurnsToRenderItems(
         liveSession.sessioRuntimeSessionId,
         liveSession.turns,
         runtimeNow,
-      ),
-    ];
-  }, [liveSession, messages, runtimeNow, viewMode]);
+      )
+      : cachedLiveItems;
+    return [...historical, ...liveItems];
+  }, [cachedLiveItems, liveSession, messages, runtimeNow, viewMode]);
+
   const liveStreamingKey = useMemo(() => {
     if (!liveSession) return "";
     return liveSession.turns
@@ -460,6 +466,44 @@ function MessageStream({
       .map((turn) => turn.turnId)
       .join("|");
   }, [liveSession]);
+  const liveCacheKey = useMemo(() => {
+    if (!liveSession) return "";
+    return liveSession.turns
+      .map((turn) =>
+        [
+          turn.turnId,
+          turn.status,
+          turn.userText.length,
+          turn.assistantText.length,
+          turn.reasoningText.length,
+          turn.tools.length,
+          turn.permissions.length,
+          turn.updatedAt,
+        ].join(":"),
+      )
+      .join("|");
+  }, [liveSession]);
+
+  useEffect(() => {
+    if (!liveSession) return;
+    const liveItems = liveTurnsToRenderItems(
+      liveSession.sessioRuntimeSessionId,
+      liveSession.turns,
+      Date.now(),
+    );
+    setCachedLiveItems(liveItems);
+    const cached = messageCache.get(sourceKey);
+    if (cached) {
+      messageCache.set(sourceKey, { ...cached, liveItems });
+    } else {
+      messageCache.set(sourceKey, {
+        messages,
+        messageCount,
+        loadedAt: Date.now(),
+        liveItems,
+      });
+    }
+  }, [liveCacheKey, liveSession, messageCount, messages, sourceKey]);
   const activeTurnId = useMemo(() => {
     if (!liveSession) return null;
     return liveSession.turns.find((turn) =>
@@ -558,6 +602,13 @@ function MessageStream({
     const mode = pendingInitialPositionRef.current;
     if (!vp || mode === null || loading || displayItems.length === 0) return;
     const snapshot = scrollCache.get(sourceKey);
+    if (mode === "restore" && snapshot?.atBottom) {
+      followLiveStreamRef.current = true;
+      scrollChatToBottom();
+      pendingInitialPositionRef.current = null;
+      initialPositionAppliedRef.current = true;
+      return;
+    }
     if (mode === "restore" && snapshot?.anchor) {
       const idx = displayItems.findIndex((item) => item.key === snapshot.anchor?.key);
       const el = idx >= 0 ? bubbleRefs.current[idx] : null;
@@ -1468,6 +1519,15 @@ function isConversationRole(role: string): boolean {
     "permission_request",
     "turn_note",
   ].includes(role);
+}
+
+function latestMessageTimestamp(messages: SessionMessage[]): number | null {
+  let latest: number | null = null;
+  for (const message of messages) {
+    if (message.timestamp === null) continue;
+    latest = latest === null ? message.timestamp : Math.max(latest, message.timestamp);
+  }
+  return latest;
 }
 
 interface MessageRenderItem {

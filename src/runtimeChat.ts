@@ -32,6 +32,11 @@ export type LiveRuntimeAction =
       turnId: string;
       error: RuntimeError;
       timestamp: number;
+    }
+  | {
+      type: "reconcile-indexed-session";
+      sessioRuntimeSessionId: string;
+      indexedThrough: number;
     };
 
 export interface LiveRuntimeState {
@@ -55,6 +60,13 @@ export interface LiveRuntimeStatus {
   activeTurnId: string | null;
   ended: boolean;
 }
+
+export type LiveSessionActivity =
+  | "idle"
+  | "running"
+  | "failed"
+  | "cancelled"
+  | "updated";
 
 export interface LiveTurn {
   turnId: string;
@@ -98,6 +110,39 @@ export const emptyLiveRuntimeState: LiveRuntimeState = {
   lastSequence: 0,
 };
 
+export function liveSessionActivity(
+  session: LiveRuntimeSession | null | undefined,
+): LiveSessionActivity {
+  if (!session || session.turns.length === 0) return "idle";
+  const latest = latestLiveTurn(session);
+  if (!latest) return "idle";
+  if (
+    latest.status === "pending" ||
+    latest.status === "streaming" ||
+    latest.status === "cancelling"
+  ) {
+    return "running";
+  }
+  if (latest.status === "failed") return "failed";
+  if (latest.status === "cancelled") return "cancelled";
+  return "updated";
+}
+
+export function liveSessionUpdatedAt(
+  session: LiveRuntimeSession | null | undefined,
+): number | null {
+  return latestLiveTurn(session)?.updatedAt ?? null;
+}
+
+function latestLiveTurn(
+  session: LiveRuntimeSession | null | undefined,
+): LiveTurn | null {
+  if (!session || session.turns.length === 0) return null;
+  return session.turns.reduce((latest, turn) =>
+    turn.updatedAt > latest.updatedAt ? turn : latest,
+  );
+}
+
 export function normalizeAgentRuntimeEvent(raw: unknown): AgentRuntimeEvent {
   return camelizeKeys(raw) as AgentRuntimeEvent;
 }
@@ -134,6 +179,26 @@ export function applyRuntimeAction(
     } else {
       turns[fromIndex] = { ...turns[fromIndex], turnId: action.to };
     }
+    return {
+      ...state,
+      sessions: {
+        ...state.sessions,
+        [session.sessioRuntimeSessionId]: { ...session, turns },
+      },
+    };
+  }
+
+  if (action.type === "reconcile-indexed-session") {
+    const session = state.sessions[action.sessioRuntimeSessionId];
+    if (!session) return state;
+    const turns = session.turns.filter(
+      (turn) =>
+        !(
+          turn.status === "completed" &&
+          turn.updatedAt <= action.indexedThrough
+        ),
+    );
+    if (turns.length === session.turns.length) return state;
     return {
       ...state,
       sessions: {
