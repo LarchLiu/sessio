@@ -49,7 +49,12 @@ interface Props {
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
-  onMessageCount: (filePath: string, count: number) => boolean;
+  onMessageCount: (
+    agent: SessionInfo["agent"],
+    filePath: string,
+    sessionId: string,
+    count: number,
+  ) => boolean;
   onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
 }
 
@@ -116,9 +121,18 @@ interface ScrollCacheEntry {
 
 const messageCache = new Map<string, MessageCacheEntry>();
 const scrollCache = new Map<string, ScrollCacheEntry>();
+const BOTTOM_FOLLOW_THRESHOLD_PX = 24;
+const PROGRAMMATIC_SCROLL_SETTLE_MS = 120;
 
 function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
   return `${agent}:${sessionId}:${filePath}`;
+}
+
+function isNearScrollBottom(vp: HTMLDivElement): boolean {
+  return (
+    vp.scrollTop + vp.clientHeight >=
+    vp.scrollHeight - BOTTOM_FOLLOW_THRESHOLD_PX
+  );
 }
 
 export default function SessionDetail({
@@ -308,7 +322,12 @@ function MessageStream({
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onPreviewImage: (image: MarkdownImage) => void;
-  onMessageCount: (filePath: string, count: number) => boolean;
+  onMessageCount: (
+    agent: SessionInfo["agent"],
+    filePath: string,
+    sessionId: string,
+    count: number,
+  ) => boolean;
   messageCount: number;
   workspacePath: string | null;
 }) {
@@ -336,6 +355,7 @@ function MessageStream({
   const followLiveStreamRef = useRef(false);
   const liveStreamingRef = useRef(false);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
+  const programmaticScrollUntilRef = useRef(0);
   const pendingInitialPositionRef = useRef<"bottom" | "restore" | null>(null);
   const initialPositionAppliedRef = useRef(false);
   const liveSession = runtimeSessionId
@@ -401,7 +421,7 @@ function MessageStream({
                 indexedThrough,
               });
             }
-            if (!onMessageCount(filePath, result.messageCount)) return;
+            if (!onMessageCount(agent, filePath, sessionId, result.messageCount)) return;
             window.setTimeout(() => {
               updateSessionMessageCount(
                 agent,
@@ -525,10 +545,28 @@ function MessageStream({
     if (!activeTurnId) activeRuntimeTurnIdRef.current = null;
   }, [activeTurnId]);
 
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const handleUserScrollIntent = () => {
+      programmaticScrollUntilRef.current = 0;
+    };
+    vp.addEventListener("wheel", handleUserScrollIntent, { passive: true });
+    vp.addEventListener("touchmove", handleUserScrollIntent, { passive: true });
+    vp.addEventListener("keydown", handleUserScrollIntent);
+    return () => {
+      vp.removeEventListener("wheel", handleUserScrollIntent);
+      vp.removeEventListener("touchmove", handleUserScrollIntent);
+      vp.removeEventListener("keydown", handleUserScrollIntent);
+    };
+  }, []);
+
   const scrollChatToBottom = useCallback(() => {
     const scroll = () => {
       const vp = viewportRef.current;
       if (!vp) return;
+      programmaticScrollUntilRef.current =
+        performance.now() + PROGRAMMATIC_SCROLL_SETTLE_MS;
       vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
     };
     scroll();
@@ -551,7 +589,7 @@ function MessageStream({
       ) {
         return;
       }
-      const atBottom = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 1;
+      const atBottom = isNearScrollBottom(vp);
       let anchor: ScrollAnchor | null = null;
       if (!atBottom && displayItems.length > 0) {
         const vpRect = vp.getBoundingClientRect();
@@ -584,9 +622,9 @@ function MessageStream({
         anchor,
         atBottom,
       });
-      if (!liveStreamingRef.current) {
-        followLiveStreamRef.current = atBottom;
-      }
+      const isProgrammaticScroll =
+        performance.now() < programmaticScrollUntilRef.current;
+      if (!isProgrammaticScroll) followLiveStreamRef.current = atBottom;
     },
     [available, filePath, displayItems, sourceKey],
   );
@@ -1553,6 +1591,7 @@ function liveTurnsToRenderItems(
         },
       });
     }
+
     items.push({
       key: `live:${turn.turnId}:status`,
       message: {
@@ -1561,66 +1600,95 @@ function liveTurnsToRenderItems(
         timestamp: null,
       },
     });
-    if (turn.reasoningText.trim()) {
-      items.push({
-        key: `live:${turn.turnId}:reasoning`,
-        message: {
-          role: "thinking",
-          text: turn.reasoningText,
-          timestamp: turn.startedAt,
-        },
-      });
-    }
-    for (const tool of turn.tools) {
-      const inputText =
-        tool.inputText ||
-        (tool.input === null ? "" : JSON.stringify(tool.input, null, 2));
-      items.push({
-        key: `live:${turn.turnId}:tool:${tool.toolId}`,
-        message: {
-          role: "tool_call",
-          text: `[${tool.name}]\n${inputText}`,
-          timestamp: turn.updatedAt,
-          toolCallId: tool.toolId,
-        },
-        toolResult: tool.outputText
-          ? {
-              role: "tool_result",
-              text: tool.outputText,
-              timestamp: turn.updatedAt,
-              toolCallId: tool.toolId,
-            }
-          : undefined,
-      });
-    }
-    for (const permission of turn.permissions) {
-      const inputText =
-        permission.input === null ? "" : JSON.stringify(permission.input, null, 2);
-      const status =
-        permission.approved === null
-          ? "Waiting for permission"
-          : permission.approved
-            ? "Approved"
-            : "Rejected";
-      items.push({
-        key: `live:${turn.turnId}:permission:${permission.requestId}`,
-        message: {
-          role: "permission_request",
-          text: `[${permission.toolName}] ${status}${inputText ? `\n${inputText}` : ""}`,
-          timestamp: turn.updatedAt,
-          toolCallId: `permission:${sessioRuntimeSessionId}:${permission.requestId}:${permission.approved === null ? "pending" : "resolved"}`,
-        },
-      });
-    }
-    if (turn.assistantText.trim()) {
-      items.push({
-        key: `live:${turn.turnId}:assistant`,
-        message: {
-          role: "assistant",
-          text: turn.assistantText,
-          timestamp: turn.updatedAt,
-        },
-      });
+
+    const renderedTools = new Set<string>();
+    const renderedPermissions = new Set<string>();
+    for (const part of turn.parts) {
+      if (part.kind === "user") continue;
+      if (part.kind === "reasoning") {
+        items.push({
+          key: `live:${turn.turnId}:reasoning:${items.length}`,
+          message: {
+            role: "thinking",
+            text: part.text,
+            timestamp: turn.startedAt,
+          },
+        });
+        continue;
+      }
+      if (part.kind === "assistantText") {
+        items.push({
+          key: `live:${turn.turnId}:assistant:${items.length}`,
+          message: {
+            role: "assistant",
+            text: part.text,
+            timestamp: turn.updatedAt,
+          },
+        });
+        continue;
+      }
+      if (part.kind === "tool" && !renderedTools.has(part.toolId)) {
+        const tool = turn.tools.find((item) => item.toolId === part.toolId);
+        if (!tool) continue;
+        renderedTools.add(part.toolId);
+        const inputText =
+          tool.inputText ||
+          (tool.input === null ? "" : JSON.stringify(tool.input, null, 2));
+        const hasOutput = tool.outputText.trim().length > 0;
+        const statusText = tool.status ? `Status: ${formatToolStatus(tool.status)}` : "";
+        const toolText = [`[${tool.name}]`, inputText, statusText].filter(Boolean).join("\n");
+        items.push({
+          key: `live:${turn.turnId}:tool:${tool.toolId}`,
+          message: {
+            role: "tool_call",
+            text: toolText,
+            timestamp: turn.updatedAt,
+            toolCallId: tool.toolId,
+          },
+          toolResult: hasOutput
+            ? {
+                role: "tool_result",
+                text: tool.outputText,
+                timestamp: turn.updatedAt,
+                toolCallId: tool.toolId,
+              }
+            : undefined,
+        });
+        continue;
+      }
+      if (part.kind === "sessionUpdate") {
+        items.push({
+          key: `live:${turn.turnId}:session-update:${items.length}`,
+          message: {
+            role: "tool_call",
+            text: `[${sessionUpdateTitle(part.updateType)}]\n${JSON.stringify(part.data, null, 2)}`,
+            timestamp: turn.updatedAt,
+          },
+        });
+        continue;
+      }
+      if (part.kind === "permission" && !renderedPermissions.has(part.requestId)) {
+        const permission = turn.permissions.find((item) => item.requestId === part.requestId);
+        if (!permission) continue;
+        renderedPermissions.add(part.requestId);
+        const inputText =
+          permission.input === null ? "" : JSON.stringify(permission.input, null, 2);
+        const status =
+          permission.approved === null
+            ? "Waiting for permission"
+            : permission.approved
+              ? "Approved"
+              : "Rejected";
+        items.push({
+          key: `live:${turn.turnId}:permission:${permission.requestId}`,
+          message: {
+            role: "permission_request",
+            text: `[${permission.toolName}] ${status}${inputText ? `\n${inputText}` : ""}`,
+            timestamp: turn.updatedAt,
+            toolCallId: `permission:${sessioRuntimeSessionId}:${permission.requestId}:${permission.approved === null ? "pending" : "resolved"}`,
+          },
+        });
+      }
     }
     if (turn.error) {
       items.push({
@@ -1661,6 +1729,27 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}m ${seconds}s`;
+}
+
+function formatToolStatus(status: string): string {
+  return status.replace(/_/g, " ");
+}
+
+function sessionUpdateTitle(updateType: string): string {
+  switch (updateType) {
+    case "plan":
+      return "Plan";
+    case "available_commands":
+      return "Available commands";
+    case "current_mode":
+      return "Current mode";
+    case "config_options":
+      return "Config options";
+    case "session_info":
+      return "Session info";
+    default:
+      return `ACP ${formatToolStatus(updateType)}`;
+  }
 }
 
 function pairToolMessages(
@@ -1877,8 +1966,9 @@ function messageMeta(msg: SessionMessage): {
   }
   if (["tool", "tool_call", "tool_use", "function_call"].includes(role)) {
     const parsed = parseToolCall(msg.text);
+    const label = toolDisplayName(parsed.name);
     return {
-      label: parsed.name,
+      label,
       bodyText: parsed.body,
       compact: true,
       contentClass:
@@ -1922,6 +2012,11 @@ function parseToolCall(text: string): { name: string; body: string } {
   const m = text.match(/^\[([^\]\n]+)\]\s*\n?([\s\S]*)$/);
   if (!m) return { name: "Tool Use", body: text };
   return { name: m[1], body: m[2] ?? "" };
+}
+
+function toolDisplayName(name: string): string {
+  if (name === "web_search") return "Searching web";
+  return name;
 }
 
 function parseToolSummary(text: string): { description: string | null } {
@@ -2385,12 +2480,15 @@ function PermissionRequestContent({
   const parsed = parseToolCall(text);
   const meta = parsePermissionMetadata(metadata);
   const [pendingChoice, setPendingChoice] = useState<"allow" | "reject" | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const canRespond = Boolean(meta && meta.pending && !pendingChoice);
   const respond = (approved: boolean) => {
     if (!meta || !canRespond) return;
     setPendingChoice(approved ? "allow" : "reject");
+    setError(null);
     onRespond(meta.sessioRuntimeSessionId, meta.requestId, approved).catch((err) => {
       console.warn("respond permission failed", err);
+      setError(String(err));
       setPendingChoice(null);
     });
   };
@@ -2417,6 +2515,7 @@ function PermissionRequestContent({
           </button>
         </div>
       )}
+      {error && <div className="text-caption text-status-error">{error}</div>}
     </div>
   );
 }

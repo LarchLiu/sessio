@@ -510,29 +510,17 @@ fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
     store.mark_missing_scopes_unavailable(Agent::Claude, &claude_scopes)?;
 
     let mut gemini_scopes: HashSet<String> = HashSet::new();
-    let (gemini_tmp, _) = crate::agents::sources::gemini::parser::paths()?;
-    if gemini_tmp.exists() {
-        for entry in std::fs::read_dir(&gemini_tmp)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
+    match crate::agents::sources::gemini::parser::list_sessions() {
+        Ok(sessions) => {
+            for session in &sessions {
+                insert_session_project(&mut affected_projects, &session);
             }
-            let logs = entry.path().join("logs.json");
-            if !logs.exists() {
-                continue;
-            }
-            let scope = logs.to_string_lossy().into_owned();
-            match crate::agents::sources::gemini::parser::parse_logs_file(&logs) {
-                Ok(sessions) => {
-                    for session in &sessions {
-                        insert_session_project(&mut affected_projects, session);
-                    }
-                    store.replace_by_scope(&scope, Agent::Gemini, &sessions)?;
-                    gemini_scopes.insert(scope);
-                }
-                Err(e) => log::warn!("gemini parse {} failed: {e}", logs.display()),
+            for (scope, group) in group_by(sessions, |session| session.file_path.clone()) {
+                store.replace_by_scope(&scope, Agent::Gemini, &group)?;
+                gemini_scopes.insert(scope);
             }
         }
+        Err(e) => log::warn!("gemini list sessions failed: {e}"),
     }
     store.mark_missing_scopes_unavailable(Agent::Gemini, &gemini_scopes)?;
 
@@ -689,32 +677,19 @@ fn reindex_gemini_logs(path: &Path, store: &dyn SessionStore) -> Result<TaskOutc
 }
 
 fn refresh_gemini_mappings(store: &dyn SessionStore) -> Result<TaskOutcome> {
-    let (tmp_dir, _) = crate::agents::sources::gemini::parser::paths()?;
-    if !tmp_dir.exists() {
-        return Ok(TaskOutcome::default());
-    }
     let mut scopes: HashSet<String> = HashSet::new();
     let mut outcome = TaskOutcome::default();
-    for entry in std::fs::read_dir(&tmp_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let logs = entry.path().join("logs.json");
-        if !logs.exists() {
-            continue;
-        }
-        let scope = logs.to_string_lossy().into_owned();
-        match crate::agents::sources::gemini::parser::parse_logs_file(&logs) {
-            Ok(sessions) => {
-                for session in &sessions {
-                    push_session_project(&mut outcome, session);
-                }
-                store.replace_by_scope(&scope, Agent::Gemini, &sessions)?;
+    match crate::agents::sources::gemini::parser::list_sessions() {
+        Ok(sessions) => {
+            for session in &sessions {
+                push_session_project(&mut outcome, &session);
+            }
+            for (scope, group) in group_by(sessions, |session| session.file_path.clone()) {
+                store.replace_by_scope(&scope, Agent::Gemini, &group)?;
                 scopes.insert(scope);
             }
-            Err(e) => log::warn!("gemini parse {} failed: {e}", logs.display()),
         }
+        Err(e) => log::warn!("gemini list sessions failed: {e}"),
     }
     store.mark_missing_scopes_unavailable(Agent::Gemini, &scopes)?;
     Ok(outcome)

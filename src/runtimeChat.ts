@@ -87,6 +87,8 @@ export type LiveMessagePart =
   | { kind: "assistantText"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool"; toolId: string }
+  | { kind: "sessionUpdate"; updateType: string; data: unknown }
+  | { kind: "acpProtocolMessage"; message: unknown }
   | { kind: "permission"; requestId: string }
   | { kind: "error"; error: RuntimeError };
 
@@ -96,6 +98,8 @@ export interface LiveToolCall {
   input: unknown | null;
   inputText: string;
   outputText: string;
+  status: string | null;
+  data: unknown | null;
 }
 
 export interface LivePermissionRequest {
@@ -103,6 +107,7 @@ export interface LivePermissionRequest {
   toolName: string;
   input: unknown | null;
   approved: boolean | null;
+  data: unknown | null;
 }
 
 export const emptyLiveRuntimeState: LiveRuntimeState = {
@@ -289,14 +294,20 @@ export function applyRuntimeEvent(
     return next;
   }
 
+  if (event.kind === "acpProtocolMessage" && !event.turnId) {
+    return next;
+  }
+
   const turns = session.turns.slice();
-  let existingIndex =
-    "turnId" in event ? turns.findIndex((turn) => turn.turnId === event.turnId) : -1;
+  const eventTurnId = "turnId" in event ? event.turnId : null;
+  let existingIndex = eventTurnId
+    ? turns.findIndex((turn) => turn.turnId === eventTurnId)
+    : -1;
   const turn =
     existingIndex >= 0
       ? cloneTurn(turns[existingIndex])
-      : "turnId" in event
-        ? newTurn(event.turnId, event.timestamp)
+      : eventTurnId
+        ? newTurn(eventTurnId, event.timestamp)
         : null;
   if (!turn) return next;
 
@@ -322,14 +333,41 @@ export function applyRuntimeEvent(
         input: event.input,
         inputText: "",
         outputText: "",
+        status: null,
+        data: event.data,
       });
       turn.parts.push({ kind: "tool", toolId: event.toolId });
       break;
-    case "toolInputDelta":
-      upsertTool(turn, event.toolId).inputText += event.delta;
+    case "toolInputDelta": {
+      const tool = upsertTool(turn, event.toolId);
+      tool.inputText += event.delta;
+      tool.data = event.data ?? tool.data;
       break;
-    case "toolOutputDelta":
-      upsertTool(turn, event.toolId).outputText += event.delta;
+    }
+    case "toolOutputDelta": {
+      const tool = upsertTool(turn, event.toolId);
+      tool.outputText += event.delta;
+      tool.data = event.data ?? tool.data;
+      break;
+    }
+    case "toolStatusChanged": {
+      const tool = upsertTool(turn, event.toolId);
+      tool.status = event.status;
+      tool.data = event.data ?? tool.data;
+      break;
+    }
+    case "sessionUpdate":
+      turn.parts.push({
+        kind: "sessionUpdate",
+        updateType: event.updateType,
+        data: event.data,
+      });
+      break;
+    case "acpProtocolMessage":
+      turn.parts.push({
+        kind: "acpProtocolMessage",
+        message: event.message,
+      });
       break;
     case "permissionRequested":
       turn.permissions.push({
@@ -337,6 +375,7 @@ export function applyRuntimeEvent(
         toolName: event.toolName,
         input: event.input,
         approved: null,
+        data: event.data,
       });
       turn.parts.push({ kind: "permission", requestId: event.requestId });
       break;
@@ -464,6 +503,8 @@ function upsertTool(turn: LiveTurn, toolId: string): LiveToolCall {
       input: null,
       inputText: "",
       outputText: "",
+      status: null,
+      data: null,
     };
     turn.tools.push(tool);
   }

@@ -154,6 +154,20 @@ impl RuntimeError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpProtocolMessage {
+    pub direction: String,
+    pub message_kind: String,
+    pub method: String,
+    pub protocol_version: Option<String>,
+    pub acp_session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub request_id: Option<String>,
+    pub update_type: Option<String>,
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum AgentRuntimeEventPayload {
     SessionStarted {
@@ -184,18 +198,40 @@ pub enum AgentRuntimeEventPayload {
         tool_id: String,
         name: String,
         input: Option<Value>,
+        data: Value,
     },
     ToolInputDelta {
         sessio_runtime_session_id: String,
         turn_id: String,
         tool_id: String,
         delta: String,
+        data: Option<Value>,
     },
     ToolOutputDelta {
         sessio_runtime_session_id: String,
         turn_id: String,
         tool_id: String,
         delta: String,
+        data: Option<Value>,
+    },
+    ToolStatusChanged {
+        sessio_runtime_session_id: String,
+        turn_id: String,
+        tool_id: String,
+        status: String,
+        data: Option<Value>,
+    },
+    SessionUpdate {
+        sessio_runtime_session_id: String,
+        turn_id: String,
+        update_type: String,
+        data: Value,
+    },
+    AcpProtocolMessage {
+        sessio_runtime_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
+        message: AcpProtocolMessage,
     },
     PermissionRequested {
         sessio_runtime_session_id: String,
@@ -203,6 +239,7 @@ pub enum AgentRuntimeEventPayload {
         request_id: String,
         tool_name: String,
         input: Option<Value>,
+        data: Value,
     },
     PermissionResolved {
         sessio_runtime_session_id: String,

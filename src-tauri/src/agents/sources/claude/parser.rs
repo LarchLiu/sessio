@@ -352,6 +352,36 @@ fn expand_message(
                     }
                 }
             }
+            "reasoning" => {
+                if !text_parts.is_empty() {
+                    let joined = text_parts.join("\n");
+                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
+                    {
+                        out.push(SessionMessage {
+                            role: role_raw.to_string(),
+                            text: joined,
+                            timestamp: ts,
+                            tool_call_id: None,
+                        });
+                    }
+                    text_parts.clear();
+                }
+                let reasoning_text = item
+                    .get("reasoning")
+                    .or_else(|| item.get("thinking"))
+                    .or_else(|| item.get("text"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !reasoning_text.is_empty() {
+                    out.push(SessionMessage {
+                        role: "thinking".to_string(),
+                        text: reasoning_text.to_string(),
+                        timestamp: ts,
+                        tool_call_id: None,
+                    });
+                }
+            }
             "tool_use" => {
                 if !text_parts.is_empty() {
                     let joined = text_parts.join("\n");
@@ -387,6 +417,11 @@ fn expand_message(
                                 timestamp: ts,
                                 tool_call_id: item
                                     .get("id")
+                                    .or_else(|| item.get("tool_use_id"))
+                                    .or_else(|| item.get("toolUseId"))
+                                    .or_else(|| item.get("tool_useId"))
+                                    .or_else(|| item.get("toolId"))
+                                    .or_else(|| item.get("tool_id"))
                                     .and_then(|x| x.as_str())
                                     .map(String::from),
                             });
@@ -407,7 +442,15 @@ fn expand_message(
                     role: "tool_call".to_string(),
                     text,
                     timestamp: ts,
-                    tool_call_id: item.get("id").and_then(|x| x.as_str()).map(String::from),
+                    tool_call_id: item
+                        .get("id")
+                        .or_else(|| item.get("tool_use_id"))
+                        .or_else(|| item.get("toolUseId"))
+                        .or_else(|| item.get("tool_useId"))
+                        .or_else(|| item.get("toolId"))
+                        .or_else(|| item.get("tool_id"))
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
                 });
             }
             "tool_result" => {
@@ -428,6 +471,12 @@ fn expand_message(
                 if !body.trim().is_empty() {
                     let tool_use_id = item
                         .get("tool_use_id")
+                        .or_else(|| item.get("toolUseId"))
+                        .or_else(|| item.get("tool_useId"))
+                        .or_else(|| item.get("toolUseID"))
+                        .or_else(|| item.get("toolId"))
+                        .or_else(|| item.get("tool_id"))
+                        .or_else(|| item.get("id"))
                         .and_then(|x| x.as_str())
                         .map(String::from);
                     out.push(SessionMessage {
@@ -485,6 +534,8 @@ fn extract_tool_result_text(item: &serde_json::Value) -> String {
                 if let Some(markdown) = claude_image_item_to_markdown(sub, idx + 1) {
                     parts.push(markdown);
                 }
+            } else if let Some(t) = sub.as_str() {
+                parts.push(t.to_string());
             }
         }
         return parts.join("\n");
@@ -884,6 +935,16 @@ fn extract_message_text(message: &serde_json::Value) -> String {
                         parts.push(t.to_string());
                     }
                 }
+                "thinking" | "reasoning" => {
+                    if let Some(t) = item
+                        .get("thinking")
+                        .or_else(|| item.get("reasoning"))
+                        .or_else(|| item.get("text"))
+                        .and_then(|x| x.as_str())
+                    {
+                        parts.push(t.to_string());
+                    }
+                }
                 "tool_use" => {
                     let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
                     parts.push(format!("[tool_use: {name}]"));
@@ -1239,13 +1300,7 @@ mod tests {
         });
 
         let mut edits = HashMap::new();
-        let out = expand_message(
-            "assistant",
-            &msg,
-            Some(1_700_000_000_000),
-            &mut edits,
-            None,
-        );
+        let out = expand_message("assistant", &msg, Some(1_700_000_000_000), &mut edits, None);
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].role, "todo");
@@ -1253,6 +1308,48 @@ mod tests {
         assert_eq!(out[0].tool_call_id.as_deref(), Some("toolu_todos"));
         assert!(out[0].text.contains("Verify parser todo rendering"));
         assert!(out[0].text.contains("\"status\":\"completed\""));
+    }
+
+    #[test]
+    fn expand_message_parses_reasoning_and_tool_id_aliases() {
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                { "type": "reasoning", "reasoning": "checking aliases" },
+                {
+                    "type": "tool_use",
+                    "toolUseId": "tool_alias",
+                    "name": "Read",
+                    "input": { "file_path": "README.md" }
+                }
+            ]
+        });
+        let result = serde_json::json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "toolUseId": "tool_alias",
+                    "content": [
+                        { "type": "text", "text": "ok" },
+                        "tail"
+                    ]
+                }
+            ]
+        });
+        let mut edits = HashMap::new();
+        let out = expand_message("assistant", &msg, Some(1), &mut edits, None);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].role, "thinking");
+        assert_eq!(out[0].text, "checking aliases");
+        assert_eq!(out[1].role, "tool_call");
+        assert_eq!(out[1].tool_call_id.as_deref(), Some("tool_alias"));
+
+        let result_out = expand_message("user", &result, Some(2), &mut edits, None);
+        assert_eq!(result_out.len(), 1);
+        assert_eq!(result_out[0].role, "tool_result");
+        assert_eq!(result_out[0].tool_call_id.as_deref(), Some("tool_alias"));
+        assert_eq!(result_out[0].text, "ok\ntail");
     }
 
     #[test]
@@ -1405,12 +1502,11 @@ mod tests {
                 .and_then(|x| x.as_u64()),
             Some(10)
         );
-        assert!(
-            edit.get("detail")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .starts_with("@@ -10,2 +10,3 @@")
-        );
+        assert!(edit
+            .get("detail")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .starts_with("@@ -10,2 +10,3 @@"));
         assert_eq!(
             edit.get("oldContent").and_then(|x| x.as_str()),
             Some("old\nline")

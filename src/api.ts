@@ -155,6 +155,18 @@ export interface RuntimeError {
   data: unknown | null;
 }
 
+export interface AcpProtocolMessage {
+  direction: string;
+  messageKind: string;
+  method: string;
+  protocolVersion: string | null;
+  acpSessionId: string | null;
+  turnId: string | null;
+  requestId: string | null;
+  updateType: string | null;
+  data: unknown;
+}
+
 export type AgentRuntimeEventPayload =
   | {
       kind: "sessionStarted";
@@ -175,6 +187,7 @@ export type AgentRuntimeEventPayload =
       toolId: string;
       name: string;
       input: unknown | null;
+      data: unknown;
     }
   | {
       kind: "toolInputDelta";
@@ -182,6 +195,7 @@ export type AgentRuntimeEventPayload =
       turnId: string;
       toolId: string;
       delta: string;
+      data: unknown | null;
     }
   | {
       kind: "toolOutputDelta";
@@ -189,6 +203,28 @@ export type AgentRuntimeEventPayload =
       turnId: string;
       toolId: string;
       delta: string;
+      data: unknown | null;
+    }
+  | {
+      kind: "toolStatusChanged";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      toolId: string;
+      status: string;
+      data: unknown | null;
+    }
+  | {
+      kind: "sessionUpdate";
+      sessioRuntimeSessionId: string;
+      turnId: string;
+      updateType: string;
+      data: unknown;
+    }
+  | {
+      kind: "acpProtocolMessage";
+      sessioRuntimeSessionId: string;
+      turnId?: string | null;
+      message: AcpProtocolMessage;
     }
   | {
       kind: "permissionRequested";
@@ -197,6 +233,7 @@ export type AgentRuntimeEventPayload =
       requestId: string;
       toolName: string;
       input: unknown | null;
+      data: unknown;
     }
   | {
       kind: "permissionResolved";

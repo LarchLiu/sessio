@@ -8,8 +8,8 @@ use crate::agents::sources::shared::convert::{
     agent_kind, message_events_from_messages, session_record_from_info, session_source_from_info,
 };
 use crate::agents::sources::types::{
-    AgentKind, MessageEvent, PathEvent, SessionRecord, SessionSource, SourceIndexTask,
-    WatchPurpose, WatchRoot,
+    AgentKind, MessageEvent, PathEvent, PathEventKind, SessionRecord, SessionSource,
+    SourceIndexTask, SourceKind, WatchPurpose, WatchRoot,
 };
 use crate::models::Agent;
 
@@ -29,7 +29,10 @@ impl AgentSource for GeminiSource {
         Ok(vec![
             WatchRoot {
                 agent: self.agent(),
-                path: tmp,
+                path: tmp
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| tmp.clone()),
                 recursive: true,
                 purpose: WatchPurpose::Logs,
             },
@@ -87,13 +90,32 @@ impl AgentSource for GeminiSource {
             });
         }
 
-        if !event.path.starts_with(&tmp_dir) || file_name != "logs.json" {
-            return None;
+        if event.path.starts_with(&tmp_dir) && file_name == "logs.json" {
+            return Some(SourceIndexTask::ReindexScope {
+                agent: self.agent(),
+                scope: event.path.to_string_lossy().to_string(),
+            });
         }
 
-        Some(SourceIndexTask::ReindexScope {
-            agent: self.agent(),
-            scope: event.path.to_string_lossy().to_string(),
-        })
+        if parser::is_chat_file(&event.path) {
+            let source = SessionSource {
+                agent: self.agent(),
+                session_id: String::new(),
+                scope: event.path.to_string_lossy().to_string(),
+                file_path: event.path.to_string_lossy().to_string(),
+                project: None,
+                source_kind: SourceKind::MainSession,
+                metadata: Default::default(),
+            };
+            if matches!(event.kind, PathEventKind::Remove) {
+                return Some(SourceIndexTask::MarkSourceUnavailable(source));
+            }
+            return Some(SourceIndexTask::ReindexSource(source));
+        }
+
+        if !event.path.starts_with(&tmp_dir) {
+            return None;
+        }
+        None
     }
 }

@@ -380,6 +380,62 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
                     .map(String::from),
             }]
         }
+        "custom_tool_call" => {
+            let name = payload
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or("tool");
+            let input = payload
+                .get("input")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    payload
+                        .get("arguments")
+                        .and_then(|x| x.as_str())
+                        .map(String::from)
+                })
+                .or_else(|| {
+                    payload
+                        .get("input")
+                        .and_then(|x| serde_json::to_string_pretty(x).ok())
+                })
+                .unwrap_or_default();
+            let text = if input.trim().is_empty() {
+                format!("[{name}]")
+            } else {
+                format!("[{name}]\n{input}")
+            };
+            vec![SessionMessage {
+                role: "tool_call".to_string(),
+                text,
+                timestamp: ts,
+                tool_call_id: payload
+                    .get("call_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+            }]
+        }
+        "custom_tool_call_output" => {
+            let output = payload
+                .get("output")
+                .map(extract_tool_output_text)
+                .unwrap_or_default();
+            if output.trim().is_empty() {
+                return Vec::new();
+            }
+            vec![SessionMessage {
+                role: "tool_result".to_string(),
+                text: output,
+                timestamp: ts,
+                tool_call_id: payload
+                    .get("call_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+            }]
+        }
         "reasoning" => {
             let text = extract_reasoning_text(payload);
             if text.trim().is_empty() {
@@ -392,6 +448,7 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
                 tool_call_id: None,
             }]
         }
+        "web_search_call" => interpret_web_search_call(payload, ts),
         "image_generation_call" => interpret_image_generation_call(payload, ts),
         _ => Vec::new(),
     }
@@ -648,34 +705,57 @@ fn latest_timestamp_from_file(path: &Path) -> Result<Option<i64>> {
 }
 
 fn extract_message_text(payload: &serde_json::Value) -> Option<String> {
-    let content = payload.get("content")?.as_array()?;
+    if let Some(text) = payload.get("content").and_then(|x| x.as_str()) {
+        let cleaned = strip_image_placeholder_tags(text);
+        if !cleaned.trim().is_empty() {
+            return Some(cleaned);
+        }
+    }
     let mut parts = Vec::new();
-    for item in content {
-        let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
-        if matches!(kind, "input_text" | "text" | "output_text") {
-            if let Some(text) = item.get("text").and_then(|x| x.as_str()) {
-                let cleaned = strip_image_placeholder_tags(text);
-                if !cleaned.trim().is_empty() {
-                    parts.push(cleaned);
+    if let Some(content) = payload.get("content").and_then(|x| x.as_array()) {
+        for item in content {
+            let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            if matches!(kind, "input_text" | "text" | "output_text") {
+                if let Some(text) = item
+                    .get("text")
+                    .or_else(|| item.get("value"))
+                    .or_else(|| item.get("content"))
+                    .and_then(|x| x.as_str())
+                {
+                    let cleaned = strip_image_placeholder_tags(text);
+                    if !cleaned.trim().is_empty() {
+                        parts.push(cleaned);
+                    }
                 }
-            }
-        } else if matches!(kind, "input_image" | "image_url") {
-            if let Some(markdown) = image_item_to_markdown(item, parts.len() + 1) {
-                parts.push(markdown);
+            } else if matches!(kind, "input_image" | "image_url") {
+                if let Some(markdown) = image_item_to_markdown(item, parts.len() + 1) {
+                    parts.push(markdown);
+                }
             }
         }
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n"))
+    if !parts.is_empty() {
+        return Some(parts.join("\n"));
     }
+    for key in ["text", "message"] {
+        if let Some(text) = payload.get(key).and_then(|x| x.as_str()) {
+            let cleaned = strip_image_placeholder_tags(text);
+            if !cleaned.trim().is_empty() {
+                return Some(cleaned);
+            }
+        }
+    }
+    None
 }
 
 fn extract_function_call_output_text(payload: &serde_json::Value) -> String {
     let Some(output) = payload.get("output") else {
         return String::new();
     };
+    extract_tool_output_text(output)
+}
+
+fn extract_tool_output_text(output: &serde_json::Value) -> String {
     if let Some(s) = output.as_str() {
         return s.to_string();
     }
@@ -691,9 +771,35 @@ fn extract_function_call_output_text(payload: &serde_json::Value) -> String {
                 if let Some(markdown) = image_item_to_markdown(item, idx + 1) {
                     parts.push(markdown);
                 }
+            } else if let Some(t) = item
+                .get("text")
+                .or_else(|| item.get("value"))
+                .or_else(|| item.get("content"))
+                .and_then(|x| x.as_str())
+            {
+                parts.push(t.to_string());
+            } else {
+                let nested = extract_tool_output_text(item);
+                if !nested.trim().is_empty() {
+                    parts.push(nested);
+                }
             }
         }
         return parts.join("\n");
+    }
+    if let Some(obj) = output.as_object() {
+        let mut parts = Vec::new();
+        for key in ["content", "message", "text", "output", "result", "data"] {
+            if let Some(next) = obj.get(key) {
+                let nested = extract_tool_output_text(next);
+                if !nested.trim().is_empty() {
+                    parts.push(nested);
+                }
+            }
+        }
+        if !parts.is_empty() {
+            return parts.join("\n");
+        }
     }
     serde_json::to_string_pretty(output).unwrap_or_default()
 }
@@ -717,6 +823,26 @@ fn extract_reasoning_text(payload: &serde_json::Value) -> String {
         }
     }
     parts.join("\n")
+}
+
+fn interpret_web_search_call(payload: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
+    let Some(action) = payload.get("action") else {
+        return Vec::new();
+    };
+    let args_pretty = match serde_json::to_string_pretty(action) {
+        Ok(s) if !s.trim().is_empty() && s != "null" => s,
+        _ => return Vec::new(),
+    };
+    vec![SessionMessage {
+        role: "tool_call".to_string(),
+        text: format!("[web_search]\n{args_pretty}"),
+        timestamp: ts,
+        tool_call_id: payload
+            .get("id")
+            .or_else(|| payload.get("call_id"))
+            .and_then(|x| x.as_str())
+            .map(String::from),
+    }]
 }
 
 fn interpret_image_generation_call(
@@ -866,11 +992,7 @@ struct CodexChangeSummary {
     new_content: Option<String>,
 }
 
-fn codex_change_summary(
-    kind: &str,
-    path: &str,
-    change: &serde_json::Value,
-) -> CodexChangeSummary {
+fn codex_change_summary(kind: &str, path: &str, change: &serde_json::Value) -> CodexChangeSummary {
     if let Some(diff) = change.get("unified_diff").and_then(|x| x.as_str()) {
         let (additions, deletions) = unified_diff_counts(diff);
         return CodexChangeSummary {
@@ -883,10 +1005,7 @@ fn codex_change_summary(
         };
     }
 
-    let content = change
-        .get("content")
-        .and_then(|x| x.as_str())
-        .unwrap_or("");
+    let content = change.get("content").and_then(|x| x.as_str()).unwrap_or("");
     let line_count = line_count(content);
     match kind {
         "add" => CodexChangeSummary {
@@ -918,7 +1037,9 @@ fn codex_change_summary(
 
 fn unified_diff_to_file_patch(path: &str, diff: &str) -> String {
     let normalized = path.trim_start_matches('/');
-    format!("diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{diff}")
+    format!(
+        "diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{diff}"
+    )
 }
 
 fn line_count(s: &str) -> usize {
@@ -946,6 +1067,25 @@ fn unified_diff_counts(diff: &str) -> (usize, usize) {
 }
 
 fn image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String> {
+    if let Some(data) = item
+        .get("image")
+        .or_else(|| item.get("data"))
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let media_type = item
+            .get("media_type")
+            .or_else(|| item.get("mime_type"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("image/png");
+        let src = if looks_like_image_src(data) {
+            data.to_string()
+        } else {
+            format!("data:{media_type};base64,{data}")
+        };
+        return Some(format!("![Image #{idx}]({src})"));
+    }
     let url = item
         .get("image_url")
         .and_then(|x| x.as_str())
@@ -1151,6 +1291,77 @@ mod tests {
     }
 
     #[test]
+    fn read_messages_keeps_web_search_actions() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-web-search-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let search_call = r#"{"timestamp":"2026-05-23T01:56:19.628Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","queries":["Bun runtime Rust rewrite news May 2026","Bun rewrite in Rust announcement"]}}}"#;
+        let search_end = r#"{"timestamp":"2026-05-23T01:56:19.628Z","type":"event_msg","payload":{"type":"web_search_end","call_id":"ws_1","query":"Bun runtime Rust rewrite news May 2026 ...","action":{"type":"search","queries":["Bun runtime Rust rewrite news May 2026","Bun rewrite in Rust announcement"]}}}"#;
+        let open_page_call = r#"{"timestamp":"2026-05-23T01:56:33.727Z","type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"open_page","url":"https://github.com/oven-sh/bun/pull/30412"}}}"#;
+        let open_page_end = r#"{"timestamp":"2026-05-23T01:56:33.727Z","type":"event_msg","payload":{"type":"web_search_end","call_id":"ws_2","query":"https://github.com/oven-sh/bun/pull/30412","action":{"type":"open_page","url":"https://github.com/oven-sh/bun/pull/30412"}}}"#;
+        fs::write(
+            &path,
+            format!("{search_call}\n{search_end}\n{open_page_call}\n{open_page_end}\n"),
+        )
+        .unwrap();
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0.role, "tool_call");
+        assert!(events[0].0.tool_call_id.is_none());
+        assert!(events[0].0.text.contains("[web_search]"));
+        assert!(events[0]
+            .0
+            .text
+            .contains("Bun runtime Rust rewrite news May 2026"));
+        assert!(!events[0].0.text.contains("completed"));
+        assert_eq!(events[1].0.role, "tool_call");
+        assert!(events[1]
+            .0
+            .text
+            .contains("https://github.com/oven-sh/bun/pull/30412"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_messages_keeps_custom_tool_calls() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-custom-tool-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let call = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_custom","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"}}"#;
+        let output = r#"{"timestamp":"2026-05-18T05:09:16.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom","output":{"content":[{"text":"Done"}]}}}"#;
+        fs::write(&path, format!("{call}\n{output}\n")).unwrap();
+
+        let events = read_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0.role, "tool_call");
+        assert_eq!(events[0].0.tool_call_id.as_deref(), Some("call_custom"));
+        assert!(events[0].0.text.contains("[apply_patch]"));
+        assert_eq!(events[1].0.role, "tool_result");
+        assert_eq!(events[1].0.tool_call_id.as_deref(), Some("call_custom"));
+        assert_eq!(events[1].0.text, "Done");
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
     fn read_messages_keeps_patch_apply_edit_summary() {
         let dir = std::env::temp_dir().join(format!(
             "sessio-codex-parser-file-edit-test-{}-{}",
@@ -1210,30 +1421,26 @@ mod tests {
         let deleted: serde_json::Value = serde_json::from_str(&events[0].0.text).unwrap();
         assert_eq!(deleted.get("additions").and_then(|x| x.as_u64()), Some(0));
         assert_eq!(deleted.get("deletions").and_then(|x| x.as_u64()), Some(2));
-        assert!(
-            deleted
-                .get("edits")
-                .and_then(|x| x.as_array())
-                .and_then(|a| a.first())
-                .and_then(|e| e.get("detail"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .starts_with("--- deleted content\nold")
-        );
+        assert!(deleted
+            .get("edits")
+            .and_then(|x| x.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("detail"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .starts_with("--- deleted content\nold"));
 
         let added: serde_json::Value = serde_json::from_str(&events[1].0.text).unwrap();
         assert_eq!(added.get("additions").and_then(|x| x.as_u64()), Some(3));
         assert_eq!(added.get("deletions").and_then(|x| x.as_u64()), Some(0));
-        assert!(
-            added
-                .get("edits")
-                .and_then(|x| x.as_array())
-                .and_then(|a| a.first())
-                .and_then(|e| e.get("detail"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .starts_with("+++ added content\nnew")
-        );
+        assert!(added
+            .get("edits")
+            .and_then(|x| x.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("detail"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .starts_with("+++ added content\nnew"));
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();

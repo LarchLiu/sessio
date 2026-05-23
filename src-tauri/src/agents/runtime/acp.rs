@@ -1,13 +1,13 @@
 use agent_client_protocol::schema::{
     ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallUpdate,
-    ToolCallUpdateFields,
+    SessionNotification, SessionUpdate, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::Value;
 
-use super::types::{AgentRuntimeEventPayload, RuntimeError};
+use super::types::{AcpProtocolMessage, AgentRuntimeEventPayload, RuntimeError};
 
 pub fn fake_session_notification(update: AcpFakeSessionUpdate) -> SessionNotification {
     let update = match update {
@@ -28,6 +28,9 @@ pub fn fake_session_notification(update: AcpFakeSessionUpdate) -> SessionNotific
                     .status(agent_client_protocol::schema::ToolCallStatus::Completed),
             ))
         }
+        AcpFakeSessionUpdate::ToolCallInputUpdate { id, input } => SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new(id, ToolCallUpdateFields::new().raw_input(Some(input))),
+        ),
         AcpFakeSessionUpdate::Error { message } => {
             SessionUpdate::AgentMessageChunk(text_chunk(format!("Runtime error: {message}")))
         }
@@ -94,6 +97,10 @@ pub enum AcpFakeSessionUpdate {
         id: String,
         output: String,
     },
+    ToolCallInputUpdate {
+        id: String,
+        input: Value,
+    },
     Error {
         message: String,
     },
@@ -122,18 +129,65 @@ pub fn convert_session_notification(
             tool_id: tool_call.tool_call_id.to_string(),
             name: tool_call.title.clone(),
             input: tool_call.raw_input.clone(),
+            data: serde_json::to_value(tool_call)?,
         },
         SessionUpdate::ToolCallUpdate(tool_call_update) => {
-            AgentRuntimeEventPayload::ToolOutputDelta {
-                sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-                turn_id: turn_id.to_string(),
-                tool_id: tool_call_update.tool_call_id.to_string(),
-                delta: tool_call_update_text(tool_call_update)?,
-            }
+            tool_call_update_event(tool_call_update, sessio_runtime_session_id, turn_id)?
         }
-        _ => return Ok(None),
+        SessionUpdate::Plan(plan) => {
+            session_update_event("plan", plan, sessio_runtime_session_id, turn_id)?
+        }
+        SessionUpdate::AvailableCommandsUpdate(update) => session_update_event(
+            "available_commands",
+            update,
+            sessio_runtime_session_id,
+            turn_id,
+        )?,
+        SessionUpdate::CurrentModeUpdate(update) => {
+            session_update_event("current_mode", update, sessio_runtime_session_id, turn_id)?
+        }
+        SessionUpdate::ConfigOptionUpdate(update) => {
+            session_update_event("config_options", update, sessio_runtime_session_id, turn_id)?
+        }
+        SessionUpdate::SessionInfoUpdate(update) => {
+            session_update_event("session_info", update, sessio_runtime_session_id, turn_id)?
+        }
+        _ => session_update_event(
+            "unknown",
+            &notification.update,
+            sessio_runtime_session_id,
+            turn_id,
+        )?,
     };
     Ok(Some(event))
+}
+
+pub fn acp_protocol_event<T: serde::Serialize>(
+    sessio_runtime_session_id: &str,
+    direction: impl Into<String>,
+    message_kind: impl Into<String>,
+    method: impl Into<String>,
+    acp_session_id: Option<String>,
+    turn_id: Option<String>,
+    request_id: Option<String>,
+    update_type: Option<String>,
+    data: &T,
+) -> Result<AgentRuntimeEventPayload> {
+    Ok(AgentRuntimeEventPayload::AcpProtocolMessage {
+        sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+        turn_id: turn_id.clone(),
+        message: AcpProtocolMessage {
+            direction: direction.into(),
+            message_kind: message_kind.into(),
+            method: method.into(),
+            protocol_version: Some("1".to_string()),
+            acp_session_id,
+            turn_id,
+            request_id,
+            update_type,
+            data: serde_json::to_value(data)?,
+        },
+    })
 }
 
 pub fn convert_permission_request(
@@ -153,6 +207,7 @@ pub fn convert_permission_request(
             .clone()
             .unwrap_or_else(|| "tool".to_string()),
         input: request.tool_call.fields.raw_input.clone(),
+        data: serde_json::to_value(request)?,
     })
 }
 
@@ -194,15 +249,24 @@ fn content_chunk_text(chunk: &ContentChunk) -> Result<String> {
 fn content_block_text(content: &ContentBlock) -> Result<String> {
     match content {
         ContentBlock::Text(text) => Ok(text.text.clone()),
-        ContentBlock::Image(image) => Ok(format!("[image: {}]", image.mime_type)),
+        ContentBlock::Image(image) => Ok(format!(
+            "[image: {}{}]",
+            image.mime_type,
+            image
+                .uri
+                .as_ref()
+                .map(|uri| format!(" {uri}"))
+                .unwrap_or_default()
+        )),
         ContentBlock::Audio(audio) => Ok(format!("[audio: {}]", audio.mime_type)),
-        ContentBlock::ResourceLink(resource) => {
-            serde_json::to_string(resource).map_err(anyhow::Error::from)
-        }
+        ContentBlock::ResourceLink(resource) => Ok(format!(
+            "[resource: {} {}]",
+            resource.name, resource.uri
+        )),
         ContentBlock::Resource(resource) => {
             serde_json::to_string(resource).map_err(anyhow::Error::from)
         }
-        _ => bail!("unsupported ACP content block"),
+        _ => serde_json::to_string(content).map_err(anyhow::Error::from),
     }
 }
 
@@ -213,15 +277,88 @@ fn tool_call_update_text(update: &ToolCallUpdate) -> Result<String> {
     if let Some(raw_output) = &update.fields.raw_output {
         return value_text(raw_output);
     }
-    if let Some(raw_input) = &update.fields.raw_input {
-        return value_text(raw_input);
-    }
     Ok(String::new())
+}
+
+fn tool_call_update_event(
+    update: &ToolCallUpdate,
+    sessio_runtime_session_id: &str,
+    turn_id: &str,
+) -> Result<AgentRuntimeEventPayload> {
+    let delta = tool_call_update_text(update)?;
+    if !delta.is_empty() {
+        return Ok(AgentRuntimeEventPayload::ToolOutputDelta {
+            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            tool_id: update.tool_call_id.to_string(),
+            delta,
+            data: Some(serde_json::to_value(update)?),
+        });
+    }
+    let delta = update
+        .fields
+        .raw_input
+        .as_ref()
+        .map(value_text)
+        .transpose()?
+        .unwrap_or_default();
+    if !delta.is_empty() {
+        return Ok(AgentRuntimeEventPayload::ToolInputDelta {
+            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            tool_id: update.tool_call_id.to_string(),
+            delta,
+            data: Some(serde_json::to_value(update)?),
+        });
+    }
+    if let Some(status) = update.fields.status {
+        return Ok(AgentRuntimeEventPayload::ToolStatusChanged {
+            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            tool_id: update.tool_call_id.to_string(),
+            status: tool_call_status_name(status).to_string(),
+            data: Some(serde_json::to_value(update)?),
+        });
+    }
+    Ok(AgentRuntimeEventPayload::ToolInputDelta {
+        sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        tool_id: update.tool_call_id.to_string(),
+        delta,
+        data: Some(serde_json::to_value(update)?),
+    })
+}
+
+fn session_update_event<T: serde::Serialize>(
+    update_type: &str,
+    value: T,
+    sessio_runtime_session_id: &str,
+    turn_id: &str,
+) -> Result<AgentRuntimeEventPayload> {
+    Ok(AgentRuntimeEventPayload::SessionUpdate {
+        sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        update_type: update_type.to_string(),
+        data: serde_json::to_value(value)?,
+    })
+}
+
+fn tool_call_status_name(status: ToolCallStatus) -> &'static str {
+    match status {
+        ToolCallStatus::Pending => "pending",
+        ToolCallStatus::InProgress => "in_progress",
+        ToolCallStatus::Completed => "completed",
+        ToolCallStatus::Failed => "failed",
+        _ => "unknown",
+    }
 }
 
 fn tool_call_content_text(content: &[ToolCallContent]) -> Result<String> {
     let mut text = String::new();
-    for item in content {
+    for (idx, item) in content.iter().enumerate() {
+        if idx > 0 && !text.ends_with('\n') {
+            text.push('\n');
+        }
         match item {
             ToolCallContent::Content(content) => {
                 text.push_str(&content_block_text(&content.content)?);
@@ -312,6 +449,21 @@ mod tests {
             AgentRuntimeEventPayload::ToolOutputDelta { tool_id, delta, .. } => {
                 assert_eq!(tool_id, "tool-1");
                 assert_eq!(delta, "done");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let notification = fake_session_notification(AcpFakeSessionUpdate::ToolCallInputUpdate {
+            id: "tool-1".to_string(),
+            input: json!({ "query": "latest release" }),
+        });
+        let event = convert_session_notification(&notification, "sess", "turn")
+            .unwrap()
+            .unwrap();
+        match event {
+            AgentRuntimeEventPayload::ToolInputDelta { tool_id, delta, .. } => {
+                assert_eq!(tool_id, "tool-1");
+                assert!(delta.contains("latest release"));
             }
             other => panic!("unexpected event: {other:?}"),
         }

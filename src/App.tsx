@@ -102,6 +102,10 @@ function sessionKey(s: SessionInfo): string {
   return `${s.agent}:${s.filePath}:${s.id}`;
 }
 
+function messageCountKey(agent: Agent, filePath: string, sessionId: string): string {
+  return `${agent}:${sessionId}:${filePath}`;
+}
+
 type DeleteTarget =
   | { kind: "session"; session: SessionInfo; pos: { x: number; y: number } }
   | { kind: "scope"; scope: SessionScope; pos: { x: number; y: number } };
@@ -140,6 +144,9 @@ export default function App() {
   const [activeMessageMeta, setActiveMessageMeta] =
     useState<ActiveMessageMeta | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [liveRuntimeState, dispatchLiveRuntimeEvent] = useReducer(
     applyRuntimeAction,
     emptyLiveRuntimeState,
@@ -149,7 +156,9 @@ export default function App() {
   const { lang, setLang, t } = useI18n();
   const update = useUpdateCheck(__APP_VERSION__);
   const listScrollRef = useRef<HTMLDivElement>(null);
-  const messageCountByPathRef = useRef<Map<string, number>>(new Map());
+  const messageCountBySourceRef = useRef<Map<string, number>>(new Map());
+  const selectedSessionIdRef = useRef<string | null>(null);
+  const sessionsLoadedRef = useRef(false);
   const indexing = indexPhase !== "idle";
   const rebuilding = indexPhase === "rebuilding";
 
@@ -159,15 +168,61 @@ export default function App() {
   );
 
   useEffect(() => {
+    const previous = messageCountBySourceRef.current;
     const next = new Map<string, number>();
+    const changedSessionIds = new Set<string>();
     for (const session of sessions) {
-      next.set(session.filePath, session.messageCount);
+      const mainKey = messageCountKey(session.agent, session.filePath, session.id);
+      next.set(mainKey, session.messageCount);
+      const previousMainCount = previous.get(mainKey);
+      if (
+        sessionsLoadedRef.current &&
+        previousMainCount !== undefined &&
+        session.messageCount > previousMainCount
+      ) {
+        changedSessionIds.add(session.id);
+      }
       for (const subagent of session.subagents) {
-        next.set(subagent.filePath, subagent.messageCount);
+        const subKey = messageCountKey(session.agent, subagent.filePath, session.id);
+        next.set(subKey, subagent.messageCount);
+        const previousSubCount = previous.get(subKey);
+        if (
+          sessionsLoadedRef.current &&
+          previousSubCount !== undefined &&
+          subagent.messageCount > previousSubCount
+        ) {
+          changedSessionIds.add(session.id);
+        }
       }
     }
-    messageCountByPathRef.current = next;
+    messageCountBySourceRef.current = next;
+    sessionsLoadedRef.current = true;
+    if (changedSessionIds.size > 0) {
+      setUnreadSessionIds((prev) => {
+        let changed = false;
+        const unread = new Set(prev);
+        for (const id of changedSessionIds) {
+          if (id === selectedSessionIdRef.current) continue;
+          if (!unread.has(id)) {
+            unread.add(id);
+            changed = true;
+          }
+        }
+        return changed ? unread : prev;
+      });
+    }
   }, [sessions]);
+
+  useEffect(() => {
+    selectedSessionIdRef.current = selected?.id ?? null;
+    if (!selected) return;
+    setUnreadSessionIds((prev) => {
+      if (!prev.has(selected.id)) return prev;
+      const next = new Set(prev);
+      next.delete(selected.id);
+      return next;
+    });
+  }, [selected?.id]);
 
   useEffect(() => {
     listScrollRef.current?.scrollTo(0, 0);
@@ -249,6 +304,17 @@ export default function App() {
       if (cancelled) return;
       const payload = normalizeAgentRuntimeEvent(event.payload);
       console.info("[sessio-runtime:frontend:event]", payload);
+      if (
+        payload.sessioRuntimeSessionId !== selectedSessionIdRef.current &&
+        payload.kind !== "sessionEnded"
+      ) {
+        setUnreadSessionIds((prev) => {
+          if (prev.has(payload.sessioRuntimeSessionId)) return prev;
+          const next = new Set(prev);
+          next.add(payload.sessioRuntimeSessionId);
+          return next;
+        });
+      }
       dispatchLiveRuntimeEvent({ type: "runtime-event", event: payload });
     })
       .then((fn) => {
@@ -274,17 +340,33 @@ export default function App() {
     }
   }, [availableSessions, selected]);
 
-  const handleMessageCount = useCallback((filePath: string, count: number) => {
-    if (messageCountByPathRef.current.get(filePath) === count) return false;
-    messageCountByPathRef.current.set(filePath, count);
+  const handleMessageCount = useCallback((
+    agent: Agent,
+    filePath: string,
+    sessionId: string,
+    count: number,
+  ) => {
+    const countKey = messageCountKey(agent, filePath, sessionId);
+    if (messageCountBySourceRef.current.get(countKey) === count) return false;
+    messageCountBySourceRef.current.set(countKey, count);
 
     const patchSession = (session: SessionInfo): SessionInfo => {
-      if (session.filePath === filePath) {
+      if (
+        session.agent === agent &&
+        session.id === sessionId &&
+        session.filePath === filePath
+      ) {
         return { ...session, messageCount: count };
       }
       let changed = false;
       const subagents = session.subagents.map((sub) => {
-        if (sub.filePath !== filePath) return sub;
+        if (
+          session.agent !== agent ||
+          session.id !== sessionId ||
+          sub.filePath !== filePath
+        ) {
+          return sub;
+        }
         changed = true;
         return { ...sub, messageCount: count };
       });
@@ -669,6 +751,7 @@ export default function App() {
                     sessionsExpanded={expandedProjectSessions.has(p.key)}
                     selectedKey={selectedKey}
                     liveState={liveRuntimeState}
+                    unreadSessionIds={unreadSessionIds}
                     onSelectProject={() => {
                       setFilter({ kind: "project", key: p.key, label: p.label });
                       setExpandedProjects((prev) => {
@@ -1475,6 +1558,7 @@ function ProjectSidebarGroup({
   sessionsExpanded,
   selectedKey,
   liveState,
+  unreadSessionIds,
   onSelectProject,
   onSelectSession,
   onToggleSessionLimit,
@@ -1486,6 +1570,7 @@ function ProjectSidebarGroup({
   sessionsExpanded: boolean;
   selectedKey: string | null;
   liveState: LiveRuntimeState;
+  unreadSessionIds: Set<string>;
   onSelectProject: () => void;
   onSelectSession: (session: SessionInfo) => void;
   onToggleSessionLimit: () => void;
@@ -1546,19 +1631,24 @@ function ProjectSidebarGroup({
               (expanded ? "translate-y-0" : "-translate-y-1")
             }
           >
-            {visibleSessions.map((session) => (
-              <SidebarSessionItem
-                key={sessionKey(session)}
-                item={session}
-                active={selectedKey === sessionKey(session)}
-                liveActivity={liveSessionActivity(liveState.sessions[session.id])}
-                onSelect={() => onSelectSession(session)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  onSessionContextMenu(session, { x: e.clientX, y: e.clientY });
-                }}
-              />
-            ))}
+            {visibleSessions.map((session) => {
+              const key = sessionKey(session);
+              const liveActivity = liveSessionActivity(liveState.sessions[session.id]);
+              return (
+                <SidebarSessionItem
+                  key={key}
+                  item={session}
+                  active={selectedKey === key}
+                  liveActivity={liveActivity}
+                  unread={unreadSessionIds.has(session.id)}
+                  onSelect={() => onSelectSession(session)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    onSessionContextMenu(session, { x: e.clientX, y: e.clientY });
+                  }}
+                />
+              );
+            })}
           </div>
           {canToggleSessionLimit && (
             <button
@@ -1579,12 +1669,14 @@ function SidebarSessionItem({
   item,
   active,
   liveActivity,
+  unread,
   onSelect,
   onContextMenu,
 }: {
   item: SessionInfo;
   active: boolean;
   liveActivity: ReturnType<typeof liveSessionActivity>;
+  unread: boolean;
   onSelect: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
@@ -1598,15 +1690,15 @@ function SidebarSessionItem({
       onContextMenu={onContextMenu}
       title={title}
       className={
-        "group flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
+        "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
         (active
           ? "bg-ink/10 text-ink"
           : "text-ink/65 hover:bg-ink/5 hover:text-ink")
       }
     >
-      <span className="relative flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+      <SidebarSessionStatus activity={liveActivity} unread={unread} />
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
         <AgentGlyph agent={item.agent} className="h-3.5 w-3.5" />
-        <LiveSessionDot activity={liveActivity} />
       </span>
       <span
         className={
@@ -1625,27 +1717,25 @@ function SidebarSessionItem({
   );
 }
 
-function LiveSessionDot({
+function SidebarSessionStatus({
   activity,
+  unread,
 }: {
   activity: ReturnType<typeof liveSessionActivity>;
+  unread: boolean;
 }) {
-  if (activity === "idle") return null;
-  const cls =
-    activity === "running"
-      ? "bg-status-success animate-pulse"
-      : activity === "failed"
-        ? "bg-status-error"
-        : activity === "cancelled"
-          ? "bg-ink/35"
-          : "bg-accent-purple";
+  if (activity === "running") {
+    return (
+      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-status-success">
+        <RefreshCw className="h-3 w-3 animate-spin" />
+      </span>
+    );
+  }
+  if (!unread) return null;
   return (
-    <span
-      className={
-        "absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-surface-sidebar " +
-        cls
-      }
-    />
+    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center">
+      <span className="h-1.5 w-1.5 rounded-full bg-accent-purple" />
+    </span>
   );
 }
 

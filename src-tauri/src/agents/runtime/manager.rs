@@ -390,6 +390,12 @@ impl RuntimeManager {
         request_id: &str,
         approved: bool,
     ) -> Result<()> {
+        log::info!(
+            "[sessio-runtime:permission-response:user] session={} request={} approved={}",
+            sessio_runtime_session_id,
+            request_id,
+            approved
+        );
         let sender = {
             let mut sessions = self
                 .inner
@@ -475,6 +481,13 @@ impl RuntimeManager {
         turn_id: &str,
         request_id: &str,
     ) -> Result<RuntimePermissionDecision> {
+        log::info!(
+            "[sessio-runtime:permission-request:acp] session={} turn={} request={} tool={}",
+            sessio_runtime_session_id,
+            turn_id,
+            request_id,
+            request.tool_call.fields.title.as_deref().unwrap_or("tool")
+        );
         let (sender, receiver) = mpsc::channel();
         {
             let mut sessions = self
@@ -498,6 +511,15 @@ impl RuntimeManager {
         let decision = receiver
             .recv()
             .map_err(|_| anyhow::anyhow!("permission response channel closed"))?;
+        log::info!(
+            "[sessio-runtime:permission-decision:acp] session={} request={} approved={:?}",
+            sessio_runtime_session_id,
+            request_id,
+            match decision {
+                RuntimePermissionDecision::Selected { approved } => Some(approved),
+                RuntimePermissionDecision::Cancelled => None,
+            }
+        );
         if let RuntimePermissionDecision::Selected { approved } = decision {
             self.emit(permission_resolved_event(
                 sessio_runtime_session_id,
@@ -548,6 +570,15 @@ impl RuntimeManager {
             })?;
         }
         Ok(())
+    }
+
+    pub(crate) fn active_turn_id(&self, sessio_runtime_session_id: &str) -> Option<String> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(sessio_runtime_session_id)?
+                .active_turn_id
+                .clone()
+        })
     }
 
     pub(crate) fn cancel_turn_if_active(

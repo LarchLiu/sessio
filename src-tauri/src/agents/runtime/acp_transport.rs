@@ -4,12 +4,15 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionId, SessionNotification, StopReason, TextContent,
+    RequestPermissionResponse, SessionId, SessionNotification, SessionUpdate, StopReason,
+    TextContent,
 };
 use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo};
 use anyhow::{Context, Result};
 
-use super::acp::{convert_session_notification, permission_response_from_decision};
+use super::acp::{
+    acp_protocol_event, convert_session_notification, permission_response_from_decision,
+};
 use super::manager::{RuntimeManager, RuntimePermissionDecision};
 use super::types::{
     AgentInput, RuntimeCapabilitySet, RuntimeError, RuntimeMetadata, RuntimeTransportKind,
@@ -118,10 +121,39 @@ async fn run_session(
         .name("sessio")
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
-                let turn_id = current_turn(&notification_turn_id);
+                let turn_id = current_turn(&notification_turn_id).or_else(|| {
+                    notification_manager.active_turn_id(&notification_session_id)
+                });
                 let Some(turn_id) = turn_id else {
+                    log::warn!(
+                        "[sessio-runtime:acp:notification:drop] session={} update={:?}",
+                        notification_session_id,
+                        notification.update
+                    );
                     return Ok(());
                 };
+                log::info!(
+                    "[sessio-runtime:acp:notification] session={} turn={} update={:?}",
+                    notification_session_id,
+                    turn_id,
+                    notification.update
+                );
+                notification_manager
+                    .emit(
+                        acp_protocol_event(
+                            &notification_session_id,
+                            "agent_to_client",
+                            "notification",
+                            "session/update",
+                            Some(notification.session_id.to_string()),
+                            Some(turn_id.clone()),
+                            None,
+                            Some(session_update_type(&notification.update).to_string()),
+                            &notification,
+                        )
+                        .map_err(acp_internal_error)?,
+                    )
+                    .map_err(acp_internal_error)?;
                 if let Some(event) =
                     convert_session_notification(&notification, &notification_session_id, &turn_id)
                         .map_err(acp_internal_error)?
@@ -136,22 +168,45 @@ async fn run_session(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _connection| {
-                let turn_id = current_turn(&permission_turn_id);
+                let turn_id = current_turn(&permission_turn_id)
+                    .or_else(|| permission_manager.active_turn_id(&permission_session_id));
                 let Some(turn_id) = turn_id else {
+                    log::warn!(
+                        "[sessio-runtime:permission-request:drop] session={} request={:?}",
+                        permission_session_id,
+                        request
+                    );
                     return responder.respond(RequestPermissionResponse::new(
                         RequestPermissionOutcome::Cancelled,
                     ));
                 };
                 let request_id = json_id_to_string(responder.id());
+                permission_manager
+                    .emit(
+                        acp_protocol_event(
+                            &permission_session_id,
+                            "agent_to_client",
+                            "request",
+                            "session/request_permission",
+                            Some(request.session_id.to_string()),
+                            Some(turn_id.clone()),
+                            Some(request_id.clone()),
+                            None,
+                            &request,
+                        )
+                        .map_err(acp_internal_error)?,
+                    )
+                    .map_err(acp_internal_error)?;
                 let manager = permission_manager.clone();
                 let sessio_runtime_session_id = permission_session_id.clone();
                 let request_for_ui = request.clone();
                 let request_id_for_ui = request_id.clone();
+                let turn_id_for_ui = turn_id.clone();
                 let decision = tauri::async_runtime::spawn_blocking(move || {
                     manager.request_permission_from_acp(
                         &request_for_ui,
                         &sessio_runtime_session_id,
-                        &turn_id,
+                        &turn_id_for_ui,
                         &request_id_for_ui,
                     )
                 })
@@ -167,6 +222,27 @@ async fn run_session(
                         RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
                     }
                 };
+                log::info!(
+                    "[sessio-runtime:permission-response:acp] request={} response={:?}",
+                    request_id,
+                    response
+                );
+                permission_manager
+                    .emit(
+                        acp_protocol_event(
+                            &permission_session_id,
+                            "client_to_agent",
+                            "response",
+                            "session/request_permission",
+                            Some(request.session_id.to_string()),
+                            Some(turn_id.clone()),
+                            Some(request_id),
+                            None,
+                            &response,
+                        )
+                        .map_err(acp_internal_error)?,
+                    )
+                    .map_err(acp_internal_error)?;
                 responder.respond(response)
             },
             agent_client_protocol::on_receive_request!(),
@@ -182,6 +258,22 @@ async fn run_session(
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
+                manager
+                    .emit(
+                        acp_protocol_event(
+                            &sessio_runtime_session_id,
+                            "agent_to_client",
+                            "response",
+                            "initialize",
+                            None,
+                            None,
+                            None,
+                            None,
+                            &init,
+                        )
+                        .map_err(acp_internal_error)?,
+                    )
+                    .map_err(acp_internal_error)?;
                 let capabilities = runtime_capabilities_from_acp(&init.agent_capabilities);
                 let acp_session_id = match start {
                     AcpSessionStart::New => {
@@ -189,6 +281,22 @@ async fn run_session(
                             .send_request(NewSessionRequest::new(workspace_path))
                             .block_task()
                             .await?;
+                        manager
+                            .emit(
+                                acp_protocol_event(
+                                    &sessio_runtime_session_id,
+                                    "agent_to_client",
+                                    "response",
+                                    "session/new",
+                                    Some(session.session_id.to_string()),
+                                    None,
+                                    None,
+                                    None,
+                                    &session,
+                                )
+                                .map_err(acp_internal_error)?,
+                            )
+                            .map_err(acp_internal_error)?;
                         session.session_id
                     }
                     AcpSessionStart::Load { agent_session_id } => {
@@ -198,13 +306,29 @@ async fn run_session(
                             )));
                         }
                         let acp_session_id = SessionId::new(agent_session_id);
-                        connection
+                        let session = connection
                             .send_request(LoadSessionRequest::new(
                                 acp_session_id.clone(),
                                 workspace_path,
                             ))
                             .block_task()
                             .await?;
+                        manager
+                            .emit(
+                                acp_protocol_event(
+                                    &sessio_runtime_session_id,
+                                    "agent_to_client",
+                                    "response",
+                                    "session/load",
+                                    Some(acp_session_id.to_string()),
+                                    None,
+                                    None,
+                                    None,
+                                    &session,
+                                )
+                                .map_err(acp_internal_error)?,
+                            )
+                            .map_err(acp_internal_error)?;
                         acp_session_id
                     }
                 };
@@ -259,8 +383,20 @@ async fn run_command_loop(
                     sessio_runtime_session_id,
                     turn_id
                 );
+                let notification = CancelNotification::new(acp_session_id.clone());
+                manager.emit(acp_protocol_event(
+                    &sessio_runtime_session_id,
+                    "client_to_agent",
+                    "notification",
+                    "session/cancel",
+                    Some(acp_session_id.to_string()),
+                    Some(turn_id.clone()),
+                    None,
+                    None,
+                    &notification,
+                )?)?;
                 connection
-                    .send_notification(CancelNotification::new(acp_session_id.clone()))
+                    .send_notification(notification)
                     .map_err(anyhow::Error::from)?;
             }
         }
@@ -286,22 +422,86 @@ fn spawn_prompt_task(
         );
         let result = connection
             .send_request(PromptRequest::new(
-                acp_session_id,
+                acp_session_id.clone(),
                 vec![ContentBlock::Text(TextContent::new(input.text))],
             ))
             .block_task()
             .await;
 
-        clear_current_turn(&current_turn_id, &turn_id);
-
         match result {
             Ok(response) if response.stop_reason == StopReason::Cancelled => {
+                match acp_protocol_event(
+                    &sessio_runtime_session_id,
+                    "agent_to_client",
+                    "response",
+                    "session/prompt",
+                    Some(acp_session_id.to_string()),
+                    Some(turn_id.clone()),
+                    None,
+                    None,
+                    &response,
+                ) {
+                    Ok(event) => {
+                        let _ = manager.emit(event);
+                    }
+                    Err(error) => {
+                        log::warn!("[sessio-runtime:acp:prompt-response-event] {error}");
+                    }
+                }
+                log::info!(
+                    "[sessio-runtime:acp:prompt-response] session={} turn={} stop_reason={:?}",
+                    sessio_runtime_session_id,
+                    turn_id,
+                    response.stop_reason
+                );
+                clear_current_turn(&current_turn_id, &turn_id);
                 let _ = manager.cancel_turn_if_active(&sessio_runtime_session_id, &turn_id);
             }
-            Ok(_) => {
-                let _ = manager.complete_turn(&sessio_runtime_session_id, &turn_id);
+            Ok(response) => {
+                match acp_protocol_event(
+                    &sessio_runtime_session_id,
+                    "agent_to_client",
+                    "response",
+                    "session/prompt",
+                    Some(acp_session_id.to_string()),
+                    Some(turn_id.clone()),
+                    None,
+                    None,
+                    &response,
+                ) {
+                    Ok(event) => {
+                        let _ = manager.emit(event);
+                    }
+                    Err(error) => {
+                        log::warn!("[sessio-runtime:acp:prompt-response-event] {error}");
+                    }
+                }
+                log::info!(
+                    "[sessio-runtime:acp:prompt-response] session={} turn={} stop_reason={:?}",
+                    sessio_runtime_session_id,
+                    turn_id,
+                    response.stop_reason
+                );
+                tauri::async_runtime::spawn_blocking({
+                    let manager = manager.clone();
+                    let sessio_runtime_session_id = sessio_runtime_session_id.clone();
+                    let current_turn_id = current_turn_id.clone();
+                    let turn_id = turn_id.clone();
+                    move || {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        clear_current_turn(&current_turn_id, &turn_id);
+                        let _ = manager.complete_turn(&sessio_runtime_session_id, &turn_id);
+                    }
+                });
             }
             Err(error) => {
+                log::warn!(
+                    "[sessio-runtime:acp:prompt-error] session={} turn={} error={}",
+                    sessio_runtime_session_id,
+                    turn_id,
+                    error
+                );
+                clear_current_turn(&current_turn_id, &turn_id);
                 let _ = manager.fail_turn(
                     &sessio_runtime_session_id,
                     &turn_id,
@@ -324,6 +524,22 @@ fn runtime_capabilities_from_acp(
             || capabilities.prompt_capabilities.audio
             || capabilities.prompt_capabilities.embedded_context,
         supports_modes: false,
+    }
+}
+
+fn session_update_type(update: &SessionUpdate) -> &'static str {
+    match update {
+        SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+        SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+        SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+        SessionUpdate::ToolCall(_) => "tool_call",
+        SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+        SessionUpdate::Plan(_) => "plan",
+        SessionUpdate::AvailableCommandsUpdate(_) => "available_commands",
+        SessionUpdate::CurrentModeUpdate(_) => "current_mode",
+        SessionUpdate::ConfigOptionUpdate(_) => "config_options",
+        SessionUpdate::SessionInfoUpdate(_) => "session_info",
+        _ => "unknown",
     }
 }
 
