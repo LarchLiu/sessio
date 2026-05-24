@@ -1,5 +1,4 @@
 import {
-  ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -7,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, BotMessageSquare, Download, Skull, ListChevronsDownUp, ListChevronsUpDown } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -15,7 +14,6 @@ import { MenuItem } from "@tauri-apps/api/menu/menuItem";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
-  AGENT_LABEL,
   Agent,
   getIndexStatus,
   IndexPhase,
@@ -33,7 +31,7 @@ import {
 import { syncTrayMenu } from "./tray";
 import SessionDetail, { type ActiveMessageMeta } from "./components/SessionDetail";
 import SessionMemory, { SessionMetaList } from "./components/SessionMemory";
-import { AgentBadge, AgentGlyph } from "./components/AgentIcon";
+import { AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
@@ -71,7 +69,6 @@ function readViewMode(): ViewMode {
   return v === "cross" ? "cross" : "native";
 }
 
-const AGENT_ORDER: Agent[] = ["codex", "claude", "gemini"];
 const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 
 const IS_MAC =
@@ -123,7 +120,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [selected, setSelected] = useState<SessionInfo | null>(null);
-  const [expandAgent, setExpandAgent] = useState(true);
   const [expandProject, setExpandProject] = useState(true);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     () => new Set(),
@@ -423,29 +419,6 @@ export default function App() {
     }
   }, [metaPopoverOpen, selected]);
 
-  const agentStats = useMemo(() => {
-    const m: Record<Agent, { count: number; latest: number }> = {
-      codex: { count: 0, latest: 0 },
-      claude: { count: 0, latest: 0 },
-      gemini: { count: 0, latest: 0 },
-    };
-    for (const s of availableSessions) {
-      if (isSubagentOnly(s)) continue;
-      m[s.agent].count += 1;
-      const t = s.updatedAt ?? s.startedAt ?? 0;
-      if (t > m[s.agent].latest) m[s.agent].latest = t;
-    }
-    return m;
-  }, [availableSessions]);
-
-  const agentOrdered = useMemo(
-    () =>
-      AGENT_ORDER.map((a) => ({ agent: a, ...agentStats[a] })).sort(
-        (x, y) => y.latest - x.latest
-      ),
-    [agentStats]
-  );
-
   const projectGroups = useMemo(() => {
     const m = new Map<
       string,
@@ -530,11 +503,6 @@ export default function App() {
       return changed ? next : prev;
     });
   }, [projectGroups]);
-
-  const totalRealSessions = useMemo(
-    () => availableSessions.filter((s) => !isSubagentOnly(s)).length,
-    [availableSessions]
-  );
 
   const recentForMenu = useMemo(
     () => availableSessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
@@ -628,18 +596,9 @@ export default function App() {
     await openDeleteMenu(pos, (clickPos) => setDeleteTarget({ kind: "session", session, pos: clickPos }));
   };
 
-  const visible = useMemo(() => {
-    return availableSessions.filter((s) => {
-      if (filter.kind === "agent" && s.agent !== filter.agent) return false;
-      if (filter.kind === "project" && projectKey(s) !== filter.key) return false;
-      return true;
-    });
-  }, [availableSessions, filter]);
-
-  const visibleCount = useMemo(
-    () => visible.filter((s) => !isSubagentOnly(s)).length,
-    [visible]
-  );
+  const visibleCount = selected
+    ? 1
+    : availableSessions.filter((s) => !isSubagentOnly(s)).length;
   const detailTitle =
     selected?.title ??
     selected?.firstUserMessage ??
@@ -690,45 +649,6 @@ export default function App() {
 
         <nav className="flex-1 min-h-0 w-64 p-2 pb-0 flex flex-col gap-0.5">
           <div className="shrink-0 flex flex-col gap-0.5">
-            <SidebarItem
-              label={t("sidebar.all_sessions")}
-              count={totalRealSessions}
-              active={filter.kind === "all"}
-              onClick={() => setFilter({ kind: "all" })}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    void openScopeMenu(
-                      { kind: "all" },
-                      { x: e.clientX, y: e.clientY },
-                    );
-                  }}
-              icon={<BotMessageSquare className="w-3.5 h-3.5 shrink-0 text-ink/55" />}
-            />
-
-            <SectionHeader
-              label={t("sidebar.by_agent")}
-              collapsed={!expandAgent}
-              onToggle={() => setExpandAgent((v) => !v)}
-            />
-            {expandAgent &&
-              agentOrdered.map(({ agent, count }) => (
-                <SidebarItem
-                  key={agent}
-                  label={AGENT_LABEL[agent]}
-                  count={count}
-                  active={filter.kind === "agent" && filter.agent === agent}
-                  onClick={() => setFilter({ kind: "agent", agent })}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    void openScopeMenu(
-                      { kind: "agent", agent },
-                      { x: e.clientX, y: e.clientY },
-                    );
-                  }}
-                  icon={<AgentBadge agent={agent} className="w-3.5 h-3.5" />}
-                />
-              ))}
-
             <SectionHeader
               label={t("sidebar.by_project")}
               collapsed={!expandProject}
@@ -1500,46 +1420,6 @@ function Chevron({ collapsed }: { collapsed: boolean }) {
         (collapsed ? "-rotate-90" : "")
       }
     />
-  );
-}
-
-function SidebarItem({
-  label,
-  count,
-  active,
-  onClick,
-  onContextMenu,
-  icon,
-  title,
-}: {
-  label: string;
-  count: number;
-  active: boolean;
-  onClick: () => void;
-  onContextMenu?: (e: React.MouseEvent) => void;
-  icon?: ReactNode;
-  title?: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      onContextMenu={onContextMenu}
-      title={title}
-      className={
-        "flex items-center gap-2 px-2.5 py-1.5 rounded-md text-left text-body transition " +
-        (active
-          ? "bg-ink/10 text-ink"
-          : "text-ink/70 hover:bg-ink/5 hover:text-ink")
-      }
-    >
-      {icon !== undefined ? (
-        icon
-      ) : (
-        <span className="w-2 shrink-0" />
-      )}
-      <span className="flex-1 truncate">{label}</span>
-      <span className="text-meta text-ink/40 tabular-nums">{count}</span>
-    </button>
   );
 }
 
