@@ -97,30 +97,26 @@ fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Resu
             let path_str = path.to_string_lossy().into_owned();
             let archived =
                 crate::agents::sources::codex::parser::path_is_archived(path, &archived_root);
-            let parsed_subagent =
-                crate::agents::sources::codex::parser::parse_one_subagent_file(path, archived)
-                    .unwrap_or(None)
-                    .is_some();
-            let needs_reindex = if parsed_subagent {
-                match known_sub.remove(&path_str) {
-                    Some(row) => {
-                        !row.available || file_changed(path, row.file_size, row.file_mtime)
-                    }
-                    None => true,
+            if let Some(row) = known_main.remove(&path_str) {
+                let changed =
+                    file_changed(path, row.file_size, row.file_mtime) || row.archived != archived;
+                if changed {
+                    indexer.submit(IndexTask::ReindexCodexFile(path.to_path_buf()))?;
                 }
-            } else {
-                match known_main.remove(&path_str) {
-                    // File reappeared after a previous soft-delete, or it changed,
-                    // or it switched between live/archived: re-parse it.
-                    Some(row) => {
-                        !row.available
-                            || file_changed(path, row.file_size, row.file_mtime)
-                            || row.archived != archived
-                    }
-                    None => true,
+                continue;
+            }
+
+            if let Some(row) = known_sub.remove(&path_str) {
+                if file_changed(path, row.file_size, row.file_mtime) {
+                    indexer.submit(IndexTask::ReindexCodexFile(path.to_path_buf()))?;
                 }
-            };
-            if needs_reindex {
+                continue;
+            }
+
+            let parsed =
+                crate::agents::sources::codex::parser::parse_one_file_with_relation(path, archived)
+                    .unwrap_or(None);
+            if parsed.is_some() {
                 indexer.submit(IndexTask::ReindexCodexFile(path.to_path_buf()))?;
             }
         }
@@ -342,8 +338,8 @@ fn poll_gemini(
             .iter()
             .filter_map(|row| row.available.then_some(*row))
             .collect();
-        let needs_reindex = !live_rows.is_empty()
-            && live_rows
+        let needs_reindex = rows.is_empty()
+            || rows
                 .iter()
                 .any(|row| file_changed(&logs, row.file_size, row.file_mtime));
         if needs_reindex {
@@ -371,8 +367,7 @@ fn poll_gemini(
             .filter_map(|row| row.available.then_some(*row))
             .collect();
         let needs_reindex = rows.is_empty()
-            || live_rows.is_empty()
-            || live_rows
+            || rows
                 .iter()
                 .any(|row| file_changed(&chat_path, row.file_size, row.file_mtime));
         if needs_reindex {
@@ -540,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn gemini_poll_should_not_reindex_when_only_unavailable_rows_remain() {
+    fn gemini_poll_should_not_reindex_unchanged_unavailable_rows() {
         let dir = unique_tmp("gemini-poll-unavailable");
         let path = dir.join("logs.json");
         fs::write(&path, "[]\n").unwrap();
@@ -554,14 +549,29 @@ mod tests {
             session_id: "gone".to_string(),
             scope: path.to_string_lossy().to_string(),
             file_path: path.to_string_lossy().to_string(),
-            file_size: meta.len() + 42,
-            file_mtime: mtime.map(|v| v - 1000),
+            file_size: meta.len(),
+            file_mtime: mtime,
             last_indexed_at: 1,
             available: false,
             archived: false,
             subagents: Vec::new(),
         }];
-        assert!(rows.iter().all(|row| !row.available));
+        let needs_reindex = rows.is_empty()
+            || rows
+                .iter()
+                .any(|row| file_changed(&path, row.file_size, row.file_mtime));
+        assert!(!needs_reindex);
+
+        let changed_rows = vec![IndexedSessionRecord {
+            file_size: meta.len() + 42,
+            file_mtime: mtime.map(|v| v - 1000),
+            ..rows[0].clone()
+        }];
+        let changed_needs_reindex = changed_rows.is_empty()
+            || changed_rows
+                .iter()
+                .any(|row| file_changed(&path, row.file_size, row.file_mtime));
+        assert!(changed_needs_reindex);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -233,6 +233,12 @@ impl SessionStore for CachedStore {
         Ok(())
     }
 
+    fn mark_file_path_unindexable(&self, agent: Agent, file_path: &str) -> Result<()> {
+        self.inner.mark_file_path_unindexable(agent, file_path)?;
+        self.refresh_from_inner()?;
+        Ok(())
+    }
+
     fn mark_missing_scopes_unavailable(
         &self,
         agent: Agent,

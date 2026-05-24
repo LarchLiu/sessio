@@ -54,6 +54,7 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<()>;
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()>;
     fn mark_subagent_file_unavailable(&self, file_path: &str) -> Result<()>;
+    fn mark_file_path_unindexable(&self, agent: Agent, file_path: &str) -> Result<()>;
     fn mark_missing_scopes_unavailable(
         &self,
         agent: Agent,

@@ -573,8 +573,7 @@ fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutco
         }
         None => {
             let path_str = path.to_string_lossy();
-            store.mark_file_path_unavailable(&path_str)?;
-            store.mark_subagent_file_unavailable(&path_str)?;
+            store.mark_file_path_unindexable(Agent::Codex, &path_str)?;
         }
     }
     Ok(outcome)
@@ -667,6 +666,10 @@ fn reindex_gemini_logs(path: &Path, store: &dyn SessionStore) -> Result<TaskOutc
     }
     let sessions = crate::agents::sources::gemini::parser::parse_logs_file(path)?;
     let mut outcome = TaskOutcome::default();
+    if sessions.is_empty() {
+        store.mark_file_path_unindexable(Agent::Gemini, &path.to_string_lossy())?;
+        return Ok(outcome);
+    }
     for session in &sessions {
         push_session_project(&mut outcome, session);
         push_session_source(&mut outcome, session);

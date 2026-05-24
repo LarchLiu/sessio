@@ -705,6 +705,48 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
+    fn mark_file_path_unindexable(&self, agent: Agent, file_path: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM subagents WHERE file_path = ?", params![file_path])?;
+        let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+        let file_mtime = file_mtime_for(file_path);
+        let session_id = format!("__unindexable__:{}", file_path);
+        tx.execute(
+            "INSERT OR REPLACE INTO sessions (
+                agent, session_id, scope, file_path,
+                project_path, project_name,
+                started_at, updated_at,
+                message_count, title, first_user_message,
+                file_size, file_mtime,
+                partial, available, archived,
+                last_indexed_at, forked_from_id
+            ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?, ?,?, ?,?,?, ?,?)",
+            params![
+                agent.as_str(),
+                session_id,
+                file_path,
+                file_path,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<i64>::None,
+                file_mtime,
+                0i64,
+                Option::<String>::None,
+                Option::<String>::None,
+                file_size as i64,
+                file_mtime,
+                0i64,
+                0i64,
+                0i64,
+                now_ms(),
+                Option::<String>::None,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn mark_missing_scopes_unavailable(
         &self,
         agent: Agent,
