@@ -128,7 +128,6 @@ export default function App() {
     () => new Set(),
   );
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [memoryBackendStatus, setMemoryBackendStatus] =
     useState<MemoryBackendStatus | null>(null);
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
@@ -223,10 +222,6 @@ export default function App() {
   useEffect(() => {
     listScrollRef.current?.scrollTo(0, 0);
   }, [filter]);
-
-  useEffect(() => {
-    if (!sidebarOpen) setSettingsOpen(false);
-  }, [sidebarOpen]);
 
   // Don't let webview restore focus on the last interactive control when
   // the window is shown again — leaves a stale focus ring (and tooltip).
@@ -375,6 +370,10 @@ export default function App() {
       prev && prev.filePath === filePath ? { ...prev, count } : prev,
     );
     return true;
+  }, []);
+
+  const handleActiveMessageMeta = useCallback((meta: ActiveMessageMeta) => {
+    setActiveMessageMeta(meta);
   }, []);
 
   useEffect(() => {
@@ -710,121 +709,18 @@ export default function App() {
           )}
         </nav>
 
-        <div className="relative w-64 border-t border-ink/10">
-          <div
-            className={
-              "absolute left-0 bottom-full w-64 overflow-hidden transition-all duration-250 ease-out " +
-              (settingsOpen
-                ? "translate-y-0 opacity-100 max-h-80 pointer-events-auto"
-                : "translate-y-2 opacity-0 max-h-0 pointer-events-none")
-            }
-          >
-            <div className="border-t border-ink/10 bg-surface shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur">
-              <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-3">
-                <span className="text-caption uppercase tracking-[0.12em] text-ink/40">
-                  {t("sidebar.settings")}
-                  <Tooltip content={t("sidebar.check_update")} placement="top">
-                    <button
-                      type="button"
-                      aria-label={t("sidebar.check_update")}
-                      onClick={() => update.check()}
-                      disabled={update.checking}
-                      className={
-                        "ml-2 normal-case tracking-normal transition " +
-                        (update.checking
-                          ? "text-ink/50 animate-pulse"
-                          : "text-ink/30 hover:text-ink/70 cursor-pointer")
-                      }
-                    >
-                      v{__APP_VERSION__}
-                    </button>
-                  </Tooltip>
-                </span>
-                <button
-                  type="button"
-                  aria-label={t("sidebar.close_settings")}
-                  onClick={() => setSettingsOpen(false)}
-                  className="p-1 -m-1 text-ink/40 hover:text-ink transition rounded-md"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-              <div className="mx-3 border-t border-ink/10" />
-              <div className="px-3 pt-3 pb-3 flex flex-col gap-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-body-sm text-ink/55">{t("sidebar.language")}</span>
-                  <LanguageSwitcher lang={lang} onChange={setLang} />
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-body-sm text-ink/55">{t("sidebar.theme")}</span>
-                  <ThemeSwitcher mode={mode} onChange={setMode} />
-                </div>
-                <div className="flex items-center justify-between gap-3 text-body-sm text-ink/55">
-                  <span>{t("sidebar.rebuild_index")}</span>
-                  <button
-                    type="button"
-                    aria-label={t("sidebar.rebuild_index")}
-                    onClick={() => {
-                      rebuildSessionIndex().catch((err) => {
-                        setError(String(err));
-                      }).finally(() => {
-                        refreshMemoryBackendStatus(setMemoryBackendStatus);
-                      });
-                    }}
-                    className="p-1 -m-1 text-ink/55 transition hover:text-ink rounded-md"
-                  >
-                    <RefreshCw className={"w-4 h-4 shrink-0 " + (rebuilding ? "animate-spin" : "")} />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="px-3 py-2 flex items-center justify-between gap-2">
-            <div className="shrink-0 flex items-center gap-1">
-              <Tooltip content={t("sidebar.settings")} placement="top">
-                <button
-                  type="button"
-                  aria-label={t("sidebar.settings")}
-                  onClick={() => setSettingsOpen((v) => !v)}
-                  className="p-1 text-ink/55 hover:text-ink transition rounded-md"
-                >
-                  <Settings
-                    className={
-                      "w-4 h-4 transition-transform duration-200 " +
-                      (settingsOpen ? "rotate-90" : "")
-                    }
-                  />
-                </button>
-              </Tooltip>
-              {update.hasUpdate && update.latestVersion && (
-                <Tooltip
-                  content={t("sidebar.update_available", {
-                    version: update.latestVersion,
-                  })}
-                  placement="top"
-                >
-                  <button
-                    type="button"
-                    aria-label={t("sidebar.update_available", {
-                      version: update.latestVersion,
-                    })}
-                    onClick={() => {
-                      openReleasePage(update.releaseUrl).catch((err) => {
-                        setError(String(err));
-                      });
-                    }}
-                    className="relative p-1 text-ink/55 hover:text-ink transition rounded-md"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent-purple" />
-                  </button>
-                </Tooltip>
-              )}
-            </div>
-            <IndexStatusDot indexing={indexing} />
-          </div>
-        </div>
+        <SidebarFooter
+          sidebarOpen={sidebarOpen}
+          lang={lang}
+          onLangChange={setLang}
+          themeMode={mode}
+          onThemeModeChange={setMode}
+          update={update}
+          rebuilding={rebuilding}
+          indexing={indexing}
+          onError={setError}
+          onRebuildFinished={() => refreshMemoryBackendStatus(setMemoryBackendStatus)}
+        />
       </aside>
 
       <main className="relative flex-1 flex flex-col min-w-0">
@@ -974,7 +870,7 @@ export default function App() {
                 liveState={liveRuntimeState}
                 dispatchLiveEvent={dispatchLiveRuntimeEvent}
                 onMessageCount={handleMessageCount}
-                onActiveMessageMeta={setActiveMessageMeta}
+                onActiveMessageMeta={handleActiveMessageMeta}
               />
             </div>
             <div
@@ -1099,6 +995,157 @@ function StatusDot({
         style={{ background: "rgb(var(--color-emerald))" }}
       />
     </span>
+  );
+}
+
+function SidebarFooter({
+  sidebarOpen,
+  lang,
+  onLangChange,
+  themeMode,
+  onThemeModeChange,
+  update,
+  rebuilding,
+  indexing,
+  onError,
+  onRebuildFinished,
+}: {
+  sidebarOpen: boolean;
+  lang: Lang;
+  onLangChange: (lang: Lang) => void;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
+  update: ReturnType<typeof useUpdateCheck>;
+  rebuilding: boolean;
+  indexing: boolean;
+  onError: (error: string | null) => void;
+  onRebuildFinished: () => Promise<void> | void;
+}) {
+  const { t } = useI18n();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!sidebarOpen) setSettingsOpen(false);
+  }, [sidebarOpen]);
+
+  return (
+    <div className="relative w-64 border-t border-ink/10">
+      <div
+        className={
+          "absolute left-0 bottom-full w-64 origin-bottom transition-[opacity,transform] duration-200 ease-out " +
+          (settingsOpen
+            ? "translate-y-0 scale-y-100 opacity-100 pointer-events-auto"
+            : "translate-y-2 scale-y-95 opacity-0 pointer-events-none")
+        }
+      >
+        <div className="border-t border-ink/10 bg-surface shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur">
+          <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-3">
+            <span className="text-caption uppercase tracking-[0.12em] text-ink/40">
+              {t("sidebar.settings")}
+              <Tooltip content={t("sidebar.check_update")} placement="top">
+                <button
+                  type="button"
+                  aria-label={t("sidebar.check_update")}
+                  onClick={() => update.check()}
+                  disabled={update.checking}
+                  className={
+                    "ml-2 normal-case tracking-normal transition " +
+                    (update.checking
+                      ? "text-ink/50 animate-pulse"
+                      : "text-ink/30 hover:text-ink/70 cursor-pointer")
+                  }
+                >
+                  v{__APP_VERSION__}
+                </button>
+              </Tooltip>
+            </span>
+            <button
+              type="button"
+              aria-label={t("sidebar.close_settings")}
+              onClick={() => setSettingsOpen(false)}
+              className="p-1 -m-1 text-ink/40 hover:text-ink transition rounded-md"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          <div className="mx-3 border-t border-ink/10" />
+          <div className="px-3 pt-3 pb-3 flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-body-sm text-ink/55">{t("sidebar.language")}</span>
+              <LanguageSwitcher lang={lang} onChange={onLangChange} />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-body-sm text-ink/55">{t("sidebar.theme")}</span>
+              <ThemeSwitcher mode={themeMode} onChange={onThemeModeChange} />
+            </div>
+            <div className="flex items-center justify-between gap-3 text-body-sm text-ink/55">
+              <span>{t("sidebar.rebuild_index")}</span>
+              <button
+                type="button"
+                aria-label={t("sidebar.rebuild_index")}
+                onClick={() => {
+                  rebuildSessionIndex()
+                    .catch((err) => {
+                      onError(String(err));
+                    })
+                    .finally(() => {
+                      void onRebuildFinished();
+                    });
+                }}
+                className="p-1 -m-1 text-ink/55 transition hover:text-ink rounded-md"
+              >
+                <RefreshCw className={"w-4 h-4 shrink-0 " + (rebuilding ? "animate-spin" : "")} />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-3 py-2 flex items-center justify-between gap-2">
+        <div className="shrink-0 flex items-center gap-1">
+          <Tooltip content={t("sidebar.settings")} placement="top">
+            <button
+              type="button"
+              aria-label={t("sidebar.settings")}
+              onClick={() => setSettingsOpen((v) => !v)}
+              className="p-1 text-ink/55 hover:text-ink transition rounded-md"
+            >
+              <Settings
+                className={
+                  "w-4 h-4 transition-transform duration-200 " +
+                  (settingsOpen ? "rotate-90" : "")
+                }
+              />
+            </button>
+          </Tooltip>
+          {update.hasUpdate && update.latestVersion && (
+            <Tooltip
+              content={t("sidebar.update_available", {
+                version: update.latestVersion,
+              })}
+              placement="top"
+            >
+              <button
+                type="button"
+                aria-label={t("sidebar.update_available", {
+                  version: update.latestVersion,
+                })}
+                onClick={() => {
+                  openReleasePage(update.releaseUrl).catch((err) => {
+                    onError(String(err));
+                  });
+                }}
+                className="relative p-1 text-ink/55 hover:text-ink transition rounded-md"
+              >
+                <Download className="w-4 h-4" />
+                <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent-purple" />
+              </button>
+            </Tooltip>
+          )}
+        </div>
+        <IndexStatusDot indexing={indexing} />
+      </div>
+    </div>
   );
 }
 

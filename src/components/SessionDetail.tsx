@@ -1,4 +1,5 @@
 import {
+  memo,
   startTransition,
   forwardRef,
   useCallback,
@@ -156,7 +157,7 @@ function isNearScrollBottom(vp: HTMLDivElement): boolean {
   );
 }
 
-export default function SessionDetail({
+function SessionDetail({
   session,
   viewMode,
   liveState,
@@ -278,6 +279,8 @@ export default function SessionDetail({
     </div>
   );
 }
+
+export default memo(SessionDetail);
 
 function TabButton({
   active,

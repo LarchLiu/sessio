@@ -1,4 +1,5 @@
 import {
+  memo,
   type RefObject,
   useCallback,
   useLayoutEffect,
@@ -37,7 +38,7 @@ function memorySourceKey(session: SessionInfo): string {
   return `${session.agent}:${session.id}:${session.filePath}`;
 }
 
-export default function SessionMemory({ session }: Props) {
+function SessionMemory({ session }: Props) {
   const sourceKey = memorySourceKey(session);
   const viewportRef = useRef<HTMLDivElement>(null);
   const anchorRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -131,6 +132,8 @@ export default function SessionMemory({ session }: Props) {
     </ScrollArea>
   );
 }
+
+export default memo(SessionMemory);
 
 export function SessionMetaList({
   session,
