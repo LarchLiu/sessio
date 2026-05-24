@@ -11,7 +11,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowUp, ChevronDown, FileDiff, Plus, Square } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, ChevronDown, FileDiff, Plus, Square } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -371,6 +371,7 @@ function MessageStream({
   const [sending, setSending] = useState(false);
   const [historyRenderReady, setHistoryRenderReady] = useState(false);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const viewportRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -578,6 +579,7 @@ function MessageStream({
       programmaticScrollUntilRef.current =
         performance.now() + PROGRAMMATIC_SCROLL_SETTLE_MS;
       vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+      setShowScrollToBottom(false);
     };
     scroll();
     window.requestAnimationFrame(() => {
@@ -591,6 +593,9 @@ function MessageStream({
 
   const saveScrollSnapshot = useCallback(
     (vp: HTMLDivElement | null = viewportRef.current) => {
+      if (vp) {
+        setShowScrollToBottom(!isNearScrollBottom(vp));
+      }
       if (
         !vp ||
         !available ||
@@ -696,6 +701,12 @@ function MessageStream({
     if (!liveStreamingKey || !followLiveStreamRef.current) return;
     scrollChatToBottom();
   }, [liveStreamingKey, scrollChatToBottom]);
+
+  useLayoutEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    setShowScrollToBottom(!isNearScrollBottom(vp));
+  }, [visibleDisplayItems, loading]);
 
   const handleSendText = useCallback(async (rawText: string, clearComposer = false) => {
     const text = rawText.trim();
@@ -854,6 +865,16 @@ function MessageStream({
           refs={bubbleRefs}
           viewportRef={viewportRef}
         />
+        {showScrollToBottom && (
+          <button
+            type="button"
+            onClick={scrollChatToBottom}
+            className="absolute bottom-3 left-1/2 z-20 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-ink/15 bg-surface-panel/95 text-ink/85 shadow-sm transition hover:border-ink/25 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
+            aria-label="Scroll to bottom"
+          >
+            <ArrowDownToLine className="h-5 w-5" />
+          </button>
+        )}
       </div>
       <ChatComposer
         ref={composerRef}
