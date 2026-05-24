@@ -6,7 +6,12 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::acp::{convert_session_notification, fake_session_notification, AcpFakeSessionUpdate};
+use agent_client_protocol::schema::{ContentBlock, PromptRequest, SessionId, TextContent};
+
+use super::acp::{
+    acp_protocol_event, convert_session_notification, fake_session_notification,
+    AcpFakeSessionUpdate,
+};
 use super::manager::RuntimeManager;
 use super::types::{AgentInput, RuntimeError};
 
@@ -46,6 +51,21 @@ async fn stream_fake_response(
     input: AgentInput,
     cancel_token: &AtomicBool,
 ) -> anyhow::Result<()> {
+    let request = PromptRequest::new(
+        SessionId::new(sessio_runtime_session_id.to_string()),
+        vec![ContentBlock::Text(TextContent::new(input.text.clone()))],
+    );
+    manager.emit(acp_protocol_event(
+        sessio_runtime_session_id,
+        "client_to_agent",
+        "request",
+        "session/prompt",
+        Some(sessio_runtime_session_id.to_string()),
+        Some(turn_id.to_string()),
+        None,
+        None,
+        &request,
+    )?)?;
     sleep(2000);
     if is_cancelled(cancel_token) {
         return Ok(());
@@ -158,11 +178,43 @@ fn emit_fake_acp(
         notification
     );
     if let Some(event) =
+        acp_protocol_event(
+            sessio_runtime_session_id,
+            "agent_to_client",
+            "notification",
+            "session/update",
+            Some(notification.session_id.to_string()),
+            Some(turn_id.to_string()),
+            None,
+            Some(fake_session_update_type(&notification.update).to_string()),
+            &notification,
+        )
+        .ok()
+    {
+        manager.emit(event)?;
+    }
+    if let Some(event) =
         convert_session_notification(&notification, sessio_runtime_session_id, turn_id)?
     {
         manager.emit(event)?;
     }
     Ok(())
+}
+
+fn fake_session_update_type(update: &agent_client_protocol::schema::SessionUpdate) -> &'static str {
+    match update {
+        agent_client_protocol::schema::SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+        agent_client_protocol::schema::SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+        agent_client_protocol::schema::SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+        agent_client_protocol::schema::SessionUpdate::ToolCall(_) => "tool_call",
+        agent_client_protocol::schema::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+        agent_client_protocol::schema::SessionUpdate::Plan(_) => "plan",
+        agent_client_protocol::schema::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands",
+        agent_client_protocol::schema::SessionUpdate::CurrentModeUpdate(_) => "current_mode",
+        agent_client_protocol::schema::SessionUpdate::ConfigOptionUpdate(_) => "config_options",
+        agent_client_protocol::schema::SessionUpdate::SessionInfoUpdate(_) => "session_info",
+        _ => "unknown",
+    }
 }
 
 fn fake_response_text(input: &str) -> String {

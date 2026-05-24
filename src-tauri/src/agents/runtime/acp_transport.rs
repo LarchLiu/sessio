@@ -420,13 +420,29 @@ fn spawn_prompt_task(
             turn_id,
             input.text
         );
-        let result = connection
-            .send_request(PromptRequest::new(
-                acp_session_id.clone(),
-                vec![ContentBlock::Text(TextContent::new(input.text))],
-            ))
-            .block_task()
-            .await;
+        let request = PromptRequest::new(
+            acp_session_id.clone(),
+            vec![ContentBlock::Text(TextContent::new(input.text))],
+        );
+        match acp_protocol_event(
+            &sessio_runtime_session_id,
+            "client_to_agent",
+            "request",
+            "session/prompt",
+            Some(acp_session_id.to_string()),
+            Some(turn_id.clone()),
+            None,
+            None,
+            &request,
+        ) {
+            Ok(event) => {
+                let _ = manager.emit(event);
+            }
+            Err(error) => {
+                log::warn!("[sessio-runtime:acp:prompt-request-event] {error}");
+            }
+        }
+        let result = connection.send_request(request).block_task().await;
 
         match result {
             Ok(response) if response.stop_reason == StopReason::Cancelled => {

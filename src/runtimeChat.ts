@@ -1,4 +1,5 @@
 import type {
+  AcpProtocolMessage,
   Agent,
   AgentRuntimeEvent,
   RuntimeCapabilitySet,
@@ -9,10 +10,7 @@ import type {
 
 export type LiveRuntimeAction =
   | { type: "runtime-event"; event: AgentRuntimeEvent }
-  | {
-      type: "ensure-session";
-      session: LiveRuntimeSession;
-    }
+  | { type: "ensure-session"; session: LiveRuntimeSession }
   | {
       type: "optimistic-user-message";
       sessioRuntimeSessionId: string;
@@ -52,7 +50,17 @@ export interface LiveRuntimeSession {
   workspacePath: string;
   capabilities: RuntimeCapabilitySet;
   turns: LiveTurn[];
+  sessionState: AcpSessionState;
+  protocolMessages: AcpProtocolMessage[];
   ended: boolean;
+}
+
+export interface AcpSessionState {
+  plan: unknown | null;
+  availableCommands: unknown[];
+  currentModeId: string | null;
+  configOptions: unknown[];
+  sessionInfo: Record<string, unknown> | null;
 }
 
 export interface LiveRuntimeStatus {
@@ -61,54 +69,63 @@ export interface LiveRuntimeStatus {
   ended: boolean;
 }
 
-export type LiveSessionActivity =
-  | "idle"
-  | "running"
-  | "failed"
-  | "cancelled"
-  | "updated";
+export type LiveSessionActivity = "idle" | "running" | "failed" | "cancelled" | "updated";
 
 export interface LiveTurn {
   turnId: string;
   status: RuntimeTurnStatus;
-  userText: string;
-  assistantText: string;
-  reasoningText: string;
-  parts: LiveMessagePart[];
-  tools: LiveToolCall[];
-  permissions: LivePermissionRequest[];
+  blocks: AcpRenderBlock[];
+  tools: AcpToolCall[];
+  permissions: AcpPermissionRequest[];
+  protocolMessages: AcpProtocolMessage[];
+  stopReason: string | null;
   error: RuntimeError | null;
   startedAt: number;
   updatedAt: number;
 }
 
-export type LiveMessagePart =
-  | { kind: "user"; text: string }
-  | { kind: "assistantText"; text: string }
-  | { kind: "reasoning"; text: string }
+export type AcpRenderBlock =
+  | { kind: "user"; blocks: AcpContentBlock[]; raw: unknown }
+  | { kind: "assistant"; blocks: AcpContentBlock[]; raw: unknown }
+  | { kind: "thought"; blocks: AcpContentBlock[]; raw: unknown }
   | { kind: "tool"; toolId: string }
-  | { kind: "sessionUpdate"; updateType: string; data: unknown }
-  | { kind: "acpProtocolMessage"; message: unknown }
   | { kind: "permission"; requestId: string }
+  | { kind: "sessionUpdate"; updateType: string; data: unknown }
   | { kind: "error"; error: RuntimeError };
 
-export interface LiveToolCall {
+export interface AcpToolCall {
   toolId: string;
-  name: string;
-  input: unknown | null;
-  inputText: string;
-  outputText: string;
-  status: string | null;
-  data: unknown | null;
+  title: string;
+  kind: string;
+  status: string;
+  content: unknown[];
+  locations: unknown[];
+  rawInput: unknown | null;
+  rawOutput: unknown | null;
+  meta: unknown | null;
+  raw: unknown;
+  updatedAt: number;
 }
 
-export interface LivePermissionRequest {
+export interface AcpPermissionRequest {
   requestId: string;
+  toolCall: unknown;
   toolName: string;
   input: unknown | null;
-  approved: boolean | null;
-  data: unknown | null;
+  options: AcpPermissionOption[];
+  selectedOptionId: string | null;
+  cancelled: boolean;
+  raw: unknown;
 }
+
+export interface AcpPermissionOption {
+  optionId: string;
+  name: string;
+  kind: string;
+  meta: unknown | null;
+}
+
+export type AcpContentBlock = Record<string, unknown> & { type?: string };
 
 export const emptyLiveRuntimeState: LiveRuntimeState = {
   sessions: {},
@@ -118,16 +135,9 @@ export const emptyLiveRuntimeState: LiveRuntimeState = {
 export function liveSessionActivity(
   session: LiveRuntimeSession | null | undefined,
 ): LiveSessionActivity {
-  if (!session || session.turns.length === 0) return "idle";
   const latest = latestLiveTurn(session);
   if (!latest) return "idle";
-  if (
-    latest.status === "pending" ||
-    latest.status === "streaming" ||
-    latest.status === "cancelling"
-  ) {
-    return "running";
-  }
+  if (["pending", "streaming", "cancelling"].includes(latest.status)) return "running";
   if (latest.status === "failed") return "failed";
   if (latest.status === "cancelled") return "cancelled";
   return "updated";
@@ -139,9 +149,7 @@ export function liveSessionUpdatedAt(
   return latestLiveTurn(session)?.updatedAt ?? null;
 }
 
-function latestLiveTurn(
-  session: LiveRuntimeSession | null | undefined,
-): LiveTurn | null {
+function latestLiveTurn(session: LiveRuntimeSession | null | undefined): LiveTurn | null {
   if (!session || session.turns.length === 0) return null;
   return session.turns.reduce((latest, turn) =>
     turn.updatedAt > latest.updatedAt ? turn : latest,
@@ -156,9 +164,7 @@ export function applyRuntimeAction(
   state: LiveRuntimeState,
   action: LiveRuntimeAction,
 ): LiveRuntimeState {
-  if (action.type === "runtime-event") {
-    return applyRuntimeEvent(state, action.event);
-  }
+  if (action.type === "runtime-event") return applyRuntimeEvent(state, action.event);
 
   if (action.type === "ensure-session") {
     return {
@@ -174,77 +180,43 @@ export function applyRuntimeAction(
   if (action.type === "replace-turn-id") {
     const session = state.sessions[action.sessioRuntimeSessionId];
     if (!session) return state;
-    const fromIndex = session.turns.findIndex((turn) => turn.turnId === action.from);
-    if (fromIndex < 0) return state;
-    const toIndex = session.turns.findIndex((turn) => turn.turnId === action.to);
     const turns = session.turns.map(cloneTurn);
-    if (toIndex >= 0 && toIndex !== fromIndex) {
-      turns[toIndex] = mergeTurns(turns[fromIndex], turns[toIndex], action.to);
-      turns.splice(fromIndex, 1);
+    const index = turns.findIndex((turn) => turn.turnId === action.from);
+    if (index < 0) return state;
+    const existing = turns.findIndex((turn) => turn.turnId === action.to);
+    if (existing >= 0 && existing !== index) {
+      turns[existing] = mergeTurns(turns[index], turns[existing], action.to);
+      turns.splice(index, 1);
     } else {
-      turns[fromIndex] = { ...turns[fromIndex], turnId: action.to };
+      turns[index] = { ...turns[index], turnId: action.to };
     }
-    return {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        [session.sessioRuntimeSessionId]: { ...session, turns },
-      },
-    };
+    return updateSession(state, { ...session, turns });
   }
 
   if (action.type === "reconcile-indexed-session") {
-    const session = state.sessions[action.sessioRuntimeSessionId];
-    if (!session) return state;
-    const turns = session.turns.filter(
-      (turn) =>
-        !(
-          turn.status === "completed" &&
-          turn.updatedAt <= action.indexedThrough
-        ),
-    );
-    if (turns.length === session.turns.length) return state;
-    return {
-      ...state,
-      sessions: {
-        ...state.sessions,
-        [session.sessioRuntimeSessionId]: { ...session, turns },
-      },
-    };
+    return state;
   }
 
   const session = state.sessions[action.sessioRuntimeSessionId];
   if (!session) return state;
-  const turns = session.turns.slice();
-  const existingIndex = turns.findIndex((turn) => turn.turnId === action.turnId);
-  const turn =
-    existingIndex >= 0
-      ? cloneTurn(turns[existingIndex])
-      : newTurn(action.turnId, action.timestamp);
-
+  const { turns, turn } = upsertTurn(session.turns, action.turnId, action.timestamp);
   if (action.type === "optimistic-user-message") {
-    turn.userText = action.text;
     turn.status = "streaming";
     turn.updatedAt = action.timestamp;
-    if (!turn.parts.some((part) => part.kind === "user" && part.text === action.text)) {
-      turn.parts.push({ kind: "user", text: action.text });
+    if (!turn.blocks.some((block) => block.kind === "user")) {
+      turn.blocks.push({
+        kind: "user",
+        blocks: [{ type: "text", text: action.text }],
+        raw: { optimistic: true, prompt: [{ type: "text", text: action.text }] },
+      });
     }
   } else {
     turn.status = "failed";
     turn.error = action.error;
     turn.updatedAt = action.timestamp;
-    turn.parts.push({ kind: "error", error: action.error });
+    turn.blocks.push({ kind: "error", error: action.error });
   }
-
-  if (existingIndex >= 0) turns[existingIndex] = turn;
-  else turns.push(turn);
-  return {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      [session.sessioRuntimeSessionId]: { ...session, turns },
-    },
-  };
+  return updateSession(state, { ...session, turns });
 }
 
 function camelizeKeys(value: unknown): unknown {
@@ -266,13 +238,10 @@ export function applyRuntimeEvent(
   event: AgentRuntimeEvent,
 ): LiveRuntimeState {
   if (event.sequence <= state.lastSequence) return state;
-
-  const next: LiveRuntimeState = {
-    sessions: { ...state.sessions },
-    lastSequence: event.sequence,
-  };
+  let next: LiveRuntimeState = { sessions: { ...state.sessions }, lastSequence: event.sequence };
 
   if (event.kind === "sessionStarted") {
+    const existing = next.sessions[event.sessioRuntimeSessionId];
     next.sessions[event.sessioRuntimeSessionId] = {
       sessioRuntimeSessionId: event.sessioRuntimeSessionId,
       agent: event.agent,
@@ -280,7 +249,9 @@ export function applyRuntimeEvent(
       transport: event.transport,
       workspacePath: event.workspacePath,
       capabilities: event.capabilities,
-      turns: next.sessions[event.sessioRuntimeSessionId]?.turns ?? [],
+      turns: existing?.turns ?? [],
+      sessionState: existing?.sessionState ?? emptyAcpSessionState(),
+      protocolMessages: existing?.protocolMessages ?? [],
       ended: false,
     };
     return next;
@@ -290,136 +261,197 @@ export function applyRuntimeEvent(
   if (!session) return next;
 
   if (event.kind === "sessionEnded") {
-    next.sessions[event.sessioRuntimeSessionId] = { ...session, ended: true };
+    return updateSession(next, { ...session, ended: true });
+  }
+
+  if (event.kind === "turnStarted") {
+    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
+    turn.status = "streaming";
+    turn.updatedAt = event.timestamp;
+    return updateSession(next, { ...session, turns });
+  }
+
+  if (event.kind === "turnCompleted") {
+    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
+    turn.status = "completed";
+    turn.updatedAt = event.timestamp;
+    return updateSession(next, { ...session, turns });
+  }
+
+  if (event.kind === "turnCancelled") {
+    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
+    turn.status = "cancelled";
+    turn.updatedAt = event.timestamp;
+    return updateSession(next, { ...session, turns });
+  }
+
+  if (event.kind === "turnError") {
+    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
+    turn.status = "failed";
+    turn.error = event.error;
+    turn.updatedAt = event.timestamp;
+    turn.blocks.push({ kind: "error", error: event.error });
+    return updateSession(next, { ...session, turns });
+  }
+
+  if (event.kind === "permissionResolved") {
+    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
+    const permission = turn.permissions.find((item) => item.requestId === event.requestId);
+    if (permission) {
+      permission.cancelled = false;
+      permission.selectedOptionId = permission.options.find((option) =>
+        event.approved ? option.kind.startsWith("allow") : option.kind.startsWith("reject"),
+      )?.optionId ?? null;
+    }
+    turn.updatedAt = event.timestamp;
+    return updateSession(next, { ...session, turns });
+  }
+
+  if (event.kind !== "acpProtocolMessage") {
     return next;
   }
 
-  if (event.kind === "acpProtocolMessage" && !event.turnId) {
-    return next;
+  const message = event.message;
+  const protocolMessages = appendProtocolMessage(session.protocolMessages, message);
+  if (!event.turnId) {
+    return updateSession(next, {
+      ...session,
+      protocolMessages,
+      sessionState: applySessionLevelMessage(session.sessionState, message),
+    });
   }
 
-  const turns = session.turns.slice();
-  const eventTurnId = "turnId" in event ? event.turnId : null;
-  let existingIndex = eventTurnId
-    ? turns.findIndex((turn) => turn.turnId === eventTurnId)
-    : -1;
-  const turn =
-    existingIndex >= 0
-      ? cloneTurn(turns[existingIndex])
-      : eventTurnId
-        ? newTurn(eventTurnId, event.timestamp)
-        : null;
-  if (!turn) return next;
-
+  const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
+  turn.protocolMessages = appendProtocolMessage(turn.protocolMessages, message);
   turn.updatedAt = event.timestamp;
+  applyAcpMessageToTurn(turn, message, event.timestamp);
+  return updateSession(next, {
+    ...session,
+    turns,
+    protocolMessages,
+    sessionState: applySessionLevelMessage(session.sessionState, message),
+  });
+}
 
-  switch (event.kind) {
-    case "turnStarted":
-      turn.status = "streaming";
+function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, timestamp: number): void {
+  if (message.method === "session/prompt" && message.direction === "client_to_agent") {
+    const prompt = asRecord(message.data).prompt;
+    turn.status = "streaming";
+    replaceOrAppendUserBlock(turn, {
+      kind: "user",
+      blocks: normalizeContentBlocks(prompt),
+      raw: message.data,
+    });
+    return;
+  }
+
+  if (message.method === "session/prompt" && message.direction === "agent_to_client") {
+    const stopReason = stringField(message.data, "stopReason");
+    turn.stopReason = stopReason;
+    turn.status = stopReason === "cancelled" ? "cancelled" : "completed";
+    return;
+  }
+
+  if (message.method === "session/request_permission") {
+    if (message.messageKind === "request") {
+      const permission = permissionFromMessage(message);
+      if (permission) upsertPermission(turn, permission);
+      return;
+    }
+    if (message.messageKind === "response") {
+      const optionId = selectedPermissionOptionId(message.data);
+      const latest = turn.permissions[turn.permissions.length - 1];
+      if (latest) {
+        latest.selectedOptionId = optionId;
+        latest.cancelled = !optionId;
+      }
+      return;
+    }
+  }
+
+  if (message.method !== "session/update") return;
+  const update = asRecord(message.data).update;
+  const updateType = stringField(update, "sessionUpdate") ?? message.updateType ?? "unknown";
+
+  switch (updateType) {
+    case "user_message_chunk":
+      appendContentBlock(turn, "user", normalizeContentBlocks(asRecord(update).content), update);
       break;
-    case "textDelta":
-      turn.assistantText += event.text;
-      appendTextPart(turn.parts, "assistantText", event.text);
-      turn.status = "streaming";
+    case "agent_message_chunk":
+      appendContentBlock(turn, "assistant", normalizeContentBlocks(asRecord(update).content), update);
+      turn.status = turn.status === "pending" ? "streaming" : turn.status;
       break;
-    case "reasoningDelta":
-      turn.reasoningText += event.text;
-      appendTextPart(turn.parts, "reasoning", event.text);
+    case "agent_thought_chunk":
+      appendContentBlock(turn, "thought", normalizeContentBlocks(asRecord(update).content), update);
       break;
-    case "toolStarted":
-      turn.tools.push({
-        toolId: event.toolId,
-        name: event.name,
-        input: event.input,
-        inputText: "",
-        outputText: "",
-        status: null,
-        data: event.data,
-      });
-      turn.parts.push({ kind: "tool", toolId: event.toolId });
-      break;
-    case "toolInputDelta": {
-      const tool = upsertTool(turn, event.toolId);
-      tool.inputText += event.delta;
-      tool.data = event.data ?? tool.data;
+    case "tool_call": {
+      const tool = toolFromValue(update, timestamp);
+      upsertTool(turn, tool);
+      ensureBlock(turn, { kind: "tool", toolId: tool.toolId });
       break;
     }
-    case "toolOutputDelta": {
-      const tool = upsertTool(turn, event.toolId);
-      tool.outputText += event.delta;
-      tool.data = event.data ?? tool.data;
+    case "tool_call_update": {
+      const tool = toolUpdateFromValue(update, timestamp);
+      upsertTool(turn, tool);
+      ensureBlock(turn, { kind: "tool", toolId: tool.toolId });
       break;
     }
-    case "toolStatusChanged": {
-      const tool = upsertTool(turn, event.toolId);
-      tool.status = event.status;
-      tool.data = event.data ?? tool.data;
-      break;
-    }
-    case "sessionUpdate":
-      turn.parts.push({
-        kind: "sessionUpdate",
-        updateType: event.updateType,
-        data: event.data,
-      });
-      break;
-    case "acpProtocolMessage":
-      turn.parts.push({
-        kind: "acpProtocolMessage",
-        message: event.message,
-      });
-      break;
-    case "permissionRequested":
-      turn.permissions.push({
-        requestId: event.requestId,
-        toolName: event.toolName,
-        input: event.input,
-        approved: null,
-        data: event.data,
-      });
-      turn.parts.push({ kind: "permission", requestId: event.requestId });
-      break;
-    case "permissionResolved":
-      turn.permissions = turn.permissions.map((permission) =>
-        permission.requestId === event.requestId
-          ? { ...permission, approved: event.approved }
-          : permission,
-      );
-      break;
-    case "turnCompleted":
-      turn.status = "completed";
-      break;
-    case "turnError":
-      turn.status = "failed";
-      turn.error = event.error;
-      turn.parts.push({ kind: "error", error: event.error });
-      break;
-    case "turnCancelled":
-      turn.status = "cancelled";
-      break;
     default:
+      turn.blocks.push({ kind: "sessionUpdate", updateType, data: update });
       break;
   }
+}
 
-  if (existingIndex >= 0) {
-    turns[existingIndex] = turn;
-  } else {
-    turns.push(turn);
+function emptyAcpSessionState(): AcpSessionState {
+  return {
+    plan: null,
+    availableCommands: [],
+    currentModeId: null,
+    configOptions: [],
+    sessionInfo: null,
+  };
+}
+
+function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMessage): AcpSessionState {
+  if (message.method !== "session/update") return state;
+  const update = asRecord(message.data).update;
+  const updateType = stringField(update, "sessionUpdate") ?? message.updateType;
+  if (!updateType) return state;
+  switch (updateType) {
+    case "plan":
+      return { ...state, plan: update };
+    case "available_commands":
+      return { ...state, availableCommands: arrayField(update, "availableCommands") };
+    case "current_mode":
+      return { ...state, currentModeId: stringField(update, "currentModeId") };
+    case "config_options":
+      return { ...state, configOptions: arrayField(update, "configOptions") };
+    case "session_info":
+      return { ...state, sessionInfo: asRecord(update) };
+    default:
+      return state;
   }
-  next.sessions[event.sessioRuntimeSessionId] = { ...session, turns };
-  return next;
+}
+
+function upsertTurn(turns: LiveTurn[], turnId: string, timestamp: number): { turns: LiveTurn[]; turn: LiveTurn } {
+  const next = turns.map(cloneTurn);
+  let index = next.findIndex((turn) => turn.turnId === turnId);
+  if (index < 0) {
+    next.push(newTurn(turnId, timestamp));
+    index = next.length - 1;
+  }
+  return { turns: next, turn: next[index] };
 }
 
 function newTurn(turnId: string, timestamp: number): LiveTurn {
   return {
     turnId,
     status: "pending",
-    userText: "",
-    assistantText: "",
-    reasoningText: "",
-    parts: [],
+    blocks: [],
     tools: [],
     permissions: [],
+    protocolMessages: [],
+    stopReason: null,
     error: null,
     startedAt: timestamp,
     updatedAt: timestamp,
@@ -429,9 +461,10 @@ function newTurn(turnId: string, timestamp: number): LiveTurn {
 function cloneTurn(turn: LiveTurn): LiveTurn {
   return {
     ...turn,
-    parts: turn.parts.map((part) => ({ ...part })),
+    blocks: turn.blocks.map((block) => ({ ...block })),
     tools: turn.tools.map((tool) => ({ ...tool })),
-    permissions: turn.permissions.map((permission) => ({ ...permission })),
+    permissions: turn.permissions.map((permission) => ({ ...permission, options: permission.options.map((option) => ({ ...option })) })),
+    protocolMessages: turn.protocolMessages.map((message) => ({ ...message })),
   };
 }
 
@@ -439,74 +472,184 @@ function mergeTurns(localTurn: LiveTurn, runtimeTurn: LiveTurn, turnId: string):
   return {
     ...runtimeTurn,
     turnId,
-    status: runtimeTurn.status === "pending" ? localTurn.status : runtimeTurn.status,
-    userText: localTurn.userText || runtimeTurn.userText,
-    assistantText: localTurn.assistantText + runtimeTurn.assistantText,
-    reasoningText: localTurn.reasoningText + runtimeTurn.reasoningText,
-    parts: [...localTurn.parts, ...runtimeTurn.parts],
-    tools: mergeTools(localTurn.tools, runtimeTurn.tools),
-    permissions: mergePermissions(localTurn.permissions, runtimeTurn.permissions),
+    blocks: [...localTurn.blocks, ...runtimeTurn.blocks],
+    tools: mergeBy(localTurn.tools, runtimeTurn.tools, (tool) => tool.toolId),
+    permissions: mergeBy(localTurn.permissions, runtimeTurn.permissions, (permission) => permission.requestId),
+    protocolMessages: [...localTurn.protocolMessages, ...runtimeTurn.protocolMessages],
     error: runtimeTurn.error ?? localTurn.error,
     startedAt: Math.min(localTurn.startedAt, runtimeTurn.startedAt),
     updatedAt: Math.max(localTurn.updatedAt, runtimeTurn.updatedAt),
   };
 }
 
-function mergeTools(localTools: LiveToolCall[], runtimeTools: LiveToolCall[]): LiveToolCall[] {
-  const merged = localTools.map((tool) => ({ ...tool }));
-  for (const tool of runtimeTools) {
-    const index = merged.findIndex((item) => item.toolId === tool.toolId);
-    if (index >= 0) {
-      merged[index] = { ...merged[index], ...tool };
-    } else {
-      merged.push({ ...tool });
-    }
+function mergeBy<T>(left: T[], right: T[], key: (item: T) => string): T[] {
+  const merged = left.map((item) => ({ ...item }));
+  for (const item of right) {
+    const index = merged.findIndex((existing) => key(existing) === key(item));
+    if (index >= 0) merged[index] = { ...merged[index], ...item };
+    else merged.push({ ...item });
   }
   return merged;
 }
 
-function mergePermissions(
-  localPermissions: LivePermissionRequest[],
-  runtimePermissions: LivePermissionRequest[],
-): LivePermissionRequest[] {
-  const merged = localPermissions.map((permission) => ({ ...permission }));
-  for (const permission of runtimePermissions) {
-    const index = merged.findIndex((item) => item.requestId === permission.requestId);
-    if (index >= 0) {
-      merged[index] = { ...merged[index], ...permission };
-    } else {
-      merged.push({ ...permission });
-    }
-  }
-  return merged;
+function updateSession(state: LiveRuntimeState, session: LiveRuntimeSession): LiveRuntimeState {
+  return {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      [session.sessioRuntimeSessionId]: session,
+    },
+  };
 }
 
-function appendTextPart(
-  parts: LiveMessagePart[],
-  kind: "assistantText" | "reasoning",
-  text: string,
+function appendProtocolMessage(messages: AcpProtocolMessage[], message: AcpProtocolMessage): AcpProtocolMessage[] {
+  return [...messages, message].slice(-240);
+}
+
+function replaceOrAppendUserBlock(turn: LiveTurn, block: Extract<AcpRenderBlock, { kind: "user" }>): void {
+  const index = turn.blocks.findIndex((item) => item.kind === "user");
+  if (index >= 0) turn.blocks[index] = block;
+  else turn.blocks.unshift(block);
+}
+
+function appendContentBlock(
+  turn: LiveTurn,
+  kind: "user" | "assistant" | "thought",
+  blocks: AcpContentBlock[],
+  raw: unknown,
 ): void {
-  const last = parts[parts.length - 1];
+  const last = turn.blocks[turn.blocks.length - 1];
   if (last?.kind === kind) {
-    last.text += text;
+    last.blocks.push(...blocks);
     return;
   }
-  parts.push({ kind, text });
+  turn.blocks.push({ kind, blocks, raw });
 }
 
-function upsertTool(turn: LiveTurn, toolId: string): LiveToolCall {
-  let tool = turn.tools.find((item) => item.toolId === toolId);
-  if (!tool) {
-    tool = {
-      toolId,
-      name: "tool",
-      input: null,
-      inputText: "",
-      outputText: "",
-      status: null,
-      data: null,
-    };
-    turn.tools.push(tool);
+function ensureBlock(turn: LiveTurn, block: Extract<AcpRenderBlock, { kind: "tool" } | { kind: "permission" }>): void {
+  if (block.kind === "tool" && turn.blocks.some((item) => item.kind === "tool" && item.toolId === block.toolId)) return;
+  if (block.kind === "permission" && turn.blocks.some((item) => item.kind === "permission" && item.requestId === block.requestId)) return;
+  turn.blocks.push(block);
+}
+
+function normalizeContentBlocks(value: unknown): AcpContentBlock[] {
+  if (Array.isArray(value)) return value.flatMap(normalizeContentBlocks);
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  if (record.content && typeof record.content === "object" && !Array.isArray(record.content)) {
+    return [record.content as AcpContentBlock];
   }
-  return tool;
+  if (typeof record.type === "string") return [record as AcpContentBlock];
+  return [];
+}
+
+function toolFromValue(value: unknown, timestamp: number): AcpToolCall {
+  const record = asRecord(value);
+  const id = stringField(record, "toolCallId") ?? `tool-${timestamp}`;
+  return {
+    toolId: id,
+    title: stringField(record, "title") ?? "tool",
+    kind: stringField(record, "kind") ?? "other",
+    status: stringField(record, "status") ?? "pending",
+    content: arrayField(record, "content"),
+    locations: arrayField(record, "locations"),
+    rawInput: record.rawInput ?? null,
+    rawOutput: record.rawOutput ?? null,
+    meta: record.meta ?? null,
+    raw: value,
+    updatedAt: timestamp,
+  };
+}
+
+function toolUpdateFromValue(value: unknown, timestamp: number): AcpToolCall {
+  const record = asRecord(value);
+  return {
+    toolId: stringField(record, "toolCallId") ?? `tool-${timestamp}`,
+    title: stringField(record, "title") ?? "tool",
+    kind: stringField(record, "kind") ?? "other",
+    status: stringField(record, "status") ?? "pending",
+    content: arrayField(record, "content"),
+    locations: arrayField(record, "locations"),
+    rawInput: record.rawInput ?? null,
+    rawOutput: record.rawOutput ?? null,
+    meta: record.meta ?? null,
+    raw: value,
+    updatedAt: timestamp,
+  };
+}
+
+function upsertTool(turn: LiveTurn, nextTool: AcpToolCall): void {
+  const index = turn.tools.findIndex((tool) => tool.toolId === nextTool.toolId);
+  if (index < 0) {
+    turn.tools.push(nextTool);
+    return;
+  }
+  const current = turn.tools[index];
+  turn.tools[index] = {
+    ...current,
+    ...nextTool,
+    title: nextTool.title === "tool" ? current.title : nextTool.title,
+    kind: nextTool.kind === "other" ? current.kind : nextTool.kind,
+    status: nextTool.status === "pending" && current.status ? current.status : nextTool.status,
+    content: nextTool.content.length > 0 ? nextTool.content : current.content,
+    locations: nextTool.locations.length > 0 ? nextTool.locations : current.locations,
+    rawInput: nextTool.rawInput ?? current.rawInput,
+    rawOutput: nextTool.rawOutput ?? current.rawOutput,
+  };
+}
+
+function permissionFromMessage(message: AcpProtocolMessage): AcpPermissionRequest | null {
+  const data = asRecord(message.data);
+  const requestId = message.requestId ?? stringField(asRecord(data.toolCall), "toolCallId");
+  if (!requestId) return null;
+  const toolCall = asRecord(data.toolCall);
+  const fields = asRecord(toolCall.fields ?? toolCall);
+  return {
+    requestId,
+    toolCall: data.toolCall ?? null,
+    toolName: stringField(fields, "title") ?? "tool",
+    input: fields.rawInput ?? null,
+    options: arrayField(data, "options").map((item) => {
+      const option = asRecord(item);
+      return {
+        optionId: stringField(option, "optionId") ?? "",
+        name: stringField(option, "name") ?? "Option",
+        kind: stringField(option, "kind") ?? "unknown",
+        meta: option.meta ?? null,
+      };
+    }),
+    selectedOptionId: null,
+    cancelled: false,
+    raw: message.data,
+  };
+}
+
+function upsertPermission(turn: LiveTurn, permission: AcpPermissionRequest): void {
+  const index = turn.permissions.findIndex((item) => item.requestId === permission.requestId);
+  if (index >= 0) turn.permissions[index] = { ...turn.permissions[index], ...permission };
+  else turn.permissions.push(permission);
+  ensureBlock(turn, { kind: "permission", requestId: permission.requestId });
+}
+
+function selectedPermissionOptionId(value: unknown): string | null {
+  const outcome = asRecord(value).outcome;
+  const record = asRecord(outcome);
+  if (stringField(record, "outcome") === "cancelled") return null;
+  return stringField(record, "optionId");
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function stringField(value: unknown, key: string): string | null {
+  const item = asRecord(value)[key];
+  return typeof item === "string" ? item : null;
+}
+
+function arrayField(value: unknown, key: string): unknown[] {
+  const item = asRecord(value)[key];
+  return Array.isArray(item) ? item : [];
 }

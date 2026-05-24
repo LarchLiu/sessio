@@ -24,6 +24,7 @@ import "katex/dist/katex.min.css";
 import {
   SessionInfo,
   SessionMessage,
+  RuntimeError,
   SubagentInfo,
   ensureAgentRuntimeSession,
   getSessionMessages,
@@ -38,6 +39,10 @@ import Tooltip from "./Tooltip";
 import { localeTag, useI18n } from "../i18n";
 import type { ViewMode } from "../App";
 import {
+  type AcpContentBlock,
+  type AcpPermissionRequest,
+  type AcpRenderBlock,
+  type AcpToolCall,
   type LiveRuntimeAction,
   type LiveRuntimeState,
   type LiveRuntimeSession,
@@ -105,7 +110,6 @@ interface MessageCacheEntry {
   messages: SessionMessage[];
   messageCount: number;
   loadedAt: number;
-  liveItems: MessageRenderItem[];
 }
 
 interface ScrollAnchor {
@@ -339,9 +343,6 @@ function MessageStream({
   const [messages, setMessages] = useState<SessionMessage[]>(
     cachedEntry?.messages ?? [],
   );
-  const [cachedLiveItems, setCachedLiveItems] = useState<MessageRenderItem[]>(
-    cachedEntry?.liveItems ?? [],
-  );
   const [loading, setLoading] = useState(() => !isFreshCache);
   const [error, setError] = useState<string | null>(null);
   const runtimeSessionId = sessionId;
@@ -365,7 +366,6 @@ function MessageStream({
   useLayoutEffect(() => {
     if (!available || !filePath) {
       setMessages([]);
-      setCachedLiveItems([]);
       setLoading(false);
       setError(null);
       pendingInitialPositionRef.current = null;
@@ -375,12 +375,10 @@ function MessageStream({
     const cached = messageCache.get(sourceKey);
     if (cached) {
       setMessages(cached.messages);
-      setCachedLiveItems(cached.liveItems);
       setLoading(cached.messageCount !== messageCount);
       setError(null);
     } else {
       setMessages([]);
-      setCachedLiveItems([]);
       setLoading(true);
       setError(null);
     }
@@ -407,7 +405,6 @@ function MessageStream({
               messages: result.messages,
               messageCount: result.messageCount,
               loadedAt: Date.now(),
-              liveItems: messageCache.get(sourceKey)?.liveItems ?? [],
             });
             startTransition(() => {
               setMessages(result.messages);
@@ -456,27 +453,22 @@ function MessageStream({
   ]);
 
   const displayItems = useMemo(() => {
+    if (liveSession && liveSession.turns.length > 0) {
+      return liveTurnsToRenderItems(liveSession.turns);
+    }
     const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
     const filtered =
       viewMode === "native"
         ? all
         : all.filter(({ m }) => isConversationRole(m.role));
-    const historical = moveFileEditsToTurnEnd(pairToolMessages(filtered));
-    const liveItems = liveSession
-      ? liveTurnsToRenderItems(
-        liveSession.sessioRuntimeSessionId,
-        liveSession.turns,
-        runtimeNow,
-      )
-      : cachedLiveItems;
-    return [...historical, ...liveItems];
-  }, [cachedLiveItems, liveSession, messages, runtimeNow, viewMode]);
+    return moveFileEditsToTurnEnd(pairToolMessages(filtered));
+  }, [liveSession, messages, viewMode]);
 
   const liveStreamingKey = useMemo(() => {
     if (!liveSession) return "";
     return liveSession.turns
       .filter((turn) => turn.status === "streaming")
-      .map((turn) => `${turn.turnId}:${turn.assistantText.length}:${turn.reasoningText.length}`)
+      .map((turn) => `${turn.turnId}:${turn.blocks.length}:${turn.updatedAt}`)
       .join("|");
   }, [liveSession]);
   const liveActiveKey = useMemo(() => {
@@ -493,9 +485,7 @@ function MessageStream({
         [
           turn.turnId,
           turn.status,
-          turn.userText.length,
-          turn.assistantText.length,
-          turn.reasoningText.length,
+          turn.blocks.length,
           turn.tools.length,
           turn.permissions.length,
           turn.updatedAt,
@@ -504,26 +494,7 @@ function MessageStream({
       .join("|");
   }, [liveSession]);
 
-  useEffect(() => {
-    if (!liveSession) return;
-    const liveItems = liveTurnsToRenderItems(
-      liveSession.sessioRuntimeSessionId,
-      liveSession.turns,
-      Date.now(),
-    );
-    setCachedLiveItems(liveItems);
-    const cached = messageCache.get(sourceKey);
-    if (cached) {
-      messageCache.set(sourceKey, { ...cached, liveItems });
-    } else {
-      messageCache.set(sourceKey, {
-        messages,
-        messageCount,
-        loadedAt: Date.now(),
-        liveItems,
-      });
-    }
-  }, [liveCacheKey, liveSession, messageCount, messages, sourceKey]);
+  void liveCacheKey;
   const activeTurnId = useMemo(() => {
     if (!liveSession) return null;
     return liveSession.turns.find((turn) =>
@@ -805,15 +776,25 @@ function MessageStream({
               }}
               className={
                 "message-render-contain " +
-                (item.message.role === "user" ? "flex justify-end" : "")
+                (renderItemRole(item) === "user" ? "flex justify-end" : "")
               }
             >
-              <MessageBubble
-                msg={item.message}
-                toolResult={item.toolResult}
-                onPreviewImage={onPreviewImage}
-                onPermissionResponse={respondAgentPermission}
-              />
+              {item.acp ? (
+                <AcpLiveItem
+                  item={item.acp}
+                  sessioRuntimeSessionId={runtimeSessionId}
+                  now={runtimeNow}
+                  onPreviewImage={onPreviewImage}
+                  onPermissionResponse={respondAgentPermission}
+                />
+              ) : item.message ? (
+                <MessageBubble
+                  msg={item.message}
+                  toolResult={item.toolResult}
+                  onPreviewImage={onPreviewImage}
+                  onPermissionResponse={respondAgentPermission}
+                />
+              ) : null}
             </div>
           ))}
         </div>
@@ -834,14 +815,14 @@ function MessageStream({
       <RoleNav
         role="assistant"
         side="left"
-        messages={displayItems.map((d) => d.message)}
+        messages={displayItems.map(renderItemNavMessage)}
         refs={bubbleRefs}
         viewportRef={viewportRef}
       />
       <RoleNav
         role="user"
         side="right"
-        messages={displayItems.map((d) => d.message)}
+        messages={displayItems.map(renderItemNavMessage)}
         refs={bubbleRefs}
         viewportRef={viewportRef}
       />
@@ -869,6 +850,14 @@ function pendingLiveSession(handle: {
       supportsModes: false,
     },
     turns: [],
+    sessionState: {
+      plan: null,
+      availableCommands: [],
+      currentModeId: null,
+      configOptions: [],
+      sessionInfo: null,
+    },
+    protocolMessages: [],
     ended: false,
   };
 }
@@ -1265,6 +1254,284 @@ function findScroller(el: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
+function AcpLiveItem({
+  item,
+  sessioRuntimeSessionId,
+  now,
+  onPreviewImage,
+  onPermissionResponse,
+}: {
+  item: AcpRenderItem;
+  sessioRuntimeSessionId: string;
+  now: number;
+  onPreviewImage: (image: MarkdownImage) => void;
+  onPermissionResponse: (
+    sessioRuntimeSessionId: string,
+    requestId: string,
+    approved: boolean,
+  ) => Promise<void>;
+}) {
+  if (item.kind === "turnStatus") {
+    return <RuntimeStatusContent text={liveTurnStatusText(item.turn, now)} />;
+  }
+  if (item.kind === "tool") {
+    return <AcpToolCard tool={item.tool} onPreviewImage={onPreviewImage} />;
+  }
+  if (item.kind === "permission") {
+    return (
+      <AcpPermissionCard
+        sessioRuntimeSessionId={sessioRuntimeSessionId}
+        permission={item.permission}
+        onRespond={onPermissionResponse}
+      />
+    );
+  }
+  if (item.kind === "error") {
+    return (
+      <div className="rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
+        {item.error.message}
+      </div>
+    );
+  }
+  return (
+    <AcpContentBlockGroup
+      block={item.block}
+      timestamp={item.turn.updatedAt}
+      onPreviewImage={onPreviewImage}
+    />
+  );
+}
+
+function AcpContentBlockGroup({
+  block,
+  timestamp,
+  onPreviewImage,
+}: {
+  block: AcpRenderBlock;
+  timestamp: number;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  if (block.kind !== "user" && block.kind !== "assistant" && block.kind !== "thought") {
+    return null;
+  }
+  const isUser = block.kind === "user";
+  const label =
+    block.kind === "thought" ? "Thinking" : block.kind === "assistant" ? "assistant" : "user";
+  return (
+    <div
+      className={
+        "text-body leading-relaxed break-words " +
+        (isUser
+          ? "w-fit max-w-[75%] rounded-lg border border-ink/[0.04] bg-ink/[0.06] px-4 py-3"
+          : block.kind === "thought"
+            ? "py-1.5 text-ink/55 text-body-sm"
+            : "px-0 py-1 text-ink/85")
+      }
+    >
+      <div className="mb-2 flex items-center gap-2 leading-none">
+        {block.kind === "thought" && (
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink/35" />
+        )}
+        <span className="text-caption font-medium uppercase text-ink/40">
+          {label}
+        </span>
+        <span className="text-caption text-ink/30">
+          {new Date(timestamp).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </span>
+      </div>
+      <div className={block.kind === "thought" ? "ml-3.5" : ""}>
+        <AcpContentBlocks blocks={block.blocks} onPreviewImage={onPreviewImage} />
+      </div>
+    </div>
+  );
+}
+
+function AcpContentBlocks({
+  blocks,
+  onPreviewImage,
+}: {
+  blocks: AcpContentBlock[];
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {blocks.map((block, index) => (
+        <AcpContentBlockView
+          key={index}
+          block={block}
+          onPreviewImage={onPreviewImage}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AcpContentBlockView({
+  block,
+  onPreviewImage,
+}: {
+  block: AcpContentBlock;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const type = String(block.type ?? "unknown");
+  if (type === "text") {
+    return (
+      <MarkdownContent
+        text={typeof block.text === "string" ? block.text : ""}
+        onPreviewImage={onPreviewImage}
+      />
+    );
+  }
+  if (type === "image") {
+    const mimeType = typeof block.mimeType === "string" ? block.mimeType : "image";
+    const uri = typeof block.uri === "string" ? block.uri : "";
+    const data = typeof block.data === "string" ? block.data : "";
+    const src = uri || (data ? `data:${mimeType};base64,${data}` : "");
+    return src ? (
+      <MarkdownImageButton
+        image={{ alt: mimeType, src }}
+        onPreviewImage={onPreviewImage}
+      />
+    ) : (
+      <PlainTextContent text={JSON.stringify(block, null, 2)} />
+    );
+  }
+  if (type === "audio") {
+    return <PlainTextContent text={`Audio: ${String(block.mimeType ?? "unknown")}`} />;
+  }
+  if (type === "resource_link") {
+    return (
+      <div className="rounded-md border border-ink/[0.08] bg-ink/[0.035] px-3 py-2 text-body-sm">
+        <div className="font-medium text-ink/75">{String(block.name ?? "Resource")}</div>
+        <div className="truncate font-mono text-caption text-ink/45">{String(block.uri ?? "")}</div>
+      </div>
+    );
+  }
+  return <PlainTextContent text={JSON.stringify(block, null, 2)} />;
+}
+
+function AcpToolCard({
+  tool,
+  onPreviewImage,
+}: {
+  tool: AcpToolCall;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const input = tool.rawInput === null ? "" : JSON.stringify(tool.rawInput, null, 2);
+  const output =
+    tool.rawOutput !== null
+      ? JSON.stringify(tool.rawOutput, null, 2)
+      : tool.content.length > 0
+        ? tool.content.map(formatAcpToolContent).join("\n\n")
+        : "";
+  return (
+    <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-ink/[0.045] text-body-sm">
+      <div className="flex items-center justify-between gap-3 border-b border-ink/[0.07] px-3 py-2">
+        <div className="min-w-0">
+          <div className="truncate font-medium text-ink/80">{tool.title}</div>
+          <div className="text-caption text-ink/45">{tool.kind} · {formatToolStatus(tool.status)}</div>
+        </div>
+      </div>
+      {(input || output || tool.locations.length > 0) && (
+        <div className="space-y-2 px-3 py-2">
+          {input && <ToolPairRow label="IN" text={input} collapsed={false} onPreviewImage={onPreviewImage} />}
+          {output && <ToolPairRow label="OUT" text={output} collapsed={false} onPreviewImage={onPreviewImage} />}
+          {tool.locations.length > 0 && (
+            <PlainTextContent text={JSON.stringify(tool.locations, null, 2)} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AcpPermissionCard({
+  sessioRuntimeSessionId,
+  permission,
+  onRespond,
+}: {
+  sessioRuntimeSessionId: string;
+  permission: AcpPermissionRequest;
+  onRespond: (
+    sessioRuntimeSessionId: string,
+    requestId: string,
+    approved: boolean,
+  ) => Promise<void>;
+}) {
+  const [pendingChoice, setPendingChoice] = useState<"allow" | "reject" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const resolved = Boolean(permission.selectedOptionId || permission.cancelled);
+  const respond = (approved: boolean) => {
+    if (resolved || pendingChoice) return;
+    setPendingChoice(approved ? "allow" : "reject");
+    setError(null);
+    onRespond(sessioRuntimeSessionId, permission.requestId, approved).catch((err) => {
+      setError(String(err));
+      setPendingChoice(null);
+    });
+  };
+  return (
+    <div className="rounded-md border border-ink/[0.08] bg-ink/[0.045] px-3 py-2 text-body-sm">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div>
+          <div className="font-medium text-ink/80">Permission · {permission.toolName}</div>
+          <div className="text-caption text-ink/45">
+            {resolved ? "Resolved" : "Waiting for approval"}
+          </div>
+        </div>
+      </div>
+      {permission.input !== null && (
+        <PlainTextContent text={JSON.stringify(permission.input, null, 2)} />
+      )}
+      {!resolved && (
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={Boolean(pendingChoice)}
+            onClick={() => respond(true)}
+            className="rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-2.5 py-1 text-caption font-medium text-[rgb(var(--color-emerald))] transition hover:bg-[rgb(var(--color-emerald)/0.18)] disabled:cursor-not-allowed disabled:opacity-55"
+          >
+            {pendingChoice === "allow" ? "Allowing..." : "Allow"}
+          </button>
+          <button
+            type="button"
+            disabled={Boolean(pendingChoice)}
+            onClick={() => respond(false)}
+            className="rounded-md border border-ink/12 bg-ink/[0.04] px-2.5 py-1 text-caption font-medium text-ink/60 transition hover:bg-ink/[0.07] hover:text-ink/80 disabled:cursor-not-allowed disabled:opacity-55"
+          >
+            {pendingChoice === "reject" ? "Rejecting..." : "Reject"}
+          </button>
+        </div>
+      )}
+      {error && <div className="mt-2 text-caption text-status-error">{error}</div>}
+    </div>
+  );
+}
+
+function contentBlocksText(blocks: AcpContentBlock[]): string {
+  return blocks.map((block) => {
+    if (block.type === "text" && typeof block.text === "string") return block.text;
+    if (block.type === "image") return `[image: ${String(block.mimeType ?? "")}]`;
+    if (block.type === "resource_link") return `[resource: ${String(block.uri ?? "")}]`;
+    return JSON.stringify(block);
+  }).join("\n");
+}
+
+function formatAcpToolContent(content: unknown): string {
+  if (!content || typeof content !== "object") return String(content ?? "");
+  const record = content as Record<string, unknown>;
+  if (record.type === "content") {
+    const inner = record.content as AcpContentBlock | undefined;
+    return inner ? contentBlocksText([inner]) : JSON.stringify(record, null, 2);
+  }
+  if (record.type === "diff") return JSON.stringify(record, null, 2);
+  if (record.type === "terminal") return `Terminal: ${String(record.terminalId ?? "")}`;
+  return JSON.stringify(record, null, 2);
+}
+
 const MessageBubble = memo(function MessageBubble({
   msg,
   toolResult,
@@ -1570,144 +1837,64 @@ function latestMessageTimestamp(messages: SessionMessage[]): number | null {
 
 interface MessageRenderItem {
   key: string;
-  message: SessionMessage;
+  kind?: "legacy" | "acp";
+  message?: SessionMessage;
+  acp?: AcpRenderItem;
   toolResult?: SessionMessage;
 }
 
-function liveTurnsToRenderItems(
-  sessioRuntimeSessionId: string,
-  turns: LiveTurn[],
-  now: number,
-): MessageRenderItem[] {
+type AcpRenderItem =
+  | { kind: "turnStatus"; turn: LiveTurn }
+  | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
+  | { kind: "tool"; turn: LiveTurn; tool: AcpToolCall }
+  | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
+  | { kind: "error"; turn: LiveTurn; error: RuntimeError };
+
+function liveTurnsToRenderItems(turns: LiveTurn[]): MessageRenderItem[] {
   const items: MessageRenderItem[] = [];
   for (const turn of turns) {
-    if (turn.userText.trim()) {
-      items.push({
-        key: `live:${turn.turnId}:user`,
-        message: {
-          role: "user",
-          text: turn.userText,
-          timestamp: turn.startedAt,
-        },
-      });
-    }
-
     items.push({
       key: `live:${turn.turnId}:status`,
-      message: {
-        role: "runtime_status",
-        text: liveTurnStatusText(turn, now),
-        timestamp: null,
-      },
+      kind: "acp",
+      acp: { kind: "turnStatus", turn },
     });
-
     const renderedTools = new Set<string>();
     const renderedPermissions = new Set<string>();
-    for (const part of turn.parts) {
-      if (part.kind === "user") continue;
-      if (part.kind === "reasoning") {
-        items.push({
-          key: `live:${turn.turnId}:reasoning:${items.length}`,
-          message: {
-            role: "thinking",
-            text: part.text,
-            timestamp: turn.startedAt,
-          },
-        });
-        continue;
-      }
-      if (part.kind === "assistantText") {
-        items.push({
-          key: `live:${turn.turnId}:assistant:${items.length}`,
-          message: {
-            role: "assistant",
-            text: part.text,
-            timestamp: turn.updatedAt,
-          },
-        });
-        continue;
-      }
-      if (part.kind === "tool" && !renderedTools.has(part.toolId)) {
-        const tool = turn.tools.find((item) => item.toolId === part.toolId);
-        if (!tool) continue;
-        renderedTools.add(part.toolId);
-        const inputText =
-          tool.inputText ||
-          (tool.input === null ? "" : JSON.stringify(tool.input, null, 2));
-        const hasOutput = tool.outputText.trim().length > 0;
-        const statusText = tool.status ? `Status: ${formatToolStatus(tool.status)}` : "";
-        const toolText = [`[${tool.name}]`, inputText, statusText].filter(Boolean).join("\n");
+    turn.blocks.forEach((block, index) => {
+      if (block.kind === "tool") {
+        const tool = turn.tools.find((item) => item.toolId === block.toolId);
+        if (!tool || renderedTools.has(tool.toolId)) return;
+        renderedTools.add(tool.toolId);
         items.push({
           key: `live:${turn.turnId}:tool:${tool.toolId}`,
-          message: {
-            role: "tool_call",
-            text: toolText,
-            timestamp: turn.updatedAt,
-            toolCallId: tool.toolId,
-          },
-          toolResult: hasOutput
-            ? {
-                role: "tool_result",
-                text: tool.outputText,
-                timestamp: turn.updatedAt,
-                toolCallId: tool.toolId,
-              }
-            : undefined,
+          kind: "acp",
+          acp: { kind: "tool", turn, tool },
         });
-        continue;
+        return;
       }
-      if (part.kind === "sessionUpdate") {
-        items.push({
-          key: `live:${turn.turnId}:session-update:${items.length}`,
-          message: {
-            role: "tool_call",
-            text: `[${sessionUpdateTitle(part.updateType)}]\n${JSON.stringify(part.data, null, 2)}`,
-            timestamp: turn.updatedAt,
-          },
-        });
-        continue;
-      }
-      if (part.kind === "permission" && !renderedPermissions.has(part.requestId)) {
-        const permission = turn.permissions.find((item) => item.requestId === part.requestId);
-        if (!permission) continue;
-        renderedPermissions.add(part.requestId);
-        const inputText =
-          permission.input === null ? "" : JSON.stringify(permission.input, null, 2);
-        const status =
-          permission.approved === null
-            ? "Waiting for permission"
-            : permission.approved
-              ? "Approved"
-              : "Rejected";
+      if (block.kind === "permission") {
+        const permission = turn.permissions.find((item) => item.requestId === block.requestId);
+        if (!permission || renderedPermissions.has(permission.requestId)) return;
+        renderedPermissions.add(permission.requestId);
         items.push({
           key: `live:${turn.turnId}:permission:${permission.requestId}`,
-          message: {
-            role: "permission_request",
-            text: `[${permission.toolName}] ${status}${inputText ? `\n${inputText}` : ""}`,
-            timestamp: turn.updatedAt,
-            toolCallId: `permission:${sessioRuntimeSessionId}:${permission.requestId}:${permission.approved === null ? "pending" : "resolved"}`,
-          },
+          kind: "acp",
+          acp: { kind: "permission", turn, permission },
         });
+        return;
       }
-    }
+      if (block.kind === "error") return;
+      items.push({
+        key: `live:${turn.turnId}:block:${index}`,
+        kind: "acp",
+        acp: { kind: "block", turn, block },
+      });
+    });
     if (turn.error) {
       items.push({
         key: `live:${turn.turnId}:error`,
-        message: {
-          role: "tool_result",
-          text: turn.error.message,
-          timestamp: turn.updatedAt,
-        },
-      });
-    }
-    if (turn.status === "cancelled") {
-      items.push({
-        key: `live:${turn.turnId}:interrupted`,
-        message: {
-          role: "turn_note",
-          text: "interrupted by user",
-          timestamp: turn.updatedAt,
-        },
+        kind: "acp",
+        acp: { kind: "error", turn, error: turn.error },
       });
     }
   }
@@ -1723,6 +1910,32 @@ function liveTurnStatusText(turn: LiveTurn, now: number): string {
   return `${running ? "running" : "done"}|${formatDuration(elapsedMs)}`;
 }
 
+function renderItemRole(item: MessageRenderItem): string {
+  if (item.message) return item.message.role;
+  const acp = item.acp;
+  if (!acp) return "";
+  if (acp.kind === "block") {
+    if (acp.block.kind === "user") return "user";
+    if (acp.block.kind === "assistant") return "assistant";
+    if (acp.block.kind === "thought") return "thinking";
+  }
+  return "tool_call";
+}
+
+function renderItemNavMessage(item: MessageRenderItem): SessionMessage {
+  if (item.message) return item.message;
+  const acp = item.acp;
+  if (!acp || acp.kind !== "block") return { role: "", text: "", timestamp: null };
+  if (acp.block.kind !== "user" && acp.block.kind !== "assistant") {
+    return { role: "", text: "", timestamp: null };
+  }
+  return {
+    role: acp.block.kind === "user" ? "user" : "assistant",
+    text: contentBlocksText(acp.block.blocks),
+    timestamp: acp.turn.updatedAt,
+  };
+}
+
 function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
   if (totalSeconds < 60) return `${totalSeconds}s`;
@@ -1733,23 +1946,6 @@ function formatDuration(ms: number): string {
 
 function formatToolStatus(status: string): string {
   return status.replace(/_/g, " ");
-}
-
-function sessionUpdateTitle(updateType: string): string {
-  switch (updateType) {
-    case "plan":
-      return "Plan";
-    case "available_commands":
-      return "Available commands";
-    case "current_mode":
-      return "Current mode";
-    case "config_options":
-      return "Config options";
-    case "session_info":
-      return "Session info";
-    default:
-      return `ACP ${formatToolStatus(updateType)}`;
-  }
 }
 
 function pairToolMessages(
@@ -1791,15 +1987,15 @@ function moveFileEditsToTurnEnd(items: MessageRenderItem[]): MessageRenderItem[]
   let turn: MessageRenderItem[] = [];
   const flush = () => {
     if (turn.length === 0) return;
-    const edits = turn.filter((item) => item.message.role === "file_edit");
-    const rest = turn.filter((item) => item.message.role !== "file_edit");
+    const edits = turn.filter((item) => item.message?.role === "file_edit");
+    const rest = turn.filter((item) => item.message?.role !== "file_edit");
     const mergedEdit = mergeFileEditItems(edits);
     out.push(...rest);
     if (mergedEdit) out.push(mergedEdit);
     turn = [];
   };
   for (const item of items) {
-    if (item.message.role === "user" && turn.length > 0) {
+    if (item.message?.role === "user" && turn.length > 0) {
       flush();
     }
     turn.push(item);
@@ -1811,7 +2007,7 @@ function moveFileEditsToTurnEnd(items: MessageRenderItem[]): MessageRenderItem[]
 function mergeFileEditItems(items: MessageRenderItem[]): MessageRenderItem | null {
   if (items.length === 0) return null;
   const summaries = items
-    .map((item) => parseFileEditSummary(item.message.text))
+    .map((item) => item.message ? parseFileEditSummary(item.message.text) : null)
     .filter((summary): summary is FileEditSummary => Boolean(summary));
   if (summaries.length === 0) return items[items.length - 1];
   const byPath = new Map<string, FileEditItem>();
@@ -1843,6 +2039,7 @@ function mergeFileEditItems(items: MessageRenderItem[]): MessageRenderItem | nul
   const edits = Array.from(byPath.values());
   const first = items[0].message;
   const last = items[items.length - 1].message;
+  if (!first || !last) return null;
   const source = summaries.find((summary) => summary.source)?.source ?? "session";
   const text = JSON.stringify({
     source,
