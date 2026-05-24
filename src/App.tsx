@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -1651,17 +1651,31 @@ function SidebarSessionStatus({
   activity: ReturnType<typeof liveSessionActivity>;
   unread: boolean;
 }) {
+  if (activity === "permission") {
+    return (
+      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-status-warn">
+        <KeyRound className="h-3 w-3" />
+      </span>
+    );
+  }
+  if (activity === "failed") {
+    return (
+      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-status-error">
+        <CircleAlert className="h-3 w-3" />
+      </span>
+    );
+  }
   if (activity === "running") {
     return (
-      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-status-success">
+      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
         <RefreshCw className="h-3 w-3 animate-spin" />
       </span>
     );
   }
   if (!unread) return null;
   return (
-    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center">
-      <span className="h-1.5 w-1.5 rounded-full bg-accent-purple" />
+    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-accent-purple">
+      <MailPlus className="h-3 w-3" />
     </span>
   );
 }

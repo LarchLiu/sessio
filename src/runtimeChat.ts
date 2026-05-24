@@ -77,7 +77,7 @@ export interface LiveRuntimeStatus {
   ended: boolean;
 }
 
-export type LiveSessionActivity = "idle" | "running" | "failed" | "cancelled" | "updated";
+export type LiveSessionActivity = "idle" | "permission" | "running" | "failed" | "cancelled" | "updated";
 
 export interface LiveTurn {
   turnId: string;
@@ -330,6 +330,7 @@ export function liveSessionActivity(
 ): LiveSessionActivity {
   const latest = latestLiveTurn(session);
   if (!latest) return "idle";
+  if (latest.permissions.some((permission) => !permission.cancelled && !permission.selectedOptionId)) return "permission";
   if (["pending", "streaming", "cancelling"].includes(latest.status)) return "running";
   if (latest.status === "failed") return "failed";
   if (latest.status === "cancelled") return "cancelled";
