@@ -755,7 +755,7 @@ pub fn transport_requested(options: &RuntimeMetadata) -> RuntimeTransportKind {
         .get("transport")
         .and_then(|value| value.as_str())
         .map(transport_from_str)
-        .unwrap_or(RuntimeTransportKind::Fake)
+        .unwrap_or(RuntimeTransportKind::Acp)
 }
 
 pub fn transport_from_config(config: &AgentRuntimeConfig) -> RuntimeTransportKind {
@@ -763,7 +763,7 @@ pub fn transport_from_config(config: &AgentRuntimeConfig) -> RuntimeTransportKin
         .transport
         .as_deref()
         .map(transport_from_str)
-        .unwrap_or(RuntimeTransportKind::Fake)
+        .unwrap_or(RuntimeTransportKind::Acp)
 }
 
 fn transport_from_str(transport: &str) -> RuntimeTransportKind {

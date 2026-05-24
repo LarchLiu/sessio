@@ -357,6 +357,12 @@ export async function startAgentSession(
   return invoke<AgentSessionHandle>("start_agent_session", { req });
 }
 
+export async function createPendingSession(
+  session: SessionInfo,
+): Promise<void> {
+  return invoke<void>("create_pending_session", { session });
+}
+
 export async function forkAgentSession(
   req: StartAgentSessionRequest,
 ): Promise<AgentSessionHandle> {

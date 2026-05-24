@@ -300,7 +300,43 @@ fn existing_subagent_count_state(
     Ok(state)
 }
 
+struct ExistingPlaceholder {
+    session_id: String,
+    scope: String,
+}
+
 fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
+    if let Some(existing) = existing_placeholder(conn, s.agent, &s.id, scope, s)? {
+        conn.execute(
+            "UPDATE sessions
+             SET session_id = ?, scope = ?, file_path = ?, project_path = ?, project_name = ?,
+                 started_at = ?, updated_at = ?, title = ?, first_user_message = ?,
+                 file_size = ?, file_mtime = ?, available = ?, archived = ?,
+                 last_indexed_at = ?, forked_from_id = ?
+             WHERE agent = ? AND session_id = ? AND scope = ?",
+            params![
+                s.id,
+                scope,
+                s.file_path,
+                s.project_path,
+                s.project_name,
+                s.started_at,
+                s.updated_at,
+                s.title,
+                s.first_user_message,
+                s.file_size as i64,
+                file_mtime_for(&s.file_path),
+                s.available as i64,
+                s.archived as i64,
+                now_ms(),
+                s.forked_from_id,
+                s.agent.as_str(),
+                existing.session_id,
+                existing.scope,
+            ],
+        )?;
+        return Ok(());
+    }
     let (message_count, partial) = existing_session_count_state(conn, s.agent, &s.id, scope)?
         .unwrap_or((s.message_count as i64, s.partial as i64));
     conn.execute(
@@ -337,6 +373,41 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
     // Subagent rows are written through upsert_subagent so their lifecycle
     // is independent from the parent session's reindex.
     Ok(())
+}
+
+fn existing_placeholder(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+    next_scope: &str,
+    _next: &SessionInfo,
+) -> Result<Option<ExistingPlaceholder>> {
+    if let Some(scope) = existing_placeholder_scope(conn, agent, session_id, next_scope)? {
+        return Ok(Some(ExistingPlaceholder {
+            session_id: session_id.to_string(),
+            scope,
+        }));
+    }
+    Ok(None)
+}
+
+fn existing_placeholder_scope(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+    next_scope: &str,
+) -> Result<Option<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT scope FROM sessions
+         WHERE agent = ? AND session_id = ? AND scope != ?
+           AND file_size = 0 AND partial = 1
+         ORDER BY last_indexed_at DESC
+         LIMIT 1",
+    )?;
+    let scope = stmt
+        .query_row(params![agent.as_str(), session_id, next_scope], |r| r.get(0))
+        .optional()?;
+    Ok(scope)
 }
 
 fn file_mtime_for(file_path: &str) -> Option<i64> {
@@ -771,7 +842,10 @@ impl SessionStore for SqliteStore {
                 continue;
             }
             tx.execute(
-                "UPDATE sessions SET available = 0 WHERE scope = ? AND agent = ?",
+                "UPDATE sessions
+                 SET available = 0
+                 WHERE scope = ? AND agent = ?
+                   AND NOT (file_size = 0 AND partial = 1)",
                 params![scope, agent.as_str()],
             )?;
         }

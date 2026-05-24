@@ -64,9 +64,13 @@ impl RuntimeManager {
     }
 
     pub fn status(&self, agent: Agent) -> RuntimeStatus {
+        let transport = runtime_config(agent)
+            .as_ref()
+            .map(acp_transport::transport_from_config)
+            .unwrap_or(RuntimeTransportKind::Acp);
         RuntimeStatus {
             agent,
-            transport: RuntimeTransportKind::Fake,
+            transport,
             available: true,
             status: RuntimeSessionStatus::Idle,
             capabilities: RuntimeCapabilitySet::fake(),
@@ -94,7 +98,7 @@ impl RuntimeManager {
             runtime_config
                 .as_ref()
                 .map(acp_transport::transport_from_config)
-                .unwrap_or(RuntimeTransportKind::Fake)
+                .unwrap_or(RuntimeTransportKind::Acp)
         };
         let id = self.next_id("runtime");
         let agent_session_id = self.next_id("fake-agent-session");
@@ -215,7 +219,7 @@ impl RuntimeManager {
         let transport = runtime_config
             .as_ref()
             .map(acp_transport::transport_from_config)
-            .unwrap_or(RuntimeTransportKind::Fake);
+            .unwrap_or(RuntimeTransportKind::Acp);
         let agent_session_id = req
             .agent_runtime_session_id
             .clone()

@@ -28,7 +28,7 @@ use store::SessionStore;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager, State, WindowEvent,
+    AppHandle, Emitter, Manager, State, WindowEvent,
 };
 
 #[derive(serde::Serialize)]
@@ -432,6 +432,21 @@ fn update_session_message_count(
     store
         .update_message_count(agent, session_id.as_deref(), &file_path, message_count)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_pending_session(
+    session: SessionInfo,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    let scope = session.file_path.clone();
+    store
+        .upsert_session(&scope, &session)
+        .map_err(|e| e.to_string())?;
+    app.emit("sessions_index_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn count_source_lines(
@@ -841,6 +856,7 @@ pub fn run() {
             list_sessions,
             get_session_messages,
             update_session_message_count,
+            create_pending_session,
             read_local_image_data_url,
             set_window_appearance,
             get_system_appearance,

@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -15,6 +15,7 @@ import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   Agent,
+  createPendingSession,
   getIndexStatus,
   IndexPhase,
   getMemoryBackendStatus,
@@ -26,6 +27,8 @@ import {
   removeSessionsByScope,
   removeSessionFiles,
   searchProjectMemory,
+  sendAgentInput,
+  startAgentSession,
   type SessionScope,
 } from "./api";
 import { syncTrayMenu } from "./tray";
@@ -46,6 +49,7 @@ import {
   liveSessionActivity,
   liveSessionUpdatedAt,
   normalizeAgentRuntimeEvent,
+  type LiveRuntimeAction,
   type LiveRuntimeState,
 } from "./runtimeChat";
 
@@ -99,13 +103,36 @@ function sessionKey(s: SessionInfo): string {
   return `${s.agent}:${s.filePath}:${s.id}`;
 }
 
+function sessionIdentityKey(s: SessionInfo): string {
+  return `${s.agent}:${s.id}`;
+}
+
 function messageCountKey(agent: Agent, filePath: string, sessionId: string): string {
   return `${agent}:${sessionId}:${filePath}`;
+}
+
+function resizeTextareaToContent(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
+  const minHeight = lineHeight * 2;
+  const maxHeight = lineHeight * 6;
+  const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
+  el.style.height = `${nextHeight}px`;
+  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 type DeleteTarget =
   | { kind: "session"; session: SessionInfo; pos: { x: number; y: number } }
   | { kind: "scope"; scope: SessionScope; pos: { x: number; y: number } };
+
+type PendingNewChatSession = {
+  sessioRuntimeSessionId: string;
+  agent: Agent;
+  projectPath: string;
+  projectName: string;
+  prompt: string;
+  timestamp: number;
+};
 
 // Orphan main session that only exists to carry subagents (Claude cleaned
 // the main jsonl, no index entry either). Don't count it as a "real" session
@@ -146,14 +173,20 @@ export default function App() {
     applyRuntimeAction,
     emptyLiveRuntimeState,
   );
+  const [pendingSelectSession, setPendingSelectSession] = useState<{
+    agent: Agent;
+    sessionId: string;
+  } | null>(null);
+  const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
+  const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
   const update = useUpdateCheck(__APP_VERSION__);
-  const listScrollRef = useRef<HTMLDivElement>(null);
   const messageCountBySourceRef = useRef<Map<string, number>>(new Map());
   const selectedSessionIdRef = useRef<string | null>(null);
   const sessionsLoadedRef = useRef(false);
+  const pendingNewChatWritesRef = useRef<Set<string>>(new Set());
   const indexing = indexPhase !== "idle";
   const rebuilding = indexPhase === "rebuilding";
 
@@ -218,10 +251,6 @@ export default function App() {
       return next;
     });
   }, [selected?.id]);
-
-  useEffect(() => {
-    listScrollRef.current?.scrollTo(0, 0);
-  }, [filter]);
 
   // Don't let webview restore focus on the last interactive control when
   // the window is shown again — leaves a stale focus ring (and tooltip).
@@ -321,7 +350,9 @@ export default function App() {
 
   useEffect(() => {
     if (!selected) return;
-    const next = availableSessions.find((s) => sessionKey(s) === sessionKey(selected));
+    const next =
+      availableSessions.find((s) => sessionKey(s) === sessionKey(selected)) ??
+      availableSessions.find((s) => sessionIdentityKey(s) === sessionIdentityKey(selected));
     if (!next) {
       setSelected(null);
       return;
@@ -330,6 +361,70 @@ export default function App() {
       setSelected(next);
     }
   }, [availableSessions, selected]);
+
+  useEffect(() => {
+    if (!pendingSelectSession) return;
+    const next = availableSessions.find(
+      (session) =>
+        session.agent === pendingSelectSession.agent &&
+        session.id === pendingSelectSession.sessionId,
+    );
+    if (!next) return;
+    setSelected(next);
+    setDetailMode("chat");
+    setFilter({ kind: "project", key: projectKey(next), label: next.projectName ?? next.projectPath ?? t("list.unknown_project") });
+    setExpandedProjects((prev) => {
+      const expanded = new Set(prev);
+      expanded.add(projectKey(next));
+      return expanded;
+    });
+    setPendingSelectSession(null);
+  }, [availableSessions, pendingSelectSession, t]);
+
+  useEffect(() => {
+    for (const pending of Object.values(pendingNewChats)) {
+      const liveSession = liveRuntimeState.sessions[pending.sessioRuntimeSessionId];
+      if (!liveSession) continue;
+      const agentSessionId = liveSession.agentRuntimeSessionId;
+      if (!agentSessionId || agentSessionId.startsWith("fake-agent-session")) continue;
+      if (pendingNewChatWritesRef.current.has(pending.sessioRuntimeSessionId)) continue;
+
+      pendingNewChatWritesRef.current.add(pending.sessioRuntimeSessionId);
+      createPendingSession({
+        id: agentSessionId,
+        agent: pending.agent,
+        projectPath: pending.projectPath,
+        projectName: pending.projectName,
+        startedAt: pending.timestamp,
+        updatedAt: pending.timestamp,
+        messageCount: 0,
+        title: pending.prompt,
+        firstUserMessage: pending.prompt,
+        filePath: "",
+        fileSize: 0,
+        partial: true,
+        available: true,
+        archived: false,
+        subagents: [],
+      })
+        .then(() => {
+          setRuntimeSessionAliases((prev) => ({
+            ...prev,
+            [`${pending.agent}:${agentSessionId}`]: pending.sessioRuntimeSessionId,
+          }));
+          setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
+          setPendingNewChats((prev) => {
+            const next = { ...prev };
+            delete next[pending.sessioRuntimeSessionId];
+            return next;
+          });
+        })
+        .catch((err) => {
+          pendingNewChatWritesRef.current.delete(pending.sessioRuntimeSessionId);
+          setError(String(err));
+        });
+    }
+  }, [liveRuntimeState.sessions, pendingNewChats]);
 
   const handleMessageCount = useCallback((
     agent: Agent,
@@ -393,12 +488,6 @@ export default function App() {
       unlisten.then((f) => f()).catch(() => {});
     };
   }, []);
-
-  useEffect(() => {
-    if (selected || availableSessions.length === 0) return;
-    const next = availableSessions.find((s) => !isSubagentOnly(s));
-    if (next) setSelected(next);
-  }, [availableSessions, selected]);
 
   useEffect(() => {
     if (selected) return;
@@ -509,6 +598,7 @@ export default function App() {
   );
 
   const selectedKey = selected ? sessionKey(selected) : null;
+  const selectedIdentityKey = selected ? sessionIdentityKey(selected) : null;
 
   useEffect(() => {
     syncTrayMenu(recentForMenu, {
@@ -595,9 +685,6 @@ export default function App() {
     await openDeleteMenu(pos, (clickPos) => setDeleteTarget({ kind: "session", session, pos: clickPos }));
   };
 
-  const visibleCount = selected
-    ? 1
-    : availableSessions.filter((s) => !isSubagentOnly(s)).length;
   const detailTitle =
     selected?.title ??
     selected?.firstUserMessage ??
@@ -647,6 +734,22 @@ export default function App() {
         </div>
 
         <nav className="flex-1 min-h-0 w-64 p-2 pb-0 flex flex-col gap-0.5">
+          <button
+            type="button"
+            onClick={() => {
+              setSelected(null);
+              setDetailMode("chat");
+            }}
+            className={
+              "mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-body-sm font-medium transition " +
+              (!selected
+                ? "bg-ink/10 text-ink"
+                : "text-ink/72 hover:bg-ink/5 hover:text-ink")
+            }
+          >
+            <Plus className="h-4 w-4 shrink-0" />
+            <span className="truncate">{t("sidebar.new_chat")}</span>
+          </button>
           <div className="shrink-0 flex flex-col gap-0.5">
             <SectionHeader
               label={t("sidebar.by_project")}
@@ -669,7 +772,9 @@ export default function App() {
                     expanded={expanded}
                     sessionsExpanded={expandedProjectSessions.has(p.key)}
                     selectedKey={selectedKey}
+                    selectedIdentityKey={selectedIdentityKey}
                     liveState={liveRuntimeState}
+                    runtimeSessionAliases={runtimeSessionAliases}
                     unreadSessionIds={unreadSessionIds}
                     onSelectProject={() => {
                       setFilter({ kind: "project", key: p.key, label: p.label });
@@ -868,6 +973,7 @@ export default function App() {
                 session={selected}
                 viewMode={viewMode}
                 liveState={liveRuntimeState}
+                runtimeSessionAliases={runtimeSessionAliases}
                 dispatchLiveEvent={dispatchLiveRuntimeEvent}
                 onMessageCount={handleMessageCount}
                 onActiveMessageMeta={handleActiveMessageMeta}
@@ -884,12 +990,18 @@ export default function App() {
             </div>
           </div>
         ) : (
-          <ScrollArea ref={listScrollRef} className="flex-1 min-h-0">
-            <EmptyDetailState
-              indexing={indexing}
-              visibleCount={visibleCount}
-            />
-          </ScrollArea>
+          <NewChatView
+            projects={projectGroups}
+            liveState={liveRuntimeState}
+            dispatchLiveEvent={dispatchLiveRuntimeEvent}
+            onError={setError}
+            onPendingSession={(pending) => {
+              setPendingNewChats((prev) => ({
+                ...prev,
+                [pending.sessioRuntimeSessionId]: pending,
+              }));
+            }}
+          />
         )}
 
         {memorySearchMounted && projectSearchInitialKey && (
@@ -1484,7 +1596,9 @@ function ProjectSidebarGroup({
   expanded,
   sessionsExpanded,
   selectedKey,
+  selectedIdentityKey,
   liveState,
+  runtimeSessionAliases,
   unreadSessionIds,
   onSelectProject,
   onSelectSession,
@@ -1496,7 +1610,9 @@ function ProjectSidebarGroup({
   expanded: boolean;
   sessionsExpanded: boolean;
   selectedKey: string | null;
+  selectedIdentityKey: string | null;
   liveState: LiveRuntimeState;
+  runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
   onSelectProject: () => void;
   onSelectSession: (session: SessionInfo) => void;
@@ -1560,12 +1676,13 @@ function ProjectSidebarGroup({
           >
             {visibleSessions.map((session) => {
               const key = sessionKey(session);
-              const liveActivity = liveSessionActivity(liveState.sessions[session.id]);
+              const runtimeSessionId = runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id;
+              const liveActivity = liveSessionActivity(liveState.sessions[runtimeSessionId]);
               return (
                 <SidebarSessionItem
                   key={key}
                   item={session}
-                  active={selectedKey === key}
+                  active={selectedKey === key || selectedIdentityKey === sessionIdentityKey(session)}
                   liveActivity={liveActivity}
                   unread={unreadSessionIds.has(session.id)}
                   onSelect={() => onSelectSession(session)}
@@ -1697,27 +1814,268 @@ function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Reco
   return t("time.month", { count: Math.floor(diffMs / month) });
 }
 
-function EmptyDetailState({
-  indexing,
-  visibleCount,
+function NewChatView({
+  projects,
+  liveState,
+  dispatchLiveEvent,
+  onError,
+  onPendingSession,
 }: {
-  indexing: boolean;
-  visibleCount: number;
+  projects: ProjectGroup[];
+  liveState: LiveRuntimeState;
+  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
+  onError: (error: string | null) => void;
+  onPendingSession: (session: PendingNewChatSession) => void;
 }) {
   const { t } = useI18n();
+  const [text, setText] = useState("");
+  const [projectKeyValue, setProjectKeyValue] = useState(() => projects[0]?.key ?? "");
+  const [agent, setAgent] = useState<Agent>("codex");
+  const [sending, setSending] = useState(false);
+  const [composerError, setComposerError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fallbackRuntimeSequenceRef = useRef(0);
+  const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
+  const workspacePath = project?.path ?? null;
+  const canSend = text.trim().length > 0 && Boolean(workspacePath) && !sending;
+
+  useEffect(() => {
+    if (projectKeyValue && projects.some((p) => p.key === projectKeyValue)) return;
+    setProjectKeyValue(projects[0]?.key ?? "");
+  }, [projectKeyValue, projects]);
+
+  useEffect(() => {
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
+  const handleSend = async () => {
+    const prompt = text.trim();
+    if (!prompt || sending) return;
+    if (!workspacePath || !project) {
+      setComposerError(t("new_chat.no_project"));
+      return;
+    }
+    setSending(true);
+    setComposerError(null);
+    onError(null);
+    try {
+      const handle = await startAgentSession({
+        agent,
+        workspacePath,
+        options: { transport: "acp" },
+      });
+      const timestamp = Date.now();
+      const localTurnId = `local-turn-${timestamp}`;
+      const existingLiveSession = liveState.sessions[handle.sessioRuntimeSessionId];
+      if (!existingLiveSession) {
+        fallbackRuntimeSequenceRef.current += 1;
+        dispatchLiveEvent({
+          type: "runtime-event",
+          event: {
+            kind: "sessionStarted",
+            sequence: liveState.lastSequence + fallbackRuntimeSequenceRef.current,
+            timestamp,
+            agent: handle.agent,
+            sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+            agentRuntimeSessionId: handle.agentRuntimeSessionId,
+            transport: handle.transport,
+            workspacePath: handle.workspacePath,
+            capabilities: handle.capabilities,
+          },
+        });
+      }
+      dispatchLiveEvent({
+        type: "optimistic-user-message",
+        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+        turnId: localTurnId,
+        text: prompt,
+        timestamp,
+      });
+      onPendingSession({
+        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+        agent: handle.agent,
+        projectPath: workspacePath,
+        projectName: project.label,
+        prompt,
+        timestamp,
+      });
+      const turn = await sendAgentInput(handle.sessioRuntimeSessionId, { text: prompt });
+      dispatchLiveEvent({
+        type: "replace-turn-id",
+        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+        from: localTurnId,
+        to: turn.turnId,
+      });
+      setText("");
+    } catch (err) {
+      const message = String(err);
+      setComposerError(message);
+      onError(message);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const activeSessionCount = Object.values(liveState.sessions).filter(
+    (session) => !session.ended,
+  ).length;
+
   return (
-    <div className="flex min-h-full items-center justify-center p-10 text-center text-body text-ink/40">
-      {indexing ? (
-        <div className="flex items-center gap-2">
-          <StatusDot ripple />
-          <span>{t("sidebar.status_indexing")}</span>
+    <div className="flex flex-1 min-h-0 flex-col bg-surface-panel">
+      <div className="flex flex-1 min-h-0 items-center justify-center px-6 pb-16">
+        <div className="w-full max-w-[730px]">
+          <h1 className="mb-11 text-center text-[28px] font-medium leading-tight tracking-normal text-ink/92">
+            {t("new_chat.title")}
+          </h1>
+          {composerError && (
+            <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
+              {composerError}
+            </div>
+          )}
+          <div
+            className={
+              "overflow-hidden rounded-2xl bg-ink/[0.055] shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.08)] transition-shadow " +
+              (composerError
+                ? "shadow-[inset_0_0_0_1px_rgb(var(--color-status-error)/0.35)]"
+                : "focus-within:shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.20)]")
+            }
+          >
+            <textarea
+              ref={textareaRef}
+              value={text}
+              placeholder={t("new_chat.placeholder")}
+              rows={2}
+              onChange={(event) => {
+                resizeTextareaToContent(event.currentTarget);
+                setText(event.target.value);
+              }}
+              onInput={(event) => resizeTextareaToContent(event.currentTarget)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+                  return;
+                }
+                event.preventDefault();
+                if (canSend) void handleSend();
+              }}
+              className="chat-composer-textarea block w-full resize-none bg-transparent px-3.5 py-3.5 text-body leading-5 text-ink/88 placeholder:text-ink/38 outline-none"
+            />
+            <div className="flex h-12 items-center justify-between gap-3 border-b border-ink/5 px-3 pb-2">
+              <div className="flex min-w-0 items-center gap-3">
+                <Tooltip content={t("new_chat.add_context")} placement="top">
+                  <button
+                    type="button"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink/55 transition hover:bg-ink/8 hover:text-ink"
+                    aria-label={t("new_chat.add_context")}
+                  >
+                    <Plus className="h-5 w-5" />
+                  </button>
+                </Tooltip>
+                <NewChatMenuButton icon={Hand} label="Default permissions" text />
+              </div>
+              <div className="flex shrink-0 items-center gap-2.5">
+                <span className="rounded-md bg-ink/8 px-2.5 py-1 text-body-sm font-medium text-ink/64">
+                  free
+                </span>
+                <NewChatMenuButton icon={Mic} label={t("new_chat.voice")} />
+                <Tooltip content={sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
+                  <button
+                    type="button"
+                    disabled={!canSend}
+                    onClick={() => void handleSend()}
+                    className="flex h-7 w-7 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
+                    aria-label={sending ? t("new_chat.sending") : t("new_chat.send")}
+                  >
+                    <ArrowUp className="h-5 w-5" />
+                  </button>
+                </Tooltip>
+              </div>
+            </div>
+            <div className="flex h-10 items-center gap-2 px-3 text-body-sm text-ink/55">
+              <NewChatSelect
+                ariaLabel={t("new_chat.project")}
+                icon={Folder}
+                value={projectKeyValue}
+                onChange={setProjectKeyValue}
+                disabled={projects.length === 0}
+                options={projects.map((p) => ({ value: p.key, label: p.label }))}
+              />
+              <NewChatSelect
+                ariaLabel={t("new_chat.agent")}
+                icon={Cpu}
+                value={agent}
+                onChange={(value) => setAgent(value as Agent)}
+                options={[
+                  { value: "codex", label: "Codex" },
+                  { value: "claude", label: "Claude" },
+                  { value: "gemini", label: "Gemini" },
+                ]}
+              />
+              <NewChatMenuButton icon={Cpu} label={activeSessionCount > 0 ? `${activeSessionCount}` : t("new_chat.work_locally")} text />
+              <NewChatMenuButton icon={GitBranch} label="main" text />
+            </div>
+          </div>
         </div>
-      ) : visibleCount === 0 ? (
-        t("list.empty")
-      ) : (
-        t("list.select_session")
-      )}
+      </div>
     </div>
+  );
+}
+
+function NewChatSelect({
+  ariaLabel,
+  icon: Icon,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  ariaLabel: string;
+  icon: LucideIcon;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="flex min-w-0 max-w-[220px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
+      <Icon className="ml-1.5 h-4 w-4 shrink-0" />
+      <InlineMenuSelect
+        value={value}
+        options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
+        onChange={onChange}
+        menuAlign="trigger"
+        placeholder={ariaLabel}
+        ariaLabel={ariaLabel}
+        className="h-7 max-w-[190px] border-r-0 py-1 pl-1.5 pr-1 text-ink/60 hover:text-ink"
+        menuClassName="bg-surface-panel"
+        minMenuWidth={180}
+        emptyContent={ariaLabel}
+      />
+    </div>
+  );
+}
+
+function NewChatMenuButton({
+  icon: Icon,
+  label,
+  text,
+}: {
+  icon: LucideIcon;
+  label: string;
+  text?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className={
+        "flex min-w-0 items-center gap-1.5 rounded-md py-1 text-body-sm text-ink/55 transition hover:bg-ink/8 hover:text-ink " +
+        (text ? "max-w-[220px] px-1.5" : "h-7 w-7 justify-center px-0")
+      }
+      aria-label={label}
+    >
+      <Icon className="h-4 w-4 shrink-0" />
+      {text && <span className="truncate">{label}</span>}
+      {text && <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+    </button>
   );
 }
 

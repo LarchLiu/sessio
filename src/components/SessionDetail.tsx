@@ -61,6 +61,7 @@ interface Props {
   session: SessionInfo;
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
+  runtimeSessionAliases?: Record<string, string>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onMessageCount: (
     agent: SessionInfo["agent"],
@@ -161,6 +162,7 @@ function SessionDetail({
   session,
   viewMode,
   liveState,
+  runtimeSessionAliases = {},
   dispatchLiveEvent,
   onMessageCount,
   onActiveMessageMeta,
@@ -254,7 +256,9 @@ function SessionDetail({
           filePath={tab.kind === "main" ? session.filePath : tab.sub.filePath}
           sessionId={session.id}
           available={
-            tab.kind === "main" ? session.available : tab.sub.filePath !== ""
+            tab.kind === "main"
+              ? session.available || Boolean(liveState.sessions[runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id])
+              : tab.sub.filePath !== ""
           }
           emptyHint={
             tab.kind === "main"
@@ -263,11 +267,13 @@ function SessionDetail({
           }
           viewMode={viewMode}
           liveState={liveState}
+          runtimeSessionAliases={runtimeSessionAliases}
           dispatchLiveEvent={dispatchLiveEvent}
           onPreviewImage={setPreviewImage}
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
+          skipHistoryLoad={tab.kind === "main" && !session.filePath && Boolean(liveState.sessions[runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id])}
         />
 
         {previewImage && (
@@ -331,11 +337,13 @@ function MessageStream({
   emptyHint,
   viewMode,
   liveState,
+  runtimeSessionAliases,
   dispatchLiveEvent,
   onPreviewImage,
   onMessageCount,
   messageCount,
   workspacePath,
+  skipHistoryLoad = false,
 }: {
   agent: SessionInfo["agent"];
   filePath: string;
@@ -344,6 +352,7 @@ function MessageStream({
   emptyHint: string;
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
+  runtimeSessionAliases: Record<string, string>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onPreviewImage: (image: MarkdownImage) => void;
   onMessageCount: (
@@ -354,6 +363,7 @@ function MessageStream({
   ) => boolean;
   messageCount: number;
   workspacePath: string | null;
+  skipHistoryLoad?: boolean;
 }) {
   const { t } = useI18n();
   const sourceKey = messageSourceKey(agent, filePath, sessionId);
@@ -365,7 +375,7 @@ function MessageStream({
   );
   const [loading, setLoading] = useState(() => !isFreshCache);
   const [error, setError] = useState<string | null>(null);
-  const runtimeSessionId = sessionId;
+  const runtimeSessionId = runtimeSessionAliases[`${agent}:${sessionId}`] ?? sessionId;
   const [composerText, setComposerText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -386,11 +396,11 @@ function MessageStream({
     : null;
 
   useLayoutEffect(() => {
-    if (!available || !filePath) {
+    if (!available || !filePath || skipHistoryLoad) {
       setMessages([]);
       setLoading(false);
       setError(null);
-      pendingInitialPositionRef.current = null;
+      pendingInitialPositionRef.current = skipHistoryLoad ? "bottom" : null;
       initialPositionAppliedRef.current = false;
       return;
     }
@@ -409,10 +419,10 @@ function MessageStream({
       : "bottom";
     initialPositionAppliedRef.current = false;
     setHistoryRenderReady(false);
-  }, [available, filePath, messageCount, sourceKey]);
+  }, [available, filePath, messageCount, sourceKey, skipHistoryLoad]);
 
   useEffect(() => {
-    if (!available || !filePath) return;
+    if (!available || !filePath || skipHistoryLoad) return;
     const cached = messageCache.get(sourceKey);
     if (cached && cached.messageCount === messageCount) return;
 
@@ -473,6 +483,7 @@ function MessageStream({
     sourceKey,
     dispatchLiveEvent,
     runtimeSessionId,
+    skipHistoryLoad,
   ]);
 
   const acpViewModel = useMemo<AcpViewModel>(() => {
@@ -600,6 +611,7 @@ function MessageStream({
         !vp ||
         !available ||
         !filePath ||
+        skipHistoryLoad ||
         !initialPositionAppliedRef.current
       ) {
         return;
@@ -641,7 +653,7 @@ function MessageStream({
         performance.now() < programmaticScrollUntilRef.current;
       if (!isProgrammaticScroll) followLiveStreamRef.current = atBottom;
     },
-    [available, filePath, visibleDisplayItems, sourceKey],
+    [available, filePath, skipHistoryLoad, visibleDisplayItems, sourceKey],
   );
 
   useLayoutEffect(() => {
@@ -820,7 +832,7 @@ function MessageStream({
               {error}
             </div>
           )}
-          {!loading && !error && available && visibleDisplayItems.length === 0 && (
+          {!loading && !error && available && !skipHistoryLoad && visibleDisplayItems.length === 0 && (
             <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
           )}
           <div className="flex flex-col gap-2">
@@ -2125,11 +2137,9 @@ type AcpRenderItem =
 function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
   const items: AcpRenderItem[] = [];
   for (const turn of viewModel.turns) {
-    if (viewModel.source === "live") {
-      items.push({ kind: "turnStatus", turn });
-    }
     const renderedTools = new Set<string>();
     const renderedPermissions = new Set<string>();
+    let renderedTurnStatus = false;
     turn.blocks.forEach((block) => {
       if (block.kind === "tool") {
         const tool = turn.tools.find((item) => item.toolId === block.toolId);
@@ -2147,6 +2157,10 @@ function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
       }
       if (block.kind === "error") return;
       items.push({ kind: "block", turn, block });
+      if (viewModel.source === "live" && block.kind === "user" && !renderedTurnStatus) {
+        items.push({ kind: "turnStatus", turn });
+        renderedTurnStatus = true;
+      }
     });
     if (turn.error) {
       items.push({ kind: "error", turn, error: turn.error });
@@ -2157,6 +2171,9 @@ function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
         : null;
     if (turnFileEdits) {
       items.push({ kind: "turnFileEdits", turn, text: turnFileEdits });
+    }
+    if (viewModel.source === "live" && !renderedTurnStatus) {
+      items.push({ kind: "turnStatus", turn });
     }
   }
   return items;
@@ -2207,7 +2224,8 @@ function liveTurnStatusText(turn: LiveTurn, now: number): string {
     turn.status === "streaming" ||
     turn.status === "cancelling";
   const elapsedMs = Math.max(0, (running ? now : turn.updatedAt) - turn.startedAt);
-  return `${running ? "running" : "done"}|${formatDuration(elapsedMs)}`;
+  const state = running ? "running" : turn.status === "completed" ? "completed" : "done";
+  return `${state}|${formatDuration(elapsedMs)}`;
 }
 
 function renderItemKey(item: AcpRenderItem): string {
@@ -2983,12 +3001,13 @@ function PlainTextContent({ text }: { text: string }) {
 function RuntimeStatusContent({ text }: { text: string }) {
   const [state = "running", duration = "0s"] = text.split("|");
   const running = state === "running";
+  const successful = state === "completed";
   return (
     <div className="flex items-center gap-2 text-body-sm text-ink/50">
       <span
         className={
           "h-1.5 w-1.5 shrink-0 rounded-full " +
-          (running ? "bg-[rgb(var(--color-emerald))]" : "bg-ink/30")
+          (running || successful ? "bg-[rgb(var(--color-emerald))]" : "bg-ink/30")
         }
       />
       <span>{running ? "Working for" : "Worked for"} {duration}</span>
