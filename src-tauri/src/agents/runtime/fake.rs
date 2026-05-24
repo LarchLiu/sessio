@@ -177,19 +177,18 @@ fn emit_fake_acp(
         "[sessio-runtime:fake-acp:session-update] {:?}",
         notification
     );
-    if let Some(event) =
-        acp_protocol_event(
-            sessio_runtime_session_id,
-            "agent_to_client",
-            "notification",
-            "session/update",
-            Some(notification.session_id.to_string()),
-            Some(turn_id.to_string()),
-            None,
-            Some(fake_session_update_type(&notification.update).to_string()),
-            &notification,
-        )
-        .ok()
+    if let Some(event) = acp_protocol_event(
+        sessio_runtime_session_id,
+        "agent_to_client",
+        "notification",
+        "session/update",
+        Some(notification.session_id.to_string()),
+        Some(turn_id.to_string()),
+        None,
+        Some(fake_session_update_type(&notification.update).to_string()),
+        &notification,
+    )
+    .ok()
     {
         manager.emit(event)?;
     }
@@ -209,7 +208,9 @@ fn fake_session_update_type(update: &agent_client_protocol::schema::SessionUpdat
         agent_client_protocol::schema::SessionUpdate::ToolCall(_) => "tool_call",
         agent_client_protocol::schema::SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
         agent_client_protocol::schema::SessionUpdate::Plan(_) => "plan",
-        agent_client_protocol::schema::SessionUpdate::AvailableCommandsUpdate(_) => "available_commands",
+        agent_client_protocol::schema::SessionUpdate::AvailableCommandsUpdate(_) => {
+            "available_commands"
+        }
         agent_client_protocol::schema::SessionUpdate::CurrentModeUpdate(_) => "current_mode",
         agent_client_protocol::schema::SessionUpdate::ConfigOptionUpdate(_) => "config_options",
         agent_client_protocol::schema::SessionUpdate::SessionInfoUpdate(_) => "session_info",

@@ -523,7 +523,13 @@ fn fork_agent_session(
     req: StartAgentSession,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
-    if req.source_session_id.as_deref().unwrap_or("").trim().is_empty() {
+    if req
+        .source_session_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
         return Err("source_session_id is required".to_string());
     }
     runtime.start_session(req).map_err(|e| e.to_string())

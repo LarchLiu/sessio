@@ -509,9 +509,11 @@ impl RuntimeManager {
         let acp_response = option_id
             .as_deref()
             .map(|id| permission_response_from_decision(&acp_request, id))
-            .unwrap_or_else(|| agent_client_protocol::schema::RequestPermissionResponse::new(
-                agent_client_protocol::schema::RequestPermissionOutcome::Cancelled,
-            ));
+            .unwrap_or_else(|| {
+                agent_client_protocol::schema::RequestPermissionResponse::new(
+                    agent_client_protocol::schema::RequestPermissionOutcome::Cancelled,
+                )
+            });
         log::info!(
             "[sessio-runtime:fake-acp:permission-response] {:?}",
             acp_response

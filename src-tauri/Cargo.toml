@@ -4,7 +4,7 @@ version = "0.4.1"
 description = "Sessio - Agent sessions manager"
 authors = ["alex"]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.95"
 
 [lib]
 name = "app_lib"

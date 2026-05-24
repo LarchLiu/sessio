@@ -28,8 +28,10 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
             },
         )
         .collect();
-    let chat_session_ids: HashSet<String> =
-        chat_sessions.iter().map(|session| session.id.clone()).collect();
+    let chat_session_ids: HashSet<String> = chat_sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect();
 
     if tmp_dir.exists() {
         for entry in fs::read_dir(&tmp_dir)? {

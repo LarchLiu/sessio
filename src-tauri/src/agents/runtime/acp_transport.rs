@@ -55,9 +55,17 @@ pub enum AcpSessionStart {
 
 #[derive(Debug)]
 enum AcpWorkerCommand {
-    Prompt { turn_id: String, input: AgentInput },
-    Cancel { turn_id: String },
-    SetConfigOption { config_id: String, value: serde_json::Value },
+    Prompt {
+        turn_id: String,
+        input: AgentInput,
+    },
+    Cancel {
+        turn_id: String,
+    },
+    SetConfigOption {
+        config_id: String,
+        value: serde_json::Value,
+    },
 }
 
 pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {

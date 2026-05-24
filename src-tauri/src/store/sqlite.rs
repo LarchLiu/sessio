@@ -708,7 +708,10 @@ impl SessionStore for SqliteStore {
     fn mark_file_path_unindexable(&self, agent: Agent, file_path: &str) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM subagents WHERE file_path = ?", params![file_path])?;
+        tx.execute(
+            "DELETE FROM subagents WHERE file_path = ?",
+            params![file_path],
+        )?;
         let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
         let file_mtime = file_mtime_for(file_path);
         let session_id = format!("__unindexable__:{}", file_path);

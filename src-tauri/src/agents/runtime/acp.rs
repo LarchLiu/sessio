@@ -264,10 +264,9 @@ fn content_block_text(content: &ContentBlock) -> Result<String> {
                 .unwrap_or_default()
         )),
         ContentBlock::Audio(audio) => Ok(format!("[audio: {}]", audio.mime_type)),
-        ContentBlock::ResourceLink(resource) => Ok(format!(
-            "[resource: {} {}]",
-            resource.name, resource.uri
-        )),
+        ContentBlock::ResourceLink(resource) => {
+            Ok(format!("[resource: {} {}]", resource.name, resource.uri))
+        }
         ContentBlock::Resource(resource) => {
             serde_json::to_string(resource).map_err(anyhow::Error::from)
         }

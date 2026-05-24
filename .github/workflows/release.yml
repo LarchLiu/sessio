@@ -38,7 +38,7 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
@@ -76,7 +76,7 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -114,7 +114,7 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -152,7 +152,7 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri

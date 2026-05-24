@@ -66,7 +66,7 @@ Recommended versions:
 
 - `Node.js 24.x`
 - `pnpm 11.1.0`
-- `Rust 1.85+`
+- `Rust 1.95+`
 
 Install dependencies:
 
