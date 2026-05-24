@@ -791,54 +791,70 @@ function MessageStream({
   }, [activeTurnId, runtimeSessionId]);
 
   return (
-    <div className="relative flex-1 min-h-0 flex flex-col">
-      <ScrollArea
-        ref={viewportRef}
-        className="flex-1 min-h-0"
-        viewportClassName="px-10 py-4 session-chat-scroll-viewport"
-        onScroll={saveScrollSnapshot}
-      >
-        {!available && (
-          <div className="text-status-warn text-body bg-status-warn/[0.10] border border-status-warn/30 rounded p-3 leading-relaxed">
-            {emptyHint}
-          </div>
-        )}
-        {error && (
-          <div className="text-status-error text-body-sm bg-status-error/10 rounded p-3">
-            {error}
-          </div>
-        )}
-        {!loading && !error && available && visibleDisplayItems.length === 0 && (
-          <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
-        )}
-        <div className="flex flex-col gap-2">
-          <AcpSessionStatePanel
-            state={acpViewModel.sessionState}
-            sessioRuntimeSessionId={runtimeSessionId}
-            onRunCommand={handleSendText}
-          />
-          {visibleDisplayItems.map((item, i) => (
-            <div
-              key={renderItemKey(item)}
-              ref={(el) => {
-                bubbleRefs.current[i] = el;
-              }}
-              className={
-                "message-render-contain " +
-                (renderItemSide(item) === "user" ? "flex justify-end" : "")
-              }
-            >
-              <AcpLiveItem
-                item={item}
-                sessioRuntimeSessionId={runtimeSessionId}
-                now={runtimeNow}
-                onPreviewImage={onPreviewImage}
-                onPermissionResponse={respondAgentPermission}
-              />
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="relative flex flex-1 min-h-0 flex-col">
+        <ScrollArea
+          ref={viewportRef}
+          className="flex-1 min-h-0"
+          viewportClassName="px-10 py-4 session-chat-scroll-viewport"
+          onScroll={saveScrollSnapshot}
+        >
+          {!available && (
+            <div className="text-status-warn text-body bg-status-warn/[0.10] border border-status-warn/30 rounded p-3 leading-relaxed">
+              {emptyHint}
             </div>
-          ))}
-        </div>
-      </ScrollArea>
+          )}
+          {error && (
+            <div className="text-status-error text-body-sm bg-status-error/10 rounded p-3">
+              {error}
+            </div>
+          )}
+          {!loading && !error && available && visibleDisplayItems.length === 0 && (
+            <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
+          )}
+          <div className="flex flex-col gap-2">
+            <AcpSessionStatePanel
+              state={acpViewModel.sessionState}
+              sessioRuntimeSessionId={runtimeSessionId}
+              onRunCommand={handleSendText}
+            />
+            {visibleDisplayItems.map((item, i) => (
+              <div
+                key={renderItemKey(item)}
+                ref={(el) => {
+                  bubbleRefs.current[i] = el;
+                }}
+                className={
+                  "message-render-contain " +
+                  (renderItemSide(item) === "user" ? "flex justify-end" : "")
+                }
+              >
+                <AcpLiveItem
+                  item={item}
+                  sessioRuntimeSessionId={runtimeSessionId}
+                  now={runtimeNow}
+                  onPreviewImage={onPreviewImage}
+                  onPermissionResponse={respondAgentPermission}
+                />
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+        <RoleNav
+          sideKind="assistant"
+          side="left"
+          items={visibleDisplayItems}
+          refs={bubbleRefs}
+          viewportRef={viewportRef}
+        />
+        <RoleNav
+          sideKind="user"
+          side="right"
+          items={visibleDisplayItems}
+          refs={bubbleRefs}
+          viewportRef={viewportRef}
+        />
+      </div>
       <ChatComposer
         ref={composerRef}
         value={composerText}
@@ -851,20 +867,6 @@ function MessageStream({
         onChange={setComposerText}
         onSend={handleSend}
         onCancel={handleCancelTurn}
-      />
-      <RoleNav
-        sideKind="assistant"
-        side="left"
-        items={visibleDisplayItems}
-        refs={bubbleRefs}
-        viewportRef={viewportRef}
-      />
-      <RoleNav
-        sideKind="user"
-        side="right"
-        items={visibleDisplayItems}
-        refs={bubbleRefs}
-        viewportRef={viewportRef}
       />
     </div>
   );
@@ -2411,9 +2413,7 @@ function historyToolFromMessage(
     title: toolDisplayName(parsed.name),
     kind: fallbackKind,
     status: toolResult || fallbackKind === "todo" ? "completed" : "unknown",
-    content: toolResult
-      ? [{ type: "content", content: { type: "text", text: toolResult.text } }]
-      : [],
+    content: [],
     locations: [],
     rawInput: parsed.body || message.text,
     rawOutput: toolResult?.text ?? null,
