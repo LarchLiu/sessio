@@ -362,9 +362,63 @@ fn poll_gemini(
         }
     }
 
+    for chat_path in gemini_chat_files(&tmp_dir) {
+        let scope = chat_path.to_string_lossy().into_owned();
+        present_scopes.insert(scope.clone());
+        let rows = by_scope.remove(&scope).unwrap_or_default();
+        let live_rows: Vec<&IndexedSessionRecord> = rows
+            .iter()
+            .filter_map(|row| row.available.then_some(*row))
+            .collect();
+        let needs_reindex = rows.is_empty()
+            || live_rows.is_empty()
+            || live_rows
+                .iter()
+                .any(|row| file_changed(&chat_path, row.file_size, row.file_mtime));
+        if needs_reindex {
+            log::info!(
+                "polling: submit {:?} for {} (rows={}, live_rows={})",
+                IndexTask::ReindexGeminiLogs(chat_path.clone()),
+                scope,
+                rows.len(),
+                live_rows.len(),
+            );
+            indexer.submit(IndexTask::ReindexGeminiLogs(chat_path))?;
+        }
+    }
+
     store.mark_missing_scopes_unavailable(Agent::Gemini, &present_scopes)?;
 
     Ok(())
+}
+
+fn gemini_chat_files(tmp_dir: &Path) -> Vec<PathBuf> {
+    let Some(base_dir) = tmp_dir.parent() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for root in [base_dir.join("tmp"), base_dir.join("history")] {
+        if !root.exists() {
+            continue;
+        }
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path().to_path_buf();
+            if crate::agents::sources::gemini::parser::is_chat_file(&path)
+                && seen.insert(path.clone())
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 fn projects_json_changed(
@@ -508,6 +562,25 @@ mod tests {
             subagents: Vec::new(),
         }];
         assert!(rows.iter().all(|row| !row.available));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gemini_poll_discovers_chat_jsonl_scopes() {
+        let dir = unique_tmp("gemini-poll-chat-jsonl");
+        let tmp = dir.join("tmp");
+        let chats = tmp.join("sessio").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let chat = chats.join("session-2026-05-24T12-00-60fcb170.jsonl");
+        fs::write(
+            &chat,
+            r#"{"sessionId":"60fcb170-812c-4bc4-813c-cabcb9fcc88b","startTime":"2026-05-24T12:00:00Z"}
+{"id":"u1","timestamp":"2026-05-24T12:00:01Z","type":"user","content":[{"text":"hello"}]}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(gemini_chat_files(&tmp), vec![chat]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

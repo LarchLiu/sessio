@@ -16,6 +16,21 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let mappings = load_project_mappings(&projects_json).unwrap_or_default();
 
     let mut out = Vec::new();
+    let chat_sessions: Vec<SessionInfo> = collect_chat_files(&base_dir)
+        .into_iter()
+        .filter_map(
+            |chat_path| match parse_chat_file(&chat_path, Some(&base_dir), &mappings) {
+                Ok(session) => session,
+                Err(e) => {
+                    log::warn!("gemini parse {} failed: {e}", chat_path.display());
+                    None
+                }
+            },
+        )
+        .collect();
+    let chat_session_ids: HashSet<String> =
+        chat_sessions.iter().map(|session| session.id.clone()).collect();
+
     if tmp_dir.exists() {
         for entry in fs::read_dir(&tmp_dir)? {
             let entry = entry?;
@@ -31,18 +46,16 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
             let project_path = resolve_project_path(dir_name, &mappings);
 
             match parse_logs(&logs_path, project_path.as_deref()) {
-                Ok(sessions) => out.extend(sessions),
+                Ok(sessions) => out.extend(
+                    sessions
+                        .into_iter()
+                        .filter(|session| !chat_session_ids.contains(&session.id)),
+                ),
                 Err(e) => log::warn!("gemini parse {} failed: {e}", logs_path.display()),
             }
         }
     }
-    for chat_path in collect_chat_files(&base_dir) {
-        match parse_chat_file(&chat_path, Some(&base_dir), &mappings) {
-            Ok(Some(session)) => out.push(session),
-            Ok(None) => {}
-            Err(e) => log::warn!("gemini parse {} failed: {e}", chat_path.display()),
-        }
-    }
+    out.extend(chat_sessions);
     Ok(out)
 }
 
@@ -232,7 +245,12 @@ fn resolve_project_path(dir_name: &str, mappings: &ProjectMappings) -> Option<St
 }
 
 pub(crate) fn is_chat_file(path: &Path) -> bool {
-    if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("json") {
+    if !path.is_file()
+        || !matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("json") | Some("jsonl")
+        )
+    {
         return false;
     }
     let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
@@ -308,12 +326,64 @@ fn resolve_chat_project_path(
     resolve_project_path(&alias, mappings)
 }
 
+fn read_chat_file_value(path: &Path) -> Result<serde_json::Value> {
+    let text = fs::read_to_string(path)?;
+    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        return Ok(serde_json::from_str(&text)?);
+    }
+
+    let mut session = serde_json::Map::new();
+    let mut messages = Vec::new();
+    let mut message_index_by_id: HashMap<String, usize> = HashMap::new();
+    let mut last_updated: Option<String> = None;
+
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line)?;
+        if let Some(update) = value.get("$set").and_then(|v| v.as_object()) {
+            if let Some(updated) = update.get("lastUpdated").and_then(|v| v.as_str()) {
+                last_updated = Some(updated.to_string());
+            }
+            continue;
+        }
+
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        if object.get("type").is_some() {
+            if let Some(id) = object.get("id").and_then(|v| v.as_str()) {
+                if let Some(index) = message_index_by_id.get(id).copied() {
+                    messages[index] = value;
+                } else {
+                    message_index_by_id.insert(id.to_string(), messages.len());
+                    messages.push(value);
+                }
+            } else {
+                messages.push(value);
+            }
+            continue;
+        }
+
+        for (key, value) in object {
+            session.insert(key.clone(), value.clone());
+        }
+    }
+
+    if let Some(last_updated) = last_updated {
+        session.insert(
+            "lastUpdated".to_string(),
+            serde_json::Value::String(last_updated),
+        );
+    }
+    session.insert("messages".to_string(), serde_json::Value::Array(messages));
+    Ok(serde_json::Value::Object(session))
+}
+
 fn parse_chat_file(
     path: &Path,
     base_dir: Option<&Path>,
     mappings: &ProjectMappings,
 ) -> Result<Option<SessionInfo>> {
-    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+    let value = read_chat_file_value(path)?;
     let Some(session_id) = value
         .get("sessionId")
         .and_then(|v| v.as_str())
@@ -736,7 +806,7 @@ fn read_chat_messages_with_locations(
         crate::agents::sources::types::SourceLocation,
     )>,
 > {
-    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+    let value = read_chat_file_value(path)?;
     if value
         .get("sessionId")
         .and_then(|v| v.as_str())
@@ -1117,6 +1187,53 @@ mod tests {
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].0.role, "user");
         assert!(messages[0].0.text.contains("![Image #1]("));
+        assert_eq!(messages[1].0.role, "thinking");
+        assert_eq!(messages[2].0.role, "tool_call");
+        assert_eq!(messages[2].0.tool_call_id.as_deref(), Some("tool-1"));
+        assert_eq!(messages[3].0.role, "tool_result");
+        assert_eq!(messages[4].0.role, "assistant");
+        assert_eq!(messages[4].0.text, "done");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_chat_file_and_read_messages_support_session_jsonl() {
+        let dir = unique_tmp("gemini-chat-jsonl-parser");
+        let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            dir.join(".gemini")
+                .join("tmp")
+                .join("alias")
+                .join(".project_root"),
+            "/tmp/jsonl-project",
+        )
+        .unwrap();
+        let path = chats.join("session-2026-05-24T12-00-jsonl.jsonl");
+        fs::write(
+            &path,
+            r#"{"sessionId":"jsonl","startTime":"2026-05-24T12:00:00Z","lastUpdated":"2026-05-24T12:00:00Z","kind":"main"}
+{"id":"u1","timestamp":"2026-05-24T12:00:01Z","type":"user","content":[{"text":"hello"}]}
+{"$set":{"lastUpdated":"2026-05-24T12:00:02Z"}}
+{"id":"a1","timestamp":"2026-05-24T12:00:03Z","type":"gemini","content":"","thoughts":[{"subject":"Plan","description":"inspect"}]}
+{"id":"a1","timestamp":"2026-05-24T12:00:03Z","type":"gemini","content":"done","thoughts":[{"subject":"Plan","description":"inspect"}],"toolCalls":[{"id":"tool-1","name":"read_file","args":{"path":"README.md"},"resultDisplay":"contents"}]}
+"#,
+        )
+        .unwrap();
+
+        let mappings = super::ProjectMappings::default();
+        let info = super::parse_chat_file(&path, Some(&dir.join(".gemini")), &mappings)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.id, "jsonl");
+        assert_eq!(info.project_path.as_deref(), Some("/tmp/jsonl-project"));
+        assert_eq!(info.message_count, 2);
+        assert_eq!(info.first_user_message.as_deref(), Some("hello"));
+
+        let messages = read_messages_with_locations(&path, "jsonl").unwrap();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].0.role, "user");
         assert_eq!(messages[1].0.role, "thinking");
         assert_eq!(messages[2].0.role, "tool_call");
         assert_eq!(messages[2].0.tool_call_id.as_deref(), Some("tool-1"));

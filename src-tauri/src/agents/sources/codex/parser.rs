@@ -467,6 +467,8 @@ fn parse_session(
     let mut agent_nickname: Option<String> = None;
     let mut agent_role: Option<String> = None;
     let mut first_user_message: Option<String> = None;
+    let mut internal_guardian_session = false;
+    let mut skip_replayed_user_message = false;
     let reverse_ts = latest_timestamp_from_file(path).ok().flatten();
 
     let file = File::open(path)?;
@@ -484,6 +486,9 @@ fn parse_session(
         let t = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if t == "session_meta" {
             let payload = v.get("payload").cloned().unwrap_or_default();
+            if is_codex_guardian_session(&payload) {
+                internal_guardian_session = true;
+            }
             if id.is_none() {
                 id = payload.get("id").and_then(|x| x.as_str()).map(String::from);
             }
@@ -536,11 +541,30 @@ fn parse_session(
                     })
                     .map(String::from);
             }
+        } else if t == "compacted" {
+            skip_replayed_user_message = true;
+        } else if t == "event_msg" && first_user_message.is_none() {
+            if let Some(payload) = v.get("payload") {
+                if payload.get("type").and_then(|x| x.as_str()) == Some("user_message") {
+                    if let Some(text) = payload.get("message").and_then(|x| x.as_str()) {
+                        if !is_system_noise(text) {
+                            let cleaned = strip_injected_context(text);
+                            if !cleaned.is_empty() {
+                                first_user_message = Some(normalize_preview(&cleaned));
+                            }
+                        }
+                    }
+                }
+            }
         } else if t == "response_item" && first_user_message.is_none() {
             if let Some(payload) = v.get("payload") {
                 if payload.get("type").and_then(|x| x.as_str()) == Some("message")
                     && payload.get("role").and_then(|x| x.as_str()) == Some("user")
                 {
+                    if skip_replayed_user_message {
+                        skip_replayed_user_message = false;
+                        continue;
+                    }
                     if let Some(text) = extract_message_text(payload) {
                         if !is_system_noise(&text) {
                             let cleaned = strip_injected_context(&text);
@@ -563,6 +587,10 @@ fn parse_session(
         {
             break;
         }
+    }
+
+    if internal_guardian_session {
+        return Ok(None);
     }
 
     let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -623,6 +651,15 @@ fn codex_parent_thread_id(payload: &serde_json::Value) -> Option<String> {
         .and_then(|x| x.get("parent_thread_id"))
         .and_then(|x| x.as_str())
         .map(String::from)
+}
+
+fn is_codex_guardian_session(payload: &serde_json::Value) -> bool {
+    payload
+        .get("source")
+        .and_then(|x| x.get("subagent"))
+        .and_then(|x| x.get("other"))
+        .and_then(|x| x.as_str())
+        == Some("guardian")
 }
 
 fn load_session_index_titles() -> HashMap<String, String> {
@@ -1441,6 +1478,62 @@ mod tests {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .starts_with("+++ added content\nnew"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn parse_session_ignores_replayed_user_message_after_compaction() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-compaction-title-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let meta = r#"{"timestamp":"2026-05-24T07:08:10.000Z","type":"session_meta","payload":{"id":"compacted-thread","timestamp":"2026-05-24T07:08:10.000Z","cwd":"/tmp/project"}}"#;
+        let compacted = r#"{"timestamp":"2026-05-24T07:30:00.000Z","type":"compacted","payload":{"message":"summary","replacement_history":[{"type":"message","role":"user"}]}}"#;
+        let replayed_user = r#"{"timestamp":"2026-05-24T07:30:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"replayed user message from compacted history"}]}}"#;
+        let real_user = r#"{"timestamp":"2026-05-24T07:31:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"继续检查 session 列表","images":[],"local_images":[],"text_elements":[]}}"#;
+        fs::write(
+            &path,
+            format!("{meta}\n{compacted}\n{replayed_user}\n{real_user}\n"),
+        )
+        .unwrap();
+
+        let info = parse_one_file(&path, false).unwrap().unwrap();
+        assert_eq!(
+            info.first_user_message.as_deref(),
+            Some("继续检查 session 列表")
+        );
+        assert_eq!(info.title.as_deref(), Some("继续检查 session 列表"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn parse_session_hides_internal_guardian_sessions() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-guardian-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("guardian.jsonl");
+        let meta = r#"{"timestamp":"2026-05-24T11:43:37.000Z","type":"session_meta","payload":{"id":"guardian-thread","timestamp":"2026-05-24T11:43:37.000Z","cwd":"/tmp/project","thread_source":"subagent","source":{"subagent":{"other":"guardian"}}}}"#;
+        let user = r#"{"timestamp":"2026-05-24T11:43:38.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"internal approval transcript"}]}}"#;
+        fs::write(&path, format!("{meta}\n{user}\n")).unwrap();
+
+        let parsed = parse_one_file(&path, false).unwrap();
+        assert!(parsed.is_none());
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();

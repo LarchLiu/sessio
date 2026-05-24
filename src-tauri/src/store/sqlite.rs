@@ -550,6 +550,7 @@ impl SessionStore for SqliteStore {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        sessions.retain(|s| !is_codex_guardian_index_row(s));
         for s in sessions.iter_mut() {
             s.subagents = subs_by_parent
                 .remove(&(s.agent, s.id.clone()))
@@ -732,6 +733,32 @@ impl SessionStore for SqliteStore {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn is_codex_guardian_index_row(session: &SessionInfo) -> bool {
+    if session.agent != Agent::Codex {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(&session.file_path) else {
+        return false;
+    };
+    let reader = std::io::BufReader::new(file);
+    for line in std::io::BufRead::lines(reader).map_while(|line| line.ok()) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v.get("type").and_then(|x| x.as_str()) != Some("session_meta") {
+            continue;
+        }
+        return v
+            .get("payload")
+            .and_then(|x| x.get("source"))
+            .and_then(|x| x.get("subagent"))
+            .and_then(|x| x.get("other"))
+            .and_then(|x| x.as_str())
+            == Some("guardian");
+    }
+    false
 }
 
 impl MemoryStore for SqliteStore {
