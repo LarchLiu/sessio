@@ -20,6 +20,7 @@ interface MetaRow {
   label: string;
   value: string | null;
   copyable?: boolean;
+  clampLines?: number;
 }
 
 interface MemoryAnchor {
@@ -144,7 +145,7 @@ export function SessionMetaList({
   const { lang, t } = useI18n();
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const rows: MetaRow[] = [
-    { label: t("meta.title"), value: session.title },
+    { label: t("meta.title"), value: session.title, clampLines: 2 },
     { label: t("meta.agent"), value: AGENT_LABEL[session.agent] },
     { label: t("meta.session_id"), value: session.id, copyable: true },
     {
@@ -215,7 +216,19 @@ function SessionMetaRow({
     >
       <div className="text-caption uppercase text-ink/35">{row.label}</div>
       <div className="flex min-w-0 items-center gap-2 text-body-sm text-ink/75">
-        <span className="min-w-0 flex-1 break-words">
+        <span
+          className="min-w-0 flex-1 break-words"
+          style={
+            row.clampLines
+              ? {
+                  display: "-webkit-box",
+                  WebkitLineClamp: row.clampLines,
+                  WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                }
+              : undefined
+          }
+        >
           {row.value || <span className="text-ink/30">-</span>}
         </span>
         {copyValue && (

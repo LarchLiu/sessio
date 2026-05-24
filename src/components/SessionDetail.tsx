@@ -920,6 +920,7 @@ function RoleNav({
 }) {
   const { t } = useI18n();
   const showTimerRef = useRef<number | undefined>(undefined);
+  const jumpTimerRefs = useRef<number[]>([]);
   const roleIndices = useMemo(
     () =>
       items
@@ -938,6 +939,10 @@ function RoleNav({
       if (showTimerRef.current !== undefined) {
         window.clearTimeout(showTimerRef.current);
       }
+      for (const timer of jumpTimerRefs.current) {
+        window.clearTimeout(timer);
+      }
+      jumpTimerRefs.current = [];
     };
   }, []);
 
@@ -1069,6 +1074,36 @@ function RoleNav({
     }
     setNavVisible(false);
   };
+  const jumpToIndex = (idx: number) => {
+    const vp = viewportRef.current;
+    const el = refs.current[idx];
+    if (!vp || !el) return;
+
+    for (const timer of jumpTimerRefs.current) {
+      window.clearTimeout(timer);
+    }
+    jumpTimerRefs.current = [];
+
+    const align = () => {
+      const nextEl = refs.current[idx];
+      if (!nextEl) return;
+      const vpRect = vp.getBoundingClientRect();
+      const targetTop = nextEl.getBoundingClientRect().top - vpRect.top + vp.scrollTop;
+      const maxTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+      vp.scrollTop = Math.max(0, Math.min(targetTop, maxTop));
+      activeRef.current = idx;
+      setActiveIdx(idx);
+    };
+
+    align();
+    window.requestAnimationFrame(() => {
+      align();
+      window.requestAnimationFrame(align);
+    });
+    for (const delay of [80, 180]) {
+      jumpTimerRefs.current.push(window.setTimeout(align, delay));
+    }
+  };
   return (
     <div
       onWheel={handleWheel}
@@ -1108,12 +1143,7 @@ function RoleNav({
           >
             <button
               type="button"
-              onClick={() =>
-                refs.current[idx]?.scrollIntoView({
-                  behavior: "smooth",
-                  block: "start",
-                })
-              }
+              onClick={() => jumpToIndex(idx)}
               style={{ top: `${ratio * 100}%`, transform: "translateY(-50%)" }}
               className={
                 "group absolute cursor-pointer p-1.5 transition-opacity duration-150 focus-visible:opacity-100 " +

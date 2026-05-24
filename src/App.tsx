@@ -1038,7 +1038,7 @@ function SidebarFooter({
             : "translate-y-2 scale-y-95 opacity-0 pointer-events-none")
         }
       >
-        <div className="border-t border-ink/10 bg-surface shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur">
+        <div className="border-y border-ink/10 bg-surface">
           <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-3">
             <span className="text-caption uppercase tracking-[0.12em] text-ink/40">
               {t("sidebar.settings")}
