@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agents::runtime::types::{
-    AgentInput, AgentSessionHandle, AgentTurnHandle, EnsureAgentRuntimeSession, RuntimeStatus,
-    StartAgentSession,
+    AgentInput, AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle,
+    EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
 use indexer::{IndexTask, IndexerHandle};
@@ -519,6 +519,17 @@ fn start_agent_session(
 }
 
 #[tauri::command]
+fn fork_agent_session(
+    req: StartAgentSession,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<AgentSessionHandle, String> {
+    if req.source_session_id.as_deref().unwrap_or("").trim().is_empty() {
+        return Err("source_session_id is required".to_string());
+    }
+    runtime.start_session(req).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn ensure_agent_runtime_session(
     req: EnsureAgentRuntimeSession,
     runtime: State<'_, RuntimeManager>,
@@ -531,6 +542,8 @@ fn load_agent_session(
     agent: Agent,
     runtime_session_id: String,
     workspace_path: String,
+    agent_runtime_session_id: Option<String>,
+    source_agent: Option<Agent>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     runtime
@@ -538,7 +551,8 @@ fn load_agent_session(
             agent,
             sessio_runtime_session_id: runtime_session_id,
             workspace_path,
-            agent_runtime_session_id: None,
+            agent_runtime_session_id,
+            source_agent,
         })
         .map_err(|e| e.to_string())
 }
@@ -571,14 +585,25 @@ fn cancel_agent_turn(
 }
 
 #[tauri::command]
-fn respond_agent_permission(
+fn set_agent_session_config_option(
     sessio_runtime_session_id: String,
-    request_id: String,
-    approved: bool,
+    change: AgentSessionConfigChange,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<(), String> {
     runtime
-        .respond_permission(&sessio_runtime_session_id, &request_id, approved)
+        .set_config_option(&sessio_runtime_session_id, change)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn respond_agent_permission(
+    sessio_runtime_session_id: String,
+    request_id: String,
+    option_id: String,
+    runtime: State<'_, RuntimeManager>,
+) -> Result<(), String> {
+    runtime
+        .respond_permission(&sessio_runtime_session_id, &request_id, option_id)
         .map_err(|e| e.to_string())
 }
 
@@ -820,10 +845,12 @@ pub fn run() {
             write_cross_prompt,
             get_agent_runtime_status,
             start_agent_session,
+            fork_agent_session,
             ensure_agent_runtime_session,
             load_agent_session,
             send_agent_input,
             cancel_agent_turn,
+            set_agent_session_config_option,
             respond_agent_permission,
             remove_session_files,
             remove_sessions_by_scope

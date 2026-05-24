@@ -1,7 +1,6 @@
 import {
   startTransition,
   forwardRef,
-  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -11,7 +10,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowUp, ChevronDown, ChevronRight, FileDiff, Plus, Square } from "lucide-react";
+import { ArrowUp, ChevronDown, FileDiff, Plus, Square } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -32,6 +31,7 @@ import {
   cancelAgentTurn,
   respondAgentPermission,
   sendAgentInput,
+  setAgentSessionConfigOption,
   updateSessionMessageCount,
 } from "../api";
 import ScrollArea from "./ScrollArea";
@@ -39,10 +39,17 @@ import Tooltip from "./Tooltip";
 import { localeTag, useI18n } from "../i18n";
 import type { ViewMode } from "../App";
 import {
+  type AcpViewModel,
+  type AcpAvailableCommand,
   type AcpContentBlock,
   type AcpPermissionRequest,
   type AcpRenderBlock,
+  type AcpSessionConfigOption,
+  type AcpSessionState,
   type AcpToolCall,
+  type AcpToolCallContent,
+  historyTurnsToAcpViewModel,
+  liveSessionToAcpViewModel,
   type LiveRuntimeAction,
   type LiveRuntimeState,
   type LiveRuntimeSession,
@@ -112,6 +119,13 @@ interface MessageCacheEntry {
   loadedAt: number;
 }
 
+interface HistoryViewCacheEntry {
+  sourceKey: string;
+  viewMode: ViewMode;
+  messages: SessionMessage[];
+  viewModel: AcpViewModel;
+}
+
 interface ScrollAnchor {
   key: string;
   offset: number;
@@ -124,9 +138,12 @@ interface ScrollCacheEntry {
 }
 
 const messageCache = new Map<string, MessageCacheEntry>();
+const historyViewCache = new Map<string, HistoryViewCacheEntry>();
+const renderItemsCache = new WeakMap<AcpViewModel, AcpRenderItem[]>();
 const scrollCache = new Map<string, ScrollCacheEntry>();
 const BOTTOM_FOLLOW_THRESHOLD_PX = 24;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 120;
+const INITIAL_HISTORY_RENDER_ITEMS = 120;
 
 function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
   return `${agent}:${sessionId}:${filePath}`;
@@ -349,6 +366,7 @@ function MessageStream({
   const [composerText, setComposerText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [historyRenderReady, setHistoryRenderReady] = useState(false);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -386,6 +404,7 @@ function MessageStream({
       ? "restore"
       : "bottom";
     initialPositionAppliedRef.current = false;
+    setHistoryRenderReady(false);
   }, [available, filePath, messageCount, sourceKey]);
 
   useEffect(() => {
@@ -452,17 +471,34 @@ function MessageStream({
     runtimeSessionId,
   ]);
 
-  const displayItems = useMemo(() => {
+  const acpViewModel = useMemo<AcpViewModel>(() => {
     if (liveSession && liveSession.turns.length > 0) {
-      return liveTurnsToRenderItems(liveSession.turns);
+      return liveSessionToAcpViewModel(liveSession);
     }
-    const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
-    const filtered =
-      viewMode === "native"
-        ? all
-        : all.filter(({ m }) => isConversationRole(m.role));
-    return moveFileEditsToTurnEnd(pairToolMessages(filtered));
-  }, [liveSession, messages, viewMode]);
+    return cachedHistoryViewModel(sourceKey, viewMode, messages);
+  }, [liveSession, messages, sourceKey, viewMode]);
+
+  const displayItems = useMemo(
+    () => cachedAcpRenderItems(acpViewModel),
+    [acpViewModel],
+  );
+  const visibleDisplayItems = useMemo(() => {
+    if (liveSession || historyRenderReady) return displayItems;
+    if (displayItems.length <= INITIAL_HISTORY_RENDER_ITEMS) return displayItems;
+    return displayItems.slice(-INITIAL_HISTORY_RENDER_ITEMS);
+  }, [displayItems, historyRenderReady, liveSession]);
+
+  useEffect(() => {
+    if (liveSession || historyRenderReady) return;
+    if (displayItems.length <= INITIAL_HISTORY_RENDER_ITEMS) {
+      setHistoryRenderReady(true);
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      startTransition(() => setHistoryRenderReady(true));
+    }, 80);
+    return () => window.clearTimeout(timeout);
+  }, [displayItems.length, historyRenderReady, liveSession]);
 
   const liveStreamingKey = useMemo(() => {
     if (!liveSession) return "";
@@ -548,7 +584,7 @@ function MessageStream({
     window.setTimeout(scroll, 80);
   }, []);
 
-  bubbleRefs.current.length = displayItems.length;
+  bubbleRefs.current.length = visibleDisplayItems.length;
 
   const saveScrollSnapshot = useCallback(
     (vp: HTMLDivElement | null = viewportRef.current) => {
@@ -562,13 +598,13 @@ function MessageStream({
       }
       const atBottom = isNearScrollBottom(vp);
       let anchor: ScrollAnchor | null = null;
-      if (!atBottom && displayItems.length > 0) {
+      if (!atBottom && visibleDisplayItems.length > 0) {
         const vpRect = vp.getBoundingClientRect();
         let bestIdx = -1;
         let bestOffset = Number.NEGATIVE_INFINITY;
         let fallbackIdx = -1;
         let fallbackOffset = Number.POSITIVE_INFINITY;
-        for (let i = 0; i < displayItems.length; i += 1) {
+        for (let i = 0; i < visibleDisplayItems.length; i += 1) {
           const el = bubbleRefs.current[i];
           if (!el) continue;
           const offset = el.getBoundingClientRect().top - vpRect.top;
@@ -585,7 +621,7 @@ function MessageStream({
         const el = idx >= 0 ? bubbleRefs.current[idx] : null;
         if (el) {
           const offset = el.getBoundingClientRect().top - vpRect.top;
-          anchor = { key: displayItems[idx].key, offset };
+          anchor = { key: renderItemKey(visibleDisplayItems[idx]), offset };
         }
       }
       scrollCache.set(sourceKey, {
@@ -597,7 +633,7 @@ function MessageStream({
         performance.now() < programmaticScrollUntilRef.current;
       if (!isProgrammaticScroll) followLiveStreamRef.current = atBottom;
     },
-    [available, filePath, displayItems, sourceKey],
+    [available, filePath, visibleDisplayItems, sourceKey],
   );
 
   useLayoutEffect(() => {
@@ -609,7 +645,7 @@ function MessageStream({
   useLayoutEffect(() => {
     const vp = viewportRef.current;
     const mode = pendingInitialPositionRef.current;
-    if (!vp || mode === null || loading || displayItems.length === 0) return;
+    if (!vp || mode === null || loading || visibleDisplayItems.length === 0) return;
     const snapshot = scrollCache.get(sourceKey);
     if (mode === "restore" && snapshot?.atBottom) {
       followLiveStreamRef.current = true;
@@ -619,7 +655,7 @@ function MessageStream({
       return;
     }
     if (mode === "restore" && snapshot?.anchor) {
-      const idx = displayItems.findIndex((item) => item.key === snapshot.anchor?.key);
+      const idx = visibleDisplayItems.findIndex((item) => renderItemKey(item) === snapshot.anchor?.key);
       const el = idx >= 0 ? bubbleRefs.current[idx] : null;
       if (el) {
         const vpRect = vp.getBoundingClientRect();
@@ -641,25 +677,25 @@ function MessageStream({
     }
     pendingInitialPositionRef.current = null;
     initialPositionAppliedRef.current = true;
-  }, [displayItems, loading, scrollChatToBottom, sourceKey]);
+  }, [visibleDisplayItems, loading, scrollChatToBottom, sourceKey]);
 
   useLayoutEffect(() => {
     const vp = viewportRef.current;
-    if (!vp || displayItems.length === 0 || !initialPositionAppliedRef.current) {
+    if (!vp || visibleDisplayItems.length === 0 || !initialPositionAppliedRef.current) {
       return;
     }
     const snapshot = scrollCache.get(sourceKey);
     if (snapshot && !snapshot.atBottom && !followLiveStreamRef.current) return;
     scrollChatToBottom();
-  }, [displayItems, scrollChatToBottom, sourceKey]);
+  }, [visibleDisplayItems, scrollChatToBottom, sourceKey]);
 
   useEffect(() => {
     if (!liveStreamingKey || !followLiveStreamRef.current) return;
     scrollChatToBottom();
   }, [liveStreamingKey, scrollChatToBottom]);
 
-  const handleSend = useCallback(async () => {
-    const text = composerText.trim();
+  const handleSendText = useCallback(async (rawText: string, clearComposer = false) => {
+    const text = rawText.trim();
     if (!text || sending) return;
     if (!workspacePath) {
       setComposerError("This session has no workspace path, so live chat cannot start yet.");
@@ -704,6 +740,7 @@ function MessageStream({
         sessioRuntimeSessionId: runtimeSessionId,
         workspacePath,
         agentRuntimeSessionId: sessionId,
+        sourceAgent: agent,
       });
       pendingRuntimeSessionId = runtimeSessionId;
       const turn = await sendAgentInput(runtimeSessionId, { text });
@@ -714,7 +751,7 @@ function MessageStream({
         from: optimisticTurnId,
         to: turn.turnId,
       });
-      setComposerText("");
+      if (clearComposer) setComposerText("");
       window.requestAnimationFrame(() => composerRef.current?.focus());
     } catch (err) {
       const message = String(err);
@@ -732,7 +769,11 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, composerText, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, dispatchLiveEvent, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+
+  const handleSend = useCallback(async () => {
+    await handleSendText(composerText, true);
+  }, [composerText, handleSendText]);
 
   const handleCancelTurn = useCallback(async () => {
     if (!activeTurnId) return;
@@ -764,37 +805,33 @@ function MessageStream({
             {error}
           </div>
         )}
-        {!loading && !error && available && displayItems.length === 0 && (
+        {!loading && !error && available && visibleDisplayItems.length === 0 && (
           <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
         )}
         <div className="flex flex-col gap-2">
-          {displayItems.map((item, i) => (
+          <AcpSessionStatePanel
+            state={acpViewModel.sessionState}
+            sessioRuntimeSessionId={runtimeSessionId}
+            onRunCommand={handleSendText}
+          />
+          {visibleDisplayItems.map((item, i) => (
             <div
-              key={item.key}
+              key={renderItemKey(item)}
               ref={(el) => {
                 bubbleRefs.current[i] = el;
               }}
               className={
                 "message-render-contain " +
-                (renderItemRole(item) === "user" ? "flex justify-end" : "")
+                (renderItemSide(item) === "user" ? "flex justify-end" : "")
               }
             >
-              {item.acp ? (
-                <AcpLiveItem
-                  item={item.acp}
-                  sessioRuntimeSessionId={runtimeSessionId}
-                  now={runtimeNow}
-                  onPreviewImage={onPreviewImage}
-                  onPermissionResponse={respondAgentPermission}
-                />
-              ) : item.message ? (
-                <MessageBubble
-                  msg={item.message}
-                  toolResult={item.toolResult}
-                  onPreviewImage={onPreviewImage}
-                  onPermissionResponse={respondAgentPermission}
-                />
-              ) : null}
+              <AcpLiveItem
+                item={item}
+                sessioRuntimeSessionId={runtimeSessionId}
+                now={runtimeNow}
+                onPreviewImage={onPreviewImage}
+                onPermissionResponse={respondAgentPermission}
+              />
             </div>
           ))}
         </div>
@@ -813,16 +850,16 @@ function MessageStream({
         onCancel={handleCancelTurn}
       />
       <RoleNav
-        role="assistant"
+        sideKind="assistant"
         side="left"
-        messages={displayItems.map(renderItemNavMessage)}
+        items={visibleDisplayItems}
         refs={bubbleRefs}
         viewportRef={viewportRef}
       />
       <RoleNav
-        role="user"
+        sideKind="user"
         side="right"
-        messages={displayItems.map(renderItemNavMessage)}
+        items={visibleDisplayItems}
         refs={bubbleRefs}
         viewportRef={viewportRef}
       />
@@ -846,6 +883,7 @@ function pendingLiveSession(handle: {
       supportsPermissions: true,
       supportsToolDeltas: true,
       supportsResume: true,
+      supportsFork: false,
       supportsAttachments: false,
       supportsModes: false,
     },
@@ -863,15 +901,15 @@ function pendingLiveSession(handle: {
 }
 
 function RoleNav({
-  role,
+  sideKind,
   side,
-  messages,
+  items,
   refs,
   viewportRef,
 }: {
-  role: "assistant" | "user";
+  sideKind: "assistant" | "user";
   side: "left" | "right";
-  messages: SessionMessage[];
+  items: AcpRenderItem[];
   refs: React.RefObject<(HTMLDivElement | null)[]>;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
@@ -879,10 +917,10 @@ function RoleNav({
   const showTimerRef = useRef<number | undefined>(undefined);
   const roleIndices = useMemo(
     () =>
-      messages
-        .map((m, i) => (m.role === role ? i : -1))
+      items
+        .map((item, i) => (renderItemSide(item) === sideKind ? i : -1))
         .filter((i) => i >= 0),
-    [messages, role],
+    [items, sideKind],
   );
 
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
@@ -1039,7 +1077,7 @@ function RoleNav({
       {roleIndices.map((idx) => {
         const ratio = positions.get(idx);
         if (ratio === undefined) return null;
-        const cleaned = previewTextForRole(messages[idx]);
+        const cleaned = previewTextForAcpItem(items[idx]);
         const preview = cleaned.replace(/\s+/g, " ").trim().slice(0, 200);
         const tip = (
           <div
@@ -1078,7 +1116,7 @@ function RoleNav({
                 (isLeft ? "left-1.5" : "right-1.5")
               }
               aria-label={t(
-                role === "assistant"
+                sideKind === "assistant"
                   ? "detail.jump_to_assistant_msg"
                   : "detail.jump_to_user_msg",
                 { n: idx + 1 },
@@ -1238,10 +1276,219 @@ function resizeTextareaToContent(el: HTMLTextAreaElement) {
   el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
-function previewTextForRole(message: SessionMessage): string {
-  return message.role === "user"
-    ? stripInjectedContext(message.text)
-    : stripImagePlaceholders(message.text);
+function AcpSessionStatePanel({
+  state,
+  sessioRuntimeSessionId,
+  onRunCommand,
+}: {
+  state: AcpSessionState;
+  sessioRuntimeSessionId: string;
+  onRunCommand: (text: string) => Promise<void>;
+}) {
+  const hasPlan = Boolean(state.plan && state.plan.entries.length > 0);
+  const hasCommands = state.availableCommands.length > 0;
+  const hasConfig = state.configOptions.length > 0;
+  const hasInfo = Boolean(state.sessionInfo?.title || state.currentModeId);
+  if (!hasPlan && !hasCommands && !hasConfig && !hasInfo) return null;
+  return (
+    <div className="mb-2 rounded-md border border-ink/[0.08] bg-ink/[0.025] px-3 py-2 text-body-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        {state.sessionInfo?.title && (
+          <span className="font-medium text-ink/80">{state.sessionInfo.title}</span>
+        )}
+        {state.currentModeId && (
+          <span className="rounded border border-ink/10 bg-bg-panel px-1.5 py-0.5 text-caption text-ink/55">
+            Mode · {state.currentModeId}
+          </span>
+        )}
+        {hasCommands && (
+          <AcpCommandsMenu commands={state.availableCommands} onRunCommand={onRunCommand} />
+        )}
+        {state.configOptions.map((option) => (
+          <AcpConfigControl
+            key={option.id || option.name}
+            option={option}
+            sessioRuntimeSessionId={sessioRuntimeSessionId}
+          />
+        ))}
+      </div>
+      {hasPlan && (
+        <ol className="mt-2 space-y-1 border-t border-ink/[0.06] pt-2">
+          {state.plan?.entries.map((entry, index) => (
+            <li key={`${entry.content}-${index}`} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
+              <span className={planStatusDotClass(entry.status)} />
+              <span className="min-w-0 text-ink/70">{entry.content}</span>
+              <span className="text-caption text-ink/35">{entry.priority}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function AcpCommandsMenu({
+  commands,
+  onRunCommand,
+}: {
+  commands: AcpAvailableCommand[];
+  onRunCommand: (text: string) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [inputs, setInputs] = useState<Record<string, string>>({});
+  const [pendingCommand, setPendingCommand] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const runCommand = (command: AcpAvailableCommand) => {
+    if (pendingCommand) return;
+    const extra = inputs[command.name]?.trim();
+    const text = extra ? `/${command.name} ${extra}` : `/${command.name}`;
+    setPendingCommand(command.name);
+    setError(null);
+    onRunCommand(text).then(() => {
+      setOpen(false);
+    }).catch((err) => {
+      setError(String(err));
+    }).finally(() => {
+      setPendingCommand(null);
+    });
+  };
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        className="rounded border border-ink/10 bg-bg-panel px-1.5 py-0.5 text-caption text-ink/60 hover:text-ink/85"
+        onClick={() => setOpen((value) => !value)}
+      >
+        Commands · {commands.length}
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-20 mt-1 w-72 rounded-md border border-ink/10 bg-bg-panel p-1 shadow-lg">
+          {commands.map((command) => (
+            <div key={command.name} className="rounded px-2 py-1.5">
+              <div className="font-medium text-ink/75">{command.name}</div>
+              {command.description && (
+                <div className="text-caption text-ink/45">{command.description}</div>
+              )}
+              {command.input?.kind === "unstructured" && (
+                <input
+                  value={inputs[command.name] ?? ""}
+                  onChange={(event) => {
+                    setInputs((current) => ({
+                      ...current,
+                      [command.name]: event.target.value,
+                    }));
+                  }}
+                  placeholder={command.input.hint ?? ""}
+                  className="mt-1 w-full rounded border border-ink/10 bg-ink/[0.025] px-2 py-1 text-caption text-ink/70 outline-none focus:border-ink/25"
+                />
+              )}
+              <div className="mt-1 flex items-center justify-between gap-2">
+                {command.input?.kind === "unknown" ? (
+                  <span className="text-caption text-ink/35">custom input</span>
+                ) : <span />}
+                <button
+                  type="button"
+                  disabled={Boolean(pendingCommand)}
+                  onClick={() => runCommand(command)}
+                  className="rounded border border-ink/10 bg-ink/[0.04] px-2 py-0.5 text-caption text-ink/60 hover:bg-ink/[0.07] hover:text-ink/80 disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  {pendingCommand === command.name ? "Running..." : "Run"}
+                </button>
+              </div>
+            </div>
+          ))}
+          {error && <div className="px-2 py-1 text-caption text-status-error">{error}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AcpConfigControl({
+  option,
+  sessioRuntimeSessionId,
+}: {
+  option: AcpSessionConfigOption;
+  sessioRuntimeSessionId: string;
+}) {
+  const [value, setValue] = useState(() => String(option.currentValue ?? ""));
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setValue(String(option.currentValue ?? ""));
+  }, [option.currentValue]);
+  const submitValue = (nextValue: string | boolean) => {
+    if (!option.id || pending) return;
+    setPending(true);
+    setError(null);
+    setAgentSessionConfigOption(sessioRuntimeSessionId, {
+      configId: option.id,
+      value: nextValue,
+    }).catch((err) => {
+      setError(String(err));
+      setValue(String(option.currentValue ?? ""));
+    }).finally(() => {
+      setPending(false);
+    });
+  };
+  if (option.type === "select") {
+    const choices = [
+      ...(option.options ?? []),
+      ...(option.groups ?? []).flatMap((group) => group.options),
+    ];
+    return (
+      <label className="flex items-center gap-1 text-caption text-ink/50">
+        <span>{option.name}</span>
+        <select
+          value={value}
+          disabled={pending}
+          onChange={(event) => {
+            const nextValue = event.target.value;
+            setValue(nextValue);
+            submitValue(nextValue);
+          }}
+          className="rounded border border-ink/10 bg-bg-panel px-1 py-0.5 text-caption text-ink/70"
+          title={error ?? option.description ?? option.name}
+        >
+          {choices.map((choice) => (
+            <option key={choice.value} value={choice.value}>
+              {choice.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+  if (option.type === "boolean") {
+    return (
+      <label className="flex items-center gap-1 text-caption text-ink/55">
+        <input
+          type="checkbox"
+          checked={value === "true"}
+          disabled={pending}
+          onChange={(event) => {
+            const nextValue = event.target.checked;
+            setValue(String(nextValue));
+            submitValue(nextValue);
+          }}
+          title={error ?? option.description ?? option.name}
+        />
+        <span>{option.name}</span>
+      </label>
+    );
+  }
+  return (
+    <span className="rounded border border-ink/10 bg-bg-panel px-1.5 py-0.5 text-caption text-ink/50">
+      {option.name}
+    </span>
+  );
+}
+
+function planStatusDotClass(status: string): string {
+  const base = "mt-1.5 h-1.5 w-1.5 rounded-full";
+  if (status === "completed") return `${base} bg-[rgb(var(--color-emerald))]`;
+  if (status === "in_progress") return `${base} bg-[rgb(var(--color-blue))]`;
+  return `${base} bg-ink/25`;
 }
 
 function findScroller(el: HTMLElement | null): HTMLElement | null {
@@ -1268,9 +1515,10 @@ function AcpLiveItem({
   onPermissionResponse: (
     sessioRuntimeSessionId: string,
     requestId: string,
-    approved: boolean,
+    optionId: string,
   ) => Promise<void>;
 }) {
+  const { lang } = useI18n();
   if (item.kind === "turnStatus") {
     return <RuntimeStatusContent text={liveTurnStatusText(item.turn, now)} />;
   }
@@ -1286,6 +1534,9 @@ function AcpLiveItem({
       />
     );
   }
+  if (item.kind === "turnFileEdits") {
+    return <FileEditContent text={item.text} />;
+  }
   if (item.kind === "error") {
     return (
       <div className="rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
@@ -1293,11 +1544,71 @@ function AcpLiveItem({
       </div>
     );
   }
+  if (item.block.kind === "sessionUpdate") {
+    return (
+      <AcpSessionUpdateView
+        update={item.block}
+        locale={localeTag(lang)}
+      />
+    );
+  }
   return (
     <AcpContentBlockGroup
       block={item.block}
       timestamp={item.turn.updatedAt}
       onPreviewImage={onPreviewImage}
+    />
+  );
+}
+
+function AcpSessionUpdateView({
+  update,
+  locale,
+}: {
+  update: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>;
+  locale: string;
+}) {
+  const data = asRecord(update.data);
+  const text = typeof data.text === "string" ? data.text : "";
+  const timestamp =
+    typeof data.timestamp === "number" ? data.timestamp : null;
+  if (update.updateType === "file_edit") {
+    return (
+      <div className="text-body leading-relaxed break-words py-1">
+        <FileEditContent text={text} />
+      </div>
+    );
+  }
+  if (update.updateType === "runtime_status") {
+    return (
+      <div className="py-1">
+        <RuntimeStatusContent text={text} />
+      </div>
+    );
+  }
+  if (update.updateType === "turn_note") {
+    return (
+      <div className="flex items-center gap-2 py-1 text-body-sm italic text-ink/40">
+        <span>{text}</span>
+        {timestamp && (
+          <span className="text-caption not-italic text-ink/30">
+            {new Date(timestamp).toLocaleString(locale, {
+              hour: "2-digit",
+              minute: "2-digit",
+              month: "short",
+              day: "numeric",
+            })}
+          </span>
+        )}
+      </div>
+    );
+  }
+  return (
+    <PlainTextContent
+      text={
+        text ||
+        `${update.updateType}\n${JSON.stringify(update.data, null, 2)}`
+      }
     />
   );
 }
@@ -1376,41 +1687,87 @@ function AcpContentBlockView({
   block: AcpContentBlock;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
-  const type = String(block.type ?? "unknown");
-  if (type === "text") {
-    return (
-      <MarkdownContent
-        text={typeof block.text === "string" ? block.text : ""}
-        onPreviewImage={onPreviewImage}
-      />
-    );
+  switch (block.type) {
+    case "text":
+      return (
+        <div>
+          <MarkdownContent
+            text={block.text}
+            onPreviewImage={onPreviewImage}
+          />
+          <AcpMetaBadges value={block} />
+        </div>
+      );
+    case "image": {
+      const mimeType = block.mimeType ?? "image";
+      const src = block.uri || (block.data ? `data:${mimeType};base64,${block.data}` : "");
+      return src ? (
+        <div>
+          <MarkdownImageButton
+            image={{ alt: mimeType, src }}
+            onPreviewImage={onPreviewImage}
+          />
+          <AcpMetaBadges value={block} />
+        </div>
+      ) : (
+        <PlainTextContent text={JSON.stringify(block, null, 2)} />
+      );
+    }
+    case "audio":
+      return (
+        <div className="rounded-md border border-ink/[0.08] bg-ink/[0.035] px-3 py-2 text-body-sm">
+          <div className="font-medium text-ink/75">Audio</div>
+          <div className="text-caption text-ink/45">{block.mimeType ?? "unknown"}</div>
+          <AcpMetaBadges value={block} />
+        </div>
+      );
+    case "resource_link":
+      return (
+        <div className="rounded-md border border-ink/[0.08] bg-ink/[0.035] px-3 py-2 text-body-sm">
+          <div className="font-medium text-ink/75">{block.title ?? block.name ?? "Resource"}</div>
+          {block.description && (
+            <div className="text-caption text-ink/50">{block.description}</div>
+          )}
+          <div className="truncate font-mono text-caption text-ink/45">{block.uri}</div>
+          {(block.mimeType || block.size !== undefined) && (
+            <div className="text-caption text-ink/35">
+              {[block.mimeType, block.size !== undefined ? `${block.size} bytes` : ""]
+                .filter(Boolean)
+                .join(" · ")}
+            </div>
+          )}
+          <AcpMetaBadges value={block} />
+        </div>
+      );
+    case "resource": {
+      const uri = block.uri ?? "";
+      const mimeType = block.mimeType ?? "";
+      const text = block.text ?? "";
+      const blob = block.blob ?? "";
+      return (
+        <div className="rounded-md border border-ink/[0.08] bg-ink/[0.035] px-3 py-2 text-body-sm">
+          <div className="font-medium text-ink/75">
+            {block.name ?? (uri || "Embedded resource")}
+          </div>
+          {mimeType && <div className="text-caption text-ink/45">{mimeType}</div>}
+        {text ? (
+          <div className="mt-2">
+            <MarkdownContent text={text} onPreviewImage={onPreviewImage} />
+          </div>
+        ) : blob ? (
+          <PlainTextContent text={`Embedded data: ${blob.length} base64 chars`} />
+        ) : block.resource ? (
+          <PlainTextContent text={JSON.stringify(block.resource, null, 2)} />
+        ) : (
+          <PlainTextContent text={JSON.stringify(block, null, 2)} />
+        )}
+          <AcpMetaBadges value={block} />
+        </div>
+      );
+    }
+    case "unknown":
+      return <AcpUnknownCard title={`Content · ${block.originalType ?? "unknown"}`} value={block} />;
   }
-  if (type === "image") {
-    const mimeType = typeof block.mimeType === "string" ? block.mimeType : "image";
-    const uri = typeof block.uri === "string" ? block.uri : "";
-    const data = typeof block.data === "string" ? block.data : "";
-    const src = uri || (data ? `data:${mimeType};base64,${data}` : "");
-    return src ? (
-      <MarkdownImageButton
-        image={{ alt: mimeType, src }}
-        onPreviewImage={onPreviewImage}
-      />
-    ) : (
-      <PlainTextContent text={JSON.stringify(block, null, 2)} />
-    );
-  }
-  if (type === "audio") {
-    return <PlainTextContent text={`Audio: ${String(block.mimeType ?? "unknown")}`} />;
-  }
-  if (type === "resource_link") {
-    return (
-      <div className="rounded-md border border-ink/[0.08] bg-ink/[0.035] px-3 py-2 text-body-sm">
-        <div className="font-medium text-ink/75">{String(block.name ?? "Resource")}</div>
-        <div className="truncate font-mono text-caption text-ink/45">{String(block.uri ?? "")}</div>
-      </div>
-    );
-  }
-  return <PlainTextContent text={JSON.stringify(block, null, 2)} />;
 }
 
 function AcpToolCard({
@@ -1420,13 +1777,9 @@ function AcpToolCard({
   tool: AcpToolCall;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
-  const input = tool.rawInput === null ? "" : JSON.stringify(tool.rawInput, null, 2);
-  const output =
-    tool.rawOutput !== null
-      ? JSON.stringify(tool.rawOutput, null, 2)
-      : tool.content.length > 0
-        ? tool.content.map(formatAcpToolContent).join("\n\n")
-        : "";
+  const input = acpToolInputText(tool);
+  const output = tool.rawOutput !== null ? JSON.stringify(tool.rawOutput, null, 2) : "";
+  const renderedContent = tool.content.filter((content) => content.type !== "diff");
   return (
     <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-ink/[0.045] text-body-sm">
       <div className="flex items-center justify-between gap-3 border-b border-ink/[0.07] px-3 py-2">
@@ -1435,10 +1788,21 @@ function AcpToolCard({
           <div className="text-caption text-ink/45">{tool.kind} · {formatToolStatus(tool.status)}</div>
         </div>
       </div>
-      {(input || output || tool.locations.length > 0) && (
+      {(input || output || renderedContent.length > 0 || tool.locations.length > 0) && (
         <div className="space-y-2 px-3 py-2">
           {input && <ToolPairRow label="IN" text={input} collapsed={false} onPreviewImage={onPreviewImage} />}
           {output && <ToolPairRow label="OUT" text={output} collapsed={false} onPreviewImage={onPreviewImage} />}
+          {renderedContent.length > 0 && (
+            <div className="space-y-2">
+              {renderedContent.map((content, index) => (
+                <AcpToolContentView
+                  key={index}
+                  content={content}
+                  onPreviewImage={onPreviewImage}
+                />
+              ))}
+            </div>
+          )}
           {tool.locations.length > 0 && (
             <PlainTextContent text={JSON.stringify(tool.locations, null, 2)} />
           )}
@@ -1446,6 +1810,67 @@ function AcpToolCard({
       )}
     </div>
   );
+}
+
+function acpToolInputText(tool: AcpToolCall): string {
+  if (typeof tool.rawInput === "string") return tool.rawInput;
+  if (tool.rawInput !== null) return JSON.stringify(tool.rawInput, null, 2);
+  return "";
+}
+
+function acpTurnFileEditText(turn: LiveTurn): string | null {
+  const edits = turn.tools.flatMap((tool) =>
+    tool.content.flatMap(acpToolContentToFileEdits),
+  );
+  if (edits.length === 0) return null;
+  const merged = mergeFileEditItems(
+    edits.map((edit, index) => ({
+      key: `acp-diff-${index}`,
+      message: {
+        role: "file_edit",
+        text: JSON.stringify({
+          source: "acp",
+          edits: [edit],
+        }),
+        timestamp: turn.updatedAt,
+      },
+    })),
+  );
+  return merged?.message.text ?? JSON.stringify({
+    source: "acp",
+    files: edits.length,
+    additions: sumEditNumber(edits, "additions"),
+    deletions: sumEditNumber(edits, "deletions"),
+    edits,
+  });
+}
+
+function acpToolContentToFileEdits(content: unknown): FileEditItem[] {
+  const record = asRecord(content);
+  if (record.type !== "diff") return [];
+  const path = stringValue(record.path) ?? stringValue(record.filePath);
+  const oldContent = stringValue(record.oldText) ?? stringValue(record.old_text);
+  const newContent = stringValue(record.newText) ?? stringValue(record.new_text);
+  if (!path && oldContent === undefined && newContent === undefined) return [];
+  return [{
+    path: path ?? "file",
+    displayPath: path ?? "file",
+    kind: oldContent === undefined ? "create" : "modify",
+    additions: countLines(newContent),
+    deletions: countLines(oldContent),
+    oldContent,
+    newContent,
+    detail: path ? undefined : JSON.stringify(record, null, 2),
+  }];
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function countLines(value: string | undefined): number {
+  if (!value) return 0;
+  return value.split(/\r?\n/).filter((line) => line.length > 0).length;
 }
 
 function AcpPermissionCard({
@@ -1458,17 +1883,23 @@ function AcpPermissionCard({
   onRespond: (
     sessioRuntimeSessionId: string,
     requestId: string,
-    approved: boolean,
+    optionId: string,
   ) => Promise<void>;
 }) {
-  const [pendingChoice, setPendingChoice] = useState<"allow" | "reject" | null>(null);
+  const [pendingChoice, setPendingChoice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const resolved = Boolean(permission.selectedOptionId || permission.cancelled);
-  const respond = (approved: boolean) => {
+  const options = permission.options.length > 0
+    ? permission.options
+    : [
+        { optionId: "allow_once", name: "Allow once", kind: "allow_once", meta: null },
+        { optionId: "reject_once", name: "Reject once", kind: "reject_once", meta: null },
+      ];
+  const respond = (optionId: string) => {
     if (resolved || pendingChoice) return;
-    setPendingChoice(approved ? "allow" : "reject");
+    setPendingChoice(optionId);
     setError(null);
-    onRespond(sessioRuntimeSessionId, permission.requestId, approved).catch((err) => {
+    onRespond(sessioRuntimeSessionId, permission.requestId, optionId).catch((err) => {
       setError(String(err));
       setPendingChoice(null);
     });
@@ -1488,27 +1919,32 @@ function AcpPermissionCard({
       )}
       {!resolved && (
         <div className="mt-2 flex items-center gap-2">
-          <button
-            type="button"
-            disabled={Boolean(pendingChoice)}
-            onClick={() => respond(true)}
-            className="rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-2.5 py-1 text-caption font-medium text-[rgb(var(--color-emerald))] transition hover:bg-[rgb(var(--color-emerald)/0.18)] disabled:cursor-not-allowed disabled:opacity-55"
-          >
-            {pendingChoice === "allow" ? "Allowing..." : "Allow"}
-          </button>
-          <button
-            type="button"
-            disabled={Boolean(pendingChoice)}
-            onClick={() => respond(false)}
-            className="rounded-md border border-ink/12 bg-ink/[0.04] px-2.5 py-1 text-caption font-medium text-ink/60 transition hover:bg-ink/[0.07] hover:text-ink/80 disabled:cursor-not-allowed disabled:opacity-55"
-          >
-            {pendingChoice === "reject" ? "Rejecting..." : "Reject"}
-          </button>
+          {options.map((option) => (
+            <button
+              key={option.optionId}
+              type="button"
+              disabled={Boolean(pendingChoice)}
+              onClick={() => respond(option.optionId)}
+              className={permissionOptionButtonClass(option.kind)}
+            >
+              {pendingChoice === option.optionId ? "Applying..." : option.name}
+            </button>
+          ))}
         </div>
       )}
       {error && <div className="mt-2 text-caption text-status-error">{error}</div>}
     </div>
   );
+}
+
+function permissionOptionButtonClass(kind: string): string {
+  if (kind.startsWith("allow")) {
+    return "rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-2.5 py-1 text-caption font-medium text-[rgb(var(--color-emerald))] transition hover:bg-[rgb(var(--color-emerald)/0.18)] disabled:cursor-not-allowed disabled:opacity-55";
+  }
+  if (kind.startsWith("reject")) {
+    return "rounded-md border border-status-error/25 bg-status-error/10 px-2.5 py-1 text-caption font-medium text-status-error transition hover:bg-status-error/15 disabled:cursor-not-allowed disabled:opacity-55";
+  }
+  return "rounded-md border border-ink/12 bg-ink/[0.04] px-2.5 py-1 text-caption font-medium text-ink/60 transition hover:bg-ink/[0.07] hover:text-ink/80 disabled:cursor-not-allowed disabled:opacity-55";
 }
 
 function contentBlocksText(blocks: AcpContentBlock[]): string {
@@ -1520,292 +1956,79 @@ function contentBlocksText(blocks: AcpContentBlock[]): string {
   }).join("\n");
 }
 
-function formatAcpToolContent(content: unknown): string {
-  if (!content || typeof content !== "object") return String(content ?? "");
-  const record = content as Record<string, unknown>;
-  if (record.type === "content") {
-    const inner = record.content as AcpContentBlock | undefined;
-    return inner ? contentBlocksText([inner]) : JSON.stringify(record, null, 2);
+function AcpToolContentView({
+  content,
+  onPreviewImage,
+}: {
+  content: AcpToolCallContent;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  if (content.type === "content") {
+    return (
+      <AcpContentBlockView
+        block={content.content}
+        onPreviewImage={onPreviewImage}
+      />
+    );
   }
-  if (record.type === "diff") return JSON.stringify(record, null, 2);
-  if (record.type === "terminal") return `Terminal: ${String(record.terminalId ?? "")}`;
-  return JSON.stringify(record, null, 2);
+  if (content.type === "terminal") {
+    return (
+      <div className="rounded-md border border-ink/[0.08] bg-bg-panel px-3 py-2">
+        <div className="font-medium text-ink/75">Terminal</div>
+        <div className="font-mono text-caption text-ink/45">{content.terminalId}</div>
+        <AcpMetaBadges value={content} />
+      </div>
+    );
+  }
+  if (content.type === "diff") return null;
+  return <AcpUnknownCard title={`Tool content · ${content.originalType ?? "unknown"}`} value={content} />;
 }
 
-const MessageBubble = memo(function MessageBubble({
-  msg,
-  toolResult,
-  onPreviewImage,
-  onPermissionResponse,
-}: {
-  msg: SessionMessage;
-  toolResult?: SessionMessage;
-  onPreviewImage: (image: MarkdownImage) => void;
-  onPermissionResponse: (
-    sessioRuntimeSessionId: string,
-    requestId: string,
-    approved: boolean,
-  ) => Promise<void>;
-}) {
-  const { lang, t } = useI18n();
-  const LONG_TOOL_THRESHOLD = 500;
-  const MESSAGE_LINE_LIMIT = 20;
-  const thinkingCollapsible = msg.role === "thinking";
-  const todoCollapsible = msg.role === "todo";
-  const meta = messageMeta(msg);
-  const bodyText = meta.bodyText;
-  const userMedia = useMemo(
-    () => (msg.role === "user" ? splitMarkdownImages(bodyText) : null),
-    [bodyText, msg.role],
-  );
-  const renderText = userMedia?.text ?? bodyText;
-  const renderLines = useMemo(() => renderText.split(/\r?\n/), [renderText]);
-  const conversationLineCollapsible =
-    (msg.role === "user" || msg.role === "assistant") &&
-    renderLines.length > MESSAGE_LINE_LIMIT;
-  const collapseText = msg.text + (toolResult?.text ?? "");
-  const pairedToolCollapsible = Boolean(toolResult);
-  const longCollapsible =
-    !pairedToolCollapsible &&
-    !thinkingCollapsible &&
-    !todoCollapsible &&
-    msg.role !== "user" &&
-    msg.role !== "assistant" &&
-    collapseText.length > LONG_TOOL_THRESHOLD;
-  const collapsible =
-    thinkingCollapsible ||
-    todoCollapsible ||
-    conversationLineCollapsible ||
-    longCollapsible ||
-    pairedToolCollapsible;
-  const [collapsed, setCollapsed] = useState(collapsible);
-  const previewSource =
-    msg.role === "user" ? stripInjectedContext(msg.text) : msg.text;
-  const preview = collapsible
-    ? previewSource.replace(/\s+/g, " ").slice(0, 200)
-    : "";
-  const bubbleRef = useRef<HTMLDivElement>(null);
-  const anchorTopRef = useRef<number | null>(null);
-  const showHeader = meta.label.length > 0 || msg.timestamp;
-
-  useEffect(() => {
-    setCollapsed(collapsible);
-  }, [collapsible, msg.role, msg.text]);
-
-  const toggle = () => {
-    const bubble = bubbleRef.current;
-    const scroller = findScroller(bubble);
-    if (bubble && scroller) {
-      anchorTopRef.current =
-        bubble.getBoundingClientRect().top -
-        scroller.getBoundingClientRect().top;
-    }
-    setCollapsed((v) => !v);
-  };
-
-  const handleBlockClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (!collapsible) return;
-    const target = event.target as HTMLElement | null;
-    if (
-      target?.closest(
-        "button,a,input,textarea,select,summary,label,[data-no-toggle]",
-      )
-    ) {
-      return;
-    }
-    toggle();
-  };
-
-  useLayoutEffect(() => {
-    const before = anchorTopRef.current;
-    if (before === null) return;
-    anchorTopRef.current = null;
-    const bubble = bubbleRef.current;
-    const scroller = findScroller(bubble);
-    if (!bubble || !scroller) return;
-    const after =
-      bubble.getBoundingClientRect().top -
-      scroller.getBoundingClientRect().top;
-    // 折叠时若 title 已被滚出视口顶部，拉回到视口顶部；其余保持原位
-    const target = collapsed && before < 0 ? 0 : before;
-    const delta = after - target;
-    if (delta !== 0) scroller.scrollTop += delta;
-  }, [collapsed]);
-
-  const toolSummary = isToolCallRole(msg.role) ? parseToolSummary(msg.text) : null;
-  const visibleRenderText =
-    conversationLineCollapsible && collapsed
-      ? renderLines.slice(0, MESSAGE_LINE_LIMIT).join("\n")
-      : renderText;
-  const contentClass =
-    toolResult && isToolCallRole(msg.role) ? "text-body-sm" : meta.contentClass;
-
-  if (msg.role === "file_edit") {
-    return (
-      <div ref={bubbleRef} className="text-body leading-relaxed break-words py-1">
-        <FileEditContent text={msg.text} />
-      </div>
-    );
-  }
-
-  if (msg.role === "runtime_status") {
-    return (
-      <div ref={bubbleRef} className="py-1">
-        <RuntimeStatusContent text={msg.text} />
-      </div>
-    );
-  }
-
-  if (msg.role === "turn_note") {
-    return (
-      <div ref={bubbleRef} className="py-1">
-        <TurnNoteContent msg={msg} locale={localeTag(lang)} />
-      </div>
-    );
-  }
-
+function AcpMetaBadges({ value }: { value: unknown }) {
+  const record = asRecord(value);
+  const meta = record.meta ?? record._meta;
+  const annotations = record.annotations;
+  const hasMeta = Boolean(meta);
+  const hasAnnotations = Boolean(annotations);
+  if (!hasMeta && !hasAnnotations) return null;
   return (
-    <div
-      ref={bubbleRef}
-      onClick={handleBlockClick}
-      className={
-        "text-body leading-relaxed break-words " +
-        (msg.role === "user"
-          ? "w-fit max-w-[75%] rounded-lg px-4 py-3 bg-ink/[0.06] border border-ink/[0.04]"
-          : meta.compact
-            ? "py-1.5"
-            : "px-0 py-1")
-        + (collapsible ? " cursor-pointer select-none" : "")
-      }
-    >
-      {showHeader && (
-        <div
-          className={
-            "flex items-center gap-2 leading-none " +
-            (meta.compact ? "mb-1 " : "mb-2 ") +
-            (collapsible
-              ? "hover:text-ink/70"
-              : "")
-          }
-          role={collapsible ? "button" : undefined}
-          aria-expanded={collapsible ? !collapsed : undefined}
-        >
-          {meta.compact && meta.label && (
-            <span
-              className={
-                "h-1.5 w-1.5 shrink-0 rounded-full " +
-                (meta.tone === "tool"
-                  ? "bg-[rgb(var(--color-emerald)/0.7)]"
-                  : "bg-ink/45")
-              }
-            />
-          )}
-          {meta.label && (
-            <span
-              className={
-                "text-caption font-medium " +
-                (meta.compact
-                  ? "normal-case text-ink/65"
-                  : "uppercase text-ink/40")
-              }
-            >
-              {meta.label}
-            </span>
-          )}
-          {toolSummary?.description && (
-            <span className="text-caption text-ink/45">
-              {toolSummary.description}
-            </span>
-          )}
-          {(thinkingCollapsible || todoCollapsible) && (
-            collapsed ? (
-              <ChevronRight className="w-3.5 h-3.5 text-ink/35" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5 text-ink/35" />
-            )
-          )}
-          {msg.timestamp && (
-            <span className="text-caption text-ink/30">
-              {new Date(msg.timestamp).toLocaleString(localeTag(lang), {
-                hour: "2-digit",
-                minute: "2-digit",
-                month: "short",
-                day: "numeric",
-              })}
-            </span>
-          )}
-        </div>
+    <div className="mt-1 flex flex-wrap gap-1 text-caption">
+      {hasAnnotations && (
+        <details className="rounded border border-ink/10 px-1 py-0.5 text-ink/40">
+          <summary className="cursor-pointer">
+          annotations
+          </summary>
+          <PlainTextContent text={JSON.stringify(annotations, null, 2)} />
+        </details>
       )}
-      <div
-        className={
-          contentClass +
-          (meta.compact ? " ml-3.5" : "") +
-          (meta.compact && !renderText.trim() ? " hidden" : "")
-        }
-      >
-        {longCollapsible && collapsed ? (
-          <span className="text-ink/60">
-            {preview}
-            {previewSource.length > 200 ? "…" : ""}
-          </span>
-        ) : (thinkingCollapsible || todoCollapsible) && collapsed ? null : (
-          <>
-            {userMedia && userMedia.images.length > 0 && (
-              <MarkdownImageStrip
-                images={userMedia.images}
-                align="right"
-                onPreviewImage={onPreviewImage}
-              />
-            )}
-            {toolResult ? (
-              <ToolPairContent
-                input={renderText}
-                output={toolResult.text}
-                collapsed={collapsed}
-                onPreviewImage={onPreviewImage}
-              />
-            ) : meta.renderMode === "file_edit" ? (
-              <FileEditContent text={visibleRenderText} />
-            ) : meta.renderMode === "todo" ? (
-              <TodoContent text={visibleRenderText} />
-            ) : meta.renderMode === "runtime_status" ? (
-              <RuntimeStatusContent text={visibleRenderText} />
-            ) : meta.renderMode === "permission" ? (
-              <PermissionRequestContent
-                text={visibleRenderText}
-                metadata={msg.toolCallId ?? null}
-                onRespond={onPermissionResponse}
-              />
-            ) : meta.renderMode === "plain" ? (
-              <PlainTextContent text={visibleRenderText} />
-            ) : (
-              <MarkdownContent
-                text={visibleRenderText}
-                onPreviewImage={onPreviewImage}
-              />
-            )}
-            {conversationLineCollapsible && (
-              <button
-                type="button"
-                className="mt-2 flex items-center gap-1 text-left text-body-sm text-ink/60 hover:text-ink/85"
-                data-no-toggle
-                onClick={toggle}
-              >
-                <span>{t(collapsed ? "detail.expand" : "detail.collapse")}</span>
-                <ChevronDown
-                  className={
-                    "h-3.5 w-3.5 transition-transform " +
-                    (collapsed ? "" : "rotate-180")
-                  }
-                />
-              </button>
-            )}
-          </>
-        )}
-      </div>
+      {hasMeta && (
+        <details className="rounded border border-ink/10 px-1 py-0.5 text-ink/40">
+          <summary className="cursor-pointer">
+          _meta
+          </summary>
+          <PlainTextContent text={JSON.stringify(meta, null, 2)} />
+        </details>
+      )}
     </div>
   );
-});
+}
+
+function AcpUnknownCard({ title, value }: { title: string; value: unknown }) {
+  return (
+    <details className="rounded-md border border-ink/[0.08] bg-ink/[0.035] px-3 py-2 text-body-sm">
+      <summary className="cursor-pointer font-medium text-ink/65">{title}</summary>
+      <div className="mt-2">
+        <PlainTextContent text={JSON.stringify(value, null, 2)} />
+      </div>
+    </details>
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
 
 function isConversationRole(role: string): boolean {
   return [
@@ -1835,70 +2058,91 @@ function latestMessageTimestamp(messages: SessionMessage[]): number | null {
   return latest;
 }
 
-interface MessageRenderItem {
-  key: string;
-  kind?: "legacy" | "acp";
-  message?: SessionMessage;
-  acp?: AcpRenderItem;
-  toolResult?: SessionMessage;
-}
-
 type AcpRenderItem =
   | { kind: "turnStatus"; turn: LiveTurn }
   | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
   | { kind: "tool"; turn: LiveTurn; tool: AcpToolCall }
   | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
+  | { kind: "turnFileEdits"; turn: LiveTurn; text: string }
   | { kind: "error"; turn: LiveTurn; error: RuntimeError };
 
-function liveTurnsToRenderItems(turns: LiveTurn[]): MessageRenderItem[] {
-  const items: MessageRenderItem[] = [];
-  for (const turn of turns) {
-    items.push({
-      key: `live:${turn.turnId}:status`,
-      kind: "acp",
-      acp: { kind: "turnStatus", turn },
-    });
+function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
+  const items: AcpRenderItem[] = [];
+  for (const turn of viewModel.turns) {
+    if (viewModel.source === "live") {
+      items.push({ kind: "turnStatus", turn });
+    }
     const renderedTools = new Set<string>();
     const renderedPermissions = new Set<string>();
-    turn.blocks.forEach((block, index) => {
+    turn.blocks.forEach((block) => {
       if (block.kind === "tool") {
         const tool = turn.tools.find((item) => item.toolId === block.toolId);
         if (!tool || renderedTools.has(tool.toolId)) return;
         renderedTools.add(tool.toolId);
-        items.push({
-          key: `live:${turn.turnId}:tool:${tool.toolId}`,
-          kind: "acp",
-          acp: { kind: "tool", turn, tool },
-        });
+        items.push({ kind: "tool", turn, tool });
         return;
       }
       if (block.kind === "permission") {
         const permission = turn.permissions.find((item) => item.requestId === block.requestId);
         if (!permission || renderedPermissions.has(permission.requestId)) return;
         renderedPermissions.add(permission.requestId);
-        items.push({
-          key: `live:${turn.turnId}:permission:${permission.requestId}`,
-          kind: "acp",
-          acp: { kind: "permission", turn, permission },
-        });
+        items.push({ kind: "permission", turn, permission });
         return;
       }
       if (block.kind === "error") return;
-      items.push({
-        key: `live:${turn.turnId}:block:${index}`,
-        kind: "acp",
-        acp: { kind: "block", turn, block },
-      });
+      items.push({ kind: "block", turn, block });
     });
     if (turn.error) {
-      items.push({
-        key: `live:${turn.turnId}:error`,
-        kind: "acp",
-        acp: { kind: "error", turn, error: turn.error },
-      });
+      items.push({ kind: "error", turn, error: turn.error });
+    }
+    const turnFileEdits =
+      turn.tools.length > 0 && isTurnFinished(turn)
+        ? acpTurnFileEditText(turn)
+        : null;
+    if (turnFileEdits) {
+      items.push({ kind: "turnFileEdits", turn, text: turnFileEdits });
     }
   }
   return items;
+}
+
+function cachedHistoryViewModel(
+  sourceKey: string,
+  viewMode: ViewMode,
+  messages: SessionMessage[],
+): AcpViewModel {
+  const cacheKey = `${sourceKey}:${viewMode}:${messages.length}`;
+  const cached = historyViewCache.get(cacheKey);
+  if (cached?.messages === messages) return cached.viewModel;
+  const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
+  const filtered =
+    viewMode === "native"
+      ? all
+      : all.filter(({ m }) => isConversationRole(m.role));
+  const viewModel = historyTurnsToAcpViewModel(historyMessagesToLiveTurns(filtered));
+  historyViewCache.set(cacheKey, { sourceKey, viewMode, messages, viewModel });
+  trimHistoryViewCache();
+  return viewModel;
+}
+
+function cachedAcpRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
+  const cached = renderItemsCache.get(viewModel);
+  if (cached) return cached;
+  const items = acpViewModelToRenderItems(viewModel);
+  renderItemsCache.set(viewModel, items);
+  return items;
+}
+
+function trimHistoryViewCache(): void {
+  const maxEntries = 24;
+  if (historyViewCache.size <= maxEntries) return;
+  const overflow = historyViewCache.size - maxEntries;
+  let removed = 0;
+  for (const key of historyViewCache.keys()) {
+    historyViewCache.delete(key);
+    removed += 1;
+    if (removed >= overflow) break;
+  }
 }
 
 function liveTurnStatusText(turn: LiveTurn, now: number): string {
@@ -1910,30 +2154,41 @@ function liveTurnStatusText(turn: LiveTurn, now: number): string {
   return `${running ? "running" : "done"}|${formatDuration(elapsedMs)}`;
 }
 
-function renderItemRole(item: MessageRenderItem): string {
-  if (item.message) return item.message.role;
-  const acp = item.acp;
-  if (!acp) return "";
-  if (acp.kind === "block") {
-    if (acp.block.kind === "user") return "user";
-    if (acp.block.kind === "assistant") return "assistant";
-    if (acp.block.kind === "thought") return "thinking";
-  }
-  return "tool_call";
+function renderItemKey(item: AcpRenderItem): string {
+  if (item.kind === "turnStatus") return `acp:${item.turn.turnId}:status`;
+  if (item.kind === "block") return `acp:${item.turn.turnId}:block:${item.turn.blocks.indexOf(item.block)}`;
+  if (item.kind === "tool") return `acp:${item.turn.turnId}:tool:${item.tool.toolId}`;
+  if (item.kind === "permission") return `acp:${item.turn.turnId}:permission:${item.permission.requestId}`;
+  if (item.kind === "turnFileEdits") return `acp:${item.turn.turnId}:file-edits`;
+  return `acp:${item.turn.turnId}:error`;
 }
 
-function renderItemNavMessage(item: MessageRenderItem): SessionMessage {
-  if (item.message) return item.message;
-  const acp = item.acp;
-  if (!acp || acp.kind !== "block") return { role: "", text: "", timestamp: null };
-  if (acp.block.kind !== "user" && acp.block.kind !== "assistant") {
-    return { role: "", text: "", timestamp: null };
+function renderItemSide(item: AcpRenderItem): "assistant" | "user" | "other" {
+  if (item.kind !== "block") return "other";
+  if (item.block.kind === "user") return "user";
+  if (item.block.kind === "assistant") return "assistant";
+  return "other";
+}
+
+function isTurnFinished(turn: LiveTurn): boolean {
+  return turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled";
+}
+
+function previewTextForAcpItem(item: AcpRenderItem): string {
+  if (
+    item.kind !== "block" ||
+    (
+      item.block.kind !== "user" &&
+      item.block.kind !== "assistant" &&
+      item.block.kind !== "thought"
+    )
+  ) {
+    return "";
   }
-  return {
-    role: acp.block.kind === "user" ? "user" : "assistant",
-    text: contentBlocksText(acp.block.blocks),
-    timestamp: acp.turn.updatedAt,
-  };
+  const text = contentBlocksText(item.block.blocks);
+  return item.block.kind === "user"
+    ? stripInjectedContext(text)
+    : stripImagePlaceholders(text);
 }
 
 function formatDuration(ms: number): string {
@@ -1948,11 +2203,17 @@ function formatToolStatus(status: string): string {
   return status.replace(/_/g, " ");
 }
 
+interface HistoryMessageItem {
+  key: string;
+  message: SessionMessage;
+  toolResult?: SessionMessage;
+}
+
 function pairToolMessages(
   entries: { m: SessionMessage; srcIdx: number }[],
-): MessageRenderItem[] {
+): HistoryMessageItem[] {
   const consumedResults = new Set<number>();
-  const items: MessageRenderItem[] = [];
+  const items: HistoryMessageItem[] = [];
 
   for (let i = 0; i < entries.length; i += 1) {
     const { m, srcIdx } = entries[i];
@@ -1982,20 +2243,20 @@ function pairToolMessages(
   return items;
 }
 
-function moveFileEditsToTurnEnd(items: MessageRenderItem[]): MessageRenderItem[] {
-  const out: MessageRenderItem[] = [];
-  let turn: MessageRenderItem[] = [];
+function moveFileEditsToTurnEnd(items: HistoryMessageItem[]): HistoryMessageItem[] {
+  const out: HistoryMessageItem[] = [];
+  let turn: HistoryMessageItem[] = [];
   const flush = () => {
     if (turn.length === 0) return;
-    const edits = turn.filter((item) => item.message?.role === "file_edit");
-    const rest = turn.filter((item) => item.message?.role !== "file_edit");
+    const edits = turn.filter((item) => item.message.role === "file_edit");
+    const rest = turn.filter((item) => item.message.role !== "file_edit");
     const mergedEdit = mergeFileEditItems(edits);
     out.push(...rest);
     if (mergedEdit) out.push(mergedEdit);
     turn = [];
   };
   for (const item of items) {
-    if (item.message?.role === "user" && turn.length > 0) {
+    if (item.message.role === "user" && turn.length > 0) {
       flush();
     }
     turn.push(item);
@@ -2004,10 +2265,186 @@ function moveFileEditsToTurnEnd(items: MessageRenderItem[]): MessageRenderItem[]
   return out;
 }
 
-function mergeFileEditItems(items: MessageRenderItem[]): MessageRenderItem | null {
+function historyMessagesToLiveTurns(
+  entries: { m: SessionMessage; srcIdx: number }[],
+): LiveTurn[] {
+  const items = moveFileEditsToTurnEnd(pairToolMessages(entries));
+  const turns: LiveTurn[] = [];
+  let current: LiveTurn | null = null;
+  const ensureTurn = (timestamp: number, preferredId: string): LiveTurn => {
+    if (!current) {
+      current = newHistoryTurn(preferredId, timestamp);
+      turns.push(current);
+    }
+    current.startedAt = Math.min(current.startedAt, timestamp);
+    current.updatedAt = Math.max(current.updatedAt, timestamp);
+    return current;
+  };
+
+  items.forEach((item, index) => {
+    const message = item.message;
+    const timestamp = message.timestamp ?? index;
+    if (message.role === "user" || !current) {
+      current = newHistoryTurn(`history-turn-${index}`, timestamp);
+      turns.push(current);
+    }
+    const turn = ensureTurn(timestamp, `history-turn-${index}`);
+    appendHistoryMessageToTurn(turn, item, index);
+  });
+
+  return turns;
+}
+
+function newHistoryTurn(turnId: string, timestamp: number): LiveTurn {
+  return {
+    turnId,
+    status: "completed",
+    blocks: [],
+    tools: [],
+    permissions: [],
+    protocolMessages: [],
+    stopReason: null,
+    error: null,
+    startedAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+function appendHistoryMessageToTurn(
+  turn: LiveTurn,
+  item: HistoryMessageItem,
+  index: number,
+): void {
+  const message = item.message;
+  if (message.role === "user") {
+    turn.blocks.push({
+      kind: "user",
+      blocks: [{ type: "text", text: stripInjectedContext(message.text) }],
+      raw: { source: "history", message },
+    });
+    return;
+  }
+  if (message.role === "assistant") {
+    turn.blocks.push({
+      kind: "assistant",
+      blocks: [{ type: "text", text: stripImagePlaceholders(message.text) }],
+      raw: { source: "history", message },
+    });
+    return;
+  }
+  if (message.role === "thinking") {
+    turn.blocks.push({
+      kind: "thought",
+      blocks: [{ type: "text", text: message.text }],
+      raw: { source: "history", message },
+    });
+    return;
+  }
+  if (message.role === "runtime_status") {
+    turn.blocks.push({
+      kind: "sessionUpdate",
+      updateType: "runtime_status",
+      data: { text: message.text, timestamp: message.timestamp },
+    });
+    return;
+  }
+  if (message.role === "turn_note") {
+    turn.blocks.push({
+      kind: "sessionUpdate",
+      updateType: "turn_note",
+      data: { text: message.text, timestamp: message.timestamp },
+    });
+    return;
+  }
+  if (message.role === "todo") {
+    const tool = historyToolFromMessage(message, item.toolResult, index, "todo");
+    turn.tools.push(tool);
+    turn.blocks.push({ kind: "tool", toolId: tool.toolId });
+    return;
+  }
+  if (message.role === "file_edit") {
+    turn.blocks.push({
+      kind: "sessionUpdate",
+      updateType: "file_edit",
+      data: { text: message.text, timestamp: message.timestamp },
+    });
+    return;
+  }
+  if (message.role === "permission_request") {
+    const permission = historyPermissionFromMessage(message, index);
+    turn.permissions.push(permission);
+    turn.blocks.push({ kind: "permission", requestId: permission.requestId });
+    return;
+  }
+  if (isToolCallRole(message.role)) {
+    const tool = historyToolFromMessage(message, item.toolResult, index, "tool");
+    turn.tools.push(tool);
+    turn.blocks.push({ kind: "tool", toolId: tool.toolId });
+    return;
+  }
+  if (isToolResultRole(message.role)) {
+    const tool = historyToolFromMessage(message, undefined, index, "tool_result");
+    turn.tools.push(tool);
+    turn.blocks.push({ kind: "tool", toolId: tool.toolId });
+    return;
+  }
+  turn.blocks.push({
+    kind: "assistant",
+    blocks: [{ type: "text", text: message.text }],
+    raw: { source: "history", message },
+  });
+}
+
+function historyToolFromMessage(
+  message: SessionMessage,
+  toolResult: SessionMessage | undefined,
+  index: number,
+  fallbackKind: string,
+): AcpToolCall {
+  const parsed = parseToolCall(message.text);
+  const toolId = message.toolCallId ?? `history-tool-${index}`;
+  return {
+    toolId,
+    title: toolDisplayName(parsed.name),
+    kind: fallbackKind,
+    status: toolResult || fallbackKind === "todo" ? "completed" : "unknown",
+    content: toolResult
+      ? [{ type: "content", content: { type: "text", text: toolResult.text } }]
+      : [],
+    locations: [],
+    rawInput: parsed.body || message.text,
+    rawOutput: toolResult?.text ?? null,
+    meta: { source: "history", role: message.role },
+    raw: { source: "history", message, toolResult },
+    updatedAt: message.timestamp ?? index,
+  };
+}
+
+function historyPermissionFromMessage(
+  message: SessionMessage,
+  index: number,
+): AcpPermissionRequest {
+  const parsed = parseToolCall(message.text);
+  const meta = parsePermissionMetadata(message.toolCallId ?? null);
+  return {
+    requestId: meta?.requestId ?? `history-permission-${index}`,
+    toolCall: null,
+    toolName: parsed.name,
+    input: parsed.body || null,
+    options: [
+      { optionId: "allow_once", name: "Allow once", kind: "allow_once", meta: null },
+      { optionId: "reject_once", name: "Reject once", kind: "reject_once", meta: null },
+    ],
+    selectedOptionId: meta?.pending ? null : "history_resolved",
+    cancelled: false,
+    raw: { source: "history", message },
+  };
+}
+
+function mergeFileEditItems(items: HistoryMessageItem[]): HistoryMessageItem | null {
   if (items.length === 0) return null;
   const summaries = items
-    .map((item) => item.message ? parseFileEditSummary(item.message.text) : null)
+    .map((item) => parseFileEditSummary(item.message.text))
     .filter((summary): summary is FileEditSummary => Boolean(summary));
   if (summaries.length === 0) return items[items.length - 1];
   const byPath = new Map<string, FileEditItem>();
@@ -2039,7 +2476,6 @@ function mergeFileEditItems(items: MessageRenderItem[]): MessageRenderItem | nul
   const edits = Array.from(byPath.values());
   const first = items[0].message;
   const last = items[items.length - 1].message;
-  if (!first || !last) return null;
   const source = summaries.find((summary) => summary.source)?.source ?? "session";
   const text = JSON.stringify({
     source,
@@ -2090,121 +2526,6 @@ function isToolResultRole(role: string): boolean {
   return ["tool_result", "function_call_output"].includes(role);
 }
 
-function messageMeta(msg: SessionMessage): {
-  label: string;
-  bodyText: string;
-  compact: boolean;
-  contentClass: string;
-  tone: "normal" | "thinking" | "tool";
-  renderMode: "markdown" | "plain" | "todo" | "file_edit" | "runtime_status" | "permission";
-} {
-  const role = msg.role;
-  if (role === "file_edit") {
-    return {
-      label: "Edited Files",
-      bodyText: msg.text,
-      compact: false,
-      contentClass: "text-ink/70 text-body-sm",
-      tone: "tool",
-      renderMode: "file_edit",
-    };
-  }
-  if (role === "user") {
-    return {
-      label: role,
-      bodyText: stripInjectedContext(msg.text),
-      compact: false,
-      contentClass: "text-ink/85",
-      tone: "normal",
-      renderMode: "markdown",
-    };
-  }
-  if (role === "thinking") {
-    return {
-      label: "Thinking",
-      bodyText: msg.text,
-      compact: true,
-      contentClass: "text-ink/55 text-body-sm",
-      tone: "thinking",
-      renderMode: "markdown",
-    };
-  }
-  if (role === "runtime_status") {
-    return {
-      label: "",
-      bodyText: msg.text,
-      compact: true,
-      contentClass: "text-ink/45 text-body-sm",
-      tone: "thinking",
-      renderMode: "runtime_status",
-    };
-  }
-  if (role === "turn_note") {
-    return {
-      label: "",
-      bodyText: msg.text,
-      compact: true,
-      contentClass: "text-ink/40 text-body-sm italic",
-      tone: "thinking",
-      renderMode: "plain",
-    };
-  }
-  if (role === "permission_request") {
-    const parsed = parseToolCall(msg.text);
-    return {
-      label: `Permission · ${parsed.name}`,
-      bodyText: parsed.body,
-      compact: true,
-      contentClass:
-        "text-ink/75 text-body-sm bg-ink/[0.045] border border-ink/[0.08] rounded-md px-3 py-2 overflow-hidden",
-      tone: "tool",
-      renderMode: "permission",
-    };
-  }
-  if (["tool", "tool_call", "tool_use", "function_call"].includes(role)) {
-    const parsed = parseToolCall(msg.text);
-    const label = toolDisplayName(parsed.name);
-    return {
-      label,
-      bodyText: parsed.body,
-      compact: true,
-      contentClass:
-        "text-ink/80 text-body-sm bg-ink/[0.055] border border-ink/[0.08] rounded-md px-3 py-2 overflow-hidden",
-      tone: "tool",
-      renderMode: "plain",
-    };
-  }
-  if (["tool_result", "function_call_output"].includes(role)) {
-    return {
-      label: "Tool Result",
-      bodyText: msg.text,
-      compact: true,
-      contentClass:
-        "text-ink/70 text-body-sm bg-ink/[0.04] border border-ink/[0.06] rounded-md px-3 py-2 overflow-hidden",
-      tone: "tool",
-      renderMode: "plain",
-    };
-  }
-  if (role === "todo") {
-    return {
-      label: "Update Todos",
-      bodyText: msg.text,
-      compact: true,
-      contentClass: "text-ink/45 text-body-sm",
-      tone: "tool",
-      renderMode: "todo",
-    };
-  }
-  return {
-    label: role,
-    bodyText: msg.text,
-    compact: false,
-    contentClass: "text-ink/85",
-    tone: "normal",
-    renderMode: "markdown",
-  };
-}
-
 function parseToolCall(text: string): { name: string; body: string } {
   const m = text.match(/^\[([^\]\n]+)\]\s*\n?([\s\S]*)$/);
   if (!m) return { name: "Tool Use", body: text };
@@ -2214,22 +2535,6 @@ function parseToolCall(text: string): { name: string; body: string } {
 function toolDisplayName(name: string): string {
   if (name === "web_search") return "Searching web";
   return name;
-}
-
-function parseToolSummary(text: string): { description: string | null } {
-  const parsed = parseToolCall(text);
-  try {
-    const value = JSON.parse(parsed.body) as unknown;
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      const description = (value as Record<string, unknown>).description;
-      if (typeof description === "string" && description.trim()) {
-        return { description };
-      }
-    }
-  } catch {
-    // Non-JSON tool calls are still valid; they just do not have a summary.
-  }
-  return { description: null };
 }
 
 interface FileEditSummary {
@@ -2349,7 +2654,7 @@ function FileEditContent({ text }: { text: string }) {
         <div className="border-t border-ink/[0.07]">
           {visibleEdits.map((edit, i) => {
             const label = edit.displayPath || edit.path || "(unknown file)";
-            const detailKey = edit.path || edit.displayPath || `${label}-${i}`;
+            const detailKey = `${i}:${edit.path || edit.displayPath || label}`;
             const detail = typeof edit.detail === "string" ? edit.detail : "";
             const hasDetail = hasRenderableEditDetail(edit);
             const detailOpen = openDetails.has(detailKey);
@@ -2637,86 +2942,6 @@ function RuntimeStatusContent({ text }: { text: string }) {
   );
 }
 
-function TurnNoteContent({
-  msg,
-  locale,
-}: {
-  msg: SessionMessage;
-  locale: string;
-}) {
-  return (
-    <div className="flex items-center gap-2 text-body-sm italic text-ink/40">
-      <span>{msg.text}</span>
-      {msg.timestamp && (
-        <span className="text-caption not-italic text-ink/30">
-          {new Date(msg.timestamp).toLocaleString(locale, {
-            hour: "2-digit",
-            minute: "2-digit",
-            month: "short",
-            day: "numeric",
-          })}
-        </span>
-      )}
-    </div>
-  );
-}
-
-function PermissionRequestContent({
-  text,
-  metadata,
-  onRespond,
-}: {
-  text: string;
-  metadata: string | null;
-  onRespond: (
-    sessioRuntimeSessionId: string,
-    requestId: string,
-    approved: boolean,
-  ) => Promise<void>;
-}) {
-  const parsed = parseToolCall(text);
-  const meta = parsePermissionMetadata(metadata);
-  const [pendingChoice, setPendingChoice] = useState<"allow" | "reject" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const canRespond = Boolean(meta && meta.pending && !pendingChoice);
-  const respond = (approved: boolean) => {
-    if (!meta || !canRespond) return;
-    setPendingChoice(approved ? "allow" : "reject");
-    setError(null);
-    onRespond(meta.sessioRuntimeSessionId, meta.requestId, approved).catch((err) => {
-      console.warn("respond permission failed", err);
-      setError(String(err));
-      setPendingChoice(null);
-    });
-  };
-  return (
-    <div className="space-y-2">
-      {parsed.body.trim() && <PlainTextContent text={parsed.body} />}
-      {meta?.pending && (
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            disabled={!canRespond}
-            onClick={() => respond(true)}
-            className="rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-2.5 py-1 text-caption font-medium text-[rgb(var(--color-emerald))] transition hover:bg-[rgb(var(--color-emerald)/0.18)] disabled:cursor-not-allowed disabled:opacity-55"
-          >
-            {pendingChoice === "allow" ? "Allowing..." : "Allow"}
-          </button>
-          <button
-            type="button"
-            disabled={!canRespond}
-            onClick={() => respond(false)}
-            className="rounded-md border border-ink/12 bg-ink/[0.04] px-2.5 py-1 text-caption font-medium text-ink/60 transition hover:bg-ink/[0.07] hover:text-ink/80 disabled:cursor-not-allowed disabled:opacity-55"
-          >
-            {pendingChoice === "reject" ? "Rejecting..." : "Reject"}
-          </button>
-        </div>
-      )}
-      {error && <div className="text-caption text-status-error">{error}</div>}
-    </div>
-  );
-}
-
 function parsePermissionMetadata(metadata: string | null):
   | { sessioRuntimeSessionId: string; requestId: string; pending: boolean }
   | null {
@@ -2727,36 +2952,6 @@ function parsePermissionMetadata(metadata: string | null):
     requestId: parts[2],
     pending: parts[3] === "pending",
   };
-}
-
-function ToolPairContent({
-  input,
-  output,
-  collapsed,
-  onPreviewImage,
-}: {
-  input: string;
-  output: string;
-  collapsed: boolean;
-  onPreviewImage: (image: MarkdownImage) => void;
-}) {
-  return (
-    <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-bg-panel-alt">
-      <ToolPairRow
-        label="IN"
-        text={formatToolInput(input)}
-        collapsed={collapsed}
-        onPreviewImage={onPreviewImage}
-      />
-      <div className="border-t border-ink/[0.07]" />
-      <ToolPairRow
-        label="OUT"
-        text={output}
-        collapsed={collapsed}
-        onPreviewImage={onPreviewImage}
-      />
-    </div>
-  );
 }
 
 function ToolPairRow({
@@ -2801,101 +2996,6 @@ function ToolPairRow({
       </div>
     </div>
   );
-}
-
-function formatToolInput(text: string): string {
-  const parsed = parseToolCall(text);
-  const body = parsed.body.trim();
-  if (!body) return "";
-  try {
-    const value = JSON.parse(body) as unknown;
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      const record = value as Record<string, unknown>;
-      const command = record.command ?? record.cmd;
-      if (typeof command === "string" && command.trim()) {
-        return command;
-      }
-      const filePath = record.file_path ?? record.path;
-      if (typeof filePath === "string" && filePath.trim()) {
-        return filePath;
-      }
-    }
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return body;
-  }
-}
-
-type TodoStatus = "pending" | "in_progress" | "completed";
-
-interface ClaudeTodo {
-  content: string;
-  activeForm?: string;
-  status: TodoStatus | string;
-}
-
-function TodoContent({ text }: { text: string }) {
-  const todos = parseTodos(text);
-  if (todos.length === 0) return <PlainTextContent text={text} />;
-  return (
-    <ul className="mt-2 space-y-1.5">
-      {todos.map((todo, i) => {
-        const completed = todo.status === "completed";
-        const active = todo.status === "in_progress";
-        return (
-          <li
-            key={`${todo.content}-${i}`}
-            className={
-              "flex items-start gap-2 text-caption leading-relaxed " +
-              (completed
-                ? "text-ink/35 line-through decoration-ink/30"
-                : active
-                  ? "text-ink/65"
-                  : "text-ink/45")
-            }
-          >
-            <span
-              className={
-                "mt-0.5 inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border text-[10px] leading-none " +
-                (completed
-                  ? "border-ink/20 bg-ink/[0.035] text-ink/35"
-                  : active
-                    ? "border-[rgb(var(--color-emerald)/0.45)] bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald))]"
-                    : "border-ink/18 bg-bg-panel-alt text-transparent")
-              }
-              aria-hidden="true"
-            >
-              {completed ? "✓" : active ? "•" : ""}
-            </span>
-            <span>{todo.content}</span>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-function parseTodos(text: string): ClaudeTodo[] {
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap<ClaudeTodo>((item) => {
-      if (!item || typeof item !== "object") return [];
-      const record = item as Record<string, unknown>;
-      const content = record.content;
-      if (typeof content !== "string" || !content.trim()) return [];
-      const todo: ClaudeTodo = {
-        content,
-        status: typeof record.status === "string" ? record.status : "pending",
-      };
-      if (typeof record.activeForm === "string") {
-        todo.activeForm = record.activeForm;
-      }
-      return [todo];
-    });
-  } catch {
-    return [];
-  }
 }
 
 function MarkdownContent({

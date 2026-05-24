@@ -17,9 +17,10 @@ use super::acp::{
 use super::acp_transport::{self, AcpSessionController};
 use super::fake;
 use super::types::{
-    AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, AgentTurnHandle,
-    EnsureAgentRuntimeSession, RuntimeCapabilitySet, RuntimeError, RuntimeSessionStatus,
-    RuntimeStatus, RuntimeTransportKind, RuntimeTurnStatus, StartAgentSession,
+    AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionConfigChange,
+    AgentSessionHandle, AgentTurnHandle, EnsureAgentRuntimeSession, RuntimeCapabilitySet,
+    RuntimeError, RuntimeSessionStatus, RuntimeStatus, RuntimeTransportKind, RuntimeTurnStatus,
+    StartAgentSession,
 };
 use crate::config;
 use crate::models::Agent;
@@ -46,7 +47,7 @@ struct RuntimeSessionState {
 }
 
 pub(crate) enum RuntimePermissionDecision {
-    Selected { approved: bool },
+    Selected { option_id: String },
     Cancelled,
 }
 
@@ -110,13 +111,21 @@ impl RuntimeManager {
                     .map(|config| acp_transport::command_from_config(req.agent, config))
                     .unwrap_or_else(|| acp_transport::command_from_options(req.agent, &req.options))
             };
+            let start = match (&req.source_session_id, req.source_agent) {
+                (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
+                    acp_transport::AcpSessionStart::Fork {
+                        source_session_id: source_session_id.clone(),
+                    }
+                }
+                _ => acp_transport::AcpSessionStart::New,
+            };
             acp_controller = Some(acp_transport::spawn_session(
                 self.clone(),
                 id.clone(),
                 req.agent,
                 req.workspace_path.clone(),
                 command,
-                acp_transport::AcpSessionStart::New,
+                start,
             ));
         }
         let handle = AgentSessionHandle {
@@ -218,8 +227,16 @@ impl RuntimeManager {
                 .agent_runtime_session_id
                 .as_ref()
                 .filter(|id| !id.trim().is_empty())
-                .map(|agent_session_id| acp_transport::AcpSessionStart::Load {
-                    agent_session_id: agent_session_id.clone(),
+                .map(|agent_session_id| {
+                    if req.source_agent == Some(req.agent) {
+                        acp_transport::AcpSessionStart::Resume {
+                            agent_session_id: agent_session_id.clone(),
+                        }
+                    } else {
+                        acp_transport::AcpSessionStart::Load {
+                            agent_session_id: agent_session_id.clone(),
+                        }
+                    }
                 })
                 .unwrap_or(acp_transport::AcpSessionStart::New);
             acp_controller = Some(acp_transport::spawn_session(
@@ -384,17 +401,42 @@ impl RuntimeManager {
         })
     }
 
+    pub fn set_config_option(
+        &self,
+        sessio_runtime_session_id: &str,
+        change: AgentSessionConfigChange,
+    ) -> Result<()> {
+        if change.config_id.trim().is_empty() {
+            bail!("config_id is required");
+        }
+        let acp_controller = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+            let state = sessions
+                .get(sessio_runtime_session_id)
+                .with_context(|| format!("unknown runtime session: {sessio_runtime_session_id}"))?;
+            state
+                .acp_controller
+                .clone()
+                .context("session config updates require an ACP runtime session")?
+        };
+        acp_controller.set_config_option(change.config_id, change.value)
+    }
+
     pub fn respond_permission(
         &self,
         sessio_runtime_session_id: &str,
         request_id: &str,
-        approved: bool,
+        option_id: String,
     ) -> Result<()> {
         log::info!(
-            "[sessio-runtime:permission-response:user] session={} request={} approved={}",
+            "[sessio-runtime:permission-response:user] session={} request={} option={}",
             sessio_runtime_session_id,
             request_id,
-            approved
+            option_id
         );
         let sender = {
             let mut sessions = self
@@ -411,7 +453,7 @@ impl RuntimeManager {
                 .with_context(|| format!("unknown permission request: {request_id}"))?
         };
         sender
-            .send(RuntimePermissionDecision::Selected { approved })
+            .send(RuntimePermissionDecision::Selected { option_id })
             .map_err(|_| anyhow::anyhow!("permission request is no longer active"))
     }
 
@@ -456,11 +498,20 @@ impl RuntimeManager {
         let decision = receiver
             .recv()
             .map_err(|_| anyhow::anyhow!("permission response channel closed"))?;
-        let approved = match decision {
-            RuntimePermissionDecision::Selected { approved } => approved,
-            RuntimePermissionDecision::Cancelled => false,
+        let option_id = match decision {
+            RuntimePermissionDecision::Selected { option_id } => Some(option_id),
+            RuntimePermissionDecision::Cancelled => None,
         };
-        let acp_response = permission_response_from_decision(&acp_request, approved);
+        let approved = option_id
+            .as_ref()
+            .map(|id| id.to_ascii_lowercase().starts_with("allow"))
+            .unwrap_or(false);
+        let acp_response = option_id
+            .as_deref()
+            .map(|id| permission_response_from_decision(&acp_request, id))
+            .unwrap_or_else(|| agent_client_protocol::schema::RequestPermissionResponse::new(
+                agent_client_protocol::schema::RequestPermissionOutcome::Cancelled,
+            ));
         log::info!(
             "[sessio-runtime:fake-acp:permission-response] {:?}",
             acp_response
@@ -469,7 +520,7 @@ impl RuntimeManager {
             sessio_runtime_session_id,
             turn_id,
             request_id,
-            approved,
+            option_id,
         ))?;
         Ok(approved)
     }
@@ -516,24 +567,24 @@ impl RuntimeManager {
             sessio_runtime_session_id,
             request_id,
             match decision {
-                RuntimePermissionDecision::Selected { approved } => Some(approved),
+                RuntimePermissionDecision::Selected { ref option_id } => Some(option_id.as_str()),
                 RuntimePermissionDecision::Cancelled => None,
             }
         );
-        if let RuntimePermissionDecision::Selected { approved } = decision {
+        if let RuntimePermissionDecision::Selected { option_id } = decision {
             self.emit(permission_resolved_event(
                 sessio_runtime_session_id,
                 turn_id,
                 request_id,
-                approved,
+                Some(option_id.clone()),
             ))?;
-            Ok(RuntimePermissionDecision::Selected { approved })
+            Ok(RuntimePermissionDecision::Selected { option_id })
         } else {
             self.emit(permission_resolved_event(
                 sessio_runtime_session_id,
                 turn_id,
                 request_id,
-                false,
+                None,
             ))?;
             Ok(RuntimePermissionDecision::Cancelled)
         }

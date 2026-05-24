@@ -66,12 +66,12 @@ pub fn fake_permission_request(
 
 pub fn permission_response_from_decision(
     request: &RequestPermissionRequest,
-    approved: bool,
+    option_id: &str,
 ) -> RequestPermissionResponse {
     let option = request
         .options
         .iter()
-        .find(|option| permission_option_matches(option.kind, approved));
+        .find(|option| option.option_id.to_string() == option_id);
 
     match option {
         Some(option) => RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
@@ -215,13 +215,18 @@ pub fn permission_resolved_event(
     sessio_runtime_session_id: &str,
     turn_id: &str,
     request_id: &str,
-    approved: bool,
+    option_id: Option<String>,
 ) -> AgentRuntimeEventPayload {
+    let approved = option_id
+        .as_deref()
+        .map(is_allow_permission_option_id)
+        .unwrap_or(false);
     AgentRuntimeEventPayload::PermissionResolved {
         sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
         turn_id: turn_id.to_string(),
         request_id: request_id.to_string(),
         approved,
+        option_id,
     }
 }
 
@@ -382,6 +387,22 @@ fn value_text(value: &Value) -> Result<String> {
     serde_json::to_string(value).map_err(anyhow::Error::from)
 }
 
+pub fn permission_option_id_from_approved(
+    request: &RequestPermissionRequest,
+    approved: bool,
+) -> Option<String> {
+    request
+        .options
+        .iter()
+        .find(|option| permission_option_matches(option.kind, approved))
+        .map(|option| option.option_id.to_string())
+}
+
+fn is_allow_permission_option_id(option_id: &str) -> bool {
+    let normalized = option_id.to_ascii_lowercase();
+    normalized.starts_with("allow") || normalized.contains("allow_")
+}
+
 fn permission_option_matches(kind: PermissionOptionKind, approved: bool) -> bool {
     matches!(
         (approved, kind),
@@ -492,7 +513,7 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
-        let response = permission_response_from_decision(&request, true);
+        let response = permission_response_from_decision(&request, "allow_once");
         assert!(matches!(
             response.outcome,
             RequestPermissionOutcome::Selected(_)

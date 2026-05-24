@@ -93,6 +93,7 @@ export interface RuntimeCapabilitySet {
   supportsPermissions: boolean;
   supportsToolDeltas: boolean;
   supportsResume: boolean;
+  supportsFork: boolean;
   supportsAttachments: boolean;
   supportsModes: boolean;
 }
@@ -112,6 +113,7 @@ export interface StartAgentSessionRequest {
   workspacePath: string;
   initialPrompt?: string | null;
   sourceSessionId?: string | null;
+  sourceAgent?: Agent | null;
   options?: Record<string, unknown>;
 }
 
@@ -120,6 +122,7 @@ export interface EnsureAgentRuntimeSessionRequest {
   sessioRuntimeSessionId: string;
   workspacePath: string;
   agentRuntimeSessionId?: string | null;
+  sourceAgent?: Agent | null;
 }
 
 export interface AgentSessionHandle {
@@ -141,6 +144,11 @@ export interface AgentInput {
   text: string;
   attachments?: AgentAttachment[];
   options?: Record<string, unknown>;
+}
+
+export interface AgentSessionConfigChange {
+  configId: string;
+  value: unknown;
 }
 
 export interface AgentTurnHandle {
@@ -241,6 +249,7 @@ export type AgentRuntimeEventPayload =
       turnId: string;
       requestId: string;
       approved: boolean;
+      optionId?: string | null;
     }
   | {
       kind: "turnCompleted";
@@ -348,15 +357,25 @@ export async function startAgentSession(
   return invoke<AgentSessionHandle>("start_agent_session", { req });
 }
 
+export async function forkAgentSession(
+  req: StartAgentSessionRequest,
+): Promise<AgentSessionHandle> {
+  return invoke<AgentSessionHandle>("fork_agent_session", { req });
+}
+
 export async function loadAgentSession(
   agent: Agent,
   runtimeSessionId: string,
   workspacePath: string,
+  agentRuntimeSessionId?: string | null,
+  sourceAgent?: Agent | null,
 ): Promise<AgentSessionHandle> {
   return invoke<AgentSessionHandle>("load_agent_session", {
     agent,
     runtimeSessionId,
     workspacePath,
+    agentRuntimeSessionId: agentRuntimeSessionId ?? null,
+    sourceAgent: sourceAgent ?? null,
   });
 }
 
@@ -386,15 +405,25 @@ export async function cancelAgentTurn(
   });
 }
 
+export async function setAgentSessionConfigOption(
+  sessioRuntimeSessionId: string,
+  change: AgentSessionConfigChange,
+): Promise<void> {
+  return invoke<void>("set_agent_session_config_option", {
+    sessioRuntimeSessionId,
+    change,
+  });
+}
+
 export async function respondAgentPermission(
   sessioRuntimeSessionId: string,
   requestId: string,
-  approved: boolean,
+  optionId: string,
 ): Promise<void> {
   return invoke<void>("respond_agent_permission", {
     sessioRuntimeSessionId,
     requestId,
-    approved,
+    optionId,
   });
 }
 

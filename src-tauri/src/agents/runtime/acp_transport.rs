@@ -2,12 +2,12 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
-    CancelNotification, ContentBlock, InitializeRequest, LoadSessionRequest, NewSessionRequest,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionId, SessionNotification, SessionUpdate, StopReason,
-    TextContent,
+    CancelNotification, ContentBlock, ForkSessionRequest, InitializeRequest, LoadSessionRequest,
+    NewSessionRequest, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest, SessionId,
+    SessionNotification, SessionUpdate, StopReason, TextContent,
 };
-use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo};
+use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result};
 
 use super::acp::{
@@ -37,18 +37,27 @@ impl AcpSessionController {
             .try_send(AcpWorkerCommand::Cancel { turn_id })
             .map_err(|e| anyhow::anyhow!("failed to queue ACP cancellation: {e}"))
     }
+
+    pub fn set_config_option(&self, config_id: String, value: serde_json::Value) -> Result<()> {
+        self.command_tx
+            .try_send(AcpWorkerCommand::SetConfigOption { config_id, value })
+            .map_err(|e| anyhow::anyhow!("failed to queue ACP config update: {e}"))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum AcpSessionStart {
     New,
     Load { agent_session_id: String },
+    Resume { agent_session_id: String },
+    Fork { source_session_id: String },
 }
 
 #[derive(Debug)]
 enum AcpWorkerCommand {
     Prompt { turn_id: String, input: AgentInput },
     Cancel { turn_id: String },
+    SetConfigOption { config_id: String, value: serde_json::Value },
 }
 
 pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {
@@ -215,8 +224,8 @@ async fn run_session(
                 .map_err(acp_internal_error)?;
 
                 let response = match decision {
-                    RuntimePermissionDecision::Selected { approved } => {
-                        permission_response_from_decision(&request, approved)
+                    RuntimePermissionDecision::Selected { option_id } => {
+                        permission_response_from_decision(&request, &option_id)
                     }
                     RuntimePermissionDecision::Cancelled => {
                         RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
@@ -331,6 +340,70 @@ async fn run_session(
                             .map_err(acp_internal_error)?;
                         acp_session_id
                     }
+                    AcpSessionStart::Resume { agent_session_id } => {
+                        if init.agent_capabilities.session_capabilities.resume.is_none() {
+                            return Err(acp_internal_error(format!(
+                                "ACP agent does not support session/resume for session {agent_session_id}"
+                            )));
+                        }
+                        let acp_session_id = SessionId::new(agent_session_id);
+                        let session = connection
+                            .send_request(ResumeSessionRequest::new(
+                                acp_session_id.clone(),
+                                workspace_path,
+                            ))
+                            .block_task()
+                            .await?;
+                        manager
+                            .emit(
+                                acp_protocol_event(
+                                    &sessio_runtime_session_id,
+                                    "agent_to_client",
+                                    "response",
+                                    "session/resume",
+                                    Some(acp_session_id.to_string()),
+                                    None,
+                                    None,
+                                    None,
+                                    &session,
+                                )
+                                .map_err(acp_internal_error)?,
+                            )
+                            .map_err(acp_internal_error)?;
+                        acp_session_id
+                    }
+                    AcpSessionStart::Fork { source_session_id } => {
+                        if init.agent_capabilities.session_capabilities.fork.is_none() {
+                            return Err(acp_internal_error(format!(
+                                "ACP agent does not support session/fork for session {source_session_id}"
+                            )));
+                        }
+                        let source_acp_session_id = SessionId::new(source_session_id);
+                        let session = connection
+                            .send_request(ForkSessionRequest::new(
+                                source_acp_session_id,
+                                workspace_path,
+                            ))
+                            .block_task()
+                            .await?;
+                        manager
+                            .emit(
+                                acp_protocol_event(
+                                    &sessio_runtime_session_id,
+                                    "agent_to_client",
+                                    "response",
+                                    "session/fork",
+                                    Some(session.session_id.to_string()),
+                                    None,
+                                    None,
+                                    None,
+                                    &session,
+                                )
+                                .map_err(acp_internal_error)?,
+                            )
+                            .map_err(acp_internal_error)?;
+                        session.session_id
+                    }
                 };
                 let agent_runtime_session_id = acp_session_id.to_string();
                 manager.mark_session_ready(
@@ -398,6 +471,45 @@ async fn run_command_loop(
                 connection
                     .send_notification(notification)
                     .map_err(anyhow::Error::from)?;
+            }
+            AcpWorkerCommand::SetConfigOption { config_id, value } => {
+                log::info!(
+                    "[sessio-runtime:acp:set-config] session={} config={} value={:?}",
+                    sessio_runtime_session_id,
+                    config_id,
+                    value
+                );
+                let request = serde_json::json!({
+                    "sessionId": acp_session_id.to_string(),
+                    "configId": config_id,
+                    "value": value,
+                });
+                manager.emit(acp_protocol_event(
+                    &sessio_runtime_session_id,
+                    "client_to_agent",
+                    "request",
+                    "session/set_config_option",
+                    Some(acp_session_id.to_string()),
+                    current_turn(&current_turn_id),
+                    None,
+                    None,
+                    &request,
+                )?)?;
+                let response = connection
+                    .send_request(UntypedMessage::new("session/set_config_option", request)?)
+                    .block_task()
+                    .await?;
+                manager.emit(acp_protocol_event(
+                    &sessio_runtime_session_id,
+                    "agent_to_client",
+                    "response",
+                    "session/set_config_option",
+                    Some(acp_session_id.to_string()),
+                    current_turn(&current_turn_id),
+                    None,
+                    None,
+                    &response,
+                )?)?;
             }
         }
     }
@@ -536,6 +648,7 @@ fn runtime_capabilities_from_acp(
         supports_permissions: true,
         supports_tool_deltas: true,
         supports_resume: capabilities.session_capabilities.resume.is_some(),
+        supports_fork: capabilities.session_capabilities.fork.is_some(),
         supports_attachments: capabilities.prompt_capabilities.image
             || capabilities.prompt_capabilities.audio
             || capabilities.prompt_capabilities.embedded_context,

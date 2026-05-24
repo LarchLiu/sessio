@@ -36,6 +36,7 @@ pub struct RuntimeCapabilitySet {
     pub supports_permissions: bool,
     pub supports_tool_deltas: bool,
     pub supports_resume: bool,
+    pub supports_fork: bool,
     pub supports_attachments: bool,
     pub supports_modes: bool,
 }
@@ -47,6 +48,7 @@ impl RuntimeCapabilitySet {
             supports_permissions: true,
             supports_tool_deltas: true,
             supports_resume: true,
+            supports_fork: false,
             supports_attachments: false,
             supports_modes: false,
         }
@@ -73,6 +75,7 @@ pub struct StartAgentSession {
     pub workspace_path: String,
     pub initial_prompt: Option<String>,
     pub source_session_id: Option<String>,
+    pub source_agent: Option<Agent>,
     #[serde(default)]
     pub options: RuntimeMetadata,
 }
@@ -85,6 +88,8 @@ pub struct EnsureAgentRuntimeSession {
     pub workspace_path: String,
     #[serde(default)]
     pub agent_runtime_session_id: Option<String>,
+    #[serde(default)]
+    pub source_agent: Option<Agent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +119,13 @@ pub struct AgentInput {
     pub attachments: Vec<AgentAttachment>,
     #[serde(default)]
     pub options: RuntimeMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionConfigChange {
+    pub config_id: String,
+    pub value: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +258,8 @@ pub enum AgentRuntimeEventPayload {
         turn_id: String,
         request_id: String,
         approved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        option_id: Option<String>,
     },
     TurnCompleted {
         sessio_runtime_session_id: String,

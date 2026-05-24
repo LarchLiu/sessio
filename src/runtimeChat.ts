@@ -55,12 +55,20 @@ export interface LiveRuntimeSession {
   ended: boolean;
 }
 
+export interface AcpViewModel {
+  source: "live" | "history";
+  turns: LiveTurn[];
+  sessionState: AcpSessionState;
+  protocolMessages: AcpProtocolMessage[];
+  ended: boolean;
+}
+
 export interface AcpSessionState {
-  plan: unknown | null;
-  availableCommands: unknown[];
+  plan: AcpPlan | null;
+  availableCommands: AcpAvailableCommand[];
   currentModeId: string | null;
-  configOptions: unknown[];
-  sessionInfo: Record<string, unknown> | null;
+  configOptions: AcpSessionConfigOption[];
+  sessionInfo: AcpSessionInfo | null;
 }
 
 export interface LiveRuntimeStatus {
@@ -98,8 +106,8 @@ export interface AcpToolCall {
   title: string;
   kind: string;
   status: string;
-  content: unknown[];
-  locations: unknown[];
+  content: AcpToolCallContent[];
+  locations: AcpToolCallLocation[];
   rawInput: unknown | null;
   rawOutput: unknown | null;
   meta: unknown | null;
@@ -125,12 +133,197 @@ export interface AcpPermissionOption {
   meta: unknown | null;
 }
 
-export type AcpContentBlock = Record<string, unknown> & { type?: string };
+export type AcpContentBlock =
+  | AcpTextContent
+  | AcpImageContent
+  | AcpAudioContent
+  | AcpResourceLink
+  | AcpEmbeddedResource
+  | AcpUnknownContentBlock;
+
+export interface AcpBaseTypedValue {
+  meta?: unknown | null;
+  annotations?: unknown | null;
+}
+
+export interface AcpTextContent extends AcpBaseTypedValue {
+  type: "text";
+  text: string;
+}
+
+export interface AcpImageContent extends AcpBaseTypedValue {
+  type: "image";
+  uri?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+export interface AcpAudioContent extends AcpBaseTypedValue {
+  type: "audio";
+  uri?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+export interface AcpResourceLink extends AcpBaseTypedValue {
+  type: "resource_link";
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export interface AcpEmbeddedResource extends AcpBaseTypedValue {
+  type: "resource";
+  uri?: string;
+  name?: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+  resource?: unknown;
+}
+
+export type AcpUnknownContentBlock = Record<string, unknown> & {
+  type: "unknown";
+  originalType?: string;
+  meta?: unknown | null;
+};
+
+export type AcpToolCallContent =
+  | AcpToolContentBlock
+  | AcpToolDiffContent
+  | AcpToolTerminalContent
+  | AcpUnknownToolContent;
+
+export interface AcpToolContentBlock {
+  type: "content";
+  content: AcpContentBlock;
+  meta?: unknown | null;
+}
+
+export interface AcpToolDiffContent {
+  type: "diff";
+  path?: string;
+  oldText?: string | null;
+  newText?: string;
+  meta?: unknown | null;
+}
+
+export interface AcpToolTerminalContent {
+  type: "terminal";
+  terminalId: string;
+  meta?: unknown | null;
+}
+
+export type AcpUnknownToolContent = Record<string, unknown> & {
+  type: "unknown";
+  originalType?: string;
+  meta?: unknown | null;
+};
+
+export interface AcpToolCallLocation {
+  path?: string;
+  line?: number;
+  column?: number;
+  [key: string]: unknown;
+}
+
+export interface AcpPlan {
+  entries: AcpPlanEntry[];
+  meta?: unknown | null;
+}
+
+export interface AcpPlanEntry {
+  content: string;
+  priority: string;
+  status: string;
+  meta?: unknown | null;
+}
+
+export interface AcpAvailableCommand {
+  name: string;
+  description: string;
+  input?: AcpAvailableCommandInput | null;
+  meta?: unknown | null;
+}
+
+export interface AcpAvailableCommandInput {
+  kind: "unstructured" | "unknown";
+  hint?: string | null;
+  meta?: unknown | null;
+  raw: unknown;
+}
+
+export interface AcpSessionConfigOption {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  type?: string;
+  currentValue?: string | boolean | null;
+  options?: AcpSessionConfigChoice[];
+  groups?: AcpSessionConfigChoiceGroup[];
+  meta?: unknown | null;
+  raw: unknown;
+}
+
+export interface AcpSessionConfigChoice {
+  value: string;
+  name: string;
+  description?: string | null;
+  meta?: unknown | null;
+}
+
+export interface AcpSessionConfigChoiceGroup {
+  group: string;
+  name: string;
+  options: AcpSessionConfigChoice[];
+  meta?: unknown | null;
+}
+
+export interface AcpSessionInfo {
+  title?: string | null;
+  updatedAt?: string | null;
+  meta?: unknown | null;
+  raw: Record<string, unknown>;
+}
 
 export const emptyLiveRuntimeState: LiveRuntimeState = {
   sessions: {},
   lastSequence: 0,
 };
+
+export function emptyAcpSessionState(): AcpSessionState {
+  return {
+    plan: null,
+    availableCommands: [],
+    currentModeId: null,
+    configOptions: [],
+    sessionInfo: null,
+  };
+}
+
+export function liveSessionToAcpViewModel(session: LiveRuntimeSession): AcpViewModel {
+  return {
+    source: "live",
+    turns: session.turns,
+    sessionState: session.sessionState,
+    protocolMessages: session.protocolMessages,
+    ended: session.ended,
+  };
+}
+
+export function historyTurnsToAcpViewModel(turns: LiveTurn[]): AcpViewModel {
+  return {
+    source: "history",
+    turns,
+    sessionState: emptyAcpSessionState(),
+    protocolMessages: [],
+    ended: true,
+  };
+}
 
 export function liveSessionActivity(
   session: LiveRuntimeSession | null | undefined,
@@ -299,9 +492,12 @@ export function applyRuntimeEvent(
     const permission = turn.permissions.find((item) => item.requestId === event.requestId);
     if (permission) {
       permission.cancelled = false;
-      permission.selectedOptionId = permission.options.find((option) =>
-        event.approved ? option.kind.startsWith("allow") : option.kind.startsWith("reject"),
-      )?.optionId ?? null;
+      permission.selectedOptionId =
+        event.optionId ??
+        permission.options.find((option) =>
+          event.approved ? option.kind.startsWith("allow") : option.kind.startsWith("reject"),
+        )?.optionId ??
+        null;
     }
     turn.updatedAt = event.timestamp;
     return updateSession(next, { ...session, turns });
@@ -402,16 +598,6 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
   }
 }
 
-function emptyAcpSessionState(): AcpSessionState {
-  return {
-    plan: null,
-    availableCommands: [],
-    currentModeId: null,
-    configOptions: [],
-    sessionInfo: null,
-  };
-}
-
 function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMessage): AcpSessionState {
   if (message.method !== "session/update") return state;
   const update = asRecord(message.data).update;
@@ -419,15 +605,15 @@ function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMe
   if (!updateType) return state;
   switch (updateType) {
     case "plan":
-      return { ...state, plan: update };
+      return { ...state, plan: normalizePlan(update) };
     case "available_commands":
-      return { ...state, availableCommands: arrayField(update, "availableCommands") };
+      return { ...state, availableCommands: arrayField(update, "availableCommands").map(normalizeAvailableCommand) };
     case "current_mode":
       return { ...state, currentModeId: stringField(update, "currentModeId") };
     case "config_options":
-      return { ...state, configOptions: arrayField(update, "configOptions") };
+      return { ...state, configOptions: arrayField(update, "configOptions").map(normalizeSessionConfigOption) };
     case "session_info":
-      return { ...state, sessionInfo: asRecord(update) };
+      return { ...state, sessionInfo: normalizeSessionInfo(update) };
     default:
       return state;
   }
@@ -472,7 +658,7 @@ function mergeTurns(localTurn: LiveTurn, runtimeTurn: LiveTurn, turnId: string):
   return {
     ...runtimeTurn,
     turnId,
-    blocks: [...localTurn.blocks, ...runtimeTurn.blocks],
+    blocks: mergeTurnBlocks(localTurn.blocks, runtimeTurn.blocks),
     tools: mergeBy(localTurn.tools, runtimeTurn.tools, (tool) => tool.toolId),
     permissions: mergeBy(localTurn.permissions, runtimeTurn.permissions, (permission) => permission.requestId),
     protocolMessages: [...localTurn.protocolMessages, ...runtimeTurn.protocolMessages],
@@ -480,6 +666,16 @@ function mergeTurns(localTurn: LiveTurn, runtimeTurn: LiveTurn, turnId: string):
     startedAt: Math.min(localTurn.startedAt, runtimeTurn.startedAt),
     updatedAt: Math.max(localTurn.updatedAt, runtimeTurn.updatedAt),
   };
+}
+
+function mergeTurnBlocks(localBlocks: AcpRenderBlock[], runtimeBlocks: AcpRenderBlock[]): AcpRenderBlock[] {
+  if (runtimeBlocks.some((block) => block.kind === "user")) {
+    return [
+      ...localBlocks.filter((block) => block.kind !== "user"),
+      ...runtimeBlocks,
+    ];
+  }
+  return [...localBlocks, ...runtimeBlocks];
 }
 
 function mergeBy<T>(left: T[], right: T[], key: (item: T) => string): T[] {
@@ -518,12 +714,50 @@ function appendContentBlock(
   blocks: AcpContentBlock[],
   raw: unknown,
 ): void {
+  if (blocks.length === 0) return;
   const last = turn.blocks[turn.blocks.length - 1];
   if (last?.kind === kind) {
-    last.blocks.push(...blocks);
+    appendBlocksToContentBlockGroup(last, blocks);
     return;
   }
-  turn.blocks.push({ kind, blocks, raw });
+  turn.blocks.push({ kind, blocks: mergeAdjacentTextBlocks(blocks), raw });
+}
+
+function appendBlocksToContentBlockGroup(
+  target: Extract<AcpRenderBlock, { kind: "user" | "assistant" | "thought" }>,
+  blocks: AcpContentBlock[],
+): void {
+  target.blocks = mergeAdjacentTextBlocks([...target.blocks, ...blocks]);
+}
+
+function mergeAdjacentTextBlocks(blocks: AcpContentBlock[]): AcpContentBlock[] {
+  const merged: AcpContentBlock[] = [];
+  for (const block of blocks) {
+    const previous = merged[merged.length - 1];
+    if (
+      previous &&
+      previous.type === "text" &&
+      block.type === "text" &&
+      typeof previous.text === "string" &&
+      typeof block.text === "string" &&
+      sameTextBlockShape(previous, block)
+    ) {
+      previous.text += block.text;
+    } else {
+      merged.push({ ...block });
+    }
+  }
+  return merged;
+}
+
+function sameTextBlockShape(left: AcpContentBlock, right: AcpContentBlock): boolean {
+  return JSON.stringify(textBlockMetadata(left)) === JSON.stringify(textBlockMetadata(right));
+}
+
+function textBlockMetadata(block: AcpContentBlock): Record<string, unknown> {
+  const metadata = { ...(block as unknown as Record<string, unknown>) };
+  delete metadata.text;
+  return metadata;
 }
 
 function ensureBlock(turn: LiveTurn, block: Extract<AcpRenderBlock, { kind: "tool" } | { kind: "permission" }>): void {
@@ -537,10 +771,66 @@ function normalizeContentBlocks(value: unknown): AcpContentBlock[] {
   if (!value || typeof value !== "object") return [];
   const record = value as Record<string, unknown>;
   if (record.content && typeof record.content === "object" && !Array.isArray(record.content)) {
-    return [record.content as AcpContentBlock];
+    return [normalizeContentBlock(record.content)];
   }
-  if (typeof record.type === "string") return [record as AcpContentBlock];
+  if (typeof record.type === "string") return [normalizeContentBlock(record)];
   return [];
+}
+
+function normalizeContentBlock(value: unknown): AcpContentBlock {
+  const record = asRecord(value);
+  const type = stringField(record, "type") ?? "unknown";
+  const meta = record.meta ?? record._meta ?? null;
+  if (type === "text") {
+    return {
+      ...record,
+      type,
+      text: stringField(record, "text") ?? "",
+      annotations: record.annotations ?? null,
+      meta,
+    };
+  }
+  if (type === "image" || type === "audio") {
+    return {
+      ...record,
+      type,
+      uri: stringField(record, "uri") ?? undefined,
+      data: stringField(record, "data") ?? undefined,
+      mimeType: stringField(record, "mimeType") ?? undefined,
+      annotations: record.annotations ?? null,
+      meta,
+    };
+  }
+  if (type === "resource_link") {
+    return {
+      ...record,
+      type,
+      uri: stringField(record, "uri") ?? "",
+      name: stringField(record, "name") ?? undefined,
+      title: stringField(record, "title") ?? undefined,
+      description: stringField(record, "description") ?? undefined,
+      mimeType: stringField(record, "mimeType") ?? undefined,
+      size: numberField(record, "size") ?? undefined,
+      annotations: record.annotations ?? null,
+      meta,
+    };
+  }
+  if (type === "resource") {
+    const resource = asRecord(record.resource);
+    return {
+      ...record,
+      type,
+      uri: stringField(resource, "uri") ?? stringField(record, "uri") ?? undefined,
+      name: stringField(record, "name") ?? undefined,
+      mimeType: stringField(resource, "mimeType") ?? stringField(record, "mimeType") ?? undefined,
+      text: stringField(resource, "text") ?? stringField(record, "text") ?? undefined,
+      blob: stringField(resource, "blob") ?? stringField(record, "blob") ?? undefined,
+      resource: record.resource ?? null,
+      annotations: record.annotations ?? null,
+      meta,
+    };
+  }
+  return { ...record, type: "unknown", originalType: type, meta } as AcpUnknownContentBlock;
 }
 
 function toolFromValue(value: unknown, timestamp: number): AcpToolCall {
@@ -551,8 +841,8 @@ function toolFromValue(value: unknown, timestamp: number): AcpToolCall {
     title: stringField(record, "title") ?? "tool",
     kind: stringField(record, "kind") ?? "other",
     status: stringField(record, "status") ?? "pending",
-    content: arrayField(record, "content"),
-    locations: arrayField(record, "locations"),
+    content: arrayField(record, "content").map(normalizeToolCallContent),
+    locations: arrayField(record, "locations").map(normalizeToolCallLocation),
     rawInput: record.rawInput ?? null,
     rawOutput: record.rawOutput ?? null,
     meta: record.meta ?? null,
@@ -568,13 +858,153 @@ function toolUpdateFromValue(value: unknown, timestamp: number): AcpToolCall {
     title: stringField(record, "title") ?? "tool",
     kind: stringField(record, "kind") ?? "other",
     status: stringField(record, "status") ?? "pending",
-    content: arrayField(record, "content"),
-    locations: arrayField(record, "locations"),
+    content: arrayField(record, "content").map(normalizeToolCallContent),
+    locations: arrayField(record, "locations").map(normalizeToolCallLocation),
     rawInput: record.rawInput ?? null,
     rawOutput: record.rawOutput ?? null,
     meta: record.meta ?? null,
     raw: value,
     updatedAt: timestamp,
+  };
+}
+
+function normalizeToolCallContent(value: unknown): AcpToolCallContent {
+  const record = asRecord(value);
+  const type = stringField(record, "type") ?? "unknown";
+  const meta = record.meta ?? record._meta ?? null;
+  if (type === "content") {
+    return {
+      ...record,
+      type,
+      content: normalizeContentBlock(record.content),
+      meta,
+    };
+  }
+  if (type === "diff") {
+    return {
+      ...record,
+      type,
+      path: stringField(record, "path") ?? stringField(record, "filePath") ?? undefined,
+      oldText: stringField(record, "oldText") ?? stringField(record, "old_text") ?? null,
+      newText: stringField(record, "newText") ?? stringField(record, "new_text") ?? "",
+      meta,
+    };
+  }
+  if (type === "terminal") {
+    return {
+      ...record,
+      type,
+      terminalId: stringField(record, "terminalId") ?? stringField(record, "terminal_id") ?? "",
+      meta,
+    };
+  }
+  return { ...record, type: "unknown", originalType: type, meta } as AcpUnknownToolContent;
+}
+
+function normalizeToolCallLocation(value: unknown): AcpToolCallLocation {
+  return asRecord(value) as AcpToolCallLocation;
+}
+
+function normalizePlan(value: unknown): AcpPlan {
+  const record = asRecord(value);
+  return {
+    entries: arrayField(record, "entries").map((entry) => {
+      const item = asRecord(entry);
+      return {
+        content: stringField(item, "content") ?? "",
+        priority: stringField(item, "priority") ?? "medium",
+        status: stringField(item, "status") ?? "pending",
+        meta: item.meta ?? item._meta ?? null,
+      };
+    }),
+    meta: record.meta ?? record._meta ?? null,
+  };
+}
+
+function normalizeAvailableCommand(value: unknown): AcpAvailableCommand {
+  const record = asRecord(value);
+  return {
+    name: stringField(record, "name") ?? "command",
+    description: stringField(record, "description") ?? "",
+    input: normalizeAvailableCommandInput(record.input),
+    meta: record.meta ?? record._meta ?? null,
+  };
+}
+
+function normalizeAvailableCommandInput(value: unknown): AcpAvailableCommandInput | null {
+  if (value === null || value === undefined) return null;
+  const record = asRecord(value);
+  const hint = stringField(record, "hint");
+  return {
+    kind: hint !== undefined ? "unstructured" : "unknown",
+    hint,
+    meta: record.meta ?? record._meta ?? null,
+    raw: value,
+  };
+}
+
+function normalizeSessionConfigOption(value: unknown): AcpSessionConfigOption {
+  const record = asRecord(value);
+  const type = stringField(record, "type") ?? undefined;
+  const option: AcpSessionConfigOption = {
+    id: stringField(record, "id") ?? "",
+    name: stringField(record, "name") ?? "Option",
+    description: stringField(record, "description"),
+    category: stringField(record, "category"),
+    type,
+    currentValue: record.currentValue as string | boolean | null | undefined,
+    meta: record.meta ?? record._meta ?? null,
+    raw: value,
+  };
+  if (type === "select") {
+    option.options = normalizeConfigChoices(record.options).options;
+    option.groups = normalizeConfigChoices(record.options).groups;
+  }
+  if (type === "boolean" && typeof record.currentValue === "boolean") {
+    option.currentValue = record.currentValue;
+  }
+  return option;
+}
+
+function normalizeConfigChoices(value: unknown): {
+  options?: AcpSessionConfigChoice[];
+  groups?: AcpSessionConfigChoiceGroup[];
+} {
+  if (!Array.isArray(value)) return {};
+  const first = asRecord(value[0]);
+  if ("options" in first && "group" in first) {
+    return {
+      groups: value.map((groupValue) => {
+        const group = asRecord(groupValue);
+        return {
+          group: stringField(group, "group") ?? "",
+          name: stringField(group, "name") ?? "Group",
+          options: arrayField(group, "options").map(normalizeConfigChoice),
+          meta: group.meta ?? group._meta ?? null,
+        };
+      }),
+    };
+  }
+  return { options: value.map(normalizeConfigChoice) };
+}
+
+function normalizeConfigChoice(value: unknown): AcpSessionConfigChoice {
+  const record = asRecord(value);
+  return {
+    value: stringField(record, "value") ?? "",
+    name: stringField(record, "name") ?? "Option",
+    description: stringField(record, "description"),
+    meta: record.meta ?? record._meta ?? null,
+  };
+}
+
+function normalizeSessionInfo(value: unknown): AcpSessionInfo {
+  const record = asRecord(value);
+  return {
+    title: stringField(record, "title"),
+    updatedAt: stringField(record, "updatedAt"),
+    meta: record.meta ?? record._meta ?? null,
+    raw: record,
   };
 }
 
@@ -647,6 +1077,11 @@ function asRecord(value: unknown): Record<string, unknown> {
 function stringField(value: unknown, key: string): string | null {
   const item = asRecord(value)[key];
   return typeof item === "string" ? item : null;
+}
+
+function numberField(value: unknown, key: string): number | null {
+  const item = asRecord(value)[key];
+  return typeof item === "number" ? item : null;
 }
 
 function arrayField(value: unknown, key: string): unknown[] {
