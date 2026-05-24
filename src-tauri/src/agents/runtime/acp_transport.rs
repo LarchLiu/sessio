@@ -341,36 +341,69 @@ async fn run_session(
                         acp_session_id
                     }
                     AcpSessionStart::Resume { agent_session_id } => {
-                        if init.agent_capabilities.session_capabilities.resume.is_none() {
-                            return Err(acp_internal_error(format!(
-                                "ACP agent does not support session/resume for session {agent_session_id}"
-                            )));
-                        }
                         let acp_session_id = SessionId::new(agent_session_id);
-                        let session = connection
-                            .send_request(ResumeSessionRequest::new(
-                                acp_session_id.clone(),
-                                workspace_path,
-                            ))
-                            .block_task()
-                            .await?;
-                        manager
-                            .emit(
-                                acp_protocol_event(
-                                    &sessio_runtime_session_id,
-                                    "agent_to_client",
-                                    "response",
-                                    "session/resume",
-                                    Some(acp_session_id.to_string()),
-                                    None,
-                                    None,
-                                    None,
-                                    &session,
+                        if init.agent_capabilities.session_capabilities.resume.is_none()
+                            && init.agent_capabilities.load_session
+                        {
+                            log::info!(
+                                "[sessio-runtime:acp:resume-fallback-load] session={}",
+                                acp_session_id
+                            );
+                            let session = connection
+                                .send_request(LoadSessionRequest::new(
+                                    acp_session_id.clone(),
+                                    workspace_path,
+                                ))
+                                .block_task()
+                                .await?;
+                            manager
+                                .emit(
+                                    acp_protocol_event(
+                                        &sessio_runtime_session_id,
+                                        "agent_to_client",
+                                        "response",
+                                        "session/load",
+                                        Some(acp_session_id.to_string()),
+                                        None,
+                                        None,
+                                        None,
+                                        &session,
+                                    )
+                                    .map_err(acp_internal_error)?,
                                 )
-                                .map_err(acp_internal_error)?,
-                            )
-                            .map_err(acp_internal_error)?;
-                        acp_session_id
+                                .map_err(acp_internal_error)?;
+                            acp_session_id
+                        } else {
+                            if init.agent_capabilities.session_capabilities.resume.is_none() {
+                                return Err(acp_internal_error(format!(
+                                    "ACP agent does not support session/resume or session/load for session {acp_session_id}"
+                                )));
+                            }
+                            let session = connection
+                                .send_request(ResumeSessionRequest::new(
+                                    acp_session_id.clone(),
+                                    workspace_path,
+                                ))
+                                .block_task()
+                                .await?;
+                            manager
+                                .emit(
+                                    acp_protocol_event(
+                                        &sessio_runtime_session_id,
+                                        "agent_to_client",
+                                        "response",
+                                        "session/resume",
+                                        Some(acp_session_id.to_string()),
+                                        None,
+                                        None,
+                                        None,
+                                        &session,
+                                    )
+                                    .map_err(acp_internal_error)?,
+                                )
+                                .map_err(acp_internal_error)?;
+                            acp_session_id
+                        }
                     }
                     AcpSessionStart::Fork { source_session_id } => {
                         if init.agent_capabilities.session_capabilities.fork.is_none() {
