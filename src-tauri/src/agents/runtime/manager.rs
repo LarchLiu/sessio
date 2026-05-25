@@ -79,6 +79,49 @@ impl RuntimeManager {
         }
     }
 
+    pub fn configured_transport(&self, agent: Agent) -> RuntimeTransportKind {
+        runtime_config(agent)
+            .as_ref()
+            .map(acp_transport::transport_from_config)
+            .unwrap_or(RuntimeTransportKind::Acp)
+    }
+
+    pub fn configured_session_command(&self, agent: Agent) -> String {
+        runtime_config(agent)
+            .as_ref()
+            .map(|config| acp_transport::command_from_config(agent, config))
+            .unwrap_or_else(|| acp_transport::command_from_options(agent, &Default::default()))
+    }
+
+    pub fn status_for_session(&self, sessio_runtime_session_id: &str) -> Option<RuntimeSessionStatus> {
+        self.inner
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(sessio_runtime_session_id).map(|s| s.handle.status))
+    }
+
+    pub fn capabilities_for_session(
+        &self,
+        sessio_runtime_session_id: &str,
+    ) -> Option<RuntimeCapabilitySet> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(sessio_runtime_session_id)
+                .map(|s| s.handle.capabilities.clone())
+        })
+    }
+
+    pub fn dispose_session_silent(&self, sessio_runtime_session_id: &str) -> Result<()> {
+        let mut sessions = self
+            .inner
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+        sessions.remove(sessio_runtime_session_id);
+        Ok(())
+    }
+
     pub fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle> {
         if req.workspace_path.trim().is_empty() {
             bail!("workspace_path is required");

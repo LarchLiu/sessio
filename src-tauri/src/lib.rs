@@ -17,6 +17,9 @@ use agents::runtime::types::{
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
+use agents::runtime::metadata::{
+    runtime_agents_with_detected_capabilities, startup_probe_runtime_agents, RuntimeAgentsCache,
+};
 use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
@@ -526,6 +529,13 @@ fn get_agent_runtime_status(
 }
 
 #[tauri::command]
+fn list_runtime_agents(
+    cache: State<'_, RuntimeAgentsCache>,
+) -> Result<Vec<models::RuntimeAgentMetadata>, String> {
+    Ok(cache.get())
+}
+
+#[tauri::command]
 fn start_agent_session(
     req: StartAgentSession,
     runtime: State<'_, RuntimeManager>,
@@ -778,6 +788,7 @@ fn show_main_window(app: &AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -814,10 +825,30 @@ pub fn run() {
                 }
                 Err(e) => log::warn!("watcher failed to start: {e}"),
             }
-            app.manage(store);
+            app.manage(store.clone());
             app.manage(memory_store);
             app.manage(indexer_handle);
+            let runtime_probe_store = store.clone();
+            let runtime_agents_cache = RuntimeAgentsCache::default();
+            runtime_agents_cache.set(
+                runtime_agents_with_detected_capabilities(store.clone()).unwrap_or_default(),
+            );
             app.manage(RuntimeManager::new(app.handle().clone()));
+            app.manage(runtime_agents_cache);
+            let app_handle = app.handle().clone();
+
+            tauri::async_runtime::spawn_blocking(move || {
+                match startup_probe_runtime_agents(runtime_probe_store) {
+                    Ok(agents) => {
+                        let cache = app_handle.state::<RuntimeAgentsCache>();
+                        cache.set(agents);
+                        let _ = app_handle.emit("runtime_agents_updated", ());
+                    }
+                    Err(error) => {
+                        log::warn!("[sessio-runtime:metadata:start] {error}");
+                    }
+                }
+            });
 
             install_appearance_observer(app.handle().clone());
 
@@ -870,6 +901,7 @@ pub fn run() {
             search_project_memory,
             write_cross_prompt,
             get_agent_runtime_status,
+            list_runtime_agents,
             start_agent_session,
             fork_agent_session,
             ensure_agent_runtime_session,

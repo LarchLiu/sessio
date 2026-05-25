@@ -35,8 +35,12 @@ pub struct RuntimeCapabilitySet {
     pub supports_cancel: bool,
     pub supports_permissions: bool,
     pub supports_tool_deltas: bool,
+    pub supports_load_session: bool,
     pub supports_resume: bool,
     pub supports_fork: bool,
+    pub supports_image_attachments: bool,
+    pub supports_audio_attachments: bool,
+    pub supports_embedded_context: bool,
     pub supports_attachments: bool,
     pub supports_modes: bool,
 }
@@ -47,8 +51,12 @@ impl RuntimeCapabilitySet {
             supports_cancel: true,
             supports_permissions: true,
             supports_tool_deltas: true,
+            supports_load_session: true,
             supports_resume: true,
             supports_fork: false,
+            supports_image_attachments: false,
+            supports_audio_attachments: false,
+            supports_embedded_context: false,
             supports_attachments: false,
             supports_modes: false,
         }
@@ -106,9 +114,17 @@ pub struct AgentSessionHandle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum AgentAttachmentKind {
+    Image,
+    File,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentAttachment {
     pub path: String,
     pub mime_type: Option<String>,
+    pub kind: AgentAttachmentKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

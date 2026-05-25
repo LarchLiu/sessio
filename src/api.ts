@@ -92,8 +92,12 @@ export interface RuntimeCapabilitySet {
   supportsCancel: boolean;
   supportsPermissions: boolean;
   supportsToolDeltas: boolean;
+  supportsLoadSession: boolean;
   supportsResume: boolean;
   supportsFork: boolean;
+  supportsImageAttachments: boolean;
+  supportsAudioAttachments: boolean;
+  supportsEmbeddedContext: boolean;
   supportsAttachments: boolean;
   supportsModes: boolean;
 }
@@ -106,6 +110,18 @@ export interface RuntimeStatus {
   capabilities: RuntimeCapabilitySet;
   error: string | null;
   metadata: Record<string, unknown>;
+}
+
+export interface RuntimeAgentMetadata {
+  agent: Agent;
+  enabled: boolean;
+  configured: boolean;
+  transport: RuntimeTransportKind;
+  sessionCommand: string | null;
+  versionCommand: string | null;
+  detectedVersion: string | null;
+  capabilities: RuntimeCapabilitySet | null;
+  updatedAt: number | null;
 }
 
 export interface StartAgentSessionRequest {
@@ -138,6 +154,7 @@ export interface AgentSessionHandle {
 export interface AgentAttachment {
   path: string;
   mimeType: string | null;
+  kind: "image" | "file";
 }
 
 export interface AgentInput {
@@ -349,6 +366,10 @@ export async function writeCrossPrompt(
 
 export async function getAgentRuntimeStatus(agent: Agent): Promise<RuntimeStatus> {
   return invoke<RuntimeStatus>("get_agent_runtime_status", { agent });
+}
+
+export async function listRuntimeAgents(): Promise<RuntimeAgentMetadata[]> {
+  return invoke<RuntimeAgentMetadata[]>("list_runtime_agents");
 }
 
 export async function startAgentSession(
