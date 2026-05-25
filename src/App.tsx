@@ -1993,21 +1993,35 @@ function NewChatView({
             <div className="flex h-10 items-center gap-2 px-3 text-body-sm text-ink/55">
               <NewChatSelect
                 ariaLabel={t("new_chat.project")}
-                icon={Folder}
                 value={projectKeyValue}
                 onChange={setProjectKeyValue}
                 disabled={projects.length === 0}
-                options={projects.map((p) => ({ value: p.key, label: p.label }))}
+                options={projects.map((p) => ({
+                  value: p.key,
+                  label: p.label,
+                  icon: <Folder className="h-4 w-4 text-ink/55" />,
+                }))}
               />
               <NewChatSelect
                 ariaLabel={t("new_chat.agent")}
-                icon={Cpu}
                 value={agent}
                 onChange={(value) => setAgent(value as Agent)}
                 options={[
-                  { value: "codex", label: "Codex" },
-                  { value: "claude", label: "Claude" },
-                  { value: "gemini", label: "Gemini" },
+                  {
+                    value: "codex",
+                    label: "Codex",
+                    icon: <AgentGlyph agent="codex" className="h-4 w-4" />,
+                  },
+                  {
+                    value: "claude",
+                    label: "Claude",
+                    icon: <AgentGlyph agent="claude" className="h-4 w-4" />,
+                  },
+                  {
+                    value: "gemini",
+                    label: "Gemini",
+                    icon: <AgentGlyph agent="gemini" className="h-4 w-4" />,
+                  },
                 ]}
               />
               <NewChatMenuButton icon={Cpu} label={activeSessionCount > 0 ? `${activeSessionCount}` : t("new_chat.work_locally")} text />
@@ -2022,22 +2036,19 @@ function NewChatView({
 
 function NewChatSelect({
   ariaLabel,
-  icon: Icon,
   value,
   options,
   disabled,
   onChange,
 }: {
   ariaLabel: string;
-  icon: LucideIcon;
   value: string;
-  options: Array<{ value: string; label: string }>;
+  options: InlineMenuSelectOption[];
   disabled?: boolean;
   onChange: (value: string) => void;
 }) {
   return (
     <div className="flex min-w-0 max-w-[220px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
-      <Icon className="ml-1.5 h-4 w-4 shrink-0" />
       <InlineMenuSelect
         value={value}
         options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
@@ -2045,7 +2056,7 @@ function NewChatSelect({
         menuAlign="trigger"
         placeholder={ariaLabel}
         ariaLabel={ariaLabel}
-        className="h-7 max-w-[190px] border-r-0 py-1 pl-1.5 pr-1 text-ink/60 hover:text-ink"
+        className="h-7 max-w-[220px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
         menuClassName="bg-surface-panel"
         minMenuWidth={180}
         emptyContent={ariaLabel}

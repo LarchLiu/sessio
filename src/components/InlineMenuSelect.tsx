@@ -13,6 +13,7 @@ import ScrollArea from "./ScrollArea";
 export interface InlineMenuSelectOption {
   value: string;
   label: string;
+  icon?: ReactNode;
   disabled?: boolean;
 }
 
@@ -121,7 +122,8 @@ export default function InlineMenuSelect({
           className
         }
       >
-        <span className="truncate">{selected?.label ?? placeholder ?? ""}</span>
+        {selected?.icon && <span className="shrink-0">{selected.icon}</span>}
+        <span className="min-w-0 flex-1 truncate">{selected?.label ?? placeholder ?? ""}</span>
         <ChevronDown className="w-3.5 h-3.5 shrink-0" />
       </button>
       {open &&
@@ -171,6 +173,7 @@ export default function InlineMenuSelect({
                       (option.disabled ? " opacity-40 pointer-events-none" : "")
                     }
                   >
+                    {option.icon && <span className="shrink-0">{option.icon}</span>}
                     <span className="min-w-0 flex-1 truncate">{option.label}</span>
                     {option.value === value && (
                       <Check className="h-3.5 w-3.5 shrink-0 text-ink/65" />
