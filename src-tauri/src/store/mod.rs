@@ -4,6 +4,7 @@ pub mod sqlite;
 use anyhow::Result;
 use std::collections::HashSet;
 
+use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{Agent, SessionInfo, SubagentInfo};
 
 #[derive(Debug, Clone)]
@@ -32,10 +33,26 @@ pub struct IndexedSessionRecord {
     pub subagents: Vec<IndexedSubagentRecord>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeAgentCapabilityRecord {
+    pub agent: Agent,
+    pub transport: RuntimeTransportKind,
+    pub version: Option<String>,
+    pub protocol_version: Option<String>,
+    pub raw_initialize_response_json: String,
+    pub raw_capabilities_json: String,
+    pub updated_at: i64,
+}
+
 pub trait SessionStore: Send + Sync {
     fn init(&self) -> Result<()>;
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
+    fn get_runtime_agent_capability(
+        &self,
+        agent: Agent,
+    ) -> Result<Option<RuntimeAgentCapabilityRecord>>;
+    fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(

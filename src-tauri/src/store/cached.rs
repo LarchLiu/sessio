@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{Agent, SessionInfo, SubagentInfo};
-use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
+use crate::store::{
+    IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord, SessionStore,
+};
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
 // tick instead of hitting the underlying store; writes go through inner first
@@ -114,6 +116,17 @@ impl SessionStore for CachedStore {
 
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {
         Ok(self.snapshot.read().unwrap().to_vec())
+    }
+
+    fn get_runtime_agent_capability(
+        &self,
+        agent: Agent,
+    ) -> Result<Option<RuntimeAgentCapabilityRecord>> {
+        self.inner.get_runtime_agent_capability(agent)
+    }
+
+    fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()> {
+        self.inner.upsert_runtime_agent_capability(record)
     }
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {

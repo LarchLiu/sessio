@@ -10,7 +10,10 @@ use crate::memory::{
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{Agent, SessionInfo, SubagentInfo};
-use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
+use crate::agents::runtime::types::RuntimeTransportKind;
+use crate::store::{
+    IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord, SessionStore,
+};
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -211,6 +214,18 @@ const SCHEMA_V4: &str = r#"
 ALTER TABLE sessions ADD COLUMN title TEXT;
 "#;
 
+const SCHEMA_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS runtime_agent_capabilities (
+    agent                TEXT PRIMARY KEY,
+    transport_kind       TEXT NOT NULL,
+    detected_version     TEXT,
+    protocol_version     TEXT,
+    raw_initialize_response_json TEXT NOT NULL,
+    raw_capabilities_json TEXT NOT NULL,
+    updated_at           INTEGER NOT NULL
+);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -260,7 +275,33 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 5 {
+        conn.execute_batch(SCHEMA_V5)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)",
+            [],
+        )?;
+    }
+    conn.execute_batch(SCHEMA_V5)?;
     Ok(())
+}
+
+fn transport_kind_to_db(transport: RuntimeTransportKind) -> &'static str {
+    match transport {
+        RuntimeTransportKind::Acp => "acp",
+        RuntimeTransportKind::CliStreamJson => "cliStreamJson",
+        RuntimeTransportKind::PlainCli => "plainCli",
+        RuntimeTransportKind::Fake => "fake",
+    }
+}
+
+fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
+    match value {
+        "cliStreamJson" => RuntimeTransportKind::CliStreamJson,
+        "plainCli" => RuntimeTransportKind::PlainCli,
+        "fake" => RuntimeTransportKind::Fake,
+        _ => RuntimeTransportKind::Acp,
+    }
 }
 
 fn existing_session_count_state(
@@ -667,6 +708,60 @@ impl SessionStore for SqliteStore {
             s.subagents = subs;
         }
         Ok(sessions)
+    }
+
+    fn get_runtime_agent_capability(
+        &self,
+        agent: Agent,
+    ) -> Result<Option<RuntimeAgentCapabilityRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT transport_kind, detected_version, protocol_version,
+                    raw_initialize_response_json, raw_capabilities_json, updated_at
+             FROM runtime_agent_capabilities
+             WHERE agent = ?",
+        )?;
+        stmt.query_row(params![agent.as_str()], |row| {
+            let transport_kind: String = row.get(0)?;
+            Ok(RuntimeAgentCapabilityRecord {
+                agent,
+                transport: transport_kind_from_db(&transport_kind),
+                version: row.get(1)?,
+                protocol_version: row.get(2)?,
+                raw_initialize_response_json: row.get(3)?,
+                raw_capabilities_json: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO runtime_agent_capabilities (
+                agent, transport_kind, detected_version, protocol_version,
+                raw_initialize_response_json, raw_capabilities_json, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent) DO UPDATE SET
+                transport_kind = excluded.transport_kind,
+                detected_version = excluded.detected_version,
+                protocol_version = excluded.protocol_version,
+                raw_initialize_response_json = excluded.raw_initialize_response_json,
+                raw_capabilities_json = excluded.raw_capabilities_json,
+                updated_at = excluded.updated_at",
+            params![
+                record.agent.as_str(),
+                transport_kind_to_db(record.transport),
+                record.version,
+                record.protocol_version,
+                record.raw_initialize_response_json,
+                record.raw_capabilities_json,
+                record.updated_at,
+            ],
+        )?;
+        Ok(())
     }
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::agents::runtime::types::{RuntimeCapabilitySet, RuntimeTransportKind};
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
@@ -69,6 +71,20 @@ pub struct SessionMessage {
     pub timestamp: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAgentMetadata {
+    pub agent: Agent,
+    pub enabled: bool,
+    pub configured: bool,
+    pub transport: RuntimeTransportKind,
+    pub session_command: Option<String>,
+    pub version_command: Option<String>,
+    pub detected_version: Option<String>,
+    pub capabilities: Option<RuntimeCapabilitySet>,
+    pub updated_at: Option<i64>,
 }
 
 pub fn normalize_preview(s: &str) -> String {
