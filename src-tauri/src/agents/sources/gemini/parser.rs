@@ -104,6 +104,24 @@ pub fn remove_session_from_logs(
     if path.as_os_str().is_empty() || !path.exists() {
         return Ok(false);
     }
+    if is_chat_file(path) {
+        let sid = parse_chat_file(path, None, &load_default_project_mappings()?)?
+            .map(|info| info.id)
+            .unwrap_or_default();
+        if sid != session_id {
+            return Ok(false);
+        }
+
+        let relative = path
+            .strip_prefix(home)
+            .map_err(|_| anyhow::anyhow!("session file is outside home: {}", path.display()))?;
+        let removed_path = removed_root.join(relative);
+        if let Some(parent) = removed_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        move_file(path, &available_removed_path(removed_path))?;
+        return Ok(true);
+    }
     if !path.is_file() {
         return Err(anyhow::anyhow!(
             "session path is not a file: {}",
@@ -1343,6 +1361,43 @@ mod tests {
 
         let _ = fs::remove_dir_all(&home);
     }
+
+    #[test]
+    fn remove_session_from_chat_jsonl_moves_whole_file() {
+        let home = unique_tmp("gemini-chat-remove");
+        let source = home
+            .join(".gemini")
+            .join("tmp")
+            .join("sessio")
+            .join("chats")
+            .join("session-2026-05-25T05-14-test.jsonl");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(
+            &source,
+            r#"{"sessionId":"drop","startTime":"2026-05-25T05:14:25.987Z","lastUpdated":"2026-05-25T05:14:25.987Z","kind":"main"}
+{"id":"i1","timestamp":"2026-05-25T05:15:25.960Z","type":"info","content":"Waiting for authentication...\n"}
+{"$set":{"lastUpdated":"2026-05-25T05:15:25.961Z"}}
+"#,
+        )
+        .unwrap();
+
+        let removed_root = home.join(".sessio").join("removed-sessions");
+        assert!(remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
+        assert!(!source.exists());
+
+        let removed_path = removed_root
+            .join(".gemini")
+            .join("tmp")
+            .join("sessio")
+            .join("chats")
+            .join("session-2026-05-25T05-14-test.jsonl");
+        let removed = fs::read_to_string(&removed_path).unwrap();
+        assert!(removed.contains(r#""sessionId":"drop""#));
+        assert!(removed.contains(r#""type":"info""#));
+
+        assert!(!remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
+        let _ = fs::remove_dir_all(&home);
+    }
 }
 
 #[derive(Default)]
@@ -1379,4 +1434,49 @@ fn write_json_array(path: &Path, values: &[serde_json::Value]) -> Result<()> {
     let text = serde_json::to_string_pretty(values)?;
     fs::write(path, format!("{text}\n"))?;
     Ok(())
+}
+
+fn available_removed_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session".to_string());
+    for i in 1.. {
+        let candidate = parent.join(format!("{file_name}.{i}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn move_file(src: &Path, dst: &Path) -> Result<()> {
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            fs::copy(src, dst).map_err(|copy_err| {
+                anyhow::anyhow!(
+                    "move {} to {} failed: rename: {}; copy fallback: {}",
+                    src.display(),
+                    dst.display(),
+                    rename_err,
+                    copy_err
+                )
+            })?;
+            fs::remove_file(src).map_err(|remove_err| {
+                let _ = fs::remove_file(dst);
+                anyhow::anyhow!(
+                    "remove original after copying {} to {} failed: {}",
+                    src.display(),
+                    dst.display(),
+                    remove_err
+                )
+            })?;
+            Ok(())
+        }
+    }
 }
