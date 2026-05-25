@@ -11,7 +11,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, ChevronDown, FileDiff, FileText, Image as ImageIcon, Plus, Square } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, ChevronDown, FileDiff, FileText, Plus, Square } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -22,13 +22,16 @@ import remarkMath from "remark-math";
 import type { Options as SanitizeSchema } from "rehype-sanitize";
 import "katex/dist/katex.min.css";
 import {
+  type AgentAttachment,
   SessionInfo,
   SessionMessage,
+  RuntimeAgentMetadata,
   RuntimeError,
   SubagentInfo,
   ensureAgentRuntimeSession,
   getSessionMessages,
   readLocalImageDataUrl,
+  readLocalTextFile,
   cancelAgentTurn,
   respondAgentPermission,
   sendAgentInput,
@@ -37,6 +40,13 @@ import {
 } from "../api";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
+import {
+  attachmentMenuOptions,
+  type ComposerAttachment,
+  ComposerAttachmentMenu,
+  ComposerAttachmentPreviewList,
+  useComposerAttachments,
+} from "./ComposerAttachments";
 import { localeTag, useI18n } from "../i18n";
 import type { ViewMode } from "../App";
 import {
@@ -61,6 +71,7 @@ interface Props {
   session: SessionInfo;
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
+  runtimeAgents: RuntimeAgentMetadata[];
   runtimeSessionAliases?: Record<string, string>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onMessageCount: (
@@ -76,6 +87,11 @@ export interface ActiveMessageMeta {
   filePath: string;
   count: number;
   partial: boolean;
+}
+
+interface FilePreview {
+  title: string;
+  text: string;
 }
 
 // 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
@@ -162,6 +178,7 @@ function SessionDetail({
   session,
   viewMode,
   liveState,
+  runtimeAgents,
   runtimeSessionAliases = {},
   dispatchLiveEvent,
   onMessageCount,
@@ -190,6 +207,8 @@ function SessionDetail({
   }, [defaultTab, session.available, session.subagents]);
 
   const [previewImage, setPreviewImage] = useState<MarkdownImage | null>(null);
+  const [previewFile, setPreviewFile] = useState<FilePreview | null>(null);
+  const [filePreviewNotice, setFilePreviewNotice] = useState<string | null>(null);
   const activeMessageMeta =
     tab.kind === "main"
       ? {
@@ -267,9 +286,12 @@ function SessionDetail({
           }
           viewMode={viewMode}
           liveState={liveState}
+          runtimeAgents={runtimeAgents}
           runtimeSessionAliases={runtimeSessionAliases}
           dispatchLiveEvent={dispatchLiveEvent}
           onPreviewImage={setPreviewImage}
+          onPreviewFile={setPreviewFile}
+          onFilePreviewError={setFilePreviewNotice}
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
@@ -280,6 +302,18 @@ function SessionDetail({
           <ImagePreviewOverlay
             image={previewImage}
             onClose={() => setPreviewImage(null)}
+          />
+        )}
+        {previewFile && (
+          <FilePreviewOverlay
+            file={previewFile}
+            onClose={() => setPreviewFile(null)}
+          />
+        )}
+        {filePreviewNotice && (
+          <FilePreviewNotice
+            message={filePreviewNotice}
+            onClose={() => setFilePreviewNotice(null)}
           />
         )}
     </div>
@@ -337,9 +371,12 @@ function MessageStream({
   emptyHint,
   viewMode,
   liveState,
+  runtimeAgents,
   runtimeSessionAliases,
   dispatchLiveEvent,
   onPreviewImage,
+  onPreviewFile,
+  onFilePreviewError,
   onMessageCount,
   messageCount,
   workspacePath,
@@ -352,9 +389,12 @@ function MessageStream({
   emptyHint: string;
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
+  runtimeAgents: RuntimeAgentMetadata[];
   runtimeSessionAliases: Record<string, string>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onPreviewImage: (image: MarkdownImage) => void;
+  onPreviewFile: (file: FilePreview) => void;
+  onFilePreviewError: (message: string) => void;
   onMessageCount: (
     agent: SessionInfo["agent"],
     filePath: string,
@@ -394,6 +434,21 @@ function MessageStream({
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
+  const fallbackRuntimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
+  const attachmentCapabilities =
+    liveSession?.capabilities ?? fallbackRuntimeAgent?.capabilities ?? null;
+  const {
+    attachments,
+    supportsAttachments,
+    supportsImageAttachments,
+    supportsEmbeddedContext,
+    removeAttachment,
+    clearAttachments,
+    pickAttachments,
+  } = useComposerAttachments({
+    capabilities: attachmentCapabilities,
+    onError: setComposerError,
+  });
 
   useLayoutEffect(() => {
     if (!available || !filePath || skipHistoryLoad) {
@@ -720,9 +775,40 @@ function MessageStream({
     setShowScrollToBottom(!isNearScrollBottom(vp));
   }, [visibleDisplayItems, loading]);
 
-  const handleSendText = useCallback(async (rawText: string, clearComposer = false) => {
+  const handleSendText = useCallback(async (
+    rawText: string,
+    clearComposer = false,
+    inputAttachments: ComposerAttachment[] = [],
+  ) => {
     const text = rawText.trim();
     if (!text || sending) return;
+    const agentAttachments: AgentAttachment[] = await Promise.all(
+      inputAttachments.map(async ({ path, mimeType, kind, previewDataUrl }) => {
+        if (kind !== "image" || previewDataUrl) {
+          return {
+            path,
+            mimeType,
+            kind,
+            previewDataUrl,
+          };
+        }
+        try {
+          return {
+            path,
+            mimeType,
+            kind,
+            previewDataUrl: await readLocalImageDataUrl(path),
+          };
+        } catch {
+          return {
+            path,
+            mimeType,
+            kind,
+            previewDataUrl: null,
+          };
+        }
+      }),
+    );
     if (!workspacePath) {
       setComposerError("This session has no workspace path, so live chat cannot start yet.");
       return;
@@ -757,6 +843,7 @@ function MessageStream({
       sessioRuntimeSessionId: optimisticSessionId,
       turnId: optimisticTurnId,
       text,
+      attachments: agentAttachments,
       timestamp,
     });
     scrollChatToBottom();
@@ -769,7 +856,10 @@ function MessageStream({
         sourceAgent: agent,
       });
       pendingRuntimeSessionId = runtimeSessionId;
-      const turn = await sendAgentInput(runtimeSessionId, { text });
+      const turn = await sendAgentInput(runtimeSessionId, {
+        text,
+        attachments: agentAttachments,
+      });
       activeRuntimeTurnIdRef.current = turn.turnId;
       dispatchLiveEvent({
         type: "replace-turn-id",
@@ -777,7 +867,10 @@ function MessageStream({
         from: optimisticTurnId,
         to: turn.turnId,
       });
-      if (clearComposer) setComposerText("");
+      if (clearComposer) {
+        setComposerText("");
+        clearAttachments();
+      }
       window.requestAnimationFrame(() => composerRef.current?.focus());
     } catch (err) {
       const message = String(err);
@@ -795,11 +888,11 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, dispatchLiveEvent, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, clearAttachments, dispatchLiveEvent, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
-    await handleSendText(composerText, true);
-  }, [composerText, handleSendText]);
+    await handleSendText(composerText, true, attachments);
+  }, [attachments, composerText, handleSendText]);
 
   const handleCancelTurn = useCallback(async () => {
     if (!activeTurnId) return;
@@ -857,6 +950,8 @@ function MessageStream({
                   sessioRuntimeSessionId={runtimeSessionId}
                   now={runtimeNow}
                   onPreviewImage={onPreviewImage}
+                  onPreviewFile={onPreviewFile}
+                  onFilePreviewError={onFilePreviewError}
                   onPermissionResponse={respondAgentPermission}
                 />
               </div>
@@ -897,6 +992,12 @@ function MessageStream({
         error={composerError}
         contextLabel="52% used"
         placeholder="Ask, Search or Chat..."
+        attachments={attachments}
+        supportsAttachments={supportsAttachments}
+        supportsImageAttachments={supportsImageAttachments}
+        supportsEmbeddedContext={supportsEmbeddedContext}
+        onRemoveAttachment={removeAttachment}
+        onPickAttachments={pickAttachments}
         onChange={setComposerText}
         onSend={handleSend}
         onCancel={handleCancelTurn}
@@ -1226,6 +1327,12 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   error: string | null;
   contextLabel: string;
   placeholder: string;
+  attachments: ComposerAttachment[];
+  supportsAttachments: boolean;
+  supportsImageAttachments: boolean;
+  supportsEmbeddedContext: boolean;
+  onRemoveAttachment: (path: string) => void;
+  onPickAttachments: (kind: "images" | "files") => Promise<void>;
   onChange: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
@@ -1238,6 +1345,12 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     error,
     contextLabel,
     placeholder,
+    attachments,
+    supportsAttachments,
+    supportsImageAttachments,
+    supportsEmbeddedContext,
+    onRemoveAttachment,
+    onPickAttachments,
     onChange,
     onSend,
     onCancel,
@@ -1248,6 +1361,18 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   const canCancel = active && !disabled && !sending;
   const disabledTitle = disabled ? "Select a project-backed session to chat" : undefined;
   const innerRef = useRef<HTMLTextAreaElement | null>(null);
+  const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const attachmentOptions = attachmentMenuOptions({
+    supportsImageAttachments,
+    supportsEmbeddedContext,
+    imageLabel: "Add images",
+    fileLabel: "Add files",
+  });
+
+  useEffect(() => {
+    if (!supportsAttachments) setAttachmentMenuOpen(false);
+  }, [supportsAttachments]);
   useLayoutEffect(() => {
     if (innerRef.current) resizeTextareaToContent(innerRef.current);
   }, [value]);
@@ -1277,6 +1402,10 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
           }
           title={disabledTitle}
         >
+          <ComposerAttachmentPreviewList
+            attachments={attachments}
+            onRemove={onRemoveAttachment}
+          />
           <textarea
             ref={setTextareaRef}
             value={value}
@@ -1299,16 +1428,22 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
           />
           <div className="flex h-11 items-center justify-between gap-3 px-2.5 pb-2">
             <div className="flex min-w-0 items-center gap-3">
-              <Tooltip content="Add context" placement="top">
-                <button
-                  type="button"
-                  disabled={disabled}
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-ink/20 text-ink/55 transition hover:border-ink/35 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
-                  aria-label="Add context"
-                >
-                  <Plus className="h-4 w-4" />
-                </button>
-              </Tooltip>
+              {supportsAttachments && (
+                <Tooltip content="Add context" placement="top">
+                  <button
+                    ref={attachmentButtonRef}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => setAttachmentMenuOpen((open) => !open)}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-ink/20 text-ink/55 transition hover:border-ink/35 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+                    aria-label="Add context"
+                    aria-expanded={attachmentMenuOpen}
+                    aria-haspopup="menu"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              )}
               <button
                 type="button"
                 disabled={disabled}
@@ -1333,6 +1468,16 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
             </div>
           </div>
         </div>
+        {attachmentMenuOpen && attachmentButtonRef.current && (
+          <ComposerAttachmentMenu
+            anchor={attachmentButtonRef.current}
+            options={attachmentOptions}
+            onClose={() => setAttachmentMenuOpen(false)}
+            onSelect={(key) => {
+              void onPickAttachments(key);
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -1578,12 +1723,16 @@ function AcpLiveItem({
   sessioRuntimeSessionId,
   now,
   onPreviewImage,
+  onPreviewFile,
+  onFilePreviewError,
   onPermissionResponse,
 }: {
   item: AcpRenderItem;
   sessioRuntimeSessionId: string;
   now: number;
   onPreviewImage: (image: MarkdownImage) => void;
+  onPreviewFile: (file: FilePreview) => void;
+  onFilePreviewError: (message: string) => void;
   onPermissionResponse: (
     sessioRuntimeSessionId: string,
     requestId: string,
@@ -1629,6 +1778,8 @@ function AcpLiveItem({
       block={item.block}
       timestamp={item.turn.updatedAt}
       onPreviewImage={onPreviewImage}
+      onPreviewFile={onPreviewFile}
+      onFilePreviewError={onFilePreviewError}
     />
   );
 }
@@ -1689,10 +1840,14 @@ function AcpContentBlockGroup({
   block,
   timestamp,
   onPreviewImage,
+  onPreviewFile,
+  onFilePreviewError,
 }: {
   block: AcpRenderBlock;
   timestamp: number;
   onPreviewImage: (image: MarkdownImage) => void;
+  onPreviewFile: (file: FilePreview) => void;
+  onFilePreviewError: (message: string) => void;
 }) {
   if (block.kind !== "user" && block.kind !== "assistant" && block.kind !== "thought") {
     return null;
@@ -1700,8 +1855,10 @@ function AcpContentBlockGroup({
   const isUser = block.kind === "user";
   const label =
     block.kind === "thought" ? "Thinking" : block.kind === "assistant" ? "assistant" : "user";
-  const userAttachmentBlocks = isUser ? block.blocks.filter(isAttachmentContentBlock) : [];
-  const bodyBlocks = isUser ? block.blocks.filter((item) => !isAttachmentContentBlock(item)) : block.blocks;
+  const userAttachmentBlocks = isUser ? block.blocks.filter(isUserAttachmentContentBlock) : [];
+  const bodyBlocks = isUser
+    ? block.blocks.filter((item) => !isUserAttachmentContentBlock(item))
+    : block.blocks;
   return (
     <div
       className={
@@ -1729,19 +1886,24 @@ function AcpContentBlockGroup({
       </div>
       <div className={block.kind === "thought" ? "ml-3.5" : ""}>
         {userAttachmentBlocks.length > 0 && (
-          <div className="mb-2 flex flex-wrap justify-end gap-1.5">
-            {userAttachmentBlocks.map((attachment, index) => (
-              <AcpAttachmentPill key={index} block={attachment} />
-            ))}
-          </div>
+          <AcpUserAttachmentStrip
+            blocks={userAttachmentBlocks}
+            onPreviewImage={onPreviewImage}
+            onPreviewFile={onPreviewFile}
+            onFilePreviewError={onFilePreviewError}
+          />
         )}
-        <AcpContentBlocks blocks={bodyBlocks} onPreviewImage={onPreviewImage} />
+        <AcpContentBlocks
+          blocks={bodyBlocks}
+          imageAlign={isUser ? "right" : undefined}
+          onPreviewImage={onPreviewImage}
+        />
       </div>
     </div>
   );
 }
 
-function isAttachmentContentBlock(block: AcpContentBlock): boolean {
+function isUserAttachmentContentBlock(block: AcpContentBlock): boolean {
   return block.type === "image" || block.type === "resource" || block.type === "resource_link";
 }
 
@@ -1765,25 +1927,129 @@ function basenameFromUri(uri: string): string | null {
   return name || null;
 }
 
-function AcpAttachmentPill({ block }: { block: AcpContentBlock }) {
+function AcpAttachmentPill({
+  block,
+  onPreviewFile,
+  onFilePreviewError,
+}: {
+  block: AcpContentBlock;
+  onPreviewFile: (file: FilePreview) => void;
+  onFilePreviewError: (message: string) => void;
+}) {
   const label = resourceDisplayName(block);
+  const handleClick = async () => {
+    const inlineText = block.type === "resource" ? block.text : undefined;
+    if (inlineText?.trim()) {
+      onPreviewFile({ title: label, text: stripSessioUploadWrapper(inlineText) });
+      return;
+    }
+    const path = filePathFromResourceBlock(block);
+    if (!path) {
+      onFilePreviewError("Cannot preview this file: no local file path is available.");
+      return;
+    }
+    try {
+      const text = await readLocalTextFile(path);
+      onPreviewFile({ title: label, text });
+    } catch (error) {
+      onFilePreviewError(`Cannot preview ${label}: ${String(error)}`);
+    }
+  };
   return (
-    <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-ink/8 bg-bg-panel px-2.5 py-1 text-caption font-medium text-ink/70 shadow-sm">
-      {block.type === "image" ? (
-        <ImageIcon className="h-3.5 w-3.5 shrink-0 text-ink/45" />
-      ) : (
-        <FileText className="h-3.5 w-3.5 shrink-0 text-ink/45" />
-      )}
-      <span className="max-w-[220px] truncate">{label}</span>
-    </span>
+    <button
+      type="button"
+      onClick={() => {
+        void handleClick();
+      }}
+      className="my-1 inline-flex max-w-[180px] items-center gap-1.5 rounded-full border border-ink/8 bg-bg-panel px-2.5 py-1 text-caption font-medium text-ink/70 shadow-sm transition hover:border-ink/18 hover:text-ink focus:outline-none focus:ring-2 focus:ring-ink/15"
+      title={label}
+    >
+      <FileText className="h-3.5 w-3.5 shrink-0 text-ink/45" />
+      <span className="min-w-0 truncate">{compactFileLabel(label)}</span>
+    </button>
+  );
+}
+
+function compactFileLabel(label: string): string {
+  const trimmed = label.trim();
+  const maxChars = 28;
+  if (trimmed.length <= maxChars) return trimmed;
+  const dot = trimmed.lastIndexOf(".");
+  const extension =
+    dot > 0 && dot < trimmed.length - 1 && trimmed.length - dot <= 8
+      ? trimmed.slice(dot)
+      : "";
+  const stem = extension ? trimmed.slice(0, -extension.length) : trimmed;
+  const head = stem.slice(0, 14);
+  const tailBudget = Math.max(4, maxChars - head.length - extension.length - 1);
+  return `${head}...${stem.slice(-tailBudget)}${extension}`;
+}
+
+function filePathFromResourceBlock(block: AcpContentBlock): string | null {
+  const uri =
+    block.type === "resource" || block.type === "resource_link"
+      ? block.uri
+      : null;
+  if (!uri) return null;
+  if (uri.startsWith("file://")) return decodeURIComponent(uri.slice("file://".length));
+  if (/^\/|^[A-Za-z]:[\\/]/.test(uri)) return uri;
+  return null;
+}
+
+function stripSessioUploadWrapper(text: string): string {
+  return text
+    .replace(/^<sessio-upload-file\b[^>]*>\s*/i, "")
+    .replace(/\s*<\/sessio-upload-file>\s*$/i, "")
+    .replace(/^<!--\s*[^>]+-->\s*\n?/, "")
+    .trim();
+}
+
+function AcpUserAttachmentStrip({
+  blocks,
+  onPreviewImage,
+  onPreviewFile,
+  onFilePreviewError,
+}: {
+  blocks: AcpContentBlock[];
+  onPreviewImage: (image: MarkdownImage) => void;
+  onPreviewFile: (file: FilePreview) => void;
+  onFilePreviewError: (message: string) => void;
+}) {
+  const orderedBlocks = [
+    ...blocks.filter((block) => block.type !== "image"),
+    ...blocks.filter((block) => block.type === "image"),
+  ];
+  return (
+    <div className="mb-2 flex flex-wrap items-end justify-end gap-2">
+      {orderedBlocks.map((block, index) => (
+        block.type === "image" ? (
+          <AcpContentBlockView
+            key={`image-${block.uri ?? block.data ?? index}`}
+            block={block}
+            imageAlign="right"
+            coverImage
+            onPreviewImage={onPreviewImage}
+          />
+        ) : (
+          <AcpAttachmentPill
+            key={`file-${resourceDisplayName(block)}-${index}`}
+            block={block}
+            onPreviewFile={onPreviewFile}
+            onFilePreviewError={onFilePreviewError}
+          />
+        )
+      ))}
+    </div>
   );
 }
 
 function AcpContentBlocks({
   blocks,
+  imageAlign,
   onPreviewImage,
 }: {
   blocks: AcpContentBlock[];
+  imageAlign?: "left" | "right";
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   return (
@@ -1792,6 +2058,7 @@ function AcpContentBlocks({
         <AcpContentBlockView
           key={index}
           block={block}
+          imageAlign={imageAlign}
           onPreviewImage={onPreviewImage}
         />
       ))}
@@ -1801,9 +2068,13 @@ function AcpContentBlocks({
 
 function AcpContentBlockView({
   block,
+  imageAlign,
+  coverImage = false,
   onPreviewImage,
 }: {
   block: AcpContentBlock;
+  imageAlign?: "left" | "right";
+  coverImage?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   switch (block.type) {
@@ -1812,6 +2083,7 @@ function AcpContentBlockView({
         <div>
           <MarkdownContent
             text={block.text}
+            imageAlign={imageAlign}
             onPreviewImage={onPreviewImage}
           />
           <AcpMetaBadges value={block} />
@@ -1821,9 +2093,10 @@ function AcpContentBlockView({
       const mimeType = block.mimeType ?? "image";
       const src = block.uri || (block.data ? `data:${mimeType};base64,${block.data}` : "");
       return src ? (
-        <div>
+        <div className={imageAlign === "right" ? "flex justify-end" : undefined}>
           <MarkdownImageButton
             image={{ alt: mimeType, src }}
+            cover={coverImage}
             onPreviewImage={onPreviewImage}
           />
           <AcpMetaBadges value={block} />
@@ -1871,7 +2144,11 @@ function AcpContentBlockView({
           {mimeType && <div className="text-caption text-ink/45">{mimeType}</div>}
         {text ? (
           <div className="mt-2">
-            <MarkdownContent text={text} onPreviewImage={onPreviewImage} />
+            <MarkdownContent
+              text={text}
+              imageAlign={imageAlign}
+              onPreviewImage={onPreviewImage}
+            />
           </div>
         ) : blob ? (
           <PlainTextContent text={`Embedded data: ${blob.length} base64 chars`} />
@@ -2086,6 +2363,7 @@ function AcpToolContentView({
     return (
       <AcpContentBlockView
         block={content.content}
+        imageAlign="left"
         onPreviewImage={onPreviewImage}
       />
     );
@@ -2444,7 +2722,7 @@ function appendHistoryMessageToTurn(
   if (message.role === "user") {
     turn.blocks.push({
       kind: "user",
-      blocks: [{ type: "text", text: stripInjectedContext(message.text) }],
+      blocks: historyUserContentBlocks(message.text),
       raw: { source: "history", message },
     });
     return;
@@ -2518,6 +2796,42 @@ function appendHistoryMessageToTurn(
     blocks: [{ type: "text", text: message.text }],
     raw: { source: "history", message },
   });
+}
+
+function historyUserContentBlocks(text: string): AcpContentBlock[] {
+  const cleaned = stripInjectedContext(text);
+  const media = splitMarkdownImages(cleaned);
+  const blocks: AcpContentBlock[] = [];
+  for (const image of media.images) {
+    blocks.push({
+      type: "image",
+      uri: image.src,
+      mimeType: image.alt && image.alt !== "image" ? image.alt : undefined,
+    });
+  }
+  const markerPattern = /\[file:\s*([^\]|]+?)(?:\|([^\]]+))?\]/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = markerPattern.exec(media.text)) !== null) {
+    const before = media.text.slice(cursor, match.index);
+    if (before.trim()) {
+      blocks.push({ type: "text", text: before.trim() });
+    }
+    const name = match[1].trim() || "attachment";
+    const uri = match[2]?.trim() ?? "";
+    blocks.push({
+      type: "resource",
+      name,
+      uri,
+      mimeType: undefined,
+    });
+    cursor = match.index + match[0].length;
+  }
+  const rest = media.text.slice(cursor);
+  if (rest.trim()) {
+    blocks.push({ type: "text", text: rest.trim() });
+  }
+  return blocks.length > 0 ? blocks : [{ type: "text", text: media.text }];
 }
 
 function historyToolFromMessage(
@@ -3124,9 +3438,11 @@ function ToolPairRow({
 
 function MarkdownContent({
   text,
+  imageAlign,
   onPreviewImage,
 }: {
   text: string;
+  imageAlign?: "left" | "right";
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const safeText = stripImagePlaceholders(text);
@@ -3141,6 +3457,7 @@ function MarkdownContent({
       {media.images.length > 0 && (
         <MarkdownImageStrip
           images={media.images}
+          align={imageAlign}
           onPreviewImage={onPreviewImage}
         />
       )}
@@ -3296,9 +3613,11 @@ function MarkdownImageStrip({
 
 function MarkdownImageButton({
   image,
+  cover = false,
   onPreviewImage,
 }: {
   image: MarkdownImage;
+  cover?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const resolvedSrc = useResolvedImageSrc(image.src);
@@ -3316,7 +3635,7 @@ function MarkdownImageButton({
       <img
         src={resolvedSrc}
         alt={image.alt}
-        className="h-28 w-36 object-contain"
+        className={"h-28 w-36 " + (cover ? "object-cover" : "object-contain")}
         loading="lazy"
       />
     </button>
@@ -3330,6 +3649,7 @@ function ImagePreviewOverlay({
   image: MarkdownImage;
   onClose: () => void;
 }) {
+  const TOP_DRAG_SAFE_PX = 48;
   const src = useResolvedImageSrc(image.src);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -3341,7 +3661,8 @@ function ImagePreviewOverlay({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+      className="fixed inset-x-0 bottom-0 z-50 flex items-center justify-center bg-black/70 p-6"
+      style={{ top: TOP_DRAG_SAFE_PX }}
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -3353,6 +3674,74 @@ function ImagePreviewOverlay({
           className="max-h-[calc(100vh-48px)] max-w-[calc(100vw-48px)] rounded-md bg-bg-panel-alt object-contain shadow-2xl"
         />
       </div>
+    </div>
+  );
+}
+
+function FilePreviewOverlay({
+  file,
+  onClose,
+}: {
+  file: FilePreview;
+  onClose: () => void;
+}) {
+  const TOP_DRAG_SAFE_PX = 48;
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-x-0 bottom-0 z-50 flex items-center justify-center bg-black/60 p-6"
+      style={{ top: TOP_DRAG_SAFE_PX }}
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="flex max-h-[calc(100vh-48px)] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-black/10 bg-white shadow-[0_30px_90px_rgba(0,0,0,0.35)]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-black/8 bg-white px-4 py-3">
+          <div className="min-w-0">
+            <div className="truncate text-body-sm font-semibold text-black/85">{file.title}</div>
+            <div className="text-caption text-black/45">File preview</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-2 py-1 text-caption font-medium text-black/55 transition hover:bg-black/6 hover:text-black"
+          >
+            Close
+          </button>
+        </div>
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words bg-[#f7f7f4] px-4 py-3 font-mono text-caption leading-relaxed text-black/80">
+          <code>{file.text}</code>
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function FilePreviewNotice({
+  message,
+  onClose,
+}: {
+  message: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const timer = window.setTimeout(onClose, 2600);
+    return () => window.clearTimeout(timer);
+  }, [onClose]);
+
+  return (
+    <div className="fixed bottom-6 left-1/2 z-50 max-w-md -translate-x-1/2 rounded-lg border border-ink/10 bg-bg-panel px-3 py-2 text-body-sm text-ink/72 shadow-xl">
+      {message}
     </div>
   );
 }
@@ -3387,6 +3776,7 @@ function parseStandaloneMarkdownImage(line: string): MarkdownImage | null {
 function markdownUrlTransform(url: string): string {
   const raw = url.trim().replace(/^<|>$/g, "");
   if (/^(https?:|mailto:|data:|asset:|blob:)/i.test(raw)) return raw;
+  if (/^file:\/\//i.test(raw)) return convertFileSrc(decodeFileUri(raw));
   if (/^\/|^[A-Za-z]:[\\/]/.test(raw)) return convertFileSrc(raw);
   return "";
 }
@@ -3418,14 +3808,24 @@ function useResolvedImageSrc(rawSrc: string): string {
 function resolveImageSrc(rawSrc: string): string {
   const src = rawSrc.trim().replace(/^<|>$/g, "");
   if (/^(https?:|data:|asset:|blob:)/i.test(src)) return src;
+  if (/^file:\/\//i.test(src)) return convertFileSrc(decodeFileUri(src));
   if (/^\/|^[A-Za-z]:[\\/]/.test(src)) return convertFileSrc(src);
   return src;
 }
 
 function localImagePath(rawSrc: string): string | null {
   const src = rawSrc.trim().replace(/^<|>$/g, "");
+  if (/^file:\/\//i.test(src)) return decodeFileUri(src);
   if (/^\/|^[A-Za-z]:[\\/]/.test(src)) return src;
   return null;
+}
+
+function decodeFileUri(uri: string): string {
+  try {
+    return decodeURIComponent(uri.replace(/^file:\/\//i, ""));
+  } catch {
+    return uri.replace(/^file:\/\//i, "");
+  }
 }
 
 function safeHref(rawHref: string): string | null {

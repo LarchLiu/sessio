@@ -1,24 +1,20 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, FileText, Image as ImageIcon, type LucideIcon } from "lucide-react";
-import { createPortal } from "react-dom";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
-import { open } from "@tauri-apps/plugin-dialog";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   Agent,
-  type AgentAttachment,
   createPendingSession,
   getIndexStatus,
   IndexPhase,
@@ -42,6 +38,12 @@ import SessionMemory, { SessionMetaList } from "./components/SessionMemory";
 import { AgentGlyph } from "./components/AgentIcon";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
+import {
+  attachmentMenuOptions,
+  ComposerAttachmentMenu,
+  ComposerAttachmentPreviewList,
+  useComposerAttachments,
+} from "./components/ComposerAttachments";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
 import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
@@ -139,84 +141,6 @@ type PendingNewChatSession = {
   prompt: string;
   timestamp: number;
 };
-
-type ComposerAttachment = AgentAttachment & {
-  name: string;
-};
-
-const TEXT_ATTACHMENT_EXTENSIONS = [
-  "txt",
-  "md",
-  "markdown",
-  "rst",
-  "json",
-  "jsonl",
-  "yaml",
-  "yml",
-  "toml",
-  "xml",
-  "csv",
-  "ts",
-  "tsx",
-  "js",
-  "jsx",
-  "mjs",
-  "cjs",
-  "py",
-  "rs",
-  "go",
-  "java",
-  "kt",
-  "swift",
-  "rb",
-  "php",
-  "css",
-  "scss",
-  "sass",
-  "less",
-  "html",
-  "htm",
-  "sh",
-  "zsh",
-  "bash",
-  "sql",
-  "c",
-  "h",
-  "cpp",
-  "hpp",
-  "cs",
-  "lua",
-  "pl",
-  "r",
-  "ex",
-  "exs",
-  "erl",
-  "clj",
-  "scala",
-  "dart",
-  "vue",
-  "svelte",
-  "dockerfile",
-  "gitignore",
-  "env",
-];
-
-function basename(path: string): string {
-  return path.split(/[/\\]/).pop() || path;
-}
-
-function dedupeComposerAttachments(
-  attachments: ComposerAttachment[],
-): ComposerAttachment[] {
-  const seen = new Set<string>();
-  const deduped: ComposerAttachment[] = [];
-  for (const attachment of attachments) {
-    if (seen.has(attachment.path)) continue;
-    seen.add(attachment.path);
-    deduped.push(attachment);
-  }
-  return deduped;
-}
 
 // Orphan main session that only exists to carry subagents (Claude cleaned
 // the main jsonl, no index entry either). Don't count it as a "real" session
@@ -1058,6 +982,7 @@ export default function App() {
                 session={selected}
                 viewMode={viewMode}
                 liveState={liveRuntimeState}
+                runtimeAgents={runtimeAgents}
                 runtimeSessionAliases={runtimeSessionAliases}
                 dispatchLiveEvent={dispatchLiveRuntimeEvent}
                 onMessageCount={handleMessageCount}
@@ -1921,7 +1846,6 @@ function NewChatView({
   const [agent, setAgent] = useState<Agent>(
     () => runtimeAgents[0]?.agent ?? "codex",
   );
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -1942,33 +1866,32 @@ function NewChatView({
   }));
   const selectedRuntimeAgent =
     runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
-  const supportsAttachments =
-    selectedRuntimeAgent?.capabilities?.supportsAttachments ?? false;
-  const supportsImageAttachments =
-    selectedRuntimeAgent?.capabilities?.supportsImageAttachments ?? false;
-  const supportsEmbeddedContext =
-    selectedRuntimeAgent?.capabilities?.supportsEmbeddedContext ?? false;
+  const {
+    attachments,
+    supportsAttachments,
+    supportsImageAttachments,
+    supportsEmbeddedContext,
+    removeAttachment,
+    clearAttachments,
+    pickAttachments,
+  } = useComposerAttachments({
+    capabilities: selectedRuntimeAgent?.capabilities,
+    onError: (message) => {
+      setComposerError(message);
+      onError(message);
+    },
+  });
   const canSend =
     text.trim().length > 0 &&
     Boolean(workspacePath) &&
     agentOptions.length > 0 &&
     !sending;
-  const attachmentMenuOptions = [
-    supportsImageAttachments
-      ? {
-          key: "images" as const,
-          label: t("new_chat.add_images"),
-          icon: <ImageIcon className="h-4 w-4" />,
-        }
-      : null,
-    supportsEmbeddedContext
-      ? {
-          key: "files" as const,
-          label: t("new_chat.add_files"),
-          icon: <FileText className="h-4 w-4" />,
-        }
-      : null,
-  ].filter((option): option is NonNullable<typeof option> => Boolean(option));
+  const attachmentOptions = attachmentMenuOptions({
+    supportsImageAttachments,
+    supportsEmbeddedContext,
+    imageLabel: t("new_chat.add_images"),
+    fileLabel: t("new_chat.add_files"),
+  });
 
   useEffect(() => {
     if (projectKeyValue && projects.some((p) => p.key === projectKeyValue)) return;
@@ -1981,16 +1904,10 @@ function NewChatView({
   }, [agent, agentOptions, runtimeAgents]);
 
   useEffect(() => {
-    setAttachments((current) =>
-      current.filter((attachment) => {
-        if (attachment.kind === "image") return supportsImageAttachments;
-        return supportsEmbeddedContext;
-      }),
-    );
     if (!supportsAttachments) {
       setAttachmentMenuOpen(false);
     }
-  }, [supportsAttachments, supportsEmbeddedContext, supportsImageAttachments]);
+  }, [supportsAttachments]);
 
   useEffect(() => {
     window.requestAnimationFrame(() => textareaRef.current?.focus());
@@ -2009,60 +1926,6 @@ function NewChatView({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [attachmentMenuOpen]);
-
-  const addAttachmentPaths = useCallback(
-    (paths: string[], kind: ComposerAttachment["kind"]) => {
-      if (paths.length === 0) return;
-      const next = paths.map((path) => ({
-        kind,
-        path,
-        mimeType: null,
-        name: basename(path),
-      }));
-      setAttachments((current) => dedupeComposerAttachments([...current, ...next]));
-      setAttachmentMenuOpen(false);
-    },
-    [],
-  );
-
-  const removeAttachment = useCallback((path: string) => {
-    setAttachments((current) => current.filter((attachment) => attachment.path !== path));
-  }, []);
-
-  const pickAttachments = useCallback(
-    async (kind: "images" | "files") => {
-      try {
-        const selection = await open({
-          multiple: true,
-          directory: false,
-          filters:
-            kind === "images"
-              ? [
-                  {
-                    name: "Images",
-                    extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "heif"],
-                  },
-                ]
-              : [
-                  {
-                    name: "Documents and code",
-                    extensions: [
-                      ...TEXT_ATTACHMENT_EXTENSIONS,
-                    ],
-                  },
-                ],
-        });
-        if (!selection) return;
-        const paths = Array.isArray(selection) ? selection : [selection];
-        addAttachmentPaths(paths, kind === "images" ? "image" : "file");
-      } catch (error) {
-        const message = `Failed to open file picker: ${String(error)}`;
-        setComposerError(message);
-        onError(message);
-      }
-    },
-    [addAttachmentPaths, onError],
-  );
 
   const handleSend = async () => {
     const prompt = text.trim();
@@ -2109,6 +1972,12 @@ function NewChatView({
         sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
         turnId: localTurnId,
         text: prompt,
+        attachments: attachments.map(({ path, mimeType, kind, previewDataUrl }) => ({
+          path,
+          mimeType,
+          kind,
+          previewDataUrl,
+        })),
         timestamp,
       });
       onPendingSession({
@@ -2130,7 +1999,7 @@ function NewChatView({
         to: turn.turnId,
       });
       setText("");
-      setAttachments([]);
+      clearAttachments();
     } catch (err) {
       const message = String(err);
       setComposerError(message);
@@ -2164,37 +2033,10 @@ function NewChatView({
                 : "focus-within:shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.20)]")
             }
           >
-            {attachments.length > 0 && (
-              <div className="flex flex-wrap gap-2 border-b border-ink/5 px-3.5 pt-3 pb-2">
-                {attachments.map((attachment) => {
-                  const Icon = attachment.kind === "image" ? ImageIcon : FileText;
-                  return (
-                    <span
-                      key={attachment.path}
-                      className="relative inline-flex min-w-[142px] max-w-[220px] items-center gap-2 rounded-lg border border-ink/8 bg-bg-panel px-3 py-2 pr-8 text-body-sm text-ink/78 shadow-sm"
-                    >
-                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald/10 text-emerald">
-                        <Icon className="h-4 w-4" />
-                      </span>
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium leading-4">{attachment.name}</span>
-                        <span className="block text-caption uppercase leading-4 text-ink/45">
-                          {attachment.kind === "image" ? "Image" : "Text"}
-                        </span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeAttachment(attachment.path)}
-                        className="absolute right-1.5 top-1.5 rounded-full bg-ink text-[rgb(var(--color-bg-panel))] p-0.5 transition hover:bg-ink/75"
-                        aria-label={`Remove ${attachment.name}`}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  );
-                })}
-              </div>
-            )}
+            <ComposerAttachmentPreviewList
+              attachments={attachments}
+              onRemove={removeAttachment}
+            />
             <textarea
               ref={textareaRef}
               value={text}
@@ -2274,18 +2116,16 @@ function NewChatView({
               <NewChatMenuButton icon={GitBranch} label="main" text />
             </div>
           </div>
-          {attachmentMenuOpen && attachmentButtonRef.current &&
-            createPortal(
-              <NewChatAttachmentMenu
+          {attachmentMenuOpen && attachmentButtonRef.current && (
+            <ComposerAttachmentMenu
                 anchor={attachmentButtonRef.current}
-                options={attachmentMenuOptions}
+                options={attachmentOptions}
                 onClose={() => setAttachmentMenuOpen(false)}
                 onSelect={(key) => {
                   void pickAttachments(key);
                 }}
-              />,
-              document.body,
-            )}
+              />
+          )}
         </div>
       </div>
     </div>
@@ -2345,82 +2185,6 @@ function NewChatMenuButton({
       {text && <span className="truncate">{label}</span>}
       {text && <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
     </button>
-  );
-}
-
-function NewChatAttachmentMenu({
-  anchor,
-  options,
-  onSelect,
-  onClose,
-}: {
-  anchor: HTMLButtonElement;
-  options: Array<{
-    key: "images" | "files";
-    label: string;
-    icon: React.ReactNode;
-  }>;
-  onSelect: (key: "images" | "files") => void;
-  onClose: () => void;
-}) {
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  const updatePosition = useCallback(() => {
-    const rect = anchor.getBoundingClientRect();
-    const menuWidth = menuRef.current?.offsetWidth ?? 192;
-    const menuHeight = menuRef.current?.offsetHeight ?? 8 + options.length * 40;
-    const left = Math.round(
-      Math.max(8, Math.min(rect.left + rect.width / 2 - menuWidth / 2, window.innerWidth - menuWidth - 8)),
-    );
-    const top = Math.round(Math.max(8, rect.top - menuHeight - 10));
-    setPos({ top, left });
-  }, [anchor, options.length]);
-
-  useLayoutEffect(() => {
-    updatePosition();
-  }, [updatePosition]);
-
-  useEffect(() => {
-    const reposition = () => updatePosition();
-    window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
-    return () => {
-      window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
-    };
-  }, [updatePosition]);
-
-  return (
-    <>
-      <div className="fixed inset-0 z-[39] bg-transparent" onMouseDown={onClose} />
-      <div
-        ref={menuRef}
-        className="fixed z-40 min-w-[192px] rounded-xl border border-ink/10 bg-surface-panel p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.22)]"
-        style={{
-          top: pos?.top ?? -9999,
-          left: pos?.left ?? -9999,
-          visibility: pos ? "visible" : "hidden",
-        }}
-        role="menu"
-      >
-        {options.map((option) => (
-          <button
-            key={option.key}
-            type="button"
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body-sm text-ink/72 transition hover:bg-ink/6 hover:text-ink"
-            role="menuitem"
-            onClick={() => {
-              onSelect(option.key);
-              onClose();
-            }}
-          >
-            <span className="shrink-0 text-ink/55">{option.icon}</span>
-            <span>{option.label}</span>
-          </button>
-        ))}
-      </div>
-    </>
   );
 }
 

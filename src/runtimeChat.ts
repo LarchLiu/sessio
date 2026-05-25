@@ -1,6 +1,7 @@
 import type {
   AcpProtocolMessage,
   Agent,
+  AgentAttachment,
   AgentRuntimeEvent,
   RuntimeCapabilitySet,
   RuntimeError,
@@ -16,6 +17,7 @@ export type LiveRuntimeAction =
       sessioRuntimeSessionId: string;
       turnId: string;
       text: string;
+      attachments?: AgentAttachment[];
       timestamp: number;
     }
   | {
@@ -398,10 +400,11 @@ export function applyRuntimeAction(
     turn.status = "streaming";
     turn.updatedAt = action.timestamp;
     if (!turn.blocks.some((block) => block.kind === "user")) {
+      const blocks = optimisticUserContentBlocks(action.text, action.attachments ?? []);
       turn.blocks.push({
         kind: "user",
-        blocks: [{ type: "text", text: action.text }],
-        raw: { optimistic: true, prompt: [{ type: "text", text: action.text }] },
+        blocks,
+        raw: { optimistic: true, prompt: blocks },
       });
     }
   } else {
@@ -411,6 +414,34 @@ export function applyRuntimeAction(
     turn.blocks.push({ kind: "error", error: action.error });
   }
   return updateSession(state, { ...session, turns });
+}
+
+function optimisticUserContentBlocks(
+  text: string,
+  attachments: AgentAttachment[],
+): AcpContentBlock[] {
+  const blocks: AcpContentBlock[] = [{ type: "text", text }];
+  for (const attachment of attachments) {
+    if (attachment.kind === "image") {
+      blocks.push({
+        type: "image",
+        uri: attachment.previewDataUrl ?? attachment.path,
+        mimeType: attachment.mimeType ?? undefined,
+      });
+      continue;
+    }
+    blocks.push({
+      type: "resource",
+      uri: attachment.path,
+      name: basenameFromPath(attachment.path),
+      mimeType: attachment.mimeType ?? undefined,
+    });
+  }
+  return blocks;
+}
+
+function basenameFromPath(path: string): string {
+  return path.split(/[/\\]/).filter(Boolean).pop() || "attachment";
 }
 
 function camelizeKeys(value: unknown): unknown {

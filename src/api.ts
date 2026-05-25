@@ -155,6 +155,7 @@ export interface AgentAttachment {
   path: string;
   mimeType: string | null;
   kind: "image" | "file";
+  previewDataUrl?: string | null;
 }
 
 export interface AgentInput {
@@ -355,6 +356,10 @@ export async function updateSessionMessageCount(
 
 export async function readLocalImageDataUrl(path: string): Promise<string> {
   return invoke<string>("read_local_image_data_url", { path });
+}
+
+export async function readLocalTextFile(path: string): Promise<string> {
+  return invoke<string>("read_local_text_file", { path });
 }
 
 export async function writeCrossPrompt(
