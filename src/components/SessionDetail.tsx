@@ -161,6 +161,7 @@ const renderItemsCache = new WeakMap<AcpViewModel, AcpRenderItem[]>();
 const scrollCache = new Map<string, ScrollCacheEntry>();
 const BOTTOM_FOLLOW_THRESHOLD_PX = 24;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 120;
+const INITIAL_BOTTOM_SCROLL_RETRY_MS = 1200;
 const INITIAL_HISTORY_RENDER_ITEMS = 120;
 
 function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
@@ -431,6 +432,7 @@ function MessageStream({
   const programmaticScrollUntilRef = useRef(0);
   const pendingInitialPositionRef = useRef<"bottom" | "restore" | null>(null);
   const initialPositionAppliedRef = useRef(false);
+  const keepInitialBottomLockRef = useRef(false);
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
@@ -457,6 +459,7 @@ function MessageStream({
       setError(null);
       pendingInitialPositionRef.current = skipHistoryLoad ? "bottom" : null;
       initialPositionAppliedRef.current = false;
+      keepInitialBottomLockRef.current = skipHistoryLoad;
       return;
     }
     const cached = messageCache.get(sourceKey);
@@ -473,6 +476,8 @@ function MessageStream({
       ? "restore"
       : "bottom";
     initialPositionAppliedRef.current = false;
+    keepInitialBottomLockRef.current =
+      pendingInitialPositionRef.current === "bottom";
     setHistoryRenderReady(false);
   }, [available, filePath, messageCount, sourceKey, skipHistoryLoad]);
 
@@ -655,6 +660,37 @@ function MessageStream({
     window.setTimeout(scroll, 80);
   }, []);
 
+  const scrollChatToBottomUntilSettled = useCallback(() => {
+    scrollChatToBottom();
+    const start = performance.now();
+    let cancelled = false;
+    let frameId: number | null = null;
+    let timeoutId: number | null = null;
+
+    const tick = () => {
+      if (cancelled) return;
+      if (!keepInitialBottomLockRef.current) return;
+      scrollChatToBottom();
+      if (performance.now() - start >= INITIAL_BOTTOM_SCROLL_RETRY_MS) {
+        keepInitialBottomLockRef.current = false;
+        return;
+      }
+      frameId = window.requestAnimationFrame(tick);
+    };
+
+    frameId = window.requestAnimationFrame(tick);
+    timeoutId = window.setTimeout(() => {
+      if (cancelled) return;
+      keepInitialBottomLockRef.current = false;
+    }, INITIAL_BOTTOM_SCROLL_RETRY_MS + 120);
+
+    return () => {
+      cancelled = true;
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
+  }, [scrollChatToBottom]);
+
   bubbleRefs.current.length = visibleDisplayItems.length;
 
   const saveScrollSnapshot = useCallback(
@@ -724,6 +760,7 @@ function MessageStream({
     const snapshot = scrollCache.get(sourceKey);
     if (mode === "restore" && snapshot?.atBottom) {
       followLiveStreamRef.current = true;
+      keepInitialBottomLockRef.current = true;
       scrollChatToBottom();
       pendingInitialPositionRef.current = null;
       initialPositionAppliedRef.current = true;
@@ -746,8 +783,10 @@ function MessageStream({
         0,
         Math.min(snapshot.scrollTop, vp.scrollHeight - vp.clientHeight),
       );
+      keepInitialBottomLockRef.current = false;
     } else {
       followLiveStreamRef.current = true;
+      keepInitialBottomLockRef.current = true;
       scrollChatToBottom();
     }
     pendingInitialPositionRef.current = null;
@@ -763,6 +802,17 @@ function MessageStream({
     if (snapshot && !snapshot.atBottom && !followLiveStreamRef.current) return;
     scrollChatToBottom();
   }, [visibleDisplayItems, scrollChatToBottom, sourceKey]);
+
+  useEffect(() => {
+    if (!keepInitialBottomLockRef.current) return;
+    if (loading || visibleDisplayItems.length === 0) return;
+    return scrollChatToBottomUntilSettled();
+  }, [
+    historyRenderReady,
+    loading,
+    scrollChatToBottomUntilSettled,
+    visibleDisplayItems.length,
+  ]);
 
   useEffect(() => {
     if (!liveStreamingKey || !followLiveStreamRef.current) return;
