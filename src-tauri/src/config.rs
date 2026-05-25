@@ -27,8 +27,15 @@ pub struct RuntimeAgentsConfig {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AgentRuntimeConfig {
+    pub enabled: bool,
     pub transport: Option<String>,
-    pub command: Option<String>,
+    pub command: AgentRuntimeCommandConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentRuntimeCommandConfig {
+    pub session: Option<String>,
+    pub version: Option<String>,
 }
 
 impl RuntimeAgentsConfig {
@@ -76,8 +83,15 @@ struct RawRuntimeAgentsConfig {
 
 #[derive(Debug, Clone, Default)]
 struct RawAgentRuntimeConfig {
+    enabled: Option<bool>,
     transport: Option<String>,
-    command: Option<String>,
+    command: RawAgentRuntimeCommandConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawAgentRuntimeCommandConfig {
+    session: Option<String>,
+    version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -184,10 +198,22 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             Section::AgentRuntime(agent) => {
                 let target = raw_runtime_agent_mut(&mut raw, agent);
                 match key {
+                    "enabled" => target.enabled = value.map(parse_bool).transpose()?,
                     "transport" => target.transport = value,
-                    "command" => target.command = value,
+                    "command" => target.command.session = value,
                     other => bail!(
                         "unknown key in [agents.runtime.{}]: {other}",
+                        agent.as_str()
+                    ),
+                }
+            }
+            Section::AgentRuntimeCommand(agent) => {
+                let target = raw_runtime_agent_mut(&mut raw, agent);
+                match key {
+                    "session" => target.command.session = value,
+                    "version" => target.command.version = value,
+                    other => bail!(
+                        "unknown key in [agents.runtime.{}.command]: {other}",
                         agent.as_str()
                     ),
                 }
@@ -205,6 +231,7 @@ enum Section {
     Memory,
     MemoryBackendsQmd,
     AgentRuntime(Agent),
+    AgentRuntimeCommand(Agent),
     Ignored,
 }
 
@@ -229,6 +256,12 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
             "codex" => Section::AgentRuntime(Agent::Codex),
             "claude" => Section::AgentRuntime(Agent::Claude),
             "gemini" => Section::AgentRuntime(Agent::Gemini),
+            _ => Section::Ignored,
+        },
+        [a, b, c, d] if a == "agents" && b == "runtime" && d == "command" => match c.as_str() {
+            "codex" => Section::AgentRuntimeCommand(Agent::Codex),
+            "claude" => Section::AgentRuntimeCommand(Agent::Claude),
+            "gemini" => Section::AgentRuntimeCommand(Agent::Gemini),
             _ => Section::Ignored,
         },
         _ => Section::Ignored,
@@ -367,8 +400,12 @@ fn resolve_agent_runtime_config(raw: RawAgentRuntimeConfig) -> Result<AgentRunti
         }
     }
     Ok(AgentRuntimeConfig {
+        enabled: raw.enabled.unwrap_or(false),
         transport,
-        command: raw.command.filter(|value| !value.trim().is_empty()),
+        command: AgentRuntimeCommandConfig {
+            session: raw.command.session.filter(|value| !value.trim().is_empty()),
+            version: raw.command.version.filter(|value| !value.trim().is_empty()),
+        },
     })
 }
 
@@ -457,21 +494,38 @@ fn serialize_agents_config(config: &AgentsConfig) -> String {
         ("claude", &config.runtime.claude),
         ("gemini", &config.runtime.gemini),
     ] {
-        if runtime.transport.is_none() && runtime.command.is_none() {
+        if !runtime.enabled
+            && runtime.transport.is_none()
+            && runtime.command.session.is_none()
+            && runtime.command.version.is_none()
+        {
             continue;
         }
         out.push_str("[agents.runtime.");
         out.push_str(name);
         out.push_str("]\n");
+        out.push_str("enabled = ");
+        out.push_str(if runtime.enabled { "true" } else { "false" });
+        out.push('\n');
         if let Some(transport) = &runtime.transport {
             out.push_str("transport = ");
             out.push_str(&toml_string(transport));
             out.push('\n');
         }
-        if let Some(command) = &runtime.command {
-            out.push_str("command = ");
-            out.push_str(&toml_string(command));
-            out.push('\n');
+        if runtime.command.session.is_some() || runtime.command.version.is_some() {
+            out.push_str("[agents.runtime.");
+            out.push_str(name);
+            out.push_str(".command]\n");
+            if let Some(command) = &runtime.command.session {
+                out.push_str("session = ");
+                out.push_str(&toml_string(command));
+                out.push('\n');
+            }
+            if let Some(command) = &runtime.command.version {
+                out.push_str("version = ");
+                out.push_str(&toml_string(command));
+                out.push('\n');
+            }
         }
         out.push('\n');
     }
@@ -579,17 +633,25 @@ mod tests {
         let raw = parse_raw_config(
             r#"
             [agents.runtime.codex]
+            enabled = true
             transport = "acp"
-            command = "npx -y @zed-industries/codex-acp@latest"
+            [agents.runtime.codex.command]
+            session = "npx -y @zed-industries/codex-acp@latest"
+            version = "codex --version"
             "#,
         )
         .unwrap();
         let config = resolve_agents_config(raw).unwrap();
 
+        assert!(config.runtime.codex.enabled);
         assert_eq!(config.runtime.codex.transport.as_deref(), Some("acp"));
         assert_eq!(
-            config.runtime.codex.command.as_deref(),
+            config.runtime.codex.command.session.as_deref(),
             Some("npx -y @zed-industries/codex-acp@latest")
+        );
+        assert_eq!(
+            config.runtime.codex.command.version.as_deref(),
+            Some("codex --version")
         );
     }
 }
