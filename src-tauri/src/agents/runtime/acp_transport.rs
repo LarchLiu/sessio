@@ -825,10 +825,30 @@ fn text_resource_content_block(attachment: &AgentAttachment) -> Result<ContentBl
     ensure_file_size(path, MAX_TEXT_BYTES, "file attachment is too large")?;
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read text attachment {}", path.display()))?;
-    let resource = TextResourceContents::new(text, file_uri(path)).mime_type(mime_type);
+    let uri = file_uri(path);
+    let marked_text = format!(
+        "<sessio-upload-file uri=\"{}\" name=\"{}\" mimeType=\"{}\">\n{}\n</sessio-upload-file>",
+        escape_xml_attr(&uri),
+        escape_xml_attr(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("attachment")
+        ),
+        escape_xml_attr(&mime_type),
+        text
+    );
+    let resource = TextResourceContents::new(marked_text, uri).mime_type(mime_type);
     Ok(ContentBlock::Resource(EmbeddedResource::new(
         EmbeddedResourceResource::TextResourceContents(resource),
     )))
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn ensure_absolute_existing_file(path: &Path) -> Result<()> {
@@ -931,7 +951,10 @@ mod tests {
         match block {
             ContentBlock::Resource(resource) => match resource.resource {
                 EmbeddedResourceResource::TextResourceContents(contents) => {
-                    assert_eq!(contents.text, "# Context\nhello");
+                    assert!(contents.text.contains("<sessio-upload-file "));
+                    assert!(contents.text.contains("name=\"sessio-acp-attachment-"));
+                    assert!(contents.text.contains("# Context\nhello"));
+                    assert!(contents.text.contains("</sessio-upload-file>"));
                     assert_eq!(contents.mime_type.as_deref(), Some("text/markdown"));
                     assert!(contents.uri.starts_with("file://"));
                 }

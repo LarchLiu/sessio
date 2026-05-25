@@ -486,6 +486,25 @@ fn read_local_image_data_url(path: String) -> Result<String, String> {
     Ok(format!("data:{mime};base64,{encoded}"))
 }
 
+#[tauri::command]
+fn read_local_text_file(path: String) -> Result<String, String> {
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_absolute() {
+        return Err("Only absolute file paths can be loaded".to_string());
+    }
+    let _mime =
+        text_file_mime(&path_buf).ok_or_else(|| "Unsupported text file type".to_string())?;
+    let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Path is not a file".to_string());
+    }
+    const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+    if meta.len() > MAX_TEXT_BYTES {
+        return Err("File is too large to preview".to_string());
+    }
+    std::fs::read_to_string(&path_buf).map_err(|e| e.to_string())
+}
+
 fn local_image_mime(path: &Path) -> Option<&'static str> {
     match path
         .extension()
@@ -499,6 +518,34 @@ fn local_image_mime(path: &Path) -> Option<&'static str> {
         Some("gif") => Some("image/gif"),
         Some("svg") => Some("image/svg+xml"),
         Some("bmp") => Some("image/bmp"),
+        _ => None,
+    }
+}
+
+fn text_file_mime(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("txt") => Some("text/plain"),
+        Some("md") | Some("markdown") => Some("text/markdown"),
+        Some("json") | Some("jsonl") => Some("application/json"),
+        Some("yaml") | Some("yml") => Some("application/yaml"),
+        Some("toml") => Some("application/toml"),
+        Some("xml") => Some("application/xml"),
+        Some("csv") => Some("text/csv"),
+        Some("ts") | Some("tsx") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs")
+        | Some("py") | Some("rs") | Some("go") | Some("java") | Some("kt") | Some("swift")
+        | Some("rb") | Some("php") | Some("css") | Some("scss") | Some("sass")
+        | Some("less") | Some("html") | Some("htm") | Some("sh") | Some("zsh")
+        | Some("bash") | Some("sql") | Some("c") | Some("h") | Some("cpp") | Some("hpp")
+        | Some("cs") | Some("lua") | Some("pl") | Some("r") | Some("ex") | Some("exs")
+        | Some("erl") | Some("clj") | Some("scala") | Some("dart") | Some("vue")
+        | Some("svelte") | Some("dockerfile") | Some("gitignore") | Some("env") => {
+            Some("text/plain")
+        }
         _ => None,
     }
 }
@@ -893,6 +940,7 @@ pub fn run() {
             update_session_message_count,
             create_pending_session,
             read_local_image_data_url,
+            read_local_text_file,
             set_window_appearance,
             get_system_appearance,
             rebuild_session_index,

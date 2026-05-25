@@ -548,7 +548,8 @@ fn parse_session(
                 if payload.get("type").and_then(|x| x.as_str()) == Some("user_message") {
                     if let Some(text) = payload.get("message").and_then(|x| x.as_str()) {
                         if !is_system_noise(text) {
-                            let cleaned = strip_injected_context(text);
+                            let cleaned =
+                                strip_injected_context(&sanitize_user_preview_text(text));
                             if !cleaned.is_empty() {
                                 first_user_message = Some(normalize_preview(&cleaned));
                             }
@@ -565,7 +566,7 @@ fn parse_session(
                         skip_replayed_user_message = false;
                         continue;
                     }
-                    if let Some(text) = extract_message_text(payload) {
+                    if let Some(text) = extract_message_preview_text(payload) {
                         if !is_system_noise(&text) {
                             let cleaned = strip_injected_context(&text);
                             if !cleaned.is_empty() {
@@ -685,7 +686,11 @@ fn load_session_index_titles() -> HashMap<String, String> {
         if id.is_empty() || thread_name.trim().is_empty() {
             continue;
         }
-        titles.insert(id.to_string(), normalize_preview(thread_name));
+        let cleaned = strip_injected_context(&sanitize_user_preview_text(thread_name));
+        if cleaned.is_empty() {
+            continue;
+        }
+        titles.insert(id.to_string(), normalize_preview(&cleaned));
     }
     titles
 }
@@ -742,8 +747,12 @@ fn latest_timestamp_from_file(path: &Path) -> Result<Option<i64>> {
 }
 
 fn extract_message_text(payload: &serde_json::Value) -> Option<String> {
+    extract_message_text_inner(payload)
+}
+
+fn extract_message_preview_text(payload: &serde_json::Value) -> Option<String> {
     if let Some(text) = payload.get("content").and_then(|x| x.as_str()) {
-        let cleaned = strip_image_placeholder_tags(text);
+        let cleaned = sanitize_user_preview_text(text);
         if !cleaned.trim().is_empty() {
             return Some(cleaned);
         }
@@ -759,7 +768,47 @@ fn extract_message_text(payload: &serde_json::Value) -> Option<String> {
                     .or_else(|| item.get("content"))
                     .and_then(|x| x.as_str())
                 {
-                    let cleaned = strip_image_placeholder_tags(text);
+                    let cleaned = sanitize_user_preview_text(text);
+                    if !cleaned.trim().is_empty() {
+                        parts.push(cleaned);
+                    }
+                }
+            }
+        }
+    }
+    if !parts.is_empty() {
+        return Some(parts.join("\n"));
+    }
+    for key in ["text", "message"] {
+        if let Some(text) = payload.get(key).and_then(|x| x.as_str()) {
+            let cleaned = sanitize_user_preview_text(text);
+            if !cleaned.trim().is_empty() {
+                return Some(cleaned);
+            }
+        }
+    }
+    None
+}
+
+fn extract_message_text_inner(payload: &serde_json::Value) -> Option<String> {
+    if let Some(text) = payload.get("content").and_then(|x| x.as_str()) {
+        let cleaned = sanitize_user_attachment_text(text);
+        if !cleaned.trim().is_empty() {
+            return Some(cleaned);
+        }
+    }
+    let mut parts = Vec::new();
+    if let Some(content) = payload.get("content").and_then(|x| x.as_array()) {
+        for item in content {
+            let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            if matches!(kind, "input_text" | "text" | "output_text") {
+                if let Some(text) = item
+                    .get("text")
+                    .or_else(|| item.get("value"))
+                    .or_else(|| item.get("content"))
+                    .and_then(|x| x.as_str())
+                {
+                    let cleaned = sanitize_user_attachment_text(text);
                     if !cleaned.trim().is_empty() {
                         parts.push(cleaned);
                     }
@@ -776,13 +825,229 @@ fn extract_message_text(payload: &serde_json::Value) -> Option<String> {
     }
     for key in ["text", "message"] {
         if let Some(text) = payload.get(key).and_then(|x| x.as_str()) {
-            let cleaned = strip_image_placeholder_tags(text);
+            let cleaned = sanitize_user_attachment_text(text);
             if !cleaned.trim().is_empty() {
                 return Some(cleaned);
             }
         }
     }
     None
+}
+
+fn sanitize_user_preview_text(text: &str) -> String {
+    let without_images = strip_image_placeholder_tags(text);
+    let without_file_links = remove_file_markdown_links(&without_images);
+    let without_sessio_files = remove_xmlish_blocks(&without_file_links, "sessio-upload-file");
+    remove_xmlish_blocks(&without_sessio_files, "context")
+}
+
+fn sanitize_user_attachment_text(text: &str) -> String {
+    let without_images = strip_image_placeholder_tags(text);
+    let without_file_links = remove_file_markdown_links(&without_images);
+    let without_sessio_files = replace_tagged_upload_files(&without_file_links);
+    replace_codex_context_files(&without_sessio_files)
+}
+
+fn remove_xmlish_blocks(text: &str, tag: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let open_prefix = format!("<{tag}");
+    let close_tag = format!("</{tag}>");
+    while let Some(open_start) = rest.find(&open_prefix) {
+        out.push_str(&rest[..open_start]);
+        let after_open = &rest[open_start..];
+        let Some(open_end) = after_open.find('>') else {
+            return collapse_blank_lines(&out);
+        };
+        let after_tag = &after_open[open_end + 1..];
+        let Some(close_start) = after_tag.find(&close_tag) else {
+            return collapse_blank_lines(&out);
+        };
+        rest = &after_tag[close_start + close_tag.len()..];
+    }
+    out.push_str(rest);
+    collapse_blank_lines(&out)
+}
+
+fn remove_file_markdown_links(text: &str) -> String {
+    let mut out = text.to_string();
+    loop {
+        let Some(close_label) = out.find("](") else {
+            break;
+        };
+        let Some(open_label) = out[..close_label].rfind('[') else {
+            break;
+        };
+        let target_start = close_label + 2;
+        let Some(close_target_rel) = out[target_start..].find(')') else {
+            break;
+        };
+        let close_target = target_start + close_target_rel;
+        let target = out[target_start..close_target].trim().trim_matches(['<', '>']);
+        if !target.starts_with("file://") {
+            let prefix_end = close_target + 1;
+            let mut next = out[..prefix_end].to_string();
+            next.push_str(&remove_file_markdown_links(&out[prefix_end..]));
+            return collapse_blank_lines(&next);
+        }
+        out.replace_range(open_label..=close_target, "");
+    }
+    collapse_blank_lines(&out)
+}
+
+fn replace_tagged_upload_files(text: &str) -> String {
+    replace_xmlish_blocks(text, "sessio-upload-file", |attrs| {
+        let name = attrs
+            .get("name")
+            .cloned()
+            .or_else(|| attrs.get("uri").and_then(|uri| file_name_from_uri(uri)));
+        file_marker(name.as_deref(), attrs.get("uri").map(String::as_str))
+    })
+}
+
+fn replace_codex_context_files(text: &str) -> String {
+    replace_xmlish_blocks(text, "context", |attrs| {
+        let name = attrs.get("ref").and_then(|uri| file_name_from_uri(uri));
+        file_marker(name.as_deref(), attrs.get("ref").map(String::as_str))
+    })
+}
+
+fn replace_xmlish_blocks<F>(text: &str, tag: &str, marker: F) -> String
+where
+    F: Fn(&HashMap<String, String>) -> String,
+{
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let open_prefix = format!("<{tag}");
+    let close_tag = format!("</{tag}>");
+    while let Some(open_start) = rest.find(&open_prefix) {
+        out.push_str(&rest[..open_start]);
+        let after_open = &rest[open_start..];
+        let Some(open_end) = after_open.find('>') else {
+            out.push_str(after_open);
+            return collapse_blank_lines(&out);
+        };
+        let attrs_text = &after_open[open_prefix.len()..open_end];
+        let after_tag = &after_open[open_end + 1..];
+        let Some(close_start) = after_tag.find(&close_tag) else {
+            out.push_str(after_open);
+            return collapse_blank_lines(&out);
+        };
+        out.push_str(&marker(&parse_xmlish_attrs(attrs_text)));
+        rest = &after_tag[close_start + close_tag.len()..];
+    }
+    out.push_str(rest);
+    collapse_blank_lines(&out)
+}
+
+fn parse_xmlish_attrs(input: &str) -> HashMap<String, String> {
+    let mut attrs = HashMap::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let key_start = i;
+        while i < bytes.len()
+            && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'-' | b'_' | b':'))
+        {
+            i += 1;
+        }
+        if i == key_start {
+            i += 1;
+            continue;
+        }
+        let key = &input[key_start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || (bytes[i] != b'"' && bytes[i] != b'\'') {
+            continue;
+        }
+        let quote = bytes[i];
+        i += 1;
+        let value_start = i;
+        while i < bytes.len() && bytes[i] != quote {
+            i += 1;
+        }
+        let value = &input[value_start..i.min(bytes.len())];
+        attrs.insert(key.to_string(), unescape_xml_attr(value));
+        if i < bytes.len() {
+            i += 1;
+        }
+    }
+    attrs
+}
+
+fn unescape_xml_attr(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+fn file_marker(name: Option<&str>, uri: Option<&str>) -> String {
+    let trimmed = name.unwrap_or("attachment").trim();
+    let safe_name = if trimmed.is_empty() { "attachment" } else { trimmed };
+    match uri.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(uri) => format!("[file: {safe_name}|{uri}]"),
+        None => format!("[file: {safe_name}]"),
+    }
+}
+
+fn file_name_from_uri(uri: &str) -> Option<String> {
+    let raw = uri.strip_prefix("file://").unwrap_or(uri);
+    let decoded = percent_decode(raw);
+    decoded
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty())
+        .next_back()
+        .map(String::from)
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| value.to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn collapse_blank_lines(text: &str) -> String {
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("\n\n\n", "\n\n")
 }
 
 fn extract_function_call_output_text(payload: &serde_json::Value) -> String {
@@ -1135,7 +1400,7 @@ fn strip_image_placeholder_tags(text: &str) -> String {
     text.lines()
         .filter(|line| {
             let trimmed = line.trim();
-            !(trimmed.starts_with("<image ") && trimmed.ends_with(">")) && trimmed != "</image>"
+            !(trimmed.starts_with("<image") && trimmed.ends_with(">")) && trimmed != "</image>"
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1478,6 +1743,39 @@ mod tests {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .starts_with("+++ added content\nnew"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn parse_session_title_omits_uploaded_image_and_file_context() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-upload-title-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let meta = r#"{"timestamp":"2026-05-25T07:05:45.000Z","type":"session_meta","payload":{"id":"upload-thread","timestamp":"2026-05-25T07:05:45.000Z","cwd":"/tmp/project"}}"#;
+        let user = r##"{"timestamp":"2026-05-25T07:05:46.089Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"图片和游戏策划可以结合吗"},{"type":"input_text","text":"<image>"},{"type":"input_image","image_url":"data:image/png;base64,abc","detail":"high"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"[@dotAGE 游戏复刻思路研究.md](file:///Users/alex/Documents/dotAGE%20游戏复刻思路研究.md)\n<context ref=\"file:///Users/alex/Documents/dotAGE%20游戏复刻思路研究.md\">\n# **dotAGE 深度技术解构与复刻可行性研究报告**\nvery long file body\n</context>"}]}}"##;
+        fs::write(&path, format!("{meta}\n{user}\n")).unwrap();
+
+        let info = parse_one_file(&path, false).unwrap().unwrap();
+        assert_eq!(
+            info.first_user_message.as_deref(),
+            Some("图片和游戏策划可以结合吗")
+        );
+        let preview = info.first_user_message.as_deref().unwrap();
+        assert!(!preview.contains("base64"));
+        assert!(!preview.contains("very long file body"));
+        assert!(!preview.contains("file://"));
+        assert!(!preview.contains("dotAGE"));
+        assert!(!preview.contains("[image]"));
+        assert!(!preview.contains("[file:"));
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();

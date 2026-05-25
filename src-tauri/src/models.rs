@@ -88,6 +88,7 @@ pub struct RuntimeAgentMetadata {
 }
 
 pub fn normalize_preview(s: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 50;
     let trimmed = s.trim();
     let mut out = String::with_capacity(trimmed.len());
     for ch in trimmed.chars() {
@@ -97,7 +98,13 @@ pub fn normalize_preview(s: &str) -> String {
             out.push(ch);
         }
     }
-    out
+    let mut chars = out.chars();
+    let truncated: String = chars.by_ref().take(MAX_PREVIEW_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 pub fn is_system_noise(text: &str) -> bool {
@@ -158,4 +165,26 @@ pub fn strip_injected_context(s: &str) -> String {
     }
 
     text.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_preview;
+
+    #[test]
+    fn normalize_preview_limits_to_50_chars_plus_ellipsis() {
+        let exact = "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十";
+        assert_eq!(exact.chars().count(), 50);
+        assert_eq!(normalize_preview(exact), exact);
+
+        let long = format!("{exact}超出");
+        let preview = normalize_preview(&long);
+        assert_eq!(preview, format!("{exact}..."));
+        assert_eq!(preview.chars().count(), 53);
+    }
+
+    #[test]
+    fn normalize_preview_flattens_newlines_before_truncating() {
+        assert_eq!(normalize_preview(" hello\nworld\ragain "), "hello world again");
+    }
 }
