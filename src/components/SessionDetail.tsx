@@ -11,7 +11,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, ChevronDown, FileDiff, Plus, Square } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, ChevronDown, FileDiff, FileText, Image as ImageIcon, Plus, Square } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -1700,6 +1700,8 @@ function AcpContentBlockGroup({
   const isUser = block.kind === "user";
   const label =
     block.kind === "thought" ? "Thinking" : block.kind === "assistant" ? "assistant" : "user";
+  const userAttachmentBlocks = isUser ? block.blocks.filter(isAttachmentContentBlock) : [];
+  const bodyBlocks = isUser ? block.blocks.filter((item) => !isAttachmentContentBlock(item)) : block.blocks;
   return (
     <div
       className={
@@ -1726,9 +1728,54 @@ function AcpContentBlockGroup({
         </span>
       </div>
       <div className={block.kind === "thought" ? "ml-3.5" : ""}>
-        <AcpContentBlocks blocks={block.blocks} onPreviewImage={onPreviewImage} />
+        {userAttachmentBlocks.length > 0 && (
+          <div className="mb-2 flex flex-wrap justify-end gap-1.5">
+            {userAttachmentBlocks.map((attachment, index) => (
+              <AcpAttachmentPill key={index} block={attachment} />
+            ))}
+          </div>
+        )}
+        <AcpContentBlocks blocks={bodyBlocks} onPreviewImage={onPreviewImage} />
       </div>
     </div>
+  );
+}
+
+function isAttachmentContentBlock(block: AcpContentBlock): boolean {
+  return block.type === "image" || block.type === "resource" || block.type === "resource_link";
+}
+
+function resourceDisplayName(block: AcpContentBlock): string {
+  if (block.type === "resource_link") {
+    return block.title ?? block.name ?? basenameFromUri(block.uri) ?? "Resource";
+  }
+  if (block.type === "resource") {
+    return block.name ?? basenameFromUri(block.uri ?? "") ?? "Embedded resource";
+  }
+  if (block.type === "image") {
+    return basenameFromUri(block.uri ?? "") ?? block.mimeType ?? "Image";
+  }
+  return "Attachment";
+}
+
+function basenameFromUri(uri: string): string | null {
+  if (!uri) return null;
+  const decoded = uri.startsWith("file://") ? uri.slice("file://".length) : uri;
+  const name = decoded.split(/[/\\]/).filter(Boolean).pop();
+  return name || null;
+}
+
+function AcpAttachmentPill({ block }: { block: AcpContentBlock }) {
+  const label = resourceDisplayName(block);
+  return (
+    <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-ink/8 bg-bg-panel px-2.5 py-1 text-caption font-medium text-ink/70 shadow-sm">
+      {block.type === "image" ? (
+        <ImageIcon className="h-3.5 w-3.5 shrink-0 text-ink/45" />
+      ) : (
+        <FileText className="h-3.5 w-3.5 shrink-0 text-ink/45" />
+      )}
+      <span className="max-w-[220px] truncate">{label}</span>
+    </span>
   );
 }
 

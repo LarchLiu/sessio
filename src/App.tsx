@@ -2171,17 +2171,24 @@ function NewChatView({
                   return (
                     <span
                       key={attachment.path}
-                      className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-ink/8 px-2.5 py-1 text-body-sm text-ink/72"
+                      className="relative inline-flex min-w-[142px] max-w-[220px] items-center gap-2 rounded-lg border border-ink/8 bg-bg-panel px-3 py-2 pr-8 text-body-sm text-ink/78 shadow-sm"
                     >
-                      <Icon className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate max-w-[220px]">{attachment.name}</span>
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald/10 text-emerald">
+                        <Icon className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium leading-4">{attachment.name}</span>
+                        <span className="block text-caption uppercase leading-4 text-ink/45">
+                          {attachment.kind === "image" ? "Image" : "Text"}
+                        </span>
+                      </span>
                       <button
                         type="button"
                         onClick={() => removeAttachment(attachment.path)}
-                        className="rounded-full p-0.5 text-ink/45 transition hover:bg-ink/10 hover:text-ink"
+                        className="absolute right-1.5 top-1.5 rounded-full bg-ink text-[rgb(var(--color-bg-panel))] p-0.5 transition hover:bg-ink/75"
                         aria-label={`Remove ${attachment.name}`}
                       >
-                        <X className="h-3.5 w-3.5" />
+                        <X className="h-3 w-3" />
                       </button>
                     </span>
                   );
