@@ -12,7 +12,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, Wrench } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, UserKey, Wrench } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -2367,7 +2367,9 @@ function AcpToolCard({
   const showToolPairs = !isFileToolWithoutPairs(displayTool.title);
   const input = showToolPairs ? detail.command : "";
   const output = showToolPairs ? acpToolOutputText(displayTool) : "";
-  const renderedContent = displayTool.content.filter((content) => content.type !== "diff");
+  const renderedContent = displayTool.content.filter((content) =>
+    content.type !== "diff" && (!(input || output) || content.type !== "content")
+  );
   return (
     <ToolTimelineFrame title={detail.title} iconName={displayTool.title}>
       {(input || output || renderedContent.length > 0 || displayTool.locations.length > 0) && (
@@ -2656,6 +2658,7 @@ function AcpPermissionCard({
         { optionId: "allow_once", name: "Allow once", kind: "allow_once", meta: null },
         { optionId: "reject_once", name: "Reject once", kind: "reject_once", meta: null },
       ];
+  const detail = permissionDisplayDetail(permission);
   const respond = (optionId: string) => {
     if (resolved || pendingChoice) return;
     setPendingChoice(optionId);
@@ -2666,46 +2669,95 @@ function AcpPermissionCard({
     });
   };
   return (
-    <div className="rounded-md border border-ink/[0.08] bg-ink/[0.045] px-3 py-2 text-body-sm">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div>
-          <div className="font-medium text-ink/80">Permission · {permission.toolName}</div>
-          <div className="text-caption text-ink/45">
-            {resolved ? "Resolved" : "Waiting for approval"}
+    <ToolTimelineFrame
+      title={{ main: "Permission", detail: detail.reason ?? undefined }}
+      iconName="Permission"
+    >
+      <div className="space-y-2 text-body-sm">
+        <div className="text-caption text-ink/45">
+          {permissionStatusText(permission, pendingChoice)}
+        </div>
+        {detail.command && (
+          <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75">
+            <code>{detail.command}</code>
+          </pre>
+        )}
+        {!resolved && (
+          <div className="overflow-hidden rounded-md border border-ink/[0.10] bg-bg-panel/55">
+            {options.map((option) => (
+              <button
+                key={option.optionId}
+                type="button"
+                disabled={Boolean(pendingChoice)}
+                onClick={() => respond(option.optionId)}
+                className={permissionOptionButtonClass(option.kind)}
+              >
+                {pendingChoice === option.optionId ? "Applying..." : option.name}
+              </button>
+            ))}
           </div>
-        </div>
+        )}
+        {error && <div className="text-caption text-status-error">{error}</div>}
       </div>
-      {permission.input !== null && (
-        <PlainTextContent text={JSON.stringify(permission.input, null, 2)} />
-      )}
-      {!resolved && (
-        <div className="mt-2 flex items-center gap-2">
-          {options.map((option) => (
-            <button
-              key={option.optionId}
-              type="button"
-              disabled={Boolean(pendingChoice)}
-              onClick={() => respond(option.optionId)}
-              className={permissionOptionButtonClass(option.kind)}
-            >
-              {pendingChoice === option.optionId ? "Applying..." : option.name}
-            </button>
-          ))}
-        </div>
-      )}
-      {error && <div className="mt-2 text-caption text-status-error">{error}</div>}
-    </div>
+    </ToolTimelineFrame>
   );
 }
 
 function permissionOptionButtonClass(kind: string): string {
-  if (kind.startsWith("allow")) {
-    return "rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-2.5 py-1 text-caption font-medium text-[rgb(var(--color-emerald))] transition hover:bg-[rgb(var(--color-emerald)/0.18)] disabled:cursor-not-allowed disabled:opacity-55";
+  void kind;
+  return "block w-full border-b border-ink/[0.08] px-3 py-2 text-left text-caption font-medium text-ink/70 transition last:border-b-0 hover:bg-ink/[0.05] hover:text-ink/85 disabled:cursor-not-allowed disabled:opacity-55";
+}
+
+function permissionStatusText(permission: AcpPermissionRequest, pendingChoice: string | null): string {
+  if (pendingChoice) return "Applying permission decision";
+  if (permission.cancelled) return "Cancelled";
+  if (permission.selectedOptionId) return `Resolved · ${permission.selectedOptionId}`;
+  return "Waiting for approval";
+}
+
+function permissionDisplayDetail(permission: AcpPermissionRequest): {
+  reason: string | null;
+  command: string | null;
+} {
+  const input = parseObjectLike(permission.input);
+  const raw = parseObjectLike(permission.raw);
+  const rawToolCall = parseObjectLike(permission.toolCall);
+  const toolFields = parseObjectLike(rawToolCall?.fields) ?? rawToolCall;
+  const reason =
+    pickString(input?.reason) ??
+    pickString(toolFields?.reason) ??
+    pickString(raw?.reason) ??
+    pickString(raw?.description) ??
+    permission.toolName;
+  const command =
+    pickPermissionCommand(input) ??
+    pickPermissionCommand(toolFields) ??
+    pickPermissionCommand(raw);
+  return { reason, command };
+}
+
+function pickPermissionCommand(record: Record<string, unknown> | null): string | null {
+  if (!record) return null;
+  const direct = pickCommandText(record);
+  if (direct) return direct;
+  const command = record.command;
+  if (Array.isArray(command)) {
+    const parts = command
+      .map((item) => pickString(item))
+      .filter((item): item is string => Boolean(item));
+    if (parts.length > 0) return parts.join(" ");
   }
-  if (kind.startsWith("reject")) {
-    return "rounded-md border border-status-error/25 bg-status-error/10 px-2.5 py-1 text-caption font-medium text-status-error transition hover:bg-status-error/15 disabled:cursor-not-allowed disabled:opacity-55";
+  const parsedCommand = record.parsedCommand;
+  if (Array.isArray(parsedCommand)) {
+    const parts = parsedCommand
+      .map((item) => {
+        const parsed = parseObjectLike(item);
+        return parsed ? pickString(parsed.cmd) ?? pickString(parsed.command) : pickString(item);
+      })
+      .filter((item): item is string => Boolean(item));
+    if (parts.length > 0) return parts.join("\n");
   }
-  return "rounded-md border border-ink/12 bg-ink/[0.04] px-2.5 py-1 text-caption font-medium text-ink/60 transition hover:bg-ink/[0.07] hover:text-ink/80 disabled:cursor-not-allowed disabled:opacity-55";
+  return null;
 }
 
 function contentBlocksText(blocks: AcpContentBlock[]): string {
@@ -4214,6 +4266,8 @@ function ToolTitleIcon({ name }: { name: string }) {
       return <MessageCircleQuestionMark className={className} aria-label="Ask user" />;
     case "TaskUpdate":
       return <ListChecks className={className} aria-label="Task update" />;
+    case "Permission":
+      return <UserKey className={className} aria-label="Permission" />;
     case "View Image":
       return <ImageIcon className={className} aria-label="View image" />;
     case "Task":
