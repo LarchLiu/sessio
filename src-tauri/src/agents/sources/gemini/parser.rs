@@ -817,6 +817,147 @@ fn tool_call_is_error(call: &serde_json::Value, output_preview: Option<&str>) ->
             .unwrap_or(false)
 }
 
+fn gemini_file_edit_message(
+    call: &serde_json::Value,
+    ts: Option<i64>,
+    project_path: Option<&str>,
+) -> Option<SessionMessage> {
+    let result_display = call.get("resultDisplay")?;
+    let file_diff = result_display
+        .get("fileDiff")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let path = result_display
+        .get("filePath")
+        .or_else(|| result_display.get("file_path"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            call.get("args")
+                .and_then(|args| args.get("file_path").or_else(|| args.get("path")))
+                .and_then(|value| value.as_str())
+        })?;
+    let display_path = gemini_edit_display_path(call, result_display, path, project_path);
+    let additions = diff_line_count(file_diff, '+');
+    let deletions = diff_line_count(file_diff, '-');
+    let old_content = result_display
+        .get("originalContent")
+        .and_then(|value| value.as_str());
+    let new_content = result_display
+        .get("newContent")
+        .and_then(|value| value.as_str());
+    let edit = serde_json::json!({
+        "path": path,
+        "displayPath": display_path,
+        "kind": "edit",
+        "additions": additions,
+        "deletions": deletions,
+        "detail": file_diff,
+        "patch": normalize_gemini_file_diff(path, file_diff),
+        "oldContent": old_content,
+        "newContent": new_content,
+    });
+    file_edit_message("gemini", vec![edit], ts)
+}
+
+fn gemini_edit_display_path(
+    call: &serde_json::Value,
+    result_display: &serde_json::Value,
+    path: &str,
+    project_path: Option<&str>,
+) -> String {
+    if let Some(arg_path) = call
+        .get("args")
+        .and_then(|args| args.get("file_path").or_else(|| args.get("path")))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return arg_path.to_string();
+    }
+    if let Some(relative_path) = project_relative_path(path, project_path) {
+        return relative_path;
+    }
+    result_display
+        .get("fileName")
+        .or_else(|| result_display.get("file_name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn project_relative_path(path: &str, project_path: Option<&str>) -> Option<String> {
+    let project_path = project_path?.trim_end_matches('/');
+    let path = path.trim();
+    if project_path.is_empty() || path.is_empty() {
+        return None;
+    }
+    path.strip_prefix(project_path)
+        .and_then(|relative| relative.strip_prefix('/'))
+        .map(String::from)
+        .filter(|relative| !relative.is_empty())
+}
+
+fn normalize_gemini_file_diff(path: &str, diff: &str) -> String {
+    if diff.starts_with("diff --git ") {
+        return diff.to_string();
+    }
+    let body = diff
+        .lines()
+        .filter(|line| {
+            !line.starts_with("Index: ")
+                && !line.starts_with("===")
+                && !line.starts_with("--- ")
+                && !line.starts_with("+++ ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let normalized = path.trim_start_matches('/');
+    format!("diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n{body}\n")
+}
+
+fn diff_line_count(diff: &str, marker: char) -> usize {
+    diff.lines()
+        .filter(|line| {
+            line.starts_with(marker)
+                && !line.starts_with("+++")
+                && !line.starts_with("---")
+        })
+        .count()
+}
+
+fn file_edit_message(
+    source: &str,
+    edits: Vec<serde_json::Value>,
+    ts: Option<i64>,
+) -> Option<SessionMessage> {
+    if edits.is_empty() {
+        return None;
+    }
+    let additions: i64 = edits
+        .iter()
+        .filter_map(|edit| edit.get("additions").and_then(|value| value.as_i64()))
+        .sum();
+    let deletions: i64 = edits
+        .iter()
+        .filter_map(|edit| edit.get("deletions").and_then(|value| value.as_i64()))
+        .sum();
+    let text = serde_json::json!({
+        "source": source,
+        "files": edits.len(),
+        "additions": additions,
+        "deletions": deletions,
+        "edits": edits,
+    })
+    .to_string();
+    Some(SessionMessage {
+        role: "file_edit".to_string(),
+        text,
+        timestamp: ts,
+        tool_call_id: None,
+    })
+}
+
 fn read_chat_messages_with_locations(
     path: &Path,
     session_id: &str,
@@ -838,6 +979,11 @@ fn read_chat_messages_with_locations(
 
     let file_path = path.to_string_lossy().to_string();
     let location = crate::agents::sources::types::SourceLocation::file(file_path);
+    let project_path = resolve_chat_project_path(
+        path,
+        paths().ok().and_then(|(tmp_dir, _)| tmp_dir.parent().map(Path::to_path_buf)).as_deref(),
+        &load_default_project_mappings().unwrap_or_default(),
+    );
     let mut out = Vec::new();
     let raw_messages = value
         .get("messages")
@@ -972,6 +1118,11 @@ fn read_chat_messages_with_locations(
                         },
                         location.clone(),
                     ));
+                }
+                if let Some(edit_message) =
+                    gemini_file_edit_message(call, ts, project_path.as_deref())
+                {
+                    out.push((edit_message, location.clone()));
                 }
             }
         }
@@ -1260,6 +1411,54 @@ mod tests {
         assert_eq!(messages[3].0.role, "tool_result");
         assert_eq!(messages[4].0.role, "assistant");
         assert_eq!(messages[4].0.text, "done");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_messages_with_locations_adds_file_edit_for_edit_result_display() {
+        let dir = unique_tmp("gemini-edit-file-summary");
+        let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            dir.join(".gemini")
+                .join("tmp")
+                .join("alias")
+                .join(".project_root"),
+            "/tmp/jsonl-project",
+        )
+        .unwrap();
+        let path = chats.join("session-2026-05-24T12-00-edit.jsonl");
+        fs::write(
+            &path,
+            r#"{"sessionId":"edit-jsonl","startTime":"2026-05-24T12:00:00Z","lastUpdated":"2026-05-24T12:00:00Z","kind":"main"}
+{"id":"u1","timestamp":"2026-05-24T12:00:01Z","type":"user","content":[{"text":"edit"}]}
+{"id":"a1","timestamp":"2026-05-24T12:00:03Z","type":"gemini","content":"done","toolCalls":[{"id":"tool-1","name":"replace","displayName":"Edit","args":{"file_path":"src/main.rs","old_string":"old","new_string":"new"},"resultDisplay":{"fileDiff":"Index: main.rs\n===================================================================\n--- main.rs\tCurrent\n+++ main.rs\tProposed\n@@ -1 +1 @@\n-old\n+new\n","fileName":"main.rs","filePath":"/tmp/jsonl-project/src/main.rs","originalContent":"old\n","newContent":"new\n"}}]}
+"#,
+        )
+        .unwrap();
+
+        let messages = read_messages_with_locations(&path, "edit-jsonl").unwrap();
+        let file_edit = messages
+            .iter()
+            .map(|(message, _)| message)
+            .find(|message| message.role == "file_edit")
+            .expect("expected Gemini edit result to produce file_edit message");
+        let summary: serde_json::Value = serde_json::from_str(&file_edit.text).unwrap();
+        assert_eq!(summary.get("source").and_then(|v| v.as_str()), Some("gemini"));
+        assert_eq!(summary.get("files").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(summary.get("additions").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(summary.get("deletions").and_then(|v| v.as_u64()), Some(1));
+        let edit = &summary["edits"][0];
+        assert_eq!(
+            edit.get("displayPath").and_then(|v| v.as_str()),
+            Some("src/main.rs")
+        );
+        assert!(edit
+            .get("patch")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("diff --git"));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -69,6 +69,31 @@ body {
   contain-intrinsic-size: auto 220px;
 }
 
+.message-render-contain-no-cv {
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
+}
+
+.tool-pair-clamp-1,
+.tool-pair-clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.tool-pair-clamp-1 {
+  -webkit-line-clamp: 1;
+}
+
+.tool-pair-clamp-3 {
+  -webkit-line-clamp: 3;
+}
+
+.message-body-clamp-20 {
+  max-height: 30em;
+  overflow: hidden;
+}
+
 .session-chat-scroll-viewport {
   overflow-anchor: none;
 }

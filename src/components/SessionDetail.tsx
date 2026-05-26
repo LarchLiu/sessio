@@ -8,10 +8,11 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, ChevronDown, FileDiff, FileText, Plus, Square } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, Wrench } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -631,6 +632,7 @@ function MessageStream({
     const vp = viewportRef.current;
     if (!vp) return;
     const handleUserScrollIntent = () => {
+      keepInitialBottomLockRef.current = false;
       programmaticScrollUntilRef.current = 0;
     };
     vp.addEventListener("wheel", handleUserScrollIntent, { passive: true });
@@ -742,7 +744,10 @@ function MessageStream({
       });
       const isProgrammaticScroll =
         performance.now() < programmaticScrollUntilRef.current;
-      if (!isProgrammaticScroll) followLiveStreamRef.current = atBottom;
+      if (!isProgrammaticScroll) {
+        if (!atBottom) keepInitialBottomLockRef.current = false;
+        followLiveStreamRef.current = atBottom;
+      }
     },
     [available, filePath, skipHistoryLoad, visibleDisplayItems, sourceKey],
   );
@@ -991,7 +996,9 @@ function MessageStream({
                   bubbleRefs.current[i] = el;
                 }}
                 className={
-                  "message-render-contain " +
+                  (item.kind === "tool"
+                    ? "message-render-contain-no-cv "
+                    : "message-render-contain ") +
                   (renderItemSide(item) === "user" ? "flex justify-end" : "")
                 }
               >
@@ -1768,6 +1775,27 @@ function findScroller(el: HTMLElement | null): HTMLElement | null {
   return null;
 }
 
+function scrollBlockStartIntoView(el: HTMLElement | null) {
+  if (!el) return;
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      const scroller = findScroller(el);
+      const rect = el.getBoundingClientRect();
+      if (!scroller) {
+        if (rect.top < 12) {
+          el.scrollIntoView({ block: "start", behavior: "auto" });
+        }
+        return;
+      }
+      const scrollerRect = scroller.getBoundingClientRect();
+      const delta = rect.top - scrollerRect.top - 12;
+      if (delta < 0) {
+        scroller.scrollTop += delta;
+      }
+    });
+  });
+}
+
 function AcpLiveItem({
   item,
   sessioRuntimeSessionId,
@@ -1903,52 +1931,129 @@ function AcpContentBlockGroup({
     return null;
   }
   const isUser = block.kind === "user";
+  const isThought = block.kind === "thought";
+  const [thoughtExpanded, setThoughtExpanded] = useState(false);
+  const [messageExpanded, setMessageExpanded] = useState(false);
+  const [messageOverflowing, setMessageOverflowing] = useState(false);
+  const messageGroupRef = useRef<HTMLDivElement>(null);
+  const messageBodyRef = useRef<HTMLDivElement>(null);
   const label =
-    block.kind === "thought" ? "Thinking" : block.kind === "assistant" ? "assistant" : "user";
+    isThought ? "Thinking" : block.kind === "assistant" ? "assistant" : "user";
   const userAttachmentBlocks = isUser ? block.blocks.filter(isUserAttachmentContentBlock) : [];
   const bodyBlocks = isUser
     ? block.blocks.filter((item) => !isUserAttachmentContentBlock(item))
     : block.blocks;
+  const messageExpandButtonClass =
+    "mt-2 flex items-center gap-1 border-t border-ink/[0.07] py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04] " +
+    (isUser ? "-mx-4 w-[calc(100%+2rem)] px-4" : "w-full px-3");
+  useLayoutEffect(() => {
+    if (isThought) return;
+    const node = messageBodyRef.current;
+    if (!node) return;
+    const update = () => {
+      const isOverflowing = node.scrollHeight > node.clientHeight + 1;
+      setMessageOverflowing((previous) =>
+        messageExpanded ? previous || isOverflowing : isOverflowing,
+      );
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [bodyBlocks, isThought, messageExpanded]);
   return (
     <div
+      ref={messageGroupRef}
       className={
         "text-body leading-relaxed break-words " +
         (isUser
-          ? "w-fit max-w-[75%] rounded-lg border border-ink/[0.04] bg-ink/[0.06] px-4 py-3"
-          : block.kind === "thought"
+          ? "w-fit max-w-[75%] rounded-lg border border-ink/[0.04] bg-ink/[0.06] px-4 pt-3 " +
+            (messageOverflowing ? "pb-0" : "pb-3")
+          : isThought
             ? "py-1.5 text-ink/55 text-body-sm"
-            : "px-0 py-1 text-ink/85")
+            : "px-0 pt-1 text-ink/85 " + (messageOverflowing ? "pb-0" : "pb-1"))
       }
     >
-      <div className="mb-2 flex items-center gap-2 leading-none">
-        {block.kind === "thought" && (
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink/35" />
+      {isThought ? (
+        <button
+          type="button"
+          className="mb-2 flex w-full items-center gap-2 text-left leading-none text-ink/55"
+          onClick={() => setThoughtExpanded((value) => !value)}
+          aria-expanded={thoughtExpanded}
+        >
+          <Brain className="h-3.5 w-3.5 shrink-0" />
+          <span className="text-caption font-medium uppercase text-ink/40">
+            {label}
+          </span>
+          <span className="text-ink/35">
+            {thoughtExpanded ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+          </span>
+          <span className="text-caption text-ink/30">
+            {new Date(timestamp).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </span>
+        </button>
+      ) : (
+        <div className="mb-2 flex items-center gap-2 leading-none">
+          <span className="text-caption font-medium uppercase text-ink/40">
+            {label}
+          </span>
+          <span className="text-caption text-ink/30">
+            {new Date(timestamp).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </span>
+        </div>
+      )}
+      <div className={isThought ? "ml-3.5" : ""}>
+        {isThought && !thoughtExpanded ? null : (
+          <div
+            ref={isThought ? undefined : messageBodyRef}
+            className={
+              !isThought && !messageExpanded
+                ? "message-body-clamp-20"
+                : undefined
+            }
+          >
+            {userAttachmentBlocks.length > 0 && (
+              <AcpUserAttachmentStrip
+                blocks={userAttachmentBlocks}
+                onPreviewImage={onPreviewImage}
+                onPreviewFile={onPreviewFile}
+                onFilePreviewError={onFilePreviewError}
+              />
+            )}
+            <AcpContentBlocks
+              blocks={bodyBlocks}
+              imageAlign={isUser ? "right" : undefined}
+              onPreviewImage={onPreviewImage}
+            />
+          </div>
         )}
-        <span className="text-caption font-medium uppercase text-ink/40">
-          {label}
-        </span>
-        <span className="text-caption text-ink/30">
-          {new Date(timestamp).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
-        </span>
       </div>
-      <div className={block.kind === "thought" ? "ml-3.5" : ""}>
-        {userAttachmentBlocks.length > 0 && (
-          <AcpUserAttachmentStrip
-            blocks={userAttachmentBlocks}
-            onPreviewImage={onPreviewImage}
-            onPreviewFile={onPreviewFile}
-            onFilePreviewError={onFilePreviewError}
-          />
-        )}
-        <AcpContentBlocks
-          blocks={bodyBlocks}
-          imageAlign={isUser ? "right" : undefined}
-          onPreviewImage={onPreviewImage}
-        />
-      </div>
+      {!isThought && messageOverflowing && (
+        <button
+          type="button"
+          className={messageExpandButtonClass}
+          onClick={() => {
+            if (messageExpanded) {
+              scrollBlockStartIntoView(messageGroupRef.current);
+            }
+            setMessageExpanded((value) => !value);
+          }}
+          aria-expanded={messageExpanded}
+        >
+          <span>{messageExpanded ? "Collapse" : "Expand"}</span>
+          <ChevronDown className={"h-3.5 w-3.5 " + (messageExpanded ? "rotate-180" : "")} />
+        </button>
+      )}
     </div>
   );
 }
@@ -2223,23 +2328,50 @@ function AcpToolCard({
   tool: AcpToolCall;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
-  const input = acpToolInputText(tool);
-  const output = tool.rawOutput !== null ? JSON.stringify(tool.rawOutput, null, 2) : "";
-  const renderedContent = tool.content.filter((content) => content.type !== "diff");
+  const displayTool = canonicalizeAcpTool(tool);
+  if (isHiddenHistoryTool(displayTool)) return null;
+  const todos = parseTodoEntries(displayTool.rawInput);
+  const planItems = parsePlanEntries(displayTool.rawInput);
+  if (planItems.length > 0 || isPlanTool(displayTool)) {
+    return (
+      <TodoToolCard
+        tool={displayTool}
+        title={{ main: "Update Plan" }}
+        iconName="TaskUpdate"
+        todos={planItems}
+        onPreviewImage={onPreviewImage}
+      />
+    );
+  }
+  if (todos.length > 0 || isTodoTool(displayTool)) {
+    return (
+      <TodoToolCard
+        tool={displayTool}
+        title={{ main: todoToolTitle() }}
+        iconName="TodoWrite"
+        todos={todos}
+        onPreviewImage={onPreviewImage}
+      />
+    );
+  }
+  const detail = acpToolDisplayDetail(displayTool);
+  const showToolPairs = !isFileToolWithoutPairs(displayTool.title);
+  const input = showToolPairs ? detail.command : "";
+  const output = showToolPairs ? acpToolOutputText(displayTool) : "";
+  const renderedContent = displayTool.content.filter((content) => content.type !== "diff");
   return (
-    <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-ink/[0.045] text-body-sm">
-      <div className="flex items-center justify-between gap-3 border-b border-ink/[0.07] px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate font-medium text-ink/80">{tool.title}</div>
-          <div className="text-caption text-ink/45">{tool.kind} · {formatToolStatus(tool.status)}</div>
-        </div>
-      </div>
-      {(input || output || renderedContent.length > 0 || tool.locations.length > 0) && (
-        <div className="space-y-2 px-3 py-2">
-          {input && <ToolPairRow label="IN" text={input} collapsed={false} onPreviewImage={onPreviewImage} />}
-          {output && <ToolPairRow label="OUT" text={output} collapsed={false} onPreviewImage={onPreviewImage} />}
+    <ToolTimelineFrame title={detail.title} iconName={displayTool.title}>
+      {(input || output || renderedContent.length > 0 || displayTool.locations.length > 0) && (
+        <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-bg-panel/65 text-body-sm">
+          {(input || output) && (
+            <ToolPairPanel
+              input={input}
+              output={output}
+              onPreviewImage={onPreviewImage}
+            />
+          )}
           {renderedContent.length > 0 && (
-            <div className="space-y-2">
+            <div className="space-y-2 px-3 py-2">
               {renderedContent.map((content, index) => (
                 <AcpToolContentView
                   key={index}
@@ -2249,19 +2381,193 @@ function AcpToolCard({
               ))}
             </div>
           )}
-          {tool.locations.length > 0 && (
-            <PlainTextContent text={JSON.stringify(tool.locations, null, 2)} />
+          {displayTool.locations.length > 0 && (
+            <div className="px-3 py-2">
+              <PlainTextContent text={JSON.stringify(displayTool.locations, null, 2)} />
+            </div>
           )}
         </div>
       )}
-    </div>
+    </ToolTimelineFrame>
   );
 }
 
 function acpToolInputText(tool: AcpToolCall): string {
-  if (typeof tool.rawInput === "string") return tool.rawInput;
-  if (tool.rawInput !== null) return JSON.stringify(tool.rawInput, null, 2);
+  if (typeof tool.rawInput === "string") {
+    return formatToolInputValue(tool.rawInput);
+  }
+  if (tool.rawInput !== null) return formatToolInputValue(tool.rawInput);
   return "";
+}
+
+function acpToolOutputText(tool: AcpToolCall): string {
+  if (typeof tool.rawOutput === "string") return tool.rawOutput;
+  if (tool.rawOutput !== null) return JSON.stringify(tool.rawOutput, null, 2);
+  return "";
+}
+
+function canonicalizeAcpTool(tool: AcpToolCall): AcpToolCall {
+  const display = canonicalToolDisplay(tool.title, tool.rawInput ?? "");
+  const hidden = shouldHideTool(tool.title, tool.rawInput ?? "");
+  if (display.main === tool.title && !display.detail && !hidden) return tool;
+  const meta = parseObjectLike(tool.meta) ?? {};
+  return {
+    ...tool,
+    title: toolDisplayName(display.main),
+    meta: {
+      ...meta,
+      titleDetail: display.detail ?? pickString(meta.titleDetail) ?? undefined,
+      hidden: hidden || meta.hidden === true,
+    },
+  };
+}
+
+function acpToolDisplayDetail(tool: AcpToolCall): { title: ToolTitleParts; command: string } {
+  const input = parseObjectLike(tool.rawInput);
+  if (!input) {
+    const metaDetail = historyToolTitleDetail(tool);
+    return {
+      title: { main: tool.title, detail: metaDetail ?? undefined },
+      command: acpToolInputText(tool),
+    };
+  }
+  const title = acpToolTitle(tool, input);
+  const command = pickToolInputDisplayText(input) ?? acpToolInputText(tool);
+  return { title, command };
+}
+
+type ToolTitleParts = {
+  main: string;
+  detail?: string;
+};
+
+function acpToolTitle(tool: AcpToolCall, input: Record<string, unknown>): ToolTitleParts {
+  const metaDetail = historyToolTitleDetail(tool);
+  if (tool.title === "Read") {
+    return metaDetail ? { main: tool.title, detail: metaDetail } : fileToolTitle(tool.title, input, true);
+  }
+  if (isFileMutationTool(tool.title)) {
+    return metaDetail ? { main: tool.title, detail: metaDetail } : fileToolTitle(tool.title, input, false);
+  }
+  const description = pickString(input.description);
+  return { main: tool.title, detail: metaDetail ?? description ?? undefined };
+}
+
+function fileToolTitle(title: string, input: Record<string, unknown>, includeRange: boolean): ToolTitleParts {
+  const path = toolInputFilePath(input) ?? "";
+  const basename = path ? basenameFromUri(path) ?? path : "";
+  const range = includeRange ? readLineRange(input) : null;
+  return { main: title, detail: [basename, range].filter(Boolean).join(" ") };
+}
+
+function isFileMutationTool(title: string): boolean {
+  return title === "Write" || title === "Edit" || title === "MultiEdit";
+}
+
+function isFileToolWithoutPairs(title: string): boolean {
+  return title === "Read" || isFileMutationTool(title);
+}
+
+function historyToolTitleDetail(tool: AcpToolCall): string | null {
+  const meta = parseObjectLike(tool.meta);
+  return meta ? pickString(meta.titleDetail) : null;
+}
+
+function isHiddenHistoryTool(tool: AcpToolCall): boolean {
+  const meta = parseObjectLike(tool.meta);
+  return meta?.hidden === true;
+}
+
+function readLineRange(input: Record<string, unknown>): string | null {
+  const offset = pickNumber(input.offset);
+  const limit = pickNumber(input.limit);
+  const startLine = pickNumber(input.start_line) ?? pickNumber(input.startLine);
+  const endLine = pickNumber(input.end_line) ?? pickNumber(input.endLine);
+  if (startLine !== null) {
+    if (endLine !== null && endLine > startLine) return `(lines ${startLine}-${endLine})`;
+    return `(line ${startLine})`;
+  }
+  if (offset === null) return null;
+  if (limit === null || limit <= 1) return `(line ${offset})`;
+  return `(lines ${offset}-${offset + limit - 1})`;
+}
+
+function pickString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function pickNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseObjectLike(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function pickToolInputDisplayText(record: Record<string, unknown>): string | null {
+  const command = pickCommandText(record);
+  if (command) return command;
+  return formatToolInputValue(record);
+}
+
+function pickCommandText(record: Record<string, unknown>): string | null {
+  const direct =
+    pickString(record.command) ??
+    pickString(record.cmd) ??
+    pickString(record.input);
+  if (direct) return formatToolInputValue(direct);
+  for (const key of ["command", "cmd"]) {
+    const value = record[key];
+    if (Array.isArray(value)) {
+      const parts = value
+        .map((item) => pickString(item))
+        .filter((item): item is string => Boolean(item));
+      if (parts.length > 0) return parts.join(" ");
+    }
+  }
+  return null;
+}
+
+function formatToolInputValue(value: unknown): string {
+  const parsed = typeof value === "string" ? parseJsonInputString(value) : value;
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return formatObjectEntries(parsed as Record<string, unknown>);
+  }
+  if (parsed !== value) return JSON.stringify(parsed, null, 2);
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function parseJsonInputString(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) return text;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+function formatObjectEntries(record: Record<string, unknown>): string {
+  return Object.entries(record)
+    .map(([key, value]) => `${key}: ${formatObjectEntryValue(value)}`)
+    .join("\n");
+}
+
+function formatObjectEntryValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || typeof value !== "object") return String(value);
+  return JSON.stringify(value, null, 2);
 }
 
 function acpTurnFileEditText(turn: LiveTurn): string | null {
@@ -2652,10 +2958,6 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
-function formatToolStatus(status: string): string {
-  return status.replace(/_/g, " ");
-}
-
 interface HistoryMessageItem {
   key: string;
   message: SessionMessage;
@@ -2894,7 +3196,7 @@ function historyToolFromMessage(
   const toolId = message.toolCallId ?? `history-tool-${index}`;
   return {
     toolId,
-    title: toolDisplayName(parsed.name),
+    title: parsed.name,
     kind: fallbackKind,
     status: toolResult || fallbackKind === "todo" ? "completed" : "unknown",
     content: [],
@@ -3019,6 +3321,204 @@ function parseToolCall(text: string): { name: string; body: string } {
   return { name: m[1], body: m[2] ?? "" };
 }
 
+function canonicalToolDisplay(name: string, body: unknown): ToolTitleParts {
+  if (name === "apply_patch") {
+    return { main: "Edit", detail: patchDisplayFile(patchInputText(body)) ?? undefined };
+  }
+  if (name === "write_stdin") {
+    return { main: humanizeToolName(name), detail: writeStdinDisplayTarget(body) ?? undefined };
+  }
+  if (name === "web_search" || name === "WebSearch") return webSearchToolDisplay(body);
+  if (isShellToolName(name)) {
+    const cmd = toolInputCommand(body);
+    if (!cmd) return { main: "Bash" };
+    return commandToolDisplay(cmd);
+  }
+  if (isReadToolName(name)) {
+    return { main: "Read", detail: fileToolDisplayDetail(body, true) ?? undefined };
+  }
+  if (isEditToolName(name)) {
+    return { main: "Edit", detail: fileToolDisplayDetail(body, false) ?? undefined };
+  }
+  if (isGrepToolName(name)) {
+    return { main: "Grep" };
+  }
+  if (name !== "exec_command" && name !== "shell_command") {
+    return { main: canonicalKnownToolName(name) };
+  }
+  const cmd = toolInputCommand(body);
+  if (!cmd) return { main: "Bash" };
+  return commandToolDisplay(cmd);
+}
+
+function isShellToolName(name: string): boolean {
+  return ["Shell", "Run Shell Command", "run_shell_command"].includes(name);
+}
+
+function isReadToolName(name: string): boolean {
+  return ["ReadFile", "read_file"].includes(name);
+}
+
+function isEditToolName(name: string): boolean {
+  return ["replace", "write_file", "WriteFile"].includes(name);
+}
+
+function isGrepToolName(name: string): boolean {
+  return ["SearchText", "grep_search"].includes(name);
+}
+
+function toolInputCommand(body: unknown): string {
+  const input = parseObjectLike(body);
+  return input
+    ? pickString(input.cmd) ?? pickString(input.command) ?? ""
+    : typeof body === "string" ? body : "";
+}
+
+function fileToolDisplayDetail(body: unknown, includeRange: boolean): string | null {
+  const input = parseObjectLike(body);
+  if (!input) return null;
+  const path = toolInputFilePath(input);
+  const basename = path ? basenameFromUri(path) ?? path : "";
+  const range = includeRange ? readLineRange(input) : null;
+  const detail = [basename, range].filter(Boolean).join(" ");
+  return detail || null;
+}
+
+function toolInputFilePath(input: Record<string, unknown>): string | null {
+  return (
+    pickString(input.file_path) ??
+    pickString(input.filePath) ??
+    pickString(input.path) ??
+    pickString(input.absolute_path) ??
+    pickString(input.absolutePath)
+  );
+}
+
+function patchInputText(value: unknown): string {
+  if (typeof value === "string") return value;
+  const input = parseObjectLike(value);
+  return input
+    ? pickString(input.input) ?? pickString(input.patch) ?? pickString(input.text) ?? ""
+    : "";
+}
+
+function shouldHideTool(name: string, body: unknown): boolean {
+  if (name !== "web_search" && name !== "WebSearch") return false;
+  const input = parseObjectLike(body);
+  const actionType = input ? pickString(input.type) : null;
+  return actionType === "open_page" && !pickString(input?.url);
+}
+
+function commandToolDisplay(command: string): ToolTitleParts {
+  const first = firstShellCommandToken(command);
+  if (["cat", "sed", "tail", "head", "nl"].includes(first)) {
+    return { main: "Read", detail: commandDisplayFile(command) ?? undefined };
+  }
+  if (first === "rg" || first === "grep") return { main: "Grep" };
+  if (first === "ls" || first === "find") return { main: "LS" };
+  return { main: "Bash" };
+}
+
+function canonicalKnownToolName(name: string): string {
+  switch (name) {
+    case "web_fetch":
+    case "webfetch":
+      return "WebFetch";
+    case "web_search":
+    case "websearch":
+      return "WebSearch";
+    case "read_file":
+    case "ReadFile":
+      return "Read";
+    case "replace":
+    case "write_file":
+    case "WriteFile":
+      return "Edit";
+    case "grep_search":
+    case "SearchText":
+      return "Grep";
+    case "tool_search":
+    case "toolsearch":
+      return "ToolSearch";
+    case "load_workspace_dependencies":
+    case "install_workspace_dependencies":
+      return "Read";
+    case "automation_update":
+      return "TaskUpdate";
+    case "request_user_input":
+      return "AskUserQuestion";
+    case "read_thread_terminal":
+      return "Bash";
+    case "update_plan":
+      return "TaskUpdate";
+    case "view_image":
+      return "View Image";
+    default:
+      return humanizeToolName(name);
+  }
+}
+
+function humanizeToolName(name: string): string {
+  const text = name.replace(/_/g, " ").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : name;
+}
+
+function webSearchToolDisplay(body: unknown): ToolTitleParts {
+  const input = parseObjectLike(body);
+  const actionType = input ? pickString(input.type) : null;
+  if (actionType === "open_page") {
+    return { main: "WebFetch", detail: pickString(input?.url) ?? undefined };
+  }
+  return { main: "WebSearch" };
+}
+
+function writeStdinDisplayTarget(body: unknown): string | null {
+  const input = parseObjectLike(body);
+  const sessionId = input?.session_id;
+  if (typeof sessionId === "number" || typeof sessionId === "string") {
+    return `session ${sessionId}`;
+  }
+  return null;
+}
+
+function commandDisplayFile(command: string): string | null {
+  const tokens = shellTokens(command);
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    const token = stripShellTokenQuotes(tokens[i]);
+    if (!token || token.startsWith("-") || /^[0-9,]+p$/.test(token)) continue;
+    if (["cat", "sed", "tail", "head", "nl", "|"].includes(token)) continue;
+    return basenameFromUri(token) ?? token;
+  }
+  return null;
+}
+
+function patchDisplayFile(patch: string): string | null {
+  const match = patch.match(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/m);
+  const path = match?.[1]?.trim();
+  return path ? basenameFromUri(path) ?? path : null;
+}
+
+function shellTokens(command: string): string[] {
+  return command
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function stripShellTokenQuotes(token: string): string {
+  return token.replace(/^['"]|['"]$/g, "");
+}
+
+function firstShellCommandToken(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return "";
+  const firstSegment = trimmed.split(/[|;&]/, 1)[0]?.trim() ?? trimmed;
+  const tokens = firstSegment.split(/\s+/).filter(Boolean);
+  const commandToken =
+    tokens.find((token) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token) && token !== "sudo") ?? "";
+  return commandToken.split(/[/\\]/).pop() ?? commandToken;
+}
+
 function toolDisplayName(name: string): string {
   if (name === "web_search") return "Searching web";
   return name;
@@ -3066,6 +3566,7 @@ function FileEditContent({ text }: { text: string }) {
     expandedState.text === text ? expandedState.expanded : edits.length <= 3;
   const [openDetails, setOpenDetails] = useState<Set<string>>(() => new Set());
   const pendingScrollKeyRef = useRef<string | null>(null);
+  const fileEditBlockRef = useRef<HTMLDivElement>(null);
   const detailRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const visibleEdits = expanded ? edits : edits.slice(0, 3);
   const hiddenCount = Math.max(0, edits.length - visibleEdits.length);
@@ -3117,7 +3618,7 @@ function FileEditContent({ text }: { text: string }) {
   }, [openDetails]);
 
   return (
-    <div className="overflow-hidden rounded-md bg-ink/[0.035]">
+    <div ref={fileEditBlockRef} className="overflow-hidden rounded-md bg-ink/[0.035]">
       <div className="flex items-center justify-between gap-3 px-2.5 py-2">
         <div className="flex min-w-0 items-center gap-2.5">
           <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-bg-panel text-ink/70">
@@ -3227,7 +3728,10 @@ function FileEditContent({ text }: { text: string }) {
               type="button"
               className="flex w-full items-center gap-1 px-2.5 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
               data-no-toggle
-              onClick={() => setExpanded(false)}
+              onClick={() => {
+                scrollBlockStartIntoView(fileEditBlockRef.current);
+                setExpanded(false);
+              }}
             >
               <span>Collapse files</span>
               <ChevronDown className="h-3.5 w-3.5 rotate-180" />
@@ -3445,45 +3949,330 @@ function parsePermissionMetadata(metadata: string | null):
 function ToolPairRow({
   label,
   text,
-  collapsed,
+  expanded,
+  maxLines = 3,
   onPreviewImage,
 }: {
   label: string;
   text: string;
-  collapsed: boolean;
+  expanded: boolean;
+  maxLines?: number;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const media = splitMarkdownImages(text);
+  const shouldClamp = shouldClampToolPairText(text, maxLines);
   return (
-    <div className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2 px-3 py-2">
-      <div className="font-mono text-[10px] leading-relaxed text-ink/35">
-        {label}
-      </div>
-      <div className="min-w-0">
-        {media.images.length > 0 && (
-          <div className="mb-1.5 flex flex-wrap gap-2">
-            {media.images.map((image, i) => (
-              <MarkdownImageButton
-                key={`${image.src}-${i}`}
-                image={image}
-                onPreviewImage={onPreviewImage}
-              />
-            ))}
-          </div>
-        )}
-        {media.text.trim() && (
-          <pre
-            className={
-              "min-w-0 overflow-x-auto whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75 " +
-              (collapsed ? "line-clamp-3" : "")
-            }
-          >
-            <code>{media.text}</code>
-          </pre>
-        )}
+    <div className="border-b border-ink/[0.07] last:border-b-0">
+      <div className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2 px-3 py-2">
+        <div className="font-mono text-[10px] leading-relaxed text-ink/35">
+          {label}
+        </div>
+        <div className="min-w-0">
+          {media.images.length > 0 && (
+            <div className="mb-1.5 flex flex-wrap gap-2">
+              {media.images.map((image, i) => (
+                <MarkdownImageButton
+                  key={`${image.src}-${i}`}
+                  image={image}
+                  onPreviewImage={onPreviewImage}
+                />
+              ))}
+            </div>
+          )}
+          {media.text.trim() && (
+            <pre
+              className={
+                "min-w-0 whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75 " +
+                (shouldClamp && !expanded ? "" : "overflow-x-auto ") +
+                (shouldClamp && !expanded ? `tool-pair-clamp-${maxLines}` : "")
+              }
+            >
+              <code>{media.text}</code>
+            </pre>
+          )}
+        </div>
       </div>
     </div>
   );
+}
+
+function ToolPairPanel({
+  input,
+  output,
+  onPreviewImage,
+}: {
+  input: string;
+  output: string;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const stateKey = `${input}\u0000${output}`;
+  const [expandedState, setExpandedState] = useState(() => ({
+    key: stateKey,
+    expanded: false,
+  }));
+  const expanded =
+    expandedState.key === stateKey ? expandedState.expanded : false;
+  const canExpand =
+    shouldClampToolPairText(input, 3) || shouldClampToolPairText(output, 3);
+  return (
+    <div ref={panelRef}>
+      {input && (
+        <ToolPairRow
+          label="IN"
+          text={input}
+          expanded={expanded}
+          maxLines={3}
+          onPreviewImage={onPreviewImage}
+        />
+      )}
+      {output && (
+        <ToolPairRow
+          label="OUT"
+          text={output}
+          expanded={expanded}
+          maxLines={3}
+          onPreviewImage={onPreviewImage}
+        />
+      )}
+      {canExpand && (
+        <button
+          type="button"
+          className="flex w-full items-center gap-1 border-t border-ink/[0.07] px-3 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
+          onClick={() => {
+            if (expanded) {
+              scrollBlockStartIntoView(panelRef.current);
+            }
+            setExpandedState({ key: stateKey, expanded: !expanded });
+          }}
+        >
+          <span>{expanded ? "Collapse" : "Expand"}</span>
+          <ChevronDown className={"h-3.5 w-3.5 " + (expanded ? "rotate-180" : "")} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function shouldClampToolPairText(text: string, maxLines: number): boolean {
+  const media = splitMarkdownImages(text);
+  const lineCount = media.text.split(/\r?\n/).length;
+  return lineCount > maxLines || media.text.length > maxLines * 140;
+}
+
+type TodoEntry = {
+  content: string;
+  activeForm?: string;
+  status?: string;
+};
+
+function TodoToolCard({
+  tool,
+  title,
+  iconName,
+  todos,
+  onPreviewImage,
+}: {
+  tool: AcpToolCall;
+  title: ToolTitleParts;
+  iconName: string;
+  todos: TodoEntry[];
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  if (todos.length === 0) {
+    return (
+        <AcpToolCardFallback
+          tool={tool}
+          title={title}
+          iconName={iconName}
+          onPreviewImage={onPreviewImage}
+        />
+      );
+  }
+  return (
+    <ToolTimelineFrame title={title} iconName={iconName}>
+      <div className="space-y-1 text-body-sm">
+        {todos.map((todo, index) => (
+          <div key={`${todo.content}-${index}`} className="flex items-start gap-2 text-body-sm text-ink/80">
+            <span className="mt-0.5 flex w-4 shrink-0 justify-center text-ink/45">
+              <TodoStatusIcon status={todo.status} />
+            </span>
+            <span className={todo.status === "completed" ? "text-ink/45 line-through" : ""}>
+              {todo.content}
+            </span>
+          </div>
+        ))}
+      </div>
+    </ToolTimelineFrame>
+  );
+}
+
+function AcpToolCardFallback({
+  tool,
+  title,
+  iconName,
+  onPreviewImage,
+}: {
+  tool: AcpToolCall;
+  title: ToolTitleParts;
+  iconName: string;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const input = acpToolInputText(tool);
+  const output = acpToolOutputText(tool);
+  return (
+    <ToolTimelineFrame title={title} iconName={iconName}>
+      <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-bg-panel/65 text-body-sm">
+        <ToolPairPanel
+          input={input}
+          output={output}
+          onPreviewImage={onPreviewImage}
+        />
+      </div>
+    </ToolTimelineFrame>
+  );
+}
+
+function ToolTimelineFrame({
+  title,
+  iconName,
+  children,
+}: {
+  title: ToolTitleParts;
+  iconName: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="text-body-sm">
+      <div className="mb-2 flex items-center gap-2">
+        <span className="flex w-4 shrink-0 justify-center">
+          <ToolTitleIcon name={iconName} />
+        </span>
+        <span className="min-w-0 truncate text-ink/70">
+          <span className="font-medium text-ink/75">{title.main}</span>
+          {title.detail && (
+            <span className="ml-1 font-normal text-ink/50">{title.detail}</span>
+          )}
+        </span>
+      </div>
+      <div className="ml-6">
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ToolTitleIcon({ name }: { name: string }) {
+  const className = "h-3.5 w-3.5";
+  switch (name) {
+    case "TodoWrite":
+      return <ListTodo className={className} aria-label="Todo" />;
+    case "Read":
+      return <BookOpen className={className} aria-label="Read" />;
+    case "Write":
+    case "Edit":
+    case "MultiEdit":
+      return <SquarePen className={className} aria-label="Edit" />;
+    case "Bash":
+      return <SquareTerminal className={className} aria-label="Terminal" />;
+    case "Grep":
+      return <Search className={className} aria-label="Search" />;
+    case "Glob":
+      return <FileSearch className={className} aria-label="Find files" />;
+    case "LS":
+    case "List":
+      return <FolderOpen className={className} aria-label="List files" />;
+    case "WebFetch":
+    case "WebSearch":
+      return <Globe className={className} aria-label="Web" />;
+    case "NotebookEdit":
+      return <Code2 className={className} aria-label="Notebook edit" />;
+    case "ToolSearch":
+      return <SearchCheck className={className} aria-label="Tool search" />;
+    case "AskUserQuestion":
+      return <MessageCircleQuestionMark className={className} aria-label="Ask user" />;
+    case "TaskUpdate":
+      return <ListChecks className={className} aria-label="Task update" />;
+    case "View Image":
+      return <ImageIcon className={className} aria-label="View image" />;
+    case "Task":
+      return <ClipboardList className={className} aria-label="Task" />;
+    default:
+      return <Wrench className={className} aria-label={name || "Tool"} />;
+  }
+}
+
+function parseTodoEntries(value: unknown): TodoEntry[] {
+  const parsed = parseJsonLike(value);
+  const todos = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).todos
+      : null;
+  return parseTaskListEntries(todos, ["content", "activeForm"]);
+}
+
+function parsePlanEntries(value: unknown): TodoEntry[] {
+  const parsed = parseJsonLike(value);
+  const plan = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>).plan
+    : null;
+  return parseTaskListEntries(plan, ["step", "content"]);
+}
+
+function parseTaskListEntries(value: unknown, contentKeys: string[]): TodoEntry[] {
+  const todos = value;
+  if (!Array.isArray(todos)) return [];
+  return todos.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    const content = contentKeys
+      .map((key) => pickString(record[key]))
+      .find((text): text is string => Boolean(text));
+    if (!content) return [];
+    return [{
+      content,
+      activeForm: pickString(record.activeForm) ?? undefined,
+      status: pickString(record.status) ?? undefined,
+    }];
+  });
+}
+
+function TodoStatusIcon({ status }: { status?: string }) {
+  if (status === "completed") {
+    return <CheckSquare className="h-3.5 w-3.5" aria-label="Completed" />;
+  }
+  if (status === "in_progress") {
+    return <LoaderCircle className="h-3.5 w-3.5" aria-label="In progress" />;
+  }
+  return <Square className="h-3.5 w-3.5" aria-label="Pending" />;
+}
+
+function isTodoTool(tool: AcpToolCall): boolean {
+  if (parseTodoEntries(tool.rawInput).length > 0) return true;
+  const meta = tool.meta;
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    const role = (meta as Record<string, unknown>).role;
+    if (role === "todo") return true;
+  }
+  return tool.kind === "todo" || tool.title === "TodoWrite";
+}
+
+function isPlanTool(tool: AcpToolCall): boolean {
+  return tool.title === "TaskUpdate" || tool.title === "update_plan";
+}
+
+function todoToolTitle(): string {
+  return "Update Todos";
+}
+
+function parseJsonLike(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
 }
 
 function MarkdownContent({
