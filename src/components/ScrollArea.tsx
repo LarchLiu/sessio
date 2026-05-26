@@ -46,6 +46,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
   const hideTimerRef = useRef<number | undefined>(undefined);
   const dragStateRef = useRef<DragState | null>(null);
   const updateFrameRef = useRef<number | null>(null);
+  const hoverRef = useRef(false);
 
   const [visible, setVisible] = useState(false);
   const [hasVerticalOverflow, setHasVerticalOverflow] = useState(false);
@@ -90,14 +91,18 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
     }
   }, [enableHorizontal, enableVertical]);
 
-  const flashVisible = useCallback(() => {
+  const showVisible = useCallback(() => {
     setVisible(true);
     if (hideTimerRef.current !== undefined)
       window.clearTimeout(hideTimerRef.current);
-    hideTimerRef.current = window.setTimeout(() => {
-      if (!dragStateRef.current) setVisible(false);
-    }, HIDE_DELAY);
   }, []);
+
+  const flashVisible = useCallback(() => {
+    showVisible();
+    hideTimerRef.current = window.setTimeout(() => {
+      if (!dragStateRef.current && !hoverRef.current) setVisible(false);
+    }, HIDE_DELAY);
+  }, [showVisible]);
 
   const handleScroll = useCallback(() => {
     updateThumbs();
@@ -147,7 +152,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         startPointer: axis === "y" ? e.clientY : e.clientX,
         startScroll: axis === "y" ? vp.scrollTop : vp.scrollLeft,
       };
-      setVisible(true);
+      showVisible();
     };
 
   const onThumbPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -182,6 +187,16 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
     flashVisible();
   };
 
+  const onRootPointerEnter = () => {
+    hoverRef.current = true;
+    showVisible();
+  };
+
+  const onRootPointerLeave = () => {
+    hoverRef.current = false;
+    if (!dragStateRef.current) flashVisible();
+  };
+
   useImperativeHandle(ref, () => viewportRef.current as HTMLDivElement, []);
 
   const idleClass = persistScrollbars
@@ -196,7 +211,11 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         : "overflow-y-scroll overflow-x-hidden";
 
   return (
-    <div className={"relative flex flex-col " + (className ?? "")}>
+    <div
+      className={"relative flex flex-col " + (className ?? "")}
+      onPointerEnter={onRootPointerEnter}
+      onPointerLeave={onRootPointerLeave}
+    >
       <div
         ref={viewportRef}
         onScroll={handleScroll}
@@ -213,7 +232,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         <div
           aria-hidden
           className={
-            "absolute top-0 right-0.5 w-1.5 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            "absolute top-0 right-0.5 z-30 w-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
             visibilityClass
           }
           ref={verticalThumbRef}
@@ -228,7 +247,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         <div
           aria-hidden
           className={
-            "absolute bottom-0.5 left-0 h-1.5 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
+            "absolute bottom-0.5 left-0 z-30 h-2 rounded-full bg-ink/30 hover:bg-ink/50 cursor-pointer transition-opacity " +
             visibilityClass
           }
           ref={horizontalThumbRef}
