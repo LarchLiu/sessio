@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, type LucideIcon } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -23,6 +23,7 @@ import {
   ProjectMemorySearchResult,
   RuntimeAgentMetadata,
   SessionInfo,
+  type AgentRuntimeEvent,
   rebuildSessionIndex,
   getSessionAncestors,
   listSessions,
@@ -119,6 +120,63 @@ function sessionIdentityKey(s: SessionInfo): string {
 
 function sessionIdentity(agent: Agent, sessionId: string): string {
   return `${agent}:${sessionId}`;
+}
+
+function sessionUnreadKeys(
+  session: SessionInfo,
+  runtimeSessionAliases: Record<string, string>,
+): string[] {
+  const keys = new Set<string>([session.id, sessionIdentityKey(session)]);
+  const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)];
+  if (runtimeSessionId) keys.add(runtimeSessionId);
+  return Array.from(keys);
+}
+
+function runtimeEventUnreadKeys(
+  event: AgentRuntimeEvent,
+  runtimeSessionAliases: Record<string, string>,
+): string[] {
+  const keys = new Set<string>([event.sessioRuntimeSessionId]);
+  if (event.kind === "sessionStarted") {
+    keys.add(event.agentRuntimeSessionId);
+    keys.add(sessionIdentity(event.agent, event.agentRuntimeSessionId));
+    return Array.from(keys);
+  }
+  for (const [identity, runtimeSessionId] of Object.entries(runtimeSessionAliases)) {
+    if (runtimeSessionId !== event.sessioRuntimeSessionId) continue;
+    keys.add(identity);
+    const sessionId = identity.slice(identity.indexOf(":") + 1);
+    if (sessionId) keys.add(sessionId);
+    break;
+  }
+  return Array.from(keys);
+}
+
+function intersectsSet(keys: Iterable<string>, lookup: Set<string>): boolean {
+  for (const key of keys) {
+    if (lookup.has(key)) return true;
+  }
+  return false;
+}
+
+function addUnreadKeys(prev: Set<string>, keys: Iterable<string>): Set<string> {
+  let next = prev;
+  for (const key of keys) {
+    if (next.has(key)) continue;
+    if (next === prev) next = new Set(prev);
+    next.add(key);
+  }
+  return next;
+}
+
+function deleteUnreadKeys(prev: Set<string>, keys: Iterable<string>): Set<string> {
+  let next = prev;
+  for (const key of keys) {
+    if (!next.has(key)) continue;
+    if (next === prev) next = new Set(prev);
+    next.delete(key);
+  }
+  return next;
 }
 
 function ancestorSessionsFor(session: SessionInfo, sessions: SessionInfo[]): SessionInfo[] {
@@ -259,7 +317,8 @@ export default function App() {
   const { agents: runtimeAgents } = useRuntimeAgents();
   const update = useUpdateCheck(__APP_VERSION__);
   const messageCountBySourceRef = useRef<Map<string, number>>(new Map());
-  const selectedSessionIdRef = useRef<string | null>(null);
+  const selectedUnreadKeysRef = useRef<Set<string>>(new Set());
+  const runtimeSessionAliasesRef = useRef<Record<string, string>>({});
   const sessionsLoadedRef = useRef(false);
   const pendingNewChatWritesRef = useRef<Set<string>>(new Set());
   const indexing = indexPhase !== "idle";
@@ -271,9 +330,13 @@ export default function App() {
   );
 
   useEffect(() => {
+    runtimeSessionAliasesRef.current = runtimeSessionAliases;
+  }, [runtimeSessionAliases]);
+
+  useEffect(() => {
     const previous = messageCountBySourceRef.current;
     const next = new Map<string, number>();
-    const changedSessionIds = new Set<string>();
+    const changedSessions = new Map<string, SessionInfo>();
     for (const session of sessions) {
       const mainKey = messageCountKey(session.agent, session.filePath, session.id);
       next.set(mainKey, session.messageCount);
@@ -283,7 +346,7 @@ export default function App() {
         previousMainCount !== undefined &&
         session.messageCount > previousMainCount
       ) {
-        changedSessionIds.add(session.id);
+        changedSessions.set(sessionIdentityKey(session), session);
       }
       for (const subagent of session.subagents) {
         const subKey = messageCountKey(session.agent, subagent.filePath, session.id);
@@ -294,38 +357,38 @@ export default function App() {
           previousSubCount !== undefined &&
           subagent.messageCount > previousSubCount
         ) {
-          changedSessionIds.add(session.id);
+          changedSessions.set(sessionIdentityKey(session), session);
         }
       }
     }
     messageCountBySourceRef.current = next;
     sessionsLoadedRef.current = true;
-    if (changedSessionIds.size > 0) {
+    if (changedSessions.size > 0) {
+      const selectedKeys = new Set(
+        selected ? sessionUnreadKeys(selected, runtimeSessionAliases) : [],
+      );
       setUnreadSessionIds((prev) => {
-        let changed = false;
-        const unread = new Set(prev);
-        for (const id of changedSessionIds) {
-          if (id === selectedSessionIdRef.current) continue;
-          if (!unread.has(id)) {
-            unread.add(id);
-            changed = true;
-          }
+        let next = prev;
+        for (const session of changedSessions.values()) {
+          const keys = sessionUnreadKeys(session, runtimeSessionAliases);
+          if (intersectsSet(keys, selectedKeys)) continue;
+          next = addUnreadKeys(next, keys);
         }
-        return changed ? unread : prev;
+        return next;
       });
     }
-  }, [sessions]);
+  }, [runtimeSessionAliases, selected, sessions]);
 
   useEffect(() => {
-    selectedSessionIdRef.current = selected?.id ?? null;
+    const selectedKeys = selected
+      ? sessionUnreadKeys(selected, runtimeSessionAliases)
+      : [];
+    selectedUnreadKeysRef.current = new Set(selectedKeys);
     if (!selected) return;
     setUnreadSessionIds((prev) => {
-      if (!prev.has(selected.id)) return prev;
-      const next = new Set(prev);
-      next.delete(selected.id);
-      return next;
+      return deleteUnreadKeys(prev, selectedKeys);
     });
-  }, [selected?.id]);
+  }, [runtimeSessionAliases, selected]);
 
   // Don't let webview restore focus on the last interactive control when
   // the window is shown again — leaves a stale focus ring (and tooltip).
@@ -399,15 +462,16 @@ export default function App() {
       if (cancelled) return;
       const payload = normalizeAgentRuntimeEvent(event.payload);
       console.info("[sessio-runtime:frontend:event]", payload);
+      const unreadKeys = runtimeEventUnreadKeys(
+        payload,
+        runtimeSessionAliasesRef.current,
+      );
       if (
-        payload.sessioRuntimeSessionId !== selectedSessionIdRef.current &&
+        !intersectsSet(unreadKeys, selectedUnreadKeysRef.current) &&
         payload.kind !== "sessionEnded"
       ) {
         setUnreadSessionIds((prev) => {
-          if (prev.has(payload.sessioRuntimeSessionId)) return prev;
-          const next = new Set(prev);
-          next.add(payload.sessioRuntimeSessionId);
-          return next;
+          return addUnreadKeys(prev, unreadKeys);
         });
       }
       dispatchLiveRuntimeEvent({ type: "runtime-event", event: payload });
@@ -630,8 +694,10 @@ export default function App() {
         key,
         ...v,
         sessions: v.sessions.sort((a, b) => {
-          const aLive = liveSessionUpdatedAt(liveRuntimeState.sessions[a.id]) ?? 0;
-          const bLive = liveSessionUpdatedAt(liveRuntimeState.sessions[b.id]) ?? 0;
+          const aRuntimeSessionId = runtimeSessionAliases[sessionIdentityKey(a)] ?? a.id;
+          const bRuntimeSessionId = runtimeSessionAliases[sessionIdentityKey(b)] ?? b.id;
+          const aLive = liveSessionUpdatedAt(liveRuntimeState.sessions[aRuntimeSessionId]) ?? 0;
+          const bLive = liveSessionUpdatedAt(liveRuntimeState.sessions[bRuntimeSessionId]) ?? 0;
           return (
             Math.max(b.updatedAt ?? b.startedAt ?? 0, bLive) -
             Math.max(a.updatedAt ?? a.startedAt ?? 0, aLive)
@@ -639,7 +705,7 @@ export default function App() {
         }),
       }))
       .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label));
-  }, [availableSessions, liveRuntimeState.sessions, t]);
+  }, [availableSessions, liveRuntimeState.sessions, runtimeSessionAliases, t]);
 
   useEffect(() => {
     setExpandedProjects((prev) => {
@@ -1806,7 +1872,8 @@ function ProjectSidebarGroup({
           >
             {visibleSessions.map((session) => {
               const key = sessionKey(session);
-              const runtimeSessionId = runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id;
+              const unreadKeys = sessionUnreadKeys(session, runtimeSessionAliases);
+              const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)] ?? session.id;
               const liveActivity = liveSessionActivity(liveState.sessions[runtimeSessionId]);
               return (
                 <SidebarSessionItem
@@ -1814,7 +1881,7 @@ function ProjectSidebarGroup({
                   item={session}
                   active={selectedKey === key || selectedIdentityKey === sessionIdentityKey(session)}
                   liveActivity={liveActivity}
-                  unread={unreadSessionIds.has(session.id)}
+                  unread={intersectsSet(unreadKeys, unreadSessionIds)}
                   onSelect={() => onSelectSession(session)}
                   onContextMenu={(e) => {
                     e.preventDefault();
@@ -1901,7 +1968,7 @@ function SidebarSessionStatus({
   if (activity === "permission") {
     return (
       <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-status-warn">
-        <KeyRound className="h-3 w-3" />
+        <Key className="h-3 w-3" />
       </span>
     );
   }
@@ -1921,7 +1988,7 @@ function SidebarSessionStatus({
   }
   if (!unread) return null;
   return (
-    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-accent-purple">
+    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
       <MailPlus className="h-3 w-3" />
     </span>
   );

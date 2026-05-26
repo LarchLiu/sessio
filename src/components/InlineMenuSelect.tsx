@@ -10,6 +10,13 @@ import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 import ScrollArea from "./ScrollArea";
 
+const MENU_GAP = 6;
+const MENU_MARGIN = 8;
+const MENU_MAX_HEIGHT = 260;
+
+type MenuPlacement = "auto" | "bottom" | "top" | "left" | "right";
+type MenuPosition = { top: number; left: number; width: number };
+
 export interface InlineMenuSelectOption {
   value: string;
   label: string;
@@ -22,6 +29,7 @@ export interface InlineMenuSelectProps {
   options: InlineMenuSelectOption[];
   onChange: (value: string) => void;
   menuAlign?: "trigger" | "parent";
+  menuPlacement?: MenuPlacement;
   placeholder?: string;
   ariaLabel?: string;
   className?: string;
@@ -35,6 +43,7 @@ export default function InlineMenuSelect({
   options,
   onChange,
   menuAlign = "trigger",
+  menuPlacement = "auto",
   placeholder,
   ariaLabel,
   className = "",
@@ -43,11 +52,22 @@ export default function InlineMenuSelect({
   emptyContent,
 }: InlineMenuSelectProps) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [pos, setPos] = useState<MenuPosition | null>(null);
   const anchorRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const selectedItemRef = useRef<HTMLButtonElement>(null);
   const selected = options.find((option) => option.value === value);
+
+  const applyPosition = useCallback((next: MenuPosition) => {
+    setPos((current) =>
+      current &&
+      current.top === next.top &&
+      current.left === next.left &&
+      current.width === next.width
+        ? current
+        : next,
+    );
+  }, []);
 
   const updatePosition = useCallback(() => {
     if (!open) return;
@@ -60,24 +80,57 @@ export default function InlineMenuSelect({
         : rect;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    const viewportMaxWidth = Math.max(120, vw - MENU_MARGIN * 2);
     const width = Math.round(
       Math.min(
         Math.max(rect.width, minMenuWidth),
-        Math.max(120, vw - alignRect.left - 8),
+        viewportMaxWidth,
       ),
     );
-    const left = Math.round(Math.max(8, Math.min(alignRect.left, vw - width - 8)));
-    const menuHeight = Math.min(260, Math.max(120, options.length * 28 + 8));
-    const roomBelow = vh - rect.bottom - 8;
-    const top = Math.round(
-      roomBelow >= menuHeight ? rect.bottom + 6 : Math.max(8, rect.top - menuHeight - 6),
+    const maxLeft = Math.max(MENU_MARGIN, vw - width - MENU_MARGIN);
+    const measuredMenuHeight = menuRef.current?.offsetHeight ?? 0;
+    const estimatedMenuHeight = options.length > 0 ? options.length * 32 + 8 : 40;
+    const menuHeight = Math.min(
+      MENU_MAX_HEIGHT,
+      Math.max(32, measuredMenuHeight || estimatedMenuHeight),
     );
-    setPos({ top, left, width });
-  }, [open, options.length, minMenuWidth, menuAlign]);
+    const maxTop = Math.max(MENU_MARGIN, vh - menuHeight - MENU_MARGIN);
+    const roomBelow = vh - rect.bottom - MENU_MARGIN;
+    const resolvedPlacement =
+      menuPlacement === "auto"
+        ? roomBelow >= menuHeight
+          ? "bottom"
+          : "top"
+        : menuPlacement;
+
+    let left = alignRect.left;
+    let top = rect.bottom + MENU_GAP;
+
+    if (resolvedPlacement === "top") {
+      top = rect.top - menuHeight - MENU_GAP;
+    } else if (resolvedPlacement === "left") {
+      left = rect.left - width - MENU_GAP;
+      top = alignRect.top;
+    } else if (resolvedPlacement === "right") {
+      left = rect.right + MENU_GAP;
+      top = alignRect.top;
+    }
+
+    applyPosition({
+      top: Math.round(Math.max(MENU_MARGIN, Math.min(top, maxTop))),
+      left: Math.round(Math.max(MENU_MARGIN, Math.min(left, maxLeft))),
+      width,
+    });
+  }, [applyPosition, open, options.length, minMenuWidth, menuAlign, menuPlacement]);
 
   useLayoutEffect(() => {
     updatePosition();
   }, [updatePosition]);
+
+  useLayoutEffect(() => {
+    if (!open || !pos) return;
+    updatePosition();
+  }, [open, pos, updatePosition]);
 
   useEffect(() => {
     if (!open) return;
@@ -150,7 +203,7 @@ export default function InlineMenuSelect({
               top: pos.top,
               left: pos.left,
               width: pos.width,
-              maxHeight: 260,
+              maxHeight: MENU_MAX_HEIGHT,
             }}
           >
             <ScrollArea

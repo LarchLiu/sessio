@@ -33,7 +33,7 @@ export default function ConfirmPopover({
         );
 
   return createPortal(
-    <div className="fixed inset-0 z-20" onClick={onCancel}>
+    <div className="fixed inset-0 z-[70]" onClick={onCancel}>
       <div
         className="fixed w-72 rounded-md border border-ink/10 bg-surface px-3 py-3 shadow-[0_12px_30px_rgba(0,0,0,0.18)]"
         style={{ left, top }}

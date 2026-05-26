@@ -390,7 +390,16 @@ export function applyRuntimeAction(
   }
 
   if (action.type === "reconcile-indexed-session") {
-    return state;
+    const session = state.sessions[action.sessioRuntimeSessionId];
+    if (!session) return state;
+    const turns = session.turns.filter((turn) => {
+      if (turn.status === "pending" || turn.status === "streaming" || turn.status === "cancelling") {
+        return true;
+      }
+      return turn.updatedAt > action.indexedThrough;
+    });
+    if (turns.length === session.turns.length) return state;
+    return updateSession(state, { ...session, turns });
   }
 
   const session = state.sessions[action.sessioRuntimeSessionId];

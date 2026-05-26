@@ -1539,6 +1539,7 @@ function ChatComposerAgentSelect({
         options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
         onChange={onChange}
         menuAlign="trigger"
+        menuPlacement="top"
         placeholder={ariaLabel}
         ariaLabel={ariaLabel}
         className="h-7 max-w-[220px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
@@ -3041,10 +3042,82 @@ function mergeHistoryAndLiveViewModels(
 ): AcpViewModel {
   if (historyViewModel.turns.length === 0) return liveViewModel;
   if (liveViewModel.turns.length === 0) return historyViewModel;
+  const liveTurns = removeLiveUserEchoes(historyViewModel.turns, liveViewModel.turns);
   return {
     ...liveViewModel,
-    turns: [...historyViewModel.turns, ...liveViewModel.turns],
+    turns: [...historyViewModel.turns, ...liveTurns],
   };
+}
+
+function removeLiveUserEchoes(historyTurns: LiveTurn[], liveTurns: LiveTurn[]): LiveTurn[] {
+  const historyUserTexts = new Set<string>();
+  const latestHistoryUpdatedAt = historyTurns.reduce(
+    (latest, turn) => Math.max(latest, turn.updatedAt),
+    0,
+  );
+  for (const turn of historyTurns) {
+    for (const block of turn.blocks) {
+      if (block.kind !== "user") continue;
+      for (const key of normalizedAcpUserBlockKeys(block)) {
+        historyUserTexts.add(key);
+      }
+    }
+  }
+  if (historyUserTexts.size === 0) return liveTurns;
+
+  return liveTurns
+    .map((turn) => {
+      let changed = false;
+      const blocks = turn.blocks.filter((block) => {
+        if (block.kind !== "user") return true;
+        if (turn.startedAt > latestHistoryUpdatedAt + 10_000) return true;
+        const keys = normalizedAcpUserBlockKeys(block);
+        if (!keys.some((key) => historyUserTexts.has(key))) return true;
+        changed = true;
+        return false;
+      });
+      return changed ? { ...turn, blocks } : turn;
+    })
+    .filter(
+      (turn) =>
+        turn.blocks.length > 0 ||
+        turn.tools.length > 0 ||
+        turn.permissions.length > 0 ||
+        turn.error,
+    );
+}
+
+function normalizedAcpUserBlockKeys(block: Extract<AcpRenderBlock, { kind: "user" }>): string[] {
+  const textParts: string[] = [];
+  const allParts = block.blocks
+    .map((part) => {
+      if (part.type === "text") {
+        const text = normalizedUserMessageText(part.text);
+        if (text) textParts.push(text);
+        return text;
+      }
+      if (part.type === "resource" || part.type === "resource_link") {
+        return `[resource:${resourceUriForCompare(part)}]`;
+      }
+      if (part.type === "image") return `[image:${part.uri ?? part.data ?? ""}]`;
+      if (part.type === "audio") return `[audio:${part.uri ?? part.data ?? ""}]`;
+      return "";
+    })
+    .filter(Boolean);
+  const keys = [
+    allParts
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim(),
+    textParts.join(" ").replace(/\s+/g, " ").trim(),
+  ].filter(Boolean);
+  return Array.from(new Set(keys));
+}
+
+function resourceUriForCompare(block: AcpContentBlock): string {
+  if (block.type === "resource_link") return block.uri ?? "";
+  if (block.type === "resource") return block.uri ?? block.name ?? "";
+  return "";
 }
 
 async function crossContextAttachment({
