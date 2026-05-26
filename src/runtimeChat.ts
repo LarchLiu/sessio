@@ -467,13 +467,17 @@ export function applyRuntimeEvent(
 
   if (event.kind === "sessionStarted") {
     const existing = next.sessions[event.sessioRuntimeSessionId];
+    const capabilities =
+      existing?.agentRuntimeSessionId === "pending" && isPlaceholderRuntimeCapabilities(event.capabilities)
+        ? existing.capabilities
+        : event.capabilities;
     next.sessions[event.sessioRuntimeSessionId] = {
       sessioRuntimeSessionId: event.sessioRuntimeSessionId,
       agent: event.agent,
       agentRuntimeSessionId: event.agentRuntimeSessionId,
       transport: event.transport,
       workspacePath: event.workspacePath,
-      capabilities: event.capabilities,
+      capabilities,
       turns: existing?.turns ?? [],
       sessionState: existing?.sessionState ?? emptyAcpSessionState(),
       protocolMessages: existing?.protocolMessages ?? [],
@@ -698,6 +702,20 @@ function mergeTurns(localTurn: LiveTurn, runtimeTurn: LiveTurn, turnId: string):
     startedAt: Math.min(localTurn.startedAt, runtimeTurn.startedAt),
     updatedAt: Math.max(localTurn.updatedAt, runtimeTurn.updatedAt),
   };
+}
+
+function isPlaceholderRuntimeCapabilities(capabilities: RuntimeCapabilitySet): boolean {
+  return capabilities.supportsCancel
+    && capabilities.supportsPermissions
+    && capabilities.supportsToolDeltas
+    && capabilities.supportsLoadSession
+    && !capabilities.supportsResume
+    && !capabilities.supportsFork
+    && !capabilities.supportsImageAttachments
+    && !capabilities.supportsAudioAttachments
+    && !capabilities.supportsEmbeddedContext
+    && !capabilities.supportsAttachments
+    && !capabilities.supportsModes;
 }
 
 function mergeTurnBlocks(localBlocks: AcpRenderBlock[], runtimeBlocks: AcpRenderBlock[]): AcpRenderBlock[] {

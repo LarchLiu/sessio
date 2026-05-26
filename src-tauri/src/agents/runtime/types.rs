@@ -52,7 +52,7 @@ impl RuntimeCapabilitySet {
             supports_permissions: true,
             supports_tool_deltas: true,
             supports_load_session: true,
-            supports_resume: true,
+            supports_resume: false,
             supports_fork: false,
             supports_image_attachments: false,
             supports_audio_attachments: false,

@@ -27,6 +27,7 @@ import {
   SessionInfo,
   SessionMessage,
   RuntimeAgentMetadata,
+  RuntimeCapabilitySet,
   RuntimeError,
   SubagentInfo,
   ensureAgentRuntimeSession,
@@ -438,8 +439,9 @@ function MessageStream({
     ? liveState.sessions[runtimeSessionId]
     : null;
   const fallbackRuntimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
+  const fallbackCapabilities = fallbackRuntimeAgent?.capabilities ?? null;
   const attachmentCapabilities =
-    liveSession?.capabilities ?? fallbackRuntimeAgent?.capabilities ?? null;
+    liveSession?.capabilities ?? fallbackCapabilities;
   const {
     attachments,
     supportsAttachments,
@@ -899,6 +901,7 @@ function MessageStream({
           sessioRuntimeSessionId: optimisticSessionId,
           agent,
           workspacePath: workspacePath ?? "",
+          capabilities: fallbackCapabilities,
         }),
       });
     }
@@ -952,7 +955,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, clearAttachments, dispatchLiveEvent, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, clearAttachments, dispatchLiveEvent, fallbackCapabilities, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -1076,6 +1079,7 @@ function pendingLiveSession(handle: {
   sessioRuntimeSessionId: string;
   agent: SessionInfo["agent"];
   workspacePath: string;
+  capabilities: RuntimeCapabilitySet | null;
 }): LiveRuntimeSession {
   return {
     sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
@@ -1083,12 +1087,12 @@ function pendingLiveSession(handle: {
     agentRuntimeSessionId: "pending",
     transport: "fake",
     workspacePath: handle.workspacePath,
-    capabilities: {
+    capabilities: handle.capabilities ?? {
       supportsCancel: true,
       supportsPermissions: true,
       supportsToolDeltas: true,
       supportsLoadSession: true,
-      supportsResume: true,
+      supportsResume: false,
       supportsFork: false,
       supportsImageAttachments: false,
       supportsAudioAttachments: false,
