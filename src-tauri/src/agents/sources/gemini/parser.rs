@@ -120,6 +120,7 @@ pub fn remove_session_from_logs(
             fs::create_dir_all(parent)?;
         }
         move_file(path, &available_removed_path(removed_path))?;
+        remove_session_from_chat_backing_logs(path, session_id, home, removed_root)?;
         return Ok(true);
     }
     if !path.is_file() {
@@ -129,6 +130,50 @@ pub fn remove_session_from_logs(
         ));
     }
 
+    remove_session_entries_from_logs(path, session_id, home, removed_root)
+}
+
+fn remove_session_from_chat_backing_logs(
+    chat_path: &Path,
+    session_id: &str,
+    home: &Path,
+    removed_root: &Path,
+) -> Result<bool> {
+    let mut removed_any = false;
+    for logs_path in backing_logs_for_chat_path(chat_path, home) {
+        if !logs_path.exists() {
+            continue;
+        }
+        removed_any |= remove_session_entries_from_logs(&logs_path, session_id, home, removed_root)?;
+    }
+    Ok(removed_any)
+}
+
+fn backing_logs_for_chat_path(chat_path: &Path, home: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |path: PathBuf| {
+        if seen.insert(path.clone()) {
+            out.push(path);
+        }
+    };
+
+    if let Some(project_dir) = chat_path.parent().and_then(|p| p.parent()) {
+        push(project_dir.join("logs.json"));
+    }
+    if let Some(alias) = project_alias_from_chat_path(chat_path) {
+        push(home.join(".gemini").join("tmp").join(alias).join("logs.json"));
+    }
+
+    out
+}
+
+fn remove_session_entries_from_logs(
+    path: &Path,
+    session_id: &str,
+    home: &Path,
+    removed_root: &Path,
+) -> Result<bool> {
     let text = fs::read(path)?;
     let entries = scan_json_array_entries(&text)?;
 
@@ -1595,6 +1640,53 @@ mod tests {
         assert!(removed.contains(r#""type":"info""#));
 
         assert!(!remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn remove_session_from_chat_jsonl_also_removes_backing_logs_entries() {
+        let home = unique_tmp("gemini-chat-remove-logs");
+        let project_dir = home.join(".gemini").join("tmp").join("project");
+        let chats = project_dir.join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let source = chats.join("session-2026-05-25T05-14-test.jsonl");
+        let logs = project_dir.join("logs.json");
+        fs::write(
+            &source,
+            r#"{"sessionId":"drop","startTime":"2026-05-25T05:14:25.987Z","lastUpdated":"2026-05-25T05:14:25.987Z","kind":"main"}
+{"id":"i1","timestamp":"2026-05-25T05:15:25.960Z","type":"user","content":"from chat"}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &logs,
+            r#"[
+  {"sessionId":"keep","type":"user","message":"stay","timestamp":"2026-05-19T00:00:00Z"},
+  {"sessionId":"drop","type":"user","message":"gone","timestamp":"2026-05-19T00:00:01Z"}
+]
+"#,
+        )
+        .unwrap();
+
+        let removed_root = home.join(".sessio").join("removed-sessions");
+        assert!(remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
+
+        assert!(!source.exists());
+        let rewritten_logs = fs::read_to_string(&logs).unwrap();
+        assert!(rewritten_logs.contains(r#""sessionId": "keep""#));
+        assert!(!rewritten_logs.contains(r#""sessionId": "drop""#));
+
+        let removed_logs = fs::read_to_string(
+            removed_root
+                .join(".gemini")
+                .join("tmp")
+                .join("project")
+                .join("logs.json"),
+        )
+        .unwrap();
+        assert!(removed_logs.contains(r#""sessionId": "drop""#));
+        assert!(!removed_logs.contains(r#""sessionId": "keep""#));
+
         let _ = fs::remove_dir_all(&home);
     }
 }
