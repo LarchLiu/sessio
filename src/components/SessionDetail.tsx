@@ -606,7 +606,6 @@ function MessageStream({
       .join("|");
   }, [liveSession]);
 
-  void liveCacheKey;
   const activeTurnId = useMemo(() => {
     if (!liveSession) return null;
     return liveSession.turns.find((turn) =>
@@ -634,6 +633,7 @@ function MessageStream({
     const handleUserScrollIntent = () => {
       keepInitialBottomLockRef.current = false;
       programmaticScrollUntilRef.current = 0;
+      followLiveStreamRef.current = isNearScrollBottom(vp);
     };
     vp.addEventListener("wheel", handleUserScrollIntent, { passive: true });
     vp.addEventListener("touchmove", handleUserScrollIntent, { passive: true });
@@ -710,6 +710,16 @@ function MessageStream({
         return;
       }
       const atBottom = isNearScrollBottom(vp);
+      const isProgrammaticScroll =
+        performance.now() < programmaticScrollUntilRef.current;
+      if (!isProgrammaticScroll) {
+        if (atBottom) {
+          followLiveStreamRef.current = true;
+        } else if (!liveActiveKey) {
+          keepInitialBottomLockRef.current = false;
+          followLiveStreamRef.current = false;
+        }
+      }
       let anchor: ScrollAnchor | null = null;
       if (!atBottom && visibleDisplayItems.length > 0) {
         const vpRect = vp.getBoundingClientRect();
@@ -742,14 +752,8 @@ function MessageStream({
         anchor,
         atBottom,
       });
-      const isProgrammaticScroll =
-        performance.now() < programmaticScrollUntilRef.current;
-      if (!isProgrammaticScroll) {
-        if (!atBottom) keepInitialBottomLockRef.current = false;
-        followLiveStreamRef.current = atBottom;
-      }
     },
-    [available, filePath, skipHistoryLoad, visibleDisplayItems, sourceKey],
+    [available, filePath, skipHistoryLoad, visibleDisplayItems, sourceKey, liveActiveKey],
   );
 
   useLayoutEffect(() => {
@@ -819,10 +823,11 @@ function MessageStream({
     visibleDisplayItems.length,
   ]);
 
-  useEffect(() => {
-    if (!liveStreamingKey || !followLiveStreamRef.current) return;
-    scrollChatToBottom();
-  }, [liveStreamingKey, scrollChatToBottom]);
+  useLayoutEffect(() => {
+    if (!liveCacheKey || !followLiveStreamRef.current) return;
+    keepInitialBottomLockRef.current = true;
+    return scrollChatToBottomUntilSettled();
+  }, [liveCacheKey, scrollChatToBottomUntilSettled]);
 
   useLayoutEffect(() => {
     const vp = viewportRef.current;
