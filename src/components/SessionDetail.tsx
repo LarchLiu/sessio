@@ -1893,7 +1893,7 @@ function AcpLiveItem({
   return (
     <AcpContentBlockGroup
       block={item.block}
-      timestamp={item.turn.updatedAt}
+      timestamp={item.block.timestamp ?? item.turn.updatedAt}
       onPreviewImage={onPreviewImage}
       onPreviewFile={onPreviewFile}
       onFilePreviewError={onFilePreviewError}
@@ -3436,11 +3436,13 @@ function appendHistoryMessageToTurn(
   index: number,
 ): void {
   const message = item.message;
+  const timestamp = message.timestamp ?? index;
   if (message.role === "user") {
     turn.blocks.push({
       kind: "user",
       blocks: historyUserContentBlocks(message.text),
       raw: { source: "history", message },
+      timestamp,
     });
     return;
   }
@@ -3449,6 +3451,7 @@ function appendHistoryMessageToTurn(
       kind: "assistant",
       blocks: [{ type: "text", text: stripImagePlaceholders(message.text) }],
       raw: { source: "history", message },
+      timestamp,
     });
     return;
   }
@@ -3457,6 +3460,7 @@ function appendHistoryMessageToTurn(
       kind: "thought",
       blocks: [{ type: "text", text: message.text }],
       raw: { source: "history", message },
+      timestamp,
     });
     return;
   }
@@ -3465,6 +3469,7 @@ function appendHistoryMessageToTurn(
       kind: "sessionUpdate",
       updateType: "runtime_status",
       data: { text: message.text, timestamp: message.timestamp },
+      timestamp,
     });
     return;
   }
@@ -3473,13 +3478,14 @@ function appendHistoryMessageToTurn(
       kind: "sessionUpdate",
       updateType: "turn_note",
       data: { text: message.text, timestamp: message.timestamp },
+      timestamp,
     });
     return;
   }
   if (message.role === "todo") {
     const tool = historyToolFromMessage(message, item.toolResult, index, "todo");
     turn.tools.push(tool);
-    turn.blocks.push({ kind: "tool", toolId: tool.toolId });
+    turn.blocks.push({ kind: "tool", toolId: tool.toolId, timestamp });
     return;
   }
   if (message.role === "file_edit") {
@@ -3487,31 +3493,33 @@ function appendHistoryMessageToTurn(
       kind: "sessionUpdate",
       updateType: "file_edit",
       data: { text: message.text, timestamp: message.timestamp },
+      timestamp,
     });
     return;
   }
   if (message.role === "permission_request") {
     const permission = historyPermissionFromMessage(message, index);
     turn.permissions.push(permission);
-    turn.blocks.push({ kind: "permission", requestId: permission.requestId });
+    turn.blocks.push({ kind: "permission", requestId: permission.requestId, timestamp });
     return;
   }
   if (isToolCallRole(message.role)) {
     const tool = historyToolFromMessage(message, item.toolResult, index, "tool");
     turn.tools.push(tool);
-    turn.blocks.push({ kind: "tool", toolId: tool.toolId });
+    turn.blocks.push({ kind: "tool", toolId: tool.toolId, timestamp });
     return;
   }
   if (isToolResultRole(message.role)) {
     const tool = historyToolFromMessage(message, undefined, index, "tool_result");
     turn.tools.push(tool);
-    turn.blocks.push({ kind: "tool", toolId: tool.toolId });
+    turn.blocks.push({ kind: "tool", toolId: tool.toolId, timestamp });
     return;
   }
   turn.blocks.push({
     kind: "assistant",
     blocks: [{ type: "text", text: message.text }],
     raw: { source: "history", message },
+    timestamp,
   });
 }
 

@@ -95,13 +95,13 @@ export interface LiveTurn {
 }
 
 export type AcpRenderBlock =
-  | { kind: "user"; blocks: AcpContentBlock[]; raw: unknown }
-  | { kind: "assistant"; blocks: AcpContentBlock[]; raw: unknown }
-  | { kind: "thought"; blocks: AcpContentBlock[]; raw: unknown }
-  | { kind: "tool"; toolId: string }
-  | { kind: "permission"; requestId: string }
-  | { kind: "sessionUpdate"; updateType: string; data: unknown }
-  | { kind: "error"; error: RuntimeError };
+  | { kind: "user"; blocks: AcpContentBlock[]; raw: unknown; timestamp?: number }
+  | { kind: "assistant"; blocks: AcpContentBlock[]; raw: unknown; timestamp?: number }
+  | { kind: "thought"; blocks: AcpContentBlock[]; raw: unknown; timestamp?: number }
+  | { kind: "tool"; toolId: string; timestamp?: number }
+  | { kind: "permission"; requestId: string; timestamp?: number }
+  | { kind: "sessionUpdate"; updateType: string; data: unknown; timestamp?: number }
+  | { kind: "error"; error: RuntimeError; timestamp?: number };
 
 export interface AcpToolCall {
   toolId: string;
@@ -414,13 +414,14 @@ export function applyRuntimeAction(
         kind: "user",
         blocks,
         raw: { optimistic: true, prompt: blocks },
+        timestamp: action.timestamp,
       });
     }
   } else {
     turn.status = "failed";
     turn.error = action.error;
     turn.updatedAt = action.timestamp;
-    turn.blocks.push({ kind: "error", error: action.error });
+    turn.blocks.push({ kind: "error", error: action.error, timestamp: action.timestamp });
   }
   return updateSession(state, { ...session, turns });
 }
@@ -528,7 +529,7 @@ export function applyRuntimeEvent(
     turn.status = "failed";
     turn.error = event.error;
     turn.updatedAt = event.timestamp;
-    turn.blocks.push({ kind: "error", error: event.error });
+    turn.blocks.push({ kind: "error", error: event.error, timestamp: event.timestamp });
     return updateSession(next, { ...session, turns });
   }
 
@@ -582,6 +583,7 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
       kind: "user",
       blocks: normalizeContentBlocks(prompt),
       raw: message.data,
+      timestamp,
     });
     return;
   }
@@ -616,29 +618,29 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
 
   switch (updateType) {
     case "user_message_chunk":
-      appendContentBlock(turn, "user", normalizeContentBlocks(asRecord(update).content), update);
+      appendContentBlock(turn, "user", normalizeContentBlocks(asRecord(update).content), update, timestamp);
       break;
     case "agent_message_chunk":
-      appendContentBlock(turn, "assistant", normalizeContentBlocks(asRecord(update).content), update);
+      appendContentBlock(turn, "assistant", normalizeContentBlocks(asRecord(update).content), update, timestamp);
       turn.status = turn.status === "pending" ? "streaming" : turn.status;
       break;
     case "agent_thought_chunk":
-      appendContentBlock(turn, "thought", normalizeContentBlocks(asRecord(update).content), update);
+      appendContentBlock(turn, "thought", normalizeContentBlocks(asRecord(update).content), update, timestamp);
       break;
     case "tool_call": {
       const tool = toolFromValue(update, timestamp);
       upsertTool(turn, tool);
-      ensureBlock(turn, { kind: "tool", toolId: tool.toolId });
+      ensureBlock(turn, { kind: "tool", toolId: tool.toolId, timestamp });
       break;
     }
     case "tool_call_update": {
       const tool = toolUpdateFromValue(update, timestamp);
       upsertTool(turn, tool);
-      ensureBlock(turn, { kind: "tool", toolId: tool.toolId });
+      ensureBlock(turn, { kind: "tool", toolId: tool.toolId, timestamp });
       break;
     }
     default:
-      turn.blocks.push({ kind: "sessionUpdate", updateType, data: update });
+      turn.blocks.push({ kind: "sessionUpdate", updateType, data: update, timestamp });
       break;
   }
 }
@@ -772,14 +774,16 @@ function appendContentBlock(
   kind: "user" | "assistant" | "thought",
   blocks: AcpContentBlock[],
   raw: unknown,
+  timestamp: number,
 ): void {
   if (blocks.length === 0) return;
   const last = turn.blocks[turn.blocks.length - 1];
   if (last?.kind === kind) {
     appendBlocksToContentBlockGroup(last, blocks);
+    last.timestamp = last.timestamp ?? timestamp;
     return;
   }
-  turn.blocks.push({ kind, blocks: mergeAdjacentTextBlocks(blocks), raw });
+  turn.blocks.push({ kind, blocks: mergeAdjacentTextBlocks(blocks), raw, timestamp });
 }
 
 function appendBlocksToContentBlockGroup(
