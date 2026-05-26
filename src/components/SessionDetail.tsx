@@ -3075,6 +3075,64 @@ function pairToolMessages(
   return items;
 }
 
+function mergeWriteStdinPollingItems(items: HistoryMessageItem[]): HistoryMessageItem[] {
+  const out: HistoryMessageItem[] = [];
+  const runningSessions = new Map<string, HistoryMessageItem>();
+
+  for (const item of items) {
+    const writeStdinSessionId = writeStdinPollingSessionId(item.message);
+    if (writeStdinSessionId) {
+      const target = runningSessions.get(writeStdinSessionId);
+      if (target && item.toolResult) {
+        target.toolResult = appendToolResultText(target.toolResult, item.toolResult);
+        continue;
+      }
+    }
+
+    out.push(item);
+    const runningSessionId = toolOutputRunningSessionId(item.toolResult?.text ?? "");
+    if (runningSessionId) {
+      runningSessions.set(runningSessionId, item);
+    }
+  }
+
+  return out;
+}
+
+function writeStdinPollingSessionId(message: SessionMessage): string | null {
+  if (!isToolCallRole(message.role)) return null;
+  const parsed = parseToolCall(message.text);
+  if (parsed.name !== "write_stdin") return null;
+  const input = parseObjectLike(parsed.body);
+  if (!input) return null;
+  const chars = input.chars;
+  if (typeof chars === "string" && chars.length > 0) return null;
+  const sessionId = input.session_id;
+  if (typeof sessionId === "number" || typeof sessionId === "string") {
+    return String(sessionId);
+  }
+  return null;
+}
+
+function toolOutputRunningSessionId(text: string): string | null {
+  const match = text.match(/Process running with session ID\s+(\S+)/);
+  return match?.[1] ?? null;
+}
+
+function appendToolResultText(
+  base: SessionMessage | undefined,
+  extra: SessionMessage,
+): SessionMessage {
+  if (!base) return extra;
+  const left = base.text.trimEnd();
+  const right = extra.text.trimStart();
+  return {
+    ...base,
+    text: left && right ? `${left}\n\n${right}` : left || right,
+    timestamp: extra.timestamp ?? base.timestamp,
+  };
+}
+
 function moveFileEditsToTurnEnd(items: HistoryMessageItem[]): HistoryMessageItem[] {
   const out: HistoryMessageItem[] = [];
   let turn: HistoryMessageItem[] = [];
@@ -3100,7 +3158,7 @@ function moveFileEditsToTurnEnd(items: HistoryMessageItem[]): HistoryMessageItem
 function historyMessagesToLiveTurns(
   entries: { m: SessionMessage; srcIdx: number }[],
 ): LiveTurn[] {
-  const items = moveFileEditsToTurnEnd(pairToolMessages(entries));
+  const items = moveFileEditsToTurnEnd(mergeWriteStdinPollingItems(pairToolMessages(entries)));
   const turns: LiveTurn[] = [];
   let current: LiveTurn | null = null;
   const ensureTurn = (timestamp: number, preferredId: string): LiveTurn => {
