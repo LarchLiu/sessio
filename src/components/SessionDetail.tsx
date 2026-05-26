@@ -548,10 +548,14 @@ function MessageStream({
   ]);
 
   const acpViewModel = useMemo<AcpViewModel>(() => {
+    const historyViewModel = cachedHistoryViewModel(sourceKey, viewMode, messages);
     if (liveSession && liveSession.turns.length > 0) {
-      return liveSessionToAcpViewModel(liveSession);
+      return mergeHistoryAndLiveViewModels(
+        historyViewModel,
+        liveSessionToAcpViewModel(liveSession),
+      );
     }
-    return cachedHistoryViewModel(sourceKey, viewMode, messages);
+    return historyViewModel;
   }, [liveSession, messages, sourceKey, viewMode]);
 
   const displayItems = useMemo(
@@ -2867,6 +2871,18 @@ function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
     }
   }
   return items;
+}
+
+function mergeHistoryAndLiveViewModels(
+  historyViewModel: AcpViewModel,
+  liveViewModel: AcpViewModel,
+): AcpViewModel {
+  if (historyViewModel.turns.length === 0) return liveViewModel;
+  if (liveViewModel.turns.length === 0) return historyViewModel;
+  return {
+    ...liveViewModel,
+    turns: [...historyViewModel.turns, ...liveViewModel.turns],
+  };
 }
 
 function cachedHistoryViewModel(
