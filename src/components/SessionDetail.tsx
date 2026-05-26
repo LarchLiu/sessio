@@ -49,6 +49,11 @@ import {
   ComposerAttachmentPreviewList,
   useComposerAttachments,
 } from "./ComposerAttachments";
+import {
+  hasMessageStreamScrollSnapshot,
+  isNearScrollBottom,
+  useMessageStreamScrollController,
+} from "./useMessageStreamScrollController";
 import { localeTag, useI18n } from "../i18n";
 import type { ViewMode } from "../App";
 import {
@@ -146,37 +151,13 @@ interface HistoryViewCacheEntry {
   viewModel: AcpViewModel;
 }
 
-interface ScrollAnchor {
-  key: string;
-  offset: number;
-}
-
-interface ScrollCacheEntry {
-  scrollTop: number;
-  anchor: ScrollAnchor | null;
-  atBottom: boolean;
-}
-
 const messageCache = new Map<string, MessageCacheEntry>();
 const historyViewCache = new Map<string, HistoryViewCacheEntry>();
 const renderItemsCache = new WeakMap<AcpViewModel, AcpRenderItem[]>();
-const scrollCache = new Map<string, ScrollCacheEntry>();
-const BOTTOM_FOLLOW_THRESHOLD_PX = 24;
-const PROGRAMMATIC_SCROLL_SETTLE_MS = 120;
-const LAYOUT_BOTTOM_STICK_MS = 360;
-const RESTORE_ANCHOR_SETTLE_MS = 1200;
-const INITIAL_BOTTOM_SCROLL_RETRY_MS = 1200;
 const INITIAL_HISTORY_RENDER_ITEMS = 120;
 
 function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
   return `${agent}:${sessionId}:${filePath}`;
-}
-
-function isNearScrollBottom(vp: HTMLDivElement): boolean {
-  return (
-    vp.scrollTop + vp.clientHeight >=
-    vp.scrollHeight - BOTTOM_FOLLOW_THRESHOLD_PX
-  );
 }
 
 function SessionDetail({
@@ -427,26 +408,9 @@ function MessageStream({
   const [sending, setSending] = useState(false);
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const viewportRef = useRef<HTMLDivElement>(null);
-  const chatContentRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const followLiveStreamRef = useRef(false);
   const liveStreamingRef = useRef(false);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
-  const programmaticScrollUntilRef = useRef(0);
-  const pendingInitialPositionRef = useRef<"bottom" | "restore" | null>(null);
-  const initialPositionAppliedRef = useRef(false);
-  const keepInitialBottomLockRef = useRef(false);
-  const restoredAnchorRef = useRef<ScrollAnchor | null>(null);
-  const restoredAnchorUntilRef = useRef(0);
-  const lastScrollStateRef = useRef({
-    scrollTop: 0,
-    scrollHeight: 0,
-    clientHeight: 0,
-    atBottom: false,
-  });
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
@@ -466,39 +430,6 @@ function MessageStream({
     capabilities: attachmentCapabilities,
     onError: setComposerError,
   });
-
-  useLayoutEffect(() => {
-    if (!available || !filePath || skipHistoryLoad) {
-      setMessages([]);
-      setLoading(false);
-      setError(null);
-      pendingInitialPositionRef.current = skipHistoryLoad ? "bottom" : null;
-      initialPositionAppliedRef.current = false;
-      keepInitialBottomLockRef.current = skipHistoryLoad;
-      return;
-    }
-    const cached = messageCache.get(sourceKey);
-    if (cached) {
-      setMessages(cached.messages);
-      setLoading(cached.messageCount !== messageCount);
-      setError(null);
-    } else {
-      setMessages([]);
-      setLoading(true);
-      setError(null);
-    }
-    pendingInitialPositionRef.current = scrollCache.has(sourceKey)
-      ? "restore"
-      : "bottom";
-    initialPositionAppliedRef.current = false;
-    keepInitialBottomLockRef.current =
-      pendingInitialPositionRef.current === "bottom";
-    restoredAnchorRef.current = null;
-    restoredAnchorUntilRef.current = 0;
-    // Keep cached sessions fully rendered so the vertical scrollbar thumb
-    // does not shrink after a delayed history expansion when switching back.
-    setHistoryRenderReady(hasCachedHistory);
-  }, [available, filePath, hasCachedHistory, messageCount, sourceKey, skipHistoryLoad]);
 
   useEffect(() => {
     if (!available || !filePath || skipHistoryLoad) return;
@@ -585,18 +516,10 @@ function MessageStream({
     if (displayItems.length <= INITIAL_HISTORY_RENDER_ITEMS) return displayItems;
     return displayItems.slice(-INITIAL_HISTORY_RENDER_ITEMS);
   }, [displayItems, historyRenderReady, liveSession]);
-
-  useEffect(() => {
-    if (liveSession || historyRenderReady) return;
-    if (displayItems.length <= INITIAL_HISTORY_RENDER_ITEMS) {
-      setHistoryRenderReady(true);
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      startTransition(() => setHistoryRenderReady(true));
-    }, 80);
-    return () => window.clearTimeout(timeout);
-  }, [displayItems.length, historyRenderReady, liveSession]);
+  const visibleDisplayItemKeys = useMemo(
+    () => renderItemKeys(visibleDisplayItems),
+    [visibleDisplayItems],
+  );
 
   const liveStreamingKey = useMemo(() => {
     if (!liveSession) return "";
@@ -627,6 +550,70 @@ function MessageStream({
       )
       .join("|");
   }, [liveSession]);
+  const initialPositionMode = useMemo(() => {
+    if (!available || !filePath || skipHistoryLoad) {
+      return skipHistoryLoad ? "bottom" : null;
+    }
+    return hasMessageStreamScrollSnapshot(sourceKey) ? "restore" : "bottom";
+  }, [available, filePath, skipHistoryLoad, sourceKey]);
+  const keepInitialBottomLock = initialPositionMode === "bottom";
+
+  const {
+    bubbleRefs,
+    chatContentRef,
+    viewportRef,
+    showScrollToBottom,
+    positionReady,
+    beginFollowingLiveStream,
+    saveScrollSnapshot,
+    scrollChatToBottom,
+  } = useMessageStreamScrollController({
+    sourceKey,
+    available,
+    filePath,
+    skipHistoryLoad,
+    loading,
+    visibleDisplayItemCount: visibleDisplayItems.length,
+    visibleDisplayItemKeys,
+    liveActiveKey,
+    liveCacheKey,
+    initialPositionMode,
+    keepInitialBottomLock,
+  });
+
+  useLayoutEffect(() => {
+    if (!available || !filePath || skipHistoryLoad) {
+      setMessages([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    const cached = messageCache.get(sourceKey);
+    if (cached) {
+      setMessages(cached.messages);
+      setLoading(cached.messageCount !== messageCount);
+      setError(null);
+    } else {
+      setMessages([]);
+      setLoading(true);
+      setError(null);
+    }
+    // Keep cached sessions fully rendered so the vertical scrollbar thumb
+    // does not shrink after a delayed history expansion when switching back.
+    setHistoryRenderReady(hasCachedHistory);
+  }, [available, filePath, hasCachedHistory, messageCount, sourceKey, skipHistoryLoad]);
+
+  useEffect(() => {
+    if (liveSession || historyRenderReady) return;
+    if (displayItems.length <= INITIAL_HISTORY_RENDER_ITEMS) {
+      setHistoryRenderReady(true);
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      startTransition(() => setHistoryRenderReady(true));
+    }, 80);
+    return () => window.clearTimeout(timeout);
+  }, [displayItems.length, historyRenderReady, liveSession]);
 
   const activeTurnId = useMemo(() => {
     if (!liveSession) return null;
@@ -648,332 +635,6 @@ function MessageStream({
   useEffect(() => {
     if (!activeTurnId) activeRuntimeTurnIdRef.current = null;
   }, [activeTurnId]);
-
-  const recordScrollState = useCallback((vp: HTMLDivElement | null = viewportRef.current) => {
-    if (!vp) return;
-    lastScrollStateRef.current = {
-      scrollTop: vp.scrollTop,
-      scrollHeight: vp.scrollHeight,
-      clientHeight: vp.clientHeight,
-      atBottom: isNearScrollBottom(vp),
-    };
-  }, []);
-
-  useEffect(() => {
-    const vp = viewportRef.current;
-    if (!vp) return;
-    const handleUserScrollIntent = () => {
-      keepInitialBottomLockRef.current = false;
-      restoredAnchorRef.current = null;
-      restoredAnchorUntilRef.current = 0;
-      programmaticScrollUntilRef.current = 0;
-      followLiveStreamRef.current = isNearScrollBottom(vp);
-      recordScrollState(vp);
-    };
-    vp.addEventListener("wheel", handleUserScrollIntent, { passive: true });
-    vp.addEventListener("touchmove", handleUserScrollIntent, { passive: true });
-    vp.addEventListener("keydown", handleUserScrollIntent);
-    return () => {
-      vp.removeEventListener("wheel", handleUserScrollIntent);
-      vp.removeEventListener("touchmove", handleUserScrollIntent);
-      vp.removeEventListener("keydown", handleUserScrollIntent);
-    };
-  }, [recordScrollState]);
-
-  const scrollChatToBottom = useCallback((settleMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
-    const scroll = () => {
-      const vp = viewportRef.current;
-      if (!vp) return;
-      programmaticScrollUntilRef.current =
-        performance.now() + settleMs;
-      vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
-      recordScrollState(vp);
-      setShowScrollToBottom(false);
-    };
-    scroll();
-    window.requestAnimationFrame(() => {
-      scroll();
-      window.requestAnimationFrame(scroll);
-    });
-    window.setTimeout(scroll, 80);
-  }, [recordScrollState]);
-
-  const stickToBottomAfterLayoutChange = useCallback((vp: HTMLDivElement) => {
-    const previous = lastScrollStateRef.current;
-    const layoutChanged =
-      previous.scrollHeight !== vp.scrollHeight ||
-      previous.clientHeight !== vp.clientHeight;
-    const shouldStickToBottom =
-      initialPositionAppliedRef.current &&
-      layoutChanged &&
-      (previous.atBottom ||
-        followLiveStreamRef.current ||
-        keepInitialBottomLockRef.current ||
-        performance.now() < programmaticScrollUntilRef.current);
-    if (!shouldStickToBottom) return false;
-    scrollChatToBottom(LAYOUT_BOTTOM_STICK_MS);
-    return true;
-  }, [scrollChatToBottom]);
-
-  const restoreAnchorAfterLayoutChange = useCallback((vp: HTMLDivElement) => {
-    const previous = lastScrollStateRef.current;
-    const layoutChanged =
-      previous.scrollHeight !== vp.scrollHeight ||
-      previous.clientHeight !== vp.clientHeight;
-    const anchor = restoredAnchorRef.current;
-    if (
-      !initialPositionAppliedRef.current ||
-      !layoutChanged ||
-      !anchor ||
-      followLiveStreamRef.current ||
-      keepInitialBottomLockRef.current
-    ) {
-      return false;
-    }
-    if (performance.now() > restoredAnchorUntilRef.current) {
-      restoredAnchorRef.current = null;
-      restoredAnchorUntilRef.current = 0;
-      return false;
-    }
-    const idx = visibleDisplayItems.findIndex(
-      (item) => renderItemKey(item) === anchor.key,
-    );
-    const el = idx >= 0 ? bubbleRefs.current[idx] : null;
-    if (!el) return false;
-    const vpRect = vp.getBoundingClientRect();
-    const top = el.getBoundingClientRect().top - vpRect.top + vp.scrollTop;
-    const nextScrollTop = Math.max(0, top - anchor.offset);
-    if (Math.abs(vp.scrollTop - nextScrollTop) <= 0.5) return false;
-    programmaticScrollUntilRef.current =
-      performance.now() + PROGRAMMATIC_SCROLL_SETTLE_MS;
-    vp.scrollTop = nextScrollTop;
-    recordScrollState(vp);
-    return true;
-  }, [recordScrollState, visibleDisplayItems]);
-
-  const updateScrollToBottomButton = useCallback(() => {
-    const vp = viewportRef.current;
-    if (!vp) return;
-    if (stickToBottomAfterLayoutChange(vp)) return;
-    if (restoreAnchorAfterLayoutChange(vp)) return;
-    const suppressBottomButton =
-      !initialPositionAppliedRef.current ||
-      keepInitialBottomLockRef.current ||
-      performance.now() < programmaticScrollUntilRef.current;
-    setShowScrollToBottom(suppressBottomButton ? false : !isNearScrollBottom(vp));
-  }, [restoreAnchorAfterLayoutChange, stickToBottomAfterLayoutChange]);
-
-  useLayoutEffect(() => {
-    const vp = viewportRef.current;
-    const content = chatContentRef.current;
-    if (!vp || !content) return;
-    recordScrollState(vp);
-    let frameId: number | null = null;
-    const handleResize = () => {
-      if (frameId !== null) return;
-      frameId = window.requestAnimationFrame(() => {
-        frameId = null;
-        const nextVp = viewportRef.current;
-        if (!nextVp) return;
-        if (stickToBottomAfterLayoutChange(nextVp)) return;
-        if (restoreAnchorAfterLayoutChange(nextVp)) return;
-        recordScrollState(nextVp);
-        updateScrollToBottomButton();
-      });
-    };
-    const ro = new ResizeObserver(handleResize);
-    ro.observe(vp);
-    ro.observe(content);
-    return () => {
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
-      ro.disconnect();
-    };
-  }, [recordScrollState, restoreAnchorAfterLayoutChange, stickToBottomAfterLayoutChange, updateScrollToBottomButton]);
-
-  const scrollChatToBottomUntilSettled = useCallback(() => {
-    scrollChatToBottom();
-    const start = performance.now();
-    let cancelled = false;
-    let frameId: number | null = null;
-    let timeoutId: number | null = null;
-
-    const tick = () => {
-      if (cancelled) return;
-      if (!keepInitialBottomLockRef.current) return;
-      scrollChatToBottom();
-      if (performance.now() - start >= INITIAL_BOTTOM_SCROLL_RETRY_MS) {
-        keepInitialBottomLockRef.current = false;
-        updateScrollToBottomButton();
-        return;
-      }
-      frameId = window.requestAnimationFrame(tick);
-    };
-
-    frameId = window.requestAnimationFrame(tick);
-    timeoutId = window.setTimeout(() => {
-      if (cancelled) return;
-      keepInitialBottomLockRef.current = false;
-      updateScrollToBottomButton();
-    }, INITIAL_BOTTOM_SCROLL_RETRY_MS + 120);
-
-    return () => {
-      cancelled = true;
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-    };
-  }, [scrollChatToBottom, updateScrollToBottomButton]);
-
-  bubbleRefs.current.length = visibleDisplayItems.length;
-
-  const saveScrollSnapshot = useCallback(
-    (vp: HTMLDivElement | null = viewportRef.current) => {
-      updateScrollToBottomButton();
-      if (
-        !vp ||
-        !available ||
-        !filePath ||
-        skipHistoryLoad ||
-        !initialPositionAppliedRef.current
-      ) {
-        return;
-      }
-      const atBottom = isNearScrollBottom(vp);
-      const isProgrammaticScroll =
-        performance.now() < programmaticScrollUntilRef.current;
-      if (!isProgrammaticScroll) {
-        if (atBottom) {
-          followLiveStreamRef.current = true;
-        } else if (!liveActiveKey) {
-          keepInitialBottomLockRef.current = false;
-          followLiveStreamRef.current = false;
-        }
-      }
-      recordScrollState(vp);
-      let anchor: ScrollAnchor | null = null;
-      if (!atBottom && visibleDisplayItems.length > 0) {
-        const vpRect = vp.getBoundingClientRect();
-        let bestIdx = -1;
-        let bestOffset = Number.NEGATIVE_INFINITY;
-        let fallbackIdx = -1;
-        let fallbackOffset = Number.POSITIVE_INFINITY;
-        for (let i = 0; i < visibleDisplayItems.length; i += 1) {
-          const el = bubbleRefs.current[i];
-          if (!el) continue;
-          const offset = el.getBoundingClientRect().top - vpRect.top;
-          if (offset <= 0 && offset > bestOffset) {
-            bestOffset = offset;
-            bestIdx = i;
-          }
-          if (offset >= 0 && offset < fallbackOffset) {
-            fallbackOffset = offset;
-            fallbackIdx = i;
-          }
-        }
-        const idx = bestIdx >= 0 ? bestIdx : fallbackIdx;
-        const el = idx >= 0 ? bubbleRefs.current[idx] : null;
-        if (el) {
-          const offset = el.getBoundingClientRect().top - vpRect.top;
-          anchor = { key: renderItemKey(visibleDisplayItems[idx]), offset };
-        }
-      }
-      scrollCache.set(sourceKey, {
-        scrollTop: vp.scrollTop,
-        anchor,
-        atBottom,
-      });
-    },
-    [available, filePath, skipHistoryLoad, visibleDisplayItems, sourceKey, liveActiveKey, recordScrollState, updateScrollToBottomButton],
-  );
-
-  useLayoutEffect(() => {
-    return () => {
-      if (initialPositionAppliedRef.current) saveScrollSnapshot();
-    };
-  }, [saveScrollSnapshot]);
-
-  useLayoutEffect(() => {
-    const vp = viewportRef.current;
-    const mode = pendingInitialPositionRef.current;
-    if (!vp || mode === null || loading || visibleDisplayItems.length === 0) return;
-    const snapshot = scrollCache.get(sourceKey);
-    if (mode === "restore" && snapshot?.atBottom) {
-      followLiveStreamRef.current = true;
-      keepInitialBottomLockRef.current = true;
-      restoredAnchorRef.current = null;
-      restoredAnchorUntilRef.current = 0;
-      scrollChatToBottom();
-      pendingInitialPositionRef.current = null;
-      initialPositionAppliedRef.current = true;
-      recordScrollState(vp);
-      return;
-    }
-    if (mode === "restore" && snapshot?.anchor) {
-      const idx = visibleDisplayItems.findIndex((item) => renderItemKey(item) === snapshot.anchor?.key);
-      const el = idx >= 0 ? bubbleRefs.current[idx] : null;
-      if (el) {
-        const vpRect = vp.getBoundingClientRect();
-        const top = el.getBoundingClientRect().top - vpRect.top + vp.scrollTop;
-        vp.scrollTop = Math.max(0, top - snapshot.anchor.offset);
-        restoredAnchorRef.current = snapshot.anchor;
-        restoredAnchorUntilRef.current =
-          performance.now() + RESTORE_ANCHOR_SETTLE_MS;
-        pendingInitialPositionRef.current = null;
-        initialPositionAppliedRef.current = true;
-        recordScrollState(vp);
-        return;
-      }
-    }
-    if (mode === "restore" && snapshot) {
-      vp.scrollTop = Math.max(
-        0,
-        Math.min(snapshot.scrollTop, vp.scrollHeight - vp.clientHeight),
-      );
-      restoredAnchorRef.current = null;
-      restoredAnchorUntilRef.current = 0;
-      keepInitialBottomLockRef.current = false;
-      recordScrollState(vp);
-    } else {
-      followLiveStreamRef.current = true;
-      keepInitialBottomLockRef.current = true;
-      restoredAnchorRef.current = null;
-      restoredAnchorUntilRef.current = 0;
-      scrollChatToBottom();
-    }
-    pendingInitialPositionRef.current = null;
-    initialPositionAppliedRef.current = true;
-    recordScrollState(vp);
-  }, [visibleDisplayItems, loading, scrollChatToBottom, sourceKey, recordScrollState]);
-
-  useLayoutEffect(() => {
-    const vp = viewportRef.current;
-    if (!vp || visibleDisplayItems.length === 0 || !initialPositionAppliedRef.current) {
-      return;
-    }
-    const snapshot = scrollCache.get(sourceKey);
-    if (snapshot && !snapshot.atBottom && !followLiveStreamRef.current) return;
-    scrollChatToBottom();
-  }, [visibleDisplayItems, scrollChatToBottom, sourceKey]);
-
-  useEffect(() => {
-    if (!keepInitialBottomLockRef.current) return;
-    if (loading || visibleDisplayItems.length === 0) return;
-    return scrollChatToBottomUntilSettled();
-  }, [
-    historyRenderReady,
-    loading,
-    scrollChatToBottomUntilSettled,
-    visibleDisplayItems.length,
-  ]);
-
-  useLayoutEffect(() => {
-    if (!liveCacheKey || !followLiveStreamRef.current) return;
-    keepInitialBottomLockRef.current = true;
-    return scrollChatToBottomUntilSettled();
-  }, [liveCacheKey, scrollChatToBottomUntilSettled]);
-
-  useLayoutEffect(() => {
-    updateScrollToBottomButton();
-  }, [visibleDisplayItems, loading, updateScrollToBottomButton]);
 
   const handleSendText = useCallback(async (
     rawText: string,
@@ -1016,7 +677,7 @@ function MessageStream({
     setSending(true);
     setComposerError(null);
     activeRuntimeTurnIdRef.current = null;
-    followLiveStreamRef.current = true;
+    beginFollowingLiveStream();
     const timestamp = Date.now();
     const optimisticTurnId = `local-turn-${timestamp}`;
     const optimisticSessionId = runtimeSessionId;
@@ -1089,7 +750,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, clearAttachments, dispatchLiveEvent, fallbackCapabilities, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, clearAttachments, dispatchLiveEvent, fallbackCapabilities, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -1113,7 +774,10 @@ function MessageStream({
         <ScrollArea
           ref={viewportRef}
           className="flex-1 min-h-0"
-          viewportClassName="px-10 py-4 session-chat-scroll-viewport"
+          viewportClassName={
+            "px-10 py-4 session-chat-scroll-viewport transition-opacity duration-75 " +
+            (positionReady ? "opacity-100" : "opacity-0")
+          }
           onScroll={saveScrollSnapshot}
         >
           {!available && (
@@ -1137,7 +801,7 @@ function MessageStream({
             />
             {visibleDisplayItems.map((item, i) => (
               <div
-                key={renderItemKey(item)}
+                key={visibleDisplayItemKeys[i]}
                 ref={(el) => {
                   bubbleRefs.current[i] = el;
                 }}
@@ -1585,7 +1249,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     if (el) resizeTextareaToContent(el);
   };
   return (
-    <div className="shrink-0 px-10 pb-4 pt-2 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80">
+    <div className="shrink-0 px-10 pb-4 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80">
       <div className="w-full">
         {error && (
           <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
@@ -3163,9 +2827,19 @@ function liveTurnStatusText(turn: LiveTurn, now: number): string {
   return `${state}|${formatDuration(elapsedMs)}`;
 }
 
+function renderItemKeys(items: AcpRenderItem[]): string[] {
+  const blockCounts = new Map<string, number>();
+  return items.map((item) => {
+    if (item.kind !== "block") return renderItemKey(item);
+    const count = blockCounts.get(item.turn.turnId) ?? 0;
+    blockCounts.set(item.turn.turnId, count + 1);
+    return `acp:${item.turn.turnId}:block:${count}`;
+  });
+}
+
 function renderItemKey(item: AcpRenderItem): string {
   if (item.kind === "turnStatus") return `acp:${item.turn.turnId}:status`;
-  if (item.kind === "block") return `acp:${item.turn.turnId}:block:${item.turn.blocks.indexOf(item.block)}`;
+  if (item.kind === "block") return `acp:${item.turn.turnId}:block`;
   if (item.kind === "tool") return `acp:${item.turn.turnId}:tool:${item.tool.toolId}`;
   if (item.kind === "permission") return `acp:${item.turn.turnId}:permission:${item.permission.requestId}`;
   if (item.kind === "turnFileEdits") return `acp:${item.turn.turnId}:file-edits`;
