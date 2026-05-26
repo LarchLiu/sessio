@@ -668,6 +668,16 @@ function MessageStream({
     window.setTimeout(scroll, 80);
   }, []);
 
+  const updateScrollToBottomButton = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const suppressBottomButton =
+      !initialPositionAppliedRef.current ||
+      keepInitialBottomLockRef.current ||
+      performance.now() < programmaticScrollUntilRef.current;
+    setShowScrollToBottom(suppressBottomButton ? false : !isNearScrollBottom(vp));
+  }, []);
+
   const scrollChatToBottomUntilSettled = useCallback(() => {
     scrollChatToBottom();
     const start = performance.now();
@@ -681,6 +691,7 @@ function MessageStream({
       scrollChatToBottom();
       if (performance.now() - start >= INITIAL_BOTTOM_SCROLL_RETRY_MS) {
         keepInitialBottomLockRef.current = false;
+        updateScrollToBottomButton();
         return;
       }
       frameId = window.requestAnimationFrame(tick);
@@ -690,6 +701,7 @@ function MessageStream({
     timeoutId = window.setTimeout(() => {
       if (cancelled) return;
       keepInitialBottomLockRef.current = false;
+      updateScrollToBottomButton();
     }, INITIAL_BOTTOM_SCROLL_RETRY_MS + 120);
 
     return () => {
@@ -697,15 +709,13 @@ function MessageStream({
       if (frameId !== null) window.cancelAnimationFrame(frameId);
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [scrollChatToBottom]);
+  }, [scrollChatToBottom, updateScrollToBottomButton]);
 
   bubbleRefs.current.length = visibleDisplayItems.length;
 
   const saveScrollSnapshot = useCallback(
     (vp: HTMLDivElement | null = viewportRef.current) => {
-      if (vp) {
-        setShowScrollToBottom(!isNearScrollBottom(vp));
-      }
+      updateScrollToBottomButton();
       if (
         !vp ||
         !available ||
@@ -836,10 +846,8 @@ function MessageStream({
   }, [liveCacheKey, scrollChatToBottomUntilSettled]);
 
   useLayoutEffect(() => {
-    const vp = viewportRef.current;
-    if (!vp) return;
-    setShowScrollToBottom(!isNearScrollBottom(vp));
-  }, [visibleDisplayItems, loading]);
+    updateScrollToBottomButton();
+  }, [visibleDisplayItems, loading, updateScrollToBottomButton]);
 
   const handleSendText = useCallback(async (
     rawText: string,
@@ -1007,12 +1015,7 @@ function MessageStream({
                 ref={(el) => {
                   bubbleRefs.current[i] = el;
                 }}
-                className={
-                  (item.kind === "tool"
-                    ? "message-render-contain-no-cv "
-                    : "message-render-contain ") +
-                  (renderItemSide(item) === "user" ? "flex justify-end" : "")
-                }
+                className={renderItemSide(item) === "user" ? "flex justify-end" : ""}
               >
                 <AcpLiveItem
                   item={item}
@@ -1995,7 +1998,7 @@ function AcpContentBlockGroup({
           aria-expanded={thoughtExpanded}
         >
           <Brain className="h-3.5 w-3.5 shrink-0" />
-          <span className="text-caption font-medium uppercase text-ink/40">
+          <span className="text-body-sm font-medium text-ink/75">
             {label}
           </span>
           <span className="text-ink/35">
@@ -2025,7 +2028,7 @@ function AcpContentBlockGroup({
           </span>
         </div>
       )}
-      <div className={isThought ? "ml-3.5" : ""}>
+      <div className={isThought ? "ml-[1.375rem]" : ""}>
         {isThought && !thoughtExpanded ? null : (
           <div
             ref={isThought ? undefined : messageBodyRef}
@@ -2687,7 +2690,7 @@ function AcpPermissionCard({
           </pre>
         )}
         {!resolved && (
-          <div className="overflow-hidden rounded-md border border-ink/[0.10] bg-bg-panel/55">
+          <div className="overflow-hidden rounded-md border border-status-warn/35 bg-status-warn/[0.06]">
             {options.map((option) => (
               <button
                 key={option.optionId}
@@ -2709,7 +2712,7 @@ function AcpPermissionCard({
 
 function permissionOptionButtonClass(kind: string): string {
   void kind;
-  return "block w-full border-b border-ink/[0.08] px-3 py-2 text-left text-caption font-medium text-ink/70 transition last:border-b-0 hover:bg-ink/[0.05] hover:text-ink/85 disabled:cursor-not-allowed disabled:opacity-55";
+  return "block w-full border-b border-status-warn/25 px-3 py-2 text-left text-caption font-medium text-ink/70 transition last:border-b-0 hover:bg-status-warn/[0.08] hover:text-ink/85 disabled:cursor-not-allowed disabled:opacity-55";
 }
 
 function permissionStatusText(permission: AcpPermissionRequest, pendingChoice: string | null): string {
@@ -2887,15 +2890,29 @@ type AcpRenderItem =
 function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
   const items: AcpRenderItem[] = [];
   for (const turn of viewModel.turns) {
+    const terminalSessionTools = new Map<string, AcpToolCall>();
     const renderedTools = new Set<string>();
     const renderedPermissions = new Set<string>();
     let renderedTurnStatus = false;
     turn.blocks.forEach((block) => {
       if (block.kind === "tool") {
-        const tool = turn.tools.find((item) => item.toolId === block.toolId);
-        if (!tool || renderedTools.has(tool.toolId)) return;
-        renderedTools.add(tool.toolId);
+        const originalTool = turn.tools.find((item) => item.toolId === block.toolId);
+        if (!originalTool || renderedTools.has(originalTool.toolId)) return;
+        renderedTools.add(originalTool.toolId);
+        const tool = cloneAcpToolCall(originalTool);
+        const pollingSessionId = writeStdinPollingToolSessionId(tool);
+        if (pollingSessionId) {
+          const target = terminalSessionTools.get(pollingSessionId);
+          if (target) {
+            appendToolOutput(target, tool);
+            return;
+          }
+        }
         items.push({ kind: "tool", turn, tool });
+        const runningSessionId = toolRunningSessionId(tool);
+        if (runningSessionId) {
+          terminalSessionTools.set(runningSessionId, tool);
+        }
         return;
       }
       if (block.kind === "permission") {
@@ -2927,6 +2944,36 @@ function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
     }
   }
   return items;
+}
+
+function writeStdinPollingToolSessionId(tool: AcpToolCall): string | null {
+  if (tool.title !== "write_stdin" && tool.title !== "Write Stdin") return null;
+  const input = parseObjectLike(tool.rawInput);
+  if (!input) return null;
+  const chars = input.chars;
+  if (typeof chars === "string" && chars.length > 0) return null;
+  return sessionIdFromRecord(input);
+}
+
+function toolRunningSessionId(tool: AcpToolCall): string | null {
+  const input = parseObjectLike(tool.rawInput);
+  return toolOutputRunningSessionId(acpToolOutputText(tool)) ??
+    (input ? sessionIdFromRecord(input) : null);
+}
+
+function appendToolOutput(target: AcpToolCall, source: AcpToolCall): void {
+  const left = acpToolOutputText(target).trimEnd();
+  const right = acpToolOutputText(source).trimStart();
+  target.rawOutput = left && right ? `${left}\n\n${right}` : left || right || target.rawOutput;
+  target.updatedAt = Math.max(target.updatedAt, source.updatedAt);
+}
+
+function cloneAcpToolCall(tool: AcpToolCall): AcpToolCall {
+  return {
+    ...tool,
+    content: tool.content.map((content) => ({ ...content })),
+    locations: tool.locations.map((location) => ({ ...location })),
+  };
 }
 
 function mergeHistoryAndLiveViewModels(
@@ -3090,7 +3137,9 @@ function mergeWriteStdinPollingItems(items: HistoryMessageItem[]): HistoryMessag
     }
 
     out.push(item);
-    const runningSessionId = toolOutputRunningSessionId(item.toolResult?.text ?? "");
+    const runningSessionId =
+      toolOutputRunningSessionId(item.toolResult?.text ?? "") ??
+      toolInputSessionId(item.message);
     if (runningSessionId) {
       runningSessions.set(runningSessionId, item);
     }
@@ -3107,11 +3156,21 @@ function writeStdinPollingSessionId(message: SessionMessage): string | null {
   if (!input) return null;
   const chars = input.chars;
   if (typeof chars === "string" && chars.length > 0) return null;
-  const sessionId = input.session_id;
-  if (typeof sessionId === "number" || typeof sessionId === "string") {
-    return String(sessionId);
-  }
-  return null;
+  return sessionIdFromRecord(input);
+}
+
+function toolInputSessionId(message: SessionMessage): string | null {
+  if (!isToolCallRole(message.role)) return null;
+  const parsed = parseToolCall(message.text);
+  const input = parseObjectLike(parsed.body);
+  return input ? sessionIdFromRecord(input) : null;
+}
+
+function sessionIdFromRecord(input: Record<string, unknown>): string | null {
+  const sessionId = input.session_id ?? input.sessionId;
+  return typeof sessionId === "number" || typeof sessionId === "string"
+    ? String(sessionId)
+    : null;
 }
 
 function toolOutputRunningSessionId(text: string): string | null {
@@ -3609,8 +3668,8 @@ function webSearchToolDisplay(body: unknown): ToolTitleParts {
 
 function writeStdinDisplayTarget(body: unknown): string | null {
   const input = parseObjectLike(body);
-  const sessionId = input?.session_id;
-  if (typeof sessionId === "number" || typeof sessionId === "string") {
+  const sessionId = input ? sessionIdFromRecord(input) : null;
+  if (sessionId) {
     return `session ${sessionId}`;
   }
   return null;
@@ -4095,7 +4154,6 @@ function ToolPairRow({
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const media = splitMarkdownImages(text);
-  const shouldClamp = shouldClampToolPairText(text, maxLines);
   return (
     <div className="border-b border-ink/[0.07] last:border-b-0">
       <div className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2 px-3 py-2">
@@ -4118,8 +4176,8 @@ function ToolPairRow({
             <pre
               className={
                 "min-w-0 whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75 " +
-                (shouldClamp && !expanded ? "" : "overflow-x-auto ") +
-                (shouldClamp && !expanded ? `tool-pair-clamp-${maxLines}` : "")
+                (!expanded ? "" : "overflow-x-auto ") +
+                (!expanded ? `tool-pair-clamp-${maxLines}` : "")
               }
             >
               <code>{media.text}</code>
@@ -4191,8 +4249,10 @@ function ToolPairPanel({
 
 function shouldClampToolPairText(text: string, maxLines: number): boolean {
   const media = splitMarkdownImages(text);
-  const lineCount = media.text.split(/\r?\n/).length;
-  return lineCount > maxLines || media.text.length > maxLines * 140;
+  const estimatedVisualLines = media.text
+    .split(/\r?\n/)
+    .reduce((count, line) => count + Math.max(1, Math.ceil(line.length / 72)), 0);
+  return estimatedVisualLines > maxLines;
 }
 
 type TodoEntry = {

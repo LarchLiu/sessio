@@ -64,33 +64,21 @@ body {
   display: none;
 }
 
-.message-render-contain {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 220px;
-}
-
-.message-render-contain-no-cv {
-  content-visibility: visible;
-  contain-intrinsic-size: auto;
-}
-
 .tool-pair-clamp-1,
 .tool-pair-clamp-3 {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
 .tool-pair-clamp-1 {
-  -webkit-line-clamp: 1;
+  max-height: 1.625em;
 }
 
 .tool-pair-clamp-3 {
-  -webkit-line-clamp: 3;
+  max-height: 4.875em;
 }
 
 .message-body-clamp-20 {
-  max-height: 30em;
+  max-height: 32.5em;
   overflow: hidden;
 }
 
