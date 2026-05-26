@@ -163,6 +163,8 @@ const renderItemsCache = new WeakMap<AcpViewModel, AcpRenderItem[]>();
 const scrollCache = new Map<string, ScrollCacheEntry>();
 const BOTTOM_FOLLOW_THRESHOLD_PX = 24;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 120;
+const LAYOUT_BOTTOM_STICK_MS = 360;
+const RESTORE_ANCHOR_SETTLE_MS = 1200;
 const INITIAL_BOTTOM_SCROLL_RETRY_MS = 1200;
 const INITIAL_HISTORY_RENDER_ITEMS = 120;
 
@@ -413,6 +415,7 @@ function MessageStream({
   const cachedEntry = messageCache.get(sourceKey);
   const isFreshCache =
     Boolean(cachedEntry) && cachedEntry?.messageCount === messageCount;
+  const hasCachedHistory = Boolean(cachedEntry);
   const [messages, setMessages] = useState<SessionMessage[]>(
     cachedEntry?.messages ?? [],
   );
@@ -422,11 +425,12 @@ function MessageStream({
   const [composerText, setComposerText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const [historyRenderReady, setHistoryRenderReady] = useState(false);
+  const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const viewportRef = useRef<HTMLDivElement>(null);
+  const chatContentRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const followLiveStreamRef = useRef(false);
   const liveStreamingRef = useRef(false);
@@ -435,6 +439,14 @@ function MessageStream({
   const pendingInitialPositionRef = useRef<"bottom" | "restore" | null>(null);
   const initialPositionAppliedRef = useRef(false);
   const keepInitialBottomLockRef = useRef(false);
+  const restoredAnchorRef = useRef<ScrollAnchor | null>(null);
+  const restoredAnchorUntilRef = useRef(0);
+  const lastScrollStateRef = useRef({
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    atBottom: false,
+  });
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
@@ -481,8 +493,12 @@ function MessageStream({
     initialPositionAppliedRef.current = false;
     keepInitialBottomLockRef.current =
       pendingInitialPositionRef.current === "bottom";
-    setHistoryRenderReady(false);
-  }, [available, filePath, messageCount, sourceKey, skipHistoryLoad]);
+    restoredAnchorRef.current = null;
+    restoredAnchorUntilRef.current = 0;
+    // Keep cached sessions fully rendered so the vertical scrollbar thumb
+    // does not shrink after a delayed history expansion when switching back.
+    setHistoryRenderReady(hasCachedHistory);
+  }, [available, filePath, hasCachedHistory, messageCount, sourceKey, skipHistoryLoad]);
 
   useEffect(() => {
     if (!available || !filePath || skipHistoryLoad) return;
@@ -633,13 +649,26 @@ function MessageStream({
     if (!activeTurnId) activeRuntimeTurnIdRef.current = null;
   }, [activeTurnId]);
 
+  const recordScrollState = useCallback((vp: HTMLDivElement | null = viewportRef.current) => {
+    if (!vp) return;
+    lastScrollStateRef.current = {
+      scrollTop: vp.scrollTop,
+      scrollHeight: vp.scrollHeight,
+      clientHeight: vp.clientHeight,
+      atBottom: isNearScrollBottom(vp),
+    };
+  }, []);
+
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp) return;
     const handleUserScrollIntent = () => {
       keepInitialBottomLockRef.current = false;
+      restoredAnchorRef.current = null;
+      restoredAnchorUntilRef.current = 0;
       programmaticScrollUntilRef.current = 0;
       followLiveStreamRef.current = isNearScrollBottom(vp);
+      recordScrollState(vp);
     };
     vp.addEventListener("wheel", handleUserScrollIntent, { passive: true });
     vp.addEventListener("touchmove", handleUserScrollIntent, { passive: true });
@@ -649,15 +678,16 @@ function MessageStream({
       vp.removeEventListener("touchmove", handleUserScrollIntent);
       vp.removeEventListener("keydown", handleUserScrollIntent);
     };
-  }, []);
+  }, [recordScrollState]);
 
-  const scrollChatToBottom = useCallback(() => {
+  const scrollChatToBottom = useCallback((settleMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
     const scroll = () => {
       const vp = viewportRef.current;
       if (!vp) return;
       programmaticScrollUntilRef.current =
-        performance.now() + PROGRAMMATIC_SCROLL_SETTLE_MS;
+        performance.now() + settleMs;
       vp.scrollTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+      recordScrollState(vp);
       setShowScrollToBottom(false);
     };
     scroll();
@@ -666,17 +696,99 @@ function MessageStream({
       window.requestAnimationFrame(scroll);
     });
     window.setTimeout(scroll, 80);
-  }, []);
+  }, [recordScrollState]);
+
+  const stickToBottomAfterLayoutChange = useCallback((vp: HTMLDivElement) => {
+    const previous = lastScrollStateRef.current;
+    const layoutChanged =
+      previous.scrollHeight !== vp.scrollHeight ||
+      previous.clientHeight !== vp.clientHeight;
+    const shouldStickToBottom =
+      initialPositionAppliedRef.current &&
+      layoutChanged &&
+      (previous.atBottom ||
+        followLiveStreamRef.current ||
+        keepInitialBottomLockRef.current ||
+        performance.now() < programmaticScrollUntilRef.current);
+    if (!shouldStickToBottom) return false;
+    scrollChatToBottom(LAYOUT_BOTTOM_STICK_MS);
+    return true;
+  }, [scrollChatToBottom]);
+
+  const restoreAnchorAfterLayoutChange = useCallback((vp: HTMLDivElement) => {
+    const previous = lastScrollStateRef.current;
+    const layoutChanged =
+      previous.scrollHeight !== vp.scrollHeight ||
+      previous.clientHeight !== vp.clientHeight;
+    const anchor = restoredAnchorRef.current;
+    if (
+      !initialPositionAppliedRef.current ||
+      !layoutChanged ||
+      !anchor ||
+      followLiveStreamRef.current ||
+      keepInitialBottomLockRef.current
+    ) {
+      return false;
+    }
+    if (performance.now() > restoredAnchorUntilRef.current) {
+      restoredAnchorRef.current = null;
+      restoredAnchorUntilRef.current = 0;
+      return false;
+    }
+    const idx = visibleDisplayItems.findIndex(
+      (item) => renderItemKey(item) === anchor.key,
+    );
+    const el = idx >= 0 ? bubbleRefs.current[idx] : null;
+    if (!el) return false;
+    const vpRect = vp.getBoundingClientRect();
+    const top = el.getBoundingClientRect().top - vpRect.top + vp.scrollTop;
+    const nextScrollTop = Math.max(0, top - anchor.offset);
+    if (Math.abs(vp.scrollTop - nextScrollTop) <= 0.5) return false;
+    programmaticScrollUntilRef.current =
+      performance.now() + PROGRAMMATIC_SCROLL_SETTLE_MS;
+    vp.scrollTop = nextScrollTop;
+    recordScrollState(vp);
+    return true;
+  }, [recordScrollState, visibleDisplayItems]);
 
   const updateScrollToBottomButton = useCallback(() => {
     const vp = viewportRef.current;
     if (!vp) return;
+    if (stickToBottomAfterLayoutChange(vp)) return;
+    if (restoreAnchorAfterLayoutChange(vp)) return;
     const suppressBottomButton =
       !initialPositionAppliedRef.current ||
       keepInitialBottomLockRef.current ||
       performance.now() < programmaticScrollUntilRef.current;
     setShowScrollToBottom(suppressBottomButton ? false : !isNearScrollBottom(vp));
-  }, []);
+  }, [restoreAnchorAfterLayoutChange, stickToBottomAfterLayoutChange]);
+
+  useLayoutEffect(() => {
+    const vp = viewportRef.current;
+    const content = chatContentRef.current;
+    if (!vp || !content) return;
+    recordScrollState(vp);
+    let frameId: number | null = null;
+    const handleResize = () => {
+      if (frameId !== null) return;
+      frameId = window.requestAnimationFrame(() => {
+        frameId = null;
+        const nextVp = viewportRef.current;
+        if (!nextVp) return;
+        if (stickToBottomAfterLayoutChange(nextVp)) return;
+        if (restoreAnchorAfterLayoutChange(nextVp)) return;
+        recordScrollState(nextVp);
+        updateScrollToBottomButton();
+      });
+    };
+    const ro = new ResizeObserver(handleResize);
+    ro.observe(vp);
+    ro.observe(content);
+    return () => {
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      ro.disconnect();
+    };
+  }, [recordScrollState, restoreAnchorAfterLayoutChange, stickToBottomAfterLayoutChange, updateScrollToBottomButton]);
 
   const scrollChatToBottomUntilSettled = useCallback(() => {
     scrollChatToBottom();
@@ -736,6 +848,7 @@ function MessageStream({
           followLiveStreamRef.current = false;
         }
       }
+      recordScrollState(vp);
       let anchor: ScrollAnchor | null = null;
       if (!atBottom && visibleDisplayItems.length > 0) {
         const vpRect = vp.getBoundingClientRect();
@@ -769,7 +882,7 @@ function MessageStream({
         atBottom,
       });
     },
-    [available, filePath, skipHistoryLoad, visibleDisplayItems, sourceKey, liveActiveKey],
+    [available, filePath, skipHistoryLoad, visibleDisplayItems, sourceKey, liveActiveKey, recordScrollState, updateScrollToBottomButton],
   );
 
   useLayoutEffect(() => {
@@ -786,9 +899,12 @@ function MessageStream({
     if (mode === "restore" && snapshot?.atBottom) {
       followLiveStreamRef.current = true;
       keepInitialBottomLockRef.current = true;
+      restoredAnchorRef.current = null;
+      restoredAnchorUntilRef.current = 0;
       scrollChatToBottom();
       pendingInitialPositionRef.current = null;
       initialPositionAppliedRef.current = true;
+      recordScrollState(vp);
       return;
     }
     if (mode === "restore" && snapshot?.anchor) {
@@ -798,8 +914,12 @@ function MessageStream({
         const vpRect = vp.getBoundingClientRect();
         const top = el.getBoundingClientRect().top - vpRect.top + vp.scrollTop;
         vp.scrollTop = Math.max(0, top - snapshot.anchor.offset);
+        restoredAnchorRef.current = snapshot.anchor;
+        restoredAnchorUntilRef.current =
+          performance.now() + RESTORE_ANCHOR_SETTLE_MS;
         pendingInitialPositionRef.current = null;
         initialPositionAppliedRef.current = true;
+        recordScrollState(vp);
         return;
       }
     }
@@ -808,15 +928,21 @@ function MessageStream({
         0,
         Math.min(snapshot.scrollTop, vp.scrollHeight - vp.clientHeight),
       );
+      restoredAnchorRef.current = null;
+      restoredAnchorUntilRef.current = 0;
       keepInitialBottomLockRef.current = false;
+      recordScrollState(vp);
     } else {
       followLiveStreamRef.current = true;
       keepInitialBottomLockRef.current = true;
+      restoredAnchorRef.current = null;
+      restoredAnchorUntilRef.current = 0;
       scrollChatToBottom();
     }
     pendingInitialPositionRef.current = null;
     initialPositionAppliedRef.current = true;
-  }, [visibleDisplayItems, loading, scrollChatToBottom, sourceKey]);
+    recordScrollState(vp);
+  }, [visibleDisplayItems, loading, scrollChatToBottom, sourceKey, recordScrollState]);
 
   useLayoutEffect(() => {
     const vp = viewportRef.current;
@@ -1003,7 +1129,7 @@ function MessageStream({
           {!loading && !error && available && !skipHistoryLoad && visibleDisplayItems.length === 0 && (
             <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
           )}
-          <div className="flex flex-col gap-2">
+          <div ref={chatContentRef} className="flex flex-col gap-2">
             <AcpSessionStatePanel
               state={acpViewModel.sessionState}
               sessioRuntimeSessionId={runtimeSessionId}
@@ -1047,7 +1173,7 @@ function MessageStream({
         {showScrollToBottom && (
           <button
             type="button"
-            onClick={scrollChatToBottom}
+            onClick={() => scrollChatToBottom()}
             className="absolute bottom-3 left-1/2 z-20 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-ink/15 bg-surface-panel/95 text-ink/85 shadow-sm transition hover:border-ink/25 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
             aria-label="Scroll to bottom"
           >
@@ -3760,6 +3886,7 @@ function FileEditContent({ text }: { text: string }) {
     expandedState.text === text ? expandedState.expanded : edits.length <= 3;
   const [openDetails, setOpenDetails] = useState<Set<string>>(() => new Set());
   const pendingScrollKeyRef = useRef<string | null>(null);
+  const pendingBottomStickRef = useRef(false);
   const fileEditBlockRef = useRef<HTMLDivElement>(null);
   const detailRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const visibleEdits = expanded ? edits : edits.slice(0, 3);
@@ -3771,6 +3898,7 @@ function FileEditContent({ text }: { text: string }) {
   useEffect(() => {
     setOpenDetails(new Set());
     pendingScrollKeyRef.current = null;
+    pendingBottomStickRef.current = false;
     detailRefs.current.clear();
   }, [text]);
 
@@ -3780,6 +3908,10 @@ function FileEditContent({ text }: { text: string }) {
       if (next.has(key)) {
         next.delete(key);
       } else {
+        const scroller = findScroller(fileEditBlockRef.current);
+        pendingBottomStickRef.current = scroller instanceof HTMLDivElement
+          ? isNearScrollBottom(scroller)
+          : false;
         pendingScrollKeyRef.current = key;
         next.add(key);
       }
@@ -3793,22 +3925,33 @@ function FileEditContent({ text }: { text: string }) {
     pendingScrollKeyRef.current = null;
     const node = detailRefs.current.get(key);
     if (!node) return;
-    window.requestAnimationFrame(() => {
+    const stickToBottom = pendingBottomStickRef.current;
+    pendingBottomStickRef.current = false;
+    const align = () => {
       const scroller = findScroller(node);
       if (!scroller) {
-        node.scrollIntoView({ block: "end", behavior: "smooth" });
+        node.scrollIntoView({ block: "end", behavior: "auto" });
+        return;
+      }
+      if (stickToBottom) {
+        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
         return;
       }
       const nodeBottom = node.getBoundingClientRect().bottom;
       const scrollerBottom = scroller.getBoundingClientRect().bottom;
       const delta = nodeBottom - scrollerBottom + 12;
       if (delta > 0) {
-        scroller.scrollTo({
-          top: scroller.scrollTop + delta,
-          behavior: "smooth",
-        });
+        scroller.scrollTop += delta;
       }
+    };
+    window.requestAnimationFrame(() => {
+      align();
+      window.requestAnimationFrame(align);
     });
+    const timers = [80, 180, 360].map((delay) => window.setTimeout(align, delay));
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
   }, [openDetails]);
 
   return (
