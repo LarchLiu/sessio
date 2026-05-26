@@ -433,7 +433,7 @@ function optimisticUserContentBlocks(
     blocks.push({
       type: "resource",
       uri: attachment.path,
-      name: basenameFromPath(attachment.path),
+      name: attachment.displayName?.trim() || basenameFromPath(attachment.path),
       mimeType: attachment.mimeType ?? undefined,
     });
   }

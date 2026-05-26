@@ -13,6 +13,7 @@ pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
     thread::spawn(move || {
         let mut claude_index_mtimes: HashMap<PathBuf, Option<i64>> = HashMap::new();
         let mut gemini_projects_mtime: Option<i64> = None;
+        let mut codex_lineage_backfill_checked: HashSet<String> = HashSet::new();
         let mut first_tick = true;
         loop {
             if !first_tick {
@@ -33,6 +34,7 @@ pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
                 &indexer,
                 &mut claude_index_mtimes,
                 &mut gemini_projects_mtime,
+                &mut codex_lineage_backfill_checked,
             ) {
                 log::warn!("polling check failed: {e}");
             }
@@ -45,6 +47,7 @@ fn poll_once(
     indexer: &IndexerHandle,
     claude_index_mtimes: &mut HashMap<PathBuf, Option<i64>>,
     gemini_projects_mtime: &mut Option<i64>,
+    codex_lineage_backfill_checked: &mut HashSet<String>,
 ) -> Result<()> {
     let indexed = store.list_indexed_sessions()?;
     if indexed.is_empty() {
@@ -57,13 +60,17 @@ fn poll_once(
         indexer.submit(IndexTask::FullRebuild)?;
         return Ok(());
     }
-    poll_codex(&indexed, indexer)?;
+    poll_codex(&indexed, indexer, codex_lineage_backfill_checked)?;
     poll_claude(&indexed, claude_index_mtimes, store.as_ref(), indexer)?;
     poll_gemini(&indexed, store.as_ref(), indexer, gemini_projects_mtime)?;
     Ok(())
 }
 
-fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Result<()> {
+fn poll_codex(
+    indexed: &[IndexedSessionRecord],
+    indexer: &IndexerHandle,
+    lineage_backfill_checked: &mut HashSet<String>,
+) -> Result<()> {
     let (live_root, archived_root) = crate::agents::sources::codex::parser::roots()?;
     let mut known_main: HashMap<String, &IndexedSessionRecord> = indexed
         .iter()
@@ -100,7 +107,12 @@ fn poll_codex(indexed: &[IndexedSessionRecord], indexer: &IndexerHandle) -> Resu
             if let Some(row) = known_main.remove(&path_str) {
                 let changed =
                     file_changed(path, row.file_size, row.file_mtime) || row.archived != archived;
-                if changed {
+                let needs_lineage_backfill = row.forked_from_id.is_none()
+                    && lineage_backfill_checked.insert(path_str.clone())
+                    && parse_codex_main_lineage(path, archived)
+                        .map(|lineage| lineage.is_some())
+                        .unwrap_or(false);
+                if changed || needs_lineage_backfill {
                     indexer.submit(IndexTask::ReindexCodexFile(path.to_path_buf()))?;
                 }
                 continue;
@@ -463,6 +475,18 @@ fn file_changed(path: &Path, indexed_size: u64, indexed_mtime: Option<i64>) -> b
     }
 }
 
+fn parse_codex_main_lineage(path: &Path, archived: bool) -> Result<Option<(Agent, String)>> {
+    let parsed = crate::agents::sources::codex::parser::parse_one_file_with_relation(path, archived)?;
+    Ok(parsed.and_then(|parsed| {
+        if parsed.parent_thread_id.is_some() {
+            return None;
+        }
+        let agent = parsed.info.forked_from_agent?;
+        let session_id = parsed.info.forked_from_id?;
+        Some((agent, session_id))
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,6 +519,8 @@ mod tests {
                 session_id: "live".to_string(),
                 scope: path.to_string_lossy().to_string(),
                 file_path: path.to_string_lossy().to_string(),
+                forked_from_agent: None,
+                forked_from_id: None,
                 file_size: meta.len(),
                 file_mtime: mtime,
                 last_indexed_at: 1,
@@ -507,6 +533,8 @@ mod tests {
                 session_id: "old".to_string(),
                 scope: path.to_string_lossy().to_string(),
                 file_path: path.to_string_lossy().to_string(),
+                forked_from_agent: None,
+                forked_from_id: None,
                 file_size: meta.len(),
                 file_mtime: mtime,
                 last_indexed_at: 1,
@@ -549,6 +577,8 @@ mod tests {
             session_id: "gone".to_string(),
             scope: path.to_string_lossy().to_string(),
             file_path: path.to_string_lossy().to_string(),
+            forked_from_agent: None,
+            forked_from_id: None,
             file_size: meta.len(),
             file_mtime: mtime,
             last_indexed_at: 1,

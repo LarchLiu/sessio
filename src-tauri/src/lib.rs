@@ -8,7 +8,7 @@ pub mod polling;
 pub mod store;
 pub mod watch;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -44,6 +44,141 @@ struct SessionMessagesResult {
 #[tauri::command]
 fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionInfo>, String> {
     store.list_sessions().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_session_ancestors(
+    agent: Agent,
+    session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<SessionInfo>, String> {
+    let sessions = store.list_sessions().map_err(|e| e.to_string())?;
+    Ok(session_ancestors_from_db(agent, &session_id, &sessions))
+}
+
+fn session_ancestors_from_db(
+    agent: Agent,
+    session_id: &str,
+    sessions: &[SessionInfo],
+) -> Vec<SessionInfo> {
+    let mut by_identity: HashMap<(Agent, String), SessionInfo> = HashMap::new();
+    for session in sessions {
+        let key = (session.agent, session.id.clone());
+        let replace = by_identity
+            .get(&key)
+            .map(|current| better_lineage_candidate(session, current))
+            .unwrap_or(true);
+        if replace {
+            by_identity.insert(key, session.clone());
+        }
+    }
+
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor = by_identity.get(&(agent, session_id.to_string())).cloned();
+    seen.insert((agent, session_id.to_string()));
+
+    for _ in 0..32 {
+        let Some(current) = cursor else {
+            break;
+        };
+        let Some(parent_id) = current.forked_from_id.clone() else {
+            break;
+        };
+        let parent_agent = current.forked_from_agent.unwrap_or(current.agent);
+        let key = (parent_agent, parent_id);
+        if !seen.insert(key.clone()) {
+            break;
+        }
+        let Some(parent) = by_identity.get(&key).cloned() else {
+            break;
+        };
+        chain.push(parent.clone());
+        cursor = Some(parent);
+    }
+
+    chain.reverse();
+    chain
+}
+
+fn better_lineage_candidate(candidate: &SessionInfo, current: &SessionInfo) -> bool {
+    if candidate.available != current.available {
+        return candidate.available;
+    }
+    if candidate.file_path.is_empty() != current.file_path.is_empty() {
+        return !candidate.file_path.is_empty();
+    }
+    candidate
+        .updated_at
+        .or(candidate.started_at)
+        .unwrap_or(0)
+        > current.updated_at.or(current.started_at).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod ancestor_tests {
+    use super::*;
+
+    fn session(
+        agent: Agent,
+        id: &str,
+        forked_from_agent: Option<Agent>,
+        forked_from_id: Option<&str>,
+        file_path: &str,
+    ) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            agent,
+            forked_from_agent,
+            forked_from_id: forked_from_id.map(String::from),
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(1),
+            updated_at: Some(1),
+            message_count: 1,
+            title: None,
+            first_user_message: None,
+            file_path: file_path.to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn session_ancestors_from_db_follows_multihop_agent_lineage() {
+        let root = session(Agent::Gemini, "root", None, None, "/tmp/gemini/logs.json");
+        let middle = session(
+            Agent::Claude,
+            "middle",
+            Some(Agent::Gemini),
+            Some("root"),
+            "/tmp/claude/middle.jsonl",
+        );
+        let child = session(
+            Agent::Codex,
+            "child",
+            Some(Agent::Claude),
+            Some("middle"),
+            "/tmp/codex/child.jsonl",
+        );
+
+        let chain = session_ancestors_from_db(
+            Agent::Codex,
+            "child",
+            &[child, middle.clone(), root.clone()],
+        );
+
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].agent, Agent::Gemini);
+        assert_eq!(chain[0].id, "root");
+        assert_eq!(chain[0].file_path, root.file_path);
+        assert_eq!(chain[1].agent, Agent::Claude);
+        assert_eq!(chain[1].id, "middle");
+        assert_eq!(chain[1].file_path, middle.file_path);
+    }
 }
 
 #[tauri::command]
@@ -562,8 +697,26 @@ fn write_cross_prompt(session_id: String, content: String) -> Result<String, Str
             }
         })
         .collect();
-    let path = std::env::temp_dir().join(format!("sessio-cross-{}.txt", safe_id));
-    std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dir = dirs::home_dir()
+        .ok_or_else(|| "home directory not found".to_string())?
+        .join(".sessio")
+        .join("projects")
+        .join("cross-context");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("sessio-cross-context-{}-{}.md", safe_id, ts));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(content.as_bytes())
+        })
+        .map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -936,6 +1089,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            get_session_ancestors,
             get_session_messages,
             update_session_message_count,
             create_pending_session,

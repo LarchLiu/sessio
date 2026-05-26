@@ -25,6 +25,8 @@ pub struct IndexedSessionRecord {
     pub session_id: String,
     pub scope: String,
     pub file_path: String,
+    pub forked_from_agent: Option<Agent>,
+    pub forked_from_id: Option<String>,
     pub file_size: u64,
     pub file_mtime: Option<i64>,
     pub last_indexed_at: i64,

@@ -69,13 +69,17 @@ pub fn session_source_from_info(info: &SessionInfo) -> SessionSource {
             serde_json::Value::Number(updated_at.into()),
         );
     }
-    if info.agent == Agent::Codex {
-        if let Some(forked_from_id) = &info.forked_from_id {
-            metadata.insert(
-                "forked_from_id".to_string(),
-                serde_json::Value::String(forked_from_id.clone()),
-            );
-        }
+    if let Some(forked_from_agent) = info.forked_from_agent {
+        metadata.insert(
+            "forked_from_agent".to_string(),
+            serde_json::Value::String(forked_from_agent.as_str().to_string()),
+        );
+    }
+    if let Some(forked_from_id) = &info.forked_from_id {
+        metadata.insert(
+            "forked_from_id".to_string(),
+            serde_json::Value::String(forked_from_id.clone()),
+        );
     }
     SessionSource {
         agent: agent_kind(info.agent),

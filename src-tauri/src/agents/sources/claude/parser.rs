@@ -103,6 +103,7 @@ pub fn scan_project_dir(project_dir: &Path) -> Result<Vec<SessionInfo>> {
         group.push(SessionInfo {
             id: sub_id,
             agent: Agent::Claude,
+            forked_from_agent: None,
             forked_from_id: None,
             project_path: None,
             project_name: None,
@@ -900,6 +901,7 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
     Ok(Some(SessionInfo {
         id,
         agent: Agent::Claude,
+        forked_from_agent: None,
         forked_from_id: None,
         project_path: cwd,
         project_name,
@@ -1250,6 +1252,7 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
     Some(SessionInfo {
         id: entry.session_id.clone(),
         agent: Agent::Claude,
+        forked_from_agent: None,
         forked_from_id: None,
         project_path: cwd,
         project_name,

@@ -4,13 +4,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::agents::sources::types::SourceLocation;
 use crate::memory::{
     MemoryArtifact, MemoryJob, MemoryRecord, MemoryRecordKind, MemorySource, MemoryStore,
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{Agent, SessionInfo, SubagentInfo};
-use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord, SessionStore,
 };
@@ -99,7 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
 "#;
 
 // V3 is the single post-v0.3.2 upgrade. It adds current memory tables and the
-// Codex fork lineage column introduced after the v0.3.2 release.
+// initial Codex fork id column introduced after the v0.3.2 release.
 const SCHEMA_V3: &str = r#"
 ALTER TABLE sessions ADD COLUMN forked_from_id TEXT;
 
@@ -226,6 +226,10 @@ CREATE TABLE IF NOT EXISTS runtime_agent_capabilities (
 );
 "#;
 
+const SCHEMA_V6: &str = r#"
+ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -282,6 +286,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 6 {
+        let _ = conn.execute_batch(SCHEMA_V6);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
+            [],
+        )?;
+    }
     conn.execute_batch(SCHEMA_V5)?;
     Ok(())
 }
@@ -322,6 +333,49 @@ fn existing_session_count_state(
     Ok(state)
 }
 
+fn existing_session_lineage(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+    scope: &str,
+) -> Result<(Option<Agent>, Option<String>)> {
+    let mut stmt = conn.prepare(
+        "SELECT forked_from_agent, forked_from_id FROM sessions
+         WHERE agent = ? AND session_id = ? AND scope = ?",
+    )?;
+    let lineage = stmt
+        .query_row(params![agent.as_str(), session_id, scope], |r| {
+            let agent = r
+                .get::<_, Option<String>>(0)?
+                .and_then(|value| Agent::from_db_str(&value));
+            Ok((agent, r.get(1)?))
+        })
+        .optional()?
+        .unwrap_or((None, None));
+    Ok(lineage)
+}
+
+fn merge_session_lineage(
+    existing_agent: Option<Agent>,
+    existing_id: Option<String>,
+    parsed_agent: Option<Agent>,
+    parsed_id: Option<String>,
+) -> (Option<Agent>, Option<String>) {
+    match (existing_agent, existing_id) {
+        (Some(agent), Some(id)) => (Some(agent), Some(id)),
+        (None, Some(id)) => {
+            let agent = if parsed_id.as_deref() == Some(id.as_str()) {
+                parsed_agent
+            } else {
+                None
+            };
+            (agent, Some(id))
+        }
+        (Some(agent), None) => (Some(agent), parsed_id),
+        (None, None) => (parsed_agent, parsed_id),
+    }
+}
+
 fn existing_subagent_count_state(
     conn: &Connection,
     parent_agent: Agent,
@@ -348,12 +402,20 @@ struct ExistingPlaceholder {
 
 fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
     if let Some(existing) = existing_placeholder(conn, s.agent, &s.id, scope, s)? {
+        let (existing_forked_from_agent, existing_forked_from_id) =
+            existing_session_lineage(conn, s.agent, &existing.session_id, &existing.scope)?;
+        let (forked_from_agent, forked_from_id) = merge_session_lineage(
+            existing_forked_from_agent,
+            existing_forked_from_id,
+            s.forked_from_agent,
+            s.forked_from_id.clone(),
+        );
         conn.execute(
             "UPDATE sessions
              SET session_id = ?, scope = ?, file_path = ?, project_path = ?, project_name = ?,
                  started_at = ?, updated_at = ?, title = ?, first_user_message = ?,
                  file_size = ?, file_mtime = ?, available = ?, archived = ?,
-                 last_indexed_at = ?, forked_from_id = ?
+                 last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?
              WHERE agent = ? AND session_id = ? AND scope = ?",
             params![
                 s.id,
@@ -370,7 +432,8 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                 s.available as i64,
                 s.archived as i64,
                 now_ms(),
-                s.forked_from_id,
+                forked_from_agent.map(|agent| agent.as_str()),
+                forked_from_id,
                 s.agent.as_str(),
                 existing.session_id,
                 existing.scope,
@@ -380,6 +443,14 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
     }
     let (message_count, partial) = existing_session_count_state(conn, s.agent, &s.id, scope)?
         .unwrap_or((s.message_count as i64, s.partial as i64));
+    let (existing_forked_from_agent, existing_forked_from_id) =
+        existing_session_lineage(conn, s.agent, &s.id, scope)?;
+    let (forked_from_agent, forked_from_id) = merge_session_lineage(
+        existing_forked_from_agent,
+        existing_forked_from_id,
+        s.forked_from_agent,
+        s.forked_from_id.clone(),
+    );
     conn.execute(
         "INSERT OR REPLACE INTO sessions (
             agent, session_id, scope, file_path,
@@ -388,8 +459,8 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             message_count, title, first_user_message,
             file_size, file_mtime,
             partial, available, archived,
-            last_indexed_at, forked_from_id
-        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?, ?,?, ?,?,?, ?,?)",
+            last_indexed_at, forked_from_agent, forked_from_id
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?, ?,?, ?,?,?, ?,?,?)",
         params![
             s.agent.as_str(),
             s.id,
@@ -408,7 +479,8 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             s.available as i64,
             s.archived as i64,
             now_ms(),
-            s.forked_from_id,
+            forked_from_agent.map(|agent| agent.as_str()),
+            forked_from_id,
         ],
     )?;
     // Subagent rows are written through upsert_subagent so their lifecycle
@@ -446,7 +518,9 @@ fn existing_placeholder_scope(
          LIMIT 1",
     )?;
     let scope = stmt
-        .query_row(params![agent.as_str(), session_id, next_scope], |r| r.get(0))
+        .query_row(params![agent.as_str(), session_id, next_scope], |r| {
+            r.get(0)
+        })
         .optional()?;
     Ok(scope)
 }
@@ -634,7 +708,7 @@ impl SessionStore for SqliteStore {
         let mut stmt = conn.prepare(
             "SELECT agent, session_id, file_path, project_path, project_name,
                     started_at, updated_at, message_count, title, first_user_message,
-                    file_size, partial, available, archived, forked_from_id
+                    file_size, partial, available, archived, forked_from_agent, forked_from_id
              FROM sessions
              ORDER BY updated_at DESC",
         )?;
@@ -645,7 +719,10 @@ impl SessionStore for SqliteStore {
                 Ok(SessionInfo {
                     id: row.get(1)?,
                     agent,
-                    forked_from_id: row.get(14)?,
+                    forked_from_agent: row
+                        .get::<_, Option<String>>(14)?
+                        .and_then(|value| Agent::from_db_str(&value)),
+                    forked_from_id: row.get(15)?,
                     file_path: row.get(2)?,
                     project_path: row.get(3)?,
                     project_name: row.get(4)?,
@@ -675,7 +752,8 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut subs_by_parent = load_all_indexed_subagents_grouped(&conn)?;
         let mut stmt = conn.prepare(
-            "SELECT agent, session_id, scope, file_path, file_size, file_mtime, last_indexed_at, available, archived
+            "SELECT agent, session_id, scope, file_path, file_size, file_mtime, last_indexed_at, available, archived,
+                    forked_from_agent, forked_from_id
              FROM sessions",
         )?;
         let mut sessions: Vec<IndexedSessionRecord> = stmt
@@ -687,6 +765,10 @@ impl SessionStore for SqliteStore {
                     session_id: row.get(1)?,
                     scope: row.get(2)?,
                     file_path: row.get(3)?,
+                    forked_from_agent: row
+                        .get::<_, Option<String>>(9)?
+                        .and_then(|value| Agent::from_db_str(&value)),
+                    forked_from_id: row.get(10)?,
                     file_size: row.get::<_, i64>(4)? as u64,
                     file_mtime: row.get(5)?,
                     last_indexed_at: row.get(6)?,
@@ -887,10 +969,10 @@ impl SessionStore for SqliteStore {
                 project_path, project_name,
                 started_at, updated_at,
                 message_count, title, first_user_message,
-                file_size, file_mtime,
-                partial, available, archived,
-                last_indexed_at, forked_from_id
-            ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?, ?,?, ?,?,?, ?,?)",
+            file_size, file_mtime,
+            partial, available, archived,
+            last_indexed_at, forked_from_agent, forked_from_id
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?, ?,?, ?,?,?, ?,?,?)",
             params![
                 agent.as_str(),
                 session_id,
@@ -909,6 +991,7 @@ impl SessionStore for SqliteStore {
                 0i64,
                 0i64,
                 now_ms(),
+                Option::<String>::None,
                 Option::<String>::None,
             ],
         )?;
@@ -1653,6 +1736,7 @@ mod migration_tests {
             let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
+        assert!(session_columns.contains(&"forked_from_agent".to_string()));
         assert!(session_columns.contains(&"forked_from_id".to_string()));
         assert!(session_columns.contains(&"title".to_string()));
 
@@ -1700,6 +1784,7 @@ mod migration_tests {
             let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
+        assert!(session_columns.contains(&"forked_from_agent".to_string()));
         assert!(session_columns.contains(&"forked_from_id".to_string()));
         assert!(session_columns.contains(&"title".to_string()));
 
@@ -1722,6 +1807,153 @@ mod migration_tests {
         assert!(job_columns.contains(&"backend".to_string()));
 
         drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn upserting_indexed_session_preserves_placeholder_lineage() {
+        let path = unique_db("sessio-lineage-preserve");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let pending = SessionInfo {
+            id: "child".to_string(),
+            agent: Agent::Gemini,
+            forked_from_agent: Some(Agent::Claude),
+            forked_from_id: Some("parent".to_string()),
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(10),
+            message_count: 0,
+            title: Some("pending".to_string()),
+            first_user_message: Some("pending".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session("", &pending).unwrap();
+
+        let indexed = SessionInfo {
+            file_path: "/tmp/project/gemini-child.jsonl".to_string(),
+            file_size: 256,
+            partial: false,
+            title: Some("indexed".to_string()),
+            first_user_message: Some("indexed".to_string()),
+            forked_from_agent: None,
+            forked_from_id: None,
+            ..pending
+        };
+        store
+            .replace_by_scope("/tmp/project/gemini-child.jsonl", Agent::Gemini, &[indexed])
+            .unwrap();
+
+        let row = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Gemini && session.id == "child")
+            .unwrap();
+        assert_eq!(row.forked_from_agent, Some(Agent::Claude));
+        assert_eq!(row.forked_from_id.as_deref(), Some("parent"));
+        assert_eq!(row.file_path, "/tmp/project/gemini-child.jsonl");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn upserting_session_keeps_existing_db_lineage_over_parsed_fallback() {
+        let path = unique_db("sessio-lineage-db-wins");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let existing = SessionInfo {
+            id: "child".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: Some(Agent::Gemini),
+            forked_from_id: Some("db-parent".to_string()),
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(10),
+            message_count: 0,
+            title: Some("existing".to_string()),
+            first_user_message: Some("existing".to_string()),
+            file_path: "/tmp/project/child.jsonl".to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session("/tmp/project/child.jsonl", &existing).unwrap();
+
+        let parsed = SessionInfo {
+            forked_from_agent: Some(Agent::Claude),
+            forked_from_id: Some("cross-context-parent".to_string()),
+            title: Some("parsed".to_string()),
+            ..existing
+        };
+        store.upsert_session("/tmp/project/child.jsonl", &parsed).unwrap();
+
+        let row = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.id == "child")
+            .unwrap();
+        assert_eq!(row.forked_from_agent, Some(Agent::Gemini));
+        assert_eq!(row.forked_from_id.as_deref(), Some("db-parent"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn upserting_session_does_not_mix_existing_id_with_parsed_agent() {
+        let path = unique_db("sessio-lineage-no-mix");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let existing = SessionInfo {
+            id: "child".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: Some("db-parent".to_string()),
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(10),
+            message_count: 0,
+            title: Some("existing".to_string()),
+            first_user_message: Some("existing".to_string()),
+            file_path: "/tmp/project/child.jsonl".to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session("/tmp/project/child.jsonl", &existing).unwrap();
+
+        let parsed = SessionInfo {
+            forked_from_agent: Some(Agent::Claude),
+            forked_from_id: Some("cross-context-parent".to_string()),
+            ..existing
+        };
+        store.upsert_session("/tmp/project/child.jsonl", &parsed).unwrap();
+
+        let row = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.id == "child")
+            .unwrap();
+        assert_eq!(row.forked_from_agent, None);
+        assert_eq!(row.forked_from_id.as_deref(), Some("db-parent"));
+
         let _ = std::fs::remove_file(&path);
     }
 }

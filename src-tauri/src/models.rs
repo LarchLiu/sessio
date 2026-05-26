@@ -25,6 +25,7 @@ impl Agent {
 pub struct SessionInfo {
     pub id: String,
     pub agent: Agent,
+    pub forked_from_agent: Option<Agent>,
     pub forked_from_id: Option<String>,
     pub project_path: Option<String>,
     pub project_name: Option<String>,
@@ -185,6 +186,9 @@ mod tests {
 
     #[test]
     fn normalize_preview_flattens_newlines_before_truncating() {
-        assert_eq!(normalize_preview(" hello\nworld\ragain "), "hello world again");
+        assert_eq!(
+            normalize_preview(" hello\nworld\ragain "),
+            "hello world again"
+        );
     }
 }

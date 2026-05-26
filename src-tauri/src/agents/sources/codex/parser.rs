@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::SourceLocation;
@@ -460,6 +460,7 @@ fn parse_session(
     session_index_titles: &HashMap<String, String>,
 ) -> Result<Option<CodexParsedSession>> {
     let mut id: Option<String> = None;
+    let mut forked_from_agent: Option<Agent> = None;
     let mut forked_from_id: Option<String> = None;
     let mut started_at: Option<i64> = None;
     let mut cwd: Option<String> = None;
@@ -497,6 +498,9 @@ fn parse_session(
                     .get("forked_from_id")
                     .and_then(|x| x.as_str())
                     .map(String::from);
+                if forked_from_id.is_some() {
+                    forked_from_agent = Some(Agent::Codex);
+                }
             }
             if started_at.is_none() {
                 started_at = payload
@@ -547,9 +551,14 @@ fn parse_session(
             if let Some(payload) = v.get("payload") {
                 if payload.get("type").and_then(|x| x.as_str()) == Some("user_message") {
                     if let Some(text) = payload.get("message").and_then(|x| x.as_str()) {
+                        if forked_from_id.is_none() {
+                            if let Some(lineage) = cross_context_lineage_from_text(text) {
+                                forked_from_agent = Some(lineage.agent);
+                                forked_from_id = Some(lineage.session_id);
+                            }
+                        }
                         if !is_system_noise(text) {
-                            let cleaned =
-                                strip_injected_context(&sanitize_user_preview_text(text));
+                            let cleaned = strip_injected_context(&sanitize_user_preview_text(text));
                             if !cleaned.is_empty() {
                                 first_user_message = Some(normalize_preview(&cleaned));
                             }
@@ -565,6 +574,12 @@ fn parse_session(
                     if skip_replayed_user_message {
                         skip_replayed_user_message = false;
                         continue;
+                    }
+                    if forked_from_id.is_none() {
+                        if let Some(lineage) = cross_context_lineage_from_payload(payload) {
+                            forked_from_agent = Some(lineage.agent);
+                            forked_from_id = Some(lineage.session_id);
+                        }
                     }
                     if let Some(text) = extract_message_preview_text(payload) {
                         if !is_system_noise(&text) {
@@ -621,6 +636,7 @@ fn parse_session(
     let info = SessionInfo {
         id,
         agent: Agent::Codex,
+        forked_from_agent,
         forked_from_id,
         project_path: cwd,
         project_name,
@@ -652,6 +668,97 @@ fn codex_parent_thread_id(payload: &serde_json::Value) -> Option<String> {
         .and_then(|x| x.get("parent_thread_id"))
         .and_then(|x| x.as_str())
         .map(String::from)
+}
+
+struct CrossContextLineage {
+    agent: Agent,
+    session_id: String,
+}
+
+fn cross_context_lineage_from_text(text: &str) -> Option<CrossContextLineage> {
+    for path in cross_context_paths_from_text(text) {
+        if let Some(lineage) = cross_context_lineage_from_file(&path) {
+            return Some(lineage);
+        }
+    }
+    parse_cross_context_lineage(text)
+}
+
+fn cross_context_lineage_from_payload(payload: &serde_json::Value) -> Option<CrossContextLineage> {
+    for text in raw_text_values(payload) {
+        if let Some(lineage) = cross_context_lineage_from_text(&text) {
+            return Some(lineage);
+        }
+    }
+    None
+}
+
+fn raw_text_values(value: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_raw_text_values(value, &mut out);
+    out
+}
+
+fn collect_raw_text_values(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text.clone()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_raw_text_values(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["text", "message", "content", "value"] {
+                if let Some(child) = map.get(key) {
+                    collect_raw_text_values(child, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn cross_context_paths_from_text(text: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for marker in ["file://", "uri=\"file://", "ref=\"file://"] {
+        let mut rest = text;
+        while let Some(start) = rest.find(marker) {
+            let after = &rest[start + marker.len()..];
+            let end = after
+                .find(|ch: char| ch == '"' || ch == ')' || ch == '<' || ch.is_whitespace())
+                .unwrap_or(after.len());
+            let raw = &after[..end];
+            if raw.contains("sessio-cross-context") {
+                paths.push(PathBuf::from(percent_decode(raw)));
+            }
+            rest = &after[end..];
+        }
+    }
+    paths
+}
+
+fn cross_context_lineage_from_file(path: &Path) -> Option<CrossContextLineage> {
+    let text = fs::read_to_string(path).ok()?;
+    parse_cross_context_lineage(&text)
+}
+
+fn parse_cross_context_lineage(text: &str) -> Option<CrossContextLineage> {
+    let start = text.find("<!-- sessio-cross:start")?;
+    let after_start = &text[start..];
+    let end = after_start.find("-->")?;
+    let attrs_start = "<!-- sessio-cross:start".len();
+    let attrs = parse_xmlish_attrs(&after_start[attrs_start..end]);
+    let agent = attrs
+        .get("source_agent")
+        .and_then(|value| Agent::from_db_str(value))?;
+    let session_id = attrs.get("source_session_id")?.trim();
+    if session_id.is_empty() {
+        return None;
+    }
+    Some(CrossContextLineage {
+        agent,
+        session_id: session_id.to_string(),
+    })
 }
 
 fn is_codex_guardian_session(payload: &serde_json::Value) -> bool {
@@ -883,7 +990,9 @@ fn remove_file_markdown_links(text: &str) -> String {
             break;
         };
         let close_target = target_start + close_target_rel;
-        let target = out[target_start..close_target].trim().trim_matches(['<', '>']);
+        let target = out[target_start..close_target]
+            .trim()
+            .trim_matches(['<', '>']);
         if !target.starts_with("file://") {
             let prefix_end = close_target + 1;
             let mut next = out[..prefix_end].to_string();
@@ -998,7 +1107,11 @@ fn unescape_xml_attr(value: &str) -> String {
 
 fn file_marker(name: Option<&str>, uri: Option<&str>) -> String {
     let trimmed = name.unwrap_or("attachment").trim();
-    let safe_name = if trimmed.is_empty() { "attachment" } else { trimmed };
+    let safe_name = if trimmed.is_empty() {
+        "attachment"
+    } else {
+        trimmed
+    };
     match uri.map(str::trim).filter(|value| !value.is_empty()) {
         Some(uri) => format!("[file: {safe_name}|{uri}]"),
         None => format!("[file: {safe_name}]"),
@@ -1815,6 +1928,46 @@ mod tests {
     }
 
     #[test]
+    fn parse_session_reads_cross_context_lineage_when_session_meta_has_no_fork() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-cross-lineage-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let context_path = dir.join("sessio-cross-context-parent-123.md");
+        fs::write(
+            &context_path,
+            r#"<!-- sessio-cross:start source_agent="claude" source_session_id="parent-session" source_file_path="/tmp/parent.jsonl" -->
+
+# Continued session from agent
+hello
+
+<!-- sessio-cross:end -->"#,
+        )
+        .unwrap();
+        let path = dir.join("session.jsonl");
+        let meta = r#"{"timestamp":"2026-05-24T07:08:10.000Z","type":"session_meta","payload":{"id":"child-session","timestamp":"2026-05-24T07:08:10.000Z","cwd":"/tmp/project"}}"#;
+        let user = format!(
+            r#"{{"timestamp":"2026-05-24T07:31:00.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"现在怎么样"}},{{"type":"input_text","text":"[@sessio-cross-context-parent-123.md](file://{})\n<context ref=\"file://{}\"></context>"}}]}}}}"#,
+            context_path.display(),
+            context_path.display()
+        );
+        fs::write(&path, format!("{meta}\n{user}\n")).unwrap();
+
+        let info = parse_one_file(&path, false).unwrap().unwrap();
+        assert_eq!(info.forked_from_agent, Some(crate::models::Agent::Claude));
+        assert_eq!(info.forked_from_id.as_deref(), Some("parent-session"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&context_path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
     fn parse_session_hides_internal_guardian_sessions() {
         let dir = std::env::temp_dir().join(format!(
             "sessio-codex-parser-guardian-test-{}-{}",
@@ -1883,6 +2036,7 @@ mod tests {
             info: crate::models::SessionInfo {
                 id: "parent".to_string(),
                 agent: crate::models::Agent::Codex,
+                forked_from_agent: None,
                 forked_from_id: None,
                 project_path: Some("/tmp/project".to_string()),
                 project_name: Some("project".to_string()),
@@ -1906,6 +2060,7 @@ mod tests {
             info: crate::models::SessionInfo {
                 id: "child".to_string(),
                 agent: crate::models::Agent::Codex,
+                forked_from_agent: None,
                 forked_from_id: None,
                 project_path: Some("/tmp/project".to_string()),
                 project_name: Some("project".to_string()),

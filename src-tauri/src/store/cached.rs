@@ -56,6 +56,8 @@ impl CachedStore {
             session_id: s.id.clone(),
             scope: scope.to_string(),
             file_path: s.file_path.clone(),
+            forked_from_agent: s.forked_from_agent,
+            forked_from_id: s.forked_from_id.clone(),
             file_size: s.file_size,
             file_mtime: file_mtime_for(&s.file_path),
             last_indexed_at: now_ms(),

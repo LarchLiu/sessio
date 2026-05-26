@@ -125,6 +125,8 @@ pub struct AgentAttachment {
     pub path: String,
     pub mime_type: Option<String>,
     pub kind: AgentAttachmentKind,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

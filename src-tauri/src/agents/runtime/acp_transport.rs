@@ -6,8 +6,8 @@ use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, EmbeddedResource, EmbeddedResourceResource,
     ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, NewSessionRequest,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification,
-    SessionUpdate, StopReason, TextContent, TextResourceContents,
+    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification, SessionUpdate,
+    StopReason, TextContent, TextResourceContents,
 };
 use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result};
@@ -161,11 +161,12 @@ pub fn probe_initialize_response(command: String) -> Result<AcpInitializeProbe> 
                     .block_task()
                     .await?;
                 let protocol_version = init.protocol_version.to_string();
-                let raw_initialize_response_json = serde_json::to_string(&init).map_err(|error| {
-                    agent_client_protocol::Error::internal_error().data(error.to_string())
-                })?;
-                let raw_capabilities_json =
-                    serde_json::to_string(&init.agent_capabilities).map_err(|error| {
+                let raw_initialize_response_json =
+                    serde_json::to_string(&init).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(error.to_string())
+                    })?;
+                let raw_capabilities_json = serde_json::to_string(&init.agent_capabilities)
+                    .map_err(|error| {
                         agent_client_protocol::Error::internal_error().data(error.to_string())
                     })?;
                 Ok::<AcpInitializeProbe, agent_client_protocol::Error>(AcpInitializeProbe {
@@ -801,13 +802,18 @@ fn image_content_block(attachment: &AgentAttachment) -> Result<ContentBlock> {
     let path = Path::new(&attachment.path);
     ensure_absolute_existing_file(path)?;
     let mime_type = image_mime_type(path)
-        .or_else(|| attachment.mime_type.as_deref().filter(|mime| mime.starts_with("image/")))
+        .or_else(|| {
+            attachment
+                .mime_type
+                .as_deref()
+                .filter(|mime| mime.starts_with("image/"))
+        })
         .context("unsupported image attachment type")?
         .to_string();
     const MAX_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
     ensure_file_size(path, MAX_IMAGE_BYTES, "image attachment is too large")?;
-    let data = std::fs::read(path)
-        .with_context(|| format!("read image attachment {}", path.display()))?;
+    let data =
+        std::fs::read(path).with_context(|| format!("read image attachment {}", path.display()))?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
     Ok(ContentBlock::Image(
         ImageContent::new(encoded, mime_type).uri(file_uri(path)),
@@ -818,7 +824,12 @@ fn text_resource_content_block(attachment: &AgentAttachment) -> Result<ContentBl
     let path = Path::new(&attachment.path);
     ensure_absolute_existing_file(path)?;
     let mime_type = text_mime_type(path)
-        .or_else(|| attachment.mime_type.as_deref().filter(|mime| mime.starts_with("text/")))
+        .or_else(|| {
+            attachment
+                .mime_type
+                .as_deref()
+                .filter(|mime| mime.starts_with("text/"))
+        })
         .context("unsupported file attachment type")?
         .to_string();
     const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
@@ -829,11 +840,7 @@ fn text_resource_content_block(attachment: &AgentAttachment) -> Result<ContentBl
     let marked_text = format!(
         "<sessio-upload-file uri=\"{}\" name=\"{}\" mimeType=\"{}\">\n{}\n</sessio-upload-file>",
         escape_xml_attr(&uri),
-        escape_xml_attr(
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("attachment")
-        ),
+        escape_xml_attr(attachment_display_name(attachment, path)),
         escape_xml_attr(&mime_type),
         text
     );
@@ -861,6 +868,15 @@ fn ensure_absolute_existing_file(path: &Path) -> Result<()> {
         anyhow::bail!("attachment is not a file: {}", path.display());
     }
     Ok(())
+}
+
+fn attachment_display_name<'a>(attachment: &'a AgentAttachment, path: &'a Path) -> &'a str {
+    attachment
+        .display_name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| path.file_name().and_then(|name| name.to_str()))
+        .unwrap_or("attachment")
 }
 
 fn ensure_file_size(path: &Path, max_bytes: u64, message: &str) -> Result<()> {
@@ -906,11 +922,11 @@ fn text_mime_type(path: &Path) -> Option<&'static str> {
         Some("sh") | Some("zsh") | Some("bash") => Some("application/x-sh"),
         Some("sql") => Some("application/sql"),
         Some("ts") | Some("tsx") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs")
-        | Some("py") | Some("rs") | Some("go") | Some("java") | Some("kt")
-        | Some("swift") | Some("rb") | Some("php") | Some("c") | Some("h")
-        | Some("cpp") | Some("hpp") | Some("cs") | Some("lua") | Some("pl")
-        | Some("r") | Some("ex") | Some("exs") | Some("erl") | Some("clj")
-        | Some("scala") | Some("dart") | Some("vue") | Some("svelte") => Some("text/plain"),
+        | Some("py") | Some("rs") | Some("go") | Some("java") | Some("kt") | Some("swift")
+        | Some("rb") | Some("php") | Some("c") | Some("h") | Some("cpp") | Some("hpp")
+        | Some("cs") | Some("lua") | Some("pl") | Some("r") | Some("ex") | Some("exs")
+        | Some("erl") | Some("clj") | Some("scala") | Some("dart") | Some("vue")
+        | Some("svelte") => Some("text/plain"),
         _ => match path
             .file_name()
             .and_then(|name| name.to_str())
@@ -935,16 +951,15 @@ mod tests {
 
     #[test]
     fn text_attachment_becomes_embedded_resource() {
-        let path = std::env::temp_dir().join(format!(
-            "sessio-acp-attachment-{}.md",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("sessio-acp-attachment-{}.md", std::process::id()));
         std::fs::write(&path, "# Context\nhello").expect("write temp text attachment");
 
         let attachment = AgentAttachment {
             path: path.to_string_lossy().to_string(),
             mime_type: None,
             kind: AgentAttachmentKind::File,
+            display_name: None,
         };
         let block = content_block_from_attachment(&attachment).expect("content block");
 
@@ -967,17 +982,43 @@ mod tests {
     }
 
     #[test]
+    fn text_attachment_uses_display_name_when_available() {
+        let path =
+            std::env::temp_dir().join(format!("sessio-acp-display-name-{}.md", std::process::id()));
+        std::fs::write(&path, "# Cross context").expect("write temp text attachment");
+
+        let attachment = AgentAttachment {
+            path: path.to_string_lossy().to_string(),
+            mime_type: None,
+            kind: AgentAttachmentKind::File,
+            display_name: Some("sessio-cross-context.md".to_string()),
+        };
+        let block = content_block_from_attachment(&attachment).expect("content block");
+
+        match block {
+            ContentBlock::Resource(resource) => match resource.resource {
+                EmbeddedResourceResource::TextResourceContents(contents) => {
+                    assert!(contents.text.contains("name=\"sessio-cross-context.md\""));
+                }
+                _ => panic!("expected text resource contents"),
+            },
+            _ => panic!("expected resource block"),
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn image_attachment_becomes_image_block() {
-        let path = std::env::temp_dir().join(format!(
-            "sessio-acp-attachment-{}.png",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("sessio-acp-attachment-{}.png", std::process::id()));
         std::fs::write(&path, [1_u8, 2, 3, 4]).expect("write temp image attachment");
 
         let attachment = AgentAttachment {
             path: path.to_string_lossy().to_string(),
             mime_type: None,
             kind: AgentAttachmentKind::Image,
+            display_name: None,
         };
         let block = content_block_from_attachment(&attachment).expect("content block");
 
@@ -985,7 +1026,11 @@ mod tests {
             ContentBlock::Image(image) => {
                 assert_eq!(image.mime_type, "image/png");
                 assert_eq!(image.data, "AQIDBA==");
-                assert!(image.uri.as_deref().unwrap_or_default().starts_with("file://"));
+                assert!(image
+                    .uri
+                    .as_deref()
+                    .unwrap_or_default()
+                    .starts_with("file://"));
             }
             _ => panic!("expected image block"),
         }

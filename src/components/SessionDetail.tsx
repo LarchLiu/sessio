@@ -12,7 +12,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, UserKey, Wrench } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Hand, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, UserKey, Wrench, type LucideIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -24,6 +24,7 @@ import type { Options as SanitizeSchema } from "rehype-sanitize";
 import "katex/dist/katex.min.css";
 import {
   type AgentAttachment,
+  type Agent,
   SessionInfo,
   SessionMessage,
   RuntimeAgentMetadata,
@@ -37,11 +38,15 @@ import {
   cancelAgentTurn,
   respondAgentPermission,
   sendAgentInput,
+  startAgentSession,
   setAgentSessionConfigOption,
   updateSessionMessageCount,
+  writeCrossPrompt,
 } from "../api";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
+import { agentSelectOptions } from "./AgentSelect";
+import InlineMenuSelect, { type InlineMenuSelectOption } from "./InlineMenuSelect";
 import {
   attachmentMenuOptions,
   type ComposerAttachment,
@@ -73,6 +78,7 @@ import {
   type LiveRuntimeSession,
   type LiveTurn,
 } from "../runtimeChat";
+import { buildCrossPrompt } from "../cross";
 
 interface Props {
   session: SessionInfo;
@@ -80,7 +86,9 @@ interface Props {
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   runtimeSessionAliases?: Record<string, string>;
+  ancestorSessions?: SessionInfo[];
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
+  onPendingSession: (session: PendingAgentSession) => void;
   onMessageCount: (
     agent: SessionInfo["agent"],
     filePath: string,
@@ -99,6 +107,17 @@ export interface ActiveMessageMeta {
 interface FilePreview {
   title: string;
   text: string;
+}
+
+interface PendingAgentSession {
+  sessioRuntimeSessionId: string;
+  agent: Agent;
+  projectPath: string;
+  projectName: string;
+  prompt: string;
+  timestamp: number;
+  forkedFromAgent?: Agent | null;
+  forkedFromId?: string | null;
 }
 
 // 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
@@ -166,7 +185,9 @@ function SessionDetail({
   liveState,
   runtimeAgents,
   runtimeSessionAliases = {},
+  ancestorSessions = [],
   dispatchLiveEvent,
+  onPendingSession,
   onMessageCount,
   onActiveMessageMeta,
 }: Props) {
@@ -260,6 +281,7 @@ function SessionDetail({
           agent={session.agent}
           filePath={tab.kind === "main" ? session.filePath : tab.sub.filePath}
           sessionId={session.id}
+          ancestorSessions={tab.kind === "main" ? ancestorSessions : []}
           available={
             tab.kind === "main"
               ? session.available || Boolean(liveState.sessions[runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id])
@@ -275,6 +297,7 @@ function SessionDetail({
           runtimeAgents={runtimeAgents}
           runtimeSessionAliases={runtimeSessionAliases}
           dispatchLiveEvent={dispatchLiveEvent}
+          onPendingSession={onPendingSession}
           onPreviewImage={setPreviewImage}
           onPreviewFile={setPreviewFile}
           onFilePreviewError={setFilePreviewNotice}
@@ -353,6 +376,7 @@ function MessageStream({
   agent,
   filePath,
   sessionId,
+  ancestorSessions = [],
   available,
   emptyHint,
   viewMode,
@@ -360,6 +384,7 @@ function MessageStream({
   runtimeAgents,
   runtimeSessionAliases,
   dispatchLiveEvent,
+  onPendingSession,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -371,6 +396,7 @@ function MessageStream({
   agent: SessionInfo["agent"];
   filePath: string;
   sessionId: string;
+  ancestorSessions?: SessionInfo[];
   available: boolean;
   emptyHint: string;
   viewMode: ViewMode;
@@ -378,6 +404,7 @@ function MessageStream({
   runtimeAgents: RuntimeAgentMetadata[];
   runtimeSessionAliases: Record<string, string>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
+  onPendingSession: (session: PendingAgentSession) => void;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -393,6 +420,20 @@ function MessageStream({
 }) {
   const { t } = useI18n();
   const sourceKey = messageSourceKey(agent, filePath, sessionId);
+  const ancestorSourceKeys = useMemo(
+    () =>
+      ancestorSessions
+        .filter((session) => session.available && session.filePath)
+        .map((session) => messageSourceKey(session.agent, session.filePath, session.id)),
+    [ancestorSessions],
+  );
+  const ancestorCacheKey = ancestorSourceKeys.join("->");
+  const allAncestorCacheFresh = ancestorSessions
+    .filter((session) => session.available && session.filePath)
+    .every((session) => {
+      const cached = messageCache.get(messageSourceKey(session.agent, session.filePath, session.id));
+      return cached?.messageCount === session.messageCount;
+    });
   const cachedEntry = messageCache.get(sourceKey);
   const isFreshCache =
     Boolean(cachedEntry) && cachedEntry?.messageCount === messageCount;
@@ -400,24 +441,44 @@ function MessageStream({
   const [messages, setMessages] = useState<SessionMessage[]>(
     cachedEntry?.messages ?? [],
   );
+  const [ancestorMessages, setAncestorMessages] = useState<SessionMessage[]>(() =>
+    allAncestorCacheFresh
+      ? ancestorSessions
+          .filter((session) => session.available && session.filePath)
+          .flatMap(
+            (session) =>
+              messageCache.get(messageSourceKey(session.agent, session.filePath, session.id))
+                ?.messages ?? [],
+          )
+      : [],
+  );
   const [loading, setLoading] = useState(() => !isFreshCache);
+  const [ancestorsLoading, setAncestorsLoading] = useState(() =>
+    ancestorSessions.some((session) => session.available && session.filePath) &&
+    !allAncestorCacheFresh,
+  );
   const [error, setError] = useState<string | null>(null);
   const runtimeSessionId = runtimeSessionAliases[`${agent}:${sessionId}`] ?? sessionId;
   const [composerText, setComposerText] = useState("");
   const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [composerAgent, setComposerAgent] = useState<Agent>(agent);
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const liveStreamingRef = useRef(false);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
+  const agentOptions = useMemo(() => agentSelectOptions(runtimeAgents), [runtimeAgents]);
+  const selectedComposerAgent =
+    runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
   const fallbackRuntimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
   const fallbackCapabilities = fallbackRuntimeAgent?.capabilities ?? null;
+  const fallbackComposerCapabilities =
+    selectedComposerAgent?.capabilities ?? (composerAgent === agent ? fallbackCapabilities : null);
   const attachmentCapabilities =
-    liveSession?.capabilities ?? fallbackCapabilities;
+    (composerAgent === agent ? liveSession?.capabilities : null) ?? fallbackComposerCapabilities;
   const {
     attachments,
     supportsAttachments,
@@ -496,16 +557,70 @@ function MessageStream({
     skipHistoryLoad,
   ]);
 
-  const acpViewModel = useMemo<AcpViewModel>(() => {
-    const historyViewModel = cachedHistoryViewModel(sourceKey, viewMode, messages);
-    if (liveSession && liveSession.turns.length > 0) {
-      return mergeHistoryAndLiveViewModels(
-        historyViewModel,
-        liveSessionToAcpViewModel(liveSession),
-      );
+  useEffect(() => {
+    const readableAncestors = ancestorSessions.filter((session) => session.available && session.filePath);
+    if (readableAncestors.length === 0) {
+      setAncestorMessages([]);
+      setAncestorsLoading(false);
+      return;
     }
-    return historyViewModel;
-  }, [liveSession, messages, sourceKey, viewMode]);
+    if (allAncestorCacheFresh) {
+      setAncestorMessages(
+        readableAncestors.flatMap(
+          (session) =>
+            messageCache.get(messageSourceKey(session.agent, session.filePath, session.id))
+              ?.messages ?? [],
+        ),
+      );
+      setAncestorsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setAncestorsLoading(true);
+    Promise.all(
+      readableAncestors.map(async (session) => {
+        const key = messageSourceKey(session.agent, session.filePath, session.id);
+        const cached = messageCache.get(key);
+        if (cached && cached.messageCount === session.messageCount) {
+          return cached.messages;
+        }
+        const result = await getSessionMessages(session.agent, session.filePath, session.id);
+        messageCache.set(key, {
+          messages: result.messages,
+          messageCount: result.messageCount,
+          loadedAt: Date.now(),
+        });
+        return result.messages;
+      }),
+    )
+      .then((results) => {
+        if (cancelled) return;
+        startTransition(() => {
+          setAncestorMessages(results.flat());
+          setAncestorsLoading(false);
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(String(err));
+        setAncestorsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [allAncestorCacheFresh, ancestorCacheKey, ancestorSessions]);
+
+  const acpViewModel = useMemo<AcpViewModel>(() => {
+    const historyMessages = forkVisibleHistoryMessages(ancestorMessages, messages);
+    const historyKey = ancestorCacheKey ? `${ancestorCacheKey}->${sourceKey}` : sourceKey;
+    const historyViewModel = cachedHistoryViewModel(historyKey, viewMode, historyMessages);
+    if (!liveSession || liveSession.turns.length === 0) return historyViewModel;
+    return mergeHistoryAndLiveViewModels(
+      historyViewModel,
+      liveSessionToAcpViewModel(liveSession),
+    );
+  }, [ancestorCacheKey, ancestorMessages, liveSession, messages, sourceKey, viewMode]);
 
   const displayItems = useMemo(
     () => cachedAcpRenderItems(acpViewModel),
@@ -520,14 +635,6 @@ function MessageStream({
     () => renderItemKeys(visibleDisplayItems),
     [visibleDisplayItems],
   );
-
-  const liveStreamingKey = useMemo(() => {
-    if (!liveSession) return "";
-    return liveSession.turns
-      .filter((turn) => turn.status === "streaming")
-      .map((turn) => `${turn.turnId}:${turn.blocks.length}:${turn.updatedAt}`)
-      .join("|");
-  }, [liveSession]);
   const liveActiveKey = useMemo(() => {
     if (!liveSession) return "";
     return liveSession.turns
@@ -535,6 +642,7 @@ function MessageStream({
       .map((turn) => turn.turnId)
       .join("|");
   }, [liveSession]);
+  const sessionStateRuntimeSessionId = runtimeSessionId;
   const liveCacheKey = useMemo(() => {
     if (!liveSession) return "";
     return liveSession.turns
@@ -572,7 +680,7 @@ function MessageStream({
     available,
     filePath,
     skipHistoryLoad,
-    loading,
+    loading: loading || ancestorsLoading,
     visibleDisplayItemCount: visibleDisplayItems.length,
     visibleDisplayItemKeys,
     liveActiveKey,
@@ -623,8 +731,6 @@ function MessageStream({
       turn.status === "cancelling"
     )?.turnId ?? null;
   }, [liveSession]);
-  liveStreamingRef.current = Boolean(liveStreamingKey);
-
   useEffect(() => {
     if (!liveActiveKey) return;
     setRuntimeNow(Date.now());
@@ -635,6 +741,16 @@ function MessageStream({
   useEffect(() => {
     if (!activeTurnId) activeRuntimeTurnIdRef.current = null;
   }, [activeTurnId]);
+
+  useEffect(() => {
+    setComposerAgent(agent);
+    activeRuntimeTurnIdRef.current = null;
+  }, [agent, sessionId]);
+
+  useEffect(() => {
+    if (agentOptions.some((option) => option.value === composerAgent)) return;
+    setComposerAgent((runtimeAgents[0]?.agent ?? agent) as Agent);
+  }, [agent, agentOptions, composerAgent, runtimeAgents]);
 
   const handleSendText = useCallback(async (
     rawText: string,
@@ -677,55 +793,106 @@ function MessageStream({
     setSending(true);
     setComposerError(null);
     activeRuntimeTurnIdRef.current = null;
-    beginFollowingLiveStream();
     const timestamp = Date.now();
     const optimisticTurnId = `local-turn-${timestamp}`;
-    const optimisticSessionId = runtimeSessionId;
-    let pendingRuntimeSessionId = optimisticSessionId;
+    const targetAgent = composerAgent;
+    const sameAgent = targetAgent === agent;
+    let pendingRuntimeSessionId: string | null = sameAgent ? runtimeSessionId : null;
     console.info("[sessio-runtime:frontend:send]", {
       text,
       runtimeSessionId,
-      optimisticSessionId,
+      targetAgent,
       workspacePath,
       sourceSessionId: sessionId,
     });
-    if (!liveState.sessions[optimisticSessionId]) {
+    if (sameAgent && !liveState.sessions[runtimeSessionId]) {
       dispatchLiveEvent({
         type: "ensure-session",
         session: pendingLiveSession({
-          sessioRuntimeSessionId: optimisticSessionId,
-          agent,
+          sessioRuntimeSessionId: runtimeSessionId,
+          agent: targetAgent,
           workspacePath: workspacePath ?? "",
-          capabilities: fallbackCapabilities,
+          capabilities: fallbackComposerCapabilities,
         }),
       });
     }
-    dispatchLiveEvent({
-      type: "optimistic-user-message",
-      sessioRuntimeSessionId: optimisticSessionId,
-      turnId: optimisticTurnId,
-      text,
-      attachments: agentAttachments,
-      timestamp,
-    });
-    scrollChatToBottom();
-    try {
-      await ensureAgentRuntimeSession({
-        agent,
+    if (sameAgent) {
+      beginFollowingLiveStream();
+      dispatchLiveEvent({
+        type: "optimistic-user-message",
         sessioRuntimeSessionId: runtimeSessionId,
-        workspacePath,
-        agentRuntimeSessionId: sessionId,
-        sourceAgent: agent,
-      });
-      pendingRuntimeSessionId = runtimeSessionId;
-      const turn = await sendAgentInput(runtimeSessionId, {
+        turnId: optimisticTurnId,
         text,
         attachments: agentAttachments,
+        timestamp,
+      });
+      scrollChatToBottom();
+    }
+    try {
+      const handle = sameAgent
+        ? await ensureAgentRuntimeSession({
+            agent: targetAgent,
+            sessioRuntimeSessionId: runtimeSessionId,
+            workspacePath,
+            agentRuntimeSessionId: sessionId,
+            sourceAgent: agent,
+          })
+        : await startAgentSession({
+            agent: targetAgent,
+            workspacePath,
+            sourceAgent: agent,
+            sourceSessionId: sessionId,
+            options: { transport: "acp" },
+          });
+      pendingRuntimeSessionId = handle.sessioRuntimeSessionId;
+      if (!sameAgent) {
+        dispatchLiveEvent({
+          type: "ensure-session",
+          session: pendingLiveSession({
+            sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+            agent: handle.agent,
+            workspacePath: handle.workspacePath,
+            capabilities: handle.capabilities,
+          }),
+        });
+        dispatchLiveEvent({
+          type: "optimistic-user-message",
+          sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+          turnId: optimisticTurnId,
+          text,
+          attachments: agentAttachments,
+          timestamp,
+        });
+        onPendingSession({
+          sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+          agent: handle.agent,
+          projectPath: workspacePath,
+          projectName: workspacePath.split(/[/\\]/).filter(Boolean).pop() ?? workspacePath,
+          prompt: text,
+          timestamp,
+          forkedFromAgent: agent,
+          forkedFromId: sessionId,
+        });
+      }
+      const inputAttachmentsWithContext = sameAgent
+        ? agentAttachments
+        : [
+            ...agentAttachments,
+            await crossContextAttachment({
+              sourceAgent: agent,
+              sourceSessionId: sessionId,
+              sourceFilePath: filePath,
+              messages: [...ancestorMessages, ...messages],
+            }),
+          ];
+      const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
+        text,
+        attachments: inputAttachmentsWithContext,
       });
       activeRuntimeTurnIdRef.current = turn.turnId;
       dispatchLiveEvent({
         type: "replace-turn-id",
-        sessioRuntimeSessionId: runtimeSessionId,
+        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
         from: optimisticTurnId,
         to: turn.turnId,
       });
@@ -750,7 +917,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, clearAttachments, dispatchLiveEvent, fallbackCapabilities, liveState.sessions, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -796,7 +963,7 @@ function MessageStream({
           <div ref={chatContentRef} className="flex flex-col gap-2">
             <AcpSessionStatePanel
               state={acpViewModel.sessionState}
-              sessioRuntimeSessionId={runtimeSessionId}
+              sessioRuntimeSessionId={sessionStateRuntimeSessionId}
               onRunCommand={handleSendText}
             />
             {visibleDisplayItems.map((item, i) => (
@@ -852,7 +1019,8 @@ function MessageStream({
         active={Boolean(activeTurnId)}
         sending={sending}
         error={composerError}
-        contextLabel="52% used"
+        agent={composerAgent}
+        agentOptions={agentOptions}
         placeholder="Ask, Search or Chat..."
         attachments={attachments}
         supportsAttachments={supportsAttachments}
@@ -860,6 +1028,7 @@ function MessageStream({
         supportsEmbeddedContext={supportsEmbeddedContext}
         onRemoveAttachment={removeAttachment}
         onPickAttachments={pickAttachments}
+        onAgentChange={(nextAgent) => setComposerAgent(nextAgent as Agent)}
         onChange={setComposerText}
         onSend={handleSend}
         onCancel={handleCancelTurn}
@@ -1188,7 +1357,8 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   active: boolean;
   sending: boolean;
   error: string | null;
-  contextLabel: string;
+  agent: SessionInfo["agent"];
+  agentOptions: InlineMenuSelectOption[];
   placeholder: string;
   attachments: ComposerAttachment[];
   supportsAttachments: boolean;
@@ -1196,6 +1366,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   supportsEmbeddedContext: boolean;
   onRemoveAttachment: (path: string) => void;
   onPickAttachments: (kind: "images" | "files") => Promise<void>;
+  onAgentChange: (agent: string) => void;
   onChange: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
@@ -1206,7 +1377,8 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     active,
     sending,
     error,
-    contextLabel,
+    agent,
+    agentOptions,
     placeholder,
     attachments,
     supportsAttachments,
@@ -1214,12 +1386,14 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     supportsEmbeddedContext,
     onRemoveAttachment,
     onPickAttachments,
+    onAgentChange,
     onChange,
     onSend,
     onCancel,
   },
   ref,
 ) {
+  const { t } = useI18n();
   const canSend = value.trim().length > 0 && !disabled && !sending && !active;
   const canCancel = active && !disabled && !sending;
   const disabledTitle = disabled ? "Select a project-backed session to chat" : undefined;
@@ -1229,8 +1403,8 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   const attachmentOptions = attachmentMenuOptions({
     supportsImageAttachments,
     supportsEmbeddedContext,
-    imageLabel: "Add images",
-    fileLabel: "Add files",
+    imageLabel: t("new_chat.add_images"),
+    fileLabel: t("new_chat.add_files"),
   });
 
   useEffect(() => {
@@ -1258,10 +1432,10 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
         )}
         <div
           className={
-            "rounded-lg border bg-ink/[0.045] transition-colors " +
+            "overflow-hidden rounded-2xl bg-ink/[0.055] shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.08)] transition-shadow " +
             (error
-              ? "border-status-error/35"
-              : "border-ink/10 focus-within:border-ink/24")
+              ? "shadow-[inset_0_0_0_1px_rgb(var(--color-status-error)/0.35)]"
+              : "focus-within:shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.20)]")
           }
           title={disabledTitle}
         >
@@ -1287,46 +1461,45 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
               event.preventDefault();
               if (canSend) onSend();
             }}
-            className="chat-composer-textarea block w-full resize-none bg-transparent px-3 py-3 text-body leading-5 text-ink/85 placeholder:text-ink/45 outline-none disabled:cursor-not-allowed disabled:opacity-55"
+            className="chat-composer-textarea block w-full resize-none bg-transparent px-3.5 py-3.5 text-body leading-5 text-ink/88 placeholder:text-ink/38 outline-none disabled:cursor-not-allowed disabled:opacity-55"
           />
-          <div className="flex h-11 items-center justify-between gap-3 px-2.5 pb-2">
+          <div className="flex h-12 items-center justify-between gap-3 px-3 pb-2">
             <div className="flex min-w-0 items-center gap-3">
               {supportsAttachments && (
-                <Tooltip content="Add context" placement="top">
+                <Tooltip content={t("new_chat.add_context")} placement="top">
                   <button
                     ref={attachmentButtonRef}
                     type="button"
                     disabled={disabled}
                     onClick={() => setAttachmentMenuOpen((open) => !open)}
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-ink/20 text-ink/55 transition hover:border-ink/35 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
-                    aria-label="Add context"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
+                    aria-label={t("new_chat.add_context")}
                     aria-expanded={attachmentMenuOpen}
                     aria-haspopup="menu"
                   >
-                    <Plus className="h-4 w-4" />
+                    <Plus className="h-5 w-5" />
                   </button>
                 </Tooltip>
               )}
-              <button
-                type="button"
-                disabled={disabled}
-                className="text-body-sm font-medium text-ink/62 transition hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
-              >
-                Auto
-              </button>
+              <ChatComposerMenuButton icon={Hand} label="Default permissions" disabled={disabled} text />
             </div>
-            <div className="flex shrink-0 items-center gap-3">
-              <span className="text-body-sm font-medium text-ink/50">
-                {contextLabel}
-              </span>
+            <div className="flex shrink-0 items-center gap-2.5">
+              <ChatComposerAgentSelect
+                agent={agent}
+                options={agentOptions}
+                disabled={disabled || sending || active}
+                ariaLabel={t("new_chat.agent")}
+                onChange={onAgentChange}
+              />
+              <ChatComposerMenuButton icon={Mic} label={t("new_chat.voice")} disabled={disabled} />
               <button
                 type="button"
                 disabled={active ? !canCancel : !canSend}
                 onClick={active ? onCancel : onSend}
-                className="flex h-6 w-6 items-center justify-center rounded-full bg-ink text-[rgb(var(--color-bg-panel))] transition hover:bg-ink/85 disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
-                aria-label={active ? "Stop" : sending ? "Sending" : "Send"}
+                className="flex h-7 w-7 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
+                aria-label={active ? "Stop" : sending ? t("new_chat.sending") : t("new_chat.send")}
               >
-                {active ? <Square className="h-3 w-3 fill-current" /> : <ArrowUp className="h-4 w-4" />}
+                {active ? <Square className="h-3.5 w-3.5 fill-current" /> : <ArrowUp className="h-5 w-5" />}
               </button>
             </div>
           </div>
@@ -1345,6 +1518,65 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     </div>
   );
 });
+
+function ChatComposerAgentSelect({
+  agent,
+  options,
+  disabled,
+  ariaLabel,
+  onChange,
+}: {
+  agent: SessionInfo["agent"];
+  options: InlineMenuSelectOption[];
+  disabled: boolean;
+  ariaLabel: string;
+  onChange: (agent: string) => void;
+}) {
+  return (
+    <div className="flex min-w-0 max-w-[220px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
+      <InlineMenuSelect
+        value={agent}
+        options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
+        onChange={onChange}
+        menuAlign="trigger"
+        placeholder={ariaLabel}
+        ariaLabel={ariaLabel}
+        className="h-7 max-w-[220px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
+        menuClassName="bg-surface-panel"
+        minMenuWidth={180}
+        emptyContent={ariaLabel}
+      />
+    </div>
+  );
+}
+
+function ChatComposerMenuButton({
+  icon: Icon,
+  label,
+  disabled,
+  text,
+}: {
+  icon: LucideIcon;
+  label: string;
+  disabled?: boolean;
+  text?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      className={
+        "flex min-w-0 items-center gap-1.5 rounded-md py-1 text-body-sm text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45 " +
+        (text ? "max-w-[220px] px-1.5" : "h-7 w-7 justify-center px-0")
+      }
+      aria-label={label}
+    >
+      <Icon className="h-4 w-4 shrink-0" />
+      {text && <span className="truncate">{label}</span>}
+      {text && <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+    </button>
+  );
+}
 
 function resizeTextareaToContent(el: HTMLTextAreaElement) {
   el.style.height = "auto";
@@ -2669,6 +2901,43 @@ function latestMessageTimestamp(messages: SessionMessage[]): number | null {
   return latest;
 }
 
+function forkVisibleHistoryMessages(
+  ancestorMessages: SessionMessage[],
+  currentMessages: SessionMessage[],
+): SessionMessage[] {
+  if (ancestorMessages.length === 0) return currentMessages;
+  if (currentMessages.length === 0) return ancestorMessages;
+
+  const firstCurrentUser = currentMessages.find((message) => message.role === "user");
+  if (!firstCurrentUser) return [...ancestorMessages, ...currentMessages];
+
+  let lastAncestorUserIndex = -1;
+  for (let i = ancestorMessages.length - 1; i >= 0; i -= 1) {
+    const role = ancestorMessages[i].role;
+    if (role === "assistant") break;
+    if (role === "user") {
+      lastAncestorUserIndex = i;
+      break;
+    }
+  }
+  if (lastAncestorUserIndex < 0) return [...ancestorMessages, ...currentMessages];
+
+  const lastAncestorUser = ancestorMessages[lastAncestorUserIndex];
+  if (normalizedUserMessageText(lastAncestorUser.text) !== normalizedUserMessageText(firstCurrentUser.text)) {
+    return [...ancestorMessages, ...currentMessages];
+  }
+  return [
+    ...ancestorMessages.slice(0, lastAncestorUserIndex),
+    ...currentMessages,
+  ];
+}
+
+function normalizedUserMessageText(text: string): string {
+  return stripInjectedContext(stripSessioUploadWrapper(text))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 type AcpRenderItem =
   | { kind: "turnStatus"; turn: LiveTurn }
   | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
@@ -2775,6 +3044,35 @@ function mergeHistoryAndLiveViewModels(
   return {
     ...liveViewModel,
     turns: [...historyViewModel.turns, ...liveViewModel.turns],
+  };
+}
+
+async function crossContextAttachment({
+  messages,
+  sourceAgent,
+  sourceSessionId,
+  sourceFilePath,
+}: {
+  messages: SessionMessage[];
+  sourceAgent: Agent;
+  sourceSessionId: string;
+  sourceFilePath: string;
+}): Promise<AgentAttachment> {
+  const content = buildCrossPrompt(messages, {
+    sourceAgent,
+    sourceSessionId,
+    sourceFilePath,
+  });
+  const path = await writeCrossPrompt(
+    sourceSessionId,
+    content || "# Continued session from another agent\n",
+  );
+  const displayName = path.split(/[/\\]/).filter(Boolean).pop() || "sessio-cross-context.md";
+  return {
+    path,
+    mimeType: "text/markdown",
+    kind: "file",
+    displayName,
   };
 }
 

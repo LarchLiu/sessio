@@ -1613,6 +1613,7 @@ mod tests {
                 &SessionInfo {
                     id: earlier_session_id.clone(),
                     agent: Agent::Codex,
+                    forked_from_agent: None,
                     forked_from_id: None,
                     project_path: earlier_source
                         .project

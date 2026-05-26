@@ -5,6 +5,8 @@ export type Agent = "codex" | "claude" | "gemini";
 export interface SessionInfo {
   id: string;
   agent: Agent;
+  forkedFromAgent?: Agent | null;
+  forkedFromId?: string | null;
   projectPath: string | null;
   projectName: string | null;
   startedAt: number | null;
@@ -156,6 +158,7 @@ export interface AgentAttachment {
   mimeType: string | null;
   kind: "image" | "file";
   previewDataUrl?: string | null;
+  displayName?: string | null;
 }
 
 export interface AgentInput {
@@ -296,6 +299,13 @@ export type SessionScope =
 
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function getSessionAncestors(
+  agent: Agent,
+  sessionId: string,
+): Promise<SessionInfo[]> {
+  return invoke<SessionInfo[]>("get_session_ancestors", { agent, sessionId });
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {

@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, type LucideIcon } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, KeyRound, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -24,6 +24,7 @@ import {
   RuntimeAgentMetadata,
   SessionInfo,
   rebuildSessionIndex,
+  getSessionAncestors,
   listSessions,
   removeSessionsByScope,
   removeSessionFiles,
@@ -36,6 +37,7 @@ import { syncTrayMenu } from "./tray";
 import SessionDetail, { type ActiveMessageMeta } from "./components/SessionDetail";
 import SessionMemory, { SessionMetaList } from "./components/SessionMemory";
 import { AgentGlyph } from "./components/AgentIcon";
+import { agentSelectOptions } from "./components/AgentSelect";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
 import {
@@ -115,6 +117,68 @@ function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
 }
 
+function sessionIdentity(agent: Agent, sessionId: string): string {
+  return `${agent}:${sessionId}`;
+}
+
+function ancestorSessionsFor(session: SessionInfo, sessions: SessionInfo[]): SessionInfo[] {
+  const byIdentity = new Map<string, SessionInfo>();
+  for (const item of sessions) {
+    const key = sessionIdentityKey(item);
+    const current = byIdentity.get(key);
+    if (!current || isBetterLineageCandidate(item, current)) {
+      byIdentity.set(key, item);
+    }
+  }
+  const chain: SessionInfo[] = [];
+  const seen = new Set<string>([sessionIdentityKey(session)]);
+  let cursor: SessionInfo | undefined = session;
+
+  for (let depth = 0; depth < 32; depth += 1) {
+    const parentId = cursor?.forkedFromId;
+    const parentAgent = cursor?.forkedFromAgent ?? (parentId ? cursor?.agent : null);
+    if (!parentId || !parentAgent) break;
+
+    const key = sessionIdentity(parentAgent, parentId);
+    if (seen.has(key)) break;
+    seen.add(key);
+
+    const parent = byIdentity.get(key);
+    if (!parent) break;
+    chain.push(parent);
+    cursor = parent;
+  }
+
+  return chain.reverse();
+}
+
+function isBetterLineageCandidate(candidate: SessionInfo, current: SessionInfo): boolean {
+  if (candidate.available !== current.available) return candidate.available;
+  if (Boolean(candidate.filePath) !== Boolean(current.filePath)) return Boolean(candidate.filePath);
+  return (candidate.updatedAt ?? candidate.startedAt ?? 0) > (current.updatedAt ?? current.startedAt ?? 0);
+}
+
+function mergePendingSession(sessions: SessionInfo[], pending: SessionInfo): SessionInfo[] {
+  const index = sessions.findIndex((session) => sessionIdentityKey(session) === sessionIdentityKey(pending));
+  if (index < 0) return [pending, ...sessions];
+
+  const existing = sessions[index];
+  const merged: SessionInfo = {
+    ...pending,
+    ...existing,
+    forkedFromAgent: existing.forkedFromAgent ?? pending.forkedFromAgent ?? null,
+    forkedFromId: existing.forkedFromId ?? pending.forkedFromId ?? null,
+    filePath: existing.filePath || pending.filePath,
+    fileSize: existing.filePath ? existing.fileSize : pending.fileSize,
+    partial: existing.filePath ? existing.partial : pending.partial,
+    messageCount: Math.max(existing.messageCount, pending.messageCount),
+    subagents: existing.subagents.length > 0 ? existing.subagents : pending.subagents,
+  };
+  const next = sessions.slice();
+  next[index] = merged;
+  return next;
+}
+
 function messageCountKey(agent: Agent, filePath: string, sessionId: string): string {
   return `${agent}:${sessionId}:${filePath}`;
 }
@@ -136,6 +200,8 @@ type DeleteTarget =
 type PendingNewChatSession = {
   sessioRuntimeSessionId: string;
   agent: Agent;
+  forkedFromAgent?: Agent | null;
+  forkedFromId?: string | null;
   projectPath: string;
   projectName: string;
   prompt: string;
@@ -285,7 +351,7 @@ export default function App() {
     listSessions()
       .then((rows) => {
         if (cancelled) return;
-        setSessions(rows.filter((s) => s.available));
+        setSessions(rows);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -308,7 +374,7 @@ export default function App() {
     const unlisten = listen("sessions_index_updated", () => {
       setIndexPhase("idle");
       listSessions()
-        .then((rows) => setSessions(rows.filter((s) => s.available)))
+        .then((rows) => setSessions(rows))
         .catch(() => {});
       refreshMemoryBackendStatus(setMemoryBackendStatus);
     });
@@ -395,13 +461,21 @@ export default function App() {
       const liveSession = liveRuntimeState.sessions[pending.sessioRuntimeSessionId];
       if (!liveSession) continue;
       const agentSessionId = liveSession.agentRuntimeSessionId;
-      if (!agentSessionId || agentSessionId.startsWith("fake-agent-session")) continue;
+      if (
+        !agentSessionId ||
+        agentSessionId === "pending" ||
+        agentSessionId.startsWith("fake-agent-session")
+      ) {
+        continue;
+      }
       if (pendingNewChatWritesRef.current.has(pending.sessioRuntimeSessionId)) continue;
 
       pendingNewChatWritesRef.current.add(pending.sessioRuntimeSessionId);
-      createPendingSession({
+      const pendingSession: SessionInfo = {
         id: agentSessionId,
         agent: pending.agent,
+        forkedFromAgent: pending.forkedFromAgent ?? null,
+        forkedFromId: pending.forkedFromId ?? null,
         projectPath: pending.projectPath,
         projectName: pending.projectName,
         startedAt: pending.timestamp,
@@ -415,12 +489,16 @@ export default function App() {
         available: true,
         archived: false,
         subagents: [],
-      })
+      };
+      createPendingSession(pendingSession)
         .then(() => {
           setRuntimeSessionAliases((prev) => ({
             ...prev,
             [`${pending.agent}:${agentSessionId}`]: pending.sessioRuntimeSessionId,
           }));
+          setSessions((prev) => mergePendingSession(prev, pendingSession));
+          setSelected(pendingSession);
+          setDetailMode("chat");
           setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
           setPendingNewChats((prev) => {
             const next = { ...prev };
@@ -608,6 +686,40 @@ export default function App() {
 
   const selectedKey = selected ? sessionKey(selected) : null;
   const selectedIdentityKey = selected ? sessionIdentityKey(selected) : null;
+  const fallbackAncestorSessions = useMemo(
+    () => (selected ? ancestorSessionsFor(selected, sessions) : []),
+    [sessions, selected],
+  );
+  const [dbAncestorSessions, setDbAncestorSessions] = useState<SessionInfo[]>([]);
+  const [dbAncestorSourceKey, setDbAncestorSourceKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!selected) {
+      setDbAncestorSessions([]);
+      setDbAncestorSourceKey(null);
+      return;
+    }
+    const sourceKey = sessionIdentityKey(selected);
+    let cancelled = false;
+    getSessionAncestors(selected.agent, selected.id)
+      .then((ancestors) => {
+        if (cancelled) return;
+        setDbAncestorSessions(ancestors);
+        setDbAncestorSourceKey(sourceKey);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("load session ancestors failed", err);
+        setDbAncestorSessions([]);
+        setDbAncestorSourceKey(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+  const selectedAncestorSessions =
+    selected && dbAncestorSourceKey === selectedIdentityKey
+      ? dbAncestorSessions
+      : fallbackAncestorSessions;
 
   useEffect(() => {
     syncTrayMenu(recentForMenu, {
@@ -984,7 +1096,14 @@ export default function App() {
                 liveState={liveRuntimeState}
                 runtimeAgents={runtimeAgents}
                 runtimeSessionAliases={runtimeSessionAliases}
+                ancestorSessions={selectedAncestorSessions}
                 dispatchLiveEvent={dispatchLiveRuntimeEvent}
+                onPendingSession={(pending) => {
+                  setPendingNewChats((prev) => ({
+                    ...prev,
+                    [pending.sessioRuntimeSessionId]: pending,
+                  }));
+                }}
                 onMessageCount={handleMessageCount}
                 onActiveMessageMeta={handleActiveMessageMeta}
               />
@@ -1796,7 +1915,7 @@ function SidebarSessionStatus({
   if (activity === "running") {
     return (
       <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
-        <RefreshCw className="h-3 w-3 animate-spin" />
+        <LoaderCircle className="h-3 w-3 animate-spin" />
       </span>
     );
   }
@@ -1854,16 +1973,7 @@ function NewChatView({
   const fallbackRuntimeSequenceRef = useRef(0);
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
-  const agentOptions: InlineMenuSelectOption[] = runtimeAgents.map((runtimeAgent) => ({
-    value: runtimeAgent.agent,
-    label:
-      runtimeAgent.agent === "codex"
-        ? "Codex"
-        : runtimeAgent.agent === "claude"
-          ? "Claude"
-        : "Gemini",
-    icon: <AgentGlyph agent={runtimeAgent.agent} className="h-4 w-4" />,
-  }));
+  const agentOptions = agentSelectOptions(runtimeAgents);
   const selectedRuntimeAgent =
     runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
   const {
@@ -2076,9 +2186,13 @@ function NewChatView({
                 <NewChatMenuButton icon={Hand} label="Default permissions" text />
               </div>
               <div className="flex shrink-0 items-center gap-2.5">
-                <span className="rounded-md bg-ink/8 px-2.5 py-1 text-body-sm font-medium text-ink/64">
-                  free
-                </span>
+                <NewChatSelect
+                  ariaLabel={t("new_chat.agent")}
+                  value={agent}
+                  onChange={(value) => setAgent(value as Agent)}
+                  disabled={agentOptions.length === 0}
+                  options={agentOptions}
+                />
                 <NewChatMenuButton icon={Mic} label={t("new_chat.voice")} />
                 <Tooltip content={sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
                   <button
@@ -2104,13 +2218,6 @@ function NewChatView({
                   label: p.label,
                   icon: <Folder className="h-4 w-4 text-ink/55" />,
                 }))}
-              />
-              <NewChatSelect
-                ariaLabel={t("new_chat.agent")}
-                value={agent}
-                onChange={(value) => setAgent(value as Agent)}
-                disabled={agentOptions.length === 0}
-                options={agentOptions}
               />
               <NewChatMenuButton icon={Cpu} label={activeSessionCount > 0 ? `${activeSessionCount}` : t("new_chat.work_locally")} text />
               <NewChatMenuButton icon={GitBranch} label="main" text />

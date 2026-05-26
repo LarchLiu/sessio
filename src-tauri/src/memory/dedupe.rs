@@ -182,21 +182,23 @@ fn is_allowed_candidate(
     candidate_session_id: &str,
     candidate_time: Option<SessionTimeInfo>,
 ) -> bool {
+    // Explicit fork lineage can cross agents. When present, the only valid
+    // base is the recorded parent, never a sibling guessed by timestamps.
+    if let Some(forked_from_id) = source
+        .metadata
+        .get("forked_from_id")
+        .and_then(|value| value.as_str())
+    {
+        let forked_from_agent = source
+            .metadata
+            .get("forked_from_agent")
+            .and_then(|value| value.as_str())
+            .unwrap_or(source.agent.as_str());
+        return candidate_agent == forked_from_agent && candidate_session_id == forked_from_id;
+    }
+
     if candidate_agent != source.agent.as_str() {
         return false;
-    }
-    // Codex sessions carry an explicit fork lineage. When present, the
-    // only valid base is the parent — never a sibling, regardless of
-    // timestamps. When absent, fall through to the same time-based
-    // ordering used by other agents.
-    if source.agent.as_str() == "codex" {
-        if let Some(forked_from_id) = source
-            .metadata
-            .get("forked_from_id")
-            .and_then(|value| value.as_str())
-        {
-            return candidate_session_id == forked_from_id;
-        }
     }
 
     let candidate_started_at = candidate_time.as_ref().and_then(|info| info.started_at);
@@ -472,5 +474,45 @@ fn role_weight(role: &str, text_len: usize) -> f64 {
         "tool_use" => 1.5,
         "tool_result" => 1.0,
         _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::sources::types::{AgentKind, Metadata, SessionSource, SourceKind};
+
+    fn source_with_lineage(
+        source_agent: &str,
+        parent_agent: &str,
+        parent_id: &str,
+    ) -> SessionSource {
+        let mut metadata = Metadata::default();
+        metadata.insert(
+            "forked_from_agent".to_string(),
+            serde_json::Value::String(parent_agent.to_string()),
+        );
+        metadata.insert(
+            "forked_from_id".to_string(),
+            serde_json::Value::String(parent_id.to_string()),
+        );
+        SessionSource {
+            agent: AgentKind::new(source_agent),
+            session_id: "child".to_string(),
+            scope: "scope".to_string(),
+            file_path: "child.jsonl".to_string(),
+            project: None,
+            source_kind: SourceKind::MainSession,
+            metadata,
+        }
+    }
+
+    #[test]
+    fn explicit_fork_lineage_allows_cross_agent_parent_only() {
+        let source = source_with_lineage("gemini", "claude", "parent");
+
+        assert!(is_allowed_candidate(&source, "claude", "parent", None));
+        assert!(!is_allowed_candidate(&source, "gemini", "parent", None));
+        assert!(!is_allowed_candidate(&source, "claude", "sibling", None));
     }
 }

@@ -144,7 +144,8 @@ fn remove_session_from_chat_backing_logs(
         if !logs_path.exists() {
             continue;
         }
-        removed_any |= remove_session_entries_from_logs(&logs_path, session_id, home, removed_root)?;
+        removed_any |=
+            remove_session_entries_from_logs(&logs_path, session_id, home, removed_root)?;
     }
     Ok(removed_any)
 }
@@ -162,7 +163,12 @@ fn backing_logs_for_chat_path(chat_path: &Path, home: &Path) -> Vec<PathBuf> {
         push(project_dir.join("logs.json"));
     }
     if let Some(alias) = project_alias_from_chat_path(chat_path) {
-        push(home.join(".gemini").join("tmp").join(alias).join("logs.json"));
+        push(
+            home.join(".gemini")
+                .join("tmp")
+                .join(alias)
+                .join("logs.json"),
+        );
     }
 
     out
@@ -509,6 +515,7 @@ fn parse_chat_file(
     Ok(Some(SessionInfo {
         id: session_id,
         agent: Agent::Gemini,
+        forked_from_agent: None,
         forked_from_id: None,
         project_path,
         project_name,
@@ -592,6 +599,7 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
         out.push(SessionInfo {
             id: sid,
             agent: Agent::Gemini,
+            forked_from_agent: None,
             forked_from_id: None,
             project_path: project_path.map(String::from),
             project_name: project_name.clone(),
@@ -964,9 +972,7 @@ fn normalize_gemini_file_diff(path: &str, diff: &str) -> String {
 fn diff_line_count(diff: &str, marker: char) -> usize {
     diff.lines()
         .filter(|line| {
-            line.starts_with(marker)
-                && !line.starts_with("+++")
-                && !line.starts_with("---")
+            line.starts_with(marker) && !line.starts_with("+++") && !line.starts_with("---")
         })
         .count()
 }
@@ -1026,7 +1032,10 @@ fn read_chat_messages_with_locations(
     let location = crate::agents::sources::types::SourceLocation::file(file_path);
     let project_path = resolve_chat_project_path(
         path,
-        paths().ok().and_then(|(tmp_dir, _)| tmp_dir.parent().map(Path::to_path_buf)).as_deref(),
+        paths()
+            .ok()
+            .and_then(|(tmp_dir, _)| tmp_dir.parent().map(Path::to_path_buf))
+            .as_deref(),
         &load_default_project_mappings().unwrap_or_default(),
     );
     let mut out = Vec::new();
@@ -1490,7 +1499,10 @@ mod tests {
             .find(|message| message.role == "file_edit")
             .expect("expected Gemini edit result to produce file_edit message");
         let summary: serde_json::Value = serde_json::from_str(&file_edit.text).unwrap();
-        assert_eq!(summary.get("source").and_then(|v| v.as_str()), Some("gemini"));
+        assert_eq!(
+            summary.get("source").and_then(|v| v.as_str()),
+            Some("gemini")
+        );
         assert_eq!(summary.get("files").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(summary.get("additions").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(summary.get("deletions").and_then(|v| v.as_u64()), Some(1));
