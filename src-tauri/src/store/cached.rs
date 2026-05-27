@@ -190,6 +190,26 @@ impl SessionStore for CachedStore {
         self.inner.delete_kanban_item(item_id)
     }
 
+    fn link_kanban_item_session(
+        &self,
+        item_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<KanbanItem> {
+        self.inner
+            .link_kanban_item_session(item_id, agent, session_id)
+    }
+
+    fn unlink_kanban_item_session(
+        &self,
+        item_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<KanbanItem> {
+        self.inner
+            .unlink_kanban_item_session(item_id, agent, session_id)
+    }
+
     fn get_runtime_agent_capability(
         &self,
         agent: Agent,

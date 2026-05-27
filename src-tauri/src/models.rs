@@ -153,6 +153,8 @@ pub struct KanbanItem {
     pub sort_order: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub sessions: Vec<SessionInfo>,
 }
 
 fn default_available() -> bool {

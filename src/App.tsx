@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, type LucideIcon } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, Link2, Unlink, Send, CircleDotDashed, CircleDot, CircleSlash, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -14,6 +14,7 @@ import { MenuItem } from "@tauri-apps/api/menu/menuItem";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { open } from "@tauri-apps/plugin-dialog";
+import { createPortal } from "react-dom";
 import {
   Agent,
   ProjectInfo,
@@ -31,6 +32,8 @@ import {
   getMemoryBackendStatus,
   MemoryBackendStatus,
   ProjectMemorySearchResult,
+  linkKanbanItemSession,
+  unlinkKanbanItemSession,
   RuntimeAgentMetadata,
   SessionInfo,
   type AgentRuntimeEvent,
@@ -105,11 +108,20 @@ const PROJECT_TYPES: ProjectType[] = [
 const KANBAN_STATUSES: KanbanStatus[] = [
   "todo",
   "in_progress",
-  "canceled",
   "agent_review",
   "human_review",
   "done",
+  "canceled",
 ];
+
+const KANBAN_STATUS_ICONS: Record<KanbanStatus, LucideIcon> = {
+  todo: CircleDotDashed,
+  in_progress: CircleDot,
+  canceled: CircleSlash,
+  agent_review: CircleGauge,
+  human_review: CircleUserRound,
+  done: CircleCheck,
+};
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 
@@ -303,6 +315,8 @@ type PendingNewChatSession = {
   projectName: string;
   prompt: string;
   timestamp: number;
+  kanbanItemId?: string;
+  kanbanItemStatus?: KanbanStatus;
 };
 
 // Orphan main session that only exists to carry subagents (Claude cleaned
@@ -622,12 +636,29 @@ export default function App() {
         subagents: [],
       };
       createPendingSession(pendingSession)
-        .then(() => {
+        .then(async () => {
+          let linkedKanbanItem: KanbanItem | null = null;
+          if (pending.kanbanItemId) {
+            linkedKanbanItem = await linkKanbanItemSession(
+              pending.kanbanItemId,
+              pending.agent,
+              agentSessionId,
+            );
+            if (pending.kanbanItemStatus === "todo") {
+              linkedKanbanItem = await updateKanbanItemStatus(
+                pending.kanbanItemId,
+                "in_progress",
+              );
+            }
+          }
           setRuntimeSessionAliases((prev) => ({
             ...prev,
             [`${pending.agent}:${agentSessionId}`]: pending.sessioRuntimeSessionId,
           }));
           setSessions((prev) => mergePendingSession(prev, pendingSession));
+          if (linkedKanbanItem) {
+            setSelectedProject((current) => (current ? { ...current } : current));
+          }
           setSelected(pendingSession);
           setDetailMode("chat");
           setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
@@ -1265,6 +1296,9 @@ export default function App() {
           <ProjectWorkbench
             project={activeProject}
             sessions={availableSessions.filter((session) => session.projectPath === activeProject.path)}
+            runtimeAgents={runtimeAgents}
+            liveState={liveRuntimeState}
+            dispatchLiveEvent={dispatchLiveRuntimeEvent}
             onProjectUpdated={(project) => {
               setProjects((prev) => prev.map((item) => (item.id === project.id ? project : item)));
               setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
@@ -1278,6 +1312,16 @@ export default function App() {
             onSelectSession={(session) => {
               setSelectedProject(null);
               setSelected(session);
+              setDetailMode("chat");
+            }}
+            onPendingSession={(pending) => {
+              setPendingNewChats((prev) => ({
+                ...prev,
+                [pending.sessioRuntimeSessionId]: pending,
+              }));
+            }}
+            onChatStarted={() => {
+              setSelectedProject(null);
               setDetailMode("chat");
             }}
             onError={setError}
@@ -2038,8 +2082,8 @@ function ProjectActionsButton({
           }}
         />
       )}
-      {form && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/35 px-4">
+      {form && createPortal(
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4">
           <div className="w-full max-w-[420px] rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
@@ -2090,7 +2134,8 @@ function ProjectActionsButton({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );
@@ -2364,16 +2409,26 @@ function SidebarSessionStatus({
 function ProjectWorkbench({
   project,
   sessions,
+  runtimeAgents,
+  liveState,
+  dispatchLiveEvent,
   onProjectUpdated,
   onProjectArchived,
   onSelectSession,
+  onPendingSession,
+  onChatStarted,
   onError,
 }: {
   project: ProjectInfo;
   sessions: SessionInfo[];
+  runtimeAgents: RuntimeAgentMetadata[];
+  liveState: LiveRuntimeState;
+  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onProjectUpdated: (project: ProjectInfo) => void;
   onProjectArchived: (projectId: string) => void;
   onSelectSession: (session: SessionInfo) => void;
+  onPendingSession: (session: PendingNewChatSession) => void;
+  onChatStarted: () => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
@@ -2495,8 +2550,8 @@ function ProjectWorkbench({
           </div>
         </div>
       </div>
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_240px] gap-0">
-        <ScrollArea className="min-h-0 p-5">
+      <div className="min-h-0 flex-1">
+        <ScrollArea className="h-full min-h-0 p-5">
           <div className="mb-4 flex gap-2">
             <input
               value={newTitle}
@@ -2519,43 +2574,28 @@ function ProjectWorkbench({
           {loading ? (
             <div className="py-12 text-center text-body-sm text-ink/45">{t("memory_search.searching")}</div>
           ) : (
-            <div className="grid min-w-[980px] grid-cols-6 gap-3">
+            <div className="flex flex-col gap-3">
               {KANBAN_STATUSES.map((status) => (
                 <KanbanColumn
                   key={status}
                   status={status}
                   items={items.filter((item) => item.status === status)}
+                  project={project}
+                  sessions={sessions}
+                  runtimeAgents={runtimeAgents}
+                  liveState={liveState}
+                  dispatchLiveEvent={dispatchLiveEvent}
+                  onSelectSession={onSelectSession}
                   onItemUpdated={patchItem}
                   onItemDeleted={(itemId) => setItems((prev) => prev.filter((item) => item.id !== itemId))}
+                  onPendingSession={onPendingSession}
+                  onChatStarted={onChatStarted}
                   onError={onError}
                 />
               ))}
             </div>
           )}
         </ScrollArea>
-        <aside className="min-h-0 border-l border-ink/10 bg-ink/[0.025] p-4">
-          <div className="mb-3 text-caption uppercase tracking-[0.14em] text-ink/40">
-            {t("sidebar.sessions_count", { count: sessions.length })}
-          </div>
-          <ScrollArea className="max-h-full">
-            <div className="flex flex-col gap-1">
-              {sessions.slice(0, 24).map((session) => (
-                <button
-                  key={sessionKey(session)}
-                  type="button"
-                  onClick={() => onSelectSession(session)}
-                  className="rounded-md px-2 py-1.5 text-left text-body-sm text-ink/65 transition hover:bg-ink/5 hover:text-ink"
-                >
-                  <span className="block truncate">{session.title ?? session.firstUserMessage ?? t("list.no_user_message")}</span>
-                  <span className="text-meta text-ink/35">{formatShortRelativeTime(session.updatedAt ?? session.startedAt, t)}</span>
-                </button>
-              ))}
-              {sessions.length === 0 && (
-                <div className="py-6 text-center text-body-sm text-ink/40">{t("list.empty")}</div>
-              )}
-            </div>
-          </ScrollArea>
-        </aside>
       </div>
     </div>
   );
@@ -2564,30 +2604,58 @@ function ProjectWorkbench({
 function KanbanColumn({
   status,
   items,
+  project,
+  sessions,
+  runtimeAgents,
+  liveState,
+  dispatchLiveEvent,
+  onSelectSession,
   onItemUpdated,
   onItemDeleted,
+  onPendingSession,
+  onChatStarted,
   onError,
 }: {
   status: KanbanStatus;
   items: KanbanItem[];
+  project: ProjectInfo;
+  sessions: SessionInfo[];
+  runtimeAgents: RuntimeAgentMetadata[];
+  liveState: LiveRuntimeState;
+  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
+  onSelectSession: (session: SessionInfo) => void;
   onItemUpdated: (item: KanbanItem) => void;
   onItemDeleted: (itemId: string) => void;
+  onPendingSession: (session: PendingNewChatSession) => void;
+  onChatStarted: () => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
+  const StatusIcon = KANBAN_STATUS_ICONS[status];
   return (
-    <section className="min-h-[420px] rounded-xl border border-ink/10 bg-ink/[0.035] p-2">
+    <section className="rounded-lg border border-ink/10 bg-ink/[0.035] p-2.5">
       <div className="mb-2 flex items-center justify-between gap-2 px-1.5">
-        <h3 className="text-body-sm font-medium text-ink/75">{kanbanStatusLabel(status, t)}</h3>
+        <h3 className="inline-flex min-w-0 items-center gap-1.5 text-body-sm font-medium text-ink/75">
+          <StatusIcon className="h-4 w-4 shrink-0 text-ink/45" />
+          <span className="truncate">{kanbanStatusLabel(status, t)}</span>
+        </h3>
         <span className="rounded-full bg-ink/8 px-1.5 py-0.5 text-meta text-ink/40">{items.length}</span>
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2">
         {items.map((item) => (
           <KanbanCard
             key={item.id}
             item={item}
+            project={project}
+            sessions={sessions}
+            runtimeAgents={runtimeAgents}
+            liveState={liveState}
+            dispatchLiveEvent={dispatchLiveEvent}
+            onSelectSession={onSelectSession}
             onUpdated={onItemUpdated}
             onDeleted={onItemDeleted}
+            onPendingSession={onPendingSession}
+            onChatStarted={onChatStarted}
             onError={onError}
           />
         ))}
@@ -2598,23 +2666,76 @@ function KanbanColumn({
 
 function KanbanCard({
   item,
+  project,
+  sessions,
+  runtimeAgents,
+  liveState,
+  dispatchLiveEvent,
+  onSelectSession,
   onUpdated,
   onDeleted,
+  onPendingSession,
+  onChatStarted,
   onError,
 }: {
   item: KanbanItem;
+  project: ProjectInfo;
+  sessions: SessionInfo[];
+  runtimeAgents: RuntimeAgentMetadata[];
+  liveState: LiveRuntimeState;
+  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
+  onSelectSession: (session: SessionInfo) => void;
   onUpdated: (item: KanbanItem) => void;
   onDeleted: (itemId: string) => void;
+  onPendingSession: (session: PendingNewChatSession) => void;
+  onChatStarted: () => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(item.title);
   const [description, setDescription] = useState(item.description ?? "");
+  const [agent, setAgent] = useState<Agent>(() => runtimeAgents[0]?.agent ?? "codex");
+  const [sending, setSending] = useState(false);
+  const fallbackRuntimeSequenceRef = useRef(0);
 
   useEffect(() => {
     setTitle(item.title);
     setDescription(item.description ?? "");
+  }, [item.description, item.title]);
+
+  const linkedSessionKeys = useMemo(
+    () => new Set(item.sessions.map(sessionIdentityKey)),
+    [item.sessions],
+  );
+  const agentOptions = useMemo(() => agentSelectOptions(runtimeAgents), [runtimeAgents]);
+  const availableSessionOptions = useMemo(
+    () =>
+      sessions
+        .filter((session) => !linkedSessionKeys.has(sessionIdentityKey(session)))
+        .map((session) => ({
+          value: sessionIdentityKey(session),
+          label: session.title ?? session.firstUserMessage ?? t("list.no_user_message"),
+          icon: <AgentGlyph agent={session.agent} className="h-3.5 w-3.5" />,
+        })),
+    [linkedSessionKeys, sessions, t],
+  );
+  const sessionByKey = useMemo(() => {
+    const map = new Map<string, SessionInfo>();
+    for (const session of sessions) {
+      map.set(sessionIdentityKey(session), session);
+    }
+    return map;
+  }, [sessions]);
+
+  useEffect(() => {
+    if (agentOptions.some((option) => option.value === agent)) return;
+    setAgent((runtimeAgents[0]?.agent ?? "codex") as Agent);
+  }, [agent, agentOptions, runtimeAgents]);
+
+  const prompt = useMemo(() => {
+    const trimmedDescription = item.description?.trim();
+    return trimmedDescription ? `${item.title}\n\n${trimmedDescription}` : item.title;
   }, [item.description, item.title]);
 
   const move = async (status: KanbanStatus) => {
@@ -2647,6 +2768,91 @@ function KanbanCard({
     }
   };
 
+  const linkSession = async (value: string) => {
+    const session = sessionByKey.get(value);
+    if (!session) return;
+    try {
+      onUpdated(await linkKanbanItemSession(item.id, session.agent, session.id));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const unlinkSession = async (session: SessionInfo) => {
+    try {
+      onUpdated(await unlinkKanbanItemSession(item.id, session.agent, session.id));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const sendItem = async () => {
+    if (sending || !prompt.trim()) return;
+    if (!agentOptions.some((option) => option.value === agent)) {
+      onError("No configured runtime agent available");
+      return;
+    }
+    setSending(true);
+    onError(null);
+    try {
+      const handle = await startAgentSession({
+        agent,
+        workspacePath: project.path,
+        options: { transport: "acp" },
+      });
+      const timestamp = Date.now();
+      const localTurnId = `local-turn-${timestamp}`;
+      const existingLiveSession = liveState.sessions[handle.sessioRuntimeSessionId];
+      if (!existingLiveSession) {
+        fallbackRuntimeSequenceRef.current += 1;
+        dispatchLiveEvent({
+          type: "runtime-event",
+          event: {
+            kind: "sessionStarted",
+            sequence: liveState.lastSequence + fallbackRuntimeSequenceRef.current,
+            timestamp,
+            agent: handle.agent,
+            sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+            agentRuntimeSessionId: handle.agentRuntimeSessionId,
+            transport: handle.transport,
+            workspacePath: handle.workspacePath,
+            capabilities: handle.capabilities,
+          },
+        });
+      }
+      dispatchLiveEvent({
+        type: "optimistic-user-message",
+        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+        turnId: localTurnId,
+        text: prompt,
+        attachments: [],
+        timestamp,
+      });
+      onPendingSession({
+        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+        agent: handle.agent,
+        projectPath: project.path,
+        projectName: project.name,
+        prompt,
+        timestamp,
+        kanbanItemId: item.id,
+        kanbanItemStatus: item.status,
+      });
+      const turn = await sendAgentInput(handle.sessioRuntimeSessionId, { text: prompt });
+      dispatchLiveEvent({
+        type: "replace-turn-id",
+        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+        from: localTurnId,
+        to: turn.turnId,
+      });
+      onChatStarted();
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <article className="rounded-lg border border-ink/10 bg-surface-panel p-2.5 shadow-sm">
       {editing ? (
@@ -2662,12 +2868,89 @@ function KanbanCard({
         <>
           <div className="text-body-sm font-medium leading-snug text-ink/85">{item.title}</div>
           {item.description && <div className="mt-1 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">{item.description}</div>}
+          <div className="mt-2 border-t border-ink/10 pt-2">
+            <div className="flex min-w-0 items-center justify-between gap-2">
+              <NewChatSelect
+                ariaLabel={t("new_chat.agent")}
+                value={agent}
+                onChange={(value) => setAgent(value as Agent)}
+                disabled={agentOptions.length === 0 || sending}
+                options={agentOptions}
+              />
+              <Tooltip content={sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
+                <button
+                  type="button"
+                  disabled={sending || agentOptions.length === 0 || !prompt.trim()}
+                  onClick={() => void sendItem()}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
+                  aria-label={sending ? t("new_chat.sending") : t("new_chat.send")}
+                >
+                  {sending ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Send className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </Tooltip>
+            </div>
+          </div>
+          <div className="mt-2 border-t border-ink/10 pt-2">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <div className="inline-flex min-w-0 items-center gap-1 text-meta text-ink/40">
+                <Link2 className="h-3 w-3" />
+                <span>{t("kanban.sessions_count", { count: item.sessions.length })}</span>
+              </div>
+              <InlineMenuSelect
+                value=""
+                options={availableSessionOptions}
+                onChange={(value) => void linkSession(value)}
+                ariaLabel={t("kanban.link_session")}
+                placeholder={t("kanban.link_session")}
+                minMenuWidth={220}
+                className="h-6 max-w-[96px] border-r-0 px-1 py-0 text-caption text-ink/45 hover:text-ink"
+                emptyContent={t("kanban.no_unlinked_sessions")}
+              />
+            </div>
+            {item.sessions.length > 0 && (
+              <div className="flex flex-col gap-1">
+                {item.sessions.slice(0, 4).map((session) => (
+                  <div key={sessionIdentityKey(session)} className="group flex min-w-0 items-center gap-1.5 rounded bg-ink/[0.035] px-1.5 py-1">
+                    <button
+                      type="button"
+                      onClick={() => onSelectSession(session)}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-caption text-ink/60 hover:text-ink"
+                    >
+                      <AgentGlyph agent={session.agent} className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{session.title ?? session.firstUserMessage ?? t("list.no_user_message")}</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("kanban.unlink_session")}
+                      onClick={() => void unlinkSession(session)}
+                      className="rounded p-0.5 text-ink/25 opacity-0 transition hover:bg-ink/8 hover:text-ink/65 group-hover:opacity-100"
+                    >
+                      <Unlink className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+                {item.sessions.length > 4 && (
+                  <div className="px-1.5 text-meta text-ink/35">
+                    {t("kanban.more_sessions", { count: item.sessions.length - 4 })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
           <div className="mt-3 flex items-center justify-between gap-2">
             <InlineMenuSelect
               value={item.status}
               options={KANBAN_STATUSES.map((status) => ({
                 value: status,
                 label: kanbanStatusLabel(status, t),
+                icon: (() => {
+                  const StatusIcon = KANBAN_STATUS_ICONS[status];
+                  return <StatusIcon className="h-3.5 w-3.5" />;
+                })(),
               }))}
               onChange={(value) => void move(value as KanbanStatus)}
               minMenuWidth={150}

@@ -196,6 +196,30 @@ fn delete_kanban_item(
 }
 
 #[tauri::command]
+fn link_kanban_item_session(
+    item_id: String,
+    agent: Agent,
+    session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<KanbanItem, String> {
+    store
+        .link_kanban_item_session(&item_id, agent, &session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn unlink_kanban_item_session(
+    item_id: String,
+    agent: Agent,
+    session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<KanbanItem, String> {
+    store
+        .unlink_kanban_item_session(&item_id, agent, &session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_session_ancestors(
     agent: Agent,
     session_id: String,
@@ -1249,6 +1273,8 @@ pub fn run() {
             update_kanban_item,
             update_kanban_item_status,
             delete_kanban_item,
+            link_kanban_item_session,
+            unlink_kanban_item_session,
             get_session_ancestors,
             get_session_messages,
             update_session_message_count,

@@ -262,6 +262,22 @@ CREATE INDEX IF NOT EXISTS idx_kanban_items_project_status_order
     ON kanban_items(project_id, status, sort_order, created_at);
 "#;
 
+const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS kanban_item_sessions (
+    item_id    TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(item_id, agent, session_id),
+    FOREIGN KEY(item_id) REFERENCES kanban_items(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_kanban_item_sessions_item
+    ON kanban_item_sessions(item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_kanban_item_sessions_session
+    ON kanban_item_sessions(agent, session_id);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -345,8 +361,16 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 8 {
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)",
+            [],
+        )?;
+    }
     conn.execute_batch(SCHEMA_V5)?;
     conn.execute_batch(SCHEMA_V7)?;
+    conn.execute_batch(SCHEMA_V8)?;
     Ok(())
 }
 
@@ -689,6 +713,7 @@ fn kanban_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KanbanItem>
         sort_order: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        sessions: Vec::new(),
     })
 }
 
@@ -708,7 +733,8 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
 }
 
 fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem> {
-    conn.query_row(
+    let mut item = conn
+        .query_row(
         "SELECT id, project_id, title, description, status, sort_order, created_at, updated_at
          FROM kanban_items
          WHERE id = ?",
@@ -716,7 +742,83 @@ fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem
         kanban_item_from_row,
     )
     .optional()?
-    .ok_or_else(|| anyhow::anyhow!("kanban item not found: {item_id}"))
+    .ok_or_else(|| anyhow::anyhow!("kanban item not found: {item_id}"))?;
+    item.sessions = load_kanban_item_sessions(conn, &item.id)?;
+    Ok(item)
+}
+
+fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<SessionInfo>> {
+    let mut subs_by_parent = load_all_subagents_grouped(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
+                s.started_at, s.updated_at, s.message_count, s.title, s.first_user_message,
+                s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
+         FROM kanban_item_sessions kis
+         INNER JOIN sessions s ON s.agent = kis.agent AND s.session_id = kis.session_id
+         WHERE kis.item_id = ? AND s.available = 1
+         ORDER BY s.updated_at DESC, s.started_at DESC",
+    )?;
+    let mut sessions: Vec<SessionInfo> = stmt
+        .query_map(params![item_id], |row| {
+            let agent_str: String = row.get(0)?;
+            let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+            Ok(SessionInfo {
+                id: row.get(1)?,
+                agent,
+                forked_from_agent: row
+                    .get::<_, Option<String>>(14)?
+                    .and_then(|value| Agent::from_db_str(&value)),
+                forked_from_id: row.get(15)?,
+                file_path: row.get(2)?,
+                project_path: row.get(3)?,
+                project_name: row.get(4)?,
+                started_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                message_count: row.get::<_, i64>(7)? as usize,
+                title: row.get(8)?,
+                first_user_message: row.get(9)?,
+                file_size: row.get::<_, i64>(10)? as u64,
+                partial: row.get::<_, i64>(11)? != 0,
+                available: row.get::<_, i64>(12)? != 0,
+                archived: row.get::<_, i64>(13)? != 0,
+                subagents: Vec::new(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    sessions.retain(|s| !is_codex_guardian_index_row(s));
+    dedupe_sessions(&mut sessions);
+    for session in sessions.iter_mut() {
+        session.subagents = subs_by_parent
+            .remove(&(session.agent, session.id.clone()))
+            .unwrap_or_default();
+    }
+    Ok(sessions)
+}
+
+fn attach_kanban_item_sessions(conn: &Connection, items: &mut [KanbanItem]) -> Result<()> {
+    for item in items {
+        item.sessions = load_kanban_item_sessions(conn, &item.id)?;
+    }
+    Ok(())
+}
+
+fn dedupe_sessions(sessions: &mut Vec<SessionInfo>) {
+    let mut seen = HashSet::new();
+    sessions.retain(|session| seen.insert((session.agent, session.id.clone())));
+}
+
+fn session_project_path(conn: &Connection, agent: Agent, session_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT project_path
+         FROM sessions
+         WHERE agent = ? AND session_id = ? AND available = 1
+         ORDER BY updated_at DESC, started_at DESC
+         LIMIT 1",
+        params![agent.as_str(), session_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn read_record_kind(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<MemoryRecordKind> {
@@ -1078,7 +1180,9 @@ impl SessionStore for SqliteStore {
              ORDER BY status, sort_order ASC, created_at ASC",
         )?;
         let rows = stmt.query_map(params![project_id], kanban_item_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        attach_kanban_item_sessions(&conn, &mut items)?;
+        Ok(items)
     }
 
     fn create_kanban_item(
@@ -1187,6 +1291,44 @@ impl SessionStore for SqliteStore {
             anyhow::bail!("kanban item not found: {item_id}");
         }
         Ok(())
+    }
+
+    fn link_kanban_item_session(
+        &self,
+        item_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<KanbanItem> {
+        let conn = self.conn.lock().unwrap();
+        let item = load_kanban_item_by_id(&conn, item_id)?;
+        let project = load_project_by_id(&conn, &item.project_id)?;
+        let session_project_path = session_project_path(&conn, agent, session_id)?
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        if session_project_path != project.path {
+            anyhow::bail!("session does not belong to this project");
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO kanban_item_sessions (item_id, agent, session_id, created_at)
+             VALUES (?, ?, ?, ?)",
+            params![item_id, agent.as_str(), session_id, now_ms()],
+        )?;
+        load_kanban_item_by_id(&conn, item_id)
+    }
+
+    fn unlink_kanban_item_session(
+        &self,
+        item_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<KanbanItem> {
+        let conn = self.conn.lock().unwrap();
+        load_kanban_item_by_id(&conn, item_id)?;
+        conn.execute(
+            "DELETE FROM kanban_item_sessions
+             WHERE item_id = ? AND agent = ? AND session_id = ?",
+            params![item_id, agent.as_str(), session_id],
+        )?;
+        load_kanban_item_by_id(&conn, item_id)
     }
 
     fn get_runtime_agent_capability(
@@ -2457,5 +2599,86 @@ mod migration_tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn kanban_items_link_and_aggregate_sessions() {
+        let path = unique_db("sessio-kanban-session-links");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-kanban-link-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(&parent.to_string_lossy(), "linked", ProjectType::Code)
+            .unwrap();
+        let session = SessionInfo {
+            id: "session-a".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 3,
+            title: Some("Implement feature".to_string()),
+            first_user_message: Some("Please implement feature".to_string()),
+            file_path: Path::new(&project.path)
+                .join("session-a.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session(&session.file_path, &session).unwrap();
+        let item = store
+            .create_kanban_item(&project.id, "Build feature", None)
+            .unwrap();
+
+        let linked = store
+            .link_kanban_item_session(&item.id, Agent::Codex, &session.id)
+            .unwrap();
+        assert_eq!(linked.sessions.len(), 1);
+        assert_eq!(linked.sessions[0].id, session.id);
+
+        let listed = store.list_kanban_items(&project.id).unwrap();
+        assert_eq!(listed[0].sessions.len(), 1);
+        assert_eq!(listed[0].sessions[0].title.as_deref(), Some("Implement feature"));
+
+        let unlinked = store
+            .unlink_kanban_item_session(&item.id, Agent::Codex, &session.id)
+            .unwrap();
+        assert!(unlinked.sessions.is_empty());
+
+        let other_parent = temp_child_path(&std::env::temp_dir(), "sessio-kanban-other-parent");
+        std::fs::create_dir(&other_parent).unwrap();
+        let other_project = store
+            .create_project(&other_parent.to_string_lossy(), "other", ProjectType::Code)
+            .unwrap();
+        let other_session = SessionInfo {
+            id: "session-b".to_string(),
+            project_path: Some(other_project.path.clone()),
+            project_name: Some(other_project.name.clone()),
+            file_path: Path::new(&other_project.path)
+                .join("session-b.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            title: Some("Other project".to_string()),
+            ..session
+        };
+        store
+            .upsert_session(&other_session.file_path, &other_session)
+            .unwrap();
+        assert!(store
+            .link_kanban_item_session(&item.id, Agent::Codex, &other_session.id)
+            .is_err());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+        let _ = std::fs::remove_dir_all(&other_parent);
     }
 }

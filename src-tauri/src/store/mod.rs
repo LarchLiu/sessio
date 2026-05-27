@@ -76,6 +76,18 @@ pub trait SessionStore: Send + Sync {
         status: Option<KanbanStatus>,
     ) -> Result<KanbanItem>;
     fn delete_kanban_item(&self, item_id: &str) -> Result<()>;
+    fn link_kanban_item_session(
+        &self,
+        item_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<KanbanItem>;
+    fn unlink_kanban_item_session(
+        &self,
+        item_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<KanbanItem>;
     fn get_runtime_agent_capability(
         &self,
         agent: Agent,

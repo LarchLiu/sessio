@@ -36,6 +36,7 @@ export interface KanbanItem {
   sortOrder: number;
   createdAt: number;
   updatedAt: number;
+  sessions: SessionInfo[];
 }
 
 export interface SessionInfo {
@@ -436,6 +437,22 @@ export async function updateKanbanItemStatus(
 
 export async function deleteKanbanItem(itemId: string): Promise<void> {
   return invoke<void>("delete_kanban_item", { itemId });
+}
+
+export async function linkKanbanItemSession(
+  itemId: string,
+  agent: Agent,
+  sessionId: string,
+): Promise<KanbanItem> {
+  return invoke<KanbanItem>("link_kanban_item_session", { itemId, agent, sessionId });
+}
+
+export async function unlinkKanbanItemSession(
+  itemId: string,
+  agent: Agent,
+  sessionId: string,
+): Promise<KanbanItem> {
+  return invoke<KanbanItem>("unlink_kanban_item_session", { itemId, agent, sessionId });
 }
 
 export async function getSessionAncestors(
