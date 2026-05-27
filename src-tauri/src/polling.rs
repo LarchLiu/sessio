@@ -476,7 +476,8 @@ fn file_changed(path: &Path, indexed_size: u64, indexed_mtime: Option<i64>) -> b
 }
 
 fn parse_codex_main_lineage(path: &Path, archived: bool) -> Result<Option<(Agent, String)>> {
-    let parsed = crate::agents::sources::codex::parser::parse_one_file_with_relation(path, archived)?;
+    let parsed =
+        crate::agents::sources::codex::parser::parse_one_file_with_relation(path, archived)?;
     Ok(parsed.and_then(|parsed| {
         if parsed.parent_thread_id.is_some() {
             return None;

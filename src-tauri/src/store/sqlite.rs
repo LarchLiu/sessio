@@ -672,7 +672,10 @@ fn stable_project_id(path: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
-    format!("project-{}", hex::encode(hasher.finalize())[..16].to_string())
+    format!(
+        "project-{}",
+        hex::encode(hasher.finalize())[..16].to_string()
+    )
 }
 
 fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
@@ -681,7 +684,10 @@ fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
     hasher.update(project_id.as_bytes());
     hasher.update(title.as_bytes());
     hasher.update(now.to_string().as_bytes());
-    format!("kanban-{}", hex::encode(hasher.finalize())[..16].to_string())
+    format!(
+        "kanban-{}",
+        hex::encode(hasher.finalize())[..16].to_string()
+    )
 }
 
 #[cfg(test)]
@@ -735,14 +741,14 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
 fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem> {
     let mut item = conn
         .query_row(
-        "SELECT id, project_id, title, description, status, sort_order, created_at, updated_at
+            "SELECT id, project_id, title, description, status, sort_order, created_at, updated_at
          FROM kanban_items
          WHERE id = ?",
-        params![item_id],
-        kanban_item_from_row,
-    )
-    .optional()?
-    .ok_or_else(|| anyhow::anyhow!("kanban item not found: {item_id}"))?;
+            params![item_id],
+            kanban_item_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("kanban item not found: {item_id}"))?;
     item.sessions = load_kanban_item_sessions(conn, &item.id)?;
     Ok(item)
 }
@@ -807,7 +813,11 @@ fn dedupe_sessions(sessions: &mut Vec<SessionInfo>) {
     sessions.retain(|session| seen.insert((session.agent, session.id.clone())));
 }
 
-fn session_project_path(conn: &Connection, agent: Agent, session_id: &str) -> Result<Option<String>> {
+fn session_project_path(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+) -> Result<Option<String>> {
     conn.query_row(
         "SELECT project_path
          FROM sessions
@@ -1128,7 +1138,10 @@ impl SessionStore for SqliteStore {
         let clean_name = clean_child_project_name(name)?;
         let project_path = Path::new(&parent).join(&clean_name);
         if project_path.exists() {
-            anyhow::bail!("project directory already exists: {}", project_path.display());
+            anyhow::bail!(
+                "project directory already exists: {}",
+                project_path.display()
+            );
         }
         std::fs::create_dir(&project_path)
             .with_context(|| format!("create project directory {}", project_path.display()))?;
@@ -2428,7 +2441,9 @@ mod migration_tests {
             archived: false,
             subagents: Vec::new(),
         };
-        store.upsert_session("/tmp/project/child.jsonl", &existing).unwrap();
+        store
+            .upsert_session("/tmp/project/child.jsonl", &existing)
+            .unwrap();
 
         let parsed = SessionInfo {
             forked_from_agent: Some(Agent::Claude),
@@ -2436,7 +2451,9 @@ mod migration_tests {
             title: Some("parsed".to_string()),
             ..existing
         };
-        store.upsert_session("/tmp/project/child.jsonl", &parsed).unwrap();
+        store
+            .upsert_session("/tmp/project/child.jsonl", &parsed)
+            .unwrap();
 
         let row = store
             .list_all_sessions()
@@ -2475,14 +2492,18 @@ mod migration_tests {
             archived: false,
             subagents: Vec::new(),
         };
-        store.upsert_session("/tmp/project/child.jsonl", &existing).unwrap();
+        store
+            .upsert_session("/tmp/project/child.jsonl", &existing)
+            .unwrap();
 
         let parsed = SessionInfo {
             forked_from_agent: Some(Agent::Claude),
             forked_from_id: Some("cross-context-parent".to_string()),
             ..existing
         };
-        store.upsert_session("/tmp/project/child.jsonl", &parsed).unwrap();
+        store
+            .upsert_session("/tmp/project/child.jsonl", &parsed)
+            .unwrap();
 
         let row = store
             .list_all_sessions()
@@ -2520,7 +2541,10 @@ mod migration_tests {
             message_count: 1,
             title: Some("hello".to_string()),
             first_user_message: Some("hello".to_string()),
-            file_path: project_dir.join("session.jsonl").to_string_lossy().to_string(),
+            file_path: project_dir
+                .join("session.jsonl")
+                .to_string_lossy()
+                .to_string(),
             file_size: 1,
             partial: false,
             available: true,
@@ -2647,7 +2671,10 @@ mod migration_tests {
 
         let listed = store.list_kanban_items(&project.id).unwrap();
         assert_eq!(listed[0].sessions.len(), 1);
-        assert_eq!(listed[0].sessions[0].title.as_deref(), Some("Implement feature"));
+        assert_eq!(
+            listed[0].sessions[0].title.as_deref(),
+            Some("Implement feature")
+        );
 
         let unlinked = store
             .unlink_kanban_item_session(&item.id, Agent::Codex, &session.id)

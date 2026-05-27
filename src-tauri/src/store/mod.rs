@@ -5,7 +5,9 @@ use anyhow::Result;
 use std::collections::HashSet;
 
 use crate::agents::runtime::types::RuntimeTransportKind;
-use crate::models::{Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SubagentInfo};
+use crate::models::{
+    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SubagentInfo,
+};
 
 #[derive(Debug, Clone)]
 pub struct IndexedSubagentRecord {
@@ -52,8 +54,18 @@ pub trait SessionStore: Send + Sync {
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
     fn list_projects(&self) -> Result<Vec<ProjectInfo>>;
-    fn add_project(&self, path: &str, name: Option<&str>, project_type: ProjectType) -> Result<ProjectInfo>;
-    fn create_project(&self, parent_path: &str, name: &str, project_type: ProjectType) -> Result<ProjectInfo>;
+    fn add_project(
+        &self,
+        path: &str,
+        name: Option<&str>,
+        project_type: ProjectType,
+    ) -> Result<ProjectInfo>;
+    fn create_project(
+        &self,
+        parent_path: &str,
+        name: &str,
+        project_type: ProjectType,
+    ) -> Result<ProjectInfo>;
     fn update_project(
         &self,
         project_id: &str,

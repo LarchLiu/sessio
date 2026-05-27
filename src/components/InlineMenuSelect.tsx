@@ -21,7 +21,15 @@ export interface InlineMenuSelectOption {
   value: string;
   label: string;
   icon?: ReactNode;
+  menuIcon?: ReactNode;
   disabled?: boolean;
+  group?: InlineMenuSelectGroup;
+}
+
+export interface InlineMenuSelectGroup {
+  value: string;
+  label: string;
+  icon?: ReactNode;
 }
 
 export interface InlineMenuSelectProps {
@@ -57,6 +65,10 @@ export default function InlineMenuSelect({
   const menuRef = useRef<HTMLDivElement>(null);
   const selectedItemRef = useRef<HTMLButtonElement>(null);
   const selected = options.find((option) => option.value === value);
+  const selectedIcon = selected?.icon ?? selected?.group?.icon;
+  const menuSections = groupedMenuSections(options);
+  const estimatedRowCount =
+    options.length + menuSections.filter((section) => section.group).length;
 
   const applyPosition = useCallback((next: MenuPosition) => {
     setPos((current) =>
@@ -89,7 +101,7 @@ export default function InlineMenuSelect({
     );
     const maxLeft = Math.max(MENU_MARGIN, vw - width - MENU_MARGIN);
     const measuredMenuHeight = menuRef.current?.offsetHeight ?? 0;
-    const estimatedMenuHeight = options.length > 0 ? options.length * 32 + 8 : 40;
+    const estimatedMenuHeight = estimatedRowCount > 0 ? estimatedRowCount * 32 + 8 : 40;
     const menuHeight = Math.min(
       MENU_MAX_HEIGHT,
       Math.max(32, measuredMenuHeight || estimatedMenuHeight),
@@ -121,7 +133,7 @@ export default function InlineMenuSelect({
       left: Math.round(Math.max(MENU_MARGIN, Math.min(left, maxLeft))),
       width,
     });
-  }, [applyPosition, open, options.length, minMenuWidth, menuAlign, menuPlacement]);
+  }, [applyPosition, open, estimatedRowCount, minMenuWidth, menuAlign, menuPlacement]);
 
   useLayoutEffect(() => {
     updatePosition();
@@ -175,7 +187,7 @@ export default function InlineMenuSelect({
           className
         }
       >
-        {selected?.icon && <span className="shrink-0">{selected.icon}</span>}
+        {selectedIcon && <span className="shrink-0">{selectedIcon}</span>}
         <span className="min-w-0 flex-1 truncate">{selected?.label ?? placeholder ?? ""}</span>
         <ChevronDown className="w-3.5 h-3.5 shrink-0" />
       </button>
@@ -211,27 +223,44 @@ export default function InlineMenuSelect({
               viewportClassName="py-1"
             >
               {options.length > 0 ? (
-                options.map((option) => (
-                  <button
-                    key={option.value}
-                    ref={option.value === value ? selectedItemRef : undefined}
-                    type="button"
-                    disabled={option.disabled}
-                    onClick={() => select(option.value)}
-                    className={
-                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-body-sm transition " +
-                      (option.value === value
-                        ? "bg-ink/8 text-ink"
-                        : "text-ink/70 hover:bg-ink/5 hover:text-ink") +
-                      (option.disabled ? " opacity-40 pointer-events-none" : "")
-                    }
-                  >
-                    {option.icon && <span className="shrink-0">{option.icon}</span>}
-                    <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                    {option.value === value && (
-                      <Check className="h-3.5 w-3.5 shrink-0 text-ink/65" />
+                menuSections.map((section) => (
+                  <div key={section.key}>
+                    {section.group && (
+                      <div className="flex items-center gap-2 px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-normal text-ink/45">
+                        {section.group.icon && (
+                          <span className="shrink-0">{section.group.icon}</span>
+                        )}
+                        <span className="min-w-0 flex-1 truncate">{section.group.label}</span>
+                      </div>
                     )}
-                  </button>
+                    {section.options.map((option) => {
+                      const menuIcon = optionMenuIcon(option);
+                      const alignWithGroupLabel = Boolean(section.group?.icon && !menuIcon);
+                      return (
+                        <button
+                          key={option.value}
+                          ref={option.value === value ? selectedItemRef : undefined}
+                          type="button"
+                          disabled={option.disabled}
+                          onClick={() => select(option.value)}
+                          className={
+                            "flex w-full items-center gap-2 py-1.5 pr-3 text-left text-body-sm transition " +
+                            (alignWithGroupLabel ? "pl-9 " : "pl-3 ") +
+                            (option.value === value
+                              ? "bg-ink/8 text-ink"
+                              : "text-ink/70 hover:bg-ink/5 hover:text-ink") +
+                            (option.disabled ? " opacity-40 pointer-events-none" : "")
+                          }
+                        >
+                          {menuIcon && <span className="shrink-0">{menuIcon}</span>}
+                          <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                          {option.value === value && (
+                            <Check className="h-3.5 w-3.5 shrink-0 text-ink/65" />
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
                 ))
               ) : (
                 <div className="px-3 py-2 text-body-sm text-ink/45">
@@ -244,4 +273,39 @@ export default function InlineMenuSelect({
         )}
     </>
   );
+}
+
+function optionMenuIcon(option: InlineMenuSelectOption): ReactNode {
+  return option.menuIcon === undefined ? option.icon : option.menuIcon;
+}
+
+function groupedMenuSections(options: InlineMenuSelectOption[]): Array<{
+  key: string;
+  group?: InlineMenuSelectGroup;
+  options: InlineMenuSelectOption[];
+}> {
+  const sections: Array<{
+    key: string;
+    group?: InlineMenuSelectGroup;
+    options: InlineMenuSelectOption[];
+  }> = [];
+  const groupIndexes = new Map<string, number>();
+  options.forEach((option, index) => {
+    if (!option.group) {
+      sections.push({ key: `option:${option.value}:${index}`, options: [option] });
+      return;
+    }
+    const existingIndex = groupIndexes.get(option.group.value);
+    if (existingIndex !== undefined) {
+      sections[existingIndex].options.push(option);
+      return;
+    }
+    groupIndexes.set(option.group.value, sections.length);
+    sections.push({
+      key: `group:${option.group.value}`,
+      group: option.group,
+      options: [option],
+    });
+  });
+  return sections;
 }

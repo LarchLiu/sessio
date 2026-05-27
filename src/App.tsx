@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Hand, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, Link2, Unlink, Send, CircleDashed, CircleDot, CircleSlash, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, Link2, Unlink, Send, CircleDashed, CircleDot, CircleSlash, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -51,12 +51,17 @@ import {
   updateKanbanItem,
   updateKanbanItemStatus,
   updateProject,
+  updateRuntimeAgentPreferences,
 } from "./api";
 import { syncTrayMenu } from "./tray";
 import SessionDetail, { type ActiveMessageMeta } from "./components/SessionDetail";
 import SessionMemory, { SessionMetaList } from "./components/SessionMemory";
 import { AgentGlyph } from "./components/AgentIcon";
-import { agentSelectOptions } from "./components/AgentSelect";
+import {
+  agentModelSelectOptions,
+  agentModelSelectValue,
+  parseAgentModelSelectValue,
+} from "./components/AgentSelect";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
 import {
@@ -67,6 +72,7 @@ import {
 } from "./components/ComposerAttachments";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
 import PopupMenu, { type PopupMenuOption } from "./components/PopupMenu";
+import { RuntimeMenuSelect, runtimePermissionModeOptions } from "./components/RuntimeMenuSelect";
 import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
 import { ThemeMode, useTheme } from "./theme";
@@ -145,6 +151,22 @@ function refreshMemoryBackendStatus(
       console.error("memory backend status check failed", err);
       setMemoryBackendStatus(null);
     });
+}
+
+function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
+  return agent?.model ?? agent?.models[0]?.value ?? "";
+}
+
+function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
+  return agent?.permissionMode ?? agent?.permissionModes[0]?.value ?? "";
+}
+
+function runtimeSessionOptions(model: string, permissionMode: string): Record<string, unknown> {
+  return {
+    transport: "acp",
+    ...(model ? { model } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
+  };
 }
 
 function projectKey(s: SessionInfo): string {
@@ -2118,7 +2140,7 @@ function ProjectActionsButton({
             )}
             <div className="mb-4 flex items-center justify-between gap-3">
               <span className="text-body-sm text-ink/55">{t("project.type")}</span>
-              <NewChatSelect
+              <RuntimeMenuSelect
                 ariaLabel={t("project.type")}
                 value={form.type}
                 options={projectTypeOptions(t)}
@@ -2522,7 +2544,7 @@ function ProjectWorkbench({
             <div className="mt-1 truncate text-body-sm text-ink/45">{project.path}</div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <NewChatSelect
+            <RuntimeMenuSelect
               ariaLabel={t("project.type")}
               value={editingType}
               options={projectTypeOptions(t)}
@@ -2708,7 +2730,11 @@ function KanbanCard({
     () => new Set(item.sessions.map(sessionIdentityKey)),
     [item.sessions],
   );
-  const agentOptions = useMemo(() => agentSelectOptions(runtimeAgents), [runtimeAgents]);
+  const agentModelOptions = useMemo(() => agentModelSelectOptions(runtimeAgents), [runtimeAgents]);
+  const selectedKanbanRuntimeAgent =
+    runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
+  const [model, setModel] = useState(() => initialRuntimeModel(runtimeAgents[0] ?? null));
+  const selectedAgentModelValue = agentModelSelectValue(agent, model);
   const availableSessionOptions = useMemo(
     () =>
       sessions
@@ -2729,9 +2755,24 @@ function KanbanCard({
   }, [sessions]);
 
   useEffect(() => {
-    if (agentOptions.some((option) => option.value === agent)) return;
-    setAgent((runtimeAgents[0]?.agent ?? "codex") as Agent);
-  }, [agent, agentOptions, runtimeAgents]);
+    if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
+    const current = runtimeAgents.find((item) => item.agent === agent) ?? null;
+    const next = current ?? runtimeAgents[0] ?? null;
+    if (!next) return;
+    setAgent(next.agent);
+    setModel(initialRuntimeModel(next));
+  }, [agent, agentModelOptions, runtimeAgents, selectedAgentModelValue]);
+
+  useEffect(() => {
+    if (!selectedKanbanRuntimeAgent) return;
+    if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
+    setModel(initialRuntimeModel(selectedKanbanRuntimeAgent));
+  }, [
+    agentModelOptions,
+    selectedAgentModelValue,
+    selectedKanbanRuntimeAgent?.agent,
+    selectedKanbanRuntimeAgent?.model,
+  ]);
 
   const prompt = useMemo(() => {
     const trimmedDescription = item.description?.trim();
@@ -2788,7 +2829,7 @@ function KanbanCard({
 
   const sendItem = async () => {
     if (sending || !prompt.trim()) return;
-    if (!agentOptions.some((option) => option.value === agent)) {
+    if (!agentModelOptions.some((option) => option.value === selectedAgentModelValue)) {
       onError("No configured runtime agent available");
       return;
     }
@@ -2798,7 +2839,7 @@ function KanbanCard({
       const handle = await startAgentSession({
         agent,
         workspacePath: project.path,
-        options: { transport: "acp" },
+        options: runtimeSessionOptions(model, ""),
       });
       const timestamp = Date.now();
       const localTurnId = `local-turn-${timestamp}`;
@@ -2870,17 +2911,22 @@ function KanbanCard({
           {item.description && <div className="mt-1 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">{item.description}</div>}
           <div className="mt-2 border-t border-ink/10 pt-2">
             <div className="flex min-w-0 items-center justify-between gap-2">
-              <NewChatSelect
+              <RuntimeMenuSelect
                 ariaLabel={t("new_chat.agent")}
-                value={agent}
-                onChange={(value) => setAgent(value as Agent)}
-                disabled={agentOptions.length === 0 || sending}
-                options={agentOptions}
+                value={selectedAgentModelValue}
+                onChange={(value) => {
+                  const parsed = parseAgentModelSelectValue(value);
+                  if (!parsed) return;
+                  setAgent(parsed.agent);
+                  setModel(parsed.model);
+                }}
+                disabled={agentModelOptions.length === 0 || sending}
+                options={agentModelOptions}
               />
               <Tooltip content={sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
                 <button
                   type="button"
-                  disabled={sending || agentOptions.length === 0 || !prompt.trim()}
+                  disabled={sending || agentModelOptions.length === 0 || !prompt.trim()}
                   onClick={() => void sendItem()}
                   className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
                   aria-label={sending ? t("new_chat.sending") : t("new_chat.send")}
@@ -3011,6 +3057,10 @@ function NewChatView({
   const [agent, setAgent] = useState<Agent>(
     () => runtimeAgents[0]?.agent ?? "codex",
   );
+  const [model, setModel] = useState(() => initialRuntimeModel(runtimeAgents[0] ?? null));
+  const [permissionMode, setPermissionMode] = useState(() =>
+    initialRuntimePermission(runtimeAgents[0] ?? null),
+  );
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
@@ -3022,9 +3072,15 @@ function NewChatView({
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
   const projectId = project?.project.id ?? null;
-  const agentOptions = agentSelectOptions(runtimeAgents);
+  const agentModelOptions = agentModelSelectOptions(runtimeAgents);
+  const selectedAgentModelValue = agentModelSelectValue(agent, model);
   const selectedRuntimeAgent =
     runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
+  const permissionOptions = runtimePermissionModeOptions(
+    selectedRuntimeAgent?.permissionModes ?? [],
+    permissionMode,
+    selectedRuntimeAgent?.agent,
+  );
   const {
     attachments,
     supportsAttachments,
@@ -3043,7 +3099,7 @@ function NewChatView({
   const canSend =
     text.trim().length > 0 &&
     Boolean(workspacePath) &&
-    agentOptions.length > 0 &&
+    agentModelOptions.length > 0 &&
     !sending;
   const attachmentOptions = attachmentMenuOptions({
     supportsImageAttachments,
@@ -3059,13 +3115,19 @@ function NewChatView({
       label: t("kanban.no_item"),
       icon: <Kanban className="h-4 w-4 text-ink/45" />,
     },
-    ...kanbanItems.map((item) => {
-      const StatusIcon = KANBAN_STATUS_ICONS[item.status];
-      return {
+    ...KANBAN_STATUSES.flatMap((status) => {
+      const items = kanbanItems.filter((item) => item.status === status);
+      if (items.length === 0) return [];
+      const StatusIcon = KANBAN_STATUS_ICONS[status];
+      return items.map((item) => ({
         value: item.id,
         label: item.title,
-        icon: <StatusIcon className="h-4 w-4 text-ink/55" />,
-      };
+        group: {
+          value: status,
+          label: kanbanStatusLabel(status, t),
+          icon: <StatusIcon className="h-4 w-4 text-ink/55" />,
+        },
+      }));
     }),
   ];
 
@@ -3079,9 +3141,30 @@ function NewChatView({
   }, [initialProjectKey, projectKeyValue, projects]);
 
   useEffect(() => {
-    if (agentOptions.some((option) => option.value === agent)) return;
-    setAgent((runtimeAgents[0]?.agent ?? "codex") as Agent);
-  }, [agent, agentOptions, runtimeAgents]);
+    if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
+    const current = runtimeAgents.find((item) => item.agent === agent) ?? null;
+    const next = current ?? runtimeAgents[0] ?? null;
+    if (!next) return;
+    setAgent(next.agent);
+    setModel(initialRuntimeModel(next));
+    setPermissionMode(initialRuntimePermission(next));
+  }, [agent, agentModelOptions, runtimeAgents, selectedAgentModelValue]);
+
+  useEffect(() => {
+    if (!selectedRuntimeAgent) return;
+    if (
+      permissionMode &&
+      selectedRuntimeAgent.permissionModes.some((option) => option.value === permissionMode)
+    ) {
+      return;
+    }
+    setPermissionMode(initialRuntimePermission(selectedRuntimeAgent));
+  }, [
+    permissionMode,
+    selectedRuntimeAgent?.agent,
+    selectedRuntimeAgent?.permissionMode,
+    selectedRuntimeAgent?.permissionModes,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3131,6 +3214,36 @@ function NewChatView({
     };
   }, [attachmentMenuOpen]);
 
+  const handleAgentModelChange = async (nextValue: string) => {
+    const parsed = parseAgentModelSelectValue(nextValue);
+    if (!parsed) return;
+    const targetRuntimeAgent =
+      runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === parsed.agent) ?? null;
+    if (!targetRuntimeAgent) return;
+    setAgent(parsed.agent);
+    setModel(parsed.model);
+    setPermissionMode(initialRuntimePermission(targetRuntimeAgent));
+    try {
+      await updateRuntimeAgentPreferences({ agent: parsed.agent, model: parsed.model });
+    } catch (err) {
+      const message = String(err);
+      setComposerError(message);
+      onError(message);
+    }
+  };
+
+  const handlePermissionModeChange = async (nextValue: string) => {
+    if (!selectedRuntimeAgent) return;
+    setPermissionMode(nextValue);
+    try {
+      await updateRuntimeAgentPreferences({ agent, permissionMode: nextValue });
+    } catch (err) {
+      const message = String(err);
+      setComposerError(message);
+      onError(message);
+    }
+  };
+
   const handleSend = async () => {
     const prompt = text.trim();
     if (!prompt || sending) return;
@@ -3138,7 +3251,7 @@ function NewChatView({
       setComposerError(t("new_chat.no_project"));
       return;
     }
-    if (!agentOptions.some((option) => option.value === agent)) {
+    if (!agentModelOptions.some((option) => option.value === selectedAgentModelValue)) {
       setComposerError("No configured runtime agent available");
       return;
     }
@@ -3149,7 +3262,7 @@ function NewChatView({
       const handle = await startAgentSession({
         agent,
         workspacePath,
-        options: { transport: "acp" },
+        options: runtimeSessionOptions(model, permissionMode),
       });
       const timestamp = Date.now();
       const localTurnId = `local-turn-${timestamp}`;
@@ -3276,15 +3389,21 @@ function NewChatView({
                     </button>
                   </Tooltip>
                 )}
-                <NewChatMenuButton icon={Hand} label="Default permissions" text />
+                <RuntimeMenuSelect
+                  ariaLabel="Default permissions"
+                  value={permissionMode}
+                  onChange={(value) => void handlePermissionModeChange(value)}
+                  disabled={!selectedRuntimeAgent}
+                  options={permissionOptions}
+                />
               </div>
               <div className="flex shrink-0 items-center gap-2.5">
-                <NewChatSelect
+                <RuntimeMenuSelect
                   ariaLabel={t("new_chat.agent")}
-                  value={agent}
-                  onChange={(value) => setAgent(value as Agent)}
-                  disabled={agentOptions.length === 0}
-                  options={agentOptions}
+                  value={selectedAgentModelValue}
+                  onChange={(value) => void handleAgentModelChange(value)}
+                  disabled={agentModelOptions.length === 0}
+                  options={agentModelOptions}
                 />
                 <NewChatMenuButton icon={Mic} label={t("new_chat.voice")} />
                 <Tooltip content={sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
@@ -3301,7 +3420,7 @@ function NewChatView({
               </div>
             </div>
             <div className="flex h-10 items-center gap-2 px-3 text-body-sm text-ink/55">
-              <NewChatSelect
+              <RuntimeMenuSelect
                 ariaLabel={t("new_chat.project")}
                 value={projectKeyValue}
                 onChange={setProjectKeyValue}
@@ -3341,37 +3460,6 @@ function NewChatView({
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function NewChatSelect({
-  ariaLabel,
-  value,
-  options,
-  disabled,
-  onChange,
-}: {
-  ariaLabel: string;
-  value: string;
-  options: InlineMenuSelectOption[];
-  disabled?: boolean;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="flex min-w-0 max-w-[220px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
-      <InlineMenuSelect
-        value={value}
-        options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
-        onChange={onChange}
-        menuAlign="trigger"
-        placeholder={ariaLabel}
-        ariaLabel={ariaLabel}
-        className="h-7 max-w-[220px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
-        menuClassName="bg-surface-panel"
-        minMenuWidth={180}
-        emptyContent={ariaLabel}
-      />
     </div>
   );
 }
