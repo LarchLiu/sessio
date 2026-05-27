@@ -172,6 +172,7 @@ impl RuntimeManager {
                 req.agent,
                 req.workspace_path.clone(),
                 command,
+                runtime_config.clone(),
                 start,
             ));
         }
@@ -297,6 +298,7 @@ impl RuntimeManager {
                     .unwrap_or_else(|| {
                         acp_transport::command_from_options(req.agent, &Default::default())
                     }),
+                runtime_config.clone(),
                 start,
             ));
         }

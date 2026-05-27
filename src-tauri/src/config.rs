@@ -29,6 +29,9 @@ pub struct RuntimeAgentsConfig {
 pub struct AgentRuntimeConfig {
     pub enabled: bool,
     pub transport: Option<String>,
+    pub model: Option<String>,
+    pub permission_mode: Option<String>,
+    pub sandbox: Option<String>,
     pub command: AgentRuntimeCommandConfig,
 }
 
@@ -85,6 +88,9 @@ struct RawRuntimeAgentsConfig {
 struct RawAgentRuntimeConfig {
     enabled: Option<bool>,
     transport: Option<String>,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    sandbox: Option<String>,
     command: RawAgentRuntimeCommandConfig,
 }
 
@@ -200,6 +206,9 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 match key {
                     "enabled" => target.enabled = value.map(parse_bool).transpose()?,
                     "transport" => target.transport = value,
+                    "model" => target.model = value,
+                    "permission_mode" => target.permission_mode = value,
+                    "sandbox" => target.sandbox = value,
                     "command" => target.command.session = value,
                     other => bail!(
                         "unknown key in [agents.runtime.{}]: {other}",
@@ -402,6 +411,11 @@ fn resolve_agent_runtime_config(raw: RawAgentRuntimeConfig) -> Result<AgentRunti
     Ok(AgentRuntimeConfig {
         enabled: raw.enabled.unwrap_or(false),
         transport,
+        model: raw.model.filter(|value| !value.trim().is_empty()),
+        permission_mode: raw
+            .permission_mode
+            .filter(|value| !value.trim().is_empty()),
+        sandbox: raw.sandbox.filter(|value| !value.trim().is_empty()),
         command: AgentRuntimeCommandConfig {
             session: raw.command.session.filter(|value| !value.trim().is_empty()),
             version: raw.command.version.filter(|value| !value.trim().is_empty()),
@@ -496,6 +510,9 @@ fn serialize_agents_config(config: &AgentsConfig) -> String {
     ] {
         if !runtime.enabled
             && runtime.transport.is_none()
+            && runtime.model.is_none()
+            && runtime.permission_mode.is_none()
+            && runtime.sandbox.is_none()
             && runtime.command.session.is_none()
             && runtime.command.version.is_none()
         {
@@ -510,6 +527,21 @@ fn serialize_agents_config(config: &AgentsConfig) -> String {
         if let Some(transport) = &runtime.transport {
             out.push_str("transport = ");
             out.push_str(&toml_string(transport));
+            out.push('\n');
+        }
+        if let Some(model) = &runtime.model {
+            out.push_str("model = ");
+            out.push_str(&toml_string(model));
+            out.push('\n');
+        }
+        if let Some(permission_mode) = &runtime.permission_mode {
+            out.push_str("permission_mode = ");
+            out.push_str(&toml_string(permission_mode));
+            out.push('\n');
+        }
+        if let Some(sandbox) = &runtime.sandbox {
+            out.push_str("sandbox = ");
+            out.push_str(&toml_string(sandbox));
             out.push('\n');
         }
         if runtime.command.session.is_some() || runtime.command.version.is_some() {
@@ -635,6 +667,9 @@ mod tests {
             [agents.runtime.codex]
             enabled = true
             transport = "acp"
+            model = "gpt-5"
+            permission_mode = "on-request"
+            sandbox = "workspace-write"
             [agents.runtime.codex.command]
             session = "npx -y @zed-industries/codex-acp@latest"
             version = "codex --version"
@@ -645,6 +680,15 @@ mod tests {
 
         assert!(config.runtime.codex.enabled);
         assert_eq!(config.runtime.codex.transport.as_deref(), Some("acp"));
+        assert_eq!(config.runtime.codex.model.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            config.runtime.codex.permission_mode.as_deref(),
+            Some("on-request")
+        );
+        assert_eq!(
+            config.runtime.codex.sandbox.as_deref(),
+            Some("workspace-write")
+        );
         assert_eq!(
             config.runtime.codex.command.session.as_deref(),
             Some("npx -y @zed-industries/codex-acp@latest")

@@ -39,7 +39,7 @@ pub fn configured_runtime_agents() -> Result<Vec<RuntimeAgentMetadata>> {
             enabled: runtime.enabled,
             configured: runtime.enabled,
             transport: transport_from_runtime_config(runtime),
-            session_command: runtime.command.session.clone(),
+            session_command: Some(acp_transport::command_from_config(agent, runtime)),
             version_command: runtime.command.version.clone(),
             detected_version: None,
             capabilities: None,
@@ -75,6 +75,7 @@ pub fn startup_probe_runtime_agents(
             continue;
         }
         let transport = transport_from_runtime_config(&runtime_config);
+        let session_command = acp_transport::command_from_config(agent, &runtime_config);
         let detected_version = runtime_config
             .command
             .version
@@ -93,11 +94,7 @@ pub fn startup_probe_runtime_agents(
                 agent,
                 &workspace_path,
                 transport,
-                runtime_config
-                    .command
-                    .session
-                    .clone()
-                    .context("missing runtime session command")?,
+                session_command.clone(),
             ) {
                 Ok(probe) => {
                     let record = RuntimeAgentCapabilityRecord {
@@ -129,7 +126,7 @@ pub fn startup_probe_runtime_agents(
             enabled: runtime_config.enabled,
             configured: runtime_config.enabled,
             transport,
-            session_command: runtime_config.command.session.clone(),
+            session_command: Some(session_command),
             version_command: runtime_config.command.version.clone(),
             detected_version: capability_record
                 .as_ref()

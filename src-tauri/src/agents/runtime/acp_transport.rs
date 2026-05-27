@@ -6,8 +6,8 @@ use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, EmbeddedResource, EmbeddedResourceResource,
     ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, NewSessionRequest,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification, SessionUpdate,
-    StopReason, TextContent, TextResourceContents,
+    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification,
+    SetSessionConfigOptionRequest, SessionUpdate, StopReason, TextContent, TextResourceContents,
 };
 use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result};
@@ -89,11 +89,12 @@ pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {
 }
 
 pub fn command_from_config(agent: Agent, config: &AgentRuntimeConfig) -> String {
-    config
+    let command = config
         .command
         .session
         .clone()
-        .unwrap_or_else(|| default_acp_command(agent).to_string())
+        .unwrap_or_else(|| default_acp_command(agent).to_string());
+    append_agent_options(agent, command, config)
 }
 
 pub fn spawn_session(
@@ -102,6 +103,7 @@ pub fn spawn_session(
     _agent: Agent,
     workspace_path: String,
     command: String,
+    runtime_config: Option<AgentRuntimeConfig>,
     start: AcpSessionStart,
 ) -> AcpSessionController {
     let (command_tx, command_rx) = tauri::async_runtime::channel(32);
@@ -114,6 +116,7 @@ pub fn spawn_session(
                 sessio_runtime_session_id.clone(),
                 workspace_path,
                 command,
+                runtime_config,
                 start,
                 command_rx,
             )
@@ -208,6 +211,7 @@ async fn run_session(
     sessio_runtime_session_id: String,
     workspace_path: String,
     command: String,
+    runtime_config: Option<AgentRuntimeConfig>,
     start: AcpSessionStart,
     command_rx: tauri::async_runtime::Receiver<AcpWorkerCommand>,
 ) -> Result<()> {
@@ -358,6 +362,7 @@ async fn run_session(
             let workspace_path = workspace_path.clone();
             let start = start.clone();
             let current_turn_id = current_turn_id.clone();
+            let runtime_config = runtime_config.clone();
             async move {
                 let init = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -382,8 +387,9 @@ async fn run_session(
                 let capabilities = runtime_capabilities_from_acp(&init.agent_capabilities);
                 let acp_session_id = match start {
                     AcpSessionStart::New => {
+                        let request = new_session_request(workspace_path, runtime_config.as_ref());
                         let session = connection
-                            .send_request(NewSessionRequest::new(workspace_path))
+                            .send_request(request)
                             .block_task()
                             .await?;
                         manager
@@ -534,6 +540,14 @@ async fn run_session(
                         session.session_id
                     }
                 };
+                apply_initial_session_config(
+                    &manager,
+                    &sessio_runtime_session_id,
+                    &connection,
+                    &acp_session_id,
+                    runtime_config.as_ref(),
+                )
+                .await?;
                 let agent_runtime_session_id = acp_session_id.to_string();
                 manager.mark_session_ready(
                     &sessio_runtime_session_id,
@@ -555,6 +569,108 @@ async fn run_session(
         })
         .await
         .map_err(anyhow::Error::from)
+}
+
+fn new_session_request(
+    workspace_path: String,
+    config: Option<&AgentRuntimeConfig>,
+) -> NewSessionRequest {
+    let mut request = NewSessionRequest::new(workspace_path);
+    let Some(config) = config else {
+        return request;
+    };
+    let mut options = serde_json::Map::new();
+    if let Some(model) = config.model.as_deref() {
+        options.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+    }
+    if let Some(permission_mode) = config.permission_mode.as_deref() {
+        options.insert(
+            "permissionMode".to_string(),
+            serde_json::Value::String(permission_mode.to_string()),
+        );
+    }
+    if options.is_empty() {
+        return request;
+    }
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "claudeCode".to_string(),
+        serde_json::json!({
+            "options": options,
+        }),
+    );
+    request.meta = Some(meta);
+    request
+}
+
+async fn apply_initial_session_config(
+    manager: &RuntimeManager,
+    sessio_runtime_session_id: &str,
+    connection: &ConnectionTo<AcpAgentRole>,
+    acp_session_id: &SessionId,
+    config: Option<&AgentRuntimeConfig>,
+) -> Result<(), agent_client_protocol::Error> {
+    let Some(config) = config else {
+        return Ok(());
+    };
+    for (config_id, value) in [
+        ("model", config.model.as_deref()),
+        ("mode", config.permission_mode.as_deref()),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        let request = SetSessionConfigOptionRequest::new(
+            acp_session_id.clone(),
+            config_id.to_string(),
+            value.to_string(),
+        );
+        manager
+            .emit(
+                acp_protocol_event(
+                    sessio_runtime_session_id,
+                    "client_to_agent",
+                    "request",
+                    "session/set_config_option",
+                    Some(acp_session_id.to_string()),
+                    None,
+                    None,
+                    None,
+                    &request,
+                )
+                .map_err(acp_internal_error)?,
+            )
+            .map_err(acp_internal_error)?;
+        match connection.send_request(request).block_task().await {
+            Ok(response) => {
+                manager
+                    .emit(
+                        acp_protocol_event(
+                            sessio_runtime_session_id,
+                            "agent_to_client",
+                            "response",
+                            "session/set_config_option",
+                            Some(acp_session_id.to_string()),
+                            None,
+                            None,
+                            None,
+                            &response,
+                        )
+                        .map_err(acp_internal_error)?,
+                    )
+                    .map_err(acp_internal_error)?;
+            }
+            Err(error) => {
+                log::warn!(
+                    "[sessio-runtime:acp:initial-config-failed] session={} config={} value={} error={error}",
+                    sessio_runtime_session_id,
+                    config_id,
+                    value
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn run_command_loop(
@@ -948,6 +1064,7 @@ fn extension_lower(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AgentRuntimeCommandConfig, AgentRuntimeConfig};
 
     #[test]
     fn text_attachment_becomes_embedded_resource() {
@@ -1037,6 +1154,52 @@ mod tests {
 
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    fn codex_config_appends_model_approval_and_sandbox_flags() {
+        let command = command_from_config(
+            Agent::Codex,
+            &AgentRuntimeConfig {
+                enabled: true,
+                transport: Some("acp".to_string()),
+                model: Some("gpt-5".to_string()),
+                permission_mode: Some("on-request".to_string()),
+                sandbox: Some("workspace-write".to_string()),
+                command: AgentRuntimeCommandConfig {
+                    session: Some("npx -y @zed-industries/codex-acp@latest".to_string()),
+                    version: None,
+                },
+            },
+        );
+
+        assert_eq!(
+            command,
+            "npx -y @zed-industries/codex-acp@latest --model gpt-5 --ask-for-approval on-request --sandbox workspace-write"
+        );
+    }
+
+    #[test]
+    fn claude_config_appends_model_and_permission_mode_flags() {
+        let command = command_from_config(
+            Agent::Claude,
+            &AgentRuntimeConfig {
+                enabled: true,
+                transport: Some("acp".to_string()),
+                model: Some("sonnet".to_string()),
+                permission_mode: Some("acceptEdits".to_string()),
+                sandbox: Some("ignored-for-claude".to_string()),
+                command: AgentRuntimeCommandConfig {
+                    session: Some("npx -y @zed-industries/claude-code-acp@latest".to_string()),
+                    version: None,
+                },
+            },
+        );
+
+        assert_eq!(
+            command,
+            "npx -y @zed-industries/claude-code-acp@latest --model sonnet --permission-mode acceptEdits"
+        );
+    }
 }
 
 fn session_update_type(update: &SessionUpdate) -> &'static str {
@@ -1086,6 +1249,53 @@ fn default_acp_command(agent: Agent) -> &'static str {
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest",
         Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp",
     }
+}
+
+fn append_agent_options(agent: Agent, mut command: String, config: &AgentRuntimeConfig) -> String {
+    match agent {
+        Agent::Codex => {
+            append_option(&mut command, "--model", config.model.as_deref());
+            append_option(
+                &mut command,
+                "--ask-for-approval",
+                config.permission_mode.as_deref(),
+            );
+            append_option(&mut command, "--sandbox", config.sandbox.as_deref());
+        }
+        Agent::Claude => {
+            append_option(&mut command, "--model", config.model.as_deref());
+            append_option(
+                &mut command,
+                "--permission-mode",
+                config.permission_mode.as_deref(),
+            );
+        }
+        Agent::Gemini => {
+            append_option(&mut command, "--model", config.model.as_deref());
+        }
+    }
+    command
+}
+
+fn append_option(command: &mut String, flag: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    command.push(' ');
+    command.push_str(flag);
+    command.push(' ');
+    command.push_str(&shell_quote(value));
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'))
+    {
+        return value.to_string();
+    }
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 fn acp_internal_error(error: impl ToString) -> agent_client_protocol::Error {
