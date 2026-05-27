@@ -6,16 +6,26 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, type LucideIcon } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, FolderPlus, Kanban, Trash2, Pencil, Save, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Agent,
+  ProjectInfo,
+  ProjectType,
+  KanbanItem,
+  KanbanStatus,
+  addExistingProject,
+  archiveProject,
+  createKanbanItem,
+  createProject,
   createPendingSession,
+  deleteKanbanItem,
   getIndexStatus,
   IndexPhase,
   getMemoryBackendStatus,
@@ -24,6 +34,8 @@ import {
   RuntimeAgentMetadata,
   SessionInfo,
   type AgentRuntimeEvent,
+  listKanbanItems,
+  listProjects,
   rebuildSessionIndex,
   getSessionAncestors,
   listSessions,
@@ -33,6 +45,9 @@ import {
   sendAgentInput,
   startAgentSession,
   type SessionScope,
+  updateKanbanItem,
+  updateKanbanItemStatus,
+  updateProject,
 } from "./api";
 import { syncTrayMenu } from "./tray";
 import SessionDetail, { type ActiveMessageMeta } from "./components/SessionDetail";
@@ -68,6 +83,8 @@ type Filter =
   | SessionScope
   | { kind: "project"; key: string; label: string };
 
+type ProjectSelection = { kind: "project"; projectId: string } | null;
+
 function scopeForFilter(filter: Filter): SessionScope {
   if (filter.kind === "project") return { kind: "project", key: filter.key };
   return filter;
@@ -75,6 +92,23 @@ function scopeForFilter(filter: Filter): SessionScope {
 
 export type ViewMode = "native" | "cross";
 type DetailMode = "chat" | "memory";
+
+const PROJECT_TYPES: ProjectType[] = [
+  "code",
+  "writing",
+  "research",
+  "general",
+  "video_production",
+];
+
+const KANBAN_STATUSES: KanbanStatus[] = [
+  "todo",
+  "in_progress",
+  "canceled",
+  "agent_review",
+  "human_review",
+  "done",
+];
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 
@@ -102,6 +136,10 @@ function refreshMemoryBackendStatus(
 
 function projectKey(s: SessionInfo): string {
   return s.projectPath ?? `__unknown__:${s.agent}`;
+}
+
+function projectFilterKey(project: ProjectInfo): string {
+  return project.path;
 }
 
 function matchesScope(scope: SessionScope, session: SessionInfo): boolean {
@@ -275,9 +313,11 @@ function isSubagentOnly(s: SessionInfo): boolean {
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [indexPhase, setIndexPhase] = useState<IndexPhase>("indexing");
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
+  const [selectedProject, setSelectedProject] = useState<ProjectSelection>(null);
   const [selected, setSelected] = useState<SessionInfo | null>(null);
   const [expandProject, setExpandProject] = useState(true);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
@@ -328,6 +368,22 @@ export default function App() {
     () => sessions.filter((s) => s.available),
     [sessions]
   );
+
+  const refreshProjects = useCallback(() => {
+    return listProjects()
+      .then(setProjects)
+      .catch((err) => {
+        setError(String(err));
+      });
+  }, []);
+
+  const refreshSessions = useCallback(() => {
+    return listSessions()
+      .then(setSessions)
+      .catch((err) => {
+        setError(String(err));
+      });
+  }, []);
 
   useEffect(() => {
     runtimeSessionAliasesRef.current = runtimeSessionAliases;
@@ -411,10 +467,11 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    listSessions()
-      .then((rows) => {
+    Promise.all([listSessions(), listProjects()])
+      .then(([sessionRows, projectRows]) => {
         if (cancelled) return;
-        setSessions(rows);
+        setSessions(sessionRows);
+        setProjects(projectRows);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -436,10 +493,13 @@ export default function App() {
 
     const unlisten = listen("sessions_index_updated", () => {
       setIndexPhase("idle");
-      listSessions()
-        .then((rows) => setSessions(rows))
-        .catch(() => {});
+      void refreshSessions();
+      void refreshProjects();
       refreshMemoryBackendStatus(setMemoryBackendStatus);
+    });
+    const projectsUnlisten = listen("projects_updated", () => {
+      void refreshProjects();
+      void refreshSessions();
     });
     const statusUnlisten = listen("sessions_index_status", (event) => {
       const payload = event.payload as {
@@ -451,9 +511,10 @@ export default function App() {
     });
     return () => {
       unlisten.then((f) => f()).catch(() => {});
+      projectsUnlisten.then((f) => f()).catch(() => {});
       statusUnlisten.then((f) => f()).catch(() => {});
     };
-  }, []);
+  }, [refreshProjects, refreshSessions]);
 
   useEffect(() => {
     let cancelled = false;
@@ -511,14 +572,18 @@ export default function App() {
     if (!next) return;
     setSelected(next);
     setDetailMode("chat");
-    setFilter({ kind: "project", key: projectKey(next), label: next.projectName ?? next.projectPath ?? t("list.unknown_project") });
+    const project = projects.find((item) => item.path === next.projectPath);
+    if (project) {
+      setSelectedProject(null);
+      setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+    }
     setExpandedProjects((prev) => {
       const expanded = new Set(prev);
-      expanded.add(projectKey(next));
+      if (project) expanded.add(project.id);
       return expanded;
     });
     setPendingSelectSession(null);
-  }, [availableSessions, pendingSelectSession, t]);
+  }, [availableSessions, pendingSelectSession, projects]);
 
   useEffect(() => {
     for (const pending of Object.values(pendingNewChats)) {
@@ -662,31 +727,36 @@ export default function App() {
     const m = new Map<
       string,
       {
+        project: ProjectInfo;
         label: string;
         count: number;
-        path: string | null;
+        path: string;
         latest: number;
         sessions: SessionInfo[];
       }
     >();
-    const unknown = t("list.unknown_project");
+    for (const project of projects) {
+      m.set(project.id, {
+        project,
+        label: project.name,
+        count: 0,
+        path: project.path,
+        latest: project.updatedAt,
+        sessions: [],
+      });
+    }
+    const projectByPath = new Map(projects.map((project) => [project.path, project]));
     for (const s of availableSessions) {
-      if (isSubagentOnly(s)) continue;
-      const key = projectKey(s);
+      if (isSubagentOnly(s) || !s.projectPath) continue;
+      const project = projectByPath.get(s.projectPath);
+      if (!project) continue;
+      const key = project.id;
       const ts = s.updatedAt ?? s.startedAt ?? 0;
       const e = m.get(key);
       if (e) {
         e.count += 1;
         if (ts > e.latest) e.latest = ts;
         e.sessions.push(s);
-      } else {
-        m.set(key, {
-          label: s.projectName ?? s.projectPath ?? unknown,
-          count: 1,
-          path: s.projectPath,
-          latest: ts,
-          sessions: [s],
-        });
       }
     }
     return [...m.entries()]
@@ -705,7 +775,7 @@ export default function App() {
         }),
       }))
       .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label));
-  }, [availableSessions, liveRuntimeState.sessions, runtimeSessionAliases, t]);
+  }, [availableSessions, liveRuntimeState.sessions, projects, runtimeSessionAliases]);
 
   useEffect(() => {
     setExpandedProjects((prev) => {
@@ -722,15 +792,18 @@ export default function App() {
       }
       if (
         selected &&
-        keys.has(projectKey(selected)) &&
-        !next.has(projectKey(selected))
+        selected.projectPath &&
+        projects.some((project) => project.path === selected.projectPath)
       ) {
-        next.add(projectKey(selected));
-        changed = true;
+        const project = projects.find((item) => item.path === selected.projectPath);
+        if (project && !next.has(project.id)) {
+          next.add(project.id);
+          changed = true;
+        }
       }
       return changed ? next : prev;
     });
-  }, [projectGroups, selected]);
+  }, [projectGroups, projects, selected]);
 
   useEffect(() => {
     setExpandedProjectSessions((prev) => {
@@ -749,6 +822,16 @@ export default function App() {
     () => availableSessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
     [availableSessions]
   );
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (projects.some((project) => project.id === selectedProject.projectId)) return;
+    setSelectedProject(null);
+  }, [projects, selectedProject]);
+
+  const activeProject = selectedProject
+    ? projects.find((project) => project.id === selectedProject.projectId) ?? null
+    : null;
 
   const selectedKey = selected ? sessionKey(selected) : null;
   const selectedIdentityKey = selected ? sessionIdentityKey(selected) : null;
@@ -879,7 +962,7 @@ export default function App() {
 
   const memoryBackendMissing =
     memoryBackendStatus !== null && memoryBackendStatus.available === false;
-  const projectSearchInitialKey = filter.kind === "project" ? filter.key : projectGroups[0]?.key;
+  const projectSearchInitialKey = filter.kind === "project" ? filter.key : projects[0]?.path;
 
   useEffect(() => {
     if (memorySearchOpen && projectSearchInitialKey) {
@@ -924,6 +1007,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => {
+              setSelectedProject(null);
               setSelected(null);
               setDetailMode("chat");
             }}
@@ -938,11 +1022,24 @@ export default function App() {
             <span className="truncate">{t("sidebar.new_chat")}</span>
           </button>
           <div className="shrink-0 flex flex-col gap-0.5">
-            <SectionHeader
-              label={t("sidebar.by_project")}
-              collapsed={!expandProject}
-              onToggle={() => setExpandProject((v) => !v)}
-            />
+            <div className="flex items-center gap-1">
+              <SectionHeader
+                label={t("sidebar.by_project")}
+                collapsed={!expandProject}
+                onToggle={() => setExpandProject((v) => !v)}
+              />
+              <ProjectActionsButton
+                onProjectAdded={(project) => {
+                  setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
+                  setSelectedProject({ kind: "project", projectId: project.id });
+                  setSelected(null);
+                  setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+                  setExpandedProjects((prev) => new Set(prev).add(project.id));
+                  void refreshSessions();
+                }}
+                onError={setError}
+              />
+            </div>
           </div>
 
           {expandProject && (
@@ -964,7 +1061,10 @@ export default function App() {
                     runtimeSessionAliases={runtimeSessionAliases}
                     unreadSessionIds={unreadSessionIds}
                     onSelectProject={() => {
-                      setFilter({ kind: "project", key: p.key, label: p.label });
+                      setSelectedProject({ kind: "project", projectId: p.project.id });
+                      setSelected(null);
+                      setDetailMode("chat");
+                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
                       setExpandedProjects((prev) => {
                         const next = new Set(prev);
                         if (next.has(p.key)) next.delete(p.key);
@@ -973,7 +1073,8 @@ export default function App() {
                       });
                     }}
                     onSelectSession={(session) => {
-                      setFilter({ kind: "project", key: p.key, label: p.label });
+                      setSelectedProject(null);
+                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
                       setSelected(session);
                     }}
                     onToggleSessionLimit={() => {
@@ -987,7 +1088,7 @@ export default function App() {
                     onProjectContextMenu={(e) => {
                       e.preventDefault();
                       void openScopeMenu(
-                        scopeForFilter({ kind: "project", key: p.key, label: p.label }),
+                        scopeForFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label }),
                         { x: e.clientX, y: e.clientY },
                       );
                     }}
@@ -1184,6 +1285,27 @@ export default function App() {
               <SessionMemory session={selected} />
             </div>
           </div>
+        ) : activeProject ? (
+          <ProjectWorkbench
+            project={activeProject}
+            sessions={availableSessions.filter((session) => session.projectPath === activeProject.path)}
+            onProjectUpdated={(project) => {
+              setProjects((prev) => prev.map((item) => (item.id === project.id ? project : item)));
+              setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+            }}
+            onProjectArchived={(projectId) => {
+              setProjects((prev) => prev.filter((project) => project.id !== projectId));
+              setSelectedProject(null);
+              setFilter({ kind: "all" });
+              void refreshSessions();
+            }}
+            onSelectSession={(session) => {
+              setSelectedProject(null);
+              setSelected(session);
+              setDetailMode("chat");
+            }}
+            onError={setError}
+          />
         ) : (
           <NewChatView
             projects={projectGroups}
@@ -1204,7 +1326,10 @@ export default function App() {
           <ProjectMemorySearchDialog
             open={memorySearchOpen}
             initialProjectKey={projectSearchInitialKey}
-            projects={projectGroups}
+            projects={projects.map((project) => ({
+              key: project.path,
+              label: project.name,
+            }))}
             activeProjectKey={filter.kind === "project" ? filter.key : null}
             onClose={() => setMemorySearchOpen(false)}
             onExited={() => setMemorySearchMounted(false)}
@@ -1778,11 +1903,160 @@ function Chevron({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+function projectTypeLabel(type: ProjectType, t: (key: string) => string): string {
+  return t(`project.type.${type}`);
+}
+
+function kanbanStatusLabel(status: KanbanStatus, t: (key: string) => string): string {
+  return t(`kanban.status.${status}`);
+}
+
+function projectTypeOptions(t: (key: string) => string): InlineMenuSelectOption[] {
+  return PROJECT_TYPES.map((type) => ({
+    value: type,
+    label: projectTypeLabel(type, t),
+  }));
+}
+
+function ProjectActionsButton({
+  onProjectAdded,
+  onError,
+}: {
+  onProjectAdded: (project: ProjectInfo) => void;
+  onError: (error: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const [openMenu, setOpenMenu] = useState(false);
+  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string; name: string; type: ProjectType }>(null);
+  const [saving, setSaving] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  const pickExistingProject = async () => {
+    setOpenMenu(false);
+    try {
+      const selection = await open({ directory: true, multiple: false });
+      if (typeof selection !== "string") return;
+      const defaultName = selection.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      setForm({ mode: "existing", basePath: selection, name: defaultName, type: "code" });
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const pickNewProjectParent = async () => {
+    setOpenMenu(false);
+    try {
+      const selection = await open({ directory: true, multiple: false });
+      if (typeof selection !== "string") return;
+      setForm({ mode: "new", basePath: selection, name: "", type: "code" });
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const save = async () => {
+    if (!form || saving) return;
+    const name = form.name.trim();
+    if (!name) {
+      onError(t("project.name_required"));
+      return;
+    }
+    setSaving(true);
+    onError(null);
+    try {
+      const project =
+        form.mode === "existing"
+          ? await addExistingProject(form.basePath, name, form.type)
+          : await createProject(form.basePath, name, form.type);
+      onProjectAdded(project);
+      setForm(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Tooltip content={t("project.add")} placement="bottom">
+        <button
+          ref={buttonRef}
+          type="button"
+          onClick={() => setOpenMenu((value) => !value)}
+          className="mt-3 mb-1 rounded-md p-1 text-ink/45 transition hover:bg-ink/5 hover:text-ink"
+          aria-label={t("project.add")}
+        >
+          <FolderPlus className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
+      {openMenu && buttonRef.current && (
+        <div className="absolute left-10 top-24 z-50 w-48 overflow-hidden rounded-md border border-ink/10 bg-surface-panel shadow-lg">
+          <button type="button" onClick={() => void pickExistingProject()} className="block w-full px-3 py-2 text-left text-body-sm text-ink/75 hover:bg-ink/5">
+            {t("project.add_existing")}
+          </button>
+          <button type="button" onClick={() => void pickNewProjectParent()} className="block w-full px-3 py-2 text-left text-body-sm text-ink/75 hover:bg-ink/5">
+            {t("project.create_new")}
+          </button>
+        </div>
+      )}
+      {form && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/35 px-4">
+          <div className="w-full max-w-[420px] rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-body font-medium text-ink">
+                  {form.mode === "existing" ? t("project.add_existing") : t("project.create_new")}
+                </div>
+                <div className="mt-1 truncate text-caption text-ink/45">{form.basePath}</div>
+              </div>
+              <button type="button" onClick={() => setForm(null)} className="rounded-md p-1 text-ink/45 hover:bg-ink/5 hover:text-ink">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-caption uppercase tracking-wide text-ink/45">{t("project.name")}</span>
+              <input
+                value={form.name}
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void save();
+                  if (event.key === "Escape") setForm(null);
+                }}
+                autoFocus
+                className="w-full rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body text-ink outline-none focus:border-ink/25"
+              />
+            </label>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <span className="text-body-sm text-ink/55">{t("project.type")}</span>
+              <NewChatSelect
+                ariaLabel={t("project.type")}
+                value={form.type}
+                options={projectTypeOptions(t)}
+                onChange={(value) => setForm({ ...form, type: value as ProjectType })}
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setForm(null)} className="rounded-md px-3 py-1.5 text-body-sm text-ink/60 hover:bg-ink/5 hover:text-ink">
+                {t("delete.cancel")}
+              </button>
+              <button type="button" disabled={saving} onClick={() => void save()} className="rounded-md bg-ink px-3 py-1.5 text-body-sm text-bg disabled:opacity-50">
+                {saving ? t("new_chat.sending") : t("project.save")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 type ProjectGroup = {
   key: string;
+  project: ProjectInfo;
   label: string;
   count: number;
-  path: string | null;
+  path: string;
   latest: number;
   sessions: SessionInfo[];
 };
@@ -1855,6 +2129,9 @@ function ProjectSidebarGroup({
           }
         />
         <span className="flex-1 truncate text-body">{project.label}</span>
+        <span className="shrink-0 rounded-full bg-ink/5 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink/35">
+          {projectTypeLabel(project.project.type, t)}
+        </span>
         <span className="text-meta text-ink/40 tabular-nums">{project.count}</span>
       </button>
       <div
@@ -1991,6 +2268,333 @@ function SidebarSessionStatus({
     <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
       <MailPlus className="h-3 w-3" />
     </span>
+  );
+}
+
+function ProjectWorkbench({
+  project,
+  sessions,
+  onProjectUpdated,
+  onProjectArchived,
+  onSelectSession,
+  onError,
+}: {
+  project: ProjectInfo;
+  sessions: SessionInfo[];
+  onProjectUpdated: (project: ProjectInfo) => void;
+  onProjectArchived: (projectId: string) => void;
+  onSelectSession: (session: SessionInfo) => void;
+  onError: (error: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const [items, setItems] = useState<KanbanItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newTitle, setNewTitle] = useState("");
+  const [editingName, setEditingName] = useState(project.name);
+  const [editingType, setEditingType] = useState<ProjectType>(project.type);
+  const [projectSaving, setProjectSaving] = useState(false);
+
+  useEffect(() => {
+    setEditingName(project.name);
+    setEditingType(project.type);
+  }, [project.id, project.name, project.type]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    listKanbanItems(project.id)
+      .then((rows) => {
+        if (!cancelled) setItems(rows);
+      })
+      .catch((err) => {
+        if (!cancelled) onError(String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [onError, project.id]);
+
+  const addTodo = async () => {
+    const title = newTitle.trim();
+    if (!title) return;
+    onError(null);
+    try {
+      const item = await createKanbanItem(project.id, title);
+      setItems((prev) => [...prev, item]);
+      setNewTitle("");
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const saveProject = async () => {
+    setProjectSaving(true);
+    onError(null);
+    try {
+      const updated = await updateProject(project.id, {
+        name: editingName,
+        type: editingType,
+      });
+      onProjectUpdated(updated);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setProjectSaving(false);
+    }
+  };
+
+  const archive = async () => {
+    onError(null);
+    try {
+      await archiveProject(project.id);
+      onProjectArchived(project.id);
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const patchItem = (item: KanbanItem) => {
+    setItems((prev) => prev.map((current) => (current.id === item.id ? item : current)));
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-surface-panel">
+      <div className="border-b border-ink/10 px-6 py-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="mb-2 flex items-center gap-2 text-caption uppercase tracking-[0.16em] text-ink/40">
+              <Kanban className="h-4 w-4" />
+              {t("project.workbench")}
+            </div>
+            <input
+              value={editingName}
+              onChange={(event) => setEditingName(event.target.value)}
+              className="w-full max-w-[520px] bg-transparent text-[28px] font-medium leading-tight text-ink outline-none"
+            />
+            <div className="mt-1 truncate text-body-sm text-ink/45">{project.path}</div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <NewChatSelect
+              ariaLabel={t("project.type")}
+              value={editingType}
+              options={projectTypeOptions(t)}
+              onChange={(value) => setEditingType(value as ProjectType)}
+            />
+            <Tooltip content={t("project.save")} placement="bottom">
+              <button
+                type="button"
+                disabled={projectSaving}
+                onClick={() => void saveProject()}
+                className="rounded-md p-2 text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:opacity-45"
+              >
+                <Save className="h-4 w-4" />
+              </button>
+            </Tooltip>
+            <Tooltip content={t("project.archive")} placement="bottom">
+              <button
+                type="button"
+                onClick={() => void archive()}
+                className="rounded-md p-2 text-ink/45 transition hover:bg-status-error/10 hover:text-status-error"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+      </div>
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_240px] gap-0">
+        <ScrollArea className="min-h-0 p-5">
+          <div className="mb-4 flex gap-2">
+            <input
+              value={newTitle}
+              onChange={(event) => setNewTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void addTodo();
+              }}
+              placeholder={t("kanban.add_placeholder")}
+              className="min-w-0 flex-1 rounded-lg border border-ink/10 bg-ink/5 px-3 py-2 text-body text-ink outline-none placeholder:text-ink/35 focus:border-ink/25"
+            />
+            <button
+              type="button"
+              onClick={() => void addTodo()}
+              disabled={!newTitle.trim()}
+              className="rounded-lg bg-ink px-3 py-2 text-body-sm font-medium text-bg disabled:opacity-35"
+            >
+              {t("kanban.add")}
+            </button>
+          </div>
+          {loading ? (
+            <div className="py-12 text-center text-body-sm text-ink/45">{t("memory_search.searching")}</div>
+          ) : (
+            <div className="grid min-w-[980px] grid-cols-6 gap-3">
+              {KANBAN_STATUSES.map((status) => (
+                <KanbanColumn
+                  key={status}
+                  status={status}
+                  items={items.filter((item) => item.status === status)}
+                  onItemUpdated={patchItem}
+                  onItemDeleted={(itemId) => setItems((prev) => prev.filter((item) => item.id !== itemId))}
+                  onError={onError}
+                />
+              ))}
+            </div>
+          )}
+        </ScrollArea>
+        <aside className="min-h-0 border-l border-ink/10 bg-ink/[0.025] p-4">
+          <div className="mb-3 text-caption uppercase tracking-[0.14em] text-ink/40">
+            {t("sidebar.sessions_count", { count: sessions.length })}
+          </div>
+          <ScrollArea className="max-h-full">
+            <div className="flex flex-col gap-1">
+              {sessions.slice(0, 24).map((session) => (
+                <button
+                  key={sessionKey(session)}
+                  type="button"
+                  onClick={() => onSelectSession(session)}
+                  className="rounded-md px-2 py-1.5 text-left text-body-sm text-ink/65 transition hover:bg-ink/5 hover:text-ink"
+                >
+                  <span className="block truncate">{session.title ?? session.firstUserMessage ?? t("list.no_user_message")}</span>
+                  <span className="text-meta text-ink/35">{formatShortRelativeTime(session.updatedAt ?? session.startedAt, t)}</span>
+                </button>
+              ))}
+              {sessions.length === 0 && (
+                <div className="py-6 text-center text-body-sm text-ink/40">{t("list.empty")}</div>
+              )}
+            </div>
+          </ScrollArea>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function KanbanColumn({
+  status,
+  items,
+  onItemUpdated,
+  onItemDeleted,
+  onError,
+}: {
+  status: KanbanStatus;
+  items: KanbanItem[];
+  onItemUpdated: (item: KanbanItem) => void;
+  onItemDeleted: (itemId: string) => void;
+  onError: (error: string | null) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <section className="min-h-[420px] rounded-xl border border-ink/10 bg-ink/[0.035] p-2">
+      <div className="mb-2 flex items-center justify-between gap-2 px-1.5">
+        <h3 className="text-body-sm font-medium text-ink/75">{kanbanStatusLabel(status, t)}</h3>
+        <span className="rounded-full bg-ink/8 px-1.5 py-0.5 text-meta text-ink/40">{items.length}</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        {items.map((item) => (
+          <KanbanCard
+            key={item.id}
+            item={item}
+            onUpdated={onItemUpdated}
+            onDeleted={onItemDeleted}
+            onError={onError}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function KanbanCard({
+  item,
+  onUpdated,
+  onDeleted,
+  onError,
+}: {
+  item: KanbanItem;
+  onUpdated: (item: KanbanItem) => void;
+  onDeleted: (itemId: string) => void;
+  onError: (error: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(item.title);
+  const [description, setDescription] = useState(item.description ?? "");
+
+  useEffect(() => {
+    setTitle(item.title);
+    setDescription(item.description ?? "");
+  }, [item.description, item.title]);
+
+  const move = async (status: KanbanStatus) => {
+    try {
+      onUpdated(await updateKanbanItemStatus(item.id, status));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const save = async () => {
+    try {
+      const updated = await updateKanbanItem(item.id, {
+        title,
+        description,
+      });
+      onUpdated(updated);
+      setEditing(false);
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const remove = async () => {
+    try {
+      await deleteKanbanItem(item.id);
+      onDeleted(item.id);
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  return (
+    <article className="rounded-lg border border-ink/10 bg-surface-panel p-2.5 shadow-sm">
+      {editing ? (
+        <div className="flex flex-col gap-2">
+          <input value={title} onChange={(event) => setTitle(event.target.value)} className="rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
+          <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} className="resize-none rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
+          <div className="flex justify-end gap-1">
+            <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
+            <button type="button" onClick={() => void save()} className="rounded bg-ink px-2 py-1 text-caption text-bg">{t("project.save")}</button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="text-body-sm font-medium leading-snug text-ink/85">{item.title}</div>
+          {item.description && <div className="mt-1 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">{item.description}</div>}
+          <div className="mt-3 flex items-center justify-between gap-2">
+            <InlineMenuSelect
+              value={item.status}
+              options={KANBAN_STATUSES.map((status) => ({
+                value: status,
+                label: kanbanStatusLabel(status, t),
+              }))}
+              onChange={(value) => void move(value as KanbanStatus)}
+              minMenuWidth={150}
+              className="h-6 max-w-[120px] px-1 py-0 text-caption"
+            />
+            <div className="flex items-center gap-1">
+              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70">
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error">
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </article>
   );
 }
 

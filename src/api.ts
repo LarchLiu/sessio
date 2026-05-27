@@ -2,6 +2,42 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Agent = "codex" | "claude" | "gemini";
 
+export type ProjectType =
+  | "code"
+  | "writing"
+  | "research"
+  | "general"
+  | "video_production";
+
+export interface ProjectInfo {
+  id: string;
+  path: string;
+  name: string;
+  type: ProjectType;
+  createdAt: number;
+  updatedAt: number;
+  sessionCount: number;
+}
+
+export type KanbanStatus =
+  | "todo"
+  | "in_progress"
+  | "canceled"
+  | "agent_review"
+  | "human_review"
+  | "done";
+
+export interface KanbanItem {
+  id: string;
+  projectId: string;
+  title: string;
+  description: string | null;
+  status: KanbanStatus;
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SessionInfo {
   id: string;
   agent: Agent;
@@ -299,6 +335,97 @@ export type SessionScope =
 
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function listProjects(): Promise<ProjectInfo[]> {
+  return invoke<ProjectInfo[]>("list_projects");
+}
+
+export async function addExistingProject(
+  path: string,
+  name?: string | null,
+  projectType?: ProjectType | null,
+): Promise<ProjectInfo> {
+  return invoke<ProjectInfo>("add_existing_project", {
+    path,
+    name: name ?? null,
+    projectType: projectType ?? null,
+  });
+}
+
+export async function createProject(
+  parentPath: string,
+  name: string,
+  projectType?: ProjectType | null,
+): Promise<ProjectInfo> {
+  return invoke<ProjectInfo>("create_project", {
+    parentPath,
+    name,
+    projectType: projectType ?? null,
+  });
+}
+
+export async function updateProject(
+  projectId: string,
+  patch: { name?: string | null; type?: ProjectType | null },
+): Promise<ProjectInfo> {
+  return invoke<ProjectInfo>("update_project", {
+    projectId,
+    name: patch.name ?? null,
+    projectType: patch.type ?? null,
+  });
+}
+
+export async function archiveProject(projectId: string): Promise<void> {
+  return invoke<void>("archive_project", { projectId });
+}
+
+export async function listKanbanItems(projectId: string): Promise<KanbanItem[]> {
+  return invoke<KanbanItem[]>("list_kanban_items", { projectId });
+}
+
+export async function createKanbanItem(
+  projectId: string,
+  title: string,
+  description?: string | null,
+): Promise<KanbanItem> {
+  return invoke<KanbanItem>("create_kanban_item", {
+    projectId,
+    title,
+    description: description ?? null,
+  });
+}
+
+export async function updateKanbanItem(
+  itemId: string,
+  patch: {
+    title?: string | null;
+    description?: string | null;
+    status?: KanbanStatus | null;
+  },
+): Promise<KanbanItem> {
+  return invoke<KanbanItem>("update_kanban_item", {
+    itemId,
+    title: patch.title ?? null,
+    description:
+      Object.prototype.hasOwnProperty.call(patch, "description")
+        ? patch.description === null
+          ? null
+          : patch.description ?? ""
+        : null,
+    status: patch.status ?? null,
+  });
+}
+
+export async function updateKanbanItemStatus(
+  itemId: string,
+  status: KanbanStatus,
+): Promise<KanbanItem> {
+  return invoke<KanbanItem>("update_kanban_item_status", { itemId, status });
+}
+
+export async function deleteKanbanItem(itemId: string): Promise<void> {
+  return invoke<void>("delete_kanban_item", { itemId });
 }
 
 export async function getSessionAncestors(

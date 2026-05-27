@@ -224,11 +224,19 @@ mod tests {
     use crate::agents::runtime::types::RuntimeTransportKind;
     use crate::models::Agent;
     use crate::store::sqlite::SqliteStore;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_runtime_metadata_db() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("sessio-runtime-metadata-{nanos}.db"))
+    }
 
     #[test]
     fn manual_runtime_agent_capability_db_roundtrip_on_local_db() {
-        let home = dirs::home_dir().expect("home dir");
-        let db_path = home.join(".sessio").join("db-data").join("sessio-index.db");
+        let db_path = unique_runtime_metadata_db();
         let store = Arc::new(SqliteStore::open(&db_path).expect("open sqlite"));
         store.init().expect("init sqlite");
 
@@ -264,5 +272,7 @@ mod tests {
             loaded.raw_capabilities_json,
             "{\"loadSession\":true,\"promptCapabilities\":{}}"
         );
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

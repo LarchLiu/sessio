@@ -10,7 +10,9 @@ use crate::memory::{
     MemoryArtifact, MemoryJob, MemoryRecord, MemoryRecordKind, MemorySource, MemoryStore,
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
-use crate::models::{Agent, SessionInfo, SubagentInfo};
+use crate::models::{
+    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SubagentInfo,
+};
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord, SessionStore,
 };
@@ -230,11 +232,54 @@ const SCHEMA_V6: &str = r#"
 ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
 "#;
 
+const SCHEMA_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS projects (
+    id         TEXT PRIMARY KEY,
+    path       TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL DEFAULT 'code',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_archived_updated ON projects(archived, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
+
+CREATE TABLE IF NOT EXISTS kanban_items (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    description TEXT,
+    status      TEXT NOT NULL DEFAULT 'todo',
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_kanban_items_project_status_order
+    ON kanban_items(project_id, status, sort_order, created_at);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos}-{count}")
 }
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -293,7 +338,15 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 7 {
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
+            [],
+        )?;
+    }
     conn.execute_batch(SCHEMA_V5)?;
+    conn.execute_batch(SCHEMA_V7)?;
     Ok(())
 }
 
@@ -547,6 +600,125 @@ fn opt_i64_to_u64(v: Option<i64>) -> Option<u64> {
     v.map(|n| n as u64)
 }
 
+fn canonical_project_path(path: &str) -> Result<String> {
+    let path = Path::new(path);
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("project directory does not exist: {}", path.display()))?;
+    if !meta.is_dir() {
+        anyhow::bail!("project path is not a directory: {}", path.display());
+    }
+    Ok(std::fs::canonicalize(path)
+        .with_context(|| format!("canonicalize project path {}", path.display()))?
+        .to_string_lossy()
+        .to_string())
+}
+
+fn clean_project_name(name: Option<&str>, path: &str) -> Result<String> {
+    let from_name = name.map(str::trim).filter(|s| !s.is_empty());
+    let value = from_name
+        .map(str::to_string)
+        .or_else(|| {
+            Path::new(path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| path.to_string());
+    if value.trim().is_empty() {
+        anyhow::bail!("project name cannot be empty");
+    }
+    Ok(value)
+}
+
+fn clean_child_project_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("project name cannot be empty");
+    }
+    if trimmed.contains(std::path::MAIN_SEPARATOR) || trimmed == "." || trimmed == ".." {
+        anyhow::bail!("project name must be a single directory name");
+    }
+    if cfg!(windows) && (trimmed.contains('/') || trimmed.contains('\\')) {
+        anyhow::bail!("project name must be a single directory name");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn stable_project_id(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(path.as_bytes());
+    format!("project-{}", hex::encode(hasher.finalize())[..16].to_string())
+}
+
+fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.as_bytes());
+    hasher.update(title.as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    format!("kanban-{}", hex::encode(hasher.finalize())[..16].to_string())
+}
+
+#[cfg(test)]
+fn temp_child_path(parent: &Path, name: &str) -> std::path::PathBuf {
+    parent.join(format!("{name}-{}", unique_suffix()))
+}
+
+fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectInfo> {
+    let project_type_raw: String = row.get(3)?;
+    Ok(ProjectInfo {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        name: row.get(2)?,
+        project_type: ProjectType::from_db_str(&project_type_raw).unwrap_or(ProjectType::Code),
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        session_count: row.get::<_, i64>(6)? as usize,
+    })
+}
+
+fn kanban_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KanbanItem> {
+    let status_raw: String = row.get(4)?;
+    Ok(KanbanItem {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        status: KanbanStatus::from_db_str(&status_raw).unwrap_or(KanbanStatus::Todo),
+        sort_order: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo> {
+    conn.query_row(
+        "SELECT p.id, p.path, p.name, p.type, p.created_at, p.updated_at,
+                COUNT(s.session_id) AS session_count
+         FROM projects p
+         LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
+         WHERE p.id = ? AND p.archived = 0
+         GROUP BY p.id",
+        params![project_id],
+        project_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))
+}
+
+fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem> {
+    conn.query_row(
+        "SELECT id, project_id, title, description, status, sort_order, created_at, updated_at
+         FROM kanban_items
+         WHERE id = ?",
+        params![item_id],
+        kanban_item_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("kanban item not found: {item_id}"))
+}
+
 fn read_record_kind(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<MemoryRecordKind> {
     let raw: String = row.get(idx)?;
     MemoryRecordKind::from_db_str(&raw).map_err(|e| {
@@ -696,6 +868,59 @@ fn load_all_indexed_subagents_grouped(
     Ok(grouped)
 }
 
+fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<SessionInfo>> {
+    let mut subs_by_parent = load_all_subagents_grouped(conn)?;
+    let sql = if user_projects_only {
+        "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
+                s.started_at, s.updated_at, s.message_count, s.title, s.first_user_message,
+                s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
+         FROM sessions s
+         INNER JOIN projects p ON p.path = s.project_path AND p.archived = 0
+         ORDER BY s.updated_at DESC"
+    } else {
+        "SELECT agent, session_id, file_path, project_path, project_name,
+                started_at, updated_at, message_count, title, first_user_message,
+                file_size, partial, available, archived, forked_from_agent, forked_from_id
+         FROM sessions
+         ORDER BY updated_at DESC"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let mut sessions: Vec<SessionInfo> = stmt
+        .query_map([], |row| {
+            let agent_str: String = row.get(0)?;
+            let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+            Ok(SessionInfo {
+                id: row.get(1)?,
+                agent,
+                forked_from_agent: row
+                    .get::<_, Option<String>>(14)?
+                    .and_then(|value| Agent::from_db_str(&value)),
+                forked_from_id: row.get(15)?,
+                file_path: row.get(2)?,
+                project_path: row.get(3)?,
+                project_name: row.get(4)?,
+                started_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                message_count: row.get::<_, i64>(7)? as usize,
+                title: row.get(8)?,
+                first_user_message: row.get(9)?,
+                file_size: row.get::<_, i64>(10)? as u64,
+                partial: row.get::<_, i64>(11)? != 0,
+                available: row.get::<_, i64>(12)? != 0,
+                archived: row.get::<_, i64>(13)? != 0,
+                subagents: Vec::new(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    sessions.retain(|s| !is_codex_guardian_index_row(s));
+    for s in sessions.iter_mut() {
+        s.subagents = subs_by_parent
+            .remove(&(s.agent, s.id.clone()))
+            .unwrap_or_default();
+    }
+    Ok(sessions)
+}
+
 impl SessionStore for SqliteStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -704,48 +929,12 @@ impl SessionStore for SqliteStore {
 
     fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
-        let mut subs_by_parent = load_all_subagents_grouped(&conn)?;
-        let mut stmt = conn.prepare(
-            "SELECT agent, session_id, file_path, project_path, project_name,
-                    started_at, updated_at, message_count, title, first_user_message,
-                    file_size, partial, available, archived, forked_from_agent, forked_from_id
-             FROM sessions
-             ORDER BY updated_at DESC",
-        )?;
-        let mut sessions: Vec<SessionInfo> = stmt
-            .query_map([], |row| {
-                let agent_str: String = row.get(0)?;
-                let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
-                Ok(SessionInfo {
-                    id: row.get(1)?,
-                    agent,
-                    forked_from_agent: row
-                        .get::<_, Option<String>>(14)?
-                        .and_then(|value| Agent::from_db_str(&value)),
-                    forked_from_id: row.get(15)?,
-                    file_path: row.get(2)?,
-                    project_path: row.get(3)?,
-                    project_name: row.get(4)?,
-                    started_at: row.get(5)?,
-                    updated_at: row.get(6)?,
-                    message_count: row.get::<_, i64>(7)? as usize,
-                    title: row.get(8)?,
-                    first_user_message: row.get(9)?,
-                    file_size: row.get::<_, i64>(10)? as u64,
-                    partial: row.get::<_, i64>(11)? != 0,
-                    available: row.get::<_, i64>(12)? != 0,
-                    archived: row.get::<_, i64>(13)? != 0,
-                    subagents: Vec::new(),
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        sessions.retain(|s| !is_codex_guardian_index_row(s));
-        for s in sessions.iter_mut() {
-            s.subagents = subs_by_parent
-                .remove(&(s.agent, s.id.clone()))
-                .unwrap_or_default();
-        }
-        Ok(sessions)
+        load_sessions(&conn, true)
+    }
+
+    fn list_all_sessions(&self) -> Result<Vec<SessionInfo>> {
+        let conn = self.conn.lock().unwrap();
+        load_sessions(&conn, false)
     }
 
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {
@@ -790,6 +979,214 @@ impl SessionStore for SqliteStore {
             s.subagents = subs;
         }
         Ok(sessions)
+    }
+
+    fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.path, p.name, p.type, p.created_at, p.updated_at,
+                    COUNT(s.session_id) AS session_count
+             FROM projects p
+             LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
+             WHERE p.archived = 0
+             GROUP BY p.id
+             ORDER BY p.updated_at DESC, p.name COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt.query_map([], project_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn add_project(
+        &self,
+        path: &str,
+        name: Option<&str>,
+        project_type: ProjectType,
+    ) -> Result<ProjectInfo> {
+        let canonical = canonical_project_path(path)?;
+        let name = clean_project_name(name, &canonical)?;
+        let id = stable_project_id(&canonical);
+        let now = now_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, type, created_at, updated_at, archived)
+             VALUES (?, ?, ?, ?, ?, ?, 0)",
+            params![id, canonical, name, project_type.as_str(), now, now],
+        )
+        .with_context(|| "add project")?;
+        load_project_by_id(&conn, &id)
+    }
+
+    fn create_project(
+        &self,
+        parent_path: &str,
+        name: &str,
+        project_type: ProjectType,
+    ) -> Result<ProjectInfo> {
+        let parent = canonical_project_path(parent_path)?;
+        let clean_name = clean_child_project_name(name)?;
+        let project_path = Path::new(&parent).join(&clean_name);
+        if project_path.exists() {
+            anyhow::bail!("project directory already exists: {}", project_path.display());
+        }
+        std::fs::create_dir(&project_path)
+            .with_context(|| format!("create project directory {}", project_path.display()))?;
+        let path = canonical_project_path(&project_path.to_string_lossy())?;
+        self.add_project(&path, Some(&clean_name), project_type)
+    }
+
+    fn update_project(
+        &self,
+        project_id: &str,
+        name: Option<&str>,
+        project_type: Option<ProjectType>,
+    ) -> Result<ProjectInfo> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_project_by_id(&conn, project_id)?;
+        let next_name = match name {
+            Some(value) => clean_project_name(Some(value), &current.path)?,
+            None => current.name,
+        };
+        let next_type = project_type.unwrap_or(current.project_type);
+        conn.execute(
+            "UPDATE projects
+             SET name = ?, type = ?, updated_at = ?
+             WHERE id = ? AND archived = 0",
+            params![next_name, next_type.as_str(), now_ms(), project_id],
+        )?;
+        load_project_by_id(&conn, project_id)
+    }
+
+    fn archive_project(&self, project_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE projects SET archived = 1, updated_at = ? WHERE id = ? AND archived = 0",
+            params![now_ms(), project_id],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("project not found: {project_id}");
+        }
+        Ok(())
+    }
+
+    fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>> {
+        let conn = self.conn.lock().unwrap();
+        load_project_by_id(&conn, project_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, title, description, status, sort_order, created_at, updated_at
+             FROM kanban_items
+             WHERE project_id = ?
+             ORDER BY status, sort_order ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], kanban_item_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn create_kanban_item(
+        &self,
+        project_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<KanbanItem> {
+        let title = title.trim();
+        if title.is_empty() {
+            anyhow::bail!("todo title cannot be empty");
+        }
+        let description = description.map(str::trim).filter(|s| !s.is_empty());
+        let conn = self.conn.lock().unwrap();
+        load_project_by_id(&conn, project_id)?;
+        let next_order: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1
+                 FROM kanban_items
+                 WHERE project_id = ? AND status = ?",
+                params![project_id, KanbanStatus::Todo.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let now = now_ms();
+        let id = stable_kanban_id(project_id, title, now);
+        conn.execute(
+            "INSERT INTO kanban_items (
+                id, project_id, title, description, status, sort_order, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id,
+                project_id,
+                title,
+                description,
+                KanbanStatus::Todo.as_str(),
+                next_order,
+                now,
+                now,
+            ],
+        )?;
+        load_kanban_item_by_id(&conn, &id)
+    }
+
+    fn update_kanban_item(
+        &self,
+        item_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<KanbanStatus>,
+    ) -> Result<KanbanItem> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_kanban_item_by_id(&conn, item_id)?;
+        let next_title = match title {
+            Some(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    anyhow::bail!("todo title cannot be empty");
+                }
+                trimmed.to_string()
+            }
+            None => current.title,
+        };
+        let next_description = match description {
+            Some(Some(value)) => value
+                .trim()
+                .is_empty()
+                .then(|| None)
+                .unwrap_or_else(|| Some(value.trim().to_string())),
+            Some(None) => None,
+            None => current.description,
+        };
+        let next_status = status.unwrap_or(current.status);
+        let next_order = if next_status != current.status {
+            conn.query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1
+                 FROM kanban_items
+                 WHERE project_id = ? AND status = ?",
+                params![current.project_id, next_status.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+        } else {
+            current.sort_order
+        };
+        conn.execute(
+            "UPDATE kanban_items
+             SET title = ?, description = ?, status = ?, sort_order = ?, updated_at = ?
+             WHERE id = ?",
+            params![
+                next_title,
+                next_description,
+                next_status.as_str(),
+                next_order,
+                now_ms(),
+                item_id,
+            ],
+        )?;
+        load_kanban_item_by_id(&conn, item_id)
+    }
+
+    fn delete_kanban_item(&self, item_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute("DELETE FROM kanban_items WHERE id = ?", params![item_id])?;
+        if changed == 0 {
+            anyhow::bail!("kanban item not found: {item_id}");
+        }
+        Ok(())
     }
 
     fn get_runtime_agent_capability(
@@ -1672,14 +2069,9 @@ fn record_continuation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rec
 #[cfg(test)]
 mod migration_tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_db(prefix: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("{prefix}-{nanos}.db"))
+        std::env::temp_dir().join(format!("{prefix}-{}.db", unique_suffix()))
     }
 
     // Verify a synthetic v0.3.2-era schema migrates cleanly into the current
@@ -1739,6 +2131,11 @@ mod migration_tests {
         assert!(session_columns.contains(&"forked_from_agent".to_string()));
         assert!(session_columns.contains(&"forked_from_id".to_string()));
         assert!(session_columns.contains(&"title".to_string()));
+
+        let projects_count: i64 = conn
+            .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(projects_count, 0);
 
         let artifact_table: i64 = conn
             .query_row(
@@ -1852,7 +2249,7 @@ mod migration_tests {
             .unwrap();
 
         let row = store
-            .list_sessions()
+            .list_all_sessions()
             .unwrap()
             .into_iter()
             .find(|session| session.agent == Agent::Gemini && session.id == "child")
@@ -1900,7 +2297,7 @@ mod migration_tests {
         store.upsert_session("/tmp/project/child.jsonl", &parsed).unwrap();
 
         let row = store
-            .list_sessions()
+            .list_all_sessions()
             .unwrap()
             .into_iter()
             .find(|session| session.agent == Agent::Codex && session.id == "child")
@@ -1946,7 +2343,7 @@ mod migration_tests {
         store.upsert_session("/tmp/project/child.jsonl", &parsed).unwrap();
 
         let row = store
-            .list_sessions()
+            .list_all_sessions()
             .unwrap()
             .into_iter()
             .find(|session| session.agent == Agent::Codex && session.id == "child")
@@ -1955,5 +2352,110 @@ mod migration_tests {
         assert_eq!(row.forked_from_id.as_deref(), Some("db-parent"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn projects_start_empty_and_gate_visible_sessions() {
+        let path = unique_db("sessio-project-gates-sessions");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_dir = temp_child_path(&std::env::temp_dir(), "sessio-visible-project");
+        std::fs::create_dir(&project_dir).unwrap();
+        let project_path = std::fs::canonicalize(&project_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        let session = SessionInfo {
+            id: "visible".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project_path.clone()),
+            project_name: Some("Visible".to_string()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 1,
+            title: Some("hello".to_string()),
+            first_user_message: Some("hello".to_string()),
+            file_path: project_dir.join("session.jsonl").to_string_lossy().to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session(&session.file_path, &session).unwrap();
+
+        assert!(store.list_projects().unwrap().is_empty());
+        assert!(store.list_sessions().unwrap().is_empty());
+        assert_eq!(store.list_all_sessions().unwrap().len(), 1);
+
+        let project = store
+            .add_project(&project_path, Some("Visible"), ProjectType::Research)
+            .unwrap();
+        assert_eq!(project.project_type, ProjectType::Research);
+        assert_eq!(store.list_sessions().unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn project_and_kanban_crud_roundtrip() {
+        let path = unique_db("sessio-project-kanban");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-project-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let created = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "video-plan",
+                ProjectType::VideoProduction,
+            )
+            .unwrap();
+        assert_eq!(created.name, "video-plan");
+        assert_eq!(created.project_type, ProjectType::VideoProduction);
+        assert!(Path::new(&created.path).exists());
+
+        let updated = store
+            .update_project(&created.id, Some("Video Plan"), Some(ProjectType::General))
+            .unwrap();
+        assert_eq!(updated.name, "Video Plan");
+        assert_eq!(updated.project_type, ProjectType::General);
+
+        let item = store
+            .create_kanban_item(&created.id, "Draft outline", Some("scene beats"))
+            .unwrap();
+        assert_eq!(item.status, KanbanStatus::Todo);
+
+        let moved = store
+            .update_kanban_item(&item.id, None, None, Some(KanbanStatus::AgentReview))
+            .unwrap();
+        assert_eq!(moved.status, KanbanStatus::AgentReview);
+
+        let edited = store
+            .update_kanban_item(
+                &item.id,
+                Some("Draft cold open"),
+                Some(Some("")),
+                Some(KanbanStatus::Done),
+            )
+            .unwrap();
+        assert_eq!(edited.title, "Draft cold open");
+        assert_eq!(edited.description, None);
+        assert_eq!(edited.status, KanbanStatus::Done);
+
+        assert_eq!(store.list_kanban_items(&created.id).unwrap().len(), 1);
+        store.delete_kanban_item(&item.id).unwrap();
+        assert!(store.list_kanban_items(&created.id).unwrap().is_empty());
+
+        store.archive_project(&created.id).unwrap();
+        assert!(store.list_projects().unwrap().is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

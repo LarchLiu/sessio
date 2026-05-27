@@ -60,6 +60,101 @@ pub struct SubagentInfo {
     pub available: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectType {
+    Code,
+    Writing,
+    Research,
+    General,
+    VideoProduction,
+}
+
+impl ProjectType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProjectType::Code => "code",
+            ProjectType::Writing => "writing",
+            ProjectType::Research => "research",
+            ProjectType::General => "general",
+            ProjectType::VideoProduction => "video_production",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "code" => Some(ProjectType::Code),
+            "writing" => Some(ProjectType::Writing),
+            "research" => Some(ProjectType::Research),
+            "general" => Some(ProjectType::General),
+            "video_production" => Some(ProjectType::VideoProduction),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInfo {
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub project_type: ProjectType,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub session_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum KanbanStatus {
+    Todo,
+    InProgress,
+    Canceled,
+    AgentReview,
+    HumanReview,
+    Done,
+}
+
+impl KanbanStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            KanbanStatus::Todo => "todo",
+            KanbanStatus::InProgress => "in_progress",
+            KanbanStatus::Canceled => "canceled",
+            KanbanStatus::AgentReview => "agent_review",
+            KanbanStatus::HumanReview => "human_review",
+            KanbanStatus::Done => "done",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "todo" => Some(KanbanStatus::Todo),
+            "in_progress" => Some(KanbanStatus::InProgress),
+            "canceled" => Some(KanbanStatus::Canceled),
+            "agent_review" => Some(KanbanStatus::AgentReview),
+            "human_review" => Some(KanbanStatus::HumanReview),
+            "done" => Some(KanbanStatus::Done),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KanbanItem {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: KanbanStatus,
+    pub sort_order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 fn default_available() -> bool {
     true
 }

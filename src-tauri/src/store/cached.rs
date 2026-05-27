@@ -2,7 +2,9 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use crate::models::{Agent, SessionInfo, SubagentInfo};
+use crate::models::{
+    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SubagentInfo,
+};
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord, SessionStore,
 };
@@ -116,8 +118,76 @@ impl SessionStore for CachedStore {
         self.inner.list_sessions()
     }
 
+    fn list_all_sessions(&self) -> Result<Vec<SessionInfo>> {
+        self.inner.list_all_sessions()
+    }
+
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {
         Ok(self.snapshot.read().unwrap().to_vec())
+    }
+
+    fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
+        self.inner.list_projects()
+    }
+
+    fn add_project(
+        &self,
+        path: &str,
+        name: Option<&str>,
+        project_type: ProjectType,
+    ) -> Result<ProjectInfo> {
+        self.inner.add_project(path, name, project_type)
+    }
+
+    fn create_project(
+        &self,
+        parent_path: &str,
+        name: &str,
+        project_type: ProjectType,
+    ) -> Result<ProjectInfo> {
+        self.inner.create_project(parent_path, name, project_type)
+    }
+
+    fn update_project(
+        &self,
+        project_id: &str,
+        name: Option<&str>,
+        project_type: Option<ProjectType>,
+    ) -> Result<ProjectInfo> {
+        self.inner.update_project(project_id, name, project_type)
+    }
+
+    fn archive_project(&self, project_id: &str) -> Result<()> {
+        self.inner.archive_project(project_id)
+    }
+
+    fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>> {
+        self.inner.list_kanban_items(project_id)
+    }
+
+    fn create_kanban_item(
+        &self,
+        project_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<KanbanItem> {
+        self.inner
+            .create_kanban_item(project_id, title, description)
+    }
+
+    fn update_kanban_item(
+        &self,
+        item_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<KanbanStatus>,
+    ) -> Result<KanbanItem> {
+        self.inner
+            .update_kanban_item(item_id, title, description, status)
+    }
+
+    fn delete_kanban_item(&self, item_id: &str) -> Result<()> {
+        self.inner.delete_kanban_item(item_id)
     }
 
     fn get_runtime_agent_capability(

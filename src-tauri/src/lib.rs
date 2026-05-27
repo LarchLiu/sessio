@@ -24,7 +24,9 @@ use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
-use models::{Agent, SessionInfo, SessionMessage};
+use models::{
+    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SessionMessage,
+};
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::SessionStore;
@@ -47,12 +49,136 @@ fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionI
 }
 
 #[tauri::command]
+fn list_projects(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<ProjectInfo>, String> {
+    store.list_projects().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_existing_project(
+    path: String,
+    name: Option<String>,
+    project_type: Option<ProjectType>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ProjectInfo, String> {
+    let project = store
+        .add_project(
+            &path,
+            name.as_deref(),
+            project_type.unwrap_or(ProjectType::Code),
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    Ok(project)
+}
+
+#[tauri::command]
+fn create_project(
+    parent_path: String,
+    name: String,
+    project_type: Option<ProjectType>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ProjectInfo, String> {
+    let project = store
+        .create_project(&parent_path, &name, project_type.unwrap_or(ProjectType::Code))
+        .map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    Ok(project)
+}
+
+#[tauri::command]
+fn update_project(
+    project_id: String,
+    name: Option<String>,
+    project_type: Option<ProjectType>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ProjectInfo, String> {
+    let project = store
+        .update_project(&project_id, name.as_deref(), project_type)
+        .map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    Ok(project)
+}
+
+#[tauri::command]
+fn archive_project(
+    project_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .archive_project(&project_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    app.emit("sessions_index_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_kanban_items(
+    project_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<KanbanItem>, String> {
+    store
+        .list_kanban_items(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_kanban_item(
+    project_id: String,
+    title: String,
+    description: Option<String>,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<KanbanItem, String> {
+    store
+        .create_kanban_item(&project_id, &title, description.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_kanban_item(
+    item_id: String,
+    title: Option<String>,
+    description: Option<Option<String>>,
+    status: Option<KanbanStatus>,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<KanbanItem, String> {
+    let description_ref = description.as_ref().map(|value| value.as_deref());
+    store
+        .update_kanban_item(&item_id, title.as_deref(), description_ref, status)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_kanban_item_status(
+    item_id: String,
+    status: KanbanStatus,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<KanbanItem, String> {
+    store
+        .update_kanban_item(&item_id, None, None, Some(status))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_kanban_item(
+    item_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store.delete_kanban_item(&item_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_session_ancestors(
     agent: Agent,
     session_id: String,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Vec<SessionInfo>, String> {
-    let sessions = store.list_sessions().map_err(|e| e.to_string())?;
+    let sessions = store.list_all_sessions().map_err(|e| e.to_string())?;
     Ok(session_ancestors_from_db(agent, &session_id, &sessions))
 }
 
@@ -1089,6 +1215,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            list_projects,
+            add_existing_project,
+            create_project,
+            update_project,
+            archive_project,
+            list_kanban_items,
+            create_kanban_item,
+            update_kanban_item,
+            update_kanban_item_status,
+            delete_kanban_item,
             get_session_ancestors,
             get_session_messages,
             update_session_message_count,

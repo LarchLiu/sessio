@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 
 use crate::agents::runtime::types::RuntimeTransportKind;
-use crate::models::{Agent, SessionInfo, SubagentInfo};
+use crate::models::{Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SubagentInfo};
 
 #[derive(Debug, Clone)]
 pub struct IndexedSubagentRecord {
@@ -49,7 +49,33 @@ pub struct RuntimeAgentCapabilityRecord {
 pub trait SessionStore: Send + Sync {
     fn init(&self) -> Result<()>;
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
+    fn list_all_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
+    fn list_projects(&self) -> Result<Vec<ProjectInfo>>;
+    fn add_project(&self, path: &str, name: Option<&str>, project_type: ProjectType) -> Result<ProjectInfo>;
+    fn create_project(&self, parent_path: &str, name: &str, project_type: ProjectType) -> Result<ProjectInfo>;
+    fn update_project(
+        &self,
+        project_id: &str,
+        name: Option<&str>,
+        project_type: Option<ProjectType>,
+    ) -> Result<ProjectInfo>;
+    fn archive_project(&self, project_id: &str) -> Result<()>;
+    fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>>;
+    fn create_kanban_item(
+        &self,
+        project_id: &str,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<KanbanItem>;
+    fn update_kanban_item(
+        &self,
+        item_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<KanbanStatus>,
+    ) -> Result<KanbanItem>;
+    fn delete_kanban_item(&self, item_id: &str) -> Result<()>;
     fn get_runtime_agent_capability(
         &self,
         agent: Agent,
