@@ -625,9 +625,13 @@ function MessageStream({
     () => liveSession?.turns.map((turn) => turn.turnId).join("|") ?? "",
     [liveSession],
   );
+  const liveWorkingIndicatorTurnId = useMemo(
+    () => liveWorkingIndicatorTurn(liveSession)?.turnId ?? "",
+    [liveSession],
+  );
   const displayItems = useMemo(
-    () => cachedAcpRenderItems(acpViewModel, liveTurnIdsKey),
-    [acpViewModel, liveTurnIdsKey],
+    () => cachedAcpRenderItems(acpViewModel, liveTurnIdsKey, liveWorkingIndicatorTurnId),
+    [acpViewModel, liveTurnIdsKey, liveWorkingIndicatorTurnId],
   );
   const visibleDisplayItems = useMemo(() => {
     if (liveSession || historyRenderReady) return displayItems;
@@ -1863,6 +1867,9 @@ function AcpLiveItem({
   if (item.kind === "turnStatus") {
     return <RuntimeStatusContent text={liveTurnStatusText(item.turn, now)} />;
   }
+  if (item.kind === "workingIndicator") {
+    return <LemniscateBloomIndicator />;
+  }
   if (item.kind === "tool") {
     return <AcpToolCard tool={item.tool} onPreviewImage={onPreviewImage} />;
   }
@@ -2423,6 +2430,126 @@ function visibleContentBlocks(blocks: AcpContentBlock[], visibleChars: number): 
 function clampNumber(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, value));
+}
+
+function LemniscateBloomIndicator() {
+  const groupRef = useRef<SVGGElement>(null);
+  const pathRef = useRef<SVGPathElement>(null);
+  const particlesRef = useRef<SVGCircleElement[]>([]);
+
+  useEffect(() => {
+    const group = groupRef.current;
+    const path = pathRef.current;
+    if (!group || !path) return;
+    let frame = 0;
+    const startedAt = performance.now();
+    const render = (now: number) => {
+      const time = now - startedAt;
+      const progress = (time % LEMNISCATE_CONFIG.durationMs) / LEMNISCATE_CONFIG.durationMs;
+      const detailScale = lemniscateDetailScale(time);
+      path.setAttribute("d", lemniscatePath(detailScale));
+      particlesRef.current.forEach((node, index) => {
+        const particle = lemniscateParticle(index, progress, detailScale);
+        node.setAttribute("cx", particle.x.toFixed(2));
+        node.setAttribute("cy", particle.y.toFixed(2));
+        node.setAttribute("r", particle.radius.toFixed(2));
+        node.setAttribute("opacity", particle.opacity.toFixed(3));
+      });
+      frame = requestAnimationFrame(render);
+    };
+    frame = requestAnimationFrame(render);
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  return (
+    <div className="flex justify-start text-ink/45" aria-label="Working">
+      <svg
+        className="h-4 w-8 overflow-visible"
+        viewBox="18 34 64 32"
+        fill="none"
+        preserveAspectRatio="xMinYMid meet"
+        aria-hidden="true"
+      >
+        <g ref={groupRef}>
+          <path
+            ref={pathRef}
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={LEMNISCATE_STROKE_WIDTH}
+            opacity="0.1"
+          />
+          {Array.from({ length: LEMNISCATE_CONFIG.particleCount }, (_, index) => (
+            <circle
+              key={index}
+              ref={(node) => {
+                if (node) particlesRef.current[index] = node;
+              }}
+              fill="currentColor"
+            />
+          ))}
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+const LEMNISCATE_STROKE_WIDTH = 4.8;
+const LEMNISCATE_CONFIG = {
+  particleCount: 70,
+  trailSpan: 0.4,
+  durationMs: 2800,
+  pulseDurationMs: 2600,
+  lemniscateA: 20,
+  lemniscateBoost: 7,
+};
+
+function lemniscatePoint(progress: number, detailScale: number): { x: number; y: number } {
+  const t = normalizeUnitProgress(progress) * Math.PI * 2;
+  const scale = LEMNISCATE_CONFIG.lemniscateA + detailScale * LEMNISCATE_CONFIG.lemniscateBoost;
+  const denom = 1 + Math.sin(t) ** 2;
+  return {
+    x: 50 + (scale * Math.cos(t)) / denom,
+    y: 50 + (scale * Math.sin(t) * Math.cos(t)) / denom,
+  };
+}
+
+function lemniscateDetailScale(time: number): number {
+  const pulseProgress = (time % LEMNISCATE_CONFIG.pulseDurationMs) / LEMNISCATE_CONFIG.pulseDurationMs;
+  const pulseAngle = pulseProgress * Math.PI * 2;
+  return 0.52 + ((Math.sin(pulseAngle + 0.55) + 1) / 2) * 0.48;
+}
+
+function lemniscatePath(detailScale: number, steps = 180): string {
+  return Array.from({ length: steps + 1 }, (_, index) => {
+    const point = lemniscatePoint(index / steps, detailScale);
+    return `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function lemniscateParticle(
+  index: number,
+  progress: number,
+  detailScale: number,
+): { x: number; y: number; radius: number; opacity: number } {
+  const tailOffset = index / (LEMNISCATE_CONFIG_SAFE_PARTICLE_COUNT - 1);
+  const point = lemniscatePoint(
+    progress - tailOffset * LEMNISCATE_CONFIG.trailSpan,
+    detailScale,
+  );
+  const fade = Math.pow(1 - tailOffset, 0.56);
+  return {
+    x: point.x,
+    y: point.y,
+    radius: 0.9 + fade * 2.7,
+    opacity: 0.04 + fade * 0.96,
+  };
+}
+
+const LEMNISCATE_CONFIG_SAFE_PARTICLE_COUNT = Math.max(2, LEMNISCATE_CONFIG.particleCount);
+
+function normalizeUnitProgress(progress: number): number {
+  return ((progress % 1) + 1) % 1;
 }
 
 function AcpContentBlockView({
@@ -3067,6 +3194,7 @@ function normalizedUserMessageText(text: string): string {
 
 type AcpRenderItem =
   | { kind: "turnStatus"; turn: LiveTurn }
+  | { kind: "workingIndicator"; turn: LiveTurn }
   | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
   | { kind: "tool"; turn: LiveTurn; tool: AcpToolCall }
   | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
@@ -3076,6 +3204,7 @@ type AcpRenderItem =
 function acpViewModelToRenderItems(
   viewModel: AcpViewModel,
   liveTurnIds: Set<string>,
+  workingIndicatorTurnId: string,
 ): AcpRenderItem[] {
   const items: AcpRenderItem[] = [];
   const latestLiveTurn = latestTurnWithIds(viewModel.turns, liveTurnIds);
@@ -3128,6 +3257,9 @@ function acpViewModelToRenderItems(
     if (turnFileEdits) {
       items.push({ kind: "turnFileEdits", turn, text: turnFileEdits });
     }
+    if (turn.turnId === workingIndicatorTurnId) {
+      items.push({ kind: "workingIndicator", turn });
+    }
   }
   if (latestLiveTurn) {
     const insertAt = lastUserIndex >= 0 ? lastUserIndex : 0;
@@ -3140,6 +3272,15 @@ function latestTurnWithIds(turns: LiveTurn[], ids: Set<string>): LiveTurn | null
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
     if (ids.has(turn.turnId)) return turn;
+  }
+  return null;
+}
+
+function liveWorkingIndicatorTurn(liveSession: LiveRuntimeSession | null | undefined): LiveTurn | null {
+  if (!liveSession) return null;
+  for (let index = liveSession.turns.length - 1; index >= 0; index -= 1) {
+    const turn = liveSession.turns[index];
+    if (isTypewriterTurn(turn)) return turn;
   }
   return null;
 }
@@ -3309,14 +3450,16 @@ function cachedHistoryViewModel(
 function cachedAcpRenderItems(
   viewModel: AcpViewModel,
   liveTurnIdsKey: string,
+  workingIndicatorTurnId: string,
 ): AcpRenderItem[] {
+  const cacheKey = `${liveTurnIdsKey}\u0002${workingIndicatorTurnId}`;
   const cachedByLiveTurns = renderItemsCache.get(viewModel);
-  const cached = cachedByLiveTurns?.get(liveTurnIdsKey);
+  const cached = cachedByLiveTurns?.get(cacheKey);
   if (cached) return cached;
   const liveTurnIds = new Set(liveTurnIdsKey.split("|").filter(Boolean));
-  const items = acpViewModelToRenderItems(viewModel, liveTurnIds);
+  const items = acpViewModelToRenderItems(viewModel, liveTurnIds, workingIndicatorTurnId);
   const next = cachedByLiveTurns ?? new Map<string, AcpRenderItem[]>();
-  next.set(liveTurnIdsKey, items);
+  next.set(cacheKey, items);
   renderItemsCache.set(viewModel, next);
   return items;
 }
@@ -3355,6 +3498,7 @@ function renderItemKeys(items: AcpRenderItem[]): string[] {
 
 function renderItemKey(item: AcpRenderItem): string {
   if (item.kind === "turnStatus") return `acp:${item.turn.turnId}:status`;
+  if (item.kind === "workingIndicator") return `acp:${item.turn.turnId}:working`;
   if (item.kind === "block") return `acp:${item.turn.turnId}:block`;
   if (item.kind === "tool") return `acp:${item.turn.turnId}:tool:${item.tool.toolId}`;
   if (item.kind === "permission") return `acp:${item.turn.turnId}:permission:${item.permission.requestId}`;
