@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use super::acp_transport;
 use super::types::{RuntimeCapabilitySet, RuntimeTransportKind};
 use crate::config::{self, AgentRuntimeConfig};
-use crate::models::{Agent, RuntimeAgentMetadata};
+use crate::models::{Agent, RuntimeAgentMetadata, RuntimeAgentOptionMetadata};
 use crate::store::{RuntimeAgentCapabilityRecord, SessionStore};
 
 #[derive(Default)]
@@ -16,7 +16,10 @@ pub struct RuntimeAgentsCache {
 
 impl RuntimeAgentsCache {
     pub fn get(&self) -> Vec<RuntimeAgentMetadata> {
-        self.inner.read().map(|items| items.clone()).unwrap_or_default()
+        self.inner
+            .read()
+            .map(|items| items.clone())
+            .unwrap_or_default()
     }
 
     pub fn set(&self, items: Vec<RuntimeAgentMetadata>) {
@@ -39,6 +42,14 @@ pub fn configured_runtime_agents() -> Result<Vec<RuntimeAgentMetadata>> {
             enabled: runtime.enabled,
             configured: runtime.enabled,
             transport: transport_from_runtime_config(runtime),
+            model: runtime.model.clone(),
+            models: runtime_options_metadata(&runtime.models, runtime.model.as_deref()),
+            permission_mode: runtime_permission_mode(agent, runtime.permission_mode.as_deref()),
+            permission_modes: runtime_permission_options_metadata(
+                agent,
+                &runtime.permission_modes,
+                runtime.permission_mode.as_deref(),
+            ),
             session_command: Some(acp_transport::command_from_config(agent, runtime)),
             version_command: runtime.command.version.clone(),
             detected_version: None,
@@ -126,6 +137,20 @@ pub fn startup_probe_runtime_agents(
             enabled: runtime_config.enabled,
             configured: runtime_config.enabled,
             transport,
+            model: runtime_config.model.clone(),
+            models: runtime_options_metadata(
+                &runtime_config.models,
+                runtime_config.model.as_deref(),
+            ),
+            permission_mode: runtime_permission_mode(
+                agent,
+                runtime_config.permission_mode.as_deref(),
+            ),
+            permission_modes: runtime_permission_options_metadata(
+                agent,
+                &runtime_config.permission_modes,
+                runtime_config.permission_mode.as_deref(),
+            ),
             session_command: Some(session_command),
             version_command: runtime_config.command.version.clone(),
             detected_version: capability_record
@@ -140,6 +165,141 @@ pub fn startup_probe_runtime_agents(
     }
 
     Ok(out)
+}
+
+fn runtime_options_metadata(
+    options: &[config::AgentRuntimeOptionConfig],
+    selected: Option<&str>,
+) -> Vec<RuntimeAgentOptionMetadata> {
+    let mut out: Vec<RuntimeAgentOptionMetadata> = options
+        .iter()
+        .filter(|option| !option.value.trim().is_empty())
+        .map(|option| RuntimeAgentOptionMetadata {
+            value: option.value.clone(),
+            label: if option.label.trim().is_empty() {
+                option.value.clone()
+            } else {
+                option.label.clone()
+            },
+        })
+        .collect();
+    if let Some(selected) = selected.filter(|value| !value.trim().is_empty()) {
+        if !out.iter().any(|option| option.value == selected) {
+            out.insert(
+                0,
+                RuntimeAgentOptionMetadata {
+                    value: selected.to_string(),
+                    label: selected.to_string(),
+                },
+            );
+        }
+    }
+    out
+}
+
+fn runtime_permission_options_metadata(
+    agent: Agent,
+    options: &[config::AgentRuntimeOptionConfig],
+    selected: Option<&str>,
+) -> Vec<RuntimeAgentOptionMetadata> {
+    let fallback;
+    let source = if options.is_empty() {
+        fallback = default_permission_options(agent);
+        &fallback
+    } else {
+        options
+    };
+    if agent == Agent::Claude {
+        return claude_permission_options_metadata(source, selected);
+    }
+    runtime_options_metadata(source, selected)
+}
+
+fn default_permission_options(agent: Agent) -> Vec<config::AgentRuntimeOptionConfig> {
+    match agent {
+        Agent::Codex => vec![
+            runtime_option("read-only", "Default permissions"),
+            runtime_option("auto", "Auto-review"),
+            runtime_option("full-access", "Full access"),
+        ],
+        Agent::Claude => vec![
+            runtime_option("default", "Ask before edits"),
+            runtime_option("acceptEdits", "Edit automatically"),
+            runtime_option("plan", "Plan mode"),
+            runtime_option("dontAsk", "Don't Ask"),
+        ],
+        Agent::Gemini => Vec::new(),
+    }
+}
+
+fn runtime_permission_mode(agent: Agent, selected: Option<&str>) -> Option<String> {
+    match agent {
+        Agent::Claude => selected
+            .and_then(normalize_claude_permission_mode)
+            .or(Some("default"))
+            .map(ToString::to_string),
+        _ => selected
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+    }
+}
+
+fn claude_permission_options_metadata(
+    options: &[config::AgentRuntimeOptionConfig],
+    selected: Option<&str>,
+) -> Vec<RuntimeAgentOptionMetadata> {
+    let mut out = default_permission_options(Agent::Claude)
+        .into_iter()
+        .map(|option| {
+            let label = options
+                .iter()
+                .find(|candidate| {
+                    normalize_claude_permission_mode(&candidate.value)
+                        == Some(option.value.as_str())
+                })
+                .and_then(|candidate| {
+                    let label = candidate.label.trim();
+                    (!label.is_empty()).then(|| candidate.label.clone())
+                })
+                .unwrap_or_else(|| option.label.clone());
+            RuntimeAgentOptionMetadata {
+                value: option.value,
+                label,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let selected = selected
+        .and_then(normalize_claude_permission_mode)
+        .unwrap_or("default");
+    if !out.iter().any(|option| option.value == selected) {
+        out.insert(
+            0,
+            RuntimeAgentOptionMetadata {
+                value: selected.to_string(),
+                label: selected.to_string(),
+            },
+        );
+    }
+    out
+}
+
+fn normalize_claude_permission_mode(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "default" => Some("default"),
+        "acceptedits" => Some("acceptEdits"),
+        "plan" => Some("plan"),
+        "dontask" => Some("dontAsk"),
+        _ => None,
+    }
+}
+
+fn runtime_option(value: &str, label: &str) -> config::AgentRuntimeOptionConfig {
+    config::AgentRuntimeOptionConfig {
+        value: value.to_string(),
+        label: label.to_string(),
+    }
 }
 
 fn detect_capabilities_with_initialize_only(
@@ -271,5 +431,24 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn claude_permission_options_keep_common_modes_only() {
+        let options = vec![
+            runtime_option("auto", "Auto"),
+            runtime_option("bypassPermissions", "Bypass"),
+            runtime_option("acceptEdits", "Edit automatically"),
+        ];
+
+        let modes = runtime_permission_options_metadata(Agent::Claude, &options, Some("auto"));
+        let values: Vec<_> = modes.iter().map(|mode| mode.value.as_str()).collect();
+
+        assert_eq!(values, vec!["default", "acceptEdits", "plan", "dontAsk"]);
+        assert_eq!(modes[1].label, "Edit automatically");
+        assert_eq!(
+            runtime_permission_mode(Agent::Claude, Some("bypassPermissions")).as_deref(),
+            Some("default")
+        );
     }
 }

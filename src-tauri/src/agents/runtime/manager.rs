@@ -93,12 +93,15 @@ impl RuntimeManager {
             .unwrap_or_else(|| acp_transport::command_from_options(agent, &Default::default()))
     }
 
-    pub fn status_for_session(&self, sessio_runtime_session_id: &str) -> Option<RuntimeSessionStatus> {
-        self.inner
-            .sessions
-            .lock()
-            .ok()
-            .and_then(|sessions| sessions.get(sessio_runtime_session_id).map(|s| s.handle.status))
+    pub fn status_for_session(
+        &self,
+        sessio_runtime_session_id: &str,
+    ) -> Option<RuntimeSessionStatus> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(sessio_runtime_session_id)
+                .map(|s| s.handle.status)
+        })
     }
 
     pub fn capabilities_for_session(
@@ -134,11 +137,14 @@ impl RuntimeManager {
             bail!("workspace_path does not exist: {}", req.workspace_path);
         }
 
-        let runtime_config = runtime_config(req.agent);
+        let runtime_config =
+            runtime_config(req.agent).map(|config| normalize_runtime_config(req.agent, config));
+        let effective_runtime_config =
+            runtime_config.map(|config| apply_session_options(req.agent, config, &req.options));
         let transport = if req.options.contains_key("transport") {
             acp_transport::transport_requested(&req.options)
         } else {
-            runtime_config
+            effective_runtime_config
                 .as_ref()
                 .map(acp_transport::transport_from_config)
                 .unwrap_or(RuntimeTransportKind::Acp)
@@ -153,7 +159,7 @@ impl RuntimeManager {
             {
                 acp_transport::command_from_options(req.agent, &req.options)
             } else {
-                runtime_config
+                effective_runtime_config
                     .as_ref()
                     .map(|config| acp_transport::command_from_config(req.agent, config))
                     .unwrap_or_else(|| acp_transport::command_from_options(req.agent, &req.options))
@@ -172,7 +178,7 @@ impl RuntimeManager {
                 req.agent,
                 req.workspace_path.clone(),
                 command,
-                runtime_config.clone(),
+                effective_runtime_config.clone(),
                 start,
             ));
         }
@@ -847,6 +853,55 @@ fn runtime_config(agent: Agent) -> Option<config::AgentRuntimeConfig> {
         .map(|config| config.agents.runtime.get(agent).clone())
 }
 
+fn normalize_runtime_config(
+    agent: Agent,
+    mut config: config::AgentRuntimeConfig,
+) -> config::AgentRuntimeConfig {
+    if let Some(permission_mode) = config.permission_mode.take() {
+        config.permission_mode = Some(normalize_runtime_permission_mode(agent, &permission_mode));
+    }
+    config
+}
+
+fn apply_session_options(
+    agent: Agent,
+    config: config::AgentRuntimeConfig,
+    options: &super::types::RuntimeMetadata,
+) -> config::AgentRuntimeConfig {
+    let mut config = normalize_runtime_config(agent, config);
+    if let Some(model) = option_string(options, "model") {
+        config.model = Some(model);
+    }
+    if let Some(permission_mode) = option_string(options, "permissionMode")
+        .or_else(|| option_string(options, "permission_mode"))
+    {
+        config.permission_mode = Some(normalize_runtime_permission_mode(agent, &permission_mode));
+    }
+    config
+}
+
+fn normalize_runtime_permission_mode(agent: Agent, value: &str) -> String {
+    if agent != Agent::Claude {
+        return value.trim().to_string();
+    }
+    match value.trim().to_ascii_lowercase().as_str() {
+        "default" => "default".to_string(),
+        "acceptedits" => "acceptEdits".to_string(),
+        "plan" => "plan".to_string(),
+        "dontask" => "dontAsk".to_string(),
+        _ => "default".to_string(),
+    }
+}
+
+fn option_string(options: &super::types::RuntimeMetadata, key: &str) -> Option<String> {
+    options
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -858,5 +913,21 @@ mod tests {
         assert!(caps.supports_permissions);
         assert!(caps.supports_tool_deltas);
         assert!(!caps.supports_attachments);
+    }
+
+    #[test]
+    fn claude_permission_mode_is_clamped_to_common_modes() {
+        assert_eq!(
+            normalize_runtime_permission_mode(Agent::Claude, "acceptEdits"),
+            "acceptEdits"
+        );
+        assert_eq!(
+            normalize_runtime_permission_mode(Agent::Claude, "bypassPermissions"),
+            "default"
+        );
+        assert_eq!(
+            normalize_runtime_permission_mode(Agent::Codex, "full-access"),
+            "full-access"
+        );
     }
 }

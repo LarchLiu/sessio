@@ -156,11 +156,28 @@ export interface RuntimeAgentMetadata {
   enabled: boolean;
   configured: boolean;
   transport: RuntimeTransportKind;
+  model: string | null;
+  models: RuntimeAgentOptionMetadata[];
+  permissionMode: string | null;
+  permissionModes: RuntimeAgentOptionMetadata[];
   sessionCommand: string | null;
   versionCommand: string | null;
   detectedVersion: string | null;
   capabilities: RuntimeCapabilitySet | null;
   updatedAt: number | null;
+}
+
+export interface RuntimeAgentOptionMetadata {
+  value: string;
+  label: string;
+}
+
+export interface UpdateRuntimeAgentPreferencesRequest {
+  agent: Agent;
+  model?: string | null;
+  permissionMode?: string | null;
+  models?: RuntimeAgentOptionMetadata[];
+  permissionModes?: RuntimeAgentOptionMetadata[];
 }
 
 export interface StartAgentSessionRequest {
@@ -539,6 +556,12 @@ export async function getAgentRuntimeStatus(agent: Agent): Promise<RuntimeStatus
 
 export async function listRuntimeAgents(): Promise<RuntimeAgentMetadata[]> {
   return invoke<RuntimeAgentMetadata[]>("list_runtime_agents");
+}
+
+export async function updateRuntimeAgentPreferences(
+  req: UpdateRuntimeAgentPreferencesRequest,
+): Promise<RuntimeAgentMetadata> {
+  return invoke<RuntimeAgentMetadata>("update_runtime_agent_preferences", { req });
 }
 
 export async function startAgentSession(

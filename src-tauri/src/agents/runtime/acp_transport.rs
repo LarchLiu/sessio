@@ -6,8 +6,8 @@ use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, EmbeddedResource, EmbeddedResourceResource,
     ForkSessionRequest, ImageContent, InitializeRequest, LoadSessionRequest, NewSessionRequest,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification,
-    SetSessionConfigOptionRequest, SessionUpdate, StopReason, TextContent, TextResourceContents,
+    RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification, SessionUpdate,
+    StopReason, TextContent, TextResourceContents,
 };
 use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo, UntypedMessage};
 use anyhow::{Context, Result};
@@ -89,18 +89,17 @@ pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {
 }
 
 pub fn command_from_config(agent: Agent, config: &AgentRuntimeConfig) -> String {
-    let command = config
+    config
         .command
         .session
         .clone()
-        .unwrap_or_else(|| default_acp_command(agent).to_string());
-    append_agent_options(agent, command, config)
+        .unwrap_or_else(|| default_acp_command(agent).to_string())
 }
 
 pub fn spawn_session(
     manager: RuntimeManager,
     sessio_runtime_session_id: String,
-    _agent: Agent,
+    agent: Agent,
     workspace_path: String,
     command: String,
     runtime_config: Option<AgentRuntimeConfig>,
@@ -114,6 +113,7 @@ pub fn spawn_session(
             if let Err(error) = run_session(
                 manager.clone(),
                 sessio_runtime_session_id.clone(),
+                agent,
                 workspace_path,
                 command,
                 runtime_config,
@@ -209,13 +209,14 @@ pub fn runtime_capabilities_from_acp(
 async fn run_session(
     manager: RuntimeManager,
     sessio_runtime_session_id: String,
+    agent: Agent,
     workspace_path: String,
     command: String,
     runtime_config: Option<AgentRuntimeConfig>,
     start: AcpSessionStart,
     command_rx: tauri::async_runtime::Receiver<AcpWorkerCommand>,
 ) -> Result<()> {
-    let agent = AcpAgent::from_str(&command)
+    let acp_agent = AcpAgent::from_str(&command)
         .with_context(|| format!("failed to parse ACP command: {command}"))?;
     let current_turn_id = Arc::new(Mutex::new(None::<String>));
     let notification_manager = manager.clone();
@@ -356,9 +357,10 @@ async fn run_session(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(agent, move |connection: ConnectionTo<AcpAgentRole>| {
+        .connect_with(acp_agent, move |connection: ConnectionTo<AcpAgentRole>| {
             let manager = manager.clone();
             let sessio_runtime_session_id = sessio_runtime_session_id.clone();
+            let agent = agent;
             let workspace_path = workspace_path.clone();
             let start = start.clone();
             let current_turn_id = current_turn_id.clone();
@@ -387,7 +389,8 @@ async fn run_session(
                 let capabilities = runtime_capabilities_from_acp(&init.agent_capabilities);
                 let acp_session_id = match start {
                     AcpSessionStart::New => {
-                        let request = new_session_request(workspace_path, runtime_config.as_ref());
+                        let request =
+                            new_session_request(agent, workspace_path, runtime_config.as_ref());
                         let session = connection
                             .send_request(request)
                             .block_task()
@@ -572,16 +575,23 @@ async fn run_session(
 }
 
 fn new_session_request(
+    agent: Agent,
     workspace_path: String,
     config: Option<&AgentRuntimeConfig>,
 ) -> NewSessionRequest {
     let mut request = NewSessionRequest::new(workspace_path);
+    if agent != Agent::Claude {
+        return request;
+    }
     let Some(config) = config else {
         return request;
     };
     let mut options = serde_json::Map::new();
     if let Some(model) = config.model.as_deref() {
-        options.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+        options.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
     }
     if let Some(permission_mode) = config.permission_mode.as_deref() {
         options.insert(
@@ -613,64 +623,125 @@ async fn apply_initial_session_config(
     let Some(config) = config else {
         return Ok(());
     };
-    for (config_id, value) in [
-        ("model", config.model.as_deref()),
-        ("mode", config.permission_mode.as_deref()),
-    ] {
-        let Some(value) = value else {
-            continue;
-        };
-        let request = SetSessionConfigOptionRequest::new(
-            acp_session_id.clone(),
-            config_id.to_string(),
-            value.to_string(),
-        );
-        manager
-            .emit(
-                acp_protocol_event(
-                    sessio_runtime_session_id,
-                    "client_to_agent",
-                    "request",
-                    "session/set_config_option",
-                    Some(acp_session_id.to_string()),
-                    None,
-                    None,
-                    None,
-                    &request,
-                )
-                .map_err(acp_internal_error)?,
-            )
-            .map_err(acp_internal_error)?;
-        match connection.send_request(request).block_task().await {
-            Ok(response) => {
-                manager
-                    .emit(
-                        acp_protocol_event(
-                            sessio_runtime_session_id,
-                            "agent_to_client",
-                            "response",
-                            "session/set_config_option",
-                            Some(acp_session_id.to_string()),
-                            None,
-                            None,
-                            None,
-                            &response,
-                        )
-                        .map_err(acp_internal_error)?,
-                    )
-                    .map_err(acp_internal_error)?;
-            }
-            Err(error) => {
-                log::warn!(
-                    "[sessio-runtime:acp:initial-config-failed] session={} config={} value={} error={error}",
-                    sessio_runtime_session_id,
-                    config_id,
-                    value
-                );
-            }
+    if let Some(model) = config.model.as_deref() {
+        if let Err(error) = send_session_config_request(
+            manager,
+            sessio_runtime_session_id,
+            connection,
+            acp_session_id,
+            None,
+            "model",
+            serde_json::Value::String(model.to_string()),
+        )
+        .await
+        {
+            log::warn!(
+                "[sessio-runtime:acp:initial-config-failed] session={} config=model value={} error={error}",
+                sessio_runtime_session_id,
+                model
+            );
+        }
+    }
+    if let Some(permission_mode) = config.permission_mode.as_deref() {
+        if let Err(error) = send_session_config_request(
+            manager,
+            sessio_runtime_session_id,
+            connection,
+            acp_session_id,
+            None,
+            "mode",
+            serde_json::Value::String(permission_mode.to_string()),
+        )
+        .await
+        {
+            log::warn!(
+                "[sessio-runtime:acp:initial-config-failed] session={} config=mode value={} error={error}",
+                sessio_runtime_session_id,
+                permission_mode
+            );
         }
     }
     Ok(())
+}
+
+async fn send_session_config_request(
+    manager: &RuntimeManager,
+    sessio_runtime_session_id: &str,
+    connection: &ConnectionTo<AcpAgentRole>,
+    acp_session_id: &SessionId,
+    turn_id: Option<String>,
+    config_id: &str,
+    value: serde_json::Value,
+) -> Result<(), agent_client_protocol::Error> {
+    let (method, request) = session_config_message(acp_session_id, config_id, value)?;
+    manager
+        .emit(
+            acp_protocol_event(
+                sessio_runtime_session_id,
+                "client_to_agent",
+                "request",
+                method,
+                Some(acp_session_id.to_string()),
+                turn_id.clone(),
+                None,
+                None,
+                &request,
+            )
+            .map_err(acp_internal_error)?,
+        )
+        .map_err(acp_internal_error)?;
+    let response = connection
+        .send_request(UntypedMessage::new(method, request)?)
+        .block_task()
+        .await?;
+    manager
+        .emit(
+            acp_protocol_event(
+                sessio_runtime_session_id,
+                "agent_to_client",
+                "response",
+                method,
+                Some(acp_session_id.to_string()),
+                turn_id,
+                None,
+                None,
+                &response,
+            )
+            .map_err(acp_internal_error)?,
+        )
+        .map_err(acp_internal_error)?;
+    Ok(())
+}
+
+fn session_config_message(
+    acp_session_id: &SessionId,
+    config_id: &str,
+    value: serde_json::Value,
+) -> Result<(&'static str, serde_json::Value), agent_client_protocol::Error> {
+    match config_id {
+        "model" => Ok((
+            "session/set_model",
+            serde_json::json!({
+                "sessionId": acp_session_id.to_string(),
+                "modelId": json_id_to_string(value),
+            }),
+        )),
+        "mode" | "permission_mode" | "permissionMode" => Ok((
+            "session/set_mode",
+            serde_json::json!({
+                "sessionId": acp_session_id.to_string(),
+                "modeId": json_id_to_string(value),
+            }),
+        )),
+        _ => Ok((
+            "session/set_config_option",
+            serde_json::json!({
+                "sessionId": acp_session_id.to_string(),
+                "configId": config_id,
+                "value": json_id_to_string(value),
+            }),
+        )),
+    }
 }
 
 async fn run_command_loop(
@@ -724,37 +795,23 @@ async fn run_command_loop(
                     config_id,
                     value
                 );
-                let request = serde_json::json!({
-                    "sessionId": acp_session_id.to_string(),
-                    "configId": config_id,
-                    "value": value,
-                });
-                manager.emit(acp_protocol_event(
+                if let Err(error) = send_session_config_request(
+                    &manager,
                     &sessio_runtime_session_id,
-                    "client_to_agent",
-                    "request",
-                    "session/set_config_option",
-                    Some(acp_session_id.to_string()),
+                    &connection,
+                    &acp_session_id,
                     current_turn(&current_turn_id),
-                    None,
-                    None,
-                    &request,
-                )?)?;
-                let response = connection
-                    .send_request(UntypedMessage::new("session/set_config_option", request)?)
-                    .block_task()
-                    .await?;
-                manager.emit(acp_protocol_event(
-                    &sessio_runtime_session_id,
-                    "agent_to_client",
-                    "response",
-                    "session/set_config_option",
-                    Some(acp_session_id.to_string()),
-                    current_turn(&current_turn_id),
-                    None,
-                    None,
-                    &response,
-                )?)?;
+                    &config_id,
+                    value,
+                )
+                .await
+                {
+                    log::warn!(
+                        "[sessio-runtime:acp:set-config-failed] session={} config={} error={error}",
+                        sessio_runtime_session_id,
+                        config_id
+                    );
+                }
             }
         }
     }
@@ -1156,14 +1213,16 @@ mod tests {
     }
 
     #[test]
-    fn codex_config_appends_model_approval_and_sandbox_flags() {
+    fn codex_config_keeps_acp_adapter_command_clean() {
         let command = command_from_config(
             Agent::Codex,
             &AgentRuntimeConfig {
                 enabled: true,
                 transport: Some("acp".to_string()),
                 model: Some("gpt-5".to_string()),
+                models: Vec::new(),
                 permission_mode: Some("on-request".to_string()),
+                permission_modes: Vec::new(),
                 sandbox: Some("workspace-write".to_string()),
                 command: AgentRuntimeCommandConfig {
                     session: Some("npx -y @zed-industries/codex-acp@latest".to_string()),
@@ -1172,21 +1231,81 @@ mod tests {
             },
         );
 
+        assert_eq!(command, "npx -y @zed-industries/codex-acp@latest");
+    }
+
+    #[test]
+    fn model_config_uses_session_set_model_params() {
+        let session_id = SessionId::new("session-123");
+        let (method, request) = session_config_message(
+            &session_id,
+            "model",
+            serde_json::Value::String("gpt-5-codex".to_string()),
+        )
+        .expect("session config message");
+
+        assert_eq!(method, "session/set_model");
         assert_eq!(
-            command,
-            "npx -y @zed-industries/codex-acp@latest --model gpt-5 --ask-for-approval on-request --sandbox workspace-write"
+            request,
+            serde_json::json!({
+                "sessionId": "session-123",
+                "modelId": "gpt-5-codex",
+            })
         );
     }
 
     #[test]
-    fn claude_config_appends_model_and_permission_mode_flags() {
+    fn permission_config_uses_session_set_mode_params() {
+        let session_id = SessionId::new("session-123");
+        let (method, request) = session_config_message(
+            &session_id,
+            "mode",
+            serde_json::Value::String("acceptEdits".to_string()),
+        )
+        .expect("session config message");
+
+        assert_eq!(method, "session/set_mode");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "sessionId": "session-123",
+                "modeId": "acceptEdits",
+            })
+        );
+    }
+
+    #[test]
+    fn other_config_uses_session_set_config_option_params() {
+        let session_id = SessionId::new("session-123");
+        let (method, request) = session_config_message(
+            &session_id,
+            "effort",
+            serde_json::Value::String("high".to_string()),
+        )
+        .expect("session config message");
+
+        assert_eq!(method, "session/set_config_option");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "sessionId": "session-123",
+                "configId": "effort",
+                "value": "high",
+            })
+        );
+    }
+
+    #[test]
+    fn claude_config_keeps_acp_adapter_command_clean() {
         let command = command_from_config(
             Agent::Claude,
             &AgentRuntimeConfig {
                 enabled: true,
                 transport: Some("acp".to_string()),
                 model: Some("sonnet".to_string()),
+                models: Vec::new(),
                 permission_mode: Some("acceptEdits".to_string()),
+                permission_modes: Vec::new(),
                 sandbox: Some("ignored-for-claude".to_string()),
                 command: AgentRuntimeCommandConfig {
                     session: Some("npx -y @zed-industries/claude-code-acp@latest".to_string()),
@@ -1195,10 +1314,7 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            command,
-            "npx -y @zed-industries/claude-code-acp@latest --model sonnet --permission-mode acceptEdits"
-        );
+        assert_eq!(command, "npx -y @zed-industries/claude-code-acp@latest");
     }
 }
 
@@ -1249,53 +1365,6 @@ fn default_acp_command(agent: Agent) -> &'static str {
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest",
         Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp",
     }
-}
-
-fn append_agent_options(agent: Agent, mut command: String, config: &AgentRuntimeConfig) -> String {
-    match agent {
-        Agent::Codex => {
-            append_option(&mut command, "--model", config.model.as_deref());
-            append_option(
-                &mut command,
-                "--ask-for-approval",
-                config.permission_mode.as_deref(),
-            );
-            append_option(&mut command, "--sandbox", config.sandbox.as_deref());
-        }
-        Agent::Claude => {
-            append_option(&mut command, "--model", config.model.as_deref());
-            append_option(
-                &mut command,
-                "--permission-mode",
-                config.permission_mode.as_deref(),
-            );
-        }
-        Agent::Gemini => {
-            append_option(&mut command, "--model", config.model.as_deref());
-        }
-    }
-    command
-}
-
-fn append_option(command: &mut String, flag: &str, value: Option<&str>) {
-    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return;
-    };
-    command.push(' ');
-    command.push_str(flag);
-    command.push(' ');
-    command.push_str(&shell_quote(value));
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':' | '@'))
-    {
-        return value.to_string();
-    }
-    let escaped = value.replace('\'', "'\\''");
-    format!("'{escaped}'")
 }
 
 fn acp_internal_error(error: impl ToString) -> agent_client_protocol::Error {

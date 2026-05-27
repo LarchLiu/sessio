@@ -178,11 +178,22 @@ pub struct RuntimeAgentMetadata {
     pub enabled: bool,
     pub configured: bool,
     pub transport: RuntimeTransportKind,
+    pub model: Option<String>,
+    pub models: Vec<RuntimeAgentOptionMetadata>,
+    pub permission_mode: Option<String>,
+    pub permission_modes: Vec<RuntimeAgentOptionMetadata>,
     pub session_command: Option<String>,
     pub version_command: Option<String>,
     pub detected_version: Option<String>,
     pub capabilities: Option<RuntimeCapabilitySet>,
     pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAgentOptionMetadata {
+    pub value: String,
+    pub label: String,
 }
 
 pub fn normalize_preview(s: &str) -> String {

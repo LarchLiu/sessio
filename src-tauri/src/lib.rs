@@ -12,14 +12,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use agents::runtime::metadata::{
+    runtime_agents_with_detected_capabilities, startup_probe_runtime_agents, RuntimeAgentsCache,
+};
 use agents::runtime::types::{
     AgentInput, AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle,
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
-use agents::runtime::metadata::{
-    runtime_agents_with_detected_capabilities, startup_probe_runtime_agents, RuntimeAgentsCache,
-};
 use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
@@ -35,6 +35,23 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
 };
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeAgentOptionInput {
+    value: String,
+    label: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateRuntimeAgentPreferencesRequest {
+    agent: Agent,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    models: Option<Vec<RuntimeAgentOptionInput>>,
+    permission_modes: Option<Vec<RuntimeAgentOptionInput>>,
+}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +85,8 @@ fn add_existing_project(
             project_type.unwrap_or(ProjectType::Code),
         )
         .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ())
+        .map_err(|e| e.to_string())?;
     Ok(project)
 }
 
@@ -81,9 +99,14 @@ fn create_project(
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
     let project = store
-        .create_project(&parent_path, &name, project_type.unwrap_or(ProjectType::Code))
+        .create_project(
+            &parent_path,
+            &name,
+            project_type.unwrap_or(ProjectType::Code),
+        )
         .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ())
+        .map_err(|e| e.to_string())?;
     Ok(project)
 }
 
@@ -106,7 +129,8 @@ fn create_default_project(
             project_type.unwrap_or(ProjectType::Code),
         )
         .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ())
+        .map_err(|e| e.to_string())?;
     Ok(project)
 }
 
@@ -121,7 +145,8 @@ fn update_project(
     let project = store
         .update_project(&project_id, name.as_deref(), project_type)
         .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ())
+        .map_err(|e| e.to_string())?;
     Ok(project)
 }
 
@@ -134,7 +159,8 @@ fn archive_project(
     store
         .archive_project(&project_id)
         .map_err(|e| e.to_string())?;
-    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ())
+        .map_err(|e| e.to_string())?;
     app.emit("sessions_index_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -192,7 +218,9 @@ fn delete_kanban_item(
     item_id: String,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<(), String> {
-    store.delete_kanban_item(&item_id).map_err(|e| e.to_string())
+    store
+        .delete_kanban_item(&item_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -281,10 +309,7 @@ fn better_lineage_candidate(candidate: &SessionInfo, current: &SessionInfo) -> b
     if candidate.file_path.is_empty() != current.file_path.is_empty() {
         return !candidate.file_path.is_empty();
     }
-    candidate
-        .updated_at
-        .or(candidate.started_at)
-        .unwrap_or(0)
+    candidate.updated_at.or(candidate.started_at).unwrap_or(0)
         > current.updated_at.or(current.started_at).unwrap_or(0)
 }
 
@@ -846,14 +871,12 @@ fn text_file_mime(path: &Path) -> Option<&'static str> {
         Some("csv") => Some("text/csv"),
         Some("ts") | Some("tsx") | Some("js") | Some("jsx") | Some("mjs") | Some("cjs")
         | Some("py") | Some("rs") | Some("go") | Some("java") | Some("kt") | Some("swift")
-        | Some("rb") | Some("php") | Some("css") | Some("scss") | Some("sass")
-        | Some("less") | Some("html") | Some("htm") | Some("sh") | Some("zsh")
-        | Some("bash") | Some("sql") | Some("c") | Some("h") | Some("cpp") | Some("hpp")
-        | Some("cs") | Some("lua") | Some("pl") | Some("r") | Some("ex") | Some("exs")
-        | Some("erl") | Some("clj") | Some("scala") | Some("dart") | Some("vue")
-        | Some("svelte") | Some("dockerfile") | Some("gitignore") | Some("env") => {
-            Some("text/plain")
-        }
+        | Some("rb") | Some("php") | Some("css") | Some("scss") | Some("sass") | Some("less")
+        | Some("html") | Some("htm") | Some("sh") | Some("zsh") | Some("bash") | Some("sql")
+        | Some("c") | Some("h") | Some("cpp") | Some("hpp") | Some("cs") | Some("lua")
+        | Some("pl") | Some("r") | Some("ex") | Some("exs") | Some("erl") | Some("clj")
+        | Some("scala") | Some("dart") | Some("vue") | Some("svelte") | Some("dockerfile")
+        | Some("gitignore") | Some("env") => Some("text/plain"),
         _ => None,
     }
 }
@@ -906,6 +929,50 @@ fn list_runtime_agents(
     cache: State<'_, RuntimeAgentsCache>,
 ) -> Result<Vec<models::RuntimeAgentMetadata>, String> {
     Ok(cache.get())
+}
+
+#[tauri::command]
+fn update_runtime_agent_preferences(
+    req: UpdateRuntimeAgentPreferencesRequest,
+    app: AppHandle,
+    cache: State<'_, RuntimeAgentsCache>,
+) -> Result<models::RuntimeAgentMetadata, String> {
+    let update = config::AgentRuntimePreferencesUpdate {
+        model: req.model,
+        permission_mode: req.permission_mode,
+        models: req
+            .models
+            .unwrap_or_default()
+            .into_iter()
+            .map(|option| config::AgentRuntimeOptionConfig {
+                value: option.value,
+                label: option.label,
+            })
+            .collect(),
+        permission_modes: req
+            .permission_modes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|option| config::AgentRuntimeOptionConfig {
+                value: option.value,
+                label: option.label,
+            })
+            .collect(),
+    };
+    config::update_agent_runtime_preferences(req.agent, update).map_err(|e| e.to_string())?;
+    let agents = runtime_agents_with_detected_capabilities(
+        app.state::<Arc<dyn SessionStore>>().inner().clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    let updated = agents
+        .iter()
+        .find(|metadata| metadata.agent == req.agent)
+        .cloned()
+        .ok_or_else(|| format!("runtime agent is not configured: {}", req.agent.as_str()))?;
+    cache.set(agents);
+    app.emit("runtime_agents_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -1203,9 +1270,8 @@ pub fn run() {
             app.manage(indexer_handle);
             let runtime_probe_store = store.clone();
             let runtime_agents_cache = RuntimeAgentsCache::default();
-            runtime_agents_cache.set(
-                runtime_agents_with_detected_capabilities(store.clone()).unwrap_or_default(),
-            );
+            runtime_agents_cache
+                .set(runtime_agents_with_detected_capabilities(store.clone()).unwrap_or_default());
             app.manage(RuntimeManager::new(app.handle().clone()));
             app.manage(runtime_agents_cache);
             let app_handle = app.handle().clone();
@@ -1290,6 +1356,7 @@ pub fn run() {
             write_cross_prompt,
             get_agent_runtime_status,
             list_runtime_agents,
+            update_runtime_agent_preferences,
             start_agent_session,
             fork_agent_session,
             ensure_agent_runtime_session,
