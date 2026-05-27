@@ -12,7 +12,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Hand, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, UserKey, Wrench, type LucideIcon } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Hand, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -70,7 +70,6 @@ import {
   type AcpSessionConfigOption,
   type AcpSessionState,
   type AcpToolCall,
-  type AcpToolCallContent,
   historyTurnsToAcpViewModel,
   liveSessionToAcpViewModel,
   type LiveRuntimeAction,
@@ -172,7 +171,7 @@ interface HistoryViewCacheEntry {
 
 const messageCache = new Map<string, MessageCacheEntry>();
 const historyViewCache = new Map<string, HistoryViewCacheEntry>();
-const renderItemsCache = new WeakMap<AcpViewModel, AcpRenderItem[]>();
+const renderItemsCache = new WeakMap<AcpViewModel, Map<string, AcpRenderItem[]>>();
 const INITIAL_HISTORY_RENDER_ITEMS = 120;
 
 function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
@@ -622,9 +621,13 @@ function MessageStream({
     );
   }, [ancestorCacheKey, ancestorMessages, liveSession, messages, sourceKey, viewMode]);
 
+  const liveTurnIdsKey = useMemo(
+    () => liveSession?.turns.map((turn) => turn.turnId).join("|") ?? "",
+    [liveSession],
+  );
   const displayItems = useMemo(
-    () => cachedAcpRenderItems(acpViewModel),
-    [acpViewModel],
+    () => cachedAcpRenderItems(acpViewModel, liveTurnIdsKey),
+    [acpViewModel, liveTurnIdsKey],
   );
   const visibleDisplayItems = useMemo(() => {
     if (liveSession || historyRenderReady) return displayItems;
@@ -2397,36 +2400,15 @@ function AcpToolCard({
   const showToolPairs = !isFileToolWithoutPairs(displayTool.title);
   const input = showToolPairs ? detail.command : "";
   const output = showToolPairs ? acpToolOutputText(displayTool) : "";
-  const renderedContent = displayTool.content.filter((content) =>
-    content.type !== "diff" && (!(input || output) || content.type !== "content")
-  );
   return (
     <ToolTimelineFrame title={detail.title} iconName={displayTool.title}>
-      {(input || output || renderedContent.length > 0 || displayTool.locations.length > 0) && (
+      {(input || output) && (
         <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-bg-panel/65 text-body-sm">
-          {(input || output) && (
-            <ToolPairPanel
-              input={input}
-              output={output}
-              onPreviewImage={onPreviewImage}
-            />
-          )}
-          {renderedContent.length > 0 && (
-            <div className="space-y-2 px-3 py-2">
-              {renderedContent.map((content, index) => (
-                <AcpToolContentView
-                  key={index}
-                  content={content}
-                  onPreviewImage={onPreviewImage}
-                />
-              ))}
-            </div>
-          )}
-          {displayTool.locations.length > 0 && (
-            <div className="px-3 py-2">
-              <PlainTextContent text={JSON.stringify(displayTool.locations, null, 2)} />
-            </div>
-          )}
+          <ToolPairPanel
+            input={input}
+            output={output}
+            onPreviewImage={onPreviewImage}
+          />
         </div>
       )}
     </ToolTimelineFrame>
@@ -2448,7 +2430,16 @@ function acpToolOutputText(tool: AcpToolCall): string {
 }
 
 function canonicalizeAcpTool(tool: AcpToolCall): AcpToolCall {
-  const display = canonicalToolDisplay(tool.title, tool.rawInput ?? "");
+  const inlineTitle = splitInlineToolTitle(tool.title);
+  const webActionDisplay = webActionToolDisplay(tool.rawInput);
+  const display =
+    webActionDisplay ??
+    (inlineTitle
+      ? {
+          ...canonicalToolDisplay(inlineTitle.main, tool.rawInput ?? inlineTitle.detail, tool.kind),
+          detail: inlineTitle.detail,
+        }
+      : canonicalToolDisplay(tool.title, tool.rawInput ?? "", tool.kind));
   const hidden = shouldHideTool(tool.title, tool.rawInput ?? "");
   if (display.main === tool.title && !display.detail && !hidden) return tool;
   const meta = parseObjectLike(tool.meta) ?? {};
@@ -2502,7 +2493,7 @@ function fileToolTitle(title: string, input: Record<string, unknown>, includeRan
 }
 
 function isFileMutationTool(title: string): boolean {
-  return title === "Write" || title === "Edit" || title === "MultiEdit";
+  return title === "Write" || title === "Edit" || title === "MultiEdit" || title === "Delete" || title === "Move";
 }
 
 function isFileToolWithoutPairs(title: string): boolean {
@@ -2557,6 +2548,8 @@ function parseObjectLike(value: unknown): Record<string, unknown> | null {
 }
 
 function pickToolInputDisplayText(record: Record<string, unknown>): string | null {
+  const webInput = webActionDisplayText(record);
+  if (webInput) return webInput;
   const command = pickCommandText(record);
   if (command) return command;
   return formatToolInputValue(record);
@@ -2799,35 +2792,6 @@ function contentBlocksText(blocks: AcpContentBlock[]): string {
   }).join("\n");
 }
 
-function AcpToolContentView({
-  content,
-  onPreviewImage,
-}: {
-  content: AcpToolCallContent;
-  onPreviewImage: (image: MarkdownImage) => void;
-}) {
-  if (content.type === "content") {
-    return (
-      <AcpContentBlockView
-        block={content.content}
-        imageAlign="left"
-        onPreviewImage={onPreviewImage}
-      />
-    );
-  }
-  if (content.type === "terminal") {
-    return (
-      <div className="rounded-md border border-ink/[0.08] bg-bg-panel px-3 py-2">
-        <div className="font-medium text-ink/75">Terminal</div>
-        <div className="font-mono text-caption text-ink/45">{content.terminalId}</div>
-        <AcpMetaBadges value={content} />
-      </div>
-    );
-  }
-  if (content.type === "diff") return null;
-  return <AcpUnknownCard title={`Tool content · ${content.originalType ?? "unknown"}`} value={content} />;
-}
-
 function AcpMetaBadges({ value }: { value: unknown }) {
   const record = asRecord(value);
   const meta = record.meta ?? record._meta;
@@ -2947,13 +2911,17 @@ type AcpRenderItem =
   | { kind: "turnFileEdits"; turn: LiveTurn; text: string }
   | { kind: "error"; turn: LiveTurn; error: RuntimeError };
 
-function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
+function acpViewModelToRenderItems(
+  viewModel: AcpViewModel,
+  liveTurnIds: Set<string>,
+): AcpRenderItem[] {
   const items: AcpRenderItem[] = [];
+  const liveTurns = viewModel.turns.filter((turn) => liveTurnIds.has(turn.turnId));
+  let lastUserIndex = -1;
   for (const turn of viewModel.turns) {
     const terminalSessionTools = new Map<string, AcpToolCall>();
     const renderedTools = new Set<string>();
     const renderedPermissions = new Set<string>();
-    let renderedTurnStatus = false;
     turn.blocks.forEach((block) => {
       if (block.kind === "tool") {
         const originalTool = turn.tools.find((item) => item.toolId === block.toolId);
@@ -2984,9 +2952,8 @@ function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
       }
       if (block.kind === "error") return;
       items.push({ kind: "block", turn, block });
-      if (viewModel.source === "live" && block.kind === "user" && !renderedTurnStatus) {
-        items.push({ kind: "turnStatus", turn });
-        renderedTurnStatus = true;
+      if (block.kind === "user") {
+        lastUserIndex = items.length;
       }
     });
     if (turn.error) {
@@ -2999,9 +2966,14 @@ function acpViewModelToRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
     if (turnFileEdits) {
       items.push({ kind: "turnFileEdits", turn, text: turnFileEdits });
     }
-    if (viewModel.source === "live" && !renderedTurnStatus) {
-      items.push({ kind: "turnStatus", turn });
-    }
+  }
+  if (liveTurns.length > 0) {
+    const insertAt = lastUserIndex >= 0 ? lastUserIndex : 0;
+    items.splice(
+      insertAt,
+      0,
+      ...liveTurns.map((turn) => ({ kind: "turnStatus" as const, turn })),
+    );
   }
   return items;
 }
@@ -3168,11 +3140,18 @@ function cachedHistoryViewModel(
   return viewModel;
 }
 
-function cachedAcpRenderItems(viewModel: AcpViewModel): AcpRenderItem[] {
-  const cached = renderItemsCache.get(viewModel);
+function cachedAcpRenderItems(
+  viewModel: AcpViewModel,
+  liveTurnIdsKey: string,
+): AcpRenderItem[] {
+  const cachedByLiveTurns = renderItemsCache.get(viewModel);
+  const cached = cachedByLiveTurns?.get(liveTurnIdsKey);
   if (cached) return cached;
-  const items = acpViewModelToRenderItems(viewModel);
-  renderItemsCache.set(viewModel, items);
+  const liveTurnIds = new Set(liveTurnIdsKey.split("|").filter(Boolean));
+  const items = acpViewModelToRenderItems(viewModel, liveTurnIds);
+  const next = cachedByLiveTurns ?? new Map<string, AcpRenderItem[]>();
+  next.set(liveTurnIdsKey, items);
+  renderItemsCache.set(viewModel, next);
   return items;
 }
 
@@ -3694,7 +3673,7 @@ function parseToolCall(text: string): { name: string; body: string } {
   return { name: m[1], body: m[2] ?? "" };
 }
 
-function canonicalToolDisplay(name: string, body: unknown): ToolTitleParts {
+function canonicalToolDisplay(name: string, body: unknown, kind?: string): ToolTitleParts {
   if (name === "apply_patch") {
     return { main: "Edit", detail: patchDisplayFile(patchInputText(body)) ?? undefined };
   }
@@ -3717,7 +3696,11 @@ function canonicalToolDisplay(name: string, body: unknown): ToolTitleParts {
     return { main: "Grep" };
   }
   if (name !== "exec_command" && name !== "shell_command") {
-    return { main: canonicalKnownToolName(name) };
+    const knownName = canonicalKnownToolName(name);
+    if (knownName) return { main: knownName };
+    const kindDisplay = canonicalToolKindDisplay(kind, body);
+    if (kindDisplay) return kindDisplay;
+    return { main: humanizeToolName(name) };
   }
   const cmd = toolInputCommand(body);
   if (!cmd) return { main: "Bash" };
@@ -3738,6 +3721,31 @@ function isEditToolName(name: string): boolean {
 
 function isGrepToolName(name: string): boolean {
   return ["SearchText", "grep_search"].includes(name);
+}
+
+function splitInlineToolTitle(title: string): ToolTitleParts | null {
+  const normalized = title.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  const match = normalized.match(/^(Read|List|LS|Edit|Write|MultiEdit|Search|Grep|Glob|Bash|WebFetch|WebSearch)\s+(.+)$/);
+  if (!match) return null;
+  const main = inlineToolMainName(match[1]);
+  const detail = inlineToolDetail(match[2]);
+  return detail ? { main, detail } : { main };
+}
+
+function inlineToolMainName(name: string): string {
+  if (name === "LS") return "List";
+  return name;
+}
+
+function inlineToolDetail(detail: string): string | undefined {
+  const normalized = detail
+    .split("|")
+    .map((part) => part.trim())
+    .filter((part) => part && !/^click(?:\s+to\s+copy)?$/i.test(part))
+    .join(" ");
+  if (!normalized) return undefined;
+  return basenameFromUri(normalized) ?? normalized;
 }
 
 function toolInputCommand(body: unknown): string {
@@ -3776,10 +3784,12 @@ function patchInputText(value: unknown): string {
 }
 
 function shouldHideTool(name: string, body: unknown): boolean {
-  if (name !== "web_search" && name !== "WebSearch") return false;
   const input = parseObjectLike(body);
-  const actionType = input ? pickString(input.type) : null;
-  return actionType === "open_page" && !pickString(input?.url);
+  const action = input ? webActionRecord(input) : null;
+  const actionType = action ? pickString(action.type) : null;
+  if (actionType === "open_page") return !action || !firstWebActionUrl(action);
+  if (name !== "web_search" && name !== "WebSearch") return false;
+  return false;
 }
 
 function commandToolDisplay(command: string): ToolTitleParts {
@@ -3792,8 +3802,33 @@ function commandToolDisplay(command: string): ToolTitleParts {
   return { main: "Bash" };
 }
 
-function canonicalKnownToolName(name: string): string {
+function canonicalKnownToolName(name: string): string | null {
+  const inlineTitle = splitInlineToolTitle(name);
+  if (inlineTitle) return inlineTitle.main;
   switch (name) {
+    case "Read":
+    case "Write":
+    case "Edit":
+    case "MultiEdit":
+    case "Delete":
+    case "Move":
+    case "Search":
+    case "Grep":
+    case "Glob":
+    case "Bash":
+    case "WebFetch":
+    case "WebSearch":
+    case "NotebookEdit":
+    case "TodoWrite":
+    case "ToolSearch":
+    case "AskUserQuestion":
+    case "TaskUpdate":
+    case "Task":
+    case "View Image":
+      return name;
+    case "LS":
+    case "List":
+      return "List";
     case "web_fetch":
     case "webfetch":
       return "WebFetch";
@@ -3802,11 +3837,41 @@ function canonicalKnownToolName(name: string): string {
       return "WebSearch";
     case "read_file":
     case "ReadFile":
+    case "read":
       return "Read";
+    case "write":
+      return "Write";
     case "replace":
     case "write_file":
     case "WriteFile":
+    case "edit":
       return "Edit";
+    case "multi_edit":
+    case "MultiEditTool":
+      return "MultiEdit";
+    case "delete":
+    case "remove":
+    case "remove_file":
+    case "delete_file":
+    case "DeleteFile":
+      return "Delete";
+    case "move":
+    case "move_file":
+    case "MoveFile":
+      return "Move";
+    case "glob":
+    case "find_files":
+      return "Glob";
+    case "list":
+    case "ls":
+    case "list_dir":
+    case "list_directory":
+    case "list_files":
+      return "List";
+    case "shell":
+    case "bash":
+    case "terminal":
+      return "Bash";
     case "grep_search":
     case "SearchText":
       return "Grep";
@@ -3824,11 +3889,60 @@ function canonicalKnownToolName(name: string): string {
       return "Bash";
     case "update_plan":
       return "TaskUpdate";
+    case "task":
+      return "Task";
+    case "todo_write":
+      return "TodoWrite";
+    case "notebook_edit":
+      return "NotebookEdit";
     case "view_image":
       return "View Image";
     default:
-      return humanizeToolName(name);
+      return null;
   }
+}
+
+function canonicalToolKindDisplay(kind: string | undefined, body: unknown): ToolTitleParts | null {
+  switch (kind) {
+    case "read":
+      return { main: "Read", detail: fileToolDisplayDetail(body, true) ?? undefined };
+    case "edit":
+      return { main: "Edit", detail: fileToolDisplayDetail(body, false) ?? undefined };
+    case "delete":
+      return { main: "Delete", detail: fileToolDisplayDetail(body, false) ?? undefined };
+    case "move":
+      return { main: "Move", detail: moveToolDisplayDetail(body) ?? fileToolDisplayDetail(body, false) ?? undefined };
+    case "search":
+      return { main: "Search" };
+    case "execute": {
+      const command = toolInputCommand(body);
+      return command ? commandToolDisplay(command) : { main: "Bash" };
+    }
+    case "fetch":
+      return webActionToolDisplay(body) ?? { main: "WebFetch" };
+    case "think":
+      return { main: "Think" };
+    case "switch_mode":
+      return { main: "Switch Mode" };
+    default:
+      return null;
+  }
+}
+
+function moveToolDisplayDetail(body: unknown): string | null {
+  const input = parseObjectLike(body);
+  if (!input) return null;
+  const source = toolInputFilePath(input);
+  const target =
+    pickString(input.new_path) ??
+    pickString(input.newPath) ??
+    pickString(input.destination) ??
+    pickString(input.dest) ??
+    pickString(input.target);
+  const sourceLabel = source ? basenameFromUri(source) ?? source : "";
+  const targetLabel = target ? basenameFromUri(target) ?? target : "";
+  const detail = [sourceLabel, targetLabel].filter(Boolean).join(" -> ");
+  return detail || null;
 }
 
 function humanizeToolName(name: string): string {
@@ -3837,12 +3951,59 @@ function humanizeToolName(name: string): string {
 }
 
 function webSearchToolDisplay(body: unknown): ToolTitleParts {
+  return webActionToolDisplay(body) ?? { main: "WebSearch" };
+}
+
+function webActionToolDisplay(body: unknown): ToolTitleParts | null {
   const input = parseObjectLike(body);
-  const actionType = input ? pickString(input.type) : null;
-  if (actionType === "open_page") {
-    return { main: "WebFetch", detail: pickString(input?.url) ?? undefined };
+  const action = input ? webActionRecord(input) : null;
+  const actionType = action ? pickString(action.type) : null;
+  if (action && actionType === "open_page") {
+    return { main: "WebFetch", detail: firstWebActionUrl(action) ?? undefined };
   }
-  return { main: "WebSearch" };
+  if (action && actionType === "search") {
+    return { main: "WebSearch", detail: firstWebActionQuery(action) ?? undefined };
+  }
+  return null;
+}
+
+function webActionDisplayText(record: Record<string, unknown>): string | null {
+  const action = webActionRecord(record);
+  const actionType = pickString(action.type);
+  if (actionType === "open_page") return firstWebActionUrl(action);
+  if (actionType === "search") return webActionQueries(action).join("\n");
+  return null;
+}
+
+function webActionRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const action = asRecord(record.action);
+  return Object.keys(action).length > 0 ? action : record;
+}
+
+function firstWebActionUrl(action: Record<string, unknown>): string | null {
+  return pickString(action.url) ?? webActionStringList(action, "urls")[0] ?? null;
+}
+
+function firstWebActionQuery(action: Record<string, unknown>): string | null {
+  return webActionQueries(action)[0] ?? null;
+}
+
+function webActionQueries(action: Record<string, unknown>): string[] {
+  return [
+    ...webActionStringList(action, "queries"),
+    ...webActionStringList(action, "query"),
+  ];
+}
+
+function webActionStringList(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => pickString(item))
+      .filter((item): item is string => Boolean(item));
+  }
+  const single = pickString(value);
+  return single ? [single] : [];
 }
 
 function writeStdinDisplayTarget(body: unknown): string | null {
@@ -3894,6 +4055,7 @@ function firstShellCommandToken(command: string): string {
 
 function toolDisplayName(name: string): string {
   if (name === "web_search") return "Searching web";
+  if (name === "LS") return "List";
   return name;
 }
 
@@ -4564,8 +4726,13 @@ function ToolTitleIcon({ name }: { name: string }) {
     case "Edit":
     case "MultiEdit":
       return <SquarePen className={className} aria-label="Edit" />;
+    case "Delete":
+      return <Trash2 className={className} aria-label="Delete" />;
+    case "Move":
+      return <MoveRight className={className} aria-label="Move" />;
     case "Bash":
       return <SquareTerminal className={className} aria-label="Terminal" />;
+    case "Search":
     case "Grep":
       return <Search className={className} aria-label="Search" />;
     case "Glob":
@@ -4590,6 +4757,10 @@ function ToolTitleIcon({ name }: { name: string }) {
       return <ImageIcon className={className} aria-label="View image" />;
     case "Task":
       return <ClipboardList className={className} aria-label="Task" />;
+    case "Think":
+      return <Brain className={className} aria-label="Think" />;
+    case "Switch Mode":
+      return <ClipboardList className={className} aria-label="Switch mode" />;
     default:
       return <Wrench className={className} aria-label={name || "Tool"} />;
   }
