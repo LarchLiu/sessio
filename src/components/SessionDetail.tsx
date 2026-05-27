@@ -12,7 +12,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Hand, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, SquarePen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Hand, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -5046,7 +5046,7 @@ function ToolTitleIcon({ name }: { name: string }) {
     case "Write":
     case "Edit":
     case "MultiEdit":
-      return <SquarePen className={className} aria-label="Edit" />;
+      return <Pen className={className} aria-label="Edit" />;
     case "Delete":
       return <Trash2 className={className} aria-label="Delete" />;
     case "Move":

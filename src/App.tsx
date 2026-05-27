@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, Link2, Unlink, Send, CircleDotDashed, CircleDot, CircleSlash, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Hand, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, Link2, Unlink, Send, CircleDashed, CircleDot, CircleSlash, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -115,7 +115,7 @@ const KANBAN_STATUSES: KanbanStatus[] = [
 ];
 
 const KANBAN_STATUS_ICONS: Record<KanbanStatus, LucideIcon> = {
-  todo: CircleDotDashed,
+  todo: CircleDashed,
   in_progress: CircleDot,
   canceled: CircleSlash,
   agent_review: CircleGauge,
@@ -1052,7 +1052,7 @@ export default function App() {
                 : "text-ink/72 hover:bg-ink/5 hover:text-ink")
             }
           >
-            <Plus className="h-4 w-4 shrink-0" />
+            <SquarePen className="h-4 w-4 shrink-0" />
             <span className="truncate">{t("sidebar.new_chat")}</span>
           </button>
           <div className="shrink-0 flex flex-col gap-0.5">
@@ -3014,11 +3014,14 @@ function NewChatView({
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [kanbanItems, setKanbanItems] = useState<KanbanItem[]>([]);
+  const [selectedKanbanItemId, setSelectedKanbanItemId] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachmentButtonRef = useRef<HTMLButtonElement>(null);
   const fallbackRuntimeSequenceRef = useRef(0);
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
+  const projectId = project?.project.id ?? null;
   const agentOptions = agentSelectOptions(runtimeAgents);
   const selectedRuntimeAgent =
     runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
@@ -3048,6 +3051,23 @@ function NewChatView({
     imageLabel: t("new_chat.add_images"),
     fileLabel: t("new_chat.add_files"),
   });
+  const selectedKanbanItem =
+    kanbanItems.find((item) => item.id === selectedKanbanItemId) ?? null;
+  const kanbanItemOptions: InlineMenuSelectOption[] = [
+    {
+      value: "",
+      label: t("kanban.no_item"),
+      icon: <Kanban className="h-4 w-4 text-ink/45" />,
+    },
+    ...kanbanItems.map((item) => {
+      const StatusIcon = KANBAN_STATUS_ICONS[item.status];
+      return {
+        value: item.id,
+        label: item.title,
+        icon: <StatusIcon className="h-4 w-4 text-ink/55" />,
+      };
+    }),
+  ];
 
   useEffect(() => {
     if (initialProjectKey && projects.some((p) => p.key === initialProjectKey)) {
@@ -3062,6 +3082,30 @@ function NewChatView({
     if (agentOptions.some((option) => option.value === agent)) return;
     setAgent((runtimeAgents[0]?.agent ?? "codex") as Agent);
   }, [agent, agentOptions, runtimeAgents]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setKanbanItems([]);
+    setSelectedKanbanItemId("");
+    if (!projectId) return;
+    listKanbanItems(projectId)
+      .then((items) => {
+        if (cancelled) return;
+        setKanbanItems(items);
+      })
+      .catch((err) => {
+        if (!cancelled) onError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [onError, projectId]);
+
+  useEffect(() => {
+    if (!selectedKanbanItemId) return;
+    if (kanbanItems.some((item) => item.id === selectedKanbanItemId)) return;
+    setSelectedKanbanItemId("");
+  }, [kanbanItems, selectedKanbanItemId]);
 
   useEffect(() => {
     if (!supportsAttachments) {
@@ -3147,6 +3191,8 @@ function NewChatView({
         projectName: project.label,
         prompt,
         timestamp,
+        kanbanItemId: selectedKanbanItem?.id,
+        kanbanItemStatus: selectedKanbanItem?.status,
       });
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
         text: prompt,
@@ -3159,6 +3205,7 @@ function NewChatView({
         to: turn.turnId,
       });
       setText("");
+      setSelectedKanbanItemId("");
       clearAttachments();
     } catch (err) {
       const message = String(err);
@@ -3168,10 +3215,6 @@ function NewChatView({
       setSending(false);
     }
   };
-
-  const activeSessionCount = Object.values(liveState.sessions).filter(
-    (session) => !session.ended,
-  ).length;
 
   return (
     <div className="flex flex-1 min-h-0 flex-col bg-surface-panel">
@@ -3269,7 +3312,20 @@ function NewChatView({
                   icon: <Folder className="h-4 w-4 text-ink/55" />,
                 }))}
               />
-              <NewChatMenuButton icon={Cpu} label={activeSessionCount > 0 ? `${activeSessionCount}` : t("new_chat.work_locally")} text />
+              <div className="flex min-w-0 max-w-[260px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
+                <InlineMenuSelect
+                  value={selectedKanbanItemId}
+                  options={kanbanItemOptions}
+                  onChange={setSelectedKanbanItemId}
+                  menuAlign="trigger"
+                  placeholder={t("kanban.select_item")}
+                  ariaLabel={t("kanban.select_item")}
+                  className="h-7 max-w-[260px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
+                  menuClassName="bg-surface-panel"
+                  minMenuWidth={220}
+                  emptyContent={t("kanban.no_items")}
+                />
+              </div>
               <NewChatMenuButton icon={GitBranch} label="main" text />
             </div>
           </div>

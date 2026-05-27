@@ -32,7 +32,7 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "sidebar.click_to_check_backend": "After installing {backend}, click to check again and rebuild index in settings.",
     "sidebar.update_available": "New version v{version} available — click to download",
     "sidebar.check_update": "Check for updates",
-    "sidebar.sessions_count": "{count} sessions",
+    "sidebar.sessions_count": "{count} session{s}",
     "sidebar.close": "Close sidebar",
     "sidebar.open": "Open sidebar",
     "header.search": "Search",
@@ -76,6 +76,9 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "kanban.unlink_session": "Unlink session",
     "kanban.no_unlinked_sessions": "No sessions to link.",
     "kanban.more_sessions": "+{count} more",
+    "kanban.select_item": "Kanban item",
+    "kanban.no_item": "No kanban item",
+    "kanban.no_items": "No kanban items.",
     "memory_search.placeholder": "Search memory in {project}",
     "memory_search.project_selector": "Select project",
     "memory_search.searching": "Searching memory...",
@@ -212,6 +215,9 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "kanban.unlink_session": "取消关联会话",
     "kanban.no_unlinked_sessions": "没有可关联的会话。",
     "kanban.more_sessions": "还有 {count} 个",
+    "kanban.select_item": "看板事项",
+    "kanban.no_item": "不关联看板事项",
+    "kanban.no_items": "没有看板事项。",
     "memory_search.placeholder": "搜索 {project} 的 memory",
     "memory_search.project_selector": "选择项目",
     "memory_search.searching": "正在搜索 memory...",
@@ -322,6 +328,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       if (vars) {
         for (const k of Object.keys(vars)) {
           s = s.replace(new RegExp(`\\{${k}\\}`, "g"), String(vars[k]));
+        }
+        if (Object.prototype.hasOwnProperty.call(vars, "count")) {
+          s = s.replace(/\{s\}/g, Number(vars.count) <= 1 ? "" : "s");
         }
       }
       return s;
