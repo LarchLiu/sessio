@@ -12,7 +12,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Hand, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -40,13 +40,19 @@ import {
   sendAgentInput,
   startAgentSession,
   setAgentSessionConfigOption,
+  updateRuntimeAgentPreferences,
   updateSessionMessageCount,
   writeCrossPrompt,
 } from "../api";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
-import { agentSelectOptions } from "./AgentSelect";
-import InlineMenuSelect, { type InlineMenuSelectOption } from "./InlineMenuSelect";
+import {
+  agentModelSelectOptions,
+  agentModelSelectValue,
+  parseAgentModelSelectValue,
+} from "./AgentSelect";
+import type { InlineMenuSelectOption } from "./InlineMenuSelect";
+import { RuntimeMenuSelect, runtimePermissionModeOptions } from "./RuntimeMenuSelect";
 import {
   attachmentMenuOptions,
   type ComposerAttachment,
@@ -117,6 +123,22 @@ interface PendingAgentSession {
   timestamp: number;
   forkedFromAgent?: Agent | null;
   forkedFromId?: string | null;
+}
+
+function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
+  return agent?.model ?? agent?.models[0]?.value ?? "";
+}
+
+function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
+  return agent?.permissionMode ?? agent?.permissionModes[0]?.value ?? "";
+}
+
+function runtimeSessionOptions(model: string, permissionMode: string): Record<string, unknown> {
+  return {
+    transport: "acp",
+    ...(model ? { model } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
+  };
 }
 
 // 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
@@ -462,13 +484,21 @@ function MessageStream({
   const [composerError, setComposerError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [composerAgent, setComposerAgent] = useState<Agent>(agent);
+  const [composerModel, setComposerModel] = useState("");
+  const [composerPermissionMode, setComposerPermissionMode] = useState("");
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
-  const agentOptions = useMemo(() => agentSelectOptions(runtimeAgents), [runtimeAgents]);
+  const agentModelOptions = useMemo(() => agentModelSelectOptions(runtimeAgents), [runtimeAgents]);
+  const selectedAgentModelValue = agentModelSelectValue(composerAgent, composerModel);
   const selectedComposerAgent =
     runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
+  const composerPermissionOptions = runtimePermissionModeOptions(
+    selectedComposerAgent?.permissionModes ?? [],
+    composerPermissionMode,
+    selectedComposerAgent?.agent,
+  );
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
@@ -750,14 +780,64 @@ function MessageStream({
   }, [activeTurnId]);
 
   useEffect(() => {
+    const runtimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
     setComposerAgent(agent);
+    setComposerModel(initialRuntimeModel(runtimeAgent));
+    setComposerPermissionMode(initialRuntimePermission(runtimeAgent));
     activeRuntimeTurnIdRef.current = null;
   }, [agent, sessionId]);
 
   useEffect(() => {
-    if (agentOptions.some((option) => option.value === composerAgent)) return;
-    setComposerAgent((runtimeAgents[0]?.agent ?? agent) as Agent);
-  }, [agent, agentOptions, composerAgent, runtimeAgents]);
+    if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
+    const current = runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
+    const next = current ?? runtimeAgents[0] ?? null;
+    if (!next) return;
+    setComposerAgent(next.agent);
+    setComposerModel(initialRuntimeModel(next));
+    setComposerPermissionMode(initialRuntimePermission(next));
+  }, [agentModelOptions, composerAgent, runtimeAgents, selectedAgentModelValue]);
+
+  useEffect(() => {
+    if (!selectedComposerAgent) return;
+    if (
+      composerPermissionMode &&
+      selectedComposerAgent.permissionModes.some((option) => option.value === composerPermissionMode)
+    ) {
+      return;
+    }
+    setComposerPermissionMode(initialRuntimePermission(selectedComposerAgent));
+  }, [
+    composerPermissionMode,
+    selectedComposerAgent?.agent,
+    selectedComposerAgent?.permissionMode,
+    selectedComposerAgent?.permissionModes,
+  ]);
+
+  const handleComposerAgentModelChange = useCallback(async (nextValue: string) => {
+    const parsed = parseAgentModelSelectValue(nextValue);
+    if (!parsed) return;
+    const targetRuntimeAgent =
+      runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === parsed.agent) ?? null;
+    if (!targetRuntimeAgent) return;
+    setComposerAgent(parsed.agent);
+    setComposerModel(parsed.model);
+    setComposerPermissionMode(initialRuntimePermission(targetRuntimeAgent));
+    try {
+      await updateRuntimeAgentPreferences({ agent: parsed.agent, model: parsed.model });
+    } catch (err) {
+      setComposerError(String(err));
+    }
+  }, [runtimeAgents]);
+
+  const handleComposerPermissionChange = useCallback(async (nextValue: string) => {
+    if (!selectedComposerAgent) return;
+    setComposerPermissionMode(nextValue);
+    try {
+      await updateRuntimeAgentPreferences({ agent: composerAgent, permissionMode: nextValue });
+    } catch (err) {
+      setComposerError(String(err));
+    }
+  }, [composerAgent, selectedComposerAgent]);
 
   const handleSendText = useCallback(async (
     rawText: string,
@@ -849,9 +929,27 @@ function MessageStream({
             workspacePath,
             sourceAgent: agent,
             sourceSessionId: sessionId,
-            options: { transport: "acp" },
+            options: runtimeSessionOptions(composerModel, composerPermissionMode),
           });
       pendingRuntimeSessionId = handle.sessioRuntimeSessionId;
+      if (sameAgent) {
+        if (composerModel) {
+          await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
+            configId: "model",
+            value: composerModel,
+          }).catch((err) => {
+            console.warn("set model config failed", err);
+          });
+        }
+        if (composerPermissionMode) {
+          await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
+            configId: "mode",
+            value: composerPermissionMode,
+          }).catch((err) => {
+            console.warn("set permission config failed", err);
+          });
+        }
+      }
       if (!sameAgent) {
         dispatchLiveEvent({
           type: "ensure-session",
@@ -924,7 +1022,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -1026,8 +1124,10 @@ function MessageStream({
         active={Boolean(activeTurnId)}
         sending={sending}
         error={composerError}
-        agent={composerAgent}
-        agentOptions={agentOptions}
+        agentModelValue={selectedAgentModelValue}
+        agentModelOptions={agentModelOptions}
+        permissionMode={composerPermissionMode}
+        permissionOptions={composerPermissionOptions}
         placeholder="Ask, Search or Chat..."
         attachments={attachments}
         supportsAttachments={supportsAttachments}
@@ -1035,7 +1135,8 @@ function MessageStream({
         supportsEmbeddedContext={supportsEmbeddedContext}
         onRemoveAttachment={removeAttachment}
         onPickAttachments={pickAttachments}
-        onAgentChange={(nextAgent) => setComposerAgent(nextAgent as Agent)}
+        onAgentModelChange={handleComposerAgentModelChange}
+        onPermissionChange={handleComposerPermissionChange}
         onChange={setComposerText}
         onSend={handleSend}
         onCancel={handleCancelTurn}
@@ -1364,8 +1465,10 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   active: boolean;
   sending: boolean;
   error: string | null;
-  agent: SessionInfo["agent"];
-  agentOptions: InlineMenuSelectOption[];
+  agentModelValue: string;
+  agentModelOptions: InlineMenuSelectOption[];
+  permissionMode: string;
+  permissionOptions: InlineMenuSelectOption[];
   placeholder: string;
   attachments: ComposerAttachment[];
   supportsAttachments: boolean;
@@ -1373,7 +1476,8 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   supportsEmbeddedContext: boolean;
   onRemoveAttachment: (path: string) => void;
   onPickAttachments: (kind: "images" | "files") => Promise<void>;
-  onAgentChange: (agent: string) => void;
+  onAgentModelChange: (value: string) => void;
+  onPermissionChange: (permissionMode: string) => void;
   onChange: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
@@ -1384,8 +1488,10 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     active,
     sending,
     error,
-    agent,
-    agentOptions,
+    agentModelValue,
+    agentModelOptions,
+    permissionMode,
+    permissionOptions,
     placeholder,
     attachments,
     supportsAttachments,
@@ -1393,7 +1499,8 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     supportsEmbeddedContext,
     onRemoveAttachment,
     onPickAttachments,
-    onAgentChange,
+    onAgentModelChange,
+    onPermissionChange,
     onChange,
     onSend,
     onCancel,
@@ -1488,15 +1595,23 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
                   </button>
                 </Tooltip>
               )}
-              <ChatComposerMenuButton icon={Hand} label="Default permissions" disabled={disabled} text />
+              <RuntimeMenuSelect
+                value={permissionMode}
+                options={permissionOptions}
+                disabled={disabled}
+                ariaLabel="Default permissions"
+                onChange={onPermissionChange}
+                menuPlacement="top"
+              />
             </div>
             <div className="flex shrink-0 items-center gap-2.5">
-              <ChatComposerAgentSelect
-                agent={agent}
-                options={agentOptions}
+              <RuntimeMenuSelect
+                value={agentModelValue}
+                options={agentModelOptions}
                 disabled={disabled || sending || active}
                 ariaLabel={t("new_chat.agent")}
-                onChange={onAgentChange}
+                onChange={onAgentModelChange}
+                menuPlacement="top"
               />
               <ChatComposerMenuButton icon={Mic} label={t("new_chat.voice")} disabled={disabled} />
               <button
@@ -1525,38 +1640,6 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     </div>
   );
 });
-
-function ChatComposerAgentSelect({
-  agent,
-  options,
-  disabled,
-  ariaLabel,
-  onChange,
-}: {
-  agent: SessionInfo["agent"];
-  options: InlineMenuSelectOption[];
-  disabled: boolean;
-  ariaLabel: string;
-  onChange: (agent: string) => void;
-}) {
-  return (
-    <div className="flex min-w-0 max-w-[220px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
-      <InlineMenuSelect
-        value={agent}
-        options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
-        onChange={onChange}
-        menuAlign="trigger"
-        menuPlacement="top"
-        placeholder={ariaLabel}
-        ariaLabel={ariaLabel}
-        className="h-7 max-w-[220px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
-        menuClassName="bg-surface-panel"
-        minMenuWidth={180}
-        emptyContent={ariaLabel}
-      />
-    </div>
-  );
-}
 
 function ChatComposerMenuButton({
   icon: Icon,
