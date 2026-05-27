@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, FolderPlus, Kanban, Trash2, Pencil, Save, type LucideIcon } from "lucide-react";
+import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, Cpu, Hand, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
@@ -23,7 +23,7 @@ import {
   addExistingProject,
   archiveProject,
   createKanbanItem,
-  createProject,
+  createDefaultProject,
   createPendingSession,
   deleteKanbanItem,
   getIndexStatus,
@@ -63,6 +63,7 @@ import {
   useComposerAttachments,
 } from "./components/ComposerAttachments";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
+import PopupMenu, { type PopupMenuOption } from "./components/PopupMenu";
 import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
 import { ThemeMode, useTheme } from "./theme";
@@ -319,6 +320,7 @@ export default function App() {
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [selectedProject, setSelectedProject] = useState<ProjectSelection>(null);
   const [selected, setSelected] = useState<SessionInfo | null>(null);
+  const [newChatProjectKey, setNewChatProjectKey] = useState<string | null>(null);
   const [expandProject, setExpandProject] = useState(true);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     () => new Set(),
@@ -1008,6 +1010,7 @@ export default function App() {
             type="button"
             onClick={() => {
               setSelectedProject(null);
+              setNewChatProjectKey(null);
               setSelected(null);
               setDetailMode("chat");
             }}
@@ -1027,17 +1030,18 @@ export default function App() {
                 label={t("sidebar.by_project")}
                 collapsed={!expandProject}
                 onToggle={() => setExpandProject((v) => !v)}
-              />
-              <ProjectActionsButton
-                onProjectAdded={(project) => {
-                  setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
-                  setSelectedProject({ kind: "project", projectId: project.id });
-                  setSelected(null);
-                  setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
-                  setExpandedProjects((prev) => new Set(prev).add(project.id));
-                  void refreshSessions();
-                }}
-                onError={setError}
+                action={
+                  <ProjectActionsButton
+                    onProjectAdded={(project) => {
+                      setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
+                      setSelectedProject({ kind: "project", projectId: project.id });
+                      setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+                      setExpandedProjects((prev) => new Set(prev).add(project.id));
+                      void refreshSessions();
+                    }}
+                    onError={setError}
+                  />
+                }
               />
             </div>
           </div>
@@ -1061,10 +1065,6 @@ export default function App() {
                     runtimeSessionAliases={runtimeSessionAliases}
                     unreadSessionIds={unreadSessionIds}
                     onSelectProject={() => {
-                      setSelectedProject({ kind: "project", projectId: p.project.id });
-                      setSelected(null);
-                      setDetailMode("chat");
-                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
                       setExpandedProjects((prev) => {
                         const next = new Set(prev);
                         if (next.has(p.key)) next.delete(p.key);
@@ -1072,8 +1072,21 @@ export default function App() {
                         return next;
                       });
                     }}
+                    onOpenKanban={() => {
+                      setSelectedProject({ kind: "project", projectId: p.project.id });
+                      setNewChatProjectKey(null);
+                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
+                    }}
+                    onNewChat={() => {
+                      setSelectedProject(null);
+                      setNewChatProjectKey(p.key);
+                      setSelected(null);
+                      setDetailMode("chat");
+                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
+                    }}
                     onSelectSession={(session) => {
                       setSelectedProject(null);
+                      setNewChatProjectKey(null);
                       setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
                       setSelected(session);
                     }}
@@ -1248,6 +1261,27 @@ export default function App() {
           <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
             {error}
           </div>
+        ) : activeProject ? (
+          <ProjectWorkbench
+            project={activeProject}
+            sessions={availableSessions.filter((session) => session.projectPath === activeProject.path)}
+            onProjectUpdated={(project) => {
+              setProjects((prev) => prev.map((item) => (item.id === project.id ? project : item)));
+              setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+            }}
+            onProjectArchived={(projectId) => {
+              setProjects((prev) => prev.filter((project) => project.id !== projectId));
+              setSelectedProject(null);
+              setFilter({ kind: "all" });
+              void refreshSessions();
+            }}
+            onSelectSession={(session) => {
+              setSelectedProject(null);
+              setSelected(session);
+              setDetailMode("chat");
+            }}
+            onError={setError}
+          />
         ) : selected ? (
           <div className="relative flex-1 min-h-0">
             <div
@@ -1285,30 +1319,10 @@ export default function App() {
               <SessionMemory session={selected} />
             </div>
           </div>
-        ) : activeProject ? (
-          <ProjectWorkbench
-            project={activeProject}
-            sessions={availableSessions.filter((session) => session.projectPath === activeProject.path)}
-            onProjectUpdated={(project) => {
-              setProjects((prev) => prev.map((item) => (item.id === project.id ? project : item)));
-              setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
-            }}
-            onProjectArchived={(projectId) => {
-              setProjects((prev) => prev.filter((project) => project.id !== projectId));
-              setSelectedProject(null);
-              setFilter({ kind: "all" });
-              void refreshSessions();
-            }}
-            onSelectSession={(session) => {
-              setSelectedProject(null);
-              setSelected(session);
-              setDetailMode("chat");
-            }}
-            onError={setError}
-          />
         ) : (
           <NewChatView
             projects={projectGroups}
+            initialProjectKey={newChatProjectKey}
             runtimeAgents={runtimeAgents}
             liveState={liveRuntimeState}
             dispatchLiveEvent={dispatchLiveRuntimeEvent}
@@ -1876,19 +1890,31 @@ function SectionHeader({
   label,
   collapsed,
   onToggle,
+  action,
 }: {
   label: string;
   collapsed: boolean;
   onToggle: () => void;
+  action?: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onToggle}
-      className="group flex items-center justify-between w-full px-2 mt-3 mb-1 text-caption uppercase text-ink/55 hover:text-ink/85 transition"
-    >
-      <span>{label}</span>
-      <Chevron collapsed={collapsed} />
-    </button>
+    <div className="group flex w-full items-center px-2 mt-3 mb-1 text-caption text-ink/55 transition hover:text-ink/85">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex min-w-0 flex-1 items-center justify-between text-left text-body"
+      >
+        <span>{label}</span>
+      </button>
+      {action && (
+        <span className="mr-1 opacity-0 transition-opacity group-hover:opacity-100">
+          {action}
+        </span>
+      )}
+      <button type="button" onClick={onToggle} className="rounded p-0.5 text-ink/45 hover:text-ink/80">
+        <Chevron collapsed={collapsed} />
+      </button>
+    </div>
   );
 }
 
@@ -1927,12 +1953,26 @@ function ProjectActionsButton({
 }) {
   const { t } = useI18n();
   const [openMenu, setOpenMenu] = useState(false);
-  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string; name: string; type: ProjectType }>(null);
+  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; type: ProjectType }>(null);
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuOptions: PopupMenuOption<"existing" | "new">[] = [
+    {
+      key: "existing",
+      label: t("project.add_existing"),
+      icon: <Folder className="h-4 w-4" />,
+    },
+    {
+      key: "new",
+      label: t("project.create_new"),
+      icon: <FolderPlus className="h-4 w-4" />,
+    },
+  ];
 
   const pickExistingProject = async () => {
     setOpenMenu(false);
+    setFormError(null);
     try {
       const selection = await open({ directory: true, multiple: false });
       if (typeof selection !== "string") return;
@@ -1943,35 +1983,31 @@ function ProjectActionsButton({
     }
   };
 
-  const pickNewProjectParent = async () => {
+  const openNewProjectForm = () => {
     setOpenMenu(false);
-    try {
-      const selection = await open({ directory: true, multiple: false });
-      if (typeof selection !== "string") return;
-      setForm({ mode: "new", basePath: selection, name: "", type: "code" });
-    } catch (err) {
-      onError(String(err));
-    }
+    setFormError(null);
+    setForm({ mode: "new", basePath: null, name: "", type: "code" });
   };
 
   const save = async () => {
     if (!form || saving) return;
     const name = form.name.trim();
     if (!name) {
-      onError(t("project.name_required"));
+      setFormError(t("project.name_required"));
       return;
     }
     setSaving(true);
     onError(null);
+    setFormError(null);
     try {
       const project =
         form.mode === "existing"
-          ? await addExistingProject(form.basePath, name, form.type)
-          : await createProject(form.basePath, name, form.type);
+          ? await addExistingProject(form.basePath ?? "", name, form.type)
+          : await createDefaultProject(name, form.type);
       onProjectAdded(project);
       setForm(null);
     } catch (err) {
-      onError(String(err));
+      setFormError(String(err));
     } finally {
       setSaving(false);
     }
@@ -1979,26 +2015,28 @@ function ProjectActionsButton({
 
   return (
     <>
-      <Tooltip content={t("project.add")} placement="bottom">
+      <Tooltip content={t("project.add")} placement="top">
         <button
           ref={buttonRef}
           type="button"
           onClick={() => setOpenMenu((value) => !value)}
-          className="mt-3 mb-1 rounded-md p-1 text-ink/45 transition hover:bg-ink/5 hover:text-ink"
+          className="rounded-md p-0.5 text-ink/45 transition hover:bg-ink/5 hover:text-ink"
           aria-label={t("project.add")}
         >
           <FolderPlus className="h-3.5 w-3.5" />
         </button>
       </Tooltip>
       {openMenu && buttonRef.current && (
-        <div className="absolute left-10 top-24 z-50 w-48 overflow-hidden rounded-md border border-ink/10 bg-surface-panel shadow-lg">
-          <button type="button" onClick={() => void pickExistingProject()} className="block w-full px-3 py-2 text-left text-body-sm text-ink/75 hover:bg-ink/5">
-            {t("project.add_existing")}
-          </button>
-          <button type="button" onClick={() => void pickNewProjectParent()} className="block w-full px-3 py-2 text-left text-body-sm text-ink/75 hover:bg-ink/5">
-            {t("project.create_new")}
-          </button>
-        </div>
+        <PopupMenu
+          anchor={buttonRef.current}
+          options={menuOptions}
+          placement="right"
+          onClose={() => setOpenMenu(false)}
+          onSelect={(key) => {
+            if (key === "existing") void pickExistingProject();
+            else openNewProjectForm();
+          }}
+        />
       )}
       {form && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/35 px-4">
@@ -2008,7 +2046,9 @@ function ProjectActionsButton({
                 <div className="text-body font-medium text-ink">
                   {form.mode === "existing" ? t("project.add_existing") : t("project.create_new")}
                 </div>
-                <div className="mt-1 truncate text-caption text-ink/45">{form.basePath}</div>
+                <div className="mt-1 truncate text-caption text-ink/45">
+                  {form.mode === "existing" ? form.basePath : "~/.sessio/projects"}
+                </div>
               </div>
               <button type="button" onClick={() => setForm(null)} className="rounded-md p-1 text-ink/45 hover:bg-ink/5 hover:text-ink">
                 <X className="h-4 w-4" />
@@ -2027,6 +2067,11 @@ function ProjectActionsButton({
                 className="w-full rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body text-ink outline-none focus:border-ink/25"
               />
             </label>
+            {formError && (
+              <div className="mb-3 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
+                {formError}
+              </div>
+            )}
             <div className="mb-4 flex items-center justify-between gap-3">
               <span className="text-body-sm text-ink/55">{t("project.type")}</span>
               <NewChatSelect
@@ -2040,7 +2085,7 @@ function ProjectActionsButton({
               <button type="button" onClick={() => setForm(null)} className="rounded-md px-3 py-1.5 text-body-sm text-ink/60 hover:bg-ink/5 hover:text-ink">
                 {t("delete.cancel")}
               </button>
-              <button type="button" disabled={saving} onClick={() => void save()} className="rounded-md bg-ink px-3 py-1.5 text-body-sm text-bg disabled:opacity-50">
+              <button type="button" disabled={saving} onClick={() => void save()} className="rounded-md bg-ink px-3 py-1.5 text-body-sm text-[rgb(var(--color-bg-panel))] disabled:opacity-50">
                 {saving ? t("new_chat.sending") : t("project.save")}
               </button>
             </div>
@@ -2071,6 +2116,8 @@ function ProjectSidebarGroup({
   runtimeSessionAliases,
   unreadSessionIds,
   onSelectProject,
+  onOpenKanban,
+  onNewChat,
   onSelectSession,
   onToggleSessionLimit,
   onProjectContextMenu,
@@ -2085,6 +2132,8 @@ function ProjectSidebarGroup({
   runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
   onSelectProject: () => void;
+  onOpenKanban: () => void;
+  onNewChat: () => void;
   onSelectSession: (session: SessionInfo) => void;
   onToggleSessionLimit: () => void;
   onProjectContextMenu: (e: React.MouseEvent) => void;
@@ -2128,11 +2177,52 @@ function ProjectSidebarGroup({
             (expanded ? "scale-105" : "scale-100")
           }
         />
-        <span className="flex-1 truncate text-body">{project.label}</span>
-        <span className="shrink-0 rounded-full bg-ink/5 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-ink/35">
-          {projectTypeLabel(project.project.type, t)}
+        <span className="min-w-0 flex-1 truncate text-body">{project.label}</span>
+        <span className="text-meta text-ink/40 tabular-nums group-hover:hidden">
+          {project.count}
         </span>
-        <span className="text-meta text-ink/40 tabular-nums">{project.count}</span>
+        <span className="ml-auto hidden shrink-0 items-center gap-0.5 group-hover:flex">
+          <Tooltip content={t("project.workbench")} placement="top">
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label={t("project.workbench")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenKanban();
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onOpenKanban();
+              }}
+              className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
+            >
+              <SquareKanban className="h-3.5 w-3.5" />
+            </span>
+          </Tooltip>
+          <Tooltip content={t("sidebar.new_chat")} placement="top">
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label={t("sidebar.new_chat")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onNewChat();
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onNewChat();
+              }}
+              className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
+            >
+              <SquarePen className="h-3.5 w-3.5" />
+            </span>
+          </Tooltip>
+        </span>
       </button>
       <div
         className={
@@ -2421,7 +2511,7 @@ function ProjectWorkbench({
               type="button"
               onClick={() => void addTodo()}
               disabled={!newTitle.trim()}
-              className="rounded-lg bg-ink px-3 py-2 text-body-sm font-medium text-bg disabled:opacity-35"
+              className="rounded-lg bg-ink px-3 py-2 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
             >
               {t("kanban.add")}
             </button>
@@ -2565,7 +2655,7 @@ function KanbanCard({
           <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} className="resize-none rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
           <div className="flex justify-end gap-1">
             <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
-            <button type="button" onClick={() => void save()} className="rounded bg-ink px-2 py-1 text-caption text-bg">{t("project.save")}</button>
+            <button type="button" onClick={() => void save()} className="rounded bg-ink px-2 py-1 text-caption text-[rgb(var(--color-bg-panel))]">{t("project.save")}</button>
           </div>
         </div>
       ) : (
@@ -2617,6 +2707,7 @@ function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Reco
 
 function NewChatView({
   projects,
+  initialProjectKey,
   runtimeAgents,
   liveState,
   dispatchLiveEvent,
@@ -2624,6 +2715,7 @@ function NewChatView({
   onPendingSession,
 }: {
   projects: ProjectGroup[];
+  initialProjectKey: string | null;
   runtimeAgents: RuntimeAgentMetadata[];
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
@@ -2632,7 +2724,7 @@ function NewChatView({
 }) {
   const { t } = useI18n();
   const [text, setText] = useState("");
-  const [projectKeyValue, setProjectKeyValue] = useState(() => projects[0]?.key ?? "");
+  const [projectKeyValue, setProjectKeyValue] = useState(() => initialProjectKey ?? projects[0]?.key ?? "");
   const [agent, setAgent] = useState<Agent>(
     () => runtimeAgents[0]?.agent ?? "codex",
   );
@@ -2675,9 +2767,13 @@ function NewChatView({
   });
 
   useEffect(() => {
+    if (initialProjectKey && projects.some((p) => p.key === initialProjectKey)) {
+      setProjectKeyValue(initialProjectKey);
+      return;
+    }
     if (projectKeyValue && projects.some((p) => p.key === projectKeyValue)) return;
     setProjectKeyValue(projects[0]?.key ?? "");
-  }, [projectKeyValue, projects]);
+  }, [initialProjectKey, projectKeyValue, projects]);
 
   useEffect(() => {
     if (agentOptions.some((option) => option.value === agent)) return;

@@ -183,7 +183,7 @@ export default function InlineMenuSelect({
         pos &&
         createPortal(
           <div
-            className="fixed inset-0 z-[39] bg-transparent"
+            className="fixed inset-0 z-[79] bg-transparent"
             onMouseDown={() => setOpen(false)}
           />,
           document.body,
@@ -196,7 +196,7 @@ export default function InlineMenuSelect({
             onWheel={(e) => e.stopPropagation()}
             onScroll={(e) => e.stopPropagation()}
             className={
-              "fixed z-40 rounded-md border border-ink/10 bg-surface-panel shadow-[0_20px_60px_rgba(0,0,0,0.22)] overflow-hidden " +
+              "fixed z-[80] rounded-md border border-ink/10 bg-surface-panel shadow-[0_20px_60px_rgba(0,0,0,0.22)] overflow-hidden " +
               menuClassName
             }
             style={{

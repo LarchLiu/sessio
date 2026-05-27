@@ -365,6 +365,16 @@ export async function createProject(
   });
 }
 
+export async function createDefaultProject(
+  name: string,
+  projectType?: ProjectType | null,
+): Promise<ProjectInfo> {
+  return invoke<ProjectInfo>("create_default_project", {
+    name,
+    projectType: projectType ?? null,
+  });
+}
+
 export async function updateProject(
   projectId: string,
   patch: { name?: string | null; type?: ProjectType | null },

@@ -1,11 +1,8 @@
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
-  useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FileText, Image as ImageIcon, X } from "lucide-react";
 import {
@@ -13,6 +10,7 @@ import {
   readLocalImageDataUrl,
   type RuntimeCapabilitySet,
 } from "../api";
+import PopupMenu, { type PopupMenuOption, type PopupMenuPlacement } from "./PopupMenu";
 
 export type ComposerAttachment = AgentAttachment & {
   name: string;
@@ -20,11 +18,7 @@ export type ComposerAttachment = AgentAttachment & {
 
 export type AttachmentMenuKey = "images" | "files";
 
-export interface ComposerAttachmentMenuOption {
-  key: AttachmentMenuKey;
-  label: string;
-  icon: React.ReactNode;
-}
+export type ComposerAttachmentMenuOption = PopupMenuOption<AttachmentMenuKey>;
 
 const TEXT_ATTACHMENT_EXTENSIONS = [
   "txt",
@@ -246,71 +240,22 @@ export function ComposerAttachmentMenu({
   options,
   onSelect,
   onClose,
+  placement = "top",
 }: {
   anchor: HTMLButtonElement;
   options: ComposerAttachmentMenuOption[];
   onSelect: (key: AttachmentMenuKey) => void;
   onClose: () => void;
+  placement?: PopupMenuPlacement;
 }) {
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  const updatePosition = useCallback(() => {
-    const rect = anchor.getBoundingClientRect();
-    const menuWidth = menuRef.current?.offsetWidth ?? 192;
-    const menuHeight = menuRef.current?.offsetHeight ?? 8 + options.length * 40;
-    const left = Math.round(
-      Math.max(8, Math.min(rect.left + rect.width / 2 - menuWidth / 2, window.innerWidth - menuWidth - 8)),
-    );
-    const top = Math.round(Math.max(8, rect.top - menuHeight - 10));
-    setPos({ top, left });
-  }, [anchor, options.length]);
-
-  useLayoutEffect(() => {
-    updatePosition();
-  }, [updatePosition]);
-
-  useEffect(() => {
-    const reposition = () => updatePosition();
-    window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
-    return () => {
-      window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
-    };
-  }, [updatePosition]);
-
-  return createPortal(
-    <>
-      <div className="fixed inset-0 z-[39] bg-transparent" onMouseDown={onClose} />
-      <div
-        ref={menuRef}
-        className="fixed z-40 min-w-[192px] rounded-xl border border-ink/10 bg-surface-panel p-1.5 shadow-[0_20px_60px_rgba(0,0,0,0.22)]"
-        style={{
-          top: pos?.top ?? -9999,
-          left: pos?.left ?? -9999,
-          visibility: pos ? "visible" : "hidden",
-        }}
-        role="menu"
-      >
-        {options.map((option) => (
-          <button
-            key={option.key}
-            type="button"
-            className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body-sm text-ink/72 transition hover:bg-ink/6 hover:text-ink"
-            role="menuitem"
-            onClick={() => {
-              onSelect(option.key);
-              onClose();
-            }}
-          >
-            <span className="shrink-0 text-ink/55">{option.icon}</span>
-            <span>{option.label}</span>
-          </button>
-        ))}
-      </div>
-    </>,
-    document.body,
+  return (
+    <PopupMenu
+      anchor={anchor}
+      options={options}
+      placement={placement}
+      onSelect={onSelect}
+      onClose={onClose}
+    />
   );
 }
 

@@ -15,7 +15,7 @@ const DICTS: Record<Lang, Record<string, string>> = {
   en: {
     "sidebar.all_sessions": "All Sessions",
     "sidebar.by_agent": "By Agent",
-    "sidebar.by_project": "By Project",
+    "sidebar.by_project": "Projects",
     "sidebar.new_chat": "New chat",
     "sidebar.status_idle": "Index up to date",
     "sidebar.status_indexing": "Updating index",
@@ -146,7 +146,7 @@ const DICTS: Record<Lang, Record<string, string>> = {
   zh: {
     "sidebar.all_sessions": "全部会话",
     "sidebar.by_agent": "按助手",
-    "sidebar.by_project": "按项目",
+    "sidebar.by_project": "项目",
     "sidebar.new_chat": "新建聊天",
     "sidebar.status_idle": "索引已是最新",
     "sidebar.status_indexing": "正在更新索引",

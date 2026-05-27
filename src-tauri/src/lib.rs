@@ -88,6 +88,29 @@ fn create_project(
 }
 
 #[tauri::command]
+fn create_default_project(
+    name: String,
+    project_type: Option<ProjectType>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ProjectInfo, String> {
+    let parent = dirs::home_dir()
+        .ok_or_else(|| "home directory not found".to_string())?
+        .join(".sessio")
+        .join("projects");
+    std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+    let project = store
+        .create_project(
+            &parent.to_string_lossy(),
+            &name,
+            project_type.unwrap_or(ProjectType::Code),
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("projects_updated", ()).map_err(|e| e.to_string())?;
+    Ok(project)
+}
+
+#[tauri::command]
 fn update_project(
     project_id: String,
     name: Option<String>,
@@ -831,7 +854,7 @@ fn write_cross_prompt(session_id: String, content: String) -> Result<String, Str
         .ok_or_else(|| "home directory not found".to_string())?
         .join(".sessio")
         .join("projects")
-        .join("cross-context");
+        .join(".cross-context");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("sessio-cross-context-{}-{}.md", safe_id, ts));
     std::fs::OpenOptions::new()
@@ -1218,6 +1241,7 @@ pub fn run() {
             list_projects,
             add_existing_project,
             create_project,
+            create_default_project,
             update_project,
             archive_project,
             list_kanban_items,
