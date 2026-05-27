@@ -1897,6 +1897,12 @@ function AcpLiveItem({
     <AcpContentBlockGroup
       block={item.block}
       timestamp={item.block.timestamp ?? item.turn.updatedAt}
+      typewriterActive={
+        isTypewriterTurn(item.turn) &&
+        (item.block.kind === "assistant" || item.block.kind === "thought")
+      }
+      typewriterKey={`${item.turn.turnId}:${item.block.kind}`}
+      messageFinished={isAcpMessageBlockFinished(item.turn, item.block)}
       onPreviewImage={onPreviewImage}
       onPreviewFile={onPreviewFile}
       onFilePreviewError={onFilePreviewError}
@@ -1959,12 +1965,18 @@ function AcpSessionUpdateView({
 function AcpContentBlockGroup({
   block,
   timestamp,
+  typewriterActive = false,
+  typewriterKey,
+  messageFinished = true,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
 }: {
   block: AcpRenderBlock;
   timestamp: number;
+  typewriterActive?: boolean;
+  typewriterKey?: string;
+  messageFinished?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -1974,8 +1986,8 @@ function AcpContentBlockGroup({
   }
   const isUser = block.kind === "user";
   const isThought = block.kind === "thought";
-  const [thoughtExpanded, setThoughtExpanded] = useState(false);
-  const [messageExpanded, setMessageExpanded] = useState(false);
+  const [thoughtExpanded, setThoughtExpanded] = useState(() => isThought && typewriterActive);
+  const [messageExpanded, setMessageExpanded] = useState(() => !isThought && !isUser && typewriterActive);
   const [messageOverflowing, setMessageOverflowing] = useState(false);
   const messageGroupRef = useRef<HTMLDivElement>(null);
   const messageBodyRef = useRef<HTMLDivElement>(null);
@@ -1989,20 +2001,22 @@ function AcpContentBlockGroup({
     "mt-2 flex items-center gap-1 border-t border-ink/[0.07] py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04] " +
     (isUser ? "-mx-4 w-[calc(100%+2rem)] px-4" : "w-full px-3");
   useLayoutEffect(() => {
-    if (isThought) return;
+    if (isThought || !messageFinished) {
+      setMessageOverflowing(false);
+      return;
+    }
     const node = messageBodyRef.current;
     if (!node) return;
     const update = () => {
-      const isOverflowing = node.scrollHeight > node.clientHeight + 1;
-      setMessageOverflowing((previous) =>
-        messageExpanded ? previous || isOverflowing : isOverflowing,
-      );
+      const lineHeight = parseFloat(getComputedStyle(node).lineHeight) || 26;
+      const collapsedHeight = lineHeight * MESSAGE_COLLAPSE_LINES;
+      setMessageOverflowing(node.scrollHeight > collapsedHeight + 1);
     };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(node);
     return () => ro.disconnect();
-  }, [bodyBlocks, isThought, messageExpanded]);
+  }, [bodyBlocks, isThought, messageExpanded, messageFinished]);
   return (
     <div
       ref={messageGroupRef}
@@ -2075,12 +2089,14 @@ function AcpContentBlockGroup({
             <AcpContentBlocks
               blocks={bodyBlocks}
               imageAlign={isUser ? "right" : undefined}
+              typewriterActive={!isUser && typewriterActive}
+              typewriterKey={typewriterKey}
               onPreviewImage={onPreviewImage}
             />
           </div>
         )}
       </div>
-      {!isThought && messageOverflowing && (
+      {!isThought && messageFinished && messageOverflowing && (
         <button
           type="button"
           className={messageExpandButtonClass}
@@ -2243,15 +2259,20 @@ function AcpUserAttachmentStrip({
 function AcpContentBlocks({
   blocks,
   imageAlign,
+  typewriterActive = false,
+  typewriterKey,
   onPreviewImage,
 }: {
   blocks: AcpContentBlock[];
   imageAlign?: "left" | "right";
+  typewriterActive?: boolean;
+  typewriterKey?: string;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
+  const visibleBlocks = useTypewriterContentBlocks(blocks, typewriterActive, typewriterKey);
   return (
     <div className="space-y-2">
-      {blocks.map((block, index) => (
+      {visibleBlocks.map((block, index) => (
         <AcpContentBlockView
           key={index}
           block={block}
@@ -2261,6 +2282,147 @@ function AcpContentBlocks({
       ))}
     </div>
   );
+}
+
+const TYPEWRITER_INITIAL_CHARS_PER_SECOND = 72;
+const TYPEWRITER_MIN_CHARS_PER_SECOND = 36;
+const TYPEWRITER_MAX_CHARS_PER_SECOND = 360;
+const TYPEWRITER_DRAIN_CHARS_PER_SECOND = 220;
+const TYPEWRITER_TICK_MS = 24;
+const MESSAGE_COLLAPSE_LINES = 20;
+
+function useTypewriterContentBlocks(
+  blocks: AcpContentBlock[],
+  active: boolean,
+  typewriterKey: string | undefined,
+): AcpContentBlock[] {
+  const totalChars = useMemo(() => textContentLength(blocks), [blocks]);
+  const streamKey = typewriterKey ?? "default";
+  const [visibleChars, setVisibleChars] = useState(() => active ? 0 : totalChars);
+  const visibleCharsRef = useRef(active ? 0 : totalChars);
+  const stateRef = useRef({
+    streamKey,
+    targetChars: totalChars,
+    lastTargetChars: totalChars,
+    lastTargetAt: 0,
+    charsPerSecond: TYPEWRITER_INITIAL_CHARS_PER_SECOND,
+    wasActive: active,
+  });
+
+  useLayoutEffect(() => {
+    const state = stateRef.current;
+    const now = performance.now();
+    const streamChanged = state.streamKey !== streamKey;
+    if (streamChanged) {
+      state.streamKey = streamKey;
+      state.targetChars = totalChars;
+      state.lastTargetChars = totalChars;
+      state.lastTargetAt = now;
+      state.charsPerSecond = TYPEWRITER_INITIAL_CHARS_PER_SECOND;
+      state.wasActive = active;
+      const initialVisible = active ? 0 : totalChars;
+      visibleCharsRef.current = initialVisible;
+      setVisibleChars(initialVisible);
+      return;
+    }
+
+    if (!active && !state.wasActive) {
+      state.targetChars = totalChars;
+      state.lastTargetChars = totalChars;
+      state.lastTargetAt = now;
+      visibleCharsRef.current = totalChars;
+      setVisibleChars(totalChars);
+      return;
+    }
+
+    if (totalChars < state.targetChars) {
+      state.targetChars = totalChars;
+      state.lastTargetChars = totalChars;
+      visibleCharsRef.current = Math.min(visibleCharsRef.current, totalChars);
+      setVisibleChars((current) => Math.min(current, totalChars));
+      return;
+    }
+
+    if (totalChars > state.targetChars) {
+      const deltaChars = totalChars - state.targetChars;
+      const elapsedMs = Math.max(48, now - state.lastTargetAt);
+      const observedCharsPerSecond = deltaChars / (elapsedMs / 1000);
+      const backlog = Math.max(0, totalChars - visibleCharsRef.current);
+      const backlogBoost = backlog > 600 ? 1.9 : backlog > 260 ? 1.45 : backlog > 120 ? 1.2 : 1;
+      state.charsPerSecond = clampNumber(
+        observedCharsPerSecond * backlogBoost,
+        TYPEWRITER_MIN_CHARS_PER_SECOND,
+        TYPEWRITER_MAX_CHARS_PER_SECOND,
+      );
+      state.targetChars = totalChars;
+      state.lastTargetChars = totalChars;
+      state.lastTargetAt = now;
+    } else {
+      state.targetChars = totalChars;
+    }
+
+    if (!active) {
+      state.charsPerSecond = Math.max(state.charsPerSecond, TYPEWRITER_DRAIN_CHARS_PER_SECOND);
+    }
+    state.wasActive = state.wasActive || active || visibleCharsRef.current < state.targetChars;
+  }, [active, streamKey, totalChars]);
+
+  const shouldAnimate = visibleChars < totalChars;
+  useEffect(() => {
+    if (!shouldAnimate) return;
+    const timer = window.setInterval(() => {
+      setVisibleChars((current) => {
+        const target = stateRef.current.targetChars;
+        if (current >= target) {
+          visibleCharsRef.current = current;
+          return current;
+        }
+        const step = Math.max(
+          1,
+          Math.ceil(stateRef.current.charsPerSecond * (TYPEWRITER_TICK_MS / 1000)),
+        );
+        const next = Math.min(target, current + step);
+        visibleCharsRef.current = next;
+        return next;
+      });
+    }, TYPEWRITER_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [shouldAnimate, streamKey, totalChars]);
+
+  return useMemo(() => {
+    if (!active && visibleChars >= totalChars) return blocks;
+    return visibleContentBlocks(blocks, visibleChars);
+  }, [active, blocks, totalChars, visibleChars]);
+}
+
+function textContentLength(blocks: AcpContentBlock[]): number {
+  return blocks.reduce((total, block) => total + (block.type === "text" ? block.text.length : 0), 0);
+}
+
+function visibleContentBlocks(blocks: AcpContentBlock[], visibleChars: number): AcpContentBlock[] {
+  const visible: AcpContentBlock[] = [];
+  let consumedTextChars = 0;
+  for (const block of blocks) {
+    if (block.type !== "text") {
+      if (visibleChars >= consumedTextChars) visible.push(block);
+      continue;
+    }
+    const remaining = visibleChars - consumedTextChars;
+    if (remaining <= 0) break;
+    if (remaining >= block.text.length) {
+      visible.push(block);
+      consumedTextChars += block.text.length;
+      continue;
+    }
+    visible.push({ ...block, text: block.text.slice(0, remaining) });
+    break;
+  }
+  return visible;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
 }
 
 function AcpContentBlockView({
@@ -2916,7 +3078,7 @@ function acpViewModelToRenderItems(
   liveTurnIds: Set<string>,
 ): AcpRenderItem[] {
   const items: AcpRenderItem[] = [];
-  const liveTurns = viewModel.turns.filter((turn) => liveTurnIds.has(turn.turnId));
+  const latestLiveTurn = latestTurnWithIds(viewModel.turns, liveTurnIds);
   let lastUserIndex = -1;
   for (const turn of viewModel.turns) {
     const terminalSessionTools = new Map<string, AcpToolCall>();
@@ -2967,15 +3129,19 @@ function acpViewModelToRenderItems(
       items.push({ kind: "turnFileEdits", turn, text: turnFileEdits });
     }
   }
-  if (liveTurns.length > 0) {
+  if (latestLiveTurn) {
     const insertAt = lastUserIndex >= 0 ? lastUserIndex : 0;
-    items.splice(
-      insertAt,
-      0,
-      ...liveTurns.map((turn) => ({ kind: "turnStatus" as const, turn })),
-    );
+    items.splice(insertAt, 0, { kind: "turnStatus", turn: latestLiveTurn });
   }
   return items;
+}
+
+function latestTurnWithIds(turns: LiveTurn[], ids: Set<string>): LiveTurn | null {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (ids.has(turn.turnId)) return turn;
+  }
+  return null;
 }
 
 function writeStdinPollingToolSessionId(tool: AcpToolCall): string | null {
@@ -3205,6 +3371,17 @@ function renderItemSide(item: AcpRenderItem): "assistant" | "user" | "other" {
 
 function isTurnFinished(turn: LiveTurn): boolean {
   return turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled";
+}
+
+function isTypewriterTurn(turn: LiveTurn): boolean {
+  return turn.status === "pending" || turn.status === "streaming" || turn.status === "cancelling";
+}
+
+function isAcpMessageBlockFinished(turn: LiveTurn, block: AcpRenderBlock): boolean {
+  if (block.kind !== "assistant" && block.kind !== "thought") return true;
+  if (isTurnFinished(turn)) return true;
+  const index = turn.blocks.indexOf(block);
+  return index < 0 || index < turn.blocks.length - 1;
 }
 
 function previewTextForAcpItem(item: AcpRenderItem): string {
