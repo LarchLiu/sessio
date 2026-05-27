@@ -82,6 +82,12 @@ export default function PopupMenu<T extends string = string>({
     };
   }, [onClose, updatePosition]);
 
+  const select = (key: T, disabled?: boolean) => {
+    if (disabled) return;
+    onSelect(key);
+    onClose();
+  };
+
   return createPortal(
     <>
       <div className="fixed inset-0 z-[39] bg-transparent" onMouseDown={onClose} />
@@ -105,11 +111,11 @@ export default function PopupMenu<T extends string = string>({
             disabled={option.disabled}
             className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body-sm text-ink/72 transition hover:bg-ink/[0.08] hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
             role="menuitem"
-            onClick={() => {
-              if (option.disabled) return;
-              onSelect(option.key);
-              onClose();
+            onPointerDown={(event) => {
+              event.preventDefault();
+              select(option.key, option.disabled);
             }}
+            onClick={() => select(option.key, option.disabled)}
           >
             {option.icon && <span className="shrink-0 text-ink/55">{option.icon}</span>}
             <span>{option.label}</span>
