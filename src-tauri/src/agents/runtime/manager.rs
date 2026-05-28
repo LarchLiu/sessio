@@ -680,15 +680,6 @@ impl RuntimeManager {
         Ok(())
     }
 
-    pub(crate) fn active_turn_id(&self, sessio_runtime_session_id: &str) -> Option<String> {
-        self.inner.sessions.lock().ok().and_then(|sessions| {
-            sessions
-                .get(sessio_runtime_session_id)?
-                .active_turn_id
-                .clone()
-        })
-    }
-
     pub(crate) fn cancel_turn_if_active(
         &self,
         sessio_runtime_session_id: &str,

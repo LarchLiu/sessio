@@ -231,15 +231,29 @@ async fn run_session(
         .name("sessio")
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
-                let turn_id = current_turn(&notification_turn_id).or_else(|| {
-                    notification_manager.active_turn_id(&notification_session_id)
-                });
-                let Some(turn_id) = turn_id else {
+                let update_type = session_update_type(&notification.update).to_string();
+                let Some(turn_id) = current_turn(&notification_turn_id) else {
                     log::warn!(
-                        "[sessio-runtime:acp:notification:drop] session={} update={:?}",
+                        "[sessio-runtime:acp:notification:session-level] session={} update={:?}",
                         notification_session_id,
                         notification.update
                     );
+                    notification_manager
+                        .emit(
+                            acp_protocol_event(
+                                &notification_session_id,
+                                "agent_to_client",
+                                "notification",
+                                "session/update",
+                                Some(notification.session_id.to_string()),
+                                None,
+                                None,
+                                Some(update_type),
+                                &notification,
+                            )
+                            .map_err(acp_internal_error)?,
+                        )
+                        .map_err(acp_internal_error)?;
                     return Ok(());
                 };
                 log::info!(
@@ -258,7 +272,7 @@ async fn run_session(
                             Some(notification.session_id.to_string()),
                             Some(turn_id.clone()),
                             None,
-                            Some(session_update_type(&notification.update).to_string()),
+                            Some(update_type),
                             &notification,
                         )
                         .map_err(acp_internal_error)?,
@@ -278,8 +292,7 @@ async fn run_session(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _connection| {
-                let turn_id = current_turn(&permission_turn_id)
-                    .or_else(|| permission_manager.active_turn_id(&permission_session_id));
+                let turn_id = current_turn(&permission_turn_id);
                 let Some(turn_id) = turn_id else {
                     log::warn!(
                         "[sessio-runtime:permission-request:drop] session={} request={:?}",
