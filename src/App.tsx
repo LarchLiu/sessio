@@ -146,6 +146,8 @@ const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
+const PROJECT_NAME_SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
 function refreshMemoryBackendStatus(
   setMemoryBackendStatus: (status: MemoryBackendStatus | null) => void,
 ): Promise<void> {
@@ -172,6 +174,61 @@ function runtimeSessionOptions(model: string, permissionMode: string, effort = "
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
   };
+}
+
+function ScrambledProjectName({ name }: { name: string }) {
+  const [display, setDisplay] = useState(name);
+  const previousNameRef = useRef(name);
+
+  useEffect(() => {
+    const previousName = previousNameRef.current;
+    previousNameRef.current = name;
+    if (previousName === name) {
+      setDisplay(name);
+      return;
+    }
+    if (
+      typeof window === "undefined" ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      setDisplay(name);
+      return;
+    }
+
+    let frame = 0;
+    let raf = 0;
+    const maxLength = Math.max(previousName.length, name.length);
+    const frames = Math.min(24, Math.max(12, maxLength + 8));
+
+    const tick = () => {
+      frame += 1;
+      const settled = Math.floor((frame / frames) * maxLength);
+      let next = "";
+      for (let index = 0; index < maxLength; index += 1) {
+        const target = name[index] ?? "";
+        if (index < settled || frame >= frames) {
+          next += target;
+        } else if (target) {
+          next += PROJECT_NAME_SCRAMBLE_CHARS[
+            Math.floor(Math.random() * PROJECT_NAME_SCRAMBLE_CHARS.length)
+          ];
+        }
+      }
+      setDisplay(next || name);
+      if (frame < frames) {
+        raf = window.requestAnimationFrame(tick);
+      }
+    };
+
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [name]);
+
+  return (
+    <span className="inline-block min-w-[3ch] font-mono tabular-nums text-ink">
+      {display}
+    </span>
+  );
 }
 
 function projectKey(s: SessionInfo): string {
@@ -3427,7 +3484,7 @@ function NewChatView({
       <div className="flex flex-1 min-h-0 items-center justify-center px-6 pb-16">
         <div className="w-full max-w-[730px]">
           <h1 className="mb-11 text-center text-[28px] font-medium leading-tight tracking-normal text-ink/92">
-            {t("new_chat.title")}
+            What should we build in <ScrambledProjectName name={project?.label ?? "sessio"} />?
           </h1>
           {composerError && (
             <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
