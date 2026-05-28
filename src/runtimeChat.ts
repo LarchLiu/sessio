@@ -614,7 +614,7 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
 
   if (message.method !== "session/update") return;
   const update = asRecord(message.data).update;
-  const updateType = stringField(update, "sessionUpdate") ?? message.updateType ?? "unknown";
+  const updateType = sessionUpdateType(update, message.updateType) ?? "unknown";
 
   switch (updateType) {
     case "user_message_chunk":
@@ -639,6 +639,14 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
       ensureBlock(turn, { kind: "tool", toolId: tool.toolId, timestamp });
       break;
     }
+    case "available_commands":
+    case "current_mode":
+    case "config_options":
+    case "session_info":
+      break;
+    case "plan":
+      turn.blocks.push({ kind: "sessionUpdate", updateType, data: update, timestamp });
+      break;
     default:
       turn.blocks.push({ kind: "sessionUpdate", updateType, data: update, timestamp });
       break;
@@ -648,7 +656,7 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
 function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMessage): AcpSessionState {
   if (message.method !== "session/update") return state;
   const update = asRecord(message.data).update;
-  const updateType = stringField(update, "sessionUpdate") ?? message.updateType;
+  const updateType = sessionUpdateType(update, message.updateType);
   if (!updateType) return state;
   switch (updateType) {
     case "plan":
@@ -663,6 +671,24 @@ function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMe
       return { ...state, sessionInfo: normalizeSessionInfo(update) };
     default:
       return state;
+  }
+}
+
+function sessionUpdateType(update: unknown, fallback: string | null | undefined): string | null {
+  const value = stringField(update, "sessionUpdate") ?? fallback ?? null;
+  switch (value) {
+    case "plan_update":
+      return "plan";
+    case "available_commands_update":
+      return "available_commands";
+    case "current_mode_update":
+      return "current_mode";
+    case "config_options_update":
+      return "config_options";
+    case "session_info_update":
+      return "session_info";
+    default:
+      return value;
   }
 }
 

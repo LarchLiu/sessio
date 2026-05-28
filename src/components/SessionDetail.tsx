@@ -2042,6 +2042,9 @@ function AcpSessionUpdateView({
       </div>
     );
   }
+  if (update.updateType === "plan") {
+    return <PlanUpdateCard plan={update.data} />;
+  }
   return (
     <PlainTextContent
       text={
@@ -5064,6 +5067,24 @@ function TodoToolCard({
   );
 }
 
+function PlanUpdateCard({
+  plan,
+}: {
+  plan: unknown;
+}) {
+  const todos = parseLivePlanEntries(plan);
+  const tool = syntheticPlanTool(plan);
+  return (
+    <TodoToolCard
+      tool={tool}
+      title={{ main: "Update Plan" }}
+      iconName="TaskUpdate"
+      todos={todos}
+      onPreviewImage={() => {}}
+    />
+  );
+}
+
 function AcpToolCardFallback({
   tool,
   title,
@@ -5186,6 +5207,30 @@ function parsePlanEntries(value: unknown): TodoEntry[] {
     ? (parsed as Record<string, unknown>).plan
     : null;
   return parseTaskListEntries(plan, ["step", "content"]);
+}
+
+function parseLivePlanEntries(value: unknown): TodoEntry[] {
+  const parsed = parseJsonLike(value);
+  const entries = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>).entries
+    : null;
+  return parseTaskListEntries(entries, ["content", "step"]);
+}
+
+function syntheticPlanTool(rawInput: unknown): AcpToolCall {
+  return {
+    toolId: "live-plan",
+    title: "TaskUpdate",
+    kind: "plan",
+    status: "completed",
+    content: [],
+    locations: [],
+    rawInput,
+    rawOutput: null,
+    meta: null,
+    raw: rawInput,
+    updatedAt: 0,
+  };
 }
 
 function parseTaskListEntries(value: unknown, contentKeys: string[]): TodoEntry[] {
