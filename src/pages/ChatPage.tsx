@@ -86,6 +86,17 @@ import {
   type LiveTurn,
 } from "../runtimeChat";
 import { buildCrossPrompt } from "../cross";
+import {
+  contentBlocksText,
+  crossContextMessages,
+  forkVisibleHistoryMessages,
+  liveSessionMessages,
+  mergeHistoryWithLiveMessages,
+  normalizedUserMessageText,
+  stripImagePlaceholders,
+  stripInjectedContext,
+  stripSessioUploadWrapper,
+} from "../historyMerge";
 
 interface Props {
   session: SessionInfo;
@@ -149,37 +160,6 @@ function runtimeEffortConfigId(agent: Agent): string {
   return agent === "codex" ? "reasoning_effort" : "effort";
 }
 
-// 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
-// 剥离 IDE 注入的上下文块，仅在展示 user 消息预览时使用，展开仍保留原文。
-function stripInjectedContext(s: string): string {
-  let text = s;
-  for (;;) {
-    const trimmed = text.trimStart();
-    if (!trimmed.startsWith("<ide_")) break;
-    const afterLt = trimmed.slice("<ide_".length);
-    const closeIdx = afterLt.indexOf(">");
-    if (closeIdx < 0) break;
-    const tag = afterLt.slice(0, closeIdx);
-    const close = `</ide_${tag}>`;
-    const afterOpen = afterLt.slice(closeIdx + 1);
-    const endIdx = afterOpen.indexOf(close);
-    if (endIdx < 0) break;
-    text = afterOpen.slice(endIdx + close.length);
-  }
-  const MARKER = "## My request for Codex:";
-  const idx = text.indexOf(MARKER);
-  if (idx >= 0) text = text.slice(idx + MARKER.length);
-  return stripImagePlaceholders(text).trim();
-}
-
-function stripImagePlaceholders(s: string): string {
-  return s
-    .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, "")
-    .replace(/^\s*<image\b[^>]*>\s*$/gim, "")
-    .replace(/^\s*<\/image>\s*$/gim, "")
-    .replace(/\n{3,}/g, "\n\n");
-}
-
 type Tab =
   | { kind: "main" }
   | { kind: "sub"; sub: SubagentInfo };
@@ -190,6 +170,11 @@ interface MessageCacheEntry {
   messages: SessionMessage[];
   messageCount: number;
   loadedAt: number;
+}
+
+interface AncestorMessageGroup {
+  session: SessionInfo;
+  messages: SessionMessage[];
 }
 
 interface HistoryViewCacheEntry {
@@ -206,6 +191,15 @@ const INITIAL_HISTORY_RENDER_ITEMS = 120;
 
 function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
   return `${agent}:${sessionId}:${filePath}`;
+}
+
+function cachedAncestorMessageGroups(sessions: SessionInfo[]): AncestorMessageGroup[] {
+  return sessions.map((session) => ({
+    session,
+    messages:
+      messageCache.get(messageSourceKey(session.agent, session.filePath, session.id))
+        ?.messages ?? [],
+  }));
 }
 
 function ChatPage({
@@ -453,17 +447,17 @@ function MessageStream({
 }) {
   const { t } = useI18n();
   const sourceKey = messageSourceKey(agent, filePath, sessionId);
-  const ancestorSourceKeys = useMemo(
-    () =>
-      ancestorSessions
-        .filter((session) => session.available && session.filePath)
-        .map((session) => messageSourceKey(session.agent, session.filePath, session.id)),
+  const readableAncestorSessions = useMemo(
+    () => ancestorSessions.filter((session) => session.available && session.filePath),
     [ancestorSessions],
   );
+  const ancestorSourceKeys = useMemo(
+    () =>
+      readableAncestorSessions.map((session) => messageSourceKey(session.agent, session.filePath, session.id)),
+    [readableAncestorSessions],
+  );
   const ancestorCacheKey = ancestorSourceKeys.join("->");
-  const allAncestorCacheFresh = ancestorSessions
-    .filter((session) => session.available && session.filePath)
-    .every((session) => {
+  const allAncestorCacheFresh = readableAncestorSessions.every((session) => {
       const cached = messageCache.get(messageSourceKey(session.agent, session.filePath, session.id));
       return cached?.messageCount === session.messageCount;
     });
@@ -474,21 +468,14 @@ function MessageStream({
   const [messages, setMessages] = useState<SessionMessage[]>(
     cachedEntry?.messages ?? [],
   );
-  const [ancestorMessages, setAncestorMessages] = useState<SessionMessage[]>(() =>
+  const [ancestorMessageGroups, setAncestorMessageGroups] = useState<AncestorMessageGroup[]>(() =>
     allAncestorCacheFresh
-      ? ancestorSessions
-          .filter((session) => session.available && session.filePath)
-          .flatMap(
-            (session) =>
-              messageCache.get(messageSourceKey(session.agent, session.filePath, session.id))
-                ?.messages ?? [],
-          )
+      ? cachedAncestorMessageGroups(readableAncestorSessions)
       : [],
   );
   const [loading, setLoading] = useState(() => !isFreshCache);
   const [ancestorsLoading, setAncestorsLoading] = useState(() =>
-    ancestorSessions.some((session) => session.available && session.filePath) &&
-    !allAncestorCacheFresh,
+    readableAncestorSessions.length > 0 && !allAncestorCacheFresh,
   );
   const [error, setError] = useState<string | null>(null);
   const runtimeSessionId = runtimeSessionAliases[`${agent}:${sessionId}`] ?? sessionId;
@@ -506,6 +493,19 @@ function MessageStream({
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
+  const mergedAncestorMessages = useMemo(
+    () =>
+      ancestorMessageGroups.flatMap((group) => {
+        const runtimeId = runtimeSessionAliases[`${group.session.agent}:${group.session.id}`] ?? group.session.id;
+        const ancestorLiveSession = liveState.sessions[runtimeId];
+        if (!ancestorLiveSession || ancestorLiveSession.turns.length === 0) return group.messages;
+        return mergeHistoryWithLiveMessages(
+          group.messages,
+          liveSessionMessages(ancestorLiveSession),
+        );
+      }),
+    [ancestorMessageGroups, liveState.sessions, runtimeSessionAliases],
+  );
   const activeTurnId = useMemo(() => {
     if (!liveSession) return null;
     return liveSession.turns.find((turn) =>
@@ -634,20 +634,13 @@ function MessageStream({
   ]);
 
   useEffect(() => {
-    const readableAncestors = ancestorSessions.filter((session) => session.available && session.filePath);
-    if (readableAncestors.length === 0) {
-      setAncestorMessages([]);
+    if (readableAncestorSessions.length === 0) {
+      setAncestorMessageGroups([]);
       setAncestorsLoading(false);
       return;
     }
     if (allAncestorCacheFresh) {
-      setAncestorMessages(
-        readableAncestors.flatMap(
-          (session) =>
-            messageCache.get(messageSourceKey(session.agent, session.filePath, session.id))
-              ?.messages ?? [],
-        ),
-      );
+      setAncestorMessageGroups(cachedAncestorMessageGroups(readableAncestorSessions));
       setAncestorsLoading(false);
       return;
     }
@@ -655,11 +648,11 @@ function MessageStream({
     let cancelled = false;
     setAncestorsLoading(true);
     Promise.all(
-      readableAncestors.map(async (session) => {
+      readableAncestorSessions.map(async (session) => {
         const key = messageSourceKey(session.agent, session.filePath, session.id);
         const cached = messageCache.get(key);
         if (cached && cached.messageCount === session.messageCount) {
-          return cached.messages;
+          return { session, messages: cached.messages };
         }
         const result = await getSessionMessages(session.agent, session.filePath, session.id);
         messageCache.set(key, {
@@ -667,13 +660,13 @@ function MessageStream({
           messageCount: result.messageCount,
           loadedAt: Date.now(),
         });
-        return result.messages;
+        return { session, messages: result.messages };
       }),
     )
       .then((results) => {
         if (cancelled) return;
         startTransition(() => {
-          setAncestorMessages(results.flat());
+          setAncestorMessageGroups(results);
           setAncestorsLoading(false);
         });
       })
@@ -685,10 +678,10 @@ function MessageStream({
     return () => {
       cancelled = true;
     };
-  }, [allAncestorCacheFresh, ancestorCacheKey, ancestorSessions]);
+  }, [allAncestorCacheFresh, ancestorCacheKey, readableAncestorSessions]);
 
   const acpViewModel = useMemo<AcpViewModel>(() => {
-    const historyMessages = forkVisibleHistoryMessages(ancestorMessages, messages);
+    const historyMessages = forkVisibleHistoryMessages(mergedAncestorMessages, messages);
     const historyKey = ancestorCacheKey ? `${ancestorCacheKey}->${sourceKey}` : sourceKey;
     const historyViewModel = cachedHistoryViewModel(historyKey, viewMode, historyMessages);
     if (!liveSession || liveSession.turns.length === 0) return historyViewModel;
@@ -696,7 +689,7 @@ function MessageStream({
       historyViewModel,
       liveSessionToAcpViewModel(liveSession),
     );
-  }, [ancestorCacheKey, ancestorMessages, liveSession, messages, sourceKey, viewMode]);
+  }, [ancestorCacheKey, liveSession, mergedAncestorMessages, messages, sourceKey, viewMode]);
 
   const liveTurnIdsKey = useMemo(
     () => liveSession?.turns.map((turn) => turn.turnId).join("|") ?? "",
@@ -1038,7 +1031,7 @@ function MessageStream({
               sourceSessionId: sessionId,
               sourceFilePath: filePath,
               messages: crossContextMessages(
-                ancestorMessages,
+                mergedAncestorMessages,
                 messages,
                 liveSession,
               ),
@@ -1076,7 +1069,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveSession, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, mergedAncestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveSession, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -2433,14 +2426,6 @@ function filePathFromResourceBlock(block: AcpContentBlock): string | null {
   return null;
 }
 
-function stripSessioUploadWrapper(text: string): string {
-  return text
-    .replace(/^<sessio-upload-file\b[^>]*>\s*/i, "")
-    .replace(/\s*<\/sessio-upload-file>\s*$/i, "")
-    .replace(/^<!--\s*[^>]+-->\s*\n?/, "")
-    .trim();
-}
-
 function AcpUserAttachmentStrip({
   blocks,
   onPreviewImage,
@@ -3289,15 +3274,6 @@ function pickPermissionCommand(record: Record<string, unknown> | null): string |
   return null;
 }
 
-function contentBlocksText(blocks: AcpContentBlock[]): string {
-  return blocks.map((block) => {
-    if (block.type === "text" && typeof block.text === "string") return block.text;
-    if (block.type === "image") return `[image: ${String(block.mimeType ?? "")}]`;
-    if (block.type === "resource_link") return `[resource: ${String(block.uri ?? "")}]`;
-    return JSON.stringify(block);
-  }).join("\n");
-}
-
 function AcpMetaBadges({ value }: { value: unknown }) {
   const record = asRecord(value);
   const meta = record.meta ?? record._meta;
@@ -3370,103 +3346,6 @@ function latestMessageTimestamp(messages: SessionMessage[]): number | null {
     latest = latest === null ? message.timestamp : Math.max(latest, message.timestamp);
   }
   return latest;
-}
-
-function crossContextMessages(
-  ancestorMessages: SessionMessage[],
-  currentMessages: SessionMessage[],
-  liveSession: LiveRuntimeSession | null | undefined,
-): SessionMessage[] {
-  const historyMessages = forkVisibleHistoryMessages(ancestorMessages, currentMessages);
-  if (!liveSession || liveSession.turns.length === 0) return historyMessages;
-  return mergeHistoryWithLiveMessages(
-    historyMessages,
-    liveSessionMessages(liveSession),
-  );
-}
-
-function forkVisibleHistoryMessages(
-  ancestorMessages: SessionMessage[],
-  currentMessages: SessionMessage[],
-): SessionMessage[] {
-  if (ancestorMessages.length === 0) return currentMessages;
-  if (currentMessages.length === 0) return ancestorMessages;
-
-  const firstCurrentUser = currentMessages.find((message) => message.role === "user");
-  if (!firstCurrentUser) return [...ancestorMessages, ...currentMessages];
-
-  let lastAncestorUserIndex = -1;
-  for (let i = ancestorMessages.length - 1; i >= 0; i -= 1) {
-    const role = ancestorMessages[i].role;
-    if (role === "assistant") break;
-    if (role === "user") {
-      lastAncestorUserIndex = i;
-      break;
-    }
-  }
-  if (lastAncestorUserIndex < 0) return [...ancestorMessages, ...currentMessages];
-
-  const lastAncestorUser = ancestorMessages[lastAncestorUserIndex];
-  if (normalizedUserMessageText(lastAncestorUser.text) !== normalizedUserMessageText(firstCurrentUser.text)) {
-    return [...ancestorMessages, ...currentMessages];
-  }
-  return [
-    ...ancestorMessages.slice(0, lastAncestorUserIndex),
-    ...currentMessages,
-  ];
-}
-
-function normalizedUserMessageText(text: string): string {
-  return stripInjectedContext(stripSessioUploadWrapper(text))
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function mergeHistoryWithLiveMessages(
-  historyMessages: SessionMessage[],
-  liveMessages: SessionMessage[],
-): SessionMessage[] {
-  if (historyMessages.length === 0) return liveMessages;
-  if (liveMessages.length === 0) return historyMessages;
-  let overlap = 0;
-  const maxOverlap = Math.min(historyMessages.length, liveMessages.length);
-  for (let count = 1; count <= maxOverlap; count += 1) {
-    const historyTail = historyMessages.slice(-count);
-    const liveHead = liveMessages.slice(0, count);
-    if (historyTail.every((message, index) => sameReplayMessage(message, liveHead[index]))) {
-      overlap = count;
-    }
-  }
-  return [...historyMessages, ...liveMessages.slice(overlap)];
-}
-
-function sameReplayMessage(a: SessionMessage, b: SessionMessage): boolean {
-  return a.role === b.role &&
-    normalizedReplayText(a.text) === normalizedReplayText(b.text);
-}
-
-function normalizedReplayText(text: string): string {
-  return stripInjectedContext(stripSessioUploadWrapper(text))
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function liveSessionMessages(liveSession: LiveRuntimeSession): SessionMessage[] {
-  const messages: SessionMessage[] = [];
-  for (const turn of liveSession.turns) {
-    for (const block of turn.blocks) {
-      if (block.kind === "user" || block.kind === "assistant" || block.kind === "thought") {
-        const text = contentBlocksText(block.blocks).trim();
-        if (!text) continue;
-        messages.push({
-          role: block.kind === "thought" ? "thinking" : block.kind,
-          text,
-          timestamp: block.timestamp ?? turn.updatedAt ?? null,
-        });
-      }
-    }
-  }
-  return messages;
 }
 
 type AcpRenderItem =
