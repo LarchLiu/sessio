@@ -167,6 +167,10 @@ export interface RuntimeAgentMetadata {
   updatedAt: number | null;
 }
 
+export interface DebugConfig {
+  acpConfig: boolean;
+}
+
 export interface RuntimeAgentOptionMetadata {
   value: string;
   label: string;
@@ -556,6 +560,10 @@ export async function getAgentRuntimeStatus(agent: Agent): Promise<RuntimeStatus
 
 export async function listRuntimeAgents(): Promise<RuntimeAgentMetadata[]> {
   return invoke<RuntimeAgentMetadata[]>("list_runtime_agents");
+}
+
+export async function getDebugConfig(): Promise<DebugConfig> {
+  return invoke<DebugConfig>("get_debug_config");
 }
 
 export async function updateRuntimeAgentPreferences(

@@ -28,6 +28,7 @@ import {
   createPendingSession,
   deleteKanbanItem,
   getIndexStatus,
+  getDebugConfig,
   IndexPhase,
   getMemoryBackendStatus,
   MemoryBackendStatus,
@@ -393,6 +394,7 @@ export default function App() {
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
   const { agents: runtimeAgents } = useRuntimeAgents();
+  const [debugAcpConfig, setDebugAcpConfig] = useState(false);
   const update = useUpdateCheck(__APP_VERSION__);
   const messageCountBySourceRef = useRef<Map<string, number>>(new Map());
   const selectedUnreadKeysRef = useRef<Set<string>>(new Set());
@@ -406,6 +408,18 @@ export default function App() {
     () => sessions.filter((s) => s.available),
     [sessions]
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    getDebugConfig()
+      .then((config) => {
+        if (!cancelled) setDebugAcpConfig(config.acpConfig);
+      })
+      .catch((err) => console.warn("load debug config failed", err));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshProjects = useCallback(() => {
     return listProjects()
@@ -1319,6 +1333,7 @@ export default function App() {
             project={activeProject}
             sessions={availableSessions.filter((session) => session.projectPath === activeProject.path)}
             runtimeAgents={runtimeAgents}
+            debugAcpConfig={debugAcpConfig}
             liveState={liveRuntimeState}
             dispatchLiveEvent={dispatchLiveRuntimeEvent}
             onProjectUpdated={(project) => {
@@ -1362,6 +1377,7 @@ export default function App() {
                 viewMode={viewMode}
                 liveState={liveRuntimeState}
                 runtimeAgents={runtimeAgents}
+                debugAcpConfig={debugAcpConfig}
                 runtimeSessionAliases={runtimeSessionAliases}
                 ancestorSessions={selectedAncestorSessions}
                 dispatchLiveEvent={dispatchLiveRuntimeEvent}
@@ -2432,6 +2448,7 @@ function ProjectWorkbench({
   project,
   sessions,
   runtimeAgents,
+  debugAcpConfig,
   liveState,
   dispatchLiveEvent,
   onProjectUpdated,
@@ -2444,6 +2461,7 @@ function ProjectWorkbench({
   project: ProjectInfo;
   sessions: SessionInfo[];
   runtimeAgents: RuntimeAgentMetadata[];
+  debugAcpConfig: boolean;
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onProjectUpdated: (project: ProjectInfo) => void;
@@ -2605,6 +2623,7 @@ function ProjectWorkbench({
                   project={project}
                   sessions={sessions}
                   runtimeAgents={runtimeAgents}
+                  debugAcpConfig={debugAcpConfig}
                   liveState={liveState}
                   dispatchLiveEvent={dispatchLiveEvent}
                   onSelectSession={onSelectSession}
@@ -2629,6 +2648,7 @@ function KanbanColumn({
   project,
   sessions,
   runtimeAgents,
+  debugAcpConfig,
   liveState,
   dispatchLiveEvent,
   onSelectSession,
@@ -2643,6 +2663,7 @@ function KanbanColumn({
   project: ProjectInfo;
   sessions: SessionInfo[];
   runtimeAgents: RuntimeAgentMetadata[];
+  debugAcpConfig: boolean;
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onSelectSession: (session: SessionInfo) => void;
@@ -2671,6 +2692,7 @@ function KanbanColumn({
             project={project}
             sessions={sessions}
             runtimeAgents={runtimeAgents}
+            debugAcpConfig={debugAcpConfig}
             liveState={liveState}
             dispatchLiveEvent={dispatchLiveEvent}
             onSelectSession={onSelectSession}
@@ -2691,6 +2713,7 @@ function KanbanCard({
   project,
   sessions,
   runtimeAgents,
+  debugAcpConfig: _debugAcpConfig,
   liveState,
   dispatchLiveEvent,
   onSelectSession,
@@ -2704,6 +2727,7 @@ function KanbanCard({
   project: ProjectInfo;
   sessions: SessionInfo[];
   runtimeAgents: RuntimeAgentMetadata[];
+  debugAcpConfig: boolean;
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onSelectSession: (session: SessionInfo) => void;

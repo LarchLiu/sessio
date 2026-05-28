@@ -932,6 +932,13 @@ fn list_runtime_agents(
 }
 
 #[tauri::command]
+fn get_debug_config() -> Result<config::DebugConfig, String> {
+    config::load_config()
+        .map(|config| config.debug)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
@@ -1356,6 +1363,7 @@ pub fn run() {
             write_cross_prompt,
             get_agent_runtime_status,
             list_runtime_agents,
+            get_debug_config,
             update_runtime_agent_preferences,
             start_agent_session,
             fork_agent_session,

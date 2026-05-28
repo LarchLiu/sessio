@@ -11,6 +11,13 @@ use crate::models::Agent;
 pub struct AppConfig {
     pub memory: MemoryConfig,
     pub agents: AgentsConfig,
+    pub debug: DebugConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugConfig {
+    pub acp_config: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -78,6 +85,12 @@ pub struct QmdBackendConfig {
 struct RawConfig {
     memory: RawMemoryConfig,
     agents: RawAgentsConfig,
+    debug: RawDebugConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawDebugConfig {
+    acp_config: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -250,6 +263,10 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "install_command" => raw.memory.backends.qmd.install_command = value,
                 other => bail!("unknown key in [memory.backends.qmd]: {other}"),
             },
+            Section::Debug => match key {
+                "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
+                other => bail!("unknown key in [debug]: {other}"),
+            },
             Section::AgentRuntime(agent) => {
                 let target = raw_runtime_agent_mut(&mut raw, agent);
                 match key {
@@ -290,6 +307,7 @@ enum Section {
     Root,
     Memory,
     MemoryBackendsQmd,
+    Debug,
     AgentRuntime(Agent),
     AgentRuntimeCommand(Agent),
     Ignored,
@@ -311,6 +329,7 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
     }
     Ok(Some(match parts.as_slice() {
         [a] if a == "memory" => Section::Memory,
+        [a] if a == "debug" => Section::Debug,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
         [a, b, c] if a == "agents" && b == "runtime" => match c.as_str() {
             "codex" => Section::AgentRuntime(Agent::Codex),
@@ -394,8 +413,15 @@ fn strip_comment(line: &str) -> &str {
 fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
     Ok(AppConfig {
         memory: resolve_memory_config_inner(raw.clone(), apply_env)?,
-        agents: resolve_agents_config(raw)?,
+        agents: resolve_agents_config(raw.clone())?,
+        debug: resolve_debug_config(raw),
     })
+}
+
+fn resolve_debug_config(raw: RawConfig) -> DebugConfig {
+    DebugConfig {
+        acp_config: raw.debug.acp_config.unwrap_or(false),
+    }
 }
 
 fn resolve_memory_config_inner(raw: RawConfig, apply_env: bool) -> Result<MemoryConfig> {
@@ -482,6 +508,11 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
     merge_option(
         &mut raw.memory.backends.qmd.install_command,
         defaults.memory.backends.qmd.install_command,
+        &mut changed,
+    );
+    merge_option(
+        &mut raw.debug.acp_config,
+        defaults.debug.acp_config,
         &mut changed,
     );
 
@@ -763,6 +794,7 @@ fn default_app_config() -> Result<AppConfig> {
     Ok(AppConfig {
         memory: default_memory_config()?,
         agents: default_agents_config(),
+        debug: DebugConfig { acp_config: false },
     })
 }
 
@@ -890,7 +922,18 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     let mut out = String::new();
     out.push_str(&serialize_memory_config(&config.memory));
     out.push('\n');
+    out.push_str(&serialize_debug_config(&config.debug));
+    out.push('\n');
     out.push_str(&serialize_agents_config(&config.agents));
+    out
+}
+
+fn serialize_debug_config(config: &DebugConfig) -> String {
+    let mut out = String::new();
+    out.push_str("[debug]\n");
+    out.push_str("acp_config = ");
+    out.push_str(if config.acp_config { "true" } else { "false" });
+    out.push('\n');
     out
 }
 

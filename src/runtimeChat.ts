@@ -654,6 +654,9 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
 }
 
 function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMessage): AcpSessionState {
+  const responseState = sessionResponseState(message);
+  if (responseState) return mergeSessionState(state, responseState);
+
   if (message.method !== "session/update") return state;
   const update = asRecord(message.data).update;
   const updateType = sessionUpdateType(update, message.updateType);
@@ -672,6 +675,101 @@ function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMe
     default:
       return state;
   }
+}
+
+function sessionResponseState(message: AcpProtocolMessage): Partial<AcpSessionState> | null {
+  if (message.direction !== "agent_to_client" || message.messageKind !== "response") return null;
+  if (!["session/new", "session/load", "session/resume", "session/fork"].includes(message.method)) {
+    return null;
+  }
+  const data = asRecord(message.data);
+  const modes = normalizeModeConfigOption(data.modes);
+  const models = normalizeModelConfigOption(data.models);
+  const configOptions = arrayField(data, "configOptions").map(normalizeSessionConfigOption);
+  const next: Partial<AcpSessionState> = {};
+  const options = [modes, models, ...configOptions].filter(
+    (option): option is AcpSessionConfigOption => Boolean(option),
+  );
+  if (options.length > 0) next.configOptions = options;
+  if (modes) next.currentModeId = String(modes.currentValue ?? "") || null;
+  if (data.sessionId || data.session_id) {
+    next.sessionInfo = normalizeSessionInfo({
+      ...(asRecord(data.sessionInfo)),
+      meta: data.meta ?? data._meta ?? null,
+    });
+  }
+  return Object.keys(next).length > 0 ? next : null;
+}
+
+function mergeSessionState(
+  state: AcpSessionState,
+  patch: Partial<AcpSessionState>,
+): AcpSessionState {
+  return {
+    plan: patch.plan !== undefined ? patch.plan : state.plan,
+    availableCommands:
+      patch.availableCommands !== undefined ? patch.availableCommands : state.availableCommands,
+    currentModeId:
+      patch.currentModeId !== undefined ? patch.currentModeId : state.currentModeId,
+    configOptions:
+      patch.configOptions !== undefined ? patch.configOptions : state.configOptions,
+    sessionInfo:
+      patch.sessionInfo !== undefined ? patch.sessionInfo : state.sessionInfo,
+  };
+}
+
+function normalizeModeConfigOption(value: unknown): AcpSessionConfigOption | null {
+  const record = asRecord(value);
+  const modes = arrayField(record, "availableModes");
+  if (modes.length === 0) return null;
+  return {
+    id: "mode",
+    name: "Mode",
+    description: null,
+    category: "mode",
+    type: "select",
+    currentValue: stringField(record, "currentModeId") ?? "",
+    options: modes.map((mode) => {
+      const item = asRecord(mode);
+      const id = stringField(item, "id") ?? "";
+      return {
+        value: id,
+        name: stringField(item, "name") ?? (id || "Mode"),
+        description: stringField(item, "description"),
+        meta: item.meta ?? item._meta ?? null,
+      };
+    }),
+    groups: undefined,
+    meta: record.meta ?? record._meta ?? null,
+    raw: value,
+  };
+}
+
+function normalizeModelConfigOption(value: unknown): AcpSessionConfigOption | null {
+  const record = asRecord(value);
+  const models = arrayField(record, "availableModels");
+  if (models.length === 0) return null;
+  return {
+    id: "model",
+    name: "Model",
+    description: null,
+    category: "model",
+    type: "select",
+    currentValue: stringField(record, "currentModelId") ?? "",
+    options: models.map((model) => {
+      const item = asRecord(model);
+      const id = stringField(item, "modelId") ?? stringField(item, "id") ?? "";
+      return {
+        value: id,
+        name: stringField(item, "name") ?? (id || "Model"),
+        description: stringField(item, "description"),
+        meta: item.meta ?? item._meta ?? null,
+      };
+    }),
+    groups: undefined,
+    meta: record.meta ?? record._meta ?? null,
+    raw: value,
+  };
 }
 
 function sessionUpdateType(update: unknown, fallback: string | null | undefined): string | null {

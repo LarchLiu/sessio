@@ -90,6 +90,7 @@ interface Props {
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
+  debugAcpConfig?: boolean;
   runtimeSessionAliases?: Record<string, string>;
   ancestorSessions?: SessionInfo[];
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
@@ -205,6 +206,7 @@ function SessionDetail({
   viewMode,
   liveState,
   runtimeAgents,
+  debugAcpConfig = false,
   runtimeSessionAliases = {},
   ancestorSessions = [],
   dispatchLiveEvent,
@@ -316,6 +318,7 @@ function SessionDetail({
           viewMode={viewMode}
           liveState={liveState}
           runtimeAgents={runtimeAgents}
+          debugAcpConfig={debugAcpConfig}
           runtimeSessionAliases={runtimeSessionAliases}
           dispatchLiveEvent={dispatchLiveEvent}
           onPendingSession={onPendingSession}
@@ -403,6 +406,7 @@ function MessageStream({
   viewMode,
   liveState,
   runtimeAgents,
+  debugAcpConfig,
   runtimeSessionAliases,
   dispatchLiveEvent,
   onPendingSession,
@@ -423,6 +427,7 @@ function MessageStream({
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
+  debugAcpConfig: boolean;
   runtimeSessionAliases: Record<string, string>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onPendingSession: (session: PendingAgentSession) => void;
@@ -1069,6 +1074,7 @@ function MessageStream({
             <AcpSessionStatePanel
               state={acpViewModel.sessionState}
               sessioRuntimeSessionId={sessionStateRuntimeSessionId}
+              debugAcpConfig={debugAcpConfig}
               onRunCommand={handleSendText}
             />
             {visibleDisplayItems.map((item, i) => (
@@ -1682,10 +1688,12 @@ function resizeTextareaToContent(el: HTMLTextAreaElement) {
 function AcpSessionStatePanel({
   state,
   sessioRuntimeSessionId,
+  debugAcpConfig,
   onRunCommand,
 }: {
   state: AcpSessionState;
   sessioRuntimeSessionId: string;
+  debugAcpConfig: boolean;
   onRunCommand: (text: string) => Promise<void>;
 }) {
   const hasPlan = Boolean(state.plan && state.plan.entries.length > 0);
@@ -1725,6 +1733,9 @@ function AcpSessionStatePanel({
             </li>
           ))}
         </ol>
+      )}
+      {hasConfig && debugAcpConfig && (
+        <AcpConfigDebugPanel options={state.configOptions} />
       )}
     </div>
   );
@@ -1884,6 +1895,77 @@ function AcpConfigControl({
     <span className="rounded border border-ink/10 bg-bg-panel px-1.5 py-0.5 text-caption text-ink/50">
       {option.name}
     </span>
+  );
+}
+
+function AcpConfigDebugPanel({
+  options,
+}: {
+  options: AcpSessionConfigOption[];
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-2 border-t border-ink/[0.06] pt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex items-center gap-1 text-caption font-medium text-ink/50 hover:text-ink/75"
+      >
+        <ChevronRight className={"h-3.5 w-3.5 transition " + (open ? "rotate-90" : "")} />
+        <span>Config · {options.length}</span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          {options.map((option, index) => (
+            <AcpConfigDebugOption
+              key={`${option.id || option.name}-${index}`}
+              option={option}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AcpConfigDebugOption({
+  option,
+}: {
+  option: AcpSessionConfigOption;
+}) {
+  const choices = [
+    ...(option.options ?? []),
+    ...(option.groups ?? []).flatMap((group) => group.options),
+  ];
+  return (
+    <details className="rounded-md border border-ink/[0.08] bg-bg-panel/60 px-2 py-1.5 text-caption">
+      <summary className="cursor-pointer text-ink/65">
+        <span className="font-medium">{option.name}</span>
+        {option.id && <span className="ml-1 text-ink/35">id={option.id}</span>}
+        {option.type && <span className="ml-1 text-ink/35">type={option.type}</span>}
+        {option.currentValue !== undefined && option.currentValue !== null && (
+          <span className="ml-1 text-ink/35">current={String(option.currentValue)}</span>
+        )}
+      </summary>
+      {option.description && (
+        <div className="mt-1 text-ink/45">{option.description}</div>
+      )}
+      {choices.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {choices.map((choice) => (
+            <span
+              key={choice.value}
+              className="rounded border border-ink/10 bg-ink/[0.035] px-1.5 py-0.5 text-ink/55"
+              title={choice.description ?? choice.name}
+            >
+              {choice.value}
+              {choice.name && choice.name !== choice.value ? ` · ${choice.name}` : ""}
+            </span>
+          ))}
+        </div>
+      )}
+      <PlainTextContent text={JSON.stringify(option.raw, null, 2)} />
+    </details>
   );
 }
 
