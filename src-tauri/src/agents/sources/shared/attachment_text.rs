@@ -174,7 +174,9 @@ fn remove_file_markdown_links(text: &str) -> String {
             .trim()
             .trim_matches(['<', '>']);
         let label = &out[open_label + 1..close_label];
-        if !target.starts_with("file://") || !label.trim_start().starts_with('@') {
+        let is_at_prefix = label.trim_start().starts_with('@');
+        let is_cross_context = target.contains("sessio-cross-context");
+        if !target.starts_with("file://") || (!is_at_prefix && !is_cross_context) {
             search_from = close_target + 1;
             continue;
         }
@@ -271,5 +273,14 @@ mod tests {
     fn keeps_non_file_link() {
         let input = "open [docs](https://example.com/file.md) please";
         assert_eq!(sanitize_user_attachment_text(input), input);
+    }
+
+    #[test]
+    fn drops_cross_context_link_even_without_at_prefix() {
+        let input = "carry [doc](file:///tmp/.cross-context/sessio-cross-context-abc.md) over";
+        let cleaned = sanitize_user_attachment_text(input);
+        assert!(!cleaned.contains("sessio-cross-context"), "{cleaned}");
+        assert!(cleaned.contains("carry"));
+        assert!(cleaned.contains("over"));
     }
 }

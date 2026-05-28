@@ -93,6 +93,7 @@ import {
   liveSessionMessages,
   mergeHistoryWithLiveMessages,
   normalizedUserMessageText,
+  sanitizeSessioAttachmentText,
   stripImagePlaceholders,
   stripInjectedContext,
   stripSessioUploadWrapper,
@@ -3981,7 +3982,7 @@ function appendHistoryMessageToTurn(
 }
 
 function historyUserContentBlocks(text: string): AcpContentBlock[] {
-  const cleaned = sanitizeSessioHistoryAttachmentText(stripInjectedContext(text));
+  const cleaned = sanitizeSessioAttachmentText(stripInjectedContext(text));
   const media = splitMarkdownImages(cleaned);
   const blocks: AcpContentBlock[] = [];
   for (const image of media.images) {
@@ -4014,105 +4015,6 @@ function historyUserContentBlocks(text: string): AcpContentBlock[] {
     blocks.push({ type: "text", text: rest.trim() });
   }
   return blocks.length > 0 ? blocks : [{ type: "text", text: media.text }];
-}
-
-function sanitizeSessioHistoryAttachmentText(text: string): string {
-  const withoutFileLinks = removeFileMarkdownLinks(text);
-  return replaceXmlishBlocks(
-    replaceXmlishBlocks(withoutFileLinks, "sessio-upload-file", (attrs) => {
-      const uri = attrs.uri;
-      const name = attrs.name ?? basenameFromUri(uri ?? "") ?? "attachment";
-      return fileMarker(name, uri);
-    }),
-    "context",
-    (attrs) => fileMarker(basenameFromUri(attrs.ref ?? "") ?? "attachment", attrs.ref),
-  );
-}
-
-function removeFileMarkdownLinks(text: string): string {
-  let out = text;
-  for (;;) {
-    const closeLabel = out.indexOf("](");
-    if (closeLabel < 0) break;
-    const openLabel = out.lastIndexOf("[", closeLabel);
-    if (openLabel < 0) break;
-    const targetStart = closeLabel + 2;
-    const closeTarget = out.indexOf(")", targetStart);
-    if (closeTarget < 0) break;
-    const target = out.slice(targetStart, closeTarget).trim().replace(/^<|>$/g, "");
-    if (!target.startsWith("file://")) {
-      const prefixEnd = closeTarget + 1;
-      out = out.slice(0, prefixEnd) + removeFileMarkdownLinks(out.slice(prefixEnd));
-      break;
-    }
-    out = out.slice(0, openLabel) + out.slice(closeTarget + 1);
-  }
-  return collapseBlankLines(out);
-}
-
-function replaceXmlishBlocks(
-  text: string,
-  tag: string,
-  marker: (attrs: Record<string, string>) => string,
-): string {
-  let out = "";
-  let rest = text;
-  const openPrefix = `<${tag}`;
-  const closeTag = `</${tag}>`;
-  for (;;) {
-    const openStart = rest.indexOf(openPrefix);
-    if (openStart < 0) break;
-    out += rest.slice(0, openStart);
-    const afterOpen = rest.slice(openStart);
-    const openEnd = afterOpen.indexOf(">");
-    if (openEnd < 0) {
-      out += afterOpen;
-      return collapseBlankLines(out);
-    }
-    const afterTag = afterOpen.slice(openEnd + 1);
-    const closeStart = afterTag.indexOf(closeTag);
-    if (closeStart < 0) {
-      out += afterOpen;
-      return collapseBlankLines(out);
-    }
-    out += marker(parseXmlishAttrs(afterOpen.slice(openPrefix.length, openEnd)));
-    rest = afterTag.slice(closeStart + closeTag.length);
-  }
-  out += rest;
-  return collapseBlankLines(out);
-}
-
-function parseXmlishAttrs(input: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
-  const pattern = /([A-Za-z0-9_:-]+)\s*=\s*(["'])(.*?)\2/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(input)) !== null) {
-    attrs[match[1]] = unescapeXmlAttr(match[3]);
-  }
-  return attrs;
-}
-
-function fileMarker(name: string, uri?: string | null): string {
-  const safeName = name.trim() || "attachment";
-  const safeUri = uri?.trim();
-  return safeUri ? `[file: ${safeName}|${safeUri}]` : `[file: ${safeName}]`;
-}
-
-function unescapeXmlAttr(value: string): string {
-  return value
-    .replace(/&quot;/g, "\"")
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
-
-function collapseBlankLines(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n");
 }
 
 function historyToolFromMessage(

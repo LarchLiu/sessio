@@ -6,6 +6,7 @@ import {
   forkVisibleHistoryMessages,
   liveSessionMessages,
   mergeHistoryWithLiveMessages,
+  sanitizeSessioAttachmentText,
 } from "../src/historyMerge";
 
 function userMessage(text: string, timestamp = 1): SessionMessage {
@@ -195,5 +196,41 @@ describe("crossContextMessages", () => {
       assistantMessage("A"),
       ...current,
     ]);
+  });
+});
+
+describe("sanitizeSessioAttachmentText", () => {
+  it("keeps user-authored file links without @ prefix", () => {
+    const input = "see [design doc](file:///Users/alex/Documents/design.md) for details";
+    expect(sanitizeSessioAttachmentText(input)).toBe(input);
+  });
+
+  it("keeps non-file links", () => {
+    const input = "open [docs](https://example.com/file.md) please";
+    expect(sanitizeSessioAttachmentText(input)).toBe(input);
+  });
+
+  it("drops @-prefixed attachment links and leading bang", () => {
+    const cleaned = sanitizeSessioAttachmentText("preview ![@photo.png](file:///tmp/photo.png) end");
+    expect(cleaned).not.toContain("photo.png");
+    expect(cleaned).not.toContain("!");
+    expect(cleaned).toContain("preview");
+    expect(cleaned).toContain("end");
+  });
+
+  it("drops cross-context links even without @ prefix", () => {
+    const cleaned = sanitizeSessioAttachmentText(
+      "carry [doc](file:///tmp/.cross-context/sessio-cross-context-abc.md) over",
+    );
+    expect(cleaned).not.toContain("sessio-cross-context");
+    expect(cleaned).toContain("carry");
+    expect(cleaned).toContain("over");
+  });
+
+  it("replaces sessio-upload-file blocks with file marker", () => {
+    const cleaned = sanitizeSessioAttachmentText(
+      '<sessio-upload-file uri="file:///tmp/x.md" name="x.md">body</sessio-upload-file>',
+    );
+    expect(cleaned).toBe("[file: x.md|file:///tmp/x.md]");
   });
 });

@@ -149,3 +149,118 @@ export function crossContextMessages(
     liveSessionMessages(liveSession),
   );
 }
+
+export function sanitizeSessioAttachmentText(text: string): string {
+  const withoutFileLinks = removeFileMarkdownLinks(text);
+  return replaceXmlishBlocks(
+    replaceXmlishBlocks(withoutFileLinks, "sessio-upload-file", (attrs) => {
+      const uri = attrs.uri;
+      const name = attrs.name ?? basenameFromUri(uri ?? "");
+      return fileMarker(name, uri);
+    }),
+    "context",
+    (attrs) => fileMarker(basenameFromUri(attrs.ref ?? ""), attrs.ref),
+  );
+}
+
+export function removeFileMarkdownLinks(text: string): string {
+  let out = text;
+  let searchFrom = 0;
+  for (;;) {
+    const closeLabelRel = out.slice(searchFrom).indexOf("](");
+    if (closeLabelRel < 0) break;
+    const closeLabel = searchFrom + closeLabelRel;
+    const openLabelRel = out.slice(searchFrom, closeLabel).lastIndexOf("[");
+    if (openLabelRel < 0) {
+      searchFrom = closeLabel + 2;
+      continue;
+    }
+    const openLabel = searchFrom + openLabelRel;
+    const targetStart = closeLabel + 2;
+    const closeTarget = out.indexOf(")", targetStart);
+    if (closeTarget < 0) break;
+    const target = out.slice(targetStart, closeTarget).trim().replace(/^<|>$/g, "");
+    const label = out.slice(openLabel + 1, closeLabel);
+    const isAtPrefix = label.trimStart().startsWith("@");
+    const isCrossContext = target.includes("sessio-cross-context");
+    if (!target.startsWith("file://") || (!isAtPrefix && !isCrossContext)) {
+      searchFrom = closeTarget + 1;
+      continue;
+    }
+    const dropStart = openLabel > 0 && out[openLabel - 1] === "!" ? openLabel - 1 : openLabel;
+    out = out.slice(0, dropStart) + out.slice(closeTarget + 1);
+    searchFrom = dropStart;
+  }
+  return collapseBlankLines(out);
+}
+
+function replaceXmlishBlocks(
+  text: string,
+  tag: string,
+  marker: (attrs: Record<string, string>) => string,
+): string {
+  let out = "";
+  let rest = text;
+  const openPrefix = `<${tag}`;
+  const closeTag = `</${tag}>`;
+  for (;;) {
+    const openStart = rest.indexOf(openPrefix);
+    if (openStart < 0) break;
+    out += rest.slice(0, openStart);
+    const afterOpen = rest.slice(openStart);
+    const openEnd = afterOpen.indexOf(">");
+    if (openEnd < 0) {
+      out += afterOpen;
+      return collapseBlankLines(out);
+    }
+    const afterTag = afterOpen.slice(openEnd + 1);
+    const closeStart = afterTag.indexOf(closeTag);
+    if (closeStart < 0) {
+      out += afterOpen;
+      return collapseBlankLines(out);
+    }
+    out += marker(parseXmlishAttrs(afterOpen.slice(openPrefix.length, openEnd)));
+    rest = afterTag.slice(closeStart + closeTag.length);
+  }
+  out += rest;
+  return collapseBlankLines(out);
+}
+
+function parseXmlishAttrs(input: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const pattern = /([A-Za-z0-9_:-]+)\s*=\s*(["'])(.*?)\2/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(input)) !== null) {
+    attrs[match[1]] = unescapeXmlAttr(match[3]);
+  }
+  return attrs;
+}
+
+function fileMarker(name?: string | null, uri?: string | null): string {
+  const safeName = name?.trim() || "attachment";
+  const safeUri = uri?.trim();
+  return safeUri ? `[file: ${safeName}|${safeUri}]` : `[file: ${safeName}]`;
+}
+
+function basenameFromUri(uri: string): string | null {
+  if (!uri) return null;
+  const path = uri.startsWith("file://") ? decodeURIComponent(uri.slice("file://".length)) : uri;
+  return path.split(/[/\\]/).filter(Boolean).pop() || null;
+}
+
+function unescapeXmlAttr(value: string): string {
+  return value
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function collapseBlankLines(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+}

@@ -8,6 +8,7 @@ import type {
   RuntimeTransportKind,
   RuntimeTurnStatus,
 } from "./api";
+import { sanitizeSessioAttachmentText } from "./historyMerge";
 
 export type LiveRuntimeAction =
   | { type: "runtime-event"; event: AgentRuntimeEvent }
@@ -581,7 +582,7 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
     turn.status = "streaming";
     replaceOrAppendUserBlock(turn, {
       kind: "user",
-      blocks: normalizeContentBlocks(prompt),
+      blocks: normalizeContentBlocks(prompt, "user"),
       raw: message.data,
       timestamp,
     });
@@ -618,14 +619,14 @@ function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, time
 
   switch (updateType) {
     case "user_message_chunk":
-      appendContentBlock(turn, "user", normalizeContentBlocks(asRecord(update).content), update, timestamp);
+      appendContentBlock(turn, "user", normalizeContentBlocks(asRecord(update).content, "user"), update, timestamp);
       break;
     case "agent_message_chunk":
-      appendContentBlock(turn, "assistant", normalizeContentBlocks(asRecord(update).content), update, timestamp);
+      appendContentBlock(turn, "assistant", normalizeContentBlocks(asRecord(update).content, "assistant"), update, timestamp);
       turn.status = turn.status === "pending" ? "streaming" : turn.status;
       break;
     case "agent_thought_chunk":
-      appendContentBlock(turn, "thought", normalizeContentBlocks(asRecord(update).content), update, timestamp);
+      appendContentBlock(turn, "thought", normalizeContentBlocks(asRecord(update).content, "thought"), update, timestamp);
       break;
     case "tool_call": {
       const tool = toolFromValue(update, timestamp);
@@ -978,18 +979,20 @@ function ensureBlock(turn: LiveTurn, block: Extract<AcpRenderBlock, { kind: "too
   turn.blocks.push(block);
 }
 
-function normalizeContentBlocks(value: unknown): AcpContentBlock[] {
-  if (Array.isArray(value)) return value.flatMap(normalizeContentBlocks);
+type NormalizeContentRole = "user" | "assistant" | "thought";
+
+function normalizeContentBlocks(value: unknown, role: NormalizeContentRole): AcpContentBlock[] {
+  if (Array.isArray(value)) return value.flatMap((item) => normalizeContentBlocks(item, role));
   if (!value || typeof value !== "object") return [];
   const record = value as Record<string, unknown>;
   if (record.content && typeof record.content === "object" && !Array.isArray(record.content)) {
-    return [normalizeContentBlock(record.content)];
+    return [normalizeContentBlock(record.content, role)];
   }
-  if (typeof record.type === "string") return [normalizeContentBlock(record)];
+  if (typeof record.type === "string") return [normalizeContentBlock(record, role)];
   return [];
 }
 
-function normalizeContentBlock(value: unknown): AcpContentBlock {
+function normalizeContentBlock(value: unknown, role: NormalizeContentRole | null = null): AcpContentBlock {
   const record = asRecord(value);
   const type = stringField(record, "type") ?? "unknown";
   const meta = record.meta ?? record._meta ?? null;
@@ -997,7 +1000,9 @@ function normalizeContentBlock(value: unknown): AcpContentBlock {
     return {
       ...record,
       type,
-      text: sanitizeSessioAttachmentText(stringField(record, "text") ?? ""),
+      text: role === "user"
+        ? sanitizeSessioAttachmentText(stringField(record, "text") ?? "")
+        : stringField(record, "text") ?? "",
       annotations: record.annotations ?? null,
       meta,
     };
@@ -1014,14 +1019,27 @@ function normalizeContentBlock(value: unknown): AcpContentBlock {
     };
   }
   if (type === "resource_link") {
+    const uri = stringField(record, "uri") ?? "";
+    const name = stringField(record, "name") ?? undefined;
+    const mimeType = stringField(record, "mimeType") ?? undefined;
+    if (isSessioCrossContextResource({ uri, name, text: undefined })) {
+      return {
+        type,
+        uri,
+        name,
+        mimeType,
+        annotations: record.annotations ?? null,
+        meta,
+      };
+    }
     return {
       ...record,
       type,
-      uri: stringField(record, "uri") ?? "",
-      name: stringField(record, "name") ?? undefined,
+      uri,
+      name,
       title: stringField(record, "title") ?? undefined,
       description: stringField(record, "description") ?? undefined,
-      mimeType: stringField(record, "mimeType") ?? undefined,
+      mimeType,
       size: numberField(record, "size") ?? undefined,
       annotations: record.annotations ?? null,
       meta,
@@ -1076,109 +1094,10 @@ function isSessioCrossContextResource({
   );
 }
 
-function sanitizeSessioAttachmentText(text: string): string {
-  const withoutFileLinks = removeFileMarkdownLinks(text);
-  return replaceXmlishBlocks(
-    replaceXmlishBlocks(withoutFileLinks, "sessio-upload-file", (attrs) => {
-      const uri = attrs.uri;
-      const name = attrs.name ?? basenameFromUri(uri ?? "");
-      return fileMarker(name, uri);
-    }),
-    "context",
-    (attrs) => fileMarker(basenameFromUri(attrs.ref ?? ""), attrs.ref),
-  );
-}
-
-function removeFileMarkdownLinks(text: string): string {
-  let out = text;
-  for (;;) {
-    const closeLabel = out.indexOf("](");
-    if (closeLabel < 0) break;
-    const openLabel = out.lastIndexOf("[", closeLabel);
-    if (openLabel < 0) break;
-    const targetStart = closeLabel + 2;
-    const closeTarget = out.indexOf(")", targetStart);
-    if (closeTarget < 0) break;
-    const target = out.slice(targetStart, closeTarget).trim().replace(/^<|>$/g, "");
-    if (!target.startsWith("file://")) {
-      const prefixEnd = closeTarget + 1;
-      out = out.slice(0, prefixEnd) + removeFileMarkdownLinks(out.slice(prefixEnd));
-      break;
-    }
-    out = out.slice(0, openLabel) + out.slice(closeTarget + 1);
-  }
-  return collapseBlankLines(out);
-}
-
-function replaceXmlishBlocks(
-  text: string,
-  tag: string,
-  marker: (attrs: Record<string, string>) => string,
-): string {
-  let out = "";
-  let rest = text;
-  const openPrefix = `<${tag}`;
-  const closeTag = `</${tag}>`;
-  for (;;) {
-    const openStart = rest.indexOf(openPrefix);
-    if (openStart < 0) break;
-    out += rest.slice(0, openStart);
-    const afterOpen = rest.slice(openStart);
-    const openEnd = afterOpen.indexOf(">");
-    if (openEnd < 0) {
-      out += afterOpen;
-      return collapseBlankLines(out);
-    }
-    const afterTag = afterOpen.slice(openEnd + 1);
-    const closeStart = afterTag.indexOf(closeTag);
-    if (closeStart < 0) {
-      out += afterOpen;
-      return collapseBlankLines(out);
-    }
-    out += marker(parseXmlishAttrs(afterOpen.slice(openPrefix.length, openEnd)));
-    rest = afterTag.slice(closeStart + closeTag.length);
-  }
-  out += rest;
-  return collapseBlankLines(out);
-}
-
-function parseXmlishAttrs(input: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
-  const pattern = /([A-Za-z0-9_:-]+)\s*=\s*(["'])(.*?)\2/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(input)) !== null) {
-    attrs[match[1]] = unescapeXmlAttr(match[3]);
-  }
-  return attrs;
-}
-
-function fileMarker(name?: string | null, uri?: string | null): string {
-  const safeName = name?.trim() || "attachment";
-  const safeUri = uri?.trim();
-  return safeUri ? `[file: ${safeName}|${safeUri}]` : `[file: ${safeName}]`;
-}
-
 function basenameFromUri(uri: string): string | null {
   if (!uri) return null;
   const path = uri.startsWith("file://") ? decodeURIComponent(uri.slice("file://".length)) : uri;
   return path.split(/[/\\]/).filter(Boolean).pop() || null;
-}
-
-function unescapeXmlAttr(value: string): string {
-  return value
-    .replace(/&quot;/g, "\"")
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
-
-function collapseBlankLines(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n");
 }
 
 function toolFromValue(value: unknown, timestamp: number): AcpToolCall {
