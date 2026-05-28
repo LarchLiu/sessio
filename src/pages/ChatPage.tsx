@@ -1739,9 +1739,10 @@ function AcpSessionStatePanel({
   onRunCommand: (text: string) => Promise<void>;
 }) {
   const hasPlan = Boolean(state.plan && state.plan.entries.length > 0);
-  const hasCommands = state.availableCommands.length > 0;
-  const hasConfig = state.configOptions.length > 0;
-  const hasInfo = Boolean(state.sessionInfo?.title || state.currentModeId);
+  const hasCommands = debugAcpConfig && state.availableCommands.length > 0;
+  const hasConfig = debugAcpConfig && state.configOptions.length > 0;
+  const hasMode = debugAcpConfig && Boolean(state.currentModeId);
+  const hasInfo = Boolean(state.sessionInfo?.title || hasMode);
   if (!hasPlan && !hasCommands && !hasConfig && !hasInfo) return null;
   return (
     <div className="mb-2 rounded-md border border-ink/[0.08] bg-ink/[0.025] px-3 py-2 text-body-sm">
@@ -1749,7 +1750,7 @@ function AcpSessionStatePanel({
         {state.sessionInfo?.title && (
           <span className="font-medium text-ink/80">{state.sessionInfo.title}</span>
         )}
-        {state.currentModeId && (
+        {hasMode && state.currentModeId && (
           <span className="rounded border border-ink/10 bg-bg-panel px-1.5 py-0.5 text-caption text-ink/55">
             Mode · {state.currentModeId}
           </span>
@@ -1757,7 +1758,7 @@ function AcpSessionStatePanel({
         {hasCommands && (
           <AcpCommandsMenu commands={state.availableCommands} onRunCommand={onRunCommand} />
         )}
-        {state.configOptions.map((option, index) => (
+        {debugAcpConfig && state.configOptions.map((option, index) => (
           <AcpConfigControl
             key={`${option.id || option.category || option.name}-${index}`}
             option={option}
@@ -1776,7 +1777,7 @@ function AcpSessionStatePanel({
           ))}
         </ol>
       )}
-      {hasConfig && debugAcpConfig && (
+      {hasConfig && (
         <AcpConfigDebugPanel options={state.configOptions} />
       )}
     </div>
