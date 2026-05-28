@@ -1257,8 +1257,14 @@ pub fn run() {
             let inner: Arc<dyn SessionStore> = sqlite.clone();
             let memory_store: Arc<dyn MemoryStore> = sqlite;
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
+            let app_config = config::load_config()?;
             let indexer_handle =
-                indexer::spawn(app.handle().clone(), store.clone(), memory_store.clone());
+                indexer::spawn(
+                    app.handle().clone(),
+                    store.clone(),
+                    memory_store.clone(),
+                    app_config.memory.clone(),
+                );
             log::info!("indexer spawned");
 
             polling::spawn_polling(store.clone(), indexer_handle.clone());

@@ -12,6 +12,7 @@ use crate::agents::sources::shared::convert::session_source_from_info;
 use crate::agents::sources::types::{
     PathEvent, PathEventKind, ProjectRef, SessionSource, SourceIndexTask, SourceKind,
 };
+use crate::config::MemoryConfig;
 use crate::memory::build::MemoryBuildOptions;
 use crate::memory::service::{MemoryBackendSyncJob, MemoryService};
 use crate::memory::MemoryStore;
@@ -76,6 +77,7 @@ pub fn spawn(
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
+    memory_config: MemoryConfig,
 ) -> IndexerHandle {
     let (tx, rx) = unbounded::<IndexTask>();
     let (backend_sync_tx, backend_sync_rx) = unbounded::<MemoryBackendSyncJob>();
@@ -92,9 +94,10 @@ pub fn spawn(
     // sync worker, the main indexer loop, and per-source builds all share the
     // same backend / artifact sink / source registry instead of paying
     // config-load + AgentSourceRegistry construction on every task.
-    let service = match MemoryService::new(
+    let service = match MemoryService::from_config(
         memory_store.clone(),
         Arc::new(crate::agents::sources::builtin_agent_sources()),
+        &memory_config,
     ) {
         Ok(service) => Arc::new(service),
         Err(e) => {
