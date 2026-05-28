@@ -44,31 +44,31 @@ import {
   updateSessionMessageCount,
   writeCrossPrompt,
 } from "../api";
-import ScrollArea from "./ScrollArea";
-import Tooltip from "./Tooltip";
+import ScrollArea from "../components/ScrollArea";
+import Tooltip from "../components/Tooltip";
 import {
   agentModelSelectOptions,
   agentModelSelectValue,
   initialRuntimeEffort,
   parseAgentModelSelectValue,
   runtimeEffortOptions,
-} from "./AgentSelect";
-import type { InlineMenuSelectOption } from "./InlineMenuSelect";
-import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "./RuntimeMenuSelect";
+} from "../components/AgentSelect";
+import type { InlineMenuSelectOption } from "../components/InlineMenuSelect";
+import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import {
   attachmentMenuOptions,
   type ComposerAttachment,
   ComposerAttachmentMenu,
   ComposerAttachmentPreviewList,
   useComposerAttachments,
-} from "./ComposerAttachments";
+} from "../components/ComposerAttachments";
 import {
   hasMessageStreamScrollSnapshot,
   isNearScrollBottom,
   useMessageStreamScrollController,
-} from "./useMessageStreamScrollController";
+} from "../components/useMessageStreamScrollController";
 import { localeTag, useI18n } from "../i18n";
-import type { ViewMode } from "../App";
+import type { ViewMode } from "../navigation";
 import {
   type AcpViewModel,
   type AcpAvailableCommand,
@@ -117,7 +117,7 @@ interface FilePreview {
   text: string;
 }
 
-interface PendingAgentSession {
+export interface PendingAgentSession {
   sessioRuntimeSessionId: string;
   agent: Agent;
   projectPath: string;
@@ -208,7 +208,7 @@ function messageSourceKey(agent: SessionInfo["agent"], filePath: string, session
   return `${agent}:${sessionId}:${filePath}`;
 }
 
-function SessionDetail({
+function ChatPage({
   session,
   viewMode,
   liveState,
@@ -360,7 +360,7 @@ function SessionDetail({
   );
 }
 
-export default memo(SessionDetail);
+export default memo(ChatPage);
 
 function TabButton({
   active,

@@ -5,133 +5,70 @@ import {
   useReducer,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
-import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, Link2, Unlink, Send, CircleDashed, CircleDot, CircleSlash, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
 import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
-import { open } from "@tauri-apps/plugin-dialog";
-import { createPortal } from "react-dom";
 import {
   Agent,
   ProjectInfo,
-  ProjectType,
   KanbanItem,
-  KanbanStatus,
-  addExistingProject,
-  archiveProject,
-  createKanbanItem,
-  createDefaultProject,
   createPendingSession,
-  deleteKanbanItem,
   getIndexStatus,
   getDebugConfig,
   IndexPhase,
   getMemoryBackendStatus,
   MemoryBackendStatus,
-  ProjectMemorySearchResult,
   linkKanbanItemSession,
-  unlinkKanbanItemSession,
-  RuntimeAgentMetadata,
   SessionInfo,
-  type AgentRuntimeEvent,
-  listKanbanItems,
   listProjects,
-  rebuildSessionIndex,
-  getSessionAncestors,
   listSessions,
   removeSessionsByScope,
   removeSessionFiles,
-  searchProjectMemory,
-  sendAgentInput,
-  startAgentSession,
   type SessionScope,
-  updateKanbanItem,
   updateKanbanItemStatus,
-  updateProject,
-  updateRuntimeAgentPreferences,
 } from "./api";
 import { syncTrayMenu } from "./tray";
-import SessionDetail, { type ActiveMessageMeta } from "./components/SessionDetail";
-import SessionMemory, { SessionMetaList } from "./components/SessionMemory";
-import { AgentGlyph } from "./components/AgentIcon";
-import {
-  agentModelSelectOptions,
-  agentModelSelectValue,
-  initialRuntimeEffort,
-  parseAgentModelSelectValue,
-  runtimeEffortOptions,
-} from "./components/AgentSelect";
-import ScrollArea from "./components/ScrollArea";
-import ConfirmPopover from "./components/ConfirmPopover";
-import {
-  attachmentMenuOptions,
-  ComposerAttachmentMenu,
-  ComposerAttachmentPreviewList,
-  useComposerAttachments,
-} from "./components/ComposerAttachments";
-import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
-import PopupMenu, { type PopupMenuOption } from "./components/PopupMenu";
-import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "./components/RuntimeMenuSelect";
-import Tooltip from "./components/Tooltip";
-import WindowControls from "./components/WindowControls";
-import { ThemeMode, useTheme } from "./theme";
-import { Lang, useI18n } from "./i18n";
-import { useUpdateCheck, openReleasePage } from "./updater";
+import AppLayout from "./layouts/AppLayout";
+import ChatPage, { type ActiveMessageMeta } from "./pages/ChatPage";
+import NewChatPage from "./pages/NewChatPage";
+import { ProjectWorkbenchPage } from "./pages/ProjectPage";
+import AppHeader from "./components/AppHeader";
+import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
+import AppSidebar from "./components/AppSidebar";
+import MemoryBackendMissingButton from "./components/MemoryBackendMissingButton";
+import { useProjectGroups } from "./hooks/useProjectGroups";
+import { useSessionAncestors } from "./hooks/useSessionAncestors";
+import { useTheme } from "./theme";
+import { useI18n } from "./i18n";
+import { useUpdateCheck } from "./updater";
 import {
   applyRuntimeAction,
   emptyLiveRuntimeState,
-  liveSessionActivity,
-  liveSessionUpdatedAt,
   normalizeAgentRuntimeEvent,
-  type LiveRuntimeAction,
-  type LiveRuntimeState,
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
-
-type Filter =
-  | SessionScope
-  | { kind: "project"; key: string; label: string };
-
-type ProjectSelection = { kind: "project"; projectId: string } | null;
-
-function scopeForFilter(filter: Filter): SessionScope {
-  if (filter.kind === "project") return { kind: "project", key: filter.key };
-  return filter;
-}
-
-export type ViewMode = "native" | "cross";
-type DetailMode = "chat" | "memory";
-
-const PROJECT_TYPES: ProjectType[] = [
-  "code",
-  "writing",
-  "research",
-  "general",
-  "video_production",
-];
-
-const KANBAN_STATUSES: KanbanStatus[] = [
-  "todo",
-  "in_progress",
-  "agent_review",
-  "human_review",
-  "done",
-  "canceled",
-];
-
-const KANBAN_STATUS_ICONS: Record<KanbanStatus, LucideIcon> = {
-  todo: CircleDashed,
-  in_progress: CircleDot,
-  canceled: CircleSlash,
-  agent_review: CircleGauge,
-  human_review: CircleUserRound,
-  done: CircleCheck,
-};
+import type { DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
+import {
+  addUnreadKeys,
+  deleteUnreadKeys,
+  intersectsSet,
+  isSubagentOnly,
+  matchesScope,
+  mergePendingSession,
+  messageCountKey,
+  projectFilterKey,
+  runtimeEventUnreadKeys,
+  scopeForFilter,
+  sessionIdentityKey,
+  sessionKey,
+  sessionUnreadKeys,
+  type Filter,
+  type ProjectSelection,
+} from "./appUtils";
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 
@@ -141,12 +78,8 @@ function readViewMode(): ViewMode {
   return v === "cross" ? "cross" : "native";
 }
 
-const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
-
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
-
-const PROJECT_NAME_SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 function refreshMemoryBackendStatus(
   setMemoryBackendStatus: (status: MemoryBackendStatus | null) => void,
@@ -159,257 +92,6 @@ function refreshMemoryBackendStatus(
     });
 }
 
-function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
-  return agent?.model ?? agent?.models[0]?.value ?? "";
-}
-
-function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
-  return agent?.permissionMode ?? agent?.permissionModes[0]?.value ?? "";
-}
-
-function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
-  return {
-    transport: "acp",
-    ...(model ? { model } : {}),
-    ...(effort ? { effort } : {}),
-    ...(permissionMode ? { permissionMode } : {}),
-  };
-}
-
-function ScrambledProjectName({ name }: { name: string }) {
-  const [display, setDisplay] = useState(name);
-  const previousNameRef = useRef(name);
-
-  useEffect(() => {
-    const previousName = previousNameRef.current;
-    previousNameRef.current = name;
-    if (previousName === name) {
-      setDisplay(name);
-      return;
-    }
-    if (
-      typeof window === "undefined" ||
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    ) {
-      setDisplay(name);
-      return;
-    }
-
-    let frame = 0;
-    let raf = 0;
-    const maxLength = Math.max(previousName.length, name.length);
-    const frames = Math.min(24, Math.max(12, maxLength + 8));
-
-    const tick = () => {
-      frame += 1;
-      const settled = Math.floor((frame / frames) * maxLength);
-      let next = "";
-      for (let index = 0; index < maxLength; index += 1) {
-        const target = name[index] ?? "";
-        if (index < settled || frame >= frames) {
-          next += target;
-        } else if (target) {
-          next += PROJECT_NAME_SCRAMBLE_CHARS[
-            Math.floor(Math.random() * PROJECT_NAME_SCRAMBLE_CHARS.length)
-          ];
-        }
-      }
-      setDisplay(next || name);
-      if (frame < frames) {
-        raf = window.requestAnimationFrame(tick);
-      }
-    };
-
-    raf = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(raf);
-  }, [name]);
-
-  return (
-    <span className="inline-block min-w-[3ch] font-mono tabular-nums text-ink">
-      {display}
-    </span>
-  );
-}
-
-function projectKey(s: SessionInfo): string {
-  return s.projectPath ?? `__unknown__:${s.agent}`;
-}
-
-function projectFilterKey(project: ProjectInfo): string {
-  return project.path;
-}
-
-function matchesScope(scope: SessionScope, session: SessionInfo): boolean {
-  if (scope.kind === "all") return true;
-  if (scope.kind === "agent") return session.agent === scope.agent;
-  return projectKey(session) === scope.key;
-}
-
-function sessionKey(s: SessionInfo): string {
-  return `${s.agent}:${s.filePath}:${s.id}`;
-}
-
-function sessionIdentityKey(s: SessionInfo): string {
-  return `${s.agent}:${s.id}`;
-}
-
-function sessionIdentity(agent: Agent, sessionId: string): string {
-  return `${agent}:${sessionId}`;
-}
-
-function sessionUnreadKeys(
-  session: SessionInfo,
-  runtimeSessionAliases: Record<string, string>,
-): string[] {
-  const keys = new Set<string>([session.id, sessionIdentityKey(session)]);
-  const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)];
-  if (runtimeSessionId) keys.add(runtimeSessionId);
-  return Array.from(keys);
-}
-
-function runtimeEventUnreadKeys(
-  event: AgentRuntimeEvent,
-  runtimeSessionAliases: Record<string, string>,
-): string[] {
-  const keys = new Set<string>([event.sessioRuntimeSessionId]);
-  if (event.kind === "sessionStarted") {
-    keys.add(event.agentRuntimeSessionId);
-    keys.add(sessionIdentity(event.agent, event.agentRuntimeSessionId));
-    return Array.from(keys);
-  }
-  for (const [identity, runtimeSessionId] of Object.entries(runtimeSessionAliases)) {
-    if (runtimeSessionId !== event.sessioRuntimeSessionId) continue;
-    keys.add(identity);
-    const sessionId = identity.slice(identity.indexOf(":") + 1);
-    if (sessionId) keys.add(sessionId);
-    break;
-  }
-  return Array.from(keys);
-}
-
-function intersectsSet(keys: Iterable<string>, lookup: Set<string>): boolean {
-  for (const key of keys) {
-    if (lookup.has(key)) return true;
-  }
-  return false;
-}
-
-function addUnreadKeys(prev: Set<string>, keys: Iterable<string>): Set<string> {
-  let next = prev;
-  for (const key of keys) {
-    if (next.has(key)) continue;
-    if (next === prev) next = new Set(prev);
-    next.add(key);
-  }
-  return next;
-}
-
-function deleteUnreadKeys(prev: Set<string>, keys: Iterable<string>): Set<string> {
-  let next = prev;
-  for (const key of keys) {
-    if (!next.has(key)) continue;
-    if (next === prev) next = new Set(prev);
-    next.delete(key);
-  }
-  return next;
-}
-
-function ancestorSessionsFor(session: SessionInfo, sessions: SessionInfo[]): SessionInfo[] {
-  const byIdentity = new Map<string, SessionInfo>();
-  for (const item of sessions) {
-    const key = sessionIdentityKey(item);
-    const current = byIdentity.get(key);
-    if (!current || isBetterLineageCandidate(item, current)) {
-      byIdentity.set(key, item);
-    }
-  }
-  const chain: SessionInfo[] = [];
-  const seen = new Set<string>([sessionIdentityKey(session)]);
-  let cursor: SessionInfo | undefined = session;
-
-  for (let depth = 0; depth < 32; depth += 1) {
-    const parentId = cursor?.forkedFromId;
-    const parentAgent = cursor?.forkedFromAgent ?? (parentId ? cursor?.agent : null);
-    if (!parentId || !parentAgent) break;
-
-    const key = sessionIdentity(parentAgent, parentId);
-    if (seen.has(key)) break;
-    seen.add(key);
-
-    const parent = byIdentity.get(key);
-    if (!parent) break;
-    chain.push(parent);
-    cursor = parent;
-  }
-
-  return chain.reverse();
-}
-
-function isBetterLineageCandidate(candidate: SessionInfo, current: SessionInfo): boolean {
-  if (candidate.available !== current.available) return candidate.available;
-  if (Boolean(candidate.filePath) !== Boolean(current.filePath)) return Boolean(candidate.filePath);
-  return (candidate.updatedAt ?? candidate.startedAt ?? 0) > (current.updatedAt ?? current.startedAt ?? 0);
-}
-
-function mergePendingSession(sessions: SessionInfo[], pending: SessionInfo): SessionInfo[] {
-  const index = sessions.findIndex((session) => sessionIdentityKey(session) === sessionIdentityKey(pending));
-  if (index < 0) return [pending, ...sessions];
-
-  const existing = sessions[index];
-  const merged: SessionInfo = {
-    ...pending,
-    ...existing,
-    forkedFromAgent: existing.forkedFromAgent ?? pending.forkedFromAgent ?? null,
-    forkedFromId: existing.forkedFromId ?? pending.forkedFromId ?? null,
-    filePath: existing.filePath || pending.filePath,
-    fileSize: existing.filePath ? existing.fileSize : pending.fileSize,
-    partial: existing.filePath ? existing.partial : pending.partial,
-    messageCount: Math.max(existing.messageCount, pending.messageCount),
-    subagents: existing.subagents.length > 0 ? existing.subagents : pending.subagents,
-  };
-  const next = sessions.slice();
-  next[index] = merged;
-  return next;
-}
-
-function messageCountKey(agent: Agent, filePath: string, sessionId: string): string {
-  return `${agent}:${sessionId}:${filePath}`;
-}
-
-function resizeTextareaToContent(el: HTMLTextAreaElement) {
-  el.style.height = "auto";
-  const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
-  const minHeight = lineHeight * 2;
-  const maxHeight = lineHeight * 6;
-  const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
-  el.style.height = `${nextHeight}px`;
-  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
-}
-
-type DeleteTarget =
-  | { kind: "session"; session: SessionInfo; pos: { x: number; y: number } }
-  | { kind: "scope"; scope: SessionScope; pos: { x: number; y: number } };
-
-type PendingNewChatSession = {
-  sessioRuntimeSessionId: string;
-  agent: Agent;
-  forkedFromAgent?: Agent | null;
-  forkedFromId?: string | null;
-  projectPath: string;
-  projectName: string;
-  prompt: string;
-  timestamp: number;
-  kanbanItemId?: string;
-  kanbanItemStatus?: KanbanStatus;
-};
-
-// Orphan main session that only exists to carry subagents (Claude cleaned
-// the main jsonl, no index entry either). Don't count it as a "real" session
-// but still show it in the list so subagents stay reachable.
-function isSubagentOnly(s: SessionInfo): boolean {
-  return s.archived && s.messageCount === 0 && s.subagents.length > 0;
-}
-
 export default function App() {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -420,12 +102,6 @@ export default function App() {
   const [selected, setSelected] = useState<SessionInfo | null>(null);
   const [newChatProjectKey, setNewChatProjectKey] = useState<string | null>(null);
   const [expandProject, setExpandProject] = useState(true);
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [expandedProjectSessions, setExpandedProjectSessions] = useState<Set<string>>(
-    () => new Set(),
-  );
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [memoryBackendStatus, setMemoryBackendStatus] =
     useState<MemoryBackendStatus | null>(null);
@@ -853,100 +529,19 @@ export default function App() {
     }
   }, [metaPopoverOpen, selected]);
 
-  const projectGroups = useMemo(() => {
-    const m = new Map<
-      string,
-      {
-        project: ProjectInfo;
-        label: string;
-        count: number;
-        path: string;
-        latest: number;
-        sessions: SessionInfo[];
-      }
-    >();
-    for (const project of projects) {
-      m.set(project.id, {
-        project,
-        label: project.name,
-        count: 0,
-        path: project.path,
-        latest: project.updatedAt,
-        sessions: [],
-      });
-    }
-    const projectByPath = new Map(projects.map((project) => [project.path, project]));
-    for (const s of availableSessions) {
-      if (isSubagentOnly(s) || !s.projectPath) continue;
-      const project = projectByPath.get(s.projectPath);
-      if (!project) continue;
-      const key = project.id;
-      const ts = s.updatedAt ?? s.startedAt ?? 0;
-      const e = m.get(key);
-      if (e) {
-        e.count += 1;
-        if (ts > e.latest) e.latest = ts;
-        e.sessions.push(s);
-      }
-    }
-    return [...m.entries()]
-      .map(([key, v]) => ({
-        key,
-        ...v,
-        sessions: v.sessions.sort((a, b) => {
-          const aRuntimeSessionId = runtimeSessionAliases[sessionIdentityKey(a)] ?? a.id;
-          const bRuntimeSessionId = runtimeSessionAliases[sessionIdentityKey(b)] ?? b.id;
-          const aLive = liveSessionUpdatedAt(liveRuntimeState.sessions[aRuntimeSessionId]) ?? 0;
-          const bLive = liveSessionUpdatedAt(liveRuntimeState.sessions[bRuntimeSessionId]) ?? 0;
-          return (
-            Math.max(b.updatedAt ?? b.startedAt ?? 0, bLive) -
-            Math.max(a.updatedAt ?? a.startedAt ?? 0, aLive)
-          );
-        }),
-      }))
-      .sort((a, b) => b.latest - a.latest || a.label.localeCompare(b.label));
-  }, [availableSessions, liveRuntimeState.sessions, projects, runtimeSessionAliases]);
-
-  useEffect(() => {
-    setExpandedProjects((prev) => {
-      const keys = new Set(projectGroups.map((p) => p.key));
-      let changed = false;
-      const next = new Set<string>();
-      for (const key of prev) {
-        if (keys.has(key)) next.add(key);
-        else changed = true;
-      }
-      if (next.size === 0 && projectGroups[0]) {
-        next.add(projectGroups[0].key);
-        changed = true;
-      }
-      if (
-        selected &&
-        selected.projectPath &&
-        projects.some((project) => project.path === selected.projectPath)
-      ) {
-        const project = projects.find((item) => item.path === selected.projectPath);
-        if (project && !next.has(project.id)) {
-          next.add(project.id);
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [projectGroups, projects, selected]);
-
-  useEffect(() => {
-    setExpandedProjectSessions((prev) => {
-      const keys = new Set(projectGroups.map((p) => p.key));
-      let changed = false;
-      const next = new Set<string>();
-      for (const key of prev) {
-        if (keys.has(key)) next.add(key);
-        else changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, [projectGroups]);
+  const {
+    projectGroups,
+    expandedProjects,
+    setExpandedProjects,
+    expandedProjectSessions,
+    setExpandedProjectSessions,
+  } = useProjectGroups({
+    availableSessions,
+    projects,
+    liveSessions: liveRuntimeState.sessions,
+    runtimeSessionAliases,
+    selected,
+  });
 
   const recentForMenu = useMemo(
     () => availableSessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
@@ -962,43 +557,18 @@ export default function App() {
   const activeProject = selectedProject
     ? projects.find((project) => project.id === selectedProject.projectId) ?? null
     : null;
+  const selectedSessionProject =
+    selected?.projectPath
+      ? projects.find((project) => project.path === selected.projectPath) ?? null
+      : null;
 
   const selectedKey = selected ? sessionKey(selected) : null;
   const selectedIdentityKey = selected ? sessionIdentityKey(selected) : null;
-  const fallbackAncestorSessions = useMemo(
-    () => (selected ? ancestorSessionsFor(selected, sessions) : []),
-    [sessions, selected],
+  const selectedAncestorSessions = useSessionAncestors(
+    selected,
+    sessions,
+    selectedIdentityKey,
   );
-  const [dbAncestorSessions, setDbAncestorSessions] = useState<SessionInfo[]>([]);
-  const [dbAncestorSourceKey, setDbAncestorSourceKey] = useState<string | null>(null);
-  useEffect(() => {
-    if (!selected) {
-      setDbAncestorSessions([]);
-      setDbAncestorSourceKey(null);
-      return;
-    }
-    const sourceKey = sessionIdentityKey(selected);
-    let cancelled = false;
-    getSessionAncestors(selected.agent, selected.id)
-      .then((ancestors) => {
-        if (cancelled) return;
-        setDbAncestorSessions(ancestors);
-        setDbAncestorSourceKey(sourceKey);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        console.warn("load session ancestors failed", err);
-        setDbAncestorSessions([]);
-        setDbAncestorSourceKey(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [selected]);
-  const selectedAncestorSessions =
-    selected && dbAncestorSourceKey === selectedIdentityKey
-      ? dbAncestorSessions
-      : fallbackAncestorSessions;
 
   useEffect(() => {
     syncTrayMenu(recentForMenu, {
@@ -1093,6 +663,7 @@ export default function App() {
   const memoryBackendMissing =
     memoryBackendStatus !== null && memoryBackendStatus.available === false;
   const projectSearchInitialKey = filter.kind === "project" ? filter.key : projects[0]?.path;
+  const detailRoute: DetailMode = detailMode;
 
   useEffect(() => {
     if (memorySearchOpen && projectSearchInitialKey) {
@@ -1103,337 +674,209 @@ export default function App() {
     }
   }, [memorySearchOpen, projectSearchInitialKey]);
 
-  return (
-    <div className="flex h-screen text-body">
-      <aside
-        className={
-          "shrink-0 border-r border-ink/5 bg-surface-sidebar flex flex-col overflow-hidden transition-[width] duration-600 ease-in-out " +
-          (sidebarOpen ? "w-64" : "w-0")
-        }
-      >
-        <div
-          data-tauri-drag-region
-          className="relative h-12 shrink-0 w-64"
-        >
-          {!IS_MAC && (
-            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-title font-semibold text-ink/85 pointer-events-none select-none">
-              Sessio
-            </span>
-          )}
-          <Tooltip content={t("sidebar.close")} placement="bottom">
-            <button
-              type="button"
-              aria-label={t("sidebar.close")}
-              data-tauri-drag-region="false"
-              onClick={() => setSidebarOpen(false)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink transition rounded-md"
-            >
-              <PanelLeftClose className="w-4 h-4" />
-            </button>
-          </Tooltip>
-        </div>
+  const handleDetailModeChange = (mode: DetailMode) => {
+    setDetailMode(mode);
+    if (mode === "chat") {
+      setSelectedProject(null);
+      return;
+    }
+    if (selectedSessionProject) {
+      setSelectedProject({ kind: "project", projectId: selectedSessionProject.id });
+      setFilter({
+        kind: "project",
+        key: projectFilterKey(selectedSessionProject),
+        label: selectedSessionProject.name,
+      });
+    }
+  };
 
-        <nav className="flex-1 min-h-0 w-64 p-2 pb-0 flex flex-col gap-0.5">
-          <button
-            type="button"
-            onClick={() => {
-              setSelectedProject(null);
-              setNewChatProjectKey(null);
-              setSelected(null);
-              setDetailMode("chat");
-            }}
-            className={
-              "mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-body-sm font-medium transition " +
-              (!selected
-                ? "bg-ink/10 text-ink"
-                : "text-ink/72 hover:bg-ink/5 hover:text-ink")
-            }
-          >
-            <SquarePen className="h-4 w-4 shrink-0" />
-            <span className="truncate">{t("sidebar.new_chat")}</span>
-          </button>
-          <div className="shrink-0 flex flex-col gap-0.5">
-            <div className="flex items-center gap-1">
-              <SectionHeader
-                label={t("sidebar.by_project")}
-                collapsed={!expandProject}
-                onToggle={() => setExpandProject((v) => !v)}
-                action={
-                  <ProjectActionsButton
-                    onProjectAdded={(project) => {
-                      setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
-                      setSelectedProject({ kind: "project", projectId: project.id });
-                      setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
-                      setExpandedProjects((prev) => new Set(prev).add(project.id));
-                      void refreshSessions();
-                    }}
-                    onError={setError}
-                  />
-                }
-              />
-            </div>
-          </div>
+  const projectWorkbenchProps = (project: ProjectInfo) => ({
+    project,
+    sessions: availableSessions.filter((session) => session.projectPath === project.path),
+    runtimeAgents,
+    debugAcpConfig,
+    liveState: liveRuntimeState,
+    dispatchLiveEvent: dispatchLiveRuntimeEvent,
+    onProjectUpdated: (updatedProject: ProjectInfo) => {
+      setProjects((prev) => prev.map((item) => (item.id === updatedProject.id ? updatedProject : item)));
+      setFilter({ kind: "project", key: projectFilterKey(updatedProject), label: updatedProject.name });
+    },
+    onProjectArchived: (projectId: string) => {
+      setProjects((prev) => prev.filter((item) => item.id !== projectId));
+      setSelectedProject(null);
+      setFilter({ kind: "all" });
+      void refreshSessions();
+    },
+    onSelectSession: (session: SessionInfo) => {
+      setSelectedProject(null);
+      setSelected(session);
+      setDetailMode("chat");
+    },
+    onPendingSession: (pending: PendingNewChatSession) => {
+      setPendingNewChats((prev) => ({
+        ...prev,
+        [pending.sessioRuntimeSessionId]: pending,
+      }));
+    },
+    onChatStarted: () => {
+      setSelectedProject(null);
+      setDetailMode("chat");
+    },
+    onError: setError,
+  });
 
-          {expandProject && (
-            <ScrollArea
-              className="flex-1 min-h-0 -mr-2"
-              viewportClassName="pr-3 flex flex-col gap-1"
-            >
-              {projectGroups.map((p) => {
-                const expanded = expandedProjects.has(p.key);
-                return (
-                  <ProjectSidebarGroup
-                    key={p.key}
-                    project={p}
-                    expanded={expanded}
-                    sessionsExpanded={expandedProjectSessions.has(p.key)}
-                    selectedKey={selectedKey}
-                    selectedIdentityKey={selectedIdentityKey}
-                    liveState={liveRuntimeState}
-                    runtimeSessionAliases={runtimeSessionAliases}
-                    unreadSessionIds={unreadSessionIds}
-                    onSelectProject={() => {
-                      setExpandedProjects((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(p.key)) next.delete(p.key);
-                        else next.add(p.key);
-                        return next;
-                      });
-                    }}
-                    onOpenKanban={() => {
-                      setSelectedProject({ kind: "project", projectId: p.project.id });
-                      setNewChatProjectKey(null);
-                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
-                    }}
-                    onNewChat={() => {
-                      setSelectedProject(null);
-                      setNewChatProjectKey(p.key);
-                      setSelected(null);
-                      setDetailMode("chat");
-                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
-                    }}
-                    onSelectSession={(session) => {
-                      setSelectedProject(null);
-                      setNewChatProjectKey(null);
-                      setFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label });
-                      setSelected(session);
-                    }}
-                    onToggleSessionLimit={() => {
-                      setExpandedProjectSessions((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(p.key)) next.delete(p.key);
-                        else next.add(p.key);
-                        return next;
-                      });
-                    }}
-                    onProjectContextMenu={(e) => {
-                      e.preventDefault();
-                      void openScopeMenu(
-                        scopeForFilter({ kind: "project", key: projectFilterKey(p.project), label: p.label }),
-                        { x: e.clientX, y: e.clientY },
-                      );
-                    }}
-                    onSessionContextMenu={(session, pos) =>
-                      void openSessionMenu(session, pos)
-                    }
-                  />
-                );
-              })}
-            </ScrollArea>
-          )}
-        </nav>
+  const sidebar = (
+    <AppSidebar
+      isMac={IS_MAC}
+      sidebarOpen={sidebarOpen}
+      projectSectionExpanded={expandProject}
+      projectGroups={projectGroups}
+      expandedProjects={expandedProjects}
+      expandedProjectSessions={expandedProjectSessions}
+      selectedKey={selectedKey}
+      selectedIdentityKey={selectedIdentityKey}
+      hasSelectedSession={Boolean(selected)}
+      liveState={liveRuntimeState}
+      runtimeSessionAliases={runtimeSessionAliases}
+      unreadSessionIds={unreadSessionIds}
+      lang={lang}
+      themeMode={mode}
+      update={update}
+      rebuilding={rebuilding}
+      indexing={indexing}
+      onCloseSidebar={() => setSidebarOpen(false)}
+      onNewChat={() => {
+        setSelectedProject(null);
+        setNewChatProjectKey(null);
+        setSelected(null);
+        setDetailMode("chat");
+      }}
+      onToggleProjectSection={() => setExpandProject((value) => !value)}
+      onProjectAdded={(project) => {
+        setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
+        setSelectedProject({ kind: "project", projectId: project.id });
+        setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+        setExpandedProjects((prev) => new Set(prev).add(project.id));
+        void refreshSessions();
+      }}
+      onToggleProjectExpanded={(projectKeyValue) => {
+        setExpandedProjects((prev) => {
+          const next = new Set(prev);
+          if (next.has(projectKeyValue)) next.delete(projectKeyValue);
+          else next.add(projectKeyValue);
+          return next;
+        });
+      }}
+      onOpenKanban={(projectGroup) => {
+        setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
+        setNewChatProjectKey(null);
+        setDetailMode("project");
+        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+      }}
+      onNewProjectChat={(projectGroup) => {
+        setSelectedProject(null);
+        setNewChatProjectKey(projectGroup.key);
+        setSelected(null);
+        setDetailMode("chat");
+        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+      }}
+      onSelectSession={(projectGroup, session) => {
+        setSelectedProject(null);
+        setNewChatProjectKey(null);
+        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
+        setSelected(session);
+        setDetailMode("chat");
+      }}
+      onToggleProjectSessions={(projectKeyValue) => {
+        setExpandedProjectSessions((prev) => {
+          const next = new Set(prev);
+          if (next.has(projectKeyValue)) next.delete(projectKeyValue);
+          else next.add(projectKeyValue);
+          return next;
+        });
+      }}
+      onProjectContextMenu={(projectGroup, event) => {
+        event.preventDefault();
+        void openScopeMenu(
+          scopeForFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label }),
+          { x: event.clientX, y: event.clientY },
+        );
+      }}
+      onSessionContextMenu={(session, pos) => {
+        void openSessionMenu(session, pos);
+      }}
+      onLangChange={setLang}
+      onThemeModeChange={setMode}
+      onError={setError}
+      onRebuildFinished={() => refreshMemoryBackendStatus(setMemoryBackendStatus)}
+    />
+  );
 
-        <SidebarFooter
-          sidebarOpen={sidebarOpen}
-          lang={lang}
-          onLangChange={setLang}
-          themeMode={mode}
-          onThemeModeChange={setMode}
-          update={update}
-          rebuilding={rebuilding}
-          indexing={indexing}
-          onError={setError}
-          onRebuildFinished={() => refreshMemoryBackendStatus(setMemoryBackendStatus)}
-        />
-      </aside>
+  const header = (
+    <AppHeader
+      isMac={IS_MAC}
+      sidebarOpen={sidebarOpen}
+      selected={selected}
+      detailTitle={detailTitle}
+      detailMode={detailMode}
+      showDetailTabs={Boolean(selected)}
+      activeMessageMeta={activeMessageMeta}
+      metaPopoverOpen={metaPopoverOpen}
+      memoryBackendStatus={memoryBackendStatus}
+      memoryBackendMissing={memoryBackendMissing}
+      projectCount={projectGroups.length}
+      onOpenSidebar={() => setSidebarOpen(true)}
+      onDetailModeChange={handleDetailModeChange}
+      onToggleMetaPopover={() => setMetaPopoverOpen((open) => !open)}
+      onOpenSearch={() => setMemorySearchOpen(true)}
+      onRefreshMemoryBackend={() => refreshMemoryBackendStatus(setMemoryBackendStatus)}
+      MemoryBackendMissingButton={MemoryBackendMissingButton}
+    />
+  );
 
-      <main className="relative flex-1 flex flex-col min-w-0">
-        <div
-          data-tauri-drag-region
-          className={
-            "relative h-12 shrink-0 grid grid-cols-3 items-center px-5 bg-surface border-b border-ink/10 select-none " +
-            (IS_MAC ? "" : "pr-[138px]")
-          }
-        >
-          <Tooltip content={t("sidebar.open")} placement="bottom">
-            <button
-              type="button"
-              aria-label={t("sidebar.open")}
-              data-tauri-drag-region="false"
-              onClick={() => setSidebarOpen(true)}
-              className={
-                "absolute top-1/2 -translate-y-1/2 p-1 text-ink/55 hover:text-ink rounded-md transition-opacity duration-300 " +
-                (IS_MAC ? "left-24 " : "left-2 ") +
-                (sidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
-              }
-            >
-              <PanelLeftOpen className="w-4 h-4" />
-            </button>
-          </Tooltip>
-          <div
-            data-tauri-drag-region
-            className={
-              "flex items-center gap-2 min-w-0 " +
-              (sidebarOpen ? "" : IS_MAC ? "pl-[112px] " : "pl-9 ")
-            }
-          >
-            {selected && activeMessageMeta && sidebarOpen && (
-              <HeaderMessageMetaButton
-                label={`${activeMessageMeta.partial ? "~" : ""}${t("header.messages_count", { count: activeMessageMeta.count })}`}
-                open={metaPopoverOpen}
-                onToggle={() => setMetaPopoverOpen((open) => !open)}
-              />
-            )}
-            {selected && !sidebarOpen && (
-              <>
-                <span
-                  data-tauri-drag-region
-                  className="flex h-5 w-5 shrink-0"
-                >
-                  <AgentGlyph
-                    agent={selected.agent}
-                    className="h-5 w-5 pointer-events-none"
-                  />
-                </span>
-                <div
-                  data-tauri-drag-region
-                  className="min-w-0 max-w-[min(42vw,520px)]"
-                >
-                  <div
-                    data-tauri-drag-region
-                    className="truncate text-body font-medium leading-tight text-ink/85"
-                  >
-                    {detailTitle}
-                  </div>
-                  {activeMessageMeta && (
-                    <HeaderMessageMetaButton
-                      label={`${activeMessageMeta.partial ? "~" : ""}${t("header.messages_count", { count: activeMessageMeta.count })}`}
-                      open={metaPopoverOpen}
-                      onToggle={() => setMetaPopoverOpen((open) => !open)}
-                      compact
-                    />
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-          <div data-tauri-drag-region="false" className="justify-self-center">
-            <HeaderModeTabs mode={detailMode} onChange={setDetailMode} />
-          </div>
-          <div className="justify-self-end" data-tauri-drag-region="false">
-            {memoryBackendMissing ? (
-              <MemoryBackendMissingButton
-                status={memoryBackendStatus}
-                placement="bottom"
-                onRefresh={() => refreshMemoryBackendStatus(setMemoryBackendStatus)}
-              />
-            ) : (
-              <Tooltip content={t("header.search")} placement="bottom">
-                <button
-                  type="button"
-                  aria-label={t("header.search")}
-                  onClick={() => setMemorySearchOpen(true)}
-                  disabled={projectGroups.length === 0}
-                  className="p-1 text-ink/55 hover:text-ink disabled:opacity-35 disabled:hover:text-ink/55 transition rounded-md"
-                >
-                  <Search className="w-4 h-4" />
-                </button>
-              </Tooltip>
-            )}
-          </div>
-          <div className="absolute top-0 right-0 z-20">
-            <WindowControls />
-          </div>
-        </div>
+  const overlays = (
+    <AppOverlays
+      selected={selected}
+      metaPopoverMounted={metaPopoverMounted}
+      metaPopoverOpen={metaPopoverOpen}
+      memorySearchMounted={memorySearchMounted}
+      memorySearchOpen={memorySearchOpen}
+      projectSearchInitialKey={projectSearchInitialKey}
+      memorySearchProjects={projects.map((project) => ({
+        key: project.path,
+        label: project.name,
+      }))}
+      activeMemorySearchProjectKey={filter.kind === "project" ? filter.key : null}
+      deleteTarget={deleteTarget}
+      onCloseMetaPopover={() => setMetaPopoverOpen(false)}
+      onMetaPopoverExited={() => setMetaPopoverMounted(false)}
+      onCloseMemorySearch={() => setMemorySearchOpen(false)}
+      onMemorySearchExited={() => setMemorySearchMounted(false)}
+      onCancelDelete={() => setDeleteTarget(null)}
+      onConfirmDelete={() => {
+        void confirmDelete();
+      }}
+    />
+  );
 
-        {selected && metaPopoverMounted && (
-          <>
-            <button
-              type="button"
-              data-tauri-drag-region="false"
-              aria-label="Close metadata"
-              className={
-                "absolute inset-x-0 top-12 bottom-0 z-30 bg-bg/35 backdrop-blur-sm transition-opacity duration-150 " +
-                (metaPopoverOpen ? "opacity-100" : "opacity-0")
-              }
-              onClick={() => setMetaPopoverOpen(false)}
-              onTransitionEnd={(e) => {
-                if (!metaPopoverOpen && e.currentTarget === e.target) {
-                  setMetaPopoverMounted(false);
-                }
-              }}
-            />
-            <div
-              data-tauri-drag-region="false"
-              className={
-                "absolute left-1/2 top-12 z-40 w-[520px] max-w-[calc(100vw-80px)] -translate-x-1/2 transition-[opacity,transform] duration-150 ease-out " +
-                (metaPopoverOpen ? "translate-y-0 opacity-100" : "-translate-y-3 opacity-0")
-              }
-            >
-              <SessionMetaList session={selected} />
-            </div>
-          </>
-        )}
-
+  const mainContent = (
+    <>
         {error ? (
           <div className="m-5 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
             {error}
           </div>
         ) : activeProject ? (
-          <ProjectWorkbench
-            project={activeProject}
-            sessions={availableSessions.filter((session) => session.projectPath === activeProject.path)}
-            runtimeAgents={runtimeAgents}
-            debugAcpConfig={debugAcpConfig}
-            liveState={liveRuntimeState}
-            dispatchLiveEvent={dispatchLiveRuntimeEvent}
-            onProjectUpdated={(project) => {
-              setProjects((prev) => prev.map((item) => (item.id === project.id ? project : item)));
-              setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
-            }}
-            onProjectArchived={(projectId) => {
-              setProjects((prev) => prev.filter((project) => project.id !== projectId));
-              setSelectedProject(null);
-              setFilter({ kind: "all" });
-              void refreshSessions();
-            }}
-            onSelectSession={(session) => {
-              setSelectedProject(null);
-              setSelected(session);
-              setDetailMode("chat");
-            }}
-            onPendingSession={(pending) => {
-              setPendingNewChats((prev) => ({
-                ...prev,
-                [pending.sessioRuntimeSessionId]: pending,
-              }));
-            }}
-            onChatStarted={() => {
-              setSelectedProject(null);
-              setDetailMode("chat");
-            }}
-            onError={setError}
-          />
+          <ProjectWorkbenchPage {...projectWorkbenchProps(activeProject)} />
         ) : selected ? (
           <div className="relative flex-1 min-h-0">
             <div
               className={
                 "absolute inset-0 " +
-                (detailMode === "chat" ? "visible" : "invisible pointer-events-none")
+                (detailRoute === "chat" ? "visible" : "invisible pointer-events-none")
               }
-              aria-hidden={detailMode !== "chat"}
+              aria-hidden={detailRoute !== "chat"}
             >
-              <SessionDetail
+              <ChatPage
                 session={selected}
                 viewMode={viewMode}
                 liveState={liveRuntimeState}
@@ -1455,15 +898,21 @@ export default function App() {
             <div
               className={
                 "absolute inset-0 " +
-                (detailMode === "memory" ? "visible" : "invisible pointer-events-none")
+                (detailRoute === "project" ? "visible" : "invisible pointer-events-none")
               }
-              aria-hidden={detailMode !== "memory"}
+              aria-hidden={detailRoute !== "project"}
             >
-              <SessionMemory session={selected} />
+              {selectedSessionProject ? (
+                <ProjectWorkbenchPage {...projectWorkbenchProps(selectedSessionProject)} />
+              ) : (
+                <div className="flex h-full min-h-0 items-center justify-center bg-surface-panel px-6 text-body-sm text-ink/45">
+                  No project is linked to this session.
+                </div>
+              )}
             </div>
           </div>
         ) : (
-          <NewChatView
+          <NewChatPage
             projects={projectGroups}
             initialProjectKey={newChatProjectKey}
             runtimeAgents={runtimeAgents}
@@ -1478,2330 +927,12 @@ export default function App() {
             }}
           />
         )}
-
-        {memorySearchMounted && projectSearchInitialKey && (
-          <ProjectMemorySearchDialog
-            open={memorySearchOpen}
-            initialProjectKey={projectSearchInitialKey}
-            projects={projects.map((project) => ({
-              key: project.path,
-              label: project.name,
-            }))}
-            activeProjectKey={filter.kind === "project" ? filter.key : null}
-            onClose={() => setMemorySearchOpen(false)}
-            onExited={() => setMemorySearchMounted(false)}
-          />
-        )}
-
-        {deleteTarget && (
-          <ConfirmPopover
-            title={t("delete.title")}
-            body={
-              deleteTarget.kind === "session"
-                ? t("delete.session_body")
-                : t("delete.scope_body")
-            }
-            pos={deleteTarget.pos}
-            onCancel={() => setDeleteTarget(null)}
-            onConfirm={() => {
-              void confirmDelete();
-            }}
-          />
-        )}
-      </main>
-    </div>
-  );
-}
-
-function IndexStatusDot({ indexing }: { indexing: boolean }) {
-  const { t } = useI18n();
-  // Decouple the ripple lifecycle from `indexing` so a quick true→false flip
-  // still plays at least MIN_ITERATIONS full ring iterations; while indexing
-  // stays true the animation loops infinitely via CSS.
-  const MIN_ITERATIONS = 2;
-  const [animating, setAnimating] = useState(indexing);
-  const indexingRef = useRef(indexing);
-  const iterRef = useRef(0);
-  useEffect(() => {
-    indexingRef.current = indexing;
-    if (indexing) {
-      iterRef.current = 0;
-      setAnimating(true);
-    }
-  }, [indexing]);
-
-  const tip = (
-    <div className="flex flex-col gap-2 py-0.5">
-      <div className="flex items-center gap-2.5">
-        <StatusDot />
-        <span>{t("sidebar.status_idle")}</span>
-      </div>
-      <div className="flex items-center gap-2.5">
-        <StatusDot ripple />
-        <span>{t("sidebar.status_indexing")}</span>
-      </div>
-    </div>
-  );
-  return (
-    <Tooltip content={tip} placement="top">
-      <span
-        aria-label={
-          animating ? t("sidebar.status_indexing") : t("sidebar.status_idle")
-        }
-        className="inline-flex items-center justify-center p-1.5 -m-1.5"
-      >
-        <StatusDot
-          ripple={animating}
-          onIterationEnd={() => {
-            iterRef.current += 1;
-            if (!indexingRef.current && iterRef.current >= MIN_ITERATIONS) {
-              setAnimating(false);
-            }
-          }}
-        />
-      </span>
-    </Tooltip>
-  );
-}
-
-function StatusDot({
-  ripple,
-  onIterationEnd,
-}: {
-  ripple?: boolean;
-  onIterationEnd?: () => void;
-}) {
-  return (
-    <span className="relative inline-block w-1.5 h-1.5 shrink-0">
-      {ripple && (
-        <span
-          onAnimationIteration={onIterationEnd}
-          className="absolute inset-0 rounded-full animate-ping"
-          style={{ background: "rgb(var(--color-emerald))" }}
-        />
-      )}
-      <span
-        className="absolute inset-0 rounded-full"
-        style={{ background: "rgb(var(--color-emerald))" }}
-      />
-    </span>
-  );
-}
-
-function SidebarFooter({
-  sidebarOpen,
-  lang,
-  onLangChange,
-  themeMode,
-  onThemeModeChange,
-  update,
-  rebuilding,
-  indexing,
-  onError,
-  onRebuildFinished,
-}: {
-  sidebarOpen: boolean;
-  lang: Lang;
-  onLangChange: (lang: Lang) => void;
-  themeMode: ThemeMode;
-  onThemeModeChange: (mode: ThemeMode) => void;
-  update: ReturnType<typeof useUpdateCheck>;
-  rebuilding: boolean;
-  indexing: boolean;
-  onError: (error: string | null) => void;
-  onRebuildFinished: () => Promise<void> | void;
-}) {
-  const { t } = useI18n();
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
-  useEffect(() => {
-    if (!sidebarOpen) setSettingsOpen(false);
-  }, [sidebarOpen]);
-
-  return (
-    <div className="relative w-64 border-t border-ink/10">
-      <div
-        className={
-          "absolute left-0 bottom-full w-64 origin-bottom transition-[opacity,transform] duration-200 ease-out " +
-          (settingsOpen
-            ? "translate-y-0 scale-y-100 opacity-100 pointer-events-auto"
-            : "translate-y-2 scale-y-95 opacity-0 pointer-events-none")
-        }
-      >
-        <div className="border-y border-ink/10 bg-surface">
-          <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-3">
-            <span className="text-caption uppercase tracking-[0.12em] text-ink/40">
-              {t("sidebar.settings")}
-              <Tooltip content={t("sidebar.check_update")} placement="top">
-                <button
-                  type="button"
-                  aria-label={t("sidebar.check_update")}
-                  onClick={() => update.check()}
-                  disabled={update.checking}
-                  className={
-                    "ml-2 normal-case tracking-normal transition " +
-                    (update.checking
-                      ? "text-ink/50 animate-pulse"
-                      : "text-ink/30 hover:text-ink/70 cursor-pointer")
-                  }
-                >
-                  v{__APP_VERSION__}
-                </button>
-              </Tooltip>
-            </span>
-            <button
-              type="button"
-              aria-label={t("sidebar.close_settings")}
-              onClick={() => setSettingsOpen(false)}
-              className="p-1 -m-1 text-ink/40 hover:text-ink transition rounded-md"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          <div className="mx-3 border-t border-ink/10" />
-          <div className="px-3 pt-3 pb-3 flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-body-sm text-ink/55">{t("sidebar.language")}</span>
-              <LanguageSwitcher lang={lang} onChange={onLangChange} />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-body-sm text-ink/55">{t("sidebar.theme")}</span>
-              <ThemeSwitcher mode={themeMode} onChange={onThemeModeChange} />
-            </div>
-            <div className="flex items-center justify-between gap-3 text-body-sm text-ink/55">
-              <span>{t("sidebar.rebuild_index")}</span>
-              <button
-                type="button"
-                aria-label={t("sidebar.rebuild_index")}
-                onClick={() => {
-                  rebuildSessionIndex()
-                    .catch((err) => {
-                      onError(String(err));
-                    })
-                    .finally(() => {
-                      void onRebuildFinished();
-                    });
-                }}
-                className="p-1 -m-1 text-ink/55 transition hover:text-ink rounded-md"
-              >
-                <RefreshCw className={"w-4 h-4 shrink-0 " + (rebuilding ? "animate-spin" : "")} />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div className="px-3 py-2 flex items-center justify-between gap-2">
-        <div className="shrink-0 flex items-center gap-1">
-          <Tooltip content={t("sidebar.settings")} placement="top">
-            <button
-              type="button"
-              aria-label={t("sidebar.settings")}
-              onClick={() => setSettingsOpen((v) => !v)}
-              className="p-1 text-ink/55 hover:text-ink transition rounded-md"
-            >
-              <Settings
-                className={
-                  "w-4 h-4 transition-transform duration-200 " +
-                  (settingsOpen ? "rotate-90" : "")
-                }
-              />
-            </button>
-          </Tooltip>
-          {update.hasUpdate && update.latestVersion && (
-            <Tooltip
-              content={t("sidebar.update_available", {
-                version: update.latestVersion,
-              })}
-              placement="top"
-            >
-              <button
-                type="button"
-                aria-label={t("sidebar.update_available", {
-                  version: update.latestVersion,
-                })}
-                onClick={() => {
-                  openReleasePage(update.releaseUrl).catch((err) => {
-                    onError(String(err));
-                  });
-                }}
-                className="relative p-1 text-ink/55 hover:text-ink transition rounded-md"
-              >
-                <Download className="w-4 h-4" />
-                <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent-purple" />
-              </button>
-            </Tooltip>
-          )}
-        </div>
-        <IndexStatusDot indexing={indexing} />
-      </div>
-    </div>
-  );
-}
-
-function ProjectMemorySearchDialog({
-  open,
-  initialProjectKey,
-  projects,
-  activeProjectKey,
-  onClose,
-  onExited,
-}: {
-  open: boolean;
-  initialProjectKey: string;
-  projects: Array<{ key: string; label: string }>;
-  activeProjectKey: string | null;
-  onClose: () => void;
-  onExited: () => void;
-}) {
-  const { t } = useI18n();
-  const [selectedProjectKey, setSelectedProjectKey] = useState(initialProjectKey);
-  const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<ProjectMemorySearchResult[]>([]);
-  const [searched, setSearched] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const lockedProject = activeProjectKey !== null;
-  const selectedProject =
-    projects.find((project) => project.key === selectedProjectKey) ?? projects[0];
-
-  useEffect(() => {
-    if (!open) return;
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
-    return () => cancelAnimationFrame(id);
-  }, [open]);
-
-  useEffect(() => {
-    const nextProjectKey =
-      activeProjectKey ??
-      (projects.some((project) => project.key === selectedProjectKey)
-        ? selectedProjectKey
-        : projects[0]?.key);
-    if (nextProjectKey && nextProjectKey !== selectedProjectKey) {
-      setSelectedProjectKey(nextProjectKey);
-      setResults([]);
-      setError(null);
-      setLoading(false);
-      setSearched(false);
-    }
-  }, [activeProjectKey, projects, selectedProjectKey]);
-
-  const runSearch = () => {
-    const text = query.trim();
-    setError(null);
-    if (!text) {
-      setResults([]);
-      setLoading(false);
-      setSearched(false);
-      return;
-    }
-    setLoading(true);
-    setSearched(true);
-    searchProjectMemory(selectedProjectKey, text)
-      .then((rows) => {
-        setResults(rows);
-      })
-      .catch((err) => {
-        setResults([]);
-        setError(String(err));
-      })
-      .finally(() => setLoading(false));
-  };
-
-  const selectProject = (key: string) => {
-    setSelectedProjectKey(key);
-    setResults([]);
-    setError(null);
-    setLoading(false);
-    setSearched(false);
-  };
-
-  const clearOrClose = () => {
-    if (query.trim()) {
-      setQuery("");
-      setResults([]);
-      setError(null);
-      setLoading(false);
-      setSearched(false);
-      return;
-    }
-    onClose();
-  };
-
-  return (
-    <div
-      className={
-        "project-memory-search-dialog absolute inset-x-0 top-12 bottom-0 z-30 bg-black/35 backdrop-blur-sm flex items-start justify-center pt-10 px-4 " +
-        (open ? "project-memory-search-dialog-in" : "project-memory-search-dialog-out")
-      }
-      onClick={onClose}
-      onAnimationEnd={(e) => {
-        if (!open && e.currentTarget === e.target) {
-          onExited();
-        }
-      }}
-    >
-      <div
-        className={
-          "project-memory-search-panel w-full max-w-[680px] bg-surface-panel border border-ink/10 shadow-[0_24px_80px_rgba(0,0,0,0.22)] rounded-lg overflow-hidden " +
-          (open ? "project-memory-search-panel-in" : "project-memory-search-panel-out")
-        }
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-ink/10">
-          {!lockedProject && (
-            <InlineMenuSelect
-              value={selectedProjectKey}
-              options={projects.map(
-                (project): InlineMenuSelectOption => ({
-                  value: project.key,
-                  label: project.label,
-                }),
-              )}
-              onChange={selectProject}
-              menuAlign="parent"
-              placeholder={t("list.unknown_project")}
-              ariaLabel={t("memory_search.project_selector")}
-              className="max-w-[128px]"
-            />
-          )}
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setSearched(false);
-              setResults([]);
-              setError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") onClose();
-              if (e.key === "Enter") runSearch();
-            }}
-            placeholder={t("memory_search.placeholder", { project: selectedProject?.label ?? "" })}
-            className="flex-1 min-w-0 bg-transparent outline-none text-body text-ink placeholder:text-ink/35"
-          />
-          <button
-            type="button"
-            aria-label={t("header.search")}
-            onClick={runSearch}
-            disabled={loading || !query.trim()}
-            className="p-1 text-ink/45 hover:text-ink disabled:opacity-35 disabled:hover:text-ink/45 rounded-md transition"
-          >
-            <Search className="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            aria-label={query.trim() ? t("list.clear") : t("detail.close")}
-            onClick={clearOrClose}
-            className="p-1 text-ink/45 hover:text-ink rounded-md transition"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <ScrollArea className="max-h-[55vh]">
-          {loading && (
-            <div className="px-4 py-6 text-center text-body-sm text-ink/45">
-              {t("memory_search.searching")}
-            </div>
-          )}
-          {!loading && error && (
-            <div className="m-4 p-3 rounded bg-status-error/10 text-status-error text-body-sm">
-              {error}
-            </div>
-          )}
-          {!loading && !error && searched && query.trim() && results.length === 0 && (
-            <div className="px-4 py-6 text-center text-body-sm text-ink/45">
-              {t("memory_search.empty")}
-            </div>
-          )}
-          {!loading && !error && results.length > 0 && (
-            <ul className="divide-y divide-ink/5">
-              {results.map((result, idx) => (
-                <li key={`${result.recordId ?? result.artifactUri ?? idx}`} className="px-4 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-body-sm font-medium text-ink truncate">
-                        {result.title ?? result.recordId ?? result.artifactUri ?? t("memory_search.result")}
-                      </div>
-                      {result.snippet && (
-                        <div className="mt-1 text-body-sm text-ink/60 overflow-hidden [display:-webkit-box] [-webkit-line-clamp:3] [-webkit-box-orient:vertical]">
-                          {result.snippet}
-                        </div>
-                      )}
-                      {(result.recordId || result.artifactUri) && (
-                        <div className="mt-1 text-meta text-ink/35 truncate">
-                          {result.recordId ?? result.artifactUri}
-                        </div>
-                      )}
-                    </div>
-                    {result.score !== null && (
-                      <span className="shrink-0 text-meta tabular-nums text-ink/40">
-                        {result.score.toFixed(3)}
-                      </span>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </ScrollArea>
-      </div>
-    </div>
-  );
-}
-
-function MemoryBackendMissingButton({
-  status,
-  placement = "top",
-  onRefresh,
-}: {
-  status: MemoryBackendStatus | null;
-  placement?: "top" | "bottom";
-  onRefresh?: () => Promise<void> | void;
-}) {
-  const { t } = useI18n();
-  const [state, setState] = useState<"idle" | "copied" | "error">("idle");
-  const timerRef = useRef<number | null>(null);
-  const installCommand =
-    (status?.details as { installCommand?: string } | undefined)?.installCommand ??
-    "";
-  const backendName = status?.backend ?? "memory backend";
-
-  useEffect(
-    () => () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-    },
-    [],
-  );
-
-  const resetSoon = (next: "copied" | "error") => {
-    setState(next);
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => setState("idle"), 1500);
-  };
-
-  const handleClick = async () => {
-    let nextState: "copied" | "error" = "copied";
-    try {
-      await navigator.clipboard.writeText(installCommand);
-    } catch (err) {
-      console.error("qmd install command copy failed", err);
-      nextState = "error";
-    } finally {
-      resetSoon(nextState);
-      void onRefresh?.();
-    }
-  };
-
-  const tip =
-    state === "copied" ? (
-      t("list.copied")
-    ) : state === "error" ? (
-      t("list.copy_failed")
-    ) : (
-      <div className="flex max-w-full flex-col gap-1.5 py-0.5">
-        <span>{t("sidebar.memory_backend_required", { backend: backendName })}</span>
-        <code className="block max-w-full truncate whitespace-nowrap font-mono text-[11px] text-ink/85">
-          {installCommand}
-        </code>
-        <span className="text-ink/55">
-          {t("sidebar.click_to_copy", { backend: backendName })}
-        </span>
-        <span className="text-ink/55">
-          {t("sidebar.click_to_check_backend", { backend: backendName })}
-        </span>
-      </div>
-    );
-
-  return (
-    <Tooltip content={tip} placement={placement}>
-      <button
-        type="button"
-        onClick={handleClick}
-        aria-label={t("sidebar.copy_memory_backend_install")}
-        className="inline-flex p-1 text-ink/55 hover:text-status-error hover:bg-status-error/10 focus-visible:text-status-error focus-visible:bg-status-error/10 focus-visible:outline-none transition rounded-md"
-      >
-        <Skull className="w-4 h-4" />
-      </button>
-    </Tooltip>
-  );
-}
-
-function SectionHeader({
-  label,
-  collapsed,
-  onToggle,
-  action,
-}: {
-  label: string;
-  collapsed: boolean;
-  onToggle: () => void;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="group flex w-full items-center px-2 mt-3 mb-1 text-caption text-ink/55 transition hover:text-ink/85">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex min-w-0 flex-1 items-center justify-between text-left text-body"
-      >
-        <span>{label}</span>
-      </button>
-      {action && (
-        <span className="mr-1 opacity-0 transition-opacity group-hover:opacity-100">
-          {action}
-        </span>
-      )}
-      <button type="button" onClick={onToggle} className="rounded p-0.5 text-ink/45 hover:text-ink/80">
-        <Chevron collapsed={collapsed} />
-      </button>
-    </div>
-  );
-}
-
-function Chevron({ collapsed }: { collapsed: boolean }) {
-  return (
-    <ChevronDown
-      className={
-        "w-3.5 h-3.5 transition-transform duration-150 " +
-        (collapsed ? "-rotate-90" : "")
-      }
-    />
-  );
-}
-
-function projectTypeLabel(type: ProjectType, t: (key: string) => string): string {
-  return t(`project.type.${type}`);
-}
-
-function kanbanStatusLabel(status: KanbanStatus, t: (key: string) => string): string {
-  return t(`kanban.status.${status}`);
-}
-
-function projectTypeOptions(t: (key: string) => string): InlineMenuSelectOption[] {
-  return PROJECT_TYPES.map((type) => ({
-    value: type,
-    label: projectTypeLabel(type, t),
-  }));
-}
-
-function ProjectActionsButton({
-  onProjectAdded,
-  onError,
-}: {
-  onProjectAdded: (project: ProjectInfo) => void;
-  onError: (error: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const [openMenu, setOpenMenu] = useState(false);
-  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; type: ProjectType }>(null);
-  const [saving, setSaving] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const menuOptions: PopupMenuOption<"existing" | "new">[] = [
-    {
-      key: "existing",
-      label: t("project.add_existing"),
-      icon: <Folder className="h-4 w-4" />,
-    },
-    {
-      key: "new",
-      label: t("project.create_new"),
-      icon: <FolderPlus className="h-4 w-4" />,
-    },
-  ];
-
-  const pickExistingProject = async () => {
-    setOpenMenu(false);
-    setFormError(null);
-    try {
-      const selection = await open({ directory: true, multiple: false });
-      if (typeof selection !== "string") return;
-      const defaultName = selection.split(/[\\/]/).filter(Boolean).pop() ?? "";
-      setForm({ mode: "existing", basePath: selection, name: defaultName, type: "code" });
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const openNewProjectForm = () => {
-    setOpenMenu(false);
-    setFormError(null);
-    setForm({ mode: "new", basePath: null, name: "", type: "code" });
-  };
-
-  const save = async () => {
-    if (!form || saving) return;
-    const name = form.name.trim();
-    if (!name) {
-      setFormError(t("project.name_required"));
-      return;
-    }
-    setSaving(true);
-    onError(null);
-    setFormError(null);
-    try {
-      const project =
-        form.mode === "existing"
-          ? await addExistingProject(form.basePath ?? "", name, form.type)
-          : await createDefaultProject(name, form.type);
-      onProjectAdded(project);
-      setForm(null);
-    } catch (err) {
-      setFormError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <>
-      <Tooltip content={t("project.add")} placement="top">
-        <button
-          ref={buttonRef}
-          type="button"
-          onClick={() => setOpenMenu((value) => !value)}
-          className="rounded-md p-0.5 text-ink/45 transition hover:bg-ink/5 hover:text-ink"
-          aria-label={t("project.add")}
-        >
-          <FolderPlus className="h-3.5 w-3.5" />
-        </button>
-      </Tooltip>
-      {openMenu && buttonRef.current && (
-        <PopupMenu
-          anchor={buttonRef.current}
-          options={menuOptions}
-          placement="right"
-          onClose={() => setOpenMenu(false)}
-          onSelect={(key) => {
-            if (key === "existing") void pickExistingProject();
-            else openNewProjectForm();
-          }}
-        />
-      )}
-      {form && createPortal(
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4">
-          <div className="w-full max-w-[420px] rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <div className="text-body font-medium text-ink">
-                  {form.mode === "existing" ? t("project.add_existing") : t("project.create_new")}
-                </div>
-                <div className="mt-1 truncate text-caption text-ink/45">
-                  {form.mode === "existing" ? form.basePath : "~/.sessio/projects"}
-                </div>
-              </div>
-              <button type="button" onClick={() => setForm(null)} className="rounded-md p-1 text-ink/45 hover:bg-ink/5 hover:text-ink">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <label className="mb-3 block">
-              <span className="mb-1 block text-caption uppercase tracking-wide text-ink/45">{t("project.name")}</span>
-              <input
-                value={form.name}
-                onChange={(event) => setForm({ ...form, name: event.target.value })}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void save();
-                  if (event.key === "Escape") setForm(null);
-                }}
-                autoFocus
-                className="w-full rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body text-ink outline-none focus:border-ink/25"
-              />
-            </label>
-            {formError && (
-              <div className="mb-3 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
-                {formError}
-              </div>
-            )}
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <span className="text-body-sm text-ink/55">{t("project.type")}</span>
-              <RuntimeMenuSelect
-                ariaLabel={t("project.type")}
-                value={form.type}
-                options={projectTypeOptions(t)}
-                onChange={(value) => setForm({ ...form, type: value as ProjectType })}
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setForm(null)} className="rounded-md px-3 py-1.5 text-body-sm text-ink/60 hover:bg-ink/5 hover:text-ink">
-                {t("delete.cancel")}
-              </button>
-              <button type="button" disabled={saving} onClick={() => void save()} className="rounded-md bg-ink px-3 py-1.5 text-body-sm text-[rgb(var(--color-bg-panel))] disabled:opacity-50">
-                {saving ? t("new_chat.sending") : t("project.save")}
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
     </>
   );
-}
-
-type ProjectGroup = {
-  key: string;
-  project: ProjectInfo;
-  label: string;
-  count: number;
-  path: string;
-  latest: number;
-  sessions: SessionInfo[];
-};
-
-function ProjectSidebarGroup({
-  project,
-  expanded,
-  sessionsExpanded,
-  selectedKey,
-  selectedIdentityKey,
-  liveState,
-  runtimeSessionAliases,
-  unreadSessionIds,
-  onSelectProject,
-  onOpenKanban,
-  onNewChat,
-  onSelectSession,
-  onToggleSessionLimit,
-  onProjectContextMenu,
-  onSessionContextMenu,
-}: {
-  project: ProjectGroup;
-  expanded: boolean;
-  sessionsExpanded: boolean;
-  selectedKey: string | null;
-  selectedIdentityKey: string | null;
-  liveState: LiveRuntimeState;
-  runtimeSessionAliases: Record<string, string>;
-  unreadSessionIds: Set<string>;
-  onSelectProject: () => void;
-  onOpenKanban: () => void;
-  onNewChat: () => void;
-  onSelectSession: (session: SessionInfo) => void;
-  onToggleSessionLimit: () => void;
-  onProjectContextMenu: (e: React.MouseEvent) => void;
-  onSessionContextMenu: (
-    session: SessionInfo,
-    pos: { x: number; y: number },
-  ) => void;
-}) {
-  const { t } = useI18n();
-  const projectButtonRef = useRef<HTMLButtonElement>(null);
-  const FolderIcon = expanded ? FolderOpen : Folder;
-  const visibleSessions = sessionsExpanded
-    ? project.sessions
-    : project.sessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
-  const canToggleSessionLimit =
-    project.sessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
-  const toggleSessionLimit = () => {
-    const collapsing = sessionsExpanded;
-    onToggleSessionLimit();
-    if (collapsing) {
-      requestAnimationFrame(() => {
-        projectButtonRef.current?.scrollIntoView({ block: "nearest" });
-      });
-    }
-  };
-  return (
-    <div>
-      <button
-        ref={projectButtonRef}
-        type="button"
-        onClick={onSelectProject}
-        title={project.path ?? project.label}
-        className={
-          "group flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-ink/70 transition hover:bg-ink/5 hover:text-ink"
-        }
-        onContextMenu={onProjectContextMenu}
-      >
-        <FolderIcon
-          className={
-            "w-3.5 h-3.5 shrink-0 text-ink/55 transition-transform duration-200 " +
-            (expanded ? "scale-105" : "scale-100")
-          }
-        />
-        <span className="min-w-0 flex-1 truncate text-body">{project.label}</span>
-        <span className="text-meta text-ink/40 tabular-nums group-hover:hidden">
-          {project.count}
-        </span>
-        <span className="ml-auto hidden shrink-0 items-center gap-0.5 group-hover:flex">
-          <Tooltip content={t("project.workbench")} placement="top">
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label={t("project.workbench")}
-              onClick={(event) => {
-                event.stopPropagation();
-                onOpenKanban();
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenKanban();
-              }}
-              className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
-            >
-              <SquareKanban className="h-3.5 w-3.5" />
-            </span>
-          </Tooltip>
-          <Tooltip content={t("sidebar.new_chat")} placement="top">
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label={t("sidebar.new_chat")}
-              onClick={(event) => {
-                event.stopPropagation();
-                onNewChat();
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                event.stopPropagation();
-                onNewChat();
-              }}
-              className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
-            >
-              <SquarePen className="h-3.5 w-3.5" />
-            </span>
-          </Tooltip>
-        </span>
-      </button>
-      <div
-        className={
-          "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-out " +
-          (expanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0")
-        }
-      >
-        <div className="min-h-0 overflow-hidden">
-          <div
-            className={
-              "mt-0.5 flex flex-col gap-0.5 transition-transform duration-200 ease-out " +
-              (expanded ? "translate-y-0" : "-translate-y-1")
-            }
-          >
-            {visibleSessions.map((session) => {
-              const key = sessionKey(session);
-              const unreadKeys = sessionUnreadKeys(session, runtimeSessionAliases);
-              const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)] ?? session.id;
-              const liveActivity = liveSessionActivity(liveState.sessions[runtimeSessionId]);
-              return (
-                <SidebarSessionItem
-                  key={key}
-                  item={session}
-                  active={selectedKey === key || selectedIdentityKey === sessionIdentityKey(session)}
-                  liveActivity={liveActivity}
-                  unread={intersectsSet(unreadKeys, unreadSessionIds)}
-                  onSelect={() => onSelectSession(session)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    onSessionContextMenu(session, { x: e.clientX, y: e.clientY });
-                  }}
-                />
-              );
-            })}
-          </div>
-          {canToggleSessionLimit && (
-            <button
-              type="button"
-              onClick={toggleSessionLimit}
-              className="mt-0.5 ml-7 px-1 py-1 text-left text-body-sm text-ink/40 transition hover:text-ink/65"
-            >
-              {t(sessionsExpanded ? "list.show_less" : "list.show_more")}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SidebarSessionItem({
-  item,
-  active,
-  liveActivity,
-  unread,
-  onSelect,
-  onContextMenu,
-}: {
-  item: SessionInfo;
-  active: boolean;
-  liveActivity: ReturnType<typeof liveSessionActivity>;
-  unread: boolean;
-  onSelect: () => void;
-  onContextMenu: (e: React.MouseEvent) => void;
-}) {
-  const { t } = useI18n();
-  const title = item.title ?? item.firstUserMessage ?? t("list.no_user_message");
-  const relativeTime = formatShortRelativeTime(item.updatedAt ?? item.startedAt, t);
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      onContextMenu={onContextMenu}
-      title={title}
-      className={
-        "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
-        (active
-          ? "bg-ink/10 text-ink"
-          : "text-ink/65 hover:bg-ink/5 hover:text-ink")
-      }
-    >
-      <SidebarSessionStatus activity={liveActivity} unread={unread} />
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-        <AgentGlyph agent={item.agent} className="h-3.5 w-3.5" />
-      </span>
-      <span
-        className={
-          "min-w-0 flex-1 truncate text-body-sm leading-snug " +
-          (item.archived ? "text-ink/45" : "text-inherit")
-        }
-      >
-        {item.title ?? item.firstUserMessage ?? (
-          <span className="text-ink/30">{t("list.no_user_message")}</span>
-        )}
-      </span>
-      <span className="shrink-0 text-meta tabular-nums text-ink/35">
-        {relativeTime}
-      </span>
-    </button>
-  );
-}
-
-function SidebarSessionStatus({
-  activity,
-  unread,
-}: {
-  activity: ReturnType<typeof liveSessionActivity>;
-  unread: boolean;
-}) {
-  if (activity === "permission") {
-    return (
-      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-status-warn">
-        <Key className="h-3 w-3" />
-      </span>
-    );
-  }
-  if (activity === "failed") {
-    return (
-      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-status-error">
-        <CircleAlert className="h-3 w-3" />
-      </span>
-    );
-  }
-  if (activity === "running") {
-    return (
-      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
-        <LoaderCircle className="h-3 w-3 animate-spin" />
-      </span>
-    );
-  }
-  if (!unread) return null;
-  return (
-    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
-      <MailPlus className="h-3 w-3" />
-    </span>
-  );
-}
-
-function ProjectWorkbench({
-  project,
-  sessions,
-  runtimeAgents,
-  debugAcpConfig,
-  liveState,
-  dispatchLiveEvent,
-  onProjectUpdated,
-  onProjectArchived,
-  onSelectSession,
-  onPendingSession,
-  onChatStarted,
-  onError,
-}: {
-  project: ProjectInfo;
-  sessions: SessionInfo[];
-  runtimeAgents: RuntimeAgentMetadata[];
-  debugAcpConfig: boolean;
-  liveState: LiveRuntimeState;
-  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
-  onProjectUpdated: (project: ProjectInfo) => void;
-  onProjectArchived: (projectId: string) => void;
-  onSelectSession: (session: SessionInfo) => void;
-  onPendingSession: (session: PendingNewChatSession) => void;
-  onChatStarted: () => void;
-  onError: (error: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const [items, setItems] = useState<KanbanItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [newTitle, setNewTitle] = useState("");
-  const [editingName, setEditingName] = useState(project.name);
-  const [editingType, setEditingType] = useState<ProjectType>(project.type);
-  const [projectSaving, setProjectSaving] = useState(false);
-
-  useEffect(() => {
-    setEditingName(project.name);
-    setEditingType(project.type);
-  }, [project.id, project.name, project.type]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    listKanbanItems(project.id)
-      .then((rows) => {
-        if (!cancelled) setItems(rows);
-      })
-      .catch((err) => {
-        if (!cancelled) onError(String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [onError, project.id]);
-
-  const addTodo = async () => {
-    const title = newTitle.trim();
-    if (!title) return;
-    onError(null);
-    try {
-      const item = await createKanbanItem(project.id, title);
-      setItems((prev) => [...prev, item]);
-      setNewTitle("");
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const saveProject = async () => {
-    setProjectSaving(true);
-    onError(null);
-    try {
-      const updated = await updateProject(project.id, {
-        name: editingName,
-        type: editingType,
-      });
-      onProjectUpdated(updated);
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setProjectSaving(false);
-    }
-  };
-
-  const archive = async () => {
-    onError(null);
-    try {
-      await archiveProject(project.id);
-      onProjectArchived(project.id);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const patchItem = (item: KanbanItem) => {
-    setItems((prev) => prev.map((current) => (current.id === item.id ? item : current)));
-  };
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface-panel">
-      <div className="border-b border-ink/10 px-6 py-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="min-w-0 flex-1">
-            <div className="mb-2 flex items-center gap-2 text-caption uppercase tracking-[0.16em] text-ink/40">
-              <Kanban className="h-4 w-4" />
-              {t("project.workbench")}
-            </div>
-            <input
-              value={editingName}
-              onChange={(event) => setEditingName(event.target.value)}
-              className="w-full max-w-[520px] bg-transparent text-[28px] font-medium leading-tight text-ink outline-none"
-            />
-            <div className="mt-1 truncate text-body-sm text-ink/45">{project.path}</div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <RuntimeMenuSelect
-              ariaLabel={t("project.type")}
-              value={editingType}
-              options={projectTypeOptions(t)}
-              onChange={(value) => setEditingType(value as ProjectType)}
-            />
-            <Tooltip content={t("project.save")} placement="bottom">
-              <button
-                type="button"
-                disabled={projectSaving}
-                onClick={() => void saveProject()}
-                className="rounded-md p-2 text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:opacity-45"
-              >
-                <Save className="h-4 w-4" />
-              </button>
-            </Tooltip>
-            <Tooltip content={t("project.archive")} placement="bottom">
-              <button
-                type="button"
-                onClick={() => void archive()}
-                className="rounded-md p-2 text-ink/45 transition hover:bg-status-error/10 hover:text-status-error"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1">
-        <ScrollArea className="h-full min-h-0 p-5">
-          <div className="mb-4 flex gap-2">
-            <input
-              value={newTitle}
-              onChange={(event) => setNewTitle(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void addTodo();
-              }}
-              placeholder={t("kanban.add_placeholder")}
-              className="min-w-0 flex-1 rounded-lg border border-ink/10 bg-ink/5 px-3 py-2 text-body text-ink outline-none placeholder:text-ink/35 focus:border-ink/25"
-            />
-            <button
-              type="button"
-              onClick={() => void addTodo()}
-              disabled={!newTitle.trim()}
-              className="rounded-lg bg-ink px-3 py-2 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
-            >
-              {t("kanban.add")}
-            </button>
-          </div>
-          {loading ? (
-            <div className="py-12 text-center text-body-sm text-ink/45">{t("memory_search.searching")}</div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {KANBAN_STATUSES.map((status) => (
-                <KanbanColumn
-                  key={status}
-                  status={status}
-                  items={items.filter((item) => item.status === status)}
-                  project={project}
-                  sessions={sessions}
-                  runtimeAgents={runtimeAgents}
-                  debugAcpConfig={debugAcpConfig}
-                  liveState={liveState}
-                  dispatchLiveEvent={dispatchLiveEvent}
-                  onSelectSession={onSelectSession}
-                  onItemUpdated={patchItem}
-                  onItemDeleted={(itemId) => setItems((prev) => prev.filter((item) => item.id !== itemId))}
-                  onPendingSession={onPendingSession}
-                  onChatStarted={onChatStarted}
-                  onError={onError}
-                />
-              ))}
-            </div>
-          )}
-        </ScrollArea>
-      </div>
-    </div>
-  );
-}
-
-function KanbanColumn({
-  status,
-  items,
-  project,
-  sessions,
-  runtimeAgents,
-  debugAcpConfig,
-  liveState,
-  dispatchLiveEvent,
-  onSelectSession,
-  onItemUpdated,
-  onItemDeleted,
-  onPendingSession,
-  onChatStarted,
-  onError,
-}: {
-  status: KanbanStatus;
-  items: KanbanItem[];
-  project: ProjectInfo;
-  sessions: SessionInfo[];
-  runtimeAgents: RuntimeAgentMetadata[];
-  debugAcpConfig: boolean;
-  liveState: LiveRuntimeState;
-  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
-  onSelectSession: (session: SessionInfo) => void;
-  onItemUpdated: (item: KanbanItem) => void;
-  onItemDeleted: (itemId: string) => void;
-  onPendingSession: (session: PendingNewChatSession) => void;
-  onChatStarted: () => void;
-  onError: (error: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const StatusIcon = KANBAN_STATUS_ICONS[status];
-  return (
-    <section className="rounded-lg border border-ink/10 bg-ink/[0.035] p-2.5">
-      <div className="mb-2 flex items-center justify-between gap-2 px-1.5">
-        <h3 className="inline-flex min-w-0 items-center gap-1.5 text-body-sm font-medium text-ink/75">
-          <StatusIcon className="h-4 w-4 shrink-0 text-ink/45" />
-          <span className="truncate">{kanbanStatusLabel(status, t)}</span>
-        </h3>
-        <span className="rounded-full bg-ink/8 px-1.5 py-0.5 text-meta text-ink/40">{items.length}</span>
-      </div>
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2">
-        {items.map((item) => (
-          <KanbanCard
-            key={item.id}
-            item={item}
-            project={project}
-            sessions={sessions}
-            runtimeAgents={runtimeAgents}
-            debugAcpConfig={debugAcpConfig}
-            liveState={liveState}
-            dispatchLiveEvent={dispatchLiveEvent}
-            onSelectSession={onSelectSession}
-            onUpdated={onItemUpdated}
-            onDeleted={onItemDeleted}
-            onPendingSession={onPendingSession}
-            onChatStarted={onChatStarted}
-            onError={onError}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function KanbanCard({
-  item,
-  project,
-  sessions,
-  runtimeAgents,
-  debugAcpConfig: _debugAcpConfig,
-  liveState,
-  dispatchLiveEvent,
-  onSelectSession,
-  onUpdated,
-  onDeleted,
-  onPendingSession,
-  onChatStarted,
-  onError,
-}: {
-  item: KanbanItem;
-  project: ProjectInfo;
-  sessions: SessionInfo[];
-  runtimeAgents: RuntimeAgentMetadata[];
-  debugAcpConfig: boolean;
-  liveState: LiveRuntimeState;
-  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
-  onSelectSession: (session: SessionInfo) => void;
-  onUpdated: (item: KanbanItem) => void;
-  onDeleted: (itemId: string) => void;
-  onPendingSession: (session: PendingNewChatSession) => void;
-  onChatStarted: () => void;
-  onError: (error: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(item.title);
-  const [description, setDescription] = useState(item.description ?? "");
-  const [agent, setAgent] = useState<Agent>(() => runtimeAgents[0]?.agent ?? "codex");
-  const [sending, setSending] = useState(false);
-  const fallbackRuntimeSequenceRef = useRef(0);
-
-  useEffect(() => {
-    setTitle(item.title);
-    setDescription(item.description ?? "");
-  }, [item.description, item.title]);
-
-  const linkedSessionKeys = useMemo(
-    () => new Set(item.sessions.map(sessionIdentityKey)),
-    [item.sessions],
-  );
-  const selectedKanbanRuntimeAgent =
-    runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
-  const [model, setModel] = useState(() => initialRuntimeModel(runtimeAgents[0] ?? null));
-  const [effort, setEffort] = useState(() => initialRuntimeEffort(runtimeAgents[0] ?? null));
-  const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
-    if (targetAgent === agent) setEffort(nextValue);
-    try {
-      await updateRuntimeAgentPreferences({ agent: targetAgent, effort: nextValue });
-    } catch (err) {
-      onError(String(err));
-    }
-  }, [agent, onError]);
-  const agentModelOptions = useMemo(
-    () =>
-      agentModelSelectOptions(
-        runtimeAgents,
-        Object.fromEntries(
-          runtimeAgents.map((runtimeAgent) => [
-            runtimeAgent.agent,
-            <RuntimeEffortControl
-              value={runtimeAgent.agent === agent ? effort : initialRuntimeEffort(runtimeAgent)}
-              options={runtimeEffortOptions(runtimeAgent)}
-              onChange={(value) => void handleEffortChange(runtimeAgent.agent, value)}
-              disabled={sending}
-            />,
-          ]),
-        ) as Partial<Record<Agent, ReactNode>>,
-        { [agent]: effort },
-      ),
-    [agent, effort, handleEffortChange, runtimeAgents, sending],
-  );
-  const selectedAgentModelValue = agentModelSelectValue(agent, model);
-  const availableSessionOptions = useMemo(
-    () =>
-      sessions
-        .filter((session) => !linkedSessionKeys.has(sessionIdentityKey(session)))
-        .map((session) => ({
-          value: sessionIdentityKey(session),
-          label: session.title ?? session.firstUserMessage ?? t("list.no_user_message"),
-          icon: <AgentGlyph agent={session.agent} className="h-3.5 w-3.5" />,
-        })),
-    [linkedSessionKeys, sessions, t],
-  );
-  const sessionByKey = useMemo(() => {
-    const map = new Map<string, SessionInfo>();
-    for (const session of sessions) {
-      map.set(sessionIdentityKey(session), session);
-    }
-    return map;
-  }, [sessions]);
-
-  useEffect(() => {
-    if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
-    const current = runtimeAgents.find((item) => item.agent === agent) ?? null;
-    const next = current ?? runtimeAgents[0] ?? null;
-    if (!next) return;
-    setAgent(next.agent);
-    setModel(initialRuntimeModel(next));
-    setEffort(initialRuntimeEffort(next));
-  }, [agent, agentModelOptions, runtimeAgents, selectedAgentModelValue]);
-
-  useEffect(() => {
-    if (!selectedKanbanRuntimeAgent) return;
-    if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
-    setModel(initialRuntimeModel(selectedKanbanRuntimeAgent));
-    setEffort(initialRuntimeEffort(selectedKanbanRuntimeAgent));
-  }, [
-    agentModelOptions,
-    selectedAgentModelValue,
-    selectedKanbanRuntimeAgent?.effort,
-    selectedKanbanRuntimeAgent?.efforts,
-    selectedKanbanRuntimeAgent?.agent,
-    selectedKanbanRuntimeAgent?.model,
-  ]);
-
-  const prompt = useMemo(() => {
-    const trimmedDescription = item.description?.trim();
-    return trimmedDescription ? `${item.title}\n\n${trimmedDescription}` : item.title;
-  }, [item.description, item.title]);
-
-  const move = async (status: KanbanStatus) => {
-    try {
-      onUpdated(await updateKanbanItemStatus(item.id, status));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const save = async () => {
-    try {
-      const updated = await updateKanbanItem(item.id, {
-        title,
-        description,
-      });
-      onUpdated(updated);
-      setEditing(false);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const remove = async () => {
-    try {
-      await deleteKanbanItem(item.id);
-      onDeleted(item.id);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const linkSession = async (value: string) => {
-    const session = sessionByKey.get(value);
-    if (!session) return;
-    try {
-      onUpdated(await linkKanbanItemSession(item.id, session.agent, session.id));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const unlinkSession = async (session: SessionInfo) => {
-    try {
-      onUpdated(await unlinkKanbanItemSession(item.id, session.agent, session.id));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const sendItem = async () => {
-    if (sending || !prompt.trim()) return;
-    if (!agentModelOptions.some((option) => option.value === selectedAgentModelValue)) {
-      onError("No configured runtime agent available");
-      return;
-    }
-    setSending(true);
-    onError(null);
-    try {
-      const handle = await startAgentSession({
-        agent,
-        workspacePath: project.path,
-        options: runtimeSessionOptions(model, "", effort),
-      });
-      const timestamp = Date.now();
-      const localTurnId = `local-turn-${timestamp}`;
-      const existingLiveSession = liveState.sessions[handle.sessioRuntimeSessionId];
-      if (!existingLiveSession) {
-        fallbackRuntimeSequenceRef.current += 1;
-        dispatchLiveEvent({
-          type: "runtime-event",
-          event: {
-            kind: "sessionStarted",
-            sequence: liveState.lastSequence + fallbackRuntimeSequenceRef.current,
-            timestamp,
-            agent: handle.agent,
-            sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-            agentRuntimeSessionId: handle.agentRuntimeSessionId,
-            transport: handle.transport,
-            workspacePath: handle.workspacePath,
-            capabilities: handle.capabilities,
-          },
-        });
-      }
-      dispatchLiveEvent({
-        type: "optimistic-user-message",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        turnId: localTurnId,
-        text: prompt,
-        attachments: [],
-        timestamp,
-      });
-      onPendingSession({
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        agent: handle.agent,
-        projectPath: project.path,
-        projectName: project.name,
-        prompt,
-        timestamp,
-        kanbanItemId: item.id,
-        kanbanItemStatus: item.status,
-      });
-      const turn = await sendAgentInput(handle.sessioRuntimeSessionId, { text: prompt });
-      dispatchLiveEvent({
-        type: "replace-turn-id",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        from: localTurnId,
-        to: turn.turnId,
-      });
-      onChatStarted();
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <article className="rounded-lg border border-ink/10 bg-surface-panel p-2.5 shadow-sm">
-      {editing ? (
-        <div className="flex flex-col gap-2">
-          <input value={title} onChange={(event) => setTitle(event.target.value)} className="rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
-          <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} className="resize-none rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
-          <div className="flex justify-end gap-1">
-            <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
-            <button type="button" onClick={() => void save()} className="rounded bg-ink px-2 py-1 text-caption text-[rgb(var(--color-bg-panel))]">{t("project.save")}</button>
-          </div>
-        </div>
-      ) : (
-        <>
-          <div className="text-body-sm font-medium leading-snug text-ink/85">{item.title}</div>
-          {item.description && <div className="mt-1 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">{item.description}</div>}
-          <div className="mt-2 border-t border-ink/10 pt-2">
-            <div className="flex min-w-0 items-center justify-between gap-2">
-              <RuntimeMenuSelect
-                ariaLabel={t("new_chat.agent")}
-                value={selectedAgentModelValue}
-                onChange={(value) => {
-                  const parsed = parseAgentModelSelectValue(value);
-                  if (!parsed) return;
-                  setAgent(parsed.agent);
-                  setModel(parsed.model);
-                  const targetRuntimeAgent =
-                    runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === parsed.agent) ?? null;
-                  setEffort(initialRuntimeEffort(targetRuntimeAgent));
-                }}
-                disabled={agentModelOptions.length === 0 || sending}
-                options={agentModelOptions}
-              />
-              <Tooltip content={sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
-                <button
-                  type="button"
-                  disabled={sending || agentModelOptions.length === 0 || !prompt.trim()}
-                  onClick={() => void sendItem()}
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
-                  aria-label={sending ? t("new_chat.sending") : t("new_chat.send")}
-                >
-                  {sending ? (
-                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Send className="h-3.5 w-3.5" />
-                  )}
-                </button>
-              </Tooltip>
-            </div>
-          </div>
-          <div className="mt-2 border-t border-ink/10 pt-2">
-            <div className="mb-1.5 flex items-center justify-between gap-2">
-              <div className="inline-flex min-w-0 items-center gap-1 text-meta text-ink/40">
-                <Link2 className="h-3 w-3" />
-                <span>{t("kanban.sessions_count", { count: item.sessions.length })}</span>
-              </div>
-              <InlineMenuSelect
-                value=""
-                options={availableSessionOptions}
-                onChange={(value) => void linkSession(value)}
-                ariaLabel={t("kanban.link_session")}
-                placeholder={t("kanban.link_session")}
-                minMenuWidth={220}
-                className="h-6 max-w-[96px] border-r-0 px-1 py-0 text-caption text-ink/45 hover:text-ink"
-                emptyContent={t("kanban.no_unlinked_sessions")}
-              />
-            </div>
-            {item.sessions.length > 0 && (
-              <div className="flex flex-col gap-1">
-                {item.sessions.slice(0, 4).map((session) => (
-                  <div key={sessionIdentityKey(session)} className="group flex min-w-0 items-center gap-1.5 rounded bg-ink/[0.035] px-1.5 py-1">
-                    <button
-                      type="button"
-                      onClick={() => onSelectSession(session)}
-                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-caption text-ink/60 hover:text-ink"
-                    >
-                      <AgentGlyph agent={session.agent} className="h-3.5 w-3.5 shrink-0" />
-                      <span className="truncate">{session.title ?? session.firstUserMessage ?? t("list.no_user_message")}</span>
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={t("kanban.unlink_session")}
-                      onClick={() => void unlinkSession(session)}
-                      className="rounded p-0.5 text-ink/25 opacity-0 transition hover:bg-ink/8 hover:text-ink/65 group-hover:opacity-100"
-                    >
-                      <Unlink className="h-3 w-3" />
-                    </button>
-                  </div>
-                ))}
-                {item.sessions.length > 4 && (
-                  <div className="px-1.5 text-meta text-ink/35">
-                    {t("kanban.more_sessions", { count: item.sessions.length - 4 })}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="mt-3 flex items-center justify-between gap-2">
-            <InlineMenuSelect
-              value={item.status}
-              options={KANBAN_STATUSES.map((status) => ({
-                value: status,
-                label: kanbanStatusLabel(status, t),
-                icon: (() => {
-                  const StatusIcon = KANBAN_STATUS_ICONS[status];
-                  return <StatusIcon className="h-3.5 w-3.5" />;
-                })(),
-              }))}
-              onChange={(value) => void move(value as KanbanStatus)}
-              minMenuWidth={150}
-              className="h-6 max-w-[120px] px-1 py-0 text-caption"
-            />
-            <div className="flex items-center gap-1">
-              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70">
-                <Pencil className="h-3.5 w-3.5" />
-              </button>
-              <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error">
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-    </article>
-  );
-}
-
-function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Record<string, string | number>) => string): string {
-  if (!ts) return "";
-  const diffMs = Math.max(0, Date.now() - ts);
-  const minute = 60 * 1000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  const week = 7 * day;
-  const month = 30 * day;
-  if (diffMs < hour) {
-    return t("time.minute", { count: Math.max(1, Math.floor(diffMs / minute)) });
-  }
-  if (diffMs < day) return t("time.hour", { count: Math.floor(diffMs / hour) });
-  if (diffMs < week) return t("time.day", { count: Math.floor(diffMs / day) });
-  if (diffMs < month) return t("time.week", { count: Math.floor(diffMs / week) });
-  return t("time.month", { count: Math.floor(diffMs / month) });
-}
-
-function NewChatView({
-  projects,
-  initialProjectKey,
-  runtimeAgents,
-  liveState,
-  dispatchLiveEvent,
-  onError,
-  onPendingSession,
-}: {
-  projects: ProjectGroup[];
-  initialProjectKey: string | null;
-  runtimeAgents: RuntimeAgentMetadata[];
-  liveState: LiveRuntimeState;
-  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
-  onError: (error: string | null) => void;
-  onPendingSession: (session: PendingNewChatSession) => void;
-}) {
-  const { t } = useI18n();
-  const [text, setText] = useState("");
-  const [projectKeyValue, setProjectKeyValue] = useState(() => initialProjectKey ?? projects[0]?.key ?? "");
-  const [agent, setAgent] = useState<Agent>(
-    () => runtimeAgents[0]?.agent ?? "codex",
-  );
-  const [model, setModel] = useState(() => initialRuntimeModel(runtimeAgents[0] ?? null));
-  const [effort, setEffort] = useState(() => initialRuntimeEffort(runtimeAgents[0] ?? null));
-  const [permissionMode, setPermissionMode] = useState(() =>
-    initialRuntimePermission(runtimeAgents[0] ?? null),
-  );
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [composerError, setComposerError] = useState<string | null>(null);
-  const [kanbanItems, setKanbanItems] = useState<KanbanItem[]>([]);
-  const [selectedKanbanItemId, setSelectedKanbanItemId] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const attachmentButtonRef = useRef<HTMLButtonElement>(null);
-  const fallbackRuntimeSequenceRef = useRef(0);
-  const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
-  const workspacePath = project?.path ?? null;
-  const projectId = project?.project.id ?? null;
-  const selectedAgentModelValue = agentModelSelectValue(agent, model);
-  const selectedRuntimeAgent =
-    runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
-  const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
-    if (targetAgent === agent) setEffort(nextValue);
-    try {
-      await updateRuntimeAgentPreferences({ agent: targetAgent, effort: nextValue });
-    } catch (err) {
-      const message = String(err);
-      setComposerError(message);
-      onError(message);
-    }
-  }, [agent, onError]);
-  const agentModelOptions = useMemo(
-    () =>
-      agentModelSelectOptions(
-        runtimeAgents,
-        Object.fromEntries(
-          runtimeAgents.map((runtimeAgent) => [
-            runtimeAgent.agent,
-            <RuntimeEffortControl
-              value={runtimeAgent.agent === agent ? effort : initialRuntimeEffort(runtimeAgent)}
-              options={runtimeEffortOptions(runtimeAgent)}
-              onChange={(value) => void handleEffortChange(runtimeAgent.agent, value)}
-              disabled={sending}
-            />,
-          ]),
-        ) as Partial<Record<Agent, ReactNode>>,
-        { [agent]: effort },
-      ),
-    [agent, effort, handleEffortChange, runtimeAgents, sending],
-  );
-  const permissionOptions = runtimePermissionModeOptions(
-    selectedRuntimeAgent?.permissionModes ?? [],
-    permissionMode,
-    selectedRuntimeAgent?.agent,
-  );
-  const {
-    attachments,
-    supportsAttachments,
-    supportsImageAttachments,
-    supportsEmbeddedContext,
-    removeAttachment,
-    clearAttachments,
-    pickAttachments,
-  } = useComposerAttachments({
-    capabilities: selectedRuntimeAgent?.capabilities,
-    onError: (message) => {
-      setComposerError(message);
-      onError(message);
-    },
-  });
-  const canSend =
-    text.trim().length > 0 &&
-    Boolean(workspacePath) &&
-    agentModelOptions.length > 0 &&
-    !sending;
-  const attachmentOptions = attachmentMenuOptions({
-    supportsImageAttachments,
-    supportsEmbeddedContext,
-    imageLabel: t("new_chat.add_images"),
-    fileLabel: t("new_chat.add_files"),
-  });
-  const selectedKanbanItem =
-    kanbanItems.find((item) => item.id === selectedKanbanItemId) ?? null;
-  const kanbanItemOptions: InlineMenuSelectOption[] = [
-    {
-      value: "",
-      label: t("kanban.no_item"),
-      icon: <Kanban className="h-4 w-4 text-ink/45" />,
-    },
-    ...KANBAN_STATUSES.flatMap((status) => {
-      const items = kanbanItems.filter((item) => item.status === status);
-      if (items.length === 0) return [];
-      const StatusIcon = KANBAN_STATUS_ICONS[status];
-      return items.map((item) => ({
-        value: item.id,
-        label: item.title,
-        group: {
-          value: status,
-          label: kanbanStatusLabel(status, t),
-          icon: <StatusIcon className="h-4 w-4 text-ink/55" />,
-        },
-      }));
-    }),
-  ];
-
-  useEffect(() => {
-    if (initialProjectKey && projects.some((p) => p.key === initialProjectKey)) {
-      setProjectKeyValue(initialProjectKey);
-      return;
-    }
-    if (projectKeyValue && projects.some((p) => p.key === projectKeyValue)) return;
-    setProjectKeyValue(projects[0]?.key ?? "");
-  }, [initialProjectKey, projectKeyValue, projects]);
-
-  useEffect(() => {
-    if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
-    const current = runtimeAgents.find((item) => item.agent === agent) ?? null;
-    const next = current ?? runtimeAgents[0] ?? null;
-    if (!next) return;
-    setAgent(next.agent);
-    setModel(initialRuntimeModel(next));
-    setEffort(initialRuntimeEffort(next));
-    setPermissionMode(initialRuntimePermission(next));
-  }, [agent, agentModelOptions, runtimeAgents, selectedAgentModelValue]);
-
-  useEffect(() => {
-    if (!selectedRuntimeAgent) return;
-    if (
-      permissionMode &&
-      selectedRuntimeAgent.permissionModes.some((option) => option.value === permissionMode)
-    ) {
-      return;
-    }
-    setPermissionMode(initialRuntimePermission(selectedRuntimeAgent));
-  }, [
-    permissionMode,
-    selectedRuntimeAgent?.agent,
-    selectedRuntimeAgent?.permissionMode,
-    selectedRuntimeAgent?.permissionModes,
-  ]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setKanbanItems([]);
-    setSelectedKanbanItemId("");
-    if (!projectId) return;
-    listKanbanItems(projectId)
-      .then((items) => {
-        if (cancelled) return;
-        setKanbanItems(items);
-      })
-      .catch((err) => {
-        if (!cancelled) onError(String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [onError, projectId]);
-
-  useEffect(() => {
-    if (!selectedKanbanItemId) return;
-    if (kanbanItems.some((item) => item.id === selectedKanbanItemId)) return;
-    setSelectedKanbanItemId("");
-  }, [kanbanItems, selectedKanbanItemId]);
-
-  useEffect(() => {
-    if (!supportsAttachments) {
-      setAttachmentMenuOpen(false);
-    }
-  }, [supportsAttachments]);
-
-  useEffect(() => {
-    window.requestAnimationFrame(() => textareaRef.current?.focus());
-  }, []);
-
-  useEffect(() => {
-    if (!attachmentMenuOpen) return;
-    const close = () => setAttachmentMenuOpen(false);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    window.addEventListener("resize", close);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("resize", close);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [attachmentMenuOpen]);
-
-  const handleAgentModelChange = async (nextValue: string) => {
-    const parsed = parseAgentModelSelectValue(nextValue);
-    if (!parsed) return;
-    const targetRuntimeAgent =
-      runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === parsed.agent) ?? null;
-    if (!targetRuntimeAgent) return;
-    setAgent(parsed.agent);
-    setModel(parsed.model);
-    setEffort(initialRuntimeEffort(targetRuntimeAgent));
-    setPermissionMode(initialRuntimePermission(targetRuntimeAgent));
-    try {
-      await updateRuntimeAgentPreferences({ agent: parsed.agent, model: parsed.model });
-    } catch (err) {
-      const message = String(err);
-      setComposerError(message);
-      onError(message);
-    }
-  };
-
-  const handlePermissionModeChange = async (nextValue: string) => {
-    if (!selectedRuntimeAgent) return;
-    setPermissionMode(nextValue);
-    try {
-      await updateRuntimeAgentPreferences({ agent, permissionMode: nextValue });
-    } catch (err) {
-      const message = String(err);
-      setComposerError(message);
-      onError(message);
-    }
-  };
-
-  const handleSend = async () => {
-    const prompt = text.trim();
-    if (!prompt || sending) return;
-    if (!workspacePath || !project) {
-      setComposerError(t("new_chat.no_project"));
-      return;
-    }
-    if (!agentModelOptions.some((option) => option.value === selectedAgentModelValue)) {
-      setComposerError("No configured runtime agent available");
-      return;
-    }
-    setSending(true);
-    setComposerError(null);
-    onError(null);
-    try {
-      const handle = await startAgentSession({
-        agent,
-        workspacePath,
-        options: runtimeSessionOptions(model, permissionMode, effort),
-      });
-      const timestamp = Date.now();
-      const localTurnId = `local-turn-${timestamp}`;
-      const existingLiveSession = liveState.sessions[handle.sessioRuntimeSessionId];
-      if (!existingLiveSession) {
-        fallbackRuntimeSequenceRef.current += 1;
-        dispatchLiveEvent({
-          type: "runtime-event",
-          event: {
-            kind: "sessionStarted",
-            sequence: liveState.lastSequence + fallbackRuntimeSequenceRef.current,
-            timestamp,
-            agent: handle.agent,
-            sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-            agentRuntimeSessionId: handle.agentRuntimeSessionId,
-            transport: handle.transport,
-            workspacePath: handle.workspacePath,
-            capabilities: handle.capabilities,
-          },
-        });
-      }
-      dispatchLiveEvent({
-        type: "optimistic-user-message",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        turnId: localTurnId,
-        text: prompt,
-        attachments: attachments.map(({ path, mimeType, kind, previewDataUrl }) => ({
-          path,
-          mimeType,
-          kind,
-          previewDataUrl,
-        })),
-        timestamp,
-      });
-      onPendingSession({
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        agent: handle.agent,
-        projectPath: workspacePath,
-        projectName: project.label,
-        prompt,
-        timestamp,
-        kanbanItemId: selectedKanbanItem?.id,
-        kanbanItemStatus: selectedKanbanItem?.status,
-      });
-      const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
-        text: prompt,
-        attachments: attachments.map(({ path, mimeType, kind }) => ({ path, mimeType, kind })),
-      });
-      dispatchLiveEvent({
-        type: "replace-turn-id",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        from: localTurnId,
-        to: turn.turnId,
-      });
-      setText("");
-      setSelectedKanbanItemId("");
-      clearAttachments();
-    } catch (err) {
-      const message = String(err);
-      setComposerError(message);
-      onError(message);
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-1 min-h-0 flex-col bg-surface-panel">
-      <div className="flex flex-1 min-h-0 items-center justify-center px-6 pb-16">
-        <div className="w-full max-w-[730px]">
-          <h1 className="mb-11 text-center text-[28px] font-medium leading-tight tracking-normal text-ink/92">
-            What should we build in <ScrambledProjectName name={project?.label ?? "sessio"} />?
-          </h1>
-          {composerError && (
-            <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
-              {composerError}
-            </div>
-          )}
-          <div
-            className={
-              "overflow-hidden rounded-2xl bg-ink/[0.055] shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.08)] transition-shadow " +
-              (composerError
-                ? "shadow-[inset_0_0_0_1px_rgb(var(--color-status-error)/0.35)]"
-                : "focus-within:shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.20)]")
-            }
-          >
-            <ComposerAttachmentPreviewList
-              attachments={attachments}
-              onRemove={removeAttachment}
-            />
-            <textarea
-              ref={textareaRef}
-              value={text}
-              placeholder={t("new_chat.placeholder")}
-              rows={2}
-              onChange={(event) => {
-                resizeTextareaToContent(event.currentTarget);
-                setText(event.target.value);
-              }}
-              onInput={(event) => resizeTextareaToContent(event.currentTarget)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
-                  return;
-                }
-                event.preventDefault();
-                if (canSend) void handleSend();
-              }}
-              className="chat-composer-textarea block w-full resize-none bg-transparent px-3.5 py-3.5 text-body leading-5 text-ink/88 placeholder:text-ink/38 outline-none"
-            />
-            <div className="flex h-12 items-center justify-between gap-3 border-b border-ink/5 px-3 pb-2">
-              <div className="flex min-w-0 items-center gap-3">
-                {supportsAttachments && (
-                  <Tooltip content={t("new_chat.add_context")} placement="top">
-                    <button
-                      ref={attachmentButtonRef}
-                      type="button"
-                      onClick={() => setAttachmentMenuOpen((open) => !open)}
-                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink/55 transition hover:bg-ink/8 hover:text-ink"
-                      aria-label={t("new_chat.add_context")}
-                      aria-expanded={attachmentMenuOpen}
-                      aria-haspopup="menu"
-                    >
-                      <Plus className="h-5 w-5" />
-                    </button>
-                  </Tooltip>
-                )}
-                <RuntimeMenuSelect
-                  ariaLabel="Default permissions"
-                  value={permissionMode}
-                  onChange={(value) => void handlePermissionModeChange(value)}
-                  disabled={!selectedRuntimeAgent}
-                  options={permissionOptions}
-                />
-              </div>
-              <div className="flex shrink-0 items-center gap-2.5">
-                <RuntimeMenuSelect
-                  ariaLabel={t("new_chat.agent")}
-                  value={selectedAgentModelValue}
-                  onChange={(value) => void handleAgentModelChange(value)}
-                  disabled={agentModelOptions.length === 0}
-                  options={agentModelOptions}
-                />
-                <NewChatMenuButton icon={Mic} label={t("new_chat.voice")} />
-                <Tooltip content={sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
-                  <button
-                    type="button"
-                    disabled={!canSend}
-                    onClick={() => void handleSend()}
-                    className="flex h-7 w-7 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
-                    aria-label={sending ? t("new_chat.sending") : t("new_chat.send")}
-                  >
-                    <ArrowUp className="h-5 w-5" />
-                  </button>
-                </Tooltip>
-              </div>
-            </div>
-            <div className="flex h-10 items-center gap-2 px-3 text-body-sm text-ink/55">
-              <RuntimeMenuSelect
-                ariaLabel={t("new_chat.project")}
-                value={projectKeyValue}
-                onChange={setProjectKeyValue}
-                disabled={projects.length === 0}
-                options={projects.map((p) => ({
-                  value: p.key,
-                  label: p.label,
-                  icon: <Folder className="h-4 w-4 text-ink/55" />,
-                }))}
-              />
-              <div className="flex min-w-0 max-w-[260px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
-                <InlineMenuSelect
-                  value={selectedKanbanItemId}
-                  options={kanbanItemOptions}
-                  onChange={setSelectedKanbanItemId}
-                  menuAlign="trigger"
-                  placeholder={t("kanban.select_item")}
-                  ariaLabel={t("kanban.select_item")}
-                  className="h-7 max-w-[260px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
-                  menuClassName="bg-surface-panel"
-                  minMenuWidth={220}
-                  emptyContent={t("kanban.no_items")}
-                />
-              </div>
-              <NewChatMenuButton icon={GitBranch} label="main" text />
-            </div>
-          </div>
-          {attachmentMenuOpen && attachmentButtonRef.current && (
-            <ComposerAttachmentMenu
-                anchor={attachmentButtonRef.current}
-                options={attachmentOptions}
-                onClose={() => setAttachmentMenuOpen(false)}
-                onSelect={(key) => {
-                  void pickAttachments(key);
-                }}
-              />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function NewChatMenuButton({
-  icon: Icon,
-  label,
-  text,
-}: {
-  icon: LucideIcon;
-  label: string;
-  text?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      className={
-        "flex min-w-0 items-center gap-1.5 rounded-md py-1 text-body-sm text-ink/55 transition hover:bg-ink/8 hover:text-ink " +
-        (text ? "max-w-[220px] px-1.5" : "h-7 w-7 justify-center px-0")
-      }
-      aria-label={label}
-    >
-      <Icon className="h-4 w-4 shrink-0" />
-      {text && <span className="truncate">{label}</span>}
-      {text && <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-    </button>
-  );
-}
-
-function HeaderMessageMetaButton({
-  label,
-  open,
-  onToggle,
-  compact = false,
-}: {
-  label: string;
-  open: boolean;
-  onToggle: () => void;
-  compact?: boolean;
-}) {
-  const Icon = open ? ListChevronsDownUp : ListChevronsUpDown;
-  return (
-    <div
-      data-tauri-drag-region
-      className={
-        "inline-flex items-center gap-1.5 " +
-        (compact
-          ? "text-caption text-ink/40"
-          : "text-body font-medium text-ink/45")
-      }
-    >
-      <span data-tauri-drag-region className="tabular-nums leading-tight">
-        {label}
-      </span>
-      <button
-        type="button"
-        data-tauri-drag-region="false"
-        onClick={onToggle}
-        className="group -m-1 rounded-md p-1 text-ink/35 transition-colors hover:bg-ink/[0.05] hover:text-ink/65"
-      >
-        <Icon
-          className={
-            "shrink-0 transition-[transform,opacity] duration-200 " +
-            (compact ? "h-3.5 w-3.5" : "h-4 w-4") +
-            (open ? " rotate-0 scale-110" : " rotate-0 scale-100")
-          }
-        />
-      </button>
-    </div>
-  );
-}
-
-function HeaderModeTabs({
-  mode,
-  onChange,
-}: {
-  mode: DetailMode;
-  onChange: (mode: DetailMode) => void;
-}) {
-  const items: { value: DetailMode; label: string }[] = [
-    { value: "chat", label: "Chat" },
-    { value: "memory", label: "Memory" },
-  ];
-  const activeIndex = Math.max(
-    0,
-    items.findIndex((item) => item.value === mode),
-  );
-  const BTN_W = 72;
-  return (
-    <div className="relative flex items-center rounded-md bg-ink/[0.14] p-0.5">
-      <div
-        aria-hidden
-        className="absolute top-0.5 left-0.5 h-[26px] rounded bg-surface shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-transform duration-300 ease-out"
-        style={{
-          width: `${BTN_W}px`,
-          transform: `translateX(${activeIndex * BTN_W}px)`,
-        }}
-      />
-      {items.map(({ value, label }, index) => {
-        const active = index === activeIndex;
-        return (
-          <button
-            key={label}
-            type="button"
-            onClick={() => onChange(value)}
-            style={{ width: `${BTN_W}px` }}
-            className={
-              "relative z-10 h-[26px] flex items-center justify-center rounded text-body-sm leading-none transition-colors duration-150 " +
-              (active ? "text-ink" : "text-ink/55 hover:text-ink/85")
-            }
-          >
-            {label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function ThemeSwitcher({
-  mode,
-  onChange,
-}: {
-  mode: ThemeMode;
-  onChange: (m: ThemeMode) => void;
-}) {
-  const { t } = useI18n();
-  const items: { value: ThemeMode; icon: typeof Sun; label: string }[] = [
-    { value: "light", icon: Sun, label: t("theme.light") },
-    { value: "dark", icon: Moon, label: t("theme.dark") },
-    { value: "system", icon: Monitor, label: t("theme.system") },
-  ];
-  return (
-    <div className="flex items-center gap-0.5 rounded-md bg-ink/[0.04] p-0.5">
-      {items.map(({ value, icon: Icon, label }) => {
-        const active = mode === value;
-        return (
-          <Tooltip key={value} content={label} placement="top">
-            <button
-              type="button"
-              onClick={() => onChange(value)}
-              aria-label={label}
-              className={
-                "p-1 rounded transition " +
-                (active
-                  ? "bg-ink/10 text-ink"
-                  : "text-ink/45 hover:text-ink/80")
-              }
-            >
-              <Icon className="w-3.5 h-3.5" />
-            </button>
-          </Tooltip>
-        );
-      })}
-    </div>
-  );
-}
-
-function LanguageSwitcher({
-  lang,
-  onChange,
-}: {
-  lang: Lang;
-  onChange: (l: Lang) => void;
-}) {
-  const { t } = useI18n();
-  const items: { value: Lang; label: string; tip: string }[] = [
-    { value: "en", label: "EN", tip: t("lang.english") },
-    { value: "zh", label: "中", tip: t("lang.chinese") },
-  ];
-  return (
-    <div className="flex items-center gap-0.5 rounded-md bg-ink/[0.04] p-0.5">
-      {items.map(({ value, label, tip }) => {
-        const active = lang === value;
-        return (
-          <Tooltip key={value} content={tip} placement="top">
-            <button
-              type="button"
-              onClick={() => onChange(value)}
-              aria-label={tip}
-              className={
-                "px-1.5 h-[22px] min-w-[22px] flex items-center justify-center rounded text-caption font-medium leading-none transition " +
-                (active
-                  ? "bg-ink/10 text-ink"
-                  : "text-ink/45 hover:text-ink/80")
-              }
-            >
-              {label}
-            </button>
-          </Tooltip>
-        );
-      })}
-    </div>
+    <AppLayout sidebar={sidebar} header={header} overlays={overlays}>
+      {mainContent}
+    </AppLayout>
   );
 }
