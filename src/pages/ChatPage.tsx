@@ -1037,7 +1037,11 @@ function MessageStream({
               sourceAgent: agent,
               sourceSessionId: sessionId,
               sourceFilePath: filePath,
-              messages: [...ancestorMessages, ...messages],
+              messages: crossContextMessages(
+                ancestorMessages,
+                messages,
+                liveSession,
+              ),
             }),
           ];
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
@@ -1072,7 +1076,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveSession, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -3368,6 +3372,19 @@ function latestMessageTimestamp(messages: SessionMessage[]): number | null {
   return latest;
 }
 
+function crossContextMessages(
+  ancestorMessages: SessionMessage[],
+  currentMessages: SessionMessage[],
+  liveSession: LiveRuntimeSession | null | undefined,
+): SessionMessage[] {
+  const historyMessages = forkVisibleHistoryMessages(ancestorMessages, currentMessages);
+  if (!liveSession || liveSession.turns.length === 0) return historyMessages;
+  return mergeHistoryWithLiveMessages(
+    historyMessages,
+    liveSessionMessages(liveSession),
+  );
+}
+
 function forkVisibleHistoryMessages(
   ancestorMessages: SessionMessage[],
   currentMessages: SessionMessage[],
@@ -3403,6 +3420,53 @@ function normalizedUserMessageText(text: string): string {
   return stripInjectedContext(stripSessioUploadWrapper(text))
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function mergeHistoryWithLiveMessages(
+  historyMessages: SessionMessage[],
+  liveMessages: SessionMessage[],
+): SessionMessage[] {
+  if (historyMessages.length === 0) return liveMessages;
+  if (liveMessages.length === 0) return historyMessages;
+  let overlap = 0;
+  const maxOverlap = Math.min(historyMessages.length, liveMessages.length);
+  for (let count = 1; count <= maxOverlap; count += 1) {
+    const historyTail = historyMessages.slice(-count);
+    const liveHead = liveMessages.slice(0, count);
+    if (historyTail.every((message, index) => sameReplayMessage(message, liveHead[index]))) {
+      overlap = count;
+    }
+  }
+  return [...historyMessages, ...liveMessages.slice(overlap)];
+}
+
+function sameReplayMessage(a: SessionMessage, b: SessionMessage): boolean {
+  return a.role === b.role &&
+    normalizedReplayText(a.text) === normalizedReplayText(b.text);
+}
+
+function normalizedReplayText(text: string): string {
+  return stripInjectedContext(stripSessioUploadWrapper(text))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function liveSessionMessages(liveSession: LiveRuntimeSession): SessionMessage[] {
+  const messages: SessionMessage[] = [];
+  for (const turn of liveSession.turns) {
+    for (const block of turn.blocks) {
+      if (block.kind === "user" || block.kind === "assistant" || block.kind === "thought") {
+        const text = contentBlocksText(block.blocks).trim();
+        if (!text) continue;
+        messages.push({
+          role: block.kind === "thought" ? "thinking" : block.kind,
+          text,
+          timestamp: block.timestamp ?? turn.updatedAt ?? null,
+        });
+      }
+    }
+  }
+  return messages;
 }
 
 type AcpRenderItem =
@@ -4037,7 +4101,7 @@ function appendHistoryMessageToTurn(
 }
 
 function historyUserContentBlocks(text: string): AcpContentBlock[] {
-  const cleaned = stripInjectedContext(text);
+  const cleaned = sanitizeSessioHistoryAttachmentText(stripInjectedContext(text));
   const media = splitMarkdownImages(cleaned);
   const blocks: AcpContentBlock[] = [];
   for (const image of media.images) {
@@ -4070,6 +4134,105 @@ function historyUserContentBlocks(text: string): AcpContentBlock[] {
     blocks.push({ type: "text", text: rest.trim() });
   }
   return blocks.length > 0 ? blocks : [{ type: "text", text: media.text }];
+}
+
+function sanitizeSessioHistoryAttachmentText(text: string): string {
+  const withoutFileLinks = removeFileMarkdownLinks(text);
+  return replaceXmlishBlocks(
+    replaceXmlishBlocks(withoutFileLinks, "sessio-upload-file", (attrs) => {
+      const uri = attrs.uri;
+      const name = attrs.name ?? basenameFromUri(uri ?? "") ?? "attachment";
+      return fileMarker(name, uri);
+    }),
+    "context",
+    (attrs) => fileMarker(basenameFromUri(attrs.ref ?? "") ?? "attachment", attrs.ref),
+  );
+}
+
+function removeFileMarkdownLinks(text: string): string {
+  let out = text;
+  for (;;) {
+    const closeLabel = out.indexOf("](");
+    if (closeLabel < 0) break;
+    const openLabel = out.lastIndexOf("[", closeLabel);
+    if (openLabel < 0) break;
+    const targetStart = closeLabel + 2;
+    const closeTarget = out.indexOf(")", targetStart);
+    if (closeTarget < 0) break;
+    const target = out.slice(targetStart, closeTarget).trim().replace(/^<|>$/g, "");
+    if (!target.startsWith("file://")) {
+      const prefixEnd = closeTarget + 1;
+      out = out.slice(0, prefixEnd) + removeFileMarkdownLinks(out.slice(prefixEnd));
+      break;
+    }
+    out = out.slice(0, openLabel) + out.slice(closeTarget + 1);
+  }
+  return collapseBlankLines(out);
+}
+
+function replaceXmlishBlocks(
+  text: string,
+  tag: string,
+  marker: (attrs: Record<string, string>) => string,
+): string {
+  let out = "";
+  let rest = text;
+  const openPrefix = `<${tag}`;
+  const closeTag = `</${tag}>`;
+  for (;;) {
+    const openStart = rest.indexOf(openPrefix);
+    if (openStart < 0) break;
+    out += rest.slice(0, openStart);
+    const afterOpen = rest.slice(openStart);
+    const openEnd = afterOpen.indexOf(">");
+    if (openEnd < 0) {
+      out += afterOpen;
+      return collapseBlankLines(out);
+    }
+    const afterTag = afterOpen.slice(openEnd + 1);
+    const closeStart = afterTag.indexOf(closeTag);
+    if (closeStart < 0) {
+      out += afterOpen;
+      return collapseBlankLines(out);
+    }
+    out += marker(parseXmlishAttrs(afterOpen.slice(openPrefix.length, openEnd)));
+    rest = afterTag.slice(closeStart + closeTag.length);
+  }
+  out += rest;
+  return collapseBlankLines(out);
+}
+
+function parseXmlishAttrs(input: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const pattern = /([A-Za-z0-9_:-]+)\s*=\s*(["'])(.*?)\2/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(input)) !== null) {
+    attrs[match[1]] = unescapeXmlAttr(match[3]);
+  }
+  return attrs;
+}
+
+function fileMarker(name: string, uri?: string | null): string {
+  const safeName = name.trim() || "attachment";
+  const safeUri = uri?.trim();
+  return safeUri ? `[file: ${safeName}|${safeUri}]` : `[file: ${safeName}]`;
+}
+
+function unescapeXmlAttr(value: string): string {
+  return value
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function collapseBlankLines(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 function historyToolFromMessage(

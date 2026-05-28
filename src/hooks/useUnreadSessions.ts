@@ -85,13 +85,9 @@ export function useUnreadSessions({
   }, [sessions]);
 
   useEffect(() => {
-    const selectedKeys = selected
-      ? sessionUnreadKeys(selected, runtimeSessionAliases)
-      : [];
     if (!selected) return;
-    setUnreadSessionIds((prev) => {
-      return deleteUnreadKeys(prev, selectedKeys);
-    });
+    const selectedKeys = sessionUnreadKeys(selected, runtimeSessionAliases);
+    setUnreadSessionIds((prev) => deleteUnreadKeys(prev, selectedKeys));
   }, [runtimeSessionAliases, selected]);
 
   const handleMessageCount = useCallback((

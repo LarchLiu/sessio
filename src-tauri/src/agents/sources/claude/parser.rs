@@ -4,6 +4,9 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use crate::agents::sources::shared::attachment_text::{
+    sanitize_user_attachment_text, sanitize_user_preview_text,
+};
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::SourceLocation;
 use crate::models::{
@@ -299,9 +302,13 @@ fn expand_message(
         if role_raw == "user" && is_system_noise(s) {
             return Vec::new();
         }
+        let text = sanitize_role_text(role_raw, s.to_string());
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
         return vec![SessionMessage {
             role: role_raw.to_string(),
-            text: s.to_string(),
+            text,
             timestamp: ts,
             tool_call_id: None,
         }];
@@ -314,6 +321,27 @@ fn expand_message(
 
     let mut out = Vec::new();
     let mut text_parts: Vec<String> = Vec::new();
+
+    let flush_text = |out: &mut Vec<SessionMessage>, text_parts: &mut Vec<String>| {
+        if text_parts.is_empty() {
+            return;
+        }
+        let joined = text_parts.join("\n");
+        text_parts.clear();
+        let cleaned = sanitize_role_text(role_raw, joined);
+        if cleaned.trim().is_empty() {
+            return;
+        }
+        if role_raw == "user" && is_system_noise(&cleaned) {
+            return;
+        }
+        out.push(SessionMessage {
+            role: role_raw.to_string(),
+            text: cleaned,
+            timestamp: ts,
+            tool_call_id: None,
+        });
+    };
 
     for item in arr {
         let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -329,19 +357,7 @@ fn expand_message(
                 }
             }
             "thinking" => {
-                if !text_parts.is_empty() {
-                    let joined = text_parts.join("\n");
-                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
-                    {
-                        out.push(SessionMessage {
-                            role: role_raw.to_string(),
-                            text: joined,
-                            timestamp: ts,
-                            tool_call_id: None,
-                        });
-                    }
-                    text_parts.clear();
-                }
+                flush_text(&mut out, &mut text_parts);
                 if let Some(t) = item.get("thinking").and_then(|x| x.as_str()) {
                     if !t.trim().is_empty() {
                         out.push(SessionMessage {
@@ -354,19 +370,7 @@ fn expand_message(
                 }
             }
             "reasoning" => {
-                if !text_parts.is_empty() {
-                    let joined = text_parts.join("\n");
-                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
-                    {
-                        out.push(SessionMessage {
-                            role: role_raw.to_string(),
-                            text: joined,
-                            timestamp: ts,
-                            tool_call_id: None,
-                        });
-                    }
-                    text_parts.clear();
-                }
+                flush_text(&mut out, &mut text_parts);
                 let reasoning_text = item
                     .get("reasoning")
                     .or_else(|| item.get("thinking"))
@@ -384,19 +388,7 @@ fn expand_message(
                 }
             }
             "tool_use" => {
-                if !text_parts.is_empty() {
-                    let joined = text_parts.join("\n");
-                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
-                    {
-                        out.push(SessionMessage {
-                            role: role_raw.to_string(),
-                            text: joined,
-                            timestamp: ts,
-                            tool_call_id: None,
-                        });
-                    }
-                    text_parts.clear();
-                }
+                flush_text(&mut out, &mut text_parts);
                 let name = item.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
                 if matches!(name, "Write" | "Edit" | "MultiEdit") {
                     if let Some(id) = item.get("id").and_then(|x| x.as_str()) {
@@ -455,19 +447,7 @@ fn expand_message(
                 });
             }
             "tool_result" => {
-                if !text_parts.is_empty() {
-                    let joined = text_parts.join("\n");
-                    if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined))
-                    {
-                        out.push(SessionMessage {
-                            role: role_raw.to_string(),
-                            text: joined,
-                            timestamp: ts,
-                            tool_call_id: None,
-                        });
-                    }
-                    text_parts.clear();
-                }
+                flush_text(&mut out, &mut text_parts);
                 let body = extract_tool_result_text(item);
                 if !body.trim().is_empty() {
                     let tool_use_id = item
@@ -501,19 +481,17 @@ fn expand_message(
         }
     }
 
-    if !text_parts.is_empty() {
-        let joined = text_parts.join("\n");
-        if !(joined.trim().is_empty() || role_raw == "user" && is_system_noise(&joined)) {
-            out.push(SessionMessage {
-                role: role_raw.to_string(),
-                text: joined,
-                timestamp: ts,
-                tool_call_id: None,
-            });
-        }
-    }
+    flush_text(&mut out, &mut text_parts);
 
     out
+}
+
+fn sanitize_role_text(role_raw: &str, text: String) -> String {
+    if role_raw == "user" {
+        sanitize_user_attachment_text(&text)
+    } else {
+        text
+    }
 }
 
 fn extract_tool_result_text(item: &serde_json::Value) -> String {
@@ -860,7 +838,7 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
         let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
         if kind == "user" && first_user_message.is_none() {
             if let Some(msg) = v.get("message") {
-                let text = extract_message_text(msg);
+                let text = sanitize_user_preview_text(&extract_message_text(msg));
                 if !text.trim().is_empty() && !is_system_noise(&text) {
                     let cleaned = strip_injected_context(&text);
                     if !cleaned.is_empty() {
@@ -1518,5 +1496,76 @@ mod tests {
             edit.get("newContent").and_then(|x| x.as_str()),
             Some("new\nline\nmore")
         );
+    }
+
+    #[test]
+    fn expand_message_replaces_cross_context_attachment_with_file_marker() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "不错，写入md文档" },
+                {
+                    "type": "text",
+                    "text": "[@sessio-cross-context-abc.md](file:///tmp/.cross-context/sessio-cross-context-abc.md)"
+                },
+                {
+                    "type": "text",
+                    "text": "\n<context ref=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\">\n<sessio-upload-file uri=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\" name=\"sessio-cross-context-abc.md\" mimeType=\"text/markdown\">\n# Continued session from agent\n[user]\nhi\n</sessio-upload-file>\n</context>"
+                }
+            ]
+        });
+        let mut edits = HashMap::new();
+        let out = expand_message("user", &msg, Some(1), &mut edits, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "user");
+        assert!(out[0].text.contains("不错，写入md文档"));
+        assert!(out[0]
+            .text
+            .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"));
+        assert!(!out[0].text.contains("<sessio-upload-file"));
+        assert!(!out[0].text.contains("Continued session from agent"));
+    }
+
+    #[test]
+    fn parse_session_first_user_message_strips_cross_context_attachment_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-cross-context-preview-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("cross-context-preview-session.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "cwd": "/tmp/project",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "不错，写入md文档" },
+                    {
+                        "type": "text",
+                        "text": "[@sessio-cross-context-abc.md](file:///tmp/.cross-context/sessio-cross-context-abc.md)"
+                    },
+                    {
+                        "type": "text",
+                        "text": "\n<context ref=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\">\n<sessio-upload-file uri=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\" name=\"sessio-cross-context-abc.md\" mimeType=\"text/markdown\">\n# Continued session from agent\n[user]\nhi\n</sessio-upload-file>\n</context>"
+                    }
+                ]
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let info = parse_session(&path).unwrap().unwrap();
+        let preview = info.first_user_message.as_deref().unwrap_or("");
+        assert!(preview.contains("不错，写入md文档"), "preview should keep user text: {preview}");
+        assert!(!preview.contains("sessio-upload-file"), "preview should drop attachment tag: {preview}");
+        assert!(!preview.contains("Continued session from agent"), "preview should drop replayed body: {preview}");
+        assert!(!preview.contains("sessio-cross-context-abc.md"), "preview should drop attachment link: {preview}");
     }
 }
