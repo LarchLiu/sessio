@@ -1,4 +1,4 @@
-import type { Agent, RuntimeAgentMetadata } from "../api";
+import type { Agent, RuntimeAgentMetadata, RuntimeAgentOptionMetadata } from "../api";
 import { AgentGlyph } from "./AgentIcon";
 import type { InlineMenuSelectGroup, InlineMenuSelectOption } from "./InlineMenuSelect";
 
@@ -14,12 +14,15 @@ export function agentSelectOptions(
 
 export function agentModelSelectOptions(
   runtimeAgents: RuntimeAgentMetadata[],
+  effortControls: Partial<Record<Agent, InlineMenuSelectGroup["control"]>> = {},
+  selectedEfforts: Partial<Record<Agent, string>> = {},
 ): InlineMenuSelectOption[] {
   return runtimeAgents.flatMap((runtimeAgent) => {
     const group: InlineMenuSelectGroup = {
       value: runtimeAgent.agent,
       label: agentLabel(runtimeAgent.agent),
       icon: <AgentGlyph agent={runtimeAgent.agent} className="h-3.5 w-3.5" />,
+      control: effortControls[runtimeAgent.agent],
     };
     const models =
       runtimeAgent.models.length > 0
@@ -30,6 +33,7 @@ export function agentModelSelectOptions(
       .map((model) => ({
         value: agentModelSelectValue(runtimeAgent.agent, model.value),
         label: model.label || model.value,
+        suffix: effortLabel(runtimeAgent, selectedEfforts[runtimeAgent.agent]),
         icon: <AgentGlyph agent={runtimeAgent.agent} className="h-3.5 w-3.5" />,
         menuIcon: null,
         group,
@@ -59,6 +63,24 @@ export function parseAgentModelSelectValue(
     }
     return null;
   }
+}
+
+export function initialRuntimeEffort(agent: RuntimeAgentMetadata | null): string {
+  return agent?.effort ?? agent?.efforts[0]?.value ?? "";
+}
+
+export function runtimeEffortOptions(agent: RuntimeAgentMetadata | null): RuntimeAgentOptionMetadata[] {
+  if (!agent) return [];
+  if (agent.efforts.length > 0) return agent.efforts;
+  return agent.effort ? [{ value: agent.effort, label: agent.effort }] : [];
+}
+
+function effortLabel(agent: RuntimeAgentMetadata, selectedEffort: string | undefined): string | undefined {
+  const effort = selectedEffort ?? initialRuntimeEffort(agent);
+  if (!effort) return undefined;
+  const options = runtimeEffortOptions(agent);
+  if (options.length <= 1) return undefined;
+  return options.find((option) => option.value === effort)?.label || effort;
 }
 
 function agentLabel(agent: Agent): string {

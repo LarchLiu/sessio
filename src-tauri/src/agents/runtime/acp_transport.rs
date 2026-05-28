@@ -557,6 +557,7 @@ async fn run_session(
                     }
                 };
                 apply_initial_session_config(
+                    agent,
                     &manager,
                     &sessio_runtime_session_id,
                     &connection,
@@ -612,6 +613,12 @@ fn new_session_request(
             serde_json::Value::String(permission_mode.to_string()),
         );
     }
+    if let Some(effort) = config.effort.as_deref() {
+        options.insert(
+            "effort".to_string(),
+            serde_json::Value::String(effort.to_string()),
+        );
+    }
     if options.is_empty() {
         return request;
     }
@@ -627,6 +634,7 @@ fn new_session_request(
 }
 
 async fn apply_initial_session_config(
+    agent: Agent,
     manager: &RuntimeManager,
     sessio_runtime_session_id: &str,
     connection: &ConnectionTo<AcpAgentRole>,
@@ -674,7 +682,35 @@ async fn apply_initial_session_config(
             );
         }
     }
+    if let Some(effort) = config.effort.as_deref() {
+        let config_id = effort_config_id(agent);
+        if let Err(error) = send_session_config_request(
+            manager,
+            sessio_runtime_session_id,
+            connection,
+            acp_session_id,
+            None,
+            config_id,
+            serde_json::Value::String(effort.to_string()),
+        )
+        .await
+        {
+            log::warn!(
+                "[sessio-runtime:acp:initial-config-failed] session={} config={} value={} error={error}",
+                sessio_runtime_session_id,
+                config_id,
+                effort
+            );
+        }
+    }
     Ok(())
+}
+
+fn effort_config_id(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "reasoning_effort",
+        Agent::Claude | Agent::Gemini => "effort",
+    }
 }
 
 async fn send_session_config_request(
@@ -1234,6 +1270,8 @@ mod tests {
                 transport: Some("acp".to_string()),
                 model: Some("gpt-5".to_string()),
                 models: Vec::new(),
+                effort: None,
+                efforts: Vec::new(),
                 permission_mode: Some("on-request".to_string()),
                 permission_modes: Vec::new(),
                 sandbox: Some("workspace-write".to_string()),
@@ -1309,6 +1347,16 @@ mod tests {
     }
 
     #[test]
+    fn codex_effort_uses_reasoning_effort_config_id() {
+        assert_eq!(effort_config_id(Agent::Codex), "reasoning_effort");
+    }
+
+    #[test]
+    fn claude_effort_uses_effort_config_id() {
+        assert_eq!(effort_config_id(Agent::Claude), "effort");
+    }
+
+    #[test]
     fn claude_config_keeps_acp_adapter_command_clean() {
         let command = command_from_config(
             Agent::Claude,
@@ -1317,6 +1365,8 @@ mod tests {
                 transport: Some("acp".to_string()),
                 model: Some("sonnet".to_string()),
                 models: Vec::new(),
+                effort: None,
+                efforts: Vec::new(),
                 permission_mode: Some("acceptEdits".to_string()),
                 permission_modes: Vec::new(),
                 sandbox: Some("ignored-for-claude".to_string()),

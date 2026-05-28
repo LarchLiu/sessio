@@ -669,7 +669,12 @@ function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMe
     case "current_mode":
       return { ...state, currentModeId: stringField(update, "currentModeId") };
     case "config_options":
-      return { ...state, configOptions: arrayField(update, "configOptions").map(normalizeSessionConfigOption) };
+      return {
+        ...state,
+        configOptions: dedupeSessionConfigOptions(
+          arrayField(update, "configOptions").map(normalizeSessionConfigOption),
+        ),
+      };
     case "session_info":
       return { ...state, sessionInfo: normalizeSessionInfo(update) };
     default:
@@ -690,7 +695,7 @@ function sessionResponseState(message: AcpProtocolMessage): Partial<AcpSessionSt
   const options = [modes, models, ...configOptions].filter(
     (option): option is AcpSessionConfigOption => Boolean(option),
   );
-  if (options.length > 0) next.configOptions = options;
+  if (options.length > 0) next.configOptions = dedupeSessionConfigOptions(options);
   if (modes) next.currentModeId = String(modes.currentValue ?? "") || null;
   if (data.sessionId || data.session_id) {
     next.sessionInfo = normalizeSessionInfo({
@@ -716,6 +721,26 @@ function mergeSessionState(
     sessionInfo:
       patch.sessionInfo !== undefined ? patch.sessionInfo : state.sessionInfo,
   };
+}
+
+function dedupeSessionConfigOptions(options: AcpSessionConfigOption[]): AcpSessionConfigOption[] {
+  const seen = new Set<string>();
+  const out: AcpSessionConfigOption[] = [];
+  for (const option of options) {
+    const key = sessionConfigOptionIdentity(option);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(option);
+  }
+  return out;
+}
+
+function sessionConfigOptionIdentity(option: AcpSessionConfigOption): string {
+  const id = option.id?.trim();
+  if (id) return `id:${id}`;
+  const category = option.category?.trim();
+  if (category) return `category:${category}`;
+  return `name:${option.name.trim()}`;
 }
 
 function normalizeModeConfigOption(value: unknown): AcpSessionConfigOption | null {

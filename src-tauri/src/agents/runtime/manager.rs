@@ -863,6 +863,12 @@ fn apply_session_options(
     if let Some(model) = option_string(options, "model") {
         config.model = Some(model);
     }
+    if let Some(effort) = option_string(options, "effort")
+        .or_else(|| option_string(options, "reasoningEffort"))
+        .or_else(|| option_string(options, "reasoning_effort"))
+    {
+        config.effort = Some(effort);
+    }
     if let Some(permission_mode) = option_string(options, "permissionMode")
         .or_else(|| option_string(options, "permission_mode"))
     {

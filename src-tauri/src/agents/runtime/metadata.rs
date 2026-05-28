@@ -44,6 +44,8 @@ pub fn configured_runtime_agents() -> Result<Vec<RuntimeAgentMetadata>> {
             transport: transport_from_runtime_config(runtime),
             model: runtime.model.clone(),
             models: runtime_options_metadata(&runtime.models, runtime.model.as_deref()),
+            effort: runtime.effort.clone(),
+            efforts: runtime_options_metadata(&runtime.efforts, runtime.effort.as_deref()),
             permission_mode: runtime_permission_mode(agent, runtime.permission_mode.as_deref()),
             permission_modes: runtime_permission_options_metadata(
                 agent,
@@ -141,6 +143,11 @@ pub fn startup_probe_runtime_agents(
             models: runtime_options_metadata(
                 &runtime_config.models,
                 runtime_config.model.as_deref(),
+            ),
+            effort: runtime_config.effort.clone(),
+            efforts: runtime_options_metadata(
+                &runtime_config.efforts,
+                runtime_config.effort.as_deref(),
             ),
             permission_mode: runtime_permission_mode(
                 agent,

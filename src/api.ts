@@ -158,6 +158,8 @@ export interface RuntimeAgentMetadata {
   transport: RuntimeTransportKind;
   model: string | null;
   models: RuntimeAgentOptionMetadata[];
+  effort: string | null;
+  efforts: RuntimeAgentOptionMetadata[];
   permissionMode: string | null;
   permissionModes: RuntimeAgentOptionMetadata[];
   sessionCommand: string | null;
@@ -179,8 +181,10 @@ export interface RuntimeAgentOptionMetadata {
 export interface UpdateRuntimeAgentPreferencesRequest {
   agent: Agent;
   model?: string | null;
+  effort?: string | null;
   permissionMode?: string | null;
   models?: RuntimeAgentOptionMetadata[];
+  efforts?: RuntimeAgentOptionMetadata[];
   permissionModes?: RuntimeAgentOptionMetadata[];
 }
 

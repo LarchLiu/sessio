@@ -5,6 +5,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { Search, PanelLeftClose, PanelLeftOpen, Folder, FolderOpen, Sun, Moon, Monitor, ChevronDown, RefreshCw, LoaderCircle, Settings, X, Download, Skull, ListChevronsDownUp, ListChevronsUpDown, Key, CircleAlert, MailPlus, Plus, ArrowUp, Mic, GitBranch, FolderPlus, Kanban, SquareKanban, SquarePen, Trash2, Pencil, Save, Link2, Unlink, Send, CircleDashed, CircleDot, CircleSlash, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -61,7 +62,9 @@ import { AgentGlyph } from "./components/AgentIcon";
 import {
   agentModelSelectOptions,
   agentModelSelectValue,
+  initialRuntimeEffort,
   parseAgentModelSelectValue,
+  runtimeEffortOptions,
 } from "./components/AgentSelect";
 import ScrollArea from "./components/ScrollArea";
 import ConfirmPopover from "./components/ConfirmPopover";
@@ -73,7 +76,7 @@ import {
 } from "./components/ComposerAttachments";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./components/InlineMenuSelect";
 import PopupMenu, { type PopupMenuOption } from "./components/PopupMenu";
-import { RuntimeMenuSelect, runtimePermissionModeOptions } from "./components/RuntimeMenuSelect";
+import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "./components/RuntimeMenuSelect";
 import Tooltip from "./components/Tooltip";
 import WindowControls from "./components/WindowControls";
 import { ThemeMode, useTheme } from "./theme";
@@ -162,10 +165,11 @@ function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
   return agent?.permissionMode ?? agent?.permissionModes[0]?.value ?? "";
 }
 
-function runtimeSessionOptions(model: string, permissionMode: string): Record<string, unknown> {
+function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
   return {
     transport: "acp",
     ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
   };
 }
@@ -2754,10 +2758,37 @@ function KanbanCard({
     () => new Set(item.sessions.map(sessionIdentityKey)),
     [item.sessions],
   );
-  const agentModelOptions = useMemo(() => agentModelSelectOptions(runtimeAgents), [runtimeAgents]);
   const selectedKanbanRuntimeAgent =
     runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
   const [model, setModel] = useState(() => initialRuntimeModel(runtimeAgents[0] ?? null));
+  const [effort, setEffort] = useState(() => initialRuntimeEffort(runtimeAgents[0] ?? null));
+  const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
+    if (targetAgent === agent) setEffort(nextValue);
+    try {
+      await updateRuntimeAgentPreferences({ agent: targetAgent, effort: nextValue });
+    } catch (err) {
+      onError(String(err));
+    }
+  }, [agent, onError]);
+  const agentModelOptions = useMemo(
+    () =>
+      agentModelSelectOptions(
+        runtimeAgents,
+        Object.fromEntries(
+          runtimeAgents.map((runtimeAgent) => [
+            runtimeAgent.agent,
+            <RuntimeEffortControl
+              value={runtimeAgent.agent === agent ? effort : initialRuntimeEffort(runtimeAgent)}
+              options={runtimeEffortOptions(runtimeAgent)}
+              onChange={(value) => void handleEffortChange(runtimeAgent.agent, value)}
+              disabled={sending}
+            />,
+          ]),
+        ) as Partial<Record<Agent, ReactNode>>,
+        { [agent]: effort },
+      ),
+    [agent, effort, handleEffortChange, runtimeAgents, sending],
+  );
   const selectedAgentModelValue = agentModelSelectValue(agent, model);
   const availableSessionOptions = useMemo(
     () =>
@@ -2785,15 +2816,19 @@ function KanbanCard({
     if (!next) return;
     setAgent(next.agent);
     setModel(initialRuntimeModel(next));
+    setEffort(initialRuntimeEffort(next));
   }, [agent, agentModelOptions, runtimeAgents, selectedAgentModelValue]);
 
   useEffect(() => {
     if (!selectedKanbanRuntimeAgent) return;
     if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
     setModel(initialRuntimeModel(selectedKanbanRuntimeAgent));
+    setEffort(initialRuntimeEffort(selectedKanbanRuntimeAgent));
   }, [
     agentModelOptions,
     selectedAgentModelValue,
+    selectedKanbanRuntimeAgent?.effort,
+    selectedKanbanRuntimeAgent?.efforts,
     selectedKanbanRuntimeAgent?.agent,
     selectedKanbanRuntimeAgent?.model,
   ]);
@@ -2863,7 +2898,7 @@ function KanbanCard({
       const handle = await startAgentSession({
         agent,
         workspacePath: project.path,
-        options: runtimeSessionOptions(model, ""),
+        options: runtimeSessionOptions(model, "", effort),
       });
       const timestamp = Date.now();
       const localTurnId = `local-turn-${timestamp}`;
@@ -2943,6 +2978,9 @@ function KanbanCard({
                   if (!parsed) return;
                   setAgent(parsed.agent);
                   setModel(parsed.model);
+                  const targetRuntimeAgent =
+                    runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === parsed.agent) ?? null;
+                  setEffort(initialRuntimeEffort(targetRuntimeAgent));
                 }}
                 disabled={agentModelOptions.length === 0 || sending}
                 options={agentModelOptions}
@@ -3082,6 +3120,7 @@ function NewChatView({
     () => runtimeAgents[0]?.agent ?? "codex",
   );
   const [model, setModel] = useState(() => initialRuntimeModel(runtimeAgents[0] ?? null));
+  const [effort, setEffort] = useState(() => initialRuntimeEffort(runtimeAgents[0] ?? null));
   const [permissionMode, setPermissionMode] = useState(() =>
     initialRuntimePermission(runtimeAgents[0] ?? null),
   );
@@ -3096,10 +3135,38 @@ function NewChatView({
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
   const projectId = project?.project.id ?? null;
-  const agentModelOptions = agentModelSelectOptions(runtimeAgents);
   const selectedAgentModelValue = agentModelSelectValue(agent, model);
   const selectedRuntimeAgent =
     runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
+  const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
+    if (targetAgent === agent) setEffort(nextValue);
+    try {
+      await updateRuntimeAgentPreferences({ agent: targetAgent, effort: nextValue });
+    } catch (err) {
+      const message = String(err);
+      setComposerError(message);
+      onError(message);
+    }
+  }, [agent, onError]);
+  const agentModelOptions = useMemo(
+    () =>
+      agentModelSelectOptions(
+        runtimeAgents,
+        Object.fromEntries(
+          runtimeAgents.map((runtimeAgent) => [
+            runtimeAgent.agent,
+            <RuntimeEffortControl
+              value={runtimeAgent.agent === agent ? effort : initialRuntimeEffort(runtimeAgent)}
+              options={runtimeEffortOptions(runtimeAgent)}
+              onChange={(value) => void handleEffortChange(runtimeAgent.agent, value)}
+              disabled={sending}
+            />,
+          ]),
+        ) as Partial<Record<Agent, ReactNode>>,
+        { [agent]: effort },
+      ),
+    [agent, effort, handleEffortChange, runtimeAgents, sending],
+  );
   const permissionOptions = runtimePermissionModeOptions(
     selectedRuntimeAgent?.permissionModes ?? [],
     permissionMode,
@@ -3171,6 +3238,7 @@ function NewChatView({
     if (!next) return;
     setAgent(next.agent);
     setModel(initialRuntimeModel(next));
+    setEffort(initialRuntimeEffort(next));
     setPermissionMode(initialRuntimePermission(next));
   }, [agent, agentModelOptions, runtimeAgents, selectedAgentModelValue]);
 
@@ -3246,6 +3314,7 @@ function NewChatView({
     if (!targetRuntimeAgent) return;
     setAgent(parsed.agent);
     setModel(parsed.model);
+    setEffort(initialRuntimeEffort(targetRuntimeAgent));
     setPermissionMode(initialRuntimePermission(targetRuntimeAgent));
     try {
       await updateRuntimeAgentPreferences({ agent: parsed.agent, model: parsed.model });
@@ -3286,7 +3355,7 @@ function NewChatView({
       const handle = await startAgentSession({
         agent,
         workspacePath,
-        options: runtimeSessionOptions(model, permissionMode),
+        options: runtimeSessionOptions(model, permissionMode, effort),
       });
       const timestamp = Date.now();
       const localTurnId = `local-turn-${timestamp}`;

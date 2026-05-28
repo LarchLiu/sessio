@@ -48,8 +48,10 @@ struct RuntimeAgentOptionInput {
 struct UpdateRuntimeAgentPreferencesRequest {
     agent: Agent,
     model: Option<String>,
+    effort: Option<String>,
     permission_mode: Option<String>,
     models: Option<Vec<RuntimeAgentOptionInput>>,
+    efforts: Option<Vec<RuntimeAgentOptionInput>>,
     permission_modes: Option<Vec<RuntimeAgentOptionInput>>,
 }
 
@@ -946,9 +948,19 @@ fn update_runtime_agent_preferences(
 ) -> Result<models::RuntimeAgentMetadata, String> {
     let update = config::AgentRuntimePreferencesUpdate {
         model: req.model,
+        effort: req.effort,
         permission_mode: req.permission_mode,
         models: req
             .models
+            .unwrap_or_default()
+            .into_iter()
+            .map(|option| config::AgentRuntimeOptionConfig {
+                value: option.value,
+                label: option.label,
+            })
+            .collect(),
+        efforts: req
+            .efforts
             .unwrap_or_default()
             .into_iter()
             .map(|option| config::AgentRuntimeOptionConfig {

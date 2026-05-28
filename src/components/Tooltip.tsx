@@ -103,7 +103,7 @@ export default function Tooltip({
 
   const setAnchor = (el: HTMLElement | null) => {
     anchorRef.current = el;
-    const orig = (children as { ref?: Ref<HTMLElement> }).ref;
+    const orig = (children.props as { ref?: Ref<HTMLElement> }).ref;
     if (typeof orig === "function") orig(el);
     else if (orig && typeof orig === "object" && "current" in orig) {
       (orig as { current: HTMLElement | null }).current = el;

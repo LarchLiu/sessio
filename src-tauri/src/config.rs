@@ -38,6 +38,8 @@ pub struct AgentRuntimeConfig {
     pub transport: Option<String>,
     pub model: Option<String>,
     pub models: Vec<AgentRuntimeOptionConfig>,
+    pub effort: Option<String>,
+    pub efforts: Vec<AgentRuntimeOptionConfig>,
     pub permission_mode: Option<String>,
     pub permission_modes: Vec<AgentRuntimeOptionConfig>,
     pub sandbox: Option<String>,
@@ -111,6 +113,8 @@ struct RawAgentRuntimeConfig {
     transport: Option<String>,
     model: Option<String>,
     models: Option<String>,
+    effort: Option<String>,
+    efforts: Option<String>,
     permission_mode: Option<String>,
     permission_modes: Option<String>,
     sandbox: Option<String>,
@@ -185,11 +189,17 @@ pub fn update_agent_runtime_preferences(
     if let Some(model) = normalize_optional_string(update.model) {
         runtime.model = Some(model);
     }
+    if let Some(effort) = normalize_optional_string(update.effort) {
+        runtime.effort = Some(effort);
+    }
     if let Some(permission_mode) = normalize_optional_string(update.permission_mode) {
         runtime.permission_mode = Some(permission_mode);
     }
     for option in update.models {
         upsert_runtime_option(&mut runtime.models, option);
+    }
+    for option in update.efforts {
+        upsert_runtime_option(&mut runtime.efforts, option);
     }
     for option in update.permission_modes {
         upsert_runtime_option(&mut runtime.permission_modes, option);
@@ -201,8 +211,10 @@ pub fn update_agent_runtime_preferences(
 #[derive(Debug, Clone, Default)]
 pub struct AgentRuntimePreferencesUpdate {
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub permission_mode: Option<String>,
     pub models: Vec<AgentRuntimeOptionConfig>,
+    pub efforts: Vec<AgentRuntimeOptionConfig>,
     pub permission_modes: Vec<AgentRuntimeOptionConfig>,
 }
 
@@ -274,6 +286,8 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                     "transport" => target.transport = value,
                     "model" => target.model = value,
                     "models" => target.models = value,
+                    "effort" => target.effort = value,
+                    "efforts" => target.efforts = value,
                     "permission_mode" => target.permission_mode = value,
                     "permission_modes" => target.permission_modes = value,
                     "sandbox" => target.sandbox = value,
@@ -544,6 +558,8 @@ fn merge_raw_agent_runtime_defaults(
     merge_option(&mut target.transport, defaults.transport, changed);
     merge_option(&mut target.model, defaults.model, changed);
     merge_runtime_options_string(&mut target.models, defaults.models, changed)?;
+    merge_option(&mut target.effort, defaults.effort, changed);
+    merge_runtime_options_string(&mut target.efforts, defaults.efforts, changed)?;
     merge_option(
         &mut target.permission_mode,
         defaults.permission_mode,
@@ -637,6 +653,8 @@ fn resolve_agent_runtime_config(raw: RawAgentRuntimeConfig) -> Result<AgentRunti
         transport,
         model: raw.model.filter(|value| !value.trim().is_empty()),
         models: parse_runtime_options(raw.models.as_deref())?,
+        effort: raw.effort.filter(|value| !value.trim().is_empty()),
+        efforts: parse_runtime_options(raw.efforts.as_deref())?,
         permission_mode: raw.permission_mode.filter(|value| !value.trim().is_empty()),
         permission_modes: parse_runtime_options(raw.permission_modes.as_deref())?,
         sandbox: raw.sandbox.filter(|value| !value.trim().is_empty()),
@@ -823,6 +841,8 @@ fn default_agents_config() -> AgentsConfig {
                     runtime_option_config("gpt-5.4", "5.4"),
                     runtime_option_config("gpt-5.3-codex", "5.3 Codex"),
                 ],
+                effort: None,
+                efforts: Vec::new(),
                 permission_mode: Some("read-only".to_string()),
                 permission_modes: vec![
                     runtime_option_config("read-only", "Default permissions"),
@@ -843,6 +863,8 @@ fn default_agents_config() -> AgentsConfig {
                     runtime_option_config("claude-opus-4-7", "Opus 4.7"),
                     runtime_option_config("claude-opus-4-6", "Opus 4.6"),
                 ],
+                effort: None,
+                efforts: Vec::new(),
                 permission_mode: Some("default".to_string()),
                 permission_modes: vec![
                     runtime_option_config("default", "Ask before edits"),
@@ -863,6 +885,8 @@ fn default_agents_config() -> AgentsConfig {
                 transport: Some("acp".to_string()),
                 model: None,
                 models: Vec::new(),
+                effort: None,
+                efforts: Vec::new(),
                 permission_mode: None,
                 permission_modes: Vec::new(),
                 sandbox: None,
@@ -948,6 +972,8 @@ fn serialize_agents_config(config: &AgentsConfig) -> String {
             && runtime.transport.is_none()
             && runtime.model.is_none()
             && runtime.models.is_empty()
+            && runtime.effort.is_none()
+            && runtime.efforts.is_empty()
             && runtime.permission_mode.is_none()
             && runtime.permission_modes.is_empty()
             && runtime.sandbox.is_none()
@@ -975,6 +1001,16 @@ fn serialize_agents_config(config: &AgentsConfig) -> String {
         if !runtime.models.is_empty() {
             out.push_str("models = ");
             out.push_str(&toml_string(&serialize_runtime_options(&runtime.models)));
+            out.push('\n');
+        }
+        if let Some(effort) = &runtime.effort {
+            out.push_str("effort = ");
+            out.push_str(&toml_string(effort));
+            out.push('\n');
+        }
+        if !runtime.efforts.is_empty() {
+            out.push_str("efforts = ");
+            out.push_str(&toml_string(&serialize_runtime_options(&runtime.efforts)));
             out.push('\n');
         }
         if let Some(permission_mode) = &runtime.permission_mode {

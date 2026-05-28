@@ -1,5 +1,6 @@
-import { Hand, ScrollText, ShieldAlert, ShieldEllipsis, SquarePen } from "lucide-react";
-import type { Agent } from "../api";
+import { Hand, ScrollText, ShieldAlert, ShieldEllipsis } from "lucide-react";
+import CodeXmlIcon from '@iconify-react/material-symbols/code-xml';
+import type { Agent, RuntimeAgentOptionMetadata } from "../api";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./InlineMenuSelect";
 
 export interface RuntimeMenuSelectProps {
@@ -81,7 +82,7 @@ function runtimePermissionModeIcon(agent: Agent | null | undefined, value: strin
       case "default":
         return <Hand className={className} />;
       case "acceptEdits":
-        return <SquarePen className={className} />;
+        return <CodeXmlIcon className={className} />;
       case "plan":
         return <ScrollText className={className} />;
       case "dontAsk":
@@ -89,4 +90,59 @@ function runtimePermissionModeIcon(agent: Agent | null | undefined, value: strin
     }
   }
   return <Hand className={className} />;
+}
+
+export function RuntimeEffortControl({
+  value,
+  options,
+  onChange,
+  disabled = false,
+}: {
+  value: string;
+  options: RuntimeAgentOptionMetadata[];
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}) {
+  const visible = options.filter((option) => option.value.trim().length > 0);
+  if (visible.length <= 1) return null;
+  const selectedIndex = Math.max(0, visible.findIndex((option) => option.value === value));
+  return (
+    <div
+      className={
+        "relative flex h-4 items-center rounded-full bg-ink/10 px-0.5 " +
+        (disabled ? "opacity-45" : "")
+      }
+      role="radiogroup"
+      aria-label="Reasoning effort"
+      style={{ width: Math.max(34, visible.length * 11) }}
+    >
+      <span
+        className="absolute top-0.5 h-3 rounded-full bg-ink/70 transition-all"
+        style={{
+          width: `${100 / visible.length}%`,
+          left: `${(selectedIndex * 100) / visible.length}%`,
+        }}
+      />
+      {visible.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          disabled={disabled}
+          role="radio"
+          aria-checked={option.value === value}
+          aria-label={option.label || option.value}
+          title={option.label || option.value}
+          onClick={() => onChange(option.value)}
+          className="relative z-10 flex h-4 flex-1 items-center justify-center rounded-full disabled:cursor-not-allowed"
+        >
+          <span
+            className={
+              "h-1 w-1 rounded-full transition " +
+              (option.value === value ? "bg-bg-panel/80" : "bg-ink/30")
+            }
+          />
+        </button>
+      ))}
+    </div>
+  );
 }

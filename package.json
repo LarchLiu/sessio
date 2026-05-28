@@ -36,6 +36,7 @@
     "bundle": "tauri build"
   },
   "dependencies": {
+    "@iconify-react/material-symbols": "^1.0.16",
     "@lobehub/icons": "^5.8.0",
     "@pierre/diffs": "^1.1.22",
     "@tauri-apps/api": "^2.4.0",

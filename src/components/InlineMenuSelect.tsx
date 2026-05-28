@@ -20,6 +20,7 @@ type MenuPosition = { top: number; left: number; width: number };
 export interface InlineMenuSelectOption {
   value: string;
   label: string;
+  suffix?: string;
   icon?: ReactNode;
   menuIcon?: ReactNode;
   disabled?: boolean;
@@ -29,7 +30,9 @@ export interface InlineMenuSelectOption {
 export interface InlineMenuSelectGroup {
   value: string;
   label: string;
+  subtitle?: string;
   icon?: ReactNode;
+  control?: ReactNode;
 }
 
 export interface InlineMenuSelectProps {
@@ -101,7 +104,7 @@ export default function InlineMenuSelect({
     );
     const maxLeft = Math.max(MENU_MARGIN, vw - width - MENU_MARGIN);
     const measuredMenuHeight = menuRef.current?.offsetHeight ?? 0;
-    const estimatedMenuHeight = estimatedRowCount > 0 ? estimatedRowCount * 32 + 8 : 40;
+    const estimatedMenuHeight = estimatedRowCount > 0 ? estimatedRowCount * 34 + 8 : 40;
     const menuHeight = Math.min(
       MENU_MAX_HEIGHT,
       Math.max(32, measuredMenuHeight || estimatedMenuHeight),
@@ -183,12 +186,19 @@ export default function InlineMenuSelect({
         aria-label={ariaLabel}
         onClick={() => setOpen((v) => !v)}
         className={
-          "inline-flex h-7 max-w-[128px] shrink-0 items-center gap-1 border-r border-ink/10 pr-2 text-body-sm text-ink/70 outline-none hover:text-ink transition " +
+          "group inline-flex h-7 max-w-[128px] shrink-0 items-center gap-1 border-r border-ink/10 pr-2 text-body-sm text-ink/70 outline-none hover:text-ink transition " +
           className
         }
       >
         {selectedIcon && <span className="shrink-0">{selectedIcon}</span>}
-        <span className="min-w-0 flex-1 truncate">{selected?.label ?? placeholder ?? ""}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {selected?.label ?? placeholder ?? ""}
+          {selected?.suffix && (
+            <span className="ml-1 text-ink/40 transition group-hover:text-ink/60">
+              {selected.suffix}
+            </span>
+          )}
+        </span>
         <ChevronDown className="w-3.5 h-3.5 shrink-0" />
       </button>
       {open &&
@@ -230,7 +240,23 @@ export default function InlineMenuSelect({
                         {section.group.icon && (
                           <span className="shrink-0">{section.group.icon}</span>
                         )}
-                        <span className="min-w-0 flex-1 truncate">{section.group.label}</span>
+                        <span className="min-w-0 flex-1 truncate">
+                          {section.group.label}
+                          {section.group.subtitle && (
+                            <span className="ml-1 font-normal normal-case text-ink/35">
+                              {section.group.subtitle}
+                            </span>
+                          )}
+                        </span>
+                        {section.group.control && (
+                          <span
+                            className="shrink-0"
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            {section.group.control}
+                          </span>
+                        )}
                       </div>
                     )}
                     {section.options.map((option) => {

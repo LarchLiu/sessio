@@ -49,10 +49,12 @@ import Tooltip from "./Tooltip";
 import {
   agentModelSelectOptions,
   agentModelSelectValue,
+  initialRuntimeEffort,
   parseAgentModelSelectValue,
+  runtimeEffortOptions,
 } from "./AgentSelect";
 import type { InlineMenuSelectOption } from "./InlineMenuSelect";
-import { RuntimeMenuSelect, runtimePermissionModeOptions } from "./RuntimeMenuSelect";
+import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "./RuntimeMenuSelect";
 import {
   attachmentMenuOptions,
   type ComposerAttachment,
@@ -134,12 +136,17 @@ function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
   return agent?.permissionMode ?? agent?.permissionModes[0]?.value ?? "";
 }
 
-function runtimeSessionOptions(model: string, permissionMode: string): Record<string, unknown> {
+function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
   return {
     transport: "acp",
     ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
   };
+}
+
+function runtimeEffortConfigId(agent: Agent): string {
+  return agent === "codex" ? "reasoning_effort" : "effort";
 }
 
 // 与后端 src-tauri/src/models.rs:strip_injected_context 保持一致：
@@ -490,23 +497,58 @@ function MessageStream({
   const [sending, setSending] = useState(false);
   const [composerAgent, setComposerAgent] = useState<Agent>(agent);
   const [composerModel, setComposerModel] = useState("");
+  const [composerEffort, setComposerEffort] = useState("");
   const [composerPermissionMode, setComposerPermissionMode] = useState("");
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
-  const agentModelOptions = useMemo(() => agentModelSelectOptions(runtimeAgents), [runtimeAgents]);
+  const liveSession = runtimeSessionId
+    ? liveState.sessions[runtimeSessionId]
+    : null;
+  const activeTurnId = useMemo(() => {
+    if (!liveSession) return null;
+    return liveSession.turns.find((turn) =>
+      turn.status === "pending" ||
+      turn.status === "streaming" ||
+      turn.status === "cancelling"
+    )?.turnId ?? null;
+  }, [liveSession]);
   const selectedAgentModelValue = agentModelSelectValue(composerAgent, composerModel);
   const selectedComposerAgent =
     runtimeAgents.find((item) => item.agent === composerAgent) ?? null;
+  const handleComposerEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
+    if (targetAgent === composerAgent) setComposerEffort(nextValue);
+    try {
+      await updateRuntimeAgentPreferences({ agent: targetAgent, effort: nextValue });
+    } catch (err) {
+      setComposerError(String(err));
+    }
+  }, [composerAgent]);
+  const agentModelOptions = useMemo(
+    () =>
+      agentModelSelectOptions(
+        runtimeAgents,
+        Object.fromEntries(
+          runtimeAgents.map((runtimeAgent) => [
+            runtimeAgent.agent,
+            <RuntimeEffortControl
+              value={runtimeAgent.agent === composerAgent ? composerEffort : initialRuntimeEffort(runtimeAgent)}
+              options={runtimeEffortOptions(runtimeAgent)}
+              onChange={(value) => void handleComposerEffortChange(runtimeAgent.agent, value)}
+              disabled={sending || Boolean(activeTurnId)}
+            />,
+          ]),
+        ) as Partial<Record<Agent, ReactNode>>,
+        { [composerAgent]: composerEffort },
+      ),
+    [activeTurnId, composerAgent, composerEffort, handleComposerEffortChange, runtimeAgents, sending],
+  );
   const composerPermissionOptions = runtimePermissionModeOptions(
     selectedComposerAgent?.permissionModes ?? [],
     composerPermissionMode,
     selectedComposerAgent?.agent,
   );
-  const liveSession = runtimeSessionId
-    ? liveState.sessions[runtimeSessionId]
-    : null;
   const fallbackRuntimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
   const fallbackCapabilities = fallbackRuntimeAgent?.capabilities ?? null;
   const fallbackComposerCapabilities =
@@ -765,14 +807,6 @@ function MessageStream({
     return () => window.clearTimeout(timeout);
   }, [displayItems.length, historyRenderReady, liveSession]);
 
-  const activeTurnId = useMemo(() => {
-    if (!liveSession) return null;
-    return liveSession.turns.find((turn) =>
-      turn.status === "pending" ||
-      turn.status === "streaming" ||
-      turn.status === "cancelling"
-    )?.turnId ?? null;
-  }, [liveSession]);
   useEffect(() => {
     if (!liveActiveKey) return;
     setRuntimeNow(Date.now());
@@ -788,6 +822,7 @@ function MessageStream({
     const runtimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
     setComposerAgent(agent);
     setComposerModel(initialRuntimeModel(runtimeAgent));
+    setComposerEffort(initialRuntimeEffort(runtimeAgent));
     setComposerPermissionMode(initialRuntimePermission(runtimeAgent));
     activeRuntimeTurnIdRef.current = null;
   }, [agent, sessionId]);
@@ -799,6 +834,7 @@ function MessageStream({
     if (!next) return;
     setComposerAgent(next.agent);
     setComposerModel(initialRuntimeModel(next));
+    setComposerEffort(initialRuntimeEffort(next));
     setComposerPermissionMode(initialRuntimePermission(next));
   }, [agentModelOptions, composerAgent, runtimeAgents, selectedAgentModelValue]);
 
@@ -826,6 +862,7 @@ function MessageStream({
     if (!targetRuntimeAgent) return;
     setComposerAgent(parsed.agent);
     setComposerModel(parsed.model);
+    setComposerEffort(initialRuntimeEffort(targetRuntimeAgent));
     setComposerPermissionMode(initialRuntimePermission(targetRuntimeAgent));
     try {
       await updateRuntimeAgentPreferences({ agent: parsed.agent, model: parsed.model });
@@ -934,7 +971,7 @@ function MessageStream({
             workspacePath,
             sourceAgent: agent,
             sourceSessionId: sessionId,
-            options: runtimeSessionOptions(composerModel, composerPermissionMode),
+            options: runtimeSessionOptions(composerModel, composerPermissionMode, composerEffort),
           });
       pendingRuntimeSessionId = handle.sessioRuntimeSessionId;
       if (sameAgent) {
@@ -952,6 +989,14 @@ function MessageStream({
             value: composerPermissionMode,
           }).catch((err) => {
             console.warn("set permission config failed", err);
+          });
+        }
+        if (composerEffort) {
+          await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
+            configId: runtimeEffortConfigId(targetAgent),
+            value: composerEffort,
+          }).catch((err) => {
+            console.warn("set effort config failed", err);
           });
         }
       }
@@ -1027,7 +1072,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, ancestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -1715,9 +1760,9 @@ function AcpSessionStatePanel({
         {hasCommands && (
           <AcpCommandsMenu commands={state.availableCommands} onRunCommand={onRunCommand} />
         )}
-        {state.configOptions.map((option) => (
+        {state.configOptions.map((option, index) => (
           <AcpConfigControl
-            key={option.id || option.name}
+            key={`${option.id || option.category || option.name}-${index}`}
             option={option}
             sessioRuntimeSessionId={sessioRuntimeSessionId}
           />

@@ -180,6 +180,8 @@ pub struct RuntimeAgentMetadata {
     pub transport: RuntimeTransportKind,
     pub model: Option<String>,
     pub models: Vec<RuntimeAgentOptionMetadata>,
+    pub effort: Option<String>,
+    pub efforts: Vec<RuntimeAgentOptionMetadata>,
     pub permission_mode: Option<String>,
     pub permission_modes: Vec<RuntimeAgentOptionMetadata>,
     pub session_command: Option<String>,
