@@ -19,6 +19,51 @@ export interface ProjectInfo {
   sessionCount: number;
 }
 
+export type AssistantType = "builtin" | "custom";
+
+export interface AssistantInfo {
+  id: string;
+  name: string;
+  model: string;
+  permissionMode: string;
+  effort: string;
+  systemPrompt: string | null;
+  type: AssistantType;
+  projectId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type StageType =
+  | "research"
+  | "plan"
+  | "build"
+  | "review"
+  | "human"
+  | "done";
+
+export interface StageInfo {
+  id: string;
+  threadId: string;
+  assistantId: string;
+  type: StageType;
+  order: number;
+  createdAt: number;
+  updatedAt: number;
+  sessions: SessionInfo[];
+}
+
+export interface ThreadInfo {
+  id: string;
+  projectId: string;
+  goal: string;
+  description: string | null;
+  stageId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  stages: StageInfo[];
+}
+
 export type KanbanStatus =
   | "todo"
   | "in_progress"
@@ -523,6 +568,77 @@ export async function updateProject(
 
 export async function archiveProject(projectId: string): Promise<void> {
   return invoke<void>("archive_project", { projectId });
+}
+
+export async function listAssistants(projectId?: string | null): Promise<AssistantInfo[]> {
+  return invoke<AssistantInfo[]>("list_assistants", { projectId: projectId ?? null });
+}
+
+export async function createAssistant(input: {
+  name: string;
+  model: string;
+  permissionMode: string;
+  effort: string;
+  systemPrompt?: string | null;
+  type: AssistantType;
+  projectId?: string | null;
+}): Promise<AssistantInfo> {
+  return invoke<AssistantInfo>("create_assistant", {
+    name: input.name,
+    model: input.model,
+    permissionMode: input.permissionMode,
+    effort: input.effort,
+    systemPrompt: input.systemPrompt ?? null,
+    assistantType: input.type,
+    projectId: input.projectId ?? null,
+  });
+}
+
+export async function listThreads(projectId: string): Promise<ThreadInfo[]> {
+  return invoke<ThreadInfo[]>("list_threads", { projectId });
+}
+
+export async function createThread(
+  projectId: string,
+  goal: string,
+  description?: string | null,
+): Promise<ThreadInfo> {
+  return invoke<ThreadInfo>("create_thread", {
+    projectId,
+    goal,
+    description: description ?? null,
+  });
+}
+
+export async function addStage(
+  threadId: string,
+  assistantId: string,
+  stageType: StageType,
+): Promise<StageInfo> {
+  return invoke<StageInfo>("add_stage", { threadId, assistantId, stageType });
+}
+
+export async function setThreadStage(
+  threadId: string,
+  stageId: string,
+): Promise<ThreadInfo> {
+  return invoke<ThreadInfo>("set_thread_stage", { threadId, stageId });
+}
+
+export async function linkStageSession(
+  stageId: string,
+  agent: Agent,
+  sessionId: string,
+): Promise<StageInfo> {
+  return invoke<StageInfo>("link_stage_session", { stageId, agent, sessionId });
+}
+
+export async function unlinkStageSession(
+  stageId: string,
+  agent: Agent,
+  sessionId: string,
+): Promise<StageInfo> {
+  return invoke<StageInfo>("unlink_stage_session", { stageId, agent, sessionId });
 }
 
 export async function listKanbanItems(projectId: string): Promise<KanbanItem[]> {

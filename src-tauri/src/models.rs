@@ -119,6 +119,111 @@ pub struct ProjectInfo {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum AssistantType {
+    Builtin,
+    Custom,
+}
+
+impl AssistantType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AssistantType::Builtin => "builtin",
+            AssistantType::Custom => "custom",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "builtin" => Some(AssistantType::Builtin),
+            "custom" => Some(AssistantType::Custom),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantInfo {
+    pub id: String,
+    pub name: String,
+    pub model: String,
+    pub permission_mode: String,
+    pub effort: String,
+    pub system_prompt: Option<String>,
+    #[serde(rename = "type")]
+    pub assistant_type: AssistantType,
+    pub project_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StageType {
+    Research,
+    Plan,
+    Build,
+    Review,
+    Human,
+    Done,
+}
+
+impl StageType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StageType::Research => "research",
+            StageType::Plan => "plan",
+            StageType::Build => "build",
+            StageType::Review => "review",
+            StageType::Human => "human",
+            StageType::Done => "done",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "research" => Some(StageType::Research),
+            "plan" => Some(StageType::Plan),
+            "build" => Some(StageType::Build),
+            "review" => Some(StageType::Review),
+            "human" => Some(StageType::Human),
+            "done" => Some(StageType::Done),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageInfo {
+    pub id: String,
+    pub thread_id: String,
+    pub assistant_id: String,
+    #[serde(rename = "type")]
+    pub stage_type: StageType,
+    pub order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub sessions: Vec<SessionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadInfo {
+    pub id: String,
+    pub project_id: String,
+    pub goal: String,
+    pub description: Option<String>,
+    pub stage_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub stages: Vec<StageInfo>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum KanbanStatus {
     Todo,

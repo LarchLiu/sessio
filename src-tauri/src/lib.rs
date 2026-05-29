@@ -26,7 +26,8 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionHistoryTurn, SessionInfo,
+    Agent, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectType,
+    SessionHistoryTurn, SessionInfo, StageInfo, StageType, ThreadInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -202,6 +203,126 @@ fn archive_project(
     app.emit("sessions_index_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn list_assistants(
+    project_id: Option<String>,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<AssistantInfo>, String> {
+    store
+        .list_assistants(project_id.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_assistant(
+    name: String,
+    model: String,
+    permission_mode: String,
+    effort: String,
+    system_prompt: Option<String>,
+    assistant_type: AssistantType,
+    project_id: Option<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<AssistantInfo, String> {
+    let assistant = store
+        .create_assistant(
+            &name,
+            &model,
+            &permission_mode,
+            &effort,
+            system_prompt.as_deref(),
+            assistant_type,
+            project_id.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("assistants_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(assistant)
+}
+
+#[tauri::command]
+fn list_threads(
+    project_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<ThreadInfo>, String> {
+    store.list_threads(&project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_thread(
+    project_id: String,
+    goal: String,
+    description: Option<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ThreadInfo, String> {
+    let thread = store
+        .create_thread(&project_id, &goal, description.as_deref())
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(thread)
+}
+
+#[tauri::command]
+fn add_stage(
+    thread_id: String,
+    assistant_id: String,
+    stage_type: StageType,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageInfo, String> {
+    let stage = store
+        .add_stage(&thread_id, &assistant_id, stage_type)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn set_thread_stage(
+    thread_id: String,
+    stage_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ThreadInfo, String> {
+    let thread = store
+        .set_thread_stage(&thread_id, &stage_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(thread)
+}
+
+#[tauri::command]
+fn link_stage_session(
+    stage_id: String,
+    agent: Agent,
+    session_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageInfo, String> {
+    let stage = store
+        .link_stage_session(&stage_id, agent, &session_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn unlink_stage_session(
+    stage_id: String,
+    agent: Agent,
+    session_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageInfo, String> {
+    let stage = store
+        .unlink_stage_session(&stage_id, agent, &session_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
 }
 
 #[tauri::command]
@@ -1781,6 +1902,14 @@ pub fn run() {
             create_default_project,
             update_project,
             archive_project,
+            list_assistants,
+            create_assistant,
+            list_threads,
+            create_thread,
+            add_stage,
+            set_thread_stage,
+            link_stage_session,
+            unlink_stage_session,
             list_kanban_items,
             create_kanban_item,
             update_kanban_item,

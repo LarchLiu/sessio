@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SubagentInfo,
+    Agent, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectType,
+    SessionInfo, StageInfo, StageType, SubagentInfo, ThreadInfo,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -162,6 +163,75 @@ impl SessionStore for CachedStore {
         self.inner.archive_project(project_id)
     }
 
+    fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
+        self.inner.list_assistants(project_id)
+    }
+
+    fn create_assistant(
+        &self,
+        name: &str,
+        model: &str,
+        permission_mode: &str,
+        effort: &str,
+        system_prompt: Option<&str>,
+        assistant_type: AssistantType,
+        project_id: Option<&str>,
+    ) -> Result<AssistantInfo> {
+        self.inner.create_assistant(
+            name,
+            model,
+            permission_mode,
+            effort,
+            system_prompt,
+            assistant_type,
+            project_id,
+        )
+    }
+
+    fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>> {
+        self.inner.list_threads(project_id)
+    }
+
+    fn create_thread(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+    ) -> Result<ThreadInfo> {
+        self.inner.create_thread(project_id, goal, description)
+    }
+
+    fn add_stage(
+        &self,
+        thread_id: &str,
+        assistant_id: &str,
+        stage_type: StageType,
+    ) -> Result<StageInfo> {
+        self.inner.add_stage(thread_id, assistant_id, stage_type)
+    }
+
+    fn set_thread_stage(&self, thread_id: &str, stage_id: &str) -> Result<ThreadInfo> {
+        self.inner.set_thread_stage(thread_id, stage_id)
+    }
+
+    fn link_stage_session(
+        &self,
+        stage_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<StageInfo> {
+        self.inner.link_stage_session(stage_id, agent, session_id)
+    }
+
+    fn unlink_stage_session(
+        &self,
+        stage_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<StageInfo> {
+        self.inner.unlink_stage_session(stage_id, agent, session_id)
+    }
+
     fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>> {
         self.inner.list_kanban_items(project_id)
     }
@@ -250,11 +320,8 @@ impl SessionStore for CachedStore {
         child_session_id: &str,
         snapshots: &[SessionHistorySnapshotRecord],
     ) -> Result<()> {
-        self.inner.replace_session_history_snapshots(
-            child_agent,
-            child_session_id,
-            snapshots,
-        )
+        self.inner
+            .replace_session_history_snapshots(child_agent, child_session_id, snapshots)
     }
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {

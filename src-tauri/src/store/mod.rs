@@ -6,8 +6,8 @@ use std::collections::HashSet;
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
-    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionHistoryTurn, SessionInfo,
-    SubagentInfo,
+    Agent, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectType,
+    SessionHistoryTurn, SessionInfo, StageInfo, StageType, SubagentInfo, ThreadInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -100,6 +100,43 @@ pub trait SessionStore: Send + Sync {
         project_type: Option<ProjectType>,
     ) -> Result<ProjectInfo>;
     fn archive_project(&self, project_id: &str) -> Result<()>;
+    fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>>;
+    fn create_assistant(
+        &self,
+        name: &str,
+        model: &str,
+        permission_mode: &str,
+        effort: &str,
+        system_prompt: Option<&str>,
+        assistant_type: AssistantType,
+        project_id: Option<&str>,
+    ) -> Result<AssistantInfo>;
+    fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>>;
+    fn create_thread(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+    ) -> Result<ThreadInfo>;
+    fn add_stage(
+        &self,
+        thread_id: &str,
+        assistant_id: &str,
+        stage_type: StageType,
+    ) -> Result<StageInfo>;
+    fn set_thread_stage(&self, thread_id: &str, stage_id: &str) -> Result<ThreadInfo>;
+    fn link_stage_session(
+        &self,
+        stage_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<StageInfo>;
+    fn unlink_stage_session(
+        &self,
+        stage_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<StageInfo>;
     fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>>;
     fn create_kanban_item(
         &self,
