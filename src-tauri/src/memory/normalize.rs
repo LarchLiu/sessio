@@ -1,5 +1,5 @@
 use crate::agents::sources::types::{MessageContent, MessageEvent};
-use crate::models::strip_injected_context;
+use crate::models::{strip_injected_context, SessionContentBlock};
 
 const CROSS_START: &str = "<!-- sessio-cross:start";
 const CROSS_END: &str = "<!-- sessio-cross:end -->";
@@ -20,6 +20,13 @@ fn strip_cross_replay_from_event(mut event: MessageEvent) -> Option<MessageEvent
             }
             MessageContent::Text { text }
         }
+        MessageContent::Blocks { blocks } => {
+            let blocks = clean_content_blocks(blocks);
+            if blocks.is_empty() {
+                return None;
+            }
+            MessageContent::Blocks { blocks }
+        }
         MessageContent::Mixed { parts } => {
             let parts = parts
                 .into_iter()
@@ -30,6 +37,14 @@ fn strip_cross_replay_from_event(mut event: MessageEvent) -> Option<MessageEvent
                             None
                         } else {
                             Some(MessageContent::Text { text })
+                        }
+                    }
+                    MessageContent::Blocks { blocks } => {
+                        let blocks = clean_content_blocks(blocks);
+                        if blocks.is_empty() {
+                            None
+                        } else {
+                            Some(MessageContent::Blocks { blocks })
                         }
                     }
                     other => Some(other),
@@ -43,6 +58,43 @@ fn strip_cross_replay_from_event(mut event: MessageEvent) -> Option<MessageEvent
         other => other,
     };
     Some(event)
+}
+
+fn clean_content_blocks(blocks: Vec<SessionContentBlock>) -> Vec<SessionContentBlock> {
+    blocks
+        .into_iter()
+        .filter_map(|mut block| {
+            if is_cross_context_block(&block) {
+                return None;
+            }
+            if block.kind == "text" {
+                let text = block.text.as_deref().map(clean_text).unwrap_or_default();
+                if text.trim().is_empty() {
+                    return None;
+                }
+                block.text = Some(text);
+            }
+            Some(block)
+        })
+        .collect()
+}
+
+fn is_cross_context_block(block: &SessionContentBlock) -> bool {
+    block.uri.as_deref().is_some_and(is_cross_context_value)
+        || block.name.as_deref().is_some_and(is_cross_context_value)
+        || block.title.as_deref().is_some_and(is_cross_context_value)
+        || block
+            .description
+            .as_deref()
+            .is_some_and(is_cross_context_value)
+        || block
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains(CROSS_START) || is_cross_context_value(text))
+}
+
+fn is_cross_context_value(value: &str) -> bool {
+    value.contains("sessio-cross-context") || value.contains("/.cross-context/")
 }
 
 pub fn strip_sessio_cross_replay(input: &str) -> String {
@@ -69,6 +121,12 @@ fn clean_text(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::agents::sources::types::{
+        AgentKind, MessageContent, MessageEvent, MessageRole, SessionSource, SourceKind,
+        SourceLocation,
+    };
+    use crate::models::SessionContentBlock;
+
     use super::strip_sessio_cross_replay;
 
     #[test]
@@ -101,5 +159,54 @@ new request"#;
             strip_sessio_cross_replay("before <!-- sessio-cross:start bad"),
             "before"
         );
+    }
+
+    #[test]
+    fn normalizes_structured_blocks_without_indexing_cross_context_attachment() {
+        let source = SessionSource {
+            agent: AgentKind::new("claude"),
+            session_id: "s1".to_string(),
+            scope: "scope".to_string(),
+            file_path: "/tmp/s1.jsonl".to_string(),
+            project: None,
+            source_kind: SourceKind::MainSession,
+            metadata: Default::default(),
+        };
+        let events = super::normalize_events(vec![MessageEvent {
+            source,
+            event_id: None,
+            turn_index: 0,
+            role: MessageRole::User,
+            content: MessageContent::Blocks {
+                blocks: vec![
+                    SessionContentBlock::text(
+                        "<ide_opened_file>noise</ide_opened_file> real request",
+                    ),
+                    SessionContentBlock::resource(
+                        Some(
+                            "file:///tmp/.cross-context/sessio-cross-context-parent.md".to_string(),
+                        ),
+                        Some("sessio-cross-context-parent.md".to_string()),
+                        Some("text/markdown".to_string()),
+                    ),
+                    SessionContentBlock::resource(
+                        Some("file:///tmp/spec.md".to_string()),
+                        Some("spec.md".to_string()),
+                        Some("text/markdown".to_string()),
+                    ),
+                ],
+            },
+            timestamp: None,
+            location: SourceLocation::file("/tmp/s1.jsonl"),
+            metadata: Default::default(),
+        }]);
+
+        assert_eq!(events.len(), 1);
+        let MessageContent::Blocks { blocks } = &events[0].content else {
+            panic!("expected structured blocks");
+        };
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text.as_deref(), Some("real request"));
+        assert_eq!(blocks[1].uri.as_deref(), Some("file:///tmp/spec.md"));
     }
 }

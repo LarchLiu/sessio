@@ -5,7 +5,7 @@ use crate::agents::sources::types::{
     AgentKind, MessageContent, MessageEvent, MessageRole, Metadata, ProjectRef, SessionRecord,
     SessionSource, SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
 };
-use crate::models::{Agent, SessionInfo, SessionMessage};
+use crate::models::{Agent, SessionContentBlock, SessionInfo, SessionMessage};
 
 const TOOL_RESULT_PREVIEW_CHARS: usize = 1200;
 
@@ -105,7 +105,7 @@ pub fn message_events_from_messages(
         .enumerate()
         .map(|(turn_index, (message, location))| {
             let role = message_role(&message.role);
-            let content = message_content(&message.role, &message.text);
+            let content = message_content(&message.role, &message.text, &message.content_blocks);
             MessageEvent {
                 source: source.clone(),
                 event_id: Some(event_id(source, turn_index, &message.role, &message.text)),
@@ -132,7 +132,7 @@ fn message_role(role: &str) -> MessageRole {
     }
 }
 
-fn message_content(role: &str, text: &str) -> MessageContent {
+fn message_content(role: &str, text: &str, blocks: &[SessionContentBlock]) -> MessageContent {
     match message_role(role) {
         MessageRole::ToolUse => {
             let (name, raw) = if role == "todo" {
@@ -158,6 +158,9 @@ fn message_content(role: &str, text: &str) -> MessageContent {
                 text: compact_tool_result(text),
                 output_hash: Some(hash_text(text)),
             },
+        },
+        _ if !blocks.is_empty() => MessageContent::Blocks {
+            blocks: blocks.to_vec(),
         },
         _ => MessageContent::Text {
             text: text.to_string(),
@@ -276,7 +279,7 @@ mod tests {
     use crate::agents::sources::types::{
         AgentKind, MessageContent, ProjectRef, SessionSource, SourceKind, SourceLocation,
     };
-    use crate::models::SessionMessage;
+    use crate::models::{SessionContentBlock, SessionMessage};
 
     #[test]
     fn converts_tool_messages_to_structured_content() {
@@ -297,21 +300,11 @@ mod tests {
             &source,
             vec![
                 (
-                    SessionMessage {
-                        role: "tool_call".to_string(),
-                        text: "[shell]\n{\"cmd\":\"cargo check\"}".to_string(),
-                        timestamp: None,
-                        tool_call_id: None,
-                    },
+                    SessionMessage::new("tool_call", "[shell]\n{\"cmd\":\"cargo check\"}", None),
                     SourceLocation::file("/tmp/session.jsonl"),
                 ),
                 (
-                    SessionMessage {
-                        role: "tool_result".to_string(),
-                        text: "ok ".repeat(1000),
-                        timestamp: None,
-                        tool_call_id: None,
-                    },
+                    SessionMessage::new("tool_result", "ok ".repeat(1000), None),
                     SourceLocation::file("/tmp/session.jsonl"),
                 ),
             ],
@@ -326,6 +319,46 @@ mod tests {
                 assert!(result.text.len() < "ok ".repeat(1000).len());
             }
             other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserves_structured_message_blocks_for_indexing() {
+        let source = SessionSource {
+            agent: AgentKind::new("claude"),
+            session_id: "s1".to_string(),
+            scope: "scope".to_string(),
+            file_path: "/tmp/session.jsonl".to_string(),
+            project: Some(ProjectRef {
+                project_key: "p".to_string(),
+                project_path: None,
+                project_name: None,
+            }),
+            source_kind: SourceKind::MainSession,
+            metadata: Default::default(),
+        };
+        let events = message_events_from_messages(
+            &source,
+            vec![(
+                SessionMessage::new("user", "see [file: spec.md|file:///tmp/spec.md]", None)
+                    .with_content_blocks(vec![
+                        SessionContentBlock::text("see"),
+                        SessionContentBlock::resource(
+                            Some("file:///tmp/spec.md".to_string()),
+                            Some("spec.md".to_string()),
+                            Some("text/markdown".to_string()),
+                        ),
+                    ]),
+                SourceLocation::file("/tmp/session.jsonl"),
+            )],
+        );
+        match &events[0].content {
+            MessageContent::Blocks { blocks } => {
+                assert_eq!(blocks.len(), 2);
+                assert_eq!(blocks[1].kind, "resource");
+                assert_eq!(blocks[1].uri.as_deref(), Some("file:///tmp/spec.md"));
+            }
+            other => panic!("expected structured blocks, got {other:?}"),
         }
     }
 

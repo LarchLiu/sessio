@@ -25,14 +25,15 @@ import "katex/dist/katex.min.css";
 import {
   type AgentAttachment,
   type Agent,
+  type SessionContentBlock,
+  type SessionHistoryTurn,
   SessionInfo,
-  SessionMessage,
   RuntimeAgentMetadata,
   RuntimeCapabilitySet,
   RuntimeError,
   SubagentInfo,
   ensureAgentRuntimeSession,
-  getSessionMessages,
+  getSessionHistory,
   readLocalImageDataUrl,
   readLocalTextFile,
   cancelAgentTurn,
@@ -85,15 +86,12 @@ import {
   type LiveRuntimeSession,
   type LiveTurn,
 } from "../runtimeChat";
-import { buildCrossPrompt } from "../cross";
+import { buildCrossPromptFromTurns } from "../cross";
 import {
   contentBlocksText,
-  crossContextMessages,
-  forkVisibleHistoryMessages,
-  liveSessionMessages,
-  mergeHistoryWithLiveMessages,
+  forkVisibleHistoryTurns,
+  mergeHistoryWithLiveTurns,
   normalizedUserMessageText,
-  sanitizeSessioAttachmentText,
   stripImagePlaceholders,
   stripInjectedContext,
   stripSessioUploadWrapper,
@@ -167,39 +165,40 @@ type Tab =
 
 const ROLE_NAV_SHOW_DELAY_MS = 800;
 
-interface MessageCacheEntry {
-  messages: SessionMessage[];
+interface HistoryCacheEntry {
+  turns: LiveTurn[];
+  indexedThrough: number | null;
   messageCount: number;
   loadedAt: number;
 }
 
-interface AncestorMessageGroup {
+interface AncestorHistoryGroup {
   session: SessionInfo;
-  messages: SessionMessage[];
+  turns: LiveTurn[];
 }
 
 interface HistoryViewCacheEntry {
   sourceKey: string;
   viewMode: ViewMode;
-  messages: SessionMessage[];
+  turns: LiveTurn[];
   viewModel: AcpViewModel;
 }
 
-const messageCache = new Map<string, MessageCacheEntry>();
+const historyCache = new Map<string, HistoryCacheEntry>();
 const historyViewCache = new Map<string, HistoryViewCacheEntry>();
 const renderItemsCache = new WeakMap<AcpViewModel, Map<string, AcpRenderItem[]>>();
 const INITIAL_HISTORY_RENDER_ITEMS = 120;
 
-function messageSourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
+function historySourceKey(agent: SessionInfo["agent"], filePath: string, sessionId: string): string {
   return `${agent}:${sessionId}:${filePath}`;
 }
 
-function cachedAncestorMessageGroups(sessions: SessionInfo[]): AncestorMessageGroup[] {
+function cachedAncestorHistoryGroups(sessions: SessionInfo[]): AncestorHistoryGroup[] {
   return sessions.map((session) => ({
     session,
-    messages:
-      messageCache.get(messageSourceKey(session.agent, session.filePath, session.id))
-        ?.messages ?? [],
+    turns:
+      historyCache.get(historySourceKey(session.agent, session.filePath, session.id))
+        ?.turns ?? [],
   }));
 }
 
@@ -300,8 +299,8 @@ function ChatPage({
         <MessageStream
           key={
             tab.kind === "main"
-              ? messageSourceKey(session.agent, session.filePath, session.id)
-              : messageSourceKey(session.agent, tab.sub.filePath, `${session.id}:${tab.sub.id}`)
+              ? historySourceKey(session.agent, session.filePath, session.id)
+              : historySourceKey(session.agent, tab.sub.filePath, `${session.id}:${tab.sub.id}`)
           }
           agent={session.agent}
           filePath={tab.kind === "main" ? session.filePath : tab.sub.filePath}
@@ -447,31 +446,31 @@ function MessageStream({
   skipHistoryLoad?: boolean;
 }) {
   const { t } = useI18n();
-  const sourceKey = messageSourceKey(agent, filePath, sessionId);
+  const sourceKey = historySourceKey(agent, filePath, sessionId);
   const readableAncestorSessions = useMemo(
     () => ancestorSessions.filter((session) => session.available && session.filePath),
     [ancestorSessions],
   );
   const ancestorSourceKeys = useMemo(
     () =>
-      readableAncestorSessions.map((session) => messageSourceKey(session.agent, session.filePath, session.id)),
+      readableAncestorSessions.map((session) => historySourceKey(session.agent, session.filePath, session.id)),
     [readableAncestorSessions],
   );
   const ancestorCacheKey = ancestorSourceKeys.join("->");
   const allAncestorCacheFresh = readableAncestorSessions.every((session) => {
-      const cached = messageCache.get(messageSourceKey(session.agent, session.filePath, session.id));
+      const cached = historyCache.get(historySourceKey(session.agent, session.filePath, session.id));
       return cached?.messageCount === session.messageCount;
     });
-  const cachedEntry = messageCache.get(sourceKey);
+  const cachedEntry = historyCache.get(sourceKey);
   const isFreshCache =
     Boolean(cachedEntry) && cachedEntry?.messageCount === messageCount;
   const hasCachedHistory = Boolean(cachedEntry);
-  const [messages, setMessages] = useState<SessionMessage[]>(
-    cachedEntry?.messages ?? [],
+  const [historyTurns, setHistoryTurns] = useState<LiveTurn[]>(
+    cachedEntry?.turns ?? [],
   );
-  const [ancestorMessageGroups, setAncestorMessageGroups] = useState<AncestorMessageGroup[]>(() =>
+  const [ancestorHistoryGroups, setAncestorHistoryGroups] = useState<AncestorHistoryGroup[]>(() =>
     allAncestorCacheFresh
-      ? cachedAncestorMessageGroups(readableAncestorSessions)
+      ? cachedAncestorHistoryGroups(readableAncestorSessions)
       : [],
   );
   const [loading, setLoading] = useState(() => !isFreshCache);
@@ -494,18 +493,16 @@ function MessageStream({
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
-  const mergedAncestorMessages = useMemo(
+  const mergedAncestorTurns = useMemo(
     () =>
-      ancestorMessageGroups.flatMap((group) => {
+      ancestorHistoryGroups.flatMap((group) => {
+        const historyTurns = normalizeApiHistoryTurns(group.turns);
         const runtimeId = runtimeSessionAliases[`${group.session.agent}:${group.session.id}`] ?? group.session.id;
         const ancestorLiveSession = liveState.sessions[runtimeId];
-        if (!ancestorLiveSession || ancestorLiveSession.turns.length === 0) return group.messages;
-        return mergeHistoryWithLiveMessages(
-          group.messages,
-          liveSessionMessages(ancestorLiveSession),
-        );
+        if (!ancestorLiveSession || ancestorLiveSession.turns.length === 0) return historyTurns;
+        return mergeHistoryWithLiveTurns(historyTurns, ancestorLiveSession.turns);
       }),
-    [ancestorMessageGroups, liveState.sessions, runtimeSessionAliases],
+    [ancestorHistoryGroups, liveState.sessions, runtimeSessionAliases],
   );
   const activeTurnId = useMemo(() => {
     if (!liveSession) return null;
@@ -571,7 +568,7 @@ function MessageStream({
 
   useEffect(() => {
     if (!available || !filePath || skipHistoryLoad) return;
-    const cached = messageCache.get(sourceKey);
+    const cached = historyCache.get(sourceKey);
     if (cached && cached.messageCount === messageCount) return;
 
     let cancelled = false;
@@ -579,24 +576,25 @@ function MessageStream({
     let timerId: number | null = null;
     frameId = window.requestAnimationFrame(() => {
       timerId = window.setTimeout(() => {
-        getSessionMessages(agent, filePath, sessionId)
+        getSessionHistory(agent, filePath, sessionId)
           .then((result) => {
             if (cancelled) return;
-            messageCache.set(sourceKey, {
-              messages: result.messages,
+            const turns = normalizeSessionHistoryTurns(result.turns);
+            historyCache.set(sourceKey, {
+              turns,
+              indexedThrough: result.indexedThrough,
               messageCount: result.messageCount,
               loadedAt: Date.now(),
             });
             startTransition(() => {
-              setMessages(result.messages);
+              setHistoryTurns(turns);
               setLoading(false);
             });
-            const indexedThrough = latestMessageTimestamp(result.messages);
-            if (indexedThrough !== null) {
+            if (result.indexedThrough !== null) {
               dispatchLiveEvent({
                 type: "reconcile-indexed-session",
                 sessioRuntimeSessionId: runtimeSessionId,
-                indexedThrough,
+                indexedThrough: result.indexedThrough,
               });
             }
             if (!onMessageCount(agent, filePath, sessionId, result.messageCount)) return;
@@ -636,12 +634,12 @@ function MessageStream({
 
   useEffect(() => {
     if (readableAncestorSessions.length === 0) {
-      setAncestorMessageGroups([]);
+      setAncestorHistoryGroups([]);
       setAncestorsLoading(false);
       return;
     }
     if (allAncestorCacheFresh) {
-      setAncestorMessageGroups(cachedAncestorMessageGroups(readableAncestorSessions));
+      setAncestorHistoryGroups(cachedAncestorHistoryGroups(readableAncestorSessions));
       setAncestorsLoading(false);
       return;
     }
@@ -650,24 +648,26 @@ function MessageStream({
     setAncestorsLoading(true);
     Promise.all(
       readableAncestorSessions.map(async (session) => {
-        const key = messageSourceKey(session.agent, session.filePath, session.id);
-        const cached = messageCache.get(key);
+        const key = historySourceKey(session.agent, session.filePath, session.id);
+        const cached = historyCache.get(key);
         if (cached && cached.messageCount === session.messageCount) {
-          return { session, messages: cached.messages };
+          return { session, turns: cached.turns };
         }
-        const result = await getSessionMessages(session.agent, session.filePath, session.id);
-        messageCache.set(key, {
-          messages: result.messages,
+        const result = await getSessionHistory(session.agent, session.filePath, session.id);
+        const turns = normalizeSessionHistoryTurns(result.turns);
+        historyCache.set(key, {
+          turns,
+          indexedThrough: result.indexedThrough,
           messageCount: result.messageCount,
           loadedAt: Date.now(),
         });
-        return { session, messages: result.messages };
+        return { session, turns };
       }),
     )
       .then((results) => {
         if (cancelled) return;
         startTransition(() => {
-          setAncestorMessageGroups(results);
+          setAncestorHistoryGroups(results);
           setAncestorsLoading(false);
         });
       })
@@ -682,15 +682,18 @@ function MessageStream({
   }, [allAncestorCacheFresh, ancestorCacheKey, readableAncestorSessions]);
 
   const acpViewModel = useMemo<AcpViewModel>(() => {
-    const historyMessages = forkVisibleHistoryMessages(mergedAncestorMessages, messages);
+    const historyTurnsForView = forkVisibleHistoryTurns(
+      mergedAncestorTurns,
+      normalizeApiHistoryTurns(historyTurns),
+    );
     const historyKey = ancestorCacheKey ? `${ancestorCacheKey}->${sourceKey}` : sourceKey;
-    const historyViewModel = cachedHistoryViewModel(historyKey, viewMode, historyMessages);
+    const historyViewModel = cachedHistoryViewModel(historyKey, viewMode, historyTurnsForView);
     if (!liveSession || liveSession.turns.length === 0) return historyViewModel;
     return mergeHistoryAndLiveViewModels(
       historyViewModel,
       liveSessionToAcpViewModel(liveSession),
     );
-  }, [ancestorCacheKey, liveSession, mergedAncestorMessages, messages, sourceKey, viewMode]);
+  }, [ancestorCacheKey, historyTurns, liveSession, mergedAncestorTurns, sourceKey, viewMode]);
 
   const liveTurnIdsKey = useMemo(
     () => liveSession?.turns.map((turn) => turn.turnId).join("|") ?? "",
@@ -769,18 +772,17 @@ function MessageStream({
 
   useLayoutEffect(() => {
     if (!available || !filePath || skipHistoryLoad) {
-      setMessages([]);
       setLoading(false);
       setError(null);
       return;
     }
-    const cached = messageCache.get(sourceKey);
+    const cached = historyCache.get(sourceKey);
     if (cached) {
-      setMessages(cached.messages);
+      setHistoryTurns(cached.turns);
       setLoading(cached.messageCount !== messageCount);
       setError(null);
     } else {
-      setMessages([]);
+      setHistoryTurns([]);
       setLoading(true);
       setError(null);
     }
@@ -1031,10 +1033,12 @@ function MessageStream({
               sourceAgent: agent,
               sourceSessionId: sessionId,
               sourceFilePath: filePath,
-              messages: crossContextMessages(
-                mergedAncestorMessages,
-                messages,
-                liveSession,
+              turns: mergeHistoryWithLiveTurns(
+                forkVisibleHistoryTurns(
+                  mergedAncestorTurns,
+                  normalizeApiHistoryTurns(historyTurns),
+                ),
+                liveSession?.turns ?? [],
               ),
             }),
           ];
@@ -1070,7 +1074,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, mergedAncestorMessages, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, liveSession, liveState.sessions, messages, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.sessions, mergedAncestorTurns, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -3322,34 +3326,6 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function isConversationRole(role: string): boolean {
-  return [
-    "user",
-    "assistant",
-    "thinking",
-    "file_edit",
-    "tool",
-    "tool_call",
-    "tool_use",
-    "function_call",
-    "tool_result",
-    "function_call_output",
-    "todo",
-    "runtime_status",
-    "permission_request",
-    "turn_note",
-  ].includes(role);
-}
-
-function latestMessageTimestamp(messages: SessionMessage[]): number | null {
-  let latest: number | null = null;
-  for (const message of messages) {
-    if (message.timestamp === null) continue;
-    latest = latest === null ? message.timestamp : Math.max(latest, message.timestamp);
-  }
-  return latest;
-}
-
 type AcpRenderItem =
   | { kind: "turnStatus"; turn: LiveTurn }
   | { kind: "workingIndicator"; turn: LiveTurn }
@@ -3558,17 +3534,17 @@ function resourceUriForCompare(block: AcpContentBlock): string {
 }
 
 async function crossContextAttachment({
-  messages,
   sourceAgent,
   sourceSessionId,
   sourceFilePath,
+  turns,
 }: {
-  messages: SessionMessage[];
+  turns: LiveTurn[];
   sourceAgent: Agent;
   sourceSessionId: string;
   sourceFilePath: string;
 }): Promise<AgentAttachment> {
-  const content = buildCrossPrompt(messages, {
+  const content = buildCrossPromptFromTurns(turns, {
     sourceAgent,
     sourceSessionId,
     sourceFilePath,
@@ -3589,20 +3565,178 @@ async function crossContextAttachment({
 function cachedHistoryViewModel(
   sourceKey: string,
   viewMode: ViewMode,
-  messages: SessionMessage[],
+  turns: LiveTurn[],
 ): AcpViewModel {
-  const cacheKey = `${sourceKey}:${viewMode}:${messages.length}`;
+  const cacheKey = `${sourceKey}:${viewMode}:${turns.length}`;
   const cached = historyViewCache.get(cacheKey);
-  if (cached?.messages === messages) return cached.viewModel;
-  const all = messages.map((m, srcIdx) => ({ m, srcIdx }));
-  const filtered =
-    viewMode === "native"
-      ? all
-      : all.filter(({ m }) => isConversationRole(m.role));
-  const viewModel = historyTurnsToAcpViewModel(historyMessagesToLiveTurns(filtered));
-  historyViewCache.set(cacheKey, { sourceKey, viewMode, messages, viewModel });
+  if (cached?.turns === turns) return cached.viewModel;
+  const viewModel = historyTurnsToAcpViewModel(filterHistoryTurnsForViewMode(turns, viewMode));
+  historyViewCache.set(cacheKey, { sourceKey, viewMode, turns, viewModel });
   trimHistoryViewCache();
   return viewModel;
+}
+
+function normalizeSessionHistoryTurns(turns: SessionHistoryTurn[] | undefined): LiveTurn[] {
+  if (!Array.isArray(turns)) return [];
+  return turns.map((turn, index) => ({
+    turnId: turn.turnId || `history-turn-${index}`,
+    status: turn.status || "completed",
+    blocks: normalizeHistoryRenderBlocks(turn.blocks),
+    tools: normalizeHistoryTools(turn.tools),
+    permissions: normalizeHistoryPermissions(turn.permissions),
+    protocolMessages: Array.isArray(turn.protocolMessages) ? turn.protocolMessages : [],
+    stopReason: turn.stopReason ?? null,
+    error: turn.error ?? null,
+    startedAt: typeof turn.startedAt === "number" ? turn.startedAt : index,
+    updatedAt: typeof turn.updatedAt === "number" ? turn.updatedAt : index,
+  }));
+}
+
+function normalizeHistoryRenderBlocks(blocks: SessionHistoryTurn["blocks"]): LiveTurn["blocks"] {
+  if (!Array.isArray(blocks)) return [];
+  return blocks.flatMap((block) => {
+    if (!block || typeof block !== "object") return [];
+    if (block.kind === "user" || block.kind === "assistant" || block.kind === "thought") {
+      return [{
+        ...block,
+        blocks: normalizeHistoryContentBlocks(block.blocks),
+      } as LiveTurn["blocks"][number]];
+    }
+    return [block as LiveTurn["blocks"][number]];
+  });
+}
+
+function normalizeHistoryTools(tools: SessionHistoryTurn["tools"]): LiveTurn["tools"] {
+  if (!Array.isArray(tools)) return [];
+  return tools.map((tool, index) => ({
+    toolId: tool.toolId || `history-tool-${index}`,
+    title: tool.title || "Tool Use",
+    kind: tool.kind || "tool",
+    status: tool.status || "unknown",
+    content: Array.isArray(tool.content) ? tool.content as LiveTurn["tools"][number]["content"] : [],
+    locations: Array.isArray(tool.locations) ? tool.locations as LiveTurn["tools"][number]["locations"] : [],
+    rawInput: tool.rawInput ?? null,
+    rawOutput: tool.rawOutput ?? null,
+    meta: tool.meta ?? null,
+    raw: tool.raw,
+    updatedAt: typeof tool.updatedAt === "number" ? tool.updatedAt : index,
+  }));
+}
+
+function normalizeHistoryPermissions(
+  permissions: SessionHistoryTurn["permissions"],
+): LiveTurn["permissions"] {
+  if (!Array.isArray(permissions)) return [];
+  return permissions.map((permission, index) => ({
+    requestId: permission.requestId || `history-permission-${index}`,
+    toolCall: permission.toolCall ?? null,
+    toolName: permission.toolName || "Tool Use",
+    input: permission.input ?? null,
+    options: Array.isArray(permission.options)
+      ? permission.options.map((option, optionIndex) => {
+          const record = option && typeof option === "object" ? option as Record<string, unknown> : {};
+          return {
+            optionId: typeof record.optionId === "string" ? record.optionId : `option-${optionIndex}`,
+            name: typeof record.name === "string" ? record.name : "Option",
+            kind: typeof record.kind === "string" ? record.kind : "unknown",
+            meta: record.meta ?? null,
+          };
+        })
+      : [],
+    selectedOptionId: permission.selectedOptionId ?? null,
+    cancelled: Boolean(permission.cancelled),
+    raw: permission.raw,
+  }));
+}
+
+function filterHistoryTurnsForViewMode(turns: LiveTurn[], viewMode: ViewMode): LiveTurn[] {
+  if (viewMode === "native") return turns;
+  return turns
+    .map((turn) => ({
+      ...turn,
+      blocks: turn.blocks.filter((block) =>
+        block.kind === "user" || block.kind === "assistant" || block.kind === "thought",
+      ),
+      tools: [],
+      permissions: [],
+    }))
+    .filter((turn) => turn.blocks.length > 0);
+}
+
+function normalizeApiHistoryTurns(turns: LiveTurn[]): LiveTurn[] {
+  return turns.map((turn) => moveHistoryFileEditBlocksToTurnEnd(mergeHistoryPollingTools(turn)));
+}
+
+function mergeHistoryPollingTools(turn: LiveTurn): LiveTurn {
+  const tools = turn.tools.map(cloneAcpToolCall);
+  const removeToolIds = new Set<string>();
+  const runningSessions = new Map<string, AcpToolCall>();
+
+  for (const tool of tools) {
+    const pollingSessionId = writeStdinPollingToolSessionId(tool);
+    if (pollingSessionId) {
+      const target = runningSessions.get(pollingSessionId);
+      if (target) {
+        appendToolOutput(target, tool);
+        removeToolIds.add(tool.toolId);
+        continue;
+      }
+    }
+    const runningSessionId = toolRunningSessionId(tool);
+    if (runningSessionId) {
+      runningSessions.set(runningSessionId, tool);
+    }
+  }
+
+  if (removeToolIds.size === 0) return { ...turn, tools };
+  return {
+    ...turn,
+    tools: tools.filter((tool) => !removeToolIds.has(tool.toolId)),
+    blocks: turn.blocks.filter((block) => block.kind !== "tool" || !removeToolIds.has(block.toolId)),
+  };
+}
+
+function moveHistoryFileEditBlocksToTurnEnd(turn: LiveTurn): LiveTurn {
+  const fileEdits = turn.blocks.filter(isFileEditSessionUpdateBlock);
+  if (fileEdits.length <= 1) return turn;
+  const rest = turn.blocks.filter((block) =>
+    !(block.kind === "sessionUpdate" && block.updateType === "file_edit"),
+  );
+  const merged = mergeHistoryFileEditBlocks(fileEdits);
+  return {
+    ...turn,
+    blocks: merged ? [...rest, merged] : rest,
+  };
+}
+
+function isFileEditSessionUpdateBlock(
+  block: AcpRenderBlock,
+): block is Extract<AcpRenderBlock, { kind: "sessionUpdate" }> {
+  return block.kind === "sessionUpdate" && block.updateType === "file_edit";
+}
+
+function mergeHistoryFileEditBlocks(
+  blocks: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>[],
+): Extract<AcpRenderBlock, { kind: "sessionUpdate" }> | null {
+  const items = blocks.map((block, index) => {
+    const data = asRecord(block.data);
+    return {
+      key: `api-file-edit-${index}`,
+      message: {
+        role: "file_edit",
+        text: typeof data.text === "string" ? data.text : "",
+        timestamp: typeof data.timestamp === "number" ? data.timestamp : block.timestamp ?? null,
+      },
+    };
+  });
+  const merged = mergeFileEditItems(items);
+  if (!merged) return null;
+  return {
+    kind: "sessionUpdate",
+    updateType: "file_edit",
+    data: { text: merged.message.text, timestamp: merged.message.timestamp },
+    timestamp: merged.message.timestamp ?? blocks[blocks.length - 1]?.timestamp,
+  };
 }
 
 function cachedAcpRenderItems(
@@ -3713,86 +3847,11 @@ function formatDuration(ms: number): string {
 
 interface HistoryMessageItem {
   key: string;
-  message: SessionMessage;
-  toolResult?: SessionMessage;
-}
-
-function pairToolMessages(
-  entries: { m: SessionMessage; srcIdx: number }[],
-): HistoryMessageItem[] {
-  const consumedResults = new Set<number>();
-  const items: HistoryMessageItem[] = [];
-
-  for (let i = 0; i < entries.length; i += 1) {
-    const { m, srcIdx } = entries[i];
-    if (isToolCallRole(m.role)) {
-      const resultIdx = findToolResultIndex(entries, i);
-      if (resultIdx !== null) {
-        consumedResults.add(resultIdx);
-      }
-      items.push({
-        key: `${srcIdx}:${m.toolCallId ?? "tool"}`,
-        message: m,
-        toolResult: resultIdx !== null ? entries[resultIdx].m : undefined,
-      });
-      continue;
-    }
-    if (isToolResultRole(m.role)) {
-      if (consumedResults.has(i)) continue;
-      items.push({
-        key: `${srcIdx}:${m.toolCallId ?? "result"}`,
-        message: m,
-      });
-      continue;
-    }
-    items.push({ key: String(srcIdx), message: m });
-  }
-
-  return items;
-}
-
-function mergeWriteStdinPollingItems(items: HistoryMessageItem[]): HistoryMessageItem[] {
-  const out: HistoryMessageItem[] = [];
-  const runningSessions = new Map<string, HistoryMessageItem>();
-
-  for (const item of items) {
-    const writeStdinSessionId = writeStdinPollingSessionId(item.message);
-    if (writeStdinSessionId) {
-      const target = runningSessions.get(writeStdinSessionId);
-      if (target && item.toolResult) {
-        target.toolResult = appendToolResultText(target.toolResult, item.toolResult);
-        continue;
-      }
-    }
-
-    out.push(item);
-    const runningSessionId =
-      toolOutputRunningSessionId(item.toolResult?.text ?? "") ??
-      toolInputSessionId(item.message);
-    if (runningSessionId) {
-      runningSessions.set(runningSessionId, item);
-    }
-  }
-
-  return out;
-}
-
-function writeStdinPollingSessionId(message: SessionMessage): string | null {
-  if (!isToolCallRole(message.role)) return null;
-  const parsed = parseToolCall(message.text);
-  if (parsed.name !== "write_stdin") return null;
-  const input = parseObjectLike(parsed.body);
-  if (!input) return null;
-  const chars = input.chars;
-  if (typeof chars === "string" && chars.length > 0) return null;
-  return sessionIdFromRecord(input);
-}
-
-function toolInputSessionId(message: SessionMessage): string | null {
-  if (!isToolCallRole(message.role)) return null;
-  const parsed = parseToolCall(message.text);
-  const input = parseObjectLike(parsed.body);
-  return input ? sessionIdFromRecord(input) : null;
+  message: {
+    role: string;
+    text: string;
+    timestamp: number | null;
+  };
 }
 
 function sessionIdFromRecord(input: Record<string, unknown>): string | null {
@@ -3807,258 +3866,44 @@ function toolOutputRunningSessionId(text: string): string | null {
   return match?.[1] ?? null;
 }
 
-function appendToolResultText(
-  base: SessionMessage | undefined,
-  extra: SessionMessage,
-): SessionMessage {
-  if (!base) return extra;
-  const left = base.text.trimEnd();
-  const right = extra.text.trimStart();
-  return {
-    ...base,
-    text: left && right ? `${left}\n\n${right}` : left || right,
-    timestamp: extra.timestamp ?? base.timestamp,
-  };
-}
-
-function moveFileEditsToTurnEnd(items: HistoryMessageItem[]): HistoryMessageItem[] {
-  const out: HistoryMessageItem[] = [];
-  let turn: HistoryMessageItem[] = [];
-  const flush = () => {
-    if (turn.length === 0) return;
-    const edits = turn.filter((item) => item.message.role === "file_edit");
-    const rest = turn.filter((item) => item.message.role !== "file_edit");
-    const mergedEdit = mergeFileEditItems(edits);
-    out.push(...rest);
-    if (mergedEdit) out.push(mergedEdit);
-    turn = [];
-  };
-  for (const item of items) {
-    if (item.message.role === "user" && turn.length > 0) {
-      flush();
+function normalizeHistoryContentBlocks(blocks: SessionContentBlock[] | undefined): AcpContentBlock[] {
+  if (!Array.isArray(blocks)) return [];
+  return blocks.flatMap((block) => {
+    if (!block || typeof block !== "object") return [];
+    const record = block as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "unknown";
+    if (type === "text") {
+      return [{ ...record, type, text: typeof record.text === "string" ? record.text : "" } as AcpContentBlock];
     }
-    turn.push(item);
-  }
-  flush();
-  return out;
-}
-
-function historyMessagesToLiveTurns(
-  entries: { m: SessionMessage; srcIdx: number }[],
-): LiveTurn[] {
-  const items = moveFileEditsToTurnEnd(mergeWriteStdinPollingItems(pairToolMessages(entries)));
-  const turns: LiveTurn[] = [];
-  let current: LiveTurn | null = null;
-  const ensureTurn = (timestamp: number, preferredId: string): LiveTurn => {
-    if (!current) {
-      current = newHistoryTurn(preferredId, timestamp);
-      turns.push(current);
+    if (type === "image" || type === "audio") {
+      return [{
+        ...record,
+        type,
+        uri: typeof record.uri === "string" ? record.uri : undefined,
+        data: typeof record.data === "string" ? record.data : undefined,
+        mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
+      } as AcpContentBlock];
     }
-    current.startedAt = Math.min(current.startedAt, timestamp);
-    current.updatedAt = Math.max(current.updatedAt, timestamp);
-    return current;
-  };
-
-  items.forEach((item, index) => {
-    const message = item.message;
-    const timestamp = message.timestamp ?? index;
-    if (message.role === "user" || !current) {
-      current = newHistoryTurn(`history-turn-${index}`, timestamp);
-      turns.push(current);
+    if (type === "resource" || type === "resource_link") {
+      return [{
+        ...record,
+        type,
+        uri: typeof record.uri === "string" ? record.uri : undefined,
+        name: typeof record.name === "string" ? record.name : undefined,
+        title: typeof record.title === "string" ? record.title : undefined,
+        description: typeof record.description === "string" ? record.description : undefined,
+        mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
+        size: typeof record.size === "number" ? record.size : undefined,
+        text: typeof record.text === "string" ? record.text : undefined,
+        blob: typeof record.blob === "string" ? record.blob : undefined,
+        resource: record.resource,
+      } as AcpContentBlock];
     }
-    const turn = ensureTurn(timestamp, `history-turn-${index}`);
-    appendHistoryMessageToTurn(turn, item, index);
+    return [{ ...record, type: "unknown", originalType: type } as AcpContentBlock];
+  }).filter((block) => {
+    if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+    return true;
   });
-
-  return turns;
-}
-
-function newHistoryTurn(turnId: string, timestamp: number): LiveTurn {
-  return {
-    turnId,
-    status: "completed",
-    blocks: [],
-    tools: [],
-    permissions: [],
-    protocolMessages: [],
-    stopReason: null,
-    error: null,
-    startedAt: timestamp,
-    updatedAt: timestamp,
-  };
-}
-
-function appendHistoryMessageToTurn(
-  turn: LiveTurn,
-  item: HistoryMessageItem,
-  index: number,
-): void {
-  const message = item.message;
-  const timestamp = message.timestamp ?? index;
-  if (message.role === "user") {
-    turn.blocks.push({
-      kind: "user",
-      blocks: historyUserContentBlocks(message.text),
-      raw: { source: "history", message },
-      timestamp,
-    });
-    return;
-  }
-  if (message.role === "assistant") {
-    turn.blocks.push({
-      kind: "assistant",
-      blocks: [{ type: "text", text: stripImagePlaceholders(message.text) }],
-      raw: { source: "history", message },
-      timestamp,
-    });
-    return;
-  }
-  if (message.role === "thinking") {
-    turn.blocks.push({
-      kind: "thought",
-      blocks: [{ type: "text", text: message.text }],
-      raw: { source: "history", message },
-      timestamp,
-    });
-    return;
-  }
-  if (message.role === "runtime_status") {
-    turn.blocks.push({
-      kind: "sessionUpdate",
-      updateType: "runtime_status",
-      data: { text: message.text, timestamp: message.timestamp },
-      timestamp,
-    });
-    return;
-  }
-  if (message.role === "turn_note") {
-    turn.blocks.push({
-      kind: "sessionUpdate",
-      updateType: "turn_note",
-      data: { text: message.text, timestamp: message.timestamp },
-      timestamp,
-    });
-    return;
-  }
-  if (message.role === "todo") {
-    const tool = historyToolFromMessage(message, item.toolResult, index, "todo");
-    turn.tools.push(tool);
-    turn.blocks.push({ kind: "tool", toolId: tool.toolId, timestamp });
-    return;
-  }
-  if (message.role === "file_edit") {
-    turn.blocks.push({
-      kind: "sessionUpdate",
-      updateType: "file_edit",
-      data: { text: message.text, timestamp: message.timestamp },
-      timestamp,
-    });
-    return;
-  }
-  if (message.role === "permission_request") {
-    const permission = historyPermissionFromMessage(message, index);
-    turn.permissions.push(permission);
-    turn.blocks.push({ kind: "permission", requestId: permission.requestId, timestamp });
-    return;
-  }
-  if (isToolCallRole(message.role)) {
-    const tool = historyToolFromMessage(message, item.toolResult, index, "tool");
-    turn.tools.push(tool);
-    turn.blocks.push({ kind: "tool", toolId: tool.toolId, timestamp });
-    return;
-  }
-  if (isToolResultRole(message.role)) {
-    const tool = historyToolFromMessage(message, undefined, index, "tool_result");
-    turn.tools.push(tool);
-    turn.blocks.push({ kind: "tool", toolId: tool.toolId, timestamp });
-    return;
-  }
-  turn.blocks.push({
-    kind: "assistant",
-    blocks: [{ type: "text", text: message.text }],
-    raw: { source: "history", message },
-    timestamp,
-  });
-}
-
-function historyUserContentBlocks(text: string): AcpContentBlock[] {
-  const cleaned = sanitizeSessioAttachmentText(stripInjectedContext(text));
-  const media = splitMarkdownImages(cleaned);
-  const blocks: AcpContentBlock[] = [];
-  for (const image of media.images) {
-    blocks.push({
-      type: "image",
-      uri: image.src,
-      mimeType: image.alt && image.alt !== "image" ? image.alt : undefined,
-    });
-  }
-  const markerPattern = /\[file:\s*([^\]|]+?)(?:\|([^\]]+))?\]/g;
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = markerPattern.exec(media.text)) !== null) {
-    const before = media.text.slice(cursor, match.index);
-    if (before.trim()) {
-      blocks.push({ type: "text", text: before.trim() });
-    }
-    const name = match[1].trim() || "attachment";
-    const uri = match[2]?.trim() ?? "";
-    blocks.push({
-      type: "resource",
-      name,
-      uri,
-      mimeType: undefined,
-    });
-    cursor = match.index + match[0].length;
-  }
-  const rest = media.text.slice(cursor);
-  if (rest.trim()) {
-    blocks.push({ type: "text", text: rest.trim() });
-  }
-  return blocks.length > 0 ? blocks : [{ type: "text", text: media.text }];
-}
-
-function historyToolFromMessage(
-  message: SessionMessage,
-  toolResult: SessionMessage | undefined,
-  index: number,
-  fallbackKind: string,
-): AcpToolCall {
-  const parsed = parseToolCall(message.text);
-  const toolId = message.toolCallId ?? `history-tool-${index}`;
-  return {
-    toolId,
-    title: parsed.name,
-    kind: fallbackKind,
-    status: toolResult || fallbackKind === "todo" ? "completed" : "unknown",
-    content: [],
-    locations: [],
-    rawInput: parsed.body || message.text,
-    rawOutput: toolResult?.text ?? null,
-    meta: { source: "history", role: message.role },
-    raw: { source: "history", message, toolResult },
-    updatedAt: message.timestamp ?? index,
-  };
-}
-
-function historyPermissionFromMessage(
-  message: SessionMessage,
-  index: number,
-): AcpPermissionRequest {
-  const parsed = parseToolCall(message.text);
-  const meta = parsePermissionMetadata(message.toolCallId ?? null);
-  return {
-    requestId: meta?.requestId ?? `history-permission-${index}`,
-    toolCall: null,
-    toolName: parsed.name,
-    input: parsed.body || null,
-    options: [
-      { optionId: "allow_once", name: "Allow once", kind: "allow_once", meta: null },
-      { optionId: "reject_once", name: "Reject once", kind: "reject_once", meta: null },
-    ],
-    selectedOptionId: meta?.pending ? null : "history_resolved",
-    cancelled: false,
-    raw: { source: "history", message },
-  };
 }
 
 function mergeFileEditItems(items: HistoryMessageItem[]): HistoryMessageItem | null {
@@ -4113,43 +3958,6 @@ function mergeFileEditItems(items: HistoryMessageItem[]): HistoryMessageItem | n
       timestamp: last.timestamp ?? first.timestamp,
     },
   };
-}
-
-function findToolResultIndex(
-  entries: { m: SessionMessage; srcIdx: number }[],
-  callIndex: number,
-): number | null {
-  const call = entries[callIndex].m;
-  if (call.toolCallId) {
-    for (let i = callIndex + 1; i < entries.length; i += 1) {
-      const candidate = entries[i].m;
-      if (isToolResultRole(candidate.role) && candidate.toolCallId === call.toolCallId) {
-        return i;
-      }
-      if (isToolCallRole(candidate.role) && candidate.toolCallId === call.toolCallId) {
-        break;
-      }
-    }
-    return null;
-  }
-  const next = entries[callIndex + 1]?.m;
-  return next && isToolResultRole(next.role) && !next.toolCallId
-    ? callIndex + 1
-    : null;
-}
-
-function isToolCallRole(role: string): boolean {
-  return ["tool", "tool_call", "tool_use", "function_call"].includes(role);
-}
-
-function isToolResultRole(role: string): boolean {
-  return ["tool_result", "function_call_output"].includes(role);
-}
-
-function parseToolCall(text: string): { name: string; body: string } {
-  const m = text.match(/^\[([^\]\n]+)\]\s*\n?([\s\S]*)$/);
-  if (!m) return { name: "Tool Use", body: text };
-  return { name: m[1], body: m[2] ?? "" };
 }
 
 function canonicalToolDisplay(name: string, body: unknown, kind?: string): ToolTitleParts {
@@ -4963,18 +4771,6 @@ function RuntimeStatusContent({ text }: { text: string }) {
       <span>{running ? "Working for" : "Worked for"} {duration}</span>
     </div>
   );
-}
-
-function parsePermissionMetadata(metadata: string | null):
-  | { sessioRuntimeSessionId: string; requestId: string; pending: boolean }
-  | null {
-  const parts = metadata?.split(":") ?? [];
-  if (parts[0] !== "permission" || parts.length < 4) return null;
-  return {
-    sessioRuntimeSessionId: parts[1],
-    requestId: parts[2],
-    pending: parts[3] === "pending",
-  };
 }
 
 function ToolPairRow({

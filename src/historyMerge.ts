@@ -1,5 +1,8 @@
-import type { SessionMessage } from "./api";
-import type { AcpContentBlock, LiveRuntimeSession } from "./runtimeChat";
+import type {
+  AcpContentBlock,
+  AcpRenderBlock,
+  LiveTurn,
+} from "./runtimeChat";
 
 export function stripImagePlaceholders(s: string): string {
   return s
@@ -115,179 +118,160 @@ function safeDecodeURIComponent(value: string): string {
   }
 }
 
-export function sameReplayMessage(a: SessionMessage, b: SessionMessage): boolean {
-  return a.role === b.role &&
-    normalizedReplayText(a.text) === normalizedReplayText(b.text) &&
-    attachmentCompareSignature(a.text) === attachmentCompareSignature(b.text);
+export function forkVisibleHistoryTurns(
+  ancestorTurns: LiveTurn[],
+  currentTurns: LiveTurn[],
+): LiveTurn[] {
+  if (ancestorTurns.length === 0) return currentTurns;
+  if (currentTurns.length === 0) return ancestorTurns;
+
+  const firstCurrentUser = firstUserBlock(currentTurns);
+  if (!firstCurrentUser) return [...ancestorTurns, ...currentTurns];
+
+  const forkPoint = lastTailUserBlock(ancestorTurns);
+  if (!forkPoint || !sameAcpUserBlocks(forkPoint.block, firstCurrentUser.block)) {
+    return [...ancestorTurns, ...currentTurns];
+  }
+  return [...ancestorTurns.slice(0, forkPoint.turnIndex), ...currentTurns];
 }
 
-export function liveSessionMessages(liveSession: LiveRuntimeSession): SessionMessage[] {
-  const messages: SessionMessage[] = [];
-  for (const turn of liveSession.turns) {
-    for (const block of turn.blocks) {
-      if (block.kind === "user" || block.kind === "assistant" || block.kind === "thought") {
-        const text = contentBlocksText(block.blocks).trim();
-        if (!text) continue;
-        messages.push({
-          role: block.kind === "thought" ? "thinking" : block.kind,
-          text,
-          timestamp: block.timestamp ?? turn.updatedAt ?? null,
-        });
+export function mergeHistoryWithLiveTurns(
+  historyTurns: LiveTurn[],
+  liveTurns: LiveTurn[],
+): LiveTurn[] {
+  if (historyTurns.length === 0) return liveTurns;
+  if (liveTurns.length === 0) return historyTurns;
+  return [...historyTurns, ...trimLiveReplayPrefix(historyTurns, liveTurns)];
+}
+
+export function trimLiveReplayPrefix(
+  historyTurns: LiveTurn[],
+  liveTurns: LiveTurn[],
+): LiveTurn[] {
+  const overlap = liveReplayPrefixOverlap(historyTurns, liveTurns);
+  if (overlap === 0) return liveTurns;
+
+  let remaining = overlap;
+  const out: LiveTurn[] = [];
+  for (const turn of liveTurns) {
+    if (remaining <= 0) {
+      out.push(turn);
+      continue;
+    }
+
+    const messageBlockCount = turn.blocks.filter(isAcpMessageBlock).length;
+    if (messageBlockCount === 0) {
+      out.push(turn);
+      continue;
+    }
+
+    if (remaining >= messageBlockCount) {
+      remaining -= messageBlockCount;
+      if (isReplayTurnFinished(turn)) continue;
+      const blocks = turn.blocks.filter((block) => !isAcpMessageBlock(block));
+      if (blocks.length > 0 || turn.tools.length > 0 || turn.permissions.length > 0 || turn.error) {
+        out.push({ ...turn, blocks });
       }
+      continue;
+    }
+
+    const blocks: LiveTurn["blocks"] = [];
+    for (const block of turn.blocks) {
+      if (remaining > 0 && isAcpMessageBlock(block)) {
+        remaining -= 1;
+        continue;
+      }
+      blocks.push(block);
+    }
+    out.push({ ...turn, blocks });
+  }
+  return out;
+}
+
+type UserRenderBlock = Extract<AcpRenderBlock, { kind: "user" }>;
+
+function firstUserBlock(turns: LiveTurn[]): { turnIndex: number; block: UserRenderBlock } | null {
+  for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+    for (const block of turns[turnIndex].blocks) {
+      if (block.kind === "user") return { turnIndex, block };
     }
   }
-  return messages;
+  return null;
 }
 
-// Splice current session messages onto the ancestor chain. If the current
-// session starts with the same user message as the last ancestor user turn
-// (a forked-from continuation), drop that duplicated tail to avoid replay.
-export function forkVisibleHistoryMessages(
-  ancestorMessages: SessionMessage[],
-  currentMessages: SessionMessage[],
-): SessionMessage[] {
-  return forkVisibleHistory(ancestorMessages, currentMessages).messages;
-}
-
-type HistoryRange = {
-  start: number;
-  end: number;
-};
-
-function forkVisibleHistory(
-  ancestorMessages: SessionMessage[],
-  currentMessages: SessionMessage[],
-): { messages: SessionMessage[]; currentRange: HistoryRange | null } {
-  if (ancestorMessages.length === 0) {
-    return {
-      messages: currentMessages,
-      currentRange: currentMessages.length > 0 ? { start: 0, end: currentMessages.length } : null,
-    };
-  }
-  if (currentMessages.length === 0) {
-    return { messages: ancestorMessages, currentRange: null };
-  }
-
-  const firstCurrentUser = currentMessages.find((message) => message.role === "user");
-  if (!firstCurrentUser) {
-    return {
-      messages: [...ancestorMessages, ...currentMessages],
-      currentRange: { start: ancestorMessages.length, end: ancestorMessages.length + currentMessages.length },
-    };
-  }
-
-  let lastAncestorUserIndex = -1;
-  for (let i = ancestorMessages.length - 1; i >= 0; i -= 1) {
-    const role = ancestorMessages[i].role;
-    if (role === "assistant") break;
-    if (role === "user") {
-      lastAncestorUserIndex = i;
-      break;
+function lastTailUserBlock(turns: LiveTurn[]): { turnIndex: number; block: UserRenderBlock } | null {
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const blocks = turns[turnIndex].blocks;
+    for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = blocks[blockIndex];
+      if (block.kind === "assistant") return null;
+      if (block.kind === "user") return { turnIndex, block };
     }
   }
-  if (lastAncestorUserIndex < 0) {
-    return {
-      messages: [...ancestorMessages, ...currentMessages],
-      currentRange: { start: ancestorMessages.length, end: ancestorMessages.length + currentMessages.length },
-    };
-  }
-
-  const lastAncestorUser = ancestorMessages[lastAncestorUserIndex];
-  if (
-    normalizedUserMessageText(lastAncestorUser.text) !== normalizedUserMessageText(firstCurrentUser.text) ||
-    attachmentCompareSignature(lastAncestorUser.text) !== attachmentCompareSignature(firstCurrentUser.text)
-  ) {
-    return {
-      messages: [...ancestorMessages, ...currentMessages],
-      currentRange: { start: ancestorMessages.length, end: ancestorMessages.length + currentMessages.length },
-    };
-  }
-  const messages = [
-    ...ancestorMessages.slice(0, lastAncestorUserIndex),
-    ...currentMessages,
-  ];
-  return {
-    messages,
-    currentRange: { start: lastAncestorUserIndex, end: messages.length },
-  };
+  return null;
 }
 
-// Concatenate live messages onto history, removing the longest tail/head
-// overlap so the same message isn't shown twice while it transitions from
-// live to persisted.
-export function mergeHistoryWithLiveMessages(
-  historyMessages: SessionMessage[],
-  liveMessages: SessionMessage[],
-  replayHistoryRange?: HistoryRange | null,
-): SessionMessage[] {
-  if (historyMessages.length === 0) return liveMessages;
-  if (liveMessages.length === 0) return historyMessages;
-  let overlap = replayPrefixOverlap(historyMessages, liveMessages);
-  if (overlap === 0 && replayHistoryRange) {
-    overlap = replayPrefixAlreadyInHistory(historyMessages, liveMessages, replayHistoryRange);
-  }
-  return [...historyMessages, ...liveMessages.slice(overlap)];
+export function sameAcpUserBlocks(a: UserRenderBlock, b: UserRenderBlock): boolean {
+  const left = contentBlocksText(a.blocks);
+  const right = contentBlocksText(b.blocks);
+  return normalizedUserMessageText(left) === normalizedUserMessageText(right) &&
+    attachmentCompareSignature(left) === attachmentCompareSignature(right);
 }
 
-function replayPrefixOverlap(
-  historyMessages: SessionMessage[],
-  liveMessages: SessionMessage[],
-): number {
+type TurnMessageRole = "user" | "assistant" | "thinking";
+
+interface TurnMessageRef {
+  role: TurnMessageRole;
+  text: string;
+  timestamp: number | null;
+}
+
+function liveReplayPrefixOverlap(historyTurns: LiveTurn[], liveTurns: LiveTurn[]): number {
+  const historyMessages = turnMessageRefs(historyTurns);
+  const liveMessages = turnMessageRefs(liveTurns);
   let overlap = 0;
   const maxOverlap = Math.min(historyMessages.length, liveMessages.length);
   for (let count = 1; count <= maxOverlap; count += 1) {
     const historyTail = historyMessages.slice(-count);
     const liveHead = liveMessages.slice(0, count);
-    if (historyTail.every((message, index) => sameReplayMessage(message, liveHead[index]))) {
+    if (historyTail.every((item, index) => sameAcpReplayRef(item, liveHead[index]))) {
       overlap = count;
     }
   }
   return overlap;
 }
 
-function replayPrefixAlreadyInHistory(
-  historyMessages: SessionMessage[],
-  liveMessages: SessionMessage[],
-  range: HistoryRange,
-): number {
-  const maxPrefix = Math.min(historyMessages.length, liveMessages.length);
-  let best = 0;
-  const rangeStart = Math.max(0, Math.min(range.start, historyMessages.length));
-  const rangeEnd = Math.max(rangeStart, Math.min(range.end, historyMessages.length));
-  for (let start = rangeStart; start < rangeEnd; start += 1) {
-    let count = 0;
-    while (
-      count < maxPrefix &&
-      start + count < rangeEnd &&
-      sameReplayMessage(historyMessages[start + count], liveMessages[count]) &&
-      compatibleReplayTimestamp(historyMessages[start + count], liveMessages[count])
-    ) {
-      count += 1;
-    }
-    if (count >= 2 && count > best) {
-      best = count;
-    }
-  }
-  return best;
+function turnMessageRefs(turns: LiveTurn[]): TurnMessageRef[] {
+  const refs: TurnMessageRef[] = [];
+  turns.forEach((turn) => {
+    turn.blocks.forEach((block) => {
+      if (!isAcpMessageBlock(block)) return;
+      const text = contentBlocksText(block.blocks).trim();
+      if (!text) return;
+      refs.push({
+        role: block.kind === "thought" ? "thinking" : block.kind,
+        text,
+        timestamp: block.timestamp ?? turn.updatedAt ?? null,
+      });
+    });
+  });
+  return refs;
 }
 
-function compatibleReplayTimestamp(a: SessionMessage, b: SessionMessage): boolean {
-  if (a.timestamp == null || b.timestamp == null) return true;
-  return a.timestamp === b.timestamp;
+function sameAcpReplayRef(a: TurnMessageRef, b: TurnMessageRef): boolean {
+  return a.role === b.role &&
+    normalizedReplayText(a.text) === normalizedReplayText(b.text) &&
+    attachmentCompareSignature(a.text) === attachmentCompareSignature(b.text);
 }
 
-export function crossContextMessages(
-  ancestorMessages: SessionMessage[],
-  currentMessages: SessionMessage[],
-  liveSession: LiveRuntimeSession | null | undefined,
-): SessionMessage[] {
-  const { messages: historyMessages, currentRange } = forkVisibleHistory(ancestorMessages, currentMessages);
-  if (!liveSession || liveSession.turns.length === 0) return historyMessages;
-  return mergeHistoryWithLiveMessages(
-    historyMessages,
-    liveSessionMessages(liveSession),
-    currentRange,
-  );
+function isAcpMessageBlock(
+  block: AcpRenderBlock,
+): block is Extract<AcpRenderBlock, { kind: "user" | "assistant" | "thought" }> {
+  return block.kind === "user" || block.kind === "assistant" || block.kind === "thought";
+}
+
+function isReplayTurnFinished(turn: LiveTurn): boolean {
+  return turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled";
 }
 
 export function sanitizeSessioAttachmentText(text: string): string {

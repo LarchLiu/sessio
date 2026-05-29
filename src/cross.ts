@@ -1,9 +1,11 @@
 import {
   Agent,
-  SessionMessage,
-  getSessionMessages,
+  type SessionContentBlock,
+  getSessionHistory,
   writeCrossPrompt,
 } from "./api";
+import { contentBlocksText } from "./historyMerge";
+import type { AcpContentBlock } from "./runtimeChat";
 
 export const CROSS_PROMPT_MAX = 16 * 1024;
 const CROSS_PROMPT_SEP = "\n\n";
@@ -12,6 +14,21 @@ export interface CrossPromptSource {
   sourceAgent: Agent;
   sourceSessionId: string;
   sourceFilePath?: string;
+}
+
+export interface CrossPromptTurn {
+  blocks: CrossPromptRenderBlock[];
+}
+
+export interface CrossPromptRenderBlock {
+  kind: string;
+  blocks?: unknown;
+  [key: string]: unknown;
+}
+
+interface CrossPromptEntry {
+  role: "user" | "thinking" | "assistant";
+  text: string;
 }
 
 function htmlAttr(s: string): string {
@@ -73,15 +90,13 @@ function fitFormattedSelection(selection: string[]): string[] {
   }
 }
 
-export function buildCrossPrompt(
-  messages: SessionMessage[],
+function buildCrossPromptEntries(
+  entries: CrossPromptEntry[],
   source?: CrossPromptSource,
 ): string {
-  const filtered = messages.filter(
-    (m) => m.role === "user" || m.role === "thinking" || m.role === "assistant",
-  );
+  const filtered = entries.filter((entry) => entry.text.trim());
   if (filtered.length === 0) return "";
-  const formatted = filtered.map((m) => `[${m.role}]\n${m.text}`);
+  const formatted = filtered.map((entry) => `[${entry.role}]\n${entry.text}`);
   let size = 0;
   let startIdx = filtered.length;
   for (let i = filtered.length - 1; i >= 0; i--) {
@@ -117,6 +132,80 @@ export function buildCrossPrompt(
   return header + selected.join(CROSS_PROMPT_SEP) + `\n\n<!-- sessio-cross:end -->`;
 }
 
+export function buildCrossPromptFromTurns(
+  turns: CrossPromptTurn[],
+  source?: CrossPromptSource,
+): string {
+  return buildCrossPromptEntries(crossPromptEntriesFromTurns(turns), source);
+}
+
+function crossPromptEntriesFromTurns(turns: CrossPromptTurn[]): CrossPromptEntry[] {
+  return turns.flatMap((turn) =>
+    turn.blocks.flatMap((block) => {
+      const role = crossPromptRole(block.kind);
+      if (!role) return [];
+      const text = contentBlocksText(normalizeCrossContentBlocks(block.blocks)).trim();
+      return text ? [{ role, text }] : [];
+    }),
+  );
+}
+
+function crossPromptRole(kind: string): CrossPromptEntry["role"] | null {
+  if (kind === "user" || kind === "assistant") return kind;
+  if (kind === "thought") return "thinking";
+  return null;
+}
+
+function normalizeCrossContentBlocks(blocks: unknown): AcpContentBlock[] {
+  if (!Array.isArray(blocks)) return [];
+  const out: AcpContentBlock[] = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") continue;
+    const record = block as SessionContentBlock & Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "unknown";
+    if (type === "text") {
+      const text = typeof record.text === "string" ? record.text : "";
+      if (text.trim()) out.push({ type: "text", text });
+      continue;
+    }
+    if (type === "image" || type === "audio") {
+      out.push({
+        type,
+        uri: typeof record.uri === "string" ? record.uri : undefined,
+        data: typeof record.data === "string" ? record.data : undefined,
+        mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
+      } as AcpContentBlock);
+      continue;
+    }
+    if (type === "resource_link") {
+      out.push({
+        type: "resource_link",
+        uri: typeof record.uri === "string" ? record.uri : "",
+        name: typeof record.name === "string" ? record.name : undefined,
+        title: typeof record.title === "string" ? record.title : undefined,
+        description: typeof record.description === "string" ? record.description : undefined,
+        mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
+        size: typeof record.size === "number" ? record.size : undefined,
+      });
+      continue;
+    }
+    if (type === "resource") {
+      out.push({
+        type: "resource",
+        uri: typeof record.uri === "string" ? record.uri : undefined,
+        name: typeof record.name === "string" ? record.name : undefined,
+        mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
+        text: typeof record.text === "string" ? record.text : undefined,
+        blob: typeof record.blob === "string" ? record.blob : undefined,
+        resource: record.resource,
+      });
+      continue;
+    }
+    out.push({ ...record, type: "unknown", originalType: type, meta: record.meta ?? null });
+  }
+  return out;
+}
+
 export function buildCrossCommand(
   targetAgent: Agent,
   filePath: string,
@@ -140,8 +229,8 @@ export async function buildCrossCommandForSession(
   filePath: string,
   placeholder: string,
 ): Promise<string | null> {
-  const { messages } = await getSessionMessages(sourceAgent, filePath, sessionId);
-  const prompt = buildCrossPrompt(messages, {
+  const { turns } = await getSessionHistory(sourceAgent, filePath, sessionId);
+  const prompt = buildCrossPromptFromTurns(turns, {
     sourceAgent,
     sourceSessionId: sessionId,
     sourceFilePath: filePath,

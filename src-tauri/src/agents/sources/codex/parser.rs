@@ -341,12 +341,7 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
             if role == "user" && is_system_noise(&text) {
                 return Vec::new();
             }
-            vec![SessionMessage {
-                role,
-                text,
-                timestamp: ts,
-                tool_call_id: None,
-            }]
+            vec![SessionMessage::new(role, text, ts)]
         }
         "function_call" => {
             let name = payload
@@ -366,30 +361,28 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
             } else {
                 format!("[{name}]\n{args_pretty}")
             };
-            vec![SessionMessage {
-                role: "tool_call".to_string(),
-                text,
-                timestamp: ts,
-                tool_call_id: payload
-                    .get("call_id")
-                    .and_then(|x| x.as_str())
-                    .map(String::from),
-            }]
+            vec![
+                SessionMessage::new("tool_call", text, ts).with_tool_call_id(
+                    payload
+                        .get("call_id")
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
+                ),
+            ]
         }
         "function_call_output" => {
             let output = extract_function_call_output_text(payload);
             if output.trim().is_empty() {
                 return Vec::new();
             }
-            vec![SessionMessage {
-                role: "tool_result".to_string(),
-                text: output,
-                timestamp: ts,
-                tool_call_id: payload
-                    .get("call_id")
-                    .and_then(|x| x.as_str())
-                    .map(String::from),
-            }]
+            vec![
+                SessionMessage::new("tool_result", output, ts).with_tool_call_id(
+                    payload
+                        .get("call_id")
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
+                ),
+            ]
         }
         "custom_tool_call" => {
             let name = payload
@@ -417,16 +410,15 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
             } else {
                 format!("[{name}]\n{input}")
             };
-            vec![SessionMessage {
-                role: "tool_call".to_string(),
-                text,
-                timestamp: ts,
-                tool_call_id: payload
-                    .get("call_id")
-                    .or_else(|| payload.get("id"))
-                    .and_then(|x| x.as_str())
-                    .map(String::from),
-            }]
+            vec![
+                SessionMessage::new("tool_call", text, ts).with_tool_call_id(
+                    payload
+                        .get("call_id")
+                        .or_else(|| payload.get("id"))
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
+                ),
+            ]
         }
         "custom_tool_call_output" => {
             let output = payload
@@ -436,28 +428,22 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
             if output.trim().is_empty() {
                 return Vec::new();
             }
-            vec![SessionMessage {
-                role: "tool_result".to_string(),
-                text: output,
-                timestamp: ts,
-                tool_call_id: payload
-                    .get("call_id")
-                    .or_else(|| payload.get("id"))
-                    .and_then(|x| x.as_str())
-                    .map(String::from),
-            }]
+            vec![
+                SessionMessage::new("tool_result", output, ts).with_tool_call_id(
+                    payload
+                        .get("call_id")
+                        .or_else(|| payload.get("id"))
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
+                ),
+            ]
         }
         "reasoning" => {
             let text = extract_reasoning_text(payload);
             if text.trim().is_empty() {
                 return Vec::new();
             }
-            vec![SessionMessage {
-                role: "thinking".to_string(),
-                text,
-                timestamp: ts,
-                tool_call_id: None,
-            }]
+            vec![SessionMessage::new("thinking", text, ts)]
         }
         "web_search_call" => interpret_web_search_call(payload, ts),
         "image_generation_call" => interpret_image_generation_call(payload, ts),
@@ -943,16 +929,16 @@ fn interpret_web_search_call(payload: &serde_json::Value, ts: Option<i64>) -> Ve
         Ok(s) if !s.trim().is_empty() && s != "null" => s,
         _ => return Vec::new(),
     };
-    vec![SessionMessage {
-        role: "tool_call".to_string(),
-        text: format!("[web_search]\n{args_pretty}"),
-        timestamp: ts,
-        tool_call_id: payload
-            .get("id")
-            .or_else(|| payload.get("call_id"))
-            .and_then(|x| x.as_str())
-            .map(String::from),
-    }]
+    vec![
+        SessionMessage::new("tool_call", format!("[web_search]\n{args_pretty}"), ts)
+            .with_tool_call_id(
+                payload
+                    .get("id")
+                    .or_else(|| payload.get("call_id"))
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+            ),
+    ]
 }
 
 fn interpret_image_generation_call(
@@ -986,22 +972,17 @@ fn interpret_image_generation_call(
     }
     let args_pretty = serde_json::to_string_pretty(&serde_json::Value::Object(args))
         .unwrap_or_else(|_| "{}".to_string());
-    let mut out = vec![SessionMessage {
-        role: "tool_call".to_string(),
-        text: format!("[image_generation]\n{args_pretty}"),
-        timestamp: ts,
-        tool_call_id: call_id.clone(),
-    }];
+    let mut out = vec![SessionMessage::new(
+        "tool_call",
+        format!("[image_generation]\n{args_pretty}"),
+        ts,
+    )
+    .with_tool_call_id(call_id.clone())];
     if let Some(result) = payload
         .get("result")
         .and_then(image_generation_result_to_markdown)
     {
-        out.push(SessionMessage {
-            role: "tool_result".to_string(),
-            text: result,
-            timestamp: ts,
-            tool_call_id: call_id,
-        });
+        out.push(SessionMessage::new("tool_result", result, ts).with_tool_call_id(call_id));
     }
     out
 }
@@ -1073,12 +1054,7 @@ fn file_edit_message(
         "edits": edits,
     })
     .to_string();
-    Some(SessionMessage {
-        role: "file_edit".to_string(),
-        text,
-        timestamp: ts,
-        tool_call_id: None,
-    })
+    Some(SessionMessage::new("file_edit", text, ts))
 }
 
 fn display_path(path: &str, cwd: Option<&str>) -> String {

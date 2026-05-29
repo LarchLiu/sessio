@@ -72,16 +72,113 @@ export interface SubagentInfo {
   partial: boolean;
 }
 
-export interface SessionMessage {
-  role: string;
-  text: string;
-  timestamp: number | null;
-  toolCallId?: string | null;
+export type SessionContentBlock =
+  | {
+      type: "text";
+      text: string;
+      annotations?: unknown | null;
+      meta?: unknown | null;
+    }
+  | {
+      type: "image" | "audio";
+      uri?: string;
+      data?: string;
+      mimeType?: string;
+      annotations?: unknown | null;
+      meta?: unknown | null;
+    }
+  | {
+      type: "resource";
+      uri?: string;
+      name?: string;
+      mimeType?: string;
+      text?: string;
+      blob?: string;
+      resource?: unknown;
+      annotations?: unknown | null;
+      meta?: unknown | null;
+    }
+  | {
+      type: "resource_link";
+      uri: string;
+      name?: string;
+      title?: string;
+      description?: string;
+      mimeType?: string;
+      size?: number;
+      annotations?: unknown | null;
+      meta?: unknown | null;
+    }
+  | {
+      type: "unknown";
+      uri?: string;
+      name?: string;
+      title?: string;
+      description?: string;
+      mimeType?: string;
+      size?: number;
+      text?: string;
+      blob?: string;
+      resource?: unknown;
+      annotations?: unknown | null;
+      meta?: unknown | null;
+    }
+  | (Record<string, unknown> & {
+      type: string;
+      meta?: unknown | null;
+    });
+
+export interface SessionHistoryResult {
+  messageCount: number;
+  indexedThrough: number | null;
+  turns: SessionHistoryTurn[];
 }
 
-export interface SessionMessagesResult {
-  messages: SessionMessage[];
-  messageCount: number;
+export interface SessionHistoryTurn {
+  turnId: string;
+  status: RuntimeTurnStatus;
+  blocks: SessionHistoryRenderBlock[];
+  tools: SessionHistoryToolCall[];
+  permissions: SessionHistoryPermissionRequest[];
+  protocolMessages: AcpProtocolMessage[];
+  stopReason: string | null;
+  error: RuntimeError | null;
+  startedAt: number;
+  updatedAt: number;
+}
+
+export type SessionHistoryRenderBlock =
+  | { kind: "user"; blocks: SessionContentBlock[]; raw: unknown; timestamp?: number }
+  | { kind: "assistant"; blocks: SessionContentBlock[]; raw: unknown; timestamp?: number }
+  | { kind: "thought"; blocks: SessionContentBlock[]; raw: unknown; timestamp?: number }
+  | { kind: "tool"; toolId: string; timestamp?: number }
+  | { kind: "permission"; requestId: string; timestamp?: number }
+  | { kind: "sessionUpdate"; updateType: string; data: unknown; timestamp?: number }
+  | { kind: "error"; error: RuntimeError; timestamp?: number };
+
+export interface SessionHistoryToolCall {
+  toolId: string;
+  title: string;
+  kind: string;
+  status: string;
+  content: unknown[];
+  locations: unknown[];
+  rawInput: unknown | null;
+  rawOutput: unknown | null;
+  meta: unknown | null;
+  raw: unknown;
+  updatedAt: number;
+}
+
+export interface SessionHistoryPermissionRequest {
+  requestId: string;
+  toolCall: unknown;
+  toolName: string;
+  input: unknown | null;
+  options: unknown[];
+  selectedOptionId: string | null;
+  cancelled: boolean;
+  raw: unknown;
 }
 
 export type IndexPhase = "idle" | "indexing" | "rebuilding";
@@ -517,12 +614,12 @@ export async function removeSessionsByScope(scope: SessionScope): Promise<void> 
   return invoke<void>("remove_sessions_by_scope", { scope });
 }
 
-export async function getSessionMessages(
+export async function getSessionHistory(
   agent: Agent,
   filePath: string,
   sessionId?: string
-): Promise<SessionMessagesResult> {
-  return invoke<SessionMessagesResult>("get_session_messages", {
+): Promise<SessionHistoryResult> {
+  return invoke<SessionHistoryResult>("get_session_history", {
     agent,
     filePath,
     sessionId: sessionId ?? null,

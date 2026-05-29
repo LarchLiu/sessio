@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::models::SessionContentBlock;
+
 pub type Metadata = BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -105,6 +107,7 @@ pub struct ToolResultEvent {
 #[serde(rename_all = "camelCase")]
 pub enum MessageContent {
     Text { text: String },
+    Blocks { blocks: Vec<SessionContentBlock> },
     ToolUse { tool: ToolUseEvent },
     ToolResult { result: ToolResultEvent },
     Mixed { parts: Vec<MessageContent> },

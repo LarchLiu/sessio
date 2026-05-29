@@ -1,18 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { buildCrossPrompt, CROSS_PROMPT_MAX } from "../src/cross";
-import type { SessionMessage } from "../src/api";
+import { buildCrossPromptFromTurns, CROSS_PROMPT_MAX } from "../src/cross";
 
-function userMessage(text: string): SessionMessage {
-  return { role: "user", text, timestamp: 1 };
+function messageTurn(role: "user" | "assistant" | "thought", text: string) {
+  return {
+    blocks: [
+      {
+        kind: role,
+        blocks: [{ type: "text", text }],
+      },
+    ],
+  };
 }
 
-function assistantMessage(text: string): SessionMessage {
-  return { role: "assistant", text, timestamp: 2 };
+function userTurn(text: string) {
+  return messageTurn("user", text);
 }
 
-describe("buildCrossPrompt", () => {
+function assistantTurn(text: string) {
+  return messageTurn("assistant", text);
+}
+
+describe("buildCrossPromptFromTurns", () => {
   it("keeps the latest oversized user turn instead of returning empty", () => {
-    const prompt = buildCrossPrompt([userMessage("x".repeat(CROSS_PROMPT_MAX + 100))]);
+    const prompt = buildCrossPromptFromTurns([userTurn("x".repeat(CROSS_PROMPT_MAX + 100))]);
     expect(prompt).toContain("[user]");
     expect(prompt).toContain("[...truncated...]");
     expect(prompt).toContain("x".repeat(32));
@@ -20,9 +30,9 @@ describe("buildCrossPrompt", () => {
   });
 
   it("falls back to the latest user when only assistant tail fits", () => {
-    const prompt = buildCrossPrompt([
-      userMessage("important question"),
-      assistantMessage("y".repeat(CROSS_PROMPT_MAX + 100)),
+    const prompt = buildCrossPromptFromTurns([
+      userTurn("important question"),
+      assistantTurn("y".repeat(CROSS_PROMPT_MAX + 100)),
     ]);
     expect(prompt).toContain("[user]\nimportant question");
     expect(prompt).toContain("[assistant]");
@@ -31,13 +41,70 @@ describe("buildCrossPrompt", () => {
   });
 
   it("keeps latest user and truncates oversized assistant when both cannot fully fit", () => {
-    const prompt = buildCrossPrompt([
-      userMessage("important question"),
-      assistantMessage("y".repeat(CROSS_PROMPT_MAX * 2)),
+    const prompt = buildCrossPromptFromTurns([
+      userTurn("important question"),
+      assistantTurn("y".repeat(CROSS_PROMPT_MAX * 2)),
     ]);
     expect(prompt).toContain("[user]\nimportant question");
     expect(prompt).toContain("[assistant]");
     expect(prompt).toContain("[...truncated...]");
     expect(prompt.length).toBeLessThan(CROSS_PROMPT_MAX + 512);
+  });
+
+  it("formats structured content blocks when present", () => {
+    const prompt = buildCrossPromptFromTurns([
+      {
+        blocks: [
+          {
+            kind: "user",
+            blocks: [
+              { type: "text", text: "review these" },
+              { type: "resource", name: "spec.md", uri: "file:///tmp/spec.md" },
+              { type: "image", uri: "file:///tmp/screen.png", mimeType: "image/png" },
+            ],
+          },
+        ],
+      },
+    ]);
+    expect(prompt).toContain("[user]\nreview these");
+    expect(prompt).toContain("[file: spec.md|file:///tmp/spec.md]");
+    expect(prompt).toContain("![image/png](file:///tmp/screen.png)");
+    expect(prompt).not.toContain("[user]\nfallback");
+  });
+
+  it("builds cross context from ACP-like turns", () => {
+    const prompt = buildCrossPromptFromTurns([
+      {
+        blocks: [
+          {
+            kind: "user",
+            blocks: [
+              { type: "text", text: "review these" },
+              { type: "resource", name: "spec.md", uri: "file:///tmp/spec.md" },
+              { type: "image", uri: "file:///tmp/screen.png", mimeType: "image/png" },
+            ],
+          },
+          {
+            kind: "tool",
+            toolId: "tool-1",
+          },
+          {
+            kind: "thought",
+            blocks: [{ type: "text", text: "need to inspect files" }],
+          },
+          {
+            kind: "assistant",
+            blocks: [{ type: "text", text: "done" }],
+          },
+        ],
+      },
+    ]);
+
+    expect(prompt).toContain("[user]\nreview these");
+    expect(prompt).toContain("[file: spec.md|file:///tmp/spec.md]");
+    expect(prompt).toContain("![image/png](file:///tmp/screen.png)");
+    expect(prompt).toContain("[thinking]\nneed to inspect files");
+    expect(prompt).toContain("[assistant]\ndone");
+    expect(prompt).not.toContain("tool-1");
   });
 });

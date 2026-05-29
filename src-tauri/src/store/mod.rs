@@ -6,7 +6,8 @@ use std::collections::HashSet;
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
-    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionInfo, SubagentInfo,
+    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionHistoryTurn, SessionInfo,
+    SubagentInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -46,6 +47,19 @@ pub struct RuntimeAgentCapabilityRecord {
     pub raw_initialize_response_json: String,
     pub raw_capabilities_json: String,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionHistoryRecord {
+    pub agent: Agent,
+    pub session_id: String,
+    pub file_path: String,
+    pub file_size: u64,
+    pub file_mtime: Option<i64>,
+    pub message_count: usize,
+    pub indexed_through: Option<i64>,
+    pub updated_at: i64,
+    pub turns: Vec<SessionHistoryTurn>,
 }
 
 pub trait SessionStore: Send + Sync {
@@ -105,6 +119,13 @@ pub trait SessionStore: Send + Sync {
         agent: Agent,
     ) -> Result<Option<RuntimeAgentCapabilityRecord>>;
     fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()>;
+    fn get_session_history(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        file_path: &str,
+    ) -> Result<Option<SessionHistoryRecord>>;
+    fn replace_session_history(&self, record: &SessionHistoryRecord) -> Result<()>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(

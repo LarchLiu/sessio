@@ -307,12 +307,7 @@ fn expand_message(
         if text.trim().is_empty() {
             return Vec::new();
         }
-        return vec![SessionMessage {
-            role: role_raw.to_string(),
-            text,
-            timestamp: ts,
-            tool_call_id: None,
-        }];
+        return vec![SessionMessage::new(role_raw, text, ts)];
     }
 
     let arr = match content.as_array() {
@@ -336,12 +331,7 @@ fn expand_message(
         if role_raw == "user" && is_system_noise(&cleaned) {
             return;
         }
-        out.push(SessionMessage {
-            role: role_raw.to_string(),
-            text: cleaned,
-            timestamp: ts,
-            tool_call_id: None,
-        });
+        out.push(SessionMessage::new(role_raw, cleaned, ts));
     };
 
     for item in arr {
@@ -361,12 +351,7 @@ fn expand_message(
                 flush_text(&mut out, &mut text_parts);
                 if let Some(t) = item.get("thinking").and_then(|x| x.as_str()) {
                     if !t.trim().is_empty() {
-                        out.push(SessionMessage {
-                            role: "thinking".to_string(),
-                            text: t.to_string(),
-                            timestamp: ts,
-                            tool_call_id: None,
-                        });
+                        out.push(SessionMessage::new("thinking", t.to_string(), ts));
                     }
                 }
             }
@@ -380,12 +365,11 @@ fn expand_message(
                     .unwrap_or("")
                     .trim();
                 if !reasoning_text.is_empty() {
-                    out.push(SessionMessage {
-                        role: "thinking".to_string(),
-                        text: reasoning_text.to_string(),
-                        timestamp: ts,
-                        tool_call_id: None,
-                    });
+                    out.push(SessionMessage::new(
+                        "thinking",
+                        reasoning_text.to_string(),
+                        ts,
+                    ));
                 }
             }
             "tool_use" => {
@@ -405,20 +389,18 @@ fn expand_message(
                 if name == "TodoWrite" {
                     if let Some(todos) = item.get("input").and_then(|i| i.get("todos")) {
                         if let Ok(text) = serde_json::to_string(todos) {
-                            out.push(SessionMessage {
-                                role: "todo".to_string(),
-                                text,
-                                timestamp: ts,
-                                tool_call_id: item
-                                    .get("id")
-                                    .or_else(|| item.get("tool_use_id"))
-                                    .or_else(|| item.get("toolUseId"))
-                                    .or_else(|| item.get("tool_useId"))
-                                    .or_else(|| item.get("toolId"))
-                                    .or_else(|| item.get("tool_id"))
-                                    .and_then(|x| x.as_str())
-                                    .map(String::from),
-                            });
+                            out.push(
+                                SessionMessage::new("todo", text, ts).with_tool_call_id(
+                                    item.get("id")
+                                        .or_else(|| item.get("tool_use_id"))
+                                        .or_else(|| item.get("toolUseId"))
+                                        .or_else(|| item.get("tool_useId"))
+                                        .or_else(|| item.get("toolId"))
+                                        .or_else(|| item.get("tool_id"))
+                                        .and_then(|x| x.as_str())
+                                        .map(String::from),
+                                ),
+                            );
                             continue;
                         }
                     }
@@ -432,20 +414,18 @@ fn expand_message(
                 } else {
                     format!("[{name}]\n{input_pretty}")
                 };
-                out.push(SessionMessage {
-                    role: "tool_call".to_string(),
-                    text,
-                    timestamp: ts,
-                    tool_call_id: item
-                        .get("id")
-                        .or_else(|| item.get("tool_use_id"))
-                        .or_else(|| item.get("toolUseId"))
-                        .or_else(|| item.get("tool_useId"))
-                        .or_else(|| item.get("toolId"))
-                        .or_else(|| item.get("tool_id"))
-                        .and_then(|x| x.as_str())
-                        .map(String::from),
-                });
+                out.push(
+                    SessionMessage::new("tool_call", text, ts).with_tool_call_id(
+                        item.get("id")
+                            .or_else(|| item.get("tool_use_id"))
+                            .or_else(|| item.get("toolUseId"))
+                            .or_else(|| item.get("tool_useId"))
+                            .or_else(|| item.get("toolId"))
+                            .or_else(|| item.get("tool_id"))
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                    ),
+                );
             }
             "tool_result" => {
                 flush_text(&mut out, &mut text_parts);
@@ -461,12 +441,10 @@ fn expand_message(
                         .or_else(|| item.get("id"))
                         .and_then(|x| x.as_str())
                         .map(String::from);
-                    out.push(SessionMessage {
-                        role: "tool_result".to_string(),
-                        text: body,
-                        timestamp: ts,
-                        tool_call_id: tool_use_id.clone(),
-                    });
+                    out.push(
+                        SessionMessage::new("tool_result", body, ts)
+                            .with_tool_call_id(tool_use_id.clone()),
+                    );
                     if let Some(id) = tool_use_id {
                         if let Some(edit) = edit_tools.remove(&id) {
                             if let Some(summary) =
@@ -788,12 +766,7 @@ fn file_edit_message(
         "edits": edits,
     })
     .to_string();
-    Some(SessionMessage {
-        role: "file_edit".to_string(),
-        text,
-        timestamp: ts,
-        tool_call_id: None,
-    })
+    Some(SessionMessage::new("file_edit", text, ts))
 }
 
 fn line_count(s: &str) -> usize {

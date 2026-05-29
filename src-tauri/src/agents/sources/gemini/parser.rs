@@ -11,7 +11,9 @@ use crate::agents::sources::shared::cross_context::{
     cross_context_lineage_from_payload, cross_context_lineage_from_text,
 };
 use crate::agents::sources::system_time_to_millis;
-use crate::models::{is_system_noise, normalize_preview, Agent, SessionInfo, SessionMessage};
+use crate::models::{
+    is_system_noise, normalize_preview, Agent, SessionContentBlock, SessionInfo, SessionMessage,
+};
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let (tmp_dir, projects_json) = paths()?;
@@ -260,12 +262,7 @@ pub fn read_messages_with_locations(
             continue;
         }
         out.push((
-            SessionMessage {
-                role,
-                text,
-                timestamp: ts,
-                tool_call_id: None,
-            },
+            SessionMessage::new(role, text, ts),
             crate::agents::sources::types::SourceLocation {
                 file_path: file_path.clone(),
                 line_start: Some(entry.line_start),
@@ -875,6 +872,30 @@ fn extract_message_images(message: &serde_json::Value) -> Vec<String> {
     dedupe_string_list(images)
 }
 
+fn gemini_user_content_blocks(text: &str, images: &[String]) -> Vec<SessionContentBlock> {
+    let mut blocks = Vec::new();
+    let text_without_images = strip_trailing_markdown_images(text);
+    if !text_without_images.trim().is_empty() {
+        blocks.push(SessionContentBlock::text(
+            text_without_images.trim().to_string(),
+        ));
+    }
+    for image in images {
+        blocks.push(SessionContentBlock::image(image.to_string(), None));
+    }
+    if blocks.is_empty() {
+        blocks.push(SessionContentBlock::text(text.to_string()));
+    }
+    blocks
+}
+
+fn strip_trailing_markdown_images(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("![Image #"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn strip_image_at_references(text: &str) -> String {
     text.split_whitespace()
         .filter(|part| {
@@ -1035,12 +1056,7 @@ fn file_edit_message(
         "edits": edits,
     })
     .to_string();
-    Some(SessionMessage {
-        role: "file_edit".to_string(),
-        text,
-        timestamp: ts,
-        tool_call_id: None,
-    })
+    Some(SessionMessage::new("file_edit", text, ts))
 }
 
 fn read_chat_messages_with_locations(
@@ -1104,13 +1120,9 @@ fn read_chat_messages_with_locations(
             if text.trim().is_empty() || is_system_noise(&text) {
                 continue;
             }
+            let content_blocks = gemini_user_content_blocks(&text, &images);
             out.push((
-                SessionMessage {
-                    role: "user".to_string(),
-                    text,
-                    timestamp: ts,
-                    tool_call_id: None,
-                },
+                SessionMessage::new("user", text, ts).with_content_blocks(content_blocks),
                 location.clone(),
             ));
             continue;
@@ -1138,15 +1150,7 @@ fn read_chat_messages_with_locations(
                     (None, Some(description)) => description.to_string(),
                     (None, None) => continue,
                 };
-                out.push((
-                    SessionMessage {
-                        role: "thinking".to_string(),
-                        text,
-                        timestamp: ts,
-                        tool_call_id: None,
-                    },
-                    location.clone(),
-                ));
+                out.push((SessionMessage::new("thinking", text, ts), location.clone()));
             }
         }
 
@@ -1173,12 +1177,8 @@ fn read_chat_messages_with_locations(
                     format!("[{tool_name}]\n{input}")
                 };
                 out.push((
-                    SessionMessage {
-                        role: "tool_call".to_string(),
-                        text,
-                        timestamp: ts,
-                        tool_call_id: Some(tool_id.clone()),
-                    },
+                    SessionMessage::new("tool_call", text, ts)
+                        .with_tool_call_id(Some(tool_id.clone())),
                     location.clone(),
                 ));
 
@@ -1199,12 +1199,8 @@ fn read_chat_messages_with_locations(
                         "[result]"
                     };
                     out.push((
-                        SessionMessage {
-                            role: "tool_result".to_string(),
-                            text: format!("{prefix}\n{output}"),
-                            timestamp: ts,
-                            tool_call_id: Some(tool_id),
-                        },
+                        SessionMessage::new("tool_result", format!("{prefix}\n{output}"), ts)
+                            .with_tool_call_id(Some(tool_id)),
                         location.clone(),
                     ));
                 }
@@ -1218,15 +1214,7 @@ fn read_chat_messages_with_locations(
 
         if let Some(text) = extract_gemini_display_or_message_text(&raw) {
             if !text.trim().is_empty() {
-                out.push((
-                    SessionMessage {
-                        role: "assistant".to_string(),
-                        text,
-                        timestamp: ts,
-                        tool_call_id: None,
-                    },
-                    location.clone(),
-                ));
+                out.push((SessionMessage::new("assistant", text, ts), location.clone()));
             }
         }
     }

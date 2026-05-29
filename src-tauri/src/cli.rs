@@ -5,7 +5,7 @@ use crate::memory::qmd;
 use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
-use crate::models::Agent;
+use crate::models::{Agent, SessionHistoryBlock, SessionHistoryTurn};
 use crate::store::sqlite::SqliteStore;
 use crate::store::SessionStore;
 use anyhow::{bail, Context, Result};
@@ -659,27 +659,57 @@ fn run_sessions(cmd: SessionsCommand) -> Result<()> {
                 Some(path) => path,
                 None => resolve_session_file(agent, session_id.as_deref())?,
             };
-            let path = PathBuf::from(&file_path);
-            let messages = match agent {
-                Agent::Codex => crate::agents::sources::codex::parser::read_messages(&path)?,
-                Agent::Claude => crate::agents::sources::claude::parser::read_messages(&path)?,
-                Agent::Gemini => crate::agents::sources::gemini::parser::read_messages(
-                    &path,
-                    session_id
-                        .as_deref()
-                        .context("gemini messages require --session-id")?,
-                )?,
-            };
+            let result =
+                crate::read_session_history_result(agent, &file_path, session_id.as_deref())?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&messages)?);
+                println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
-                for m in messages {
-                    println!("[{}]\n{}\n", m.role, m.text);
-                }
+                print_session_turns(&result.turns);
             }
             Ok(())
         }
     }
+}
+
+fn print_session_turns(turns: &[SessionHistoryTurn]) {
+    for turn in turns {
+        for block in &turn.blocks {
+            if let Some((role, text)) = session_history_block_text(block) {
+                println!("[{}]\n{}\n", role, text);
+            }
+        }
+    }
+}
+
+fn session_history_block_text(block: &SessionHistoryBlock) -> Option<(&'static str, String)> {
+    let role = match block.kind.as_str() {
+        "user" => "user",
+        "assistant" => "assistant",
+        "thought" => "thinking",
+        _ => return None,
+    };
+    let text = block
+        .blocks
+        .iter()
+        .filter_map(|part| match part.kind.as_str() {
+            "text" => part.text.clone(),
+            "image" => part.uri.as_ref().map(|uri| {
+                format!(
+                    "![{}]({})",
+                    part.mime_type.as_deref().unwrap_or("image"),
+                    uri
+                )
+            }),
+            "resource" | "resource_link" => {
+                let name = part.name.as_deref().unwrap_or("attachment");
+                let uri = part.uri.as_deref().unwrap_or("");
+                Some(format!("[file: {name}|{uri}]"))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some((role, text))
 }
 
 fn resolve_session_file(agent: Agent, session_id: Option<&str>) -> Result<String> {
