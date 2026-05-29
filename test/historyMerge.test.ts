@@ -80,10 +80,57 @@ describe("mergeHistoryWithLiveMessages", () => {
     ]);
   });
 
+  it("drops replay prefix already present inside history before appending new live turns", () => {
+    const history = [
+      userMessage("a"),
+      assistantMessage("A"),
+      userMessage("b", 3),
+      assistantMessage("B", 4),
+      userMessage("c", 5),
+    ];
+    const live = [
+      userMessage("b", 3),
+      assistantMessage("B", 4),
+      userMessage("d", 6),
+    ];
+    expect(mergeHistoryWithLiveMessages(history, live, { start: 2, end: 5 })).toEqual([
+      ...history,
+      userMessage("d", 6),
+    ]);
+  });
+
+  it("does not drop live prefix that only matches an early repeated history fragment", () => {
+    const history = [
+      userMessage("repeat", 1),
+      assistantMessage("same", 2),
+      userMessage("later", 3),
+      assistantMessage("after", 4),
+      userMessage("current", 5),
+    ];
+    const live = [
+      userMessage("repeat", 10),
+      assistantMessage("same", 11),
+      userMessage("new", 12),
+    ];
+    expect(mergeHistoryWithLiveMessages(history, live)).toEqual([...history, ...live]);
+  });
+
   it("ignores cosmetic whitespace and IDE-injected blocks when matching overlap", () => {
     const history = [userMessage("<ide_opened_file>foo</ide_opened_file>hi  there")];
     const live = [userMessage("hi there")];
     expect(mergeHistoryWithLiveMessages(history, live)).toEqual(history);
+  });
+
+  it("matches equivalent attachment references when persisted history and live replay differ in marker shape", () => {
+    const history = [userMessage("inspect this\n[file: sketch.png|file:///tmp/sketch.png]")];
+    const live = [userMessage("inspect this\n![image/png](file:///tmp/sketch.png)")];
+    expect(mergeHistoryWithLiveMessages(history, live)).toEqual(history);
+  });
+
+  it("keeps same-text live replay when attachment references differ", () => {
+    const history = [userMessage("inspect this\n[file: sketch.png|file:///tmp/sketch.png]")];
+    const live = [userMessage("inspect this\n![image/png](file:///tmp/other.png)")];
+    expect(mergeHistoryWithLiveMessages(history, live)).toEqual([...history, ...live]);
   });
 });
 
@@ -108,6 +155,30 @@ describe("forkVisibleHistoryMessages", () => {
     expect(forkVisibleHistoryMessages(ancestors, current)).toEqual([
       userMessage("a"),
       assistantMessage("A"),
+      ...current,
+    ]);
+  });
+
+  it("drops duplicated fork user when equivalent attachment markers differ in shape", () => {
+    const ancestors = [
+      userMessage("a"),
+      userMessage("forked\n[file: notes.md|file:///tmp/notes.md]"),
+    ];
+    const current = [userMessage("forked\n[resource: file:///tmp/notes.md]"), assistantMessage("B-new")];
+    expect(forkVisibleHistoryMessages(ancestors, current)).toEqual([
+      userMessage("a"),
+      ...current,
+    ]);
+  });
+
+  it("keeps ancestor fork user when same text points at a different attachment", () => {
+    const ancestors = [
+      userMessage("a"),
+      userMessage("forked\n[file: notes.md|file:///tmp/notes.md]"),
+    ];
+    const current = [userMessage("forked\n[resource: file:///tmp/other.md]"), assistantMessage("B-new")];
+    expect(forkVisibleHistoryMessages(ancestors, current)).toEqual([
+      ...ancestors,
       ...current,
     ]);
   });
@@ -158,6 +229,30 @@ describe("liveSessionMessages", () => {
     expect(liveSessionMessages(session)).toEqual([
       { role: "user", text: "hi", timestamp: 10 },
       { role: "assistant", text: "hello", timestamp: 20 },
+    ]);
+  });
+
+  it("preserves live file and image references for cross-context replay", () => {
+    const session = liveSession([
+      liveTurn([
+        {
+          kind: "user",
+          blocks: [
+            { type: "text", text: "review these" },
+            { type: "resource", uri: "file:///tmp/spec.md", name: "spec.md" },
+            { type: "image", uri: "file:///tmp/screen.png", mimeType: "image/png" },
+          ],
+          raw: { source: "test" },
+          timestamp: 10,
+        },
+      ]),
+    ]);
+    expect(liveSessionMessages(session)).toEqual([
+      {
+        role: "user",
+        text: "review these\n[file: spec.md|file:///tmp/spec.md]\n![image/png](file:///tmp/screen.png)",
+        timestamp: 10,
+      },
     ]);
   });
 });

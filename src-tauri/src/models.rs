@@ -18,6 +18,15 @@ impl Agent {
             Agent::Gemini => "gemini",
         }
     }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "codex" => Some(Agent::Codex),
+            "claude" => Some(Agent::Claude),
+            "gemini" => Some(Agent::Gemini),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

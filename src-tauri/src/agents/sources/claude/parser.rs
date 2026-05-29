@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::agents::sources::shared::attachment_text::{
     sanitize_user_attachment_text, sanitize_user_preview_text,
 };
+use crate::agents::sources::shared::cross_context::cross_context_lineage_from_payload;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::SourceLocation;
 use crate::models::{
@@ -806,6 +807,8 @@ fn line_count(s: &str) -> usize {
 fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
     let mut cwd: Option<String> = None;
     let reverse = latest_reverse_metadata_from_file(path).unwrap_or_default();
+    let mut forked_from_agent: Option<Agent> = None;
+    let mut forked_from_id: Option<String> = None;
     let mut first_user_message: Option<String> = None;
     let mut earliest_ts: Option<i64> = None;
 
@@ -838,6 +841,12 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
         let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
         if kind == "user" && first_user_message.is_none() {
             if let Some(msg) = v.get("message") {
+                if forked_from_id.is_none() {
+                    if let Some(lineage) = cross_context_lineage_from_payload(msg) {
+                        forked_from_agent = Some(lineage.agent);
+                        forked_from_id = Some(lineage.session_id);
+                    }
+                }
                 let text = sanitize_user_preview_text(&extract_message_text(msg));
                 if !text.trim().is_empty() && !is_system_noise(&text) {
                     let cleaned = strip_injected_context(&text);
@@ -879,8 +888,8 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
     Ok(Some(SessionInfo {
         id,
         agent: Agent::Claude,
-        forked_from_agent: None,
-        forked_from_id: None,
+        forked_from_agent,
+        forked_from_id,
         project_path: cwd,
         project_name,
         started_at: earliest_ts,
@@ -1527,6 +1536,65 @@ mod tests {
     }
 
     #[test]
+    fn read_subagent_messages_sanitize_cross_context_attachment_for_user() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-subagent-cross-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let subagents_dir = dir.join("project").join("parent-session").join("subagents");
+        fs::create_dir_all(&subagents_dir).unwrap();
+
+        let path = subagents_dir.join("subagent-session.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "继续整理" },
+                    {
+                        "type": "text",
+                        "text": "[@sessio-cross-context-abc.md](file:///tmp/.cross-context/sessio-cross-context-abc.md)"
+                    },
+                    {
+                        "type": "text",
+                        "text": "\n<context ref=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\">\n<sessio-upload-file uri=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\" name=\"sessio-cross-context-abc.md\" mimeType=\"text/markdown\">\n# Continued session from agent\n[user]\nhi\n</sessio-upload-file>\n</context>"
+                    }
+                ]
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let messages = read_messages_with_locations(&path).unwrap();
+        let user = messages
+            .iter()
+            .find(|(message, _)| message.role == "user")
+            .expect("user message");
+        assert!(user.0.text.contains("继续整理"), "{}", user.0.text);
+        assert!(user
+            .0
+            .text
+            .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"));
+        assert!(
+            !user.0.text.contains("<sessio-upload-file"),
+            "{}",
+            user.0.text
+        );
+        assert!(
+            !user.0.text.contains("Continued session from agent"),
+            "{}",
+            user.0.text
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn parse_session_first_user_message_strips_cross_context_attachment_text() {
         let dir = std::env::temp_dir().join(format!(
             "sessio-claude-cross-context-preview-{}-{}",
@@ -1563,9 +1631,67 @@ mod tests {
 
         let info = parse_session(&path).unwrap().unwrap();
         let preview = info.first_user_message.as_deref().unwrap_or("");
-        assert!(preview.contains("不错，写入md文档"), "preview should keep user text: {preview}");
-        assert!(!preview.contains("sessio-upload-file"), "preview should drop attachment tag: {preview}");
-        assert!(!preview.contains("Continued session from agent"), "preview should drop replayed body: {preview}");
-        assert!(!preview.contains("sessio-cross-context-abc.md"), "preview should drop attachment link: {preview}");
+        assert!(
+            preview.contains("不错，写入md文档"),
+            "preview should keep user text: {preview}"
+        );
+        assert!(
+            !preview.contains("sessio-upload-file"),
+            "preview should drop attachment tag: {preview}"
+        );
+        assert!(
+            !preview.contains("Continued session from agent"),
+            "preview should drop replayed body: {preview}"
+        );
+        assert!(
+            !preview.contains("sessio-cross-context-abc.md"),
+            "preview should drop attachment link: {preview}"
+        );
+    }
+
+    #[test]
+    fn parse_session_reads_cross_context_lineage_from_user_attachment() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-cross-context-lineage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let context_path = dir.join("sessio-cross-context-parent.md");
+        fs::write(
+            &context_path,
+            r#"<!-- sessio-cross:start source_agent="codex" source_session_id="codex-parent" source_file_path="/tmp/parent.jsonl" -->
+
+# Continued session from agent
+
+<!-- sessio-cross:end -->"#,
+        )
+        .unwrap();
+        let path = dir.join("cross-context-lineage-session.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "cwd": "/tmp/project",
+            "message": {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "继续" },
+                    { "type": "text", "text": format!("[@ctx](file://{})", context_path.display()) }
+                ]
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let info = parse_session(&path).unwrap().unwrap();
+        assert_eq!(info.forked_from_agent, Some(Agent::Codex));
+        assert_eq!(info.forked_from_id.as_deref(), Some("codex-parent"));
+
+        fs::remove_file(&path).ok();
+        fs::remove_file(&context_path).ok();
+        fs::remove_dir(&dir).ok();
     }
 }

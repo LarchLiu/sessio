@@ -130,14 +130,3 @@ pub trait SessionStore: Send + Sync {
         present: &HashSet<String>,
     ) -> Result<()>;
 }
-
-impl Agent {
-    pub fn from_db_str(s: &str) -> Option<Agent> {
-        match s {
-            "codex" => Some(Agent::Codex),
-            "claude" => Some(Agent::Claude),
-            "gemini" => Some(Agent::Gemini),
-            _ => None,
-        }
-    }
-}

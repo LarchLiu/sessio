@@ -41,27 +41,84 @@ export function stripSessioUploadWrapper(text: string): string {
 export function contentBlocksText(blocks: AcpContentBlock[]): string {
   return blocks.map((block) => {
     if (block.type === "text" && typeof block.text === "string") return block.text;
-    if (block.type === "image") return `[image: ${String(block.mimeType ?? "")}]`;
-    if (block.type === "resource_link") return `[resource: ${String(block.uri ?? "")}]`;
+    if (block.type === "image") return imageMarkdown(block);
+    if (block.type === "resource" || block.type === "resource_link") {
+      return fileMarker(resourceDisplayName(block), resourceUri(block));
+    }
     return JSON.stringify(block);
   }).join("\n");
 }
 
 export function normalizedUserMessageText(text: string): string {
-  return stripInjectedContext(stripSessioUploadWrapper(text))
+  return normalizedMessageBodyText(text);
+}
+
+export function normalizedReplayText(text: string): string {
+  return normalizedMessageBodyText(text);
+}
+
+function normalizedMessageBodyText(text: string): string {
+  return stripAttachmentCompareMarkers(stripInjectedContext(stripSessioUploadWrapper(text)))
     .replace(/\s+/g, " ")
     .trim();
 }
 
-export function normalizedReplayText(text: string): string {
-  return stripInjectedContext(stripSessioUploadWrapper(text))
-    .replace(/\s+/g, " ")
-    .trim();
+export function stripAttachmentCompareMarkers(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, "")
+    .replace(/\[file:\s*[^\]]+\]/gi, "")
+    .replace(/\[image:\s*[^\]]*\]/gi, "")
+    .replace(/\[resource:\s*[^\]]*\]/gi, "");
+}
+
+export function attachmentCompareSignature(text: string): string {
+  const cleaned = stripInjectedContext(stripSessioUploadWrapper(text));
+  return attachmentCompareIdentities(cleaned).sort().join("\u001f");
+}
+
+function attachmentCompareIdentities(text: string): string[] {
+  const identities: string[] = [];
+  collectRegexIdentities(text, /!\[[^\]]*\]\(([^)]+)\)/g, 1, identities);
+  collectRegexIdentities(text, /\[file:\s*([^\]|]+)(?:\|([^\]]+))?\]/gi, 2, identities, 1);
+  collectRegexIdentities(text, /\[resource:\s*([^\]]+)\]/gi, 1, identities);
+  collectRegexIdentities(text, /\[image:\s*([^\]]+)\]/gi, 1, identities);
+  return identities;
+}
+
+function collectRegexIdentities(
+  text: string,
+  pattern: RegExp,
+  primaryGroup: number,
+  identities: string[],
+  fallbackGroup?: number,
+): void {
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const raw = match[primaryGroup] || (fallbackGroup ? match[fallbackGroup] : "");
+    const identity = normalizeAttachmentIdentity(raw);
+    if (identity) identities.push(identity);
+  }
+}
+
+function normalizeAttachmentIdentity(value: string): string {
+  const raw = value.trim().replace(/^<|>$/g, "");
+  if (!raw) return "";
+  const decoded = safeDecodeURIComponent(raw.startsWith("file://") ? raw.slice("file://".length) : raw);
+  return decoded.replace(/\\/g, "/").replace(/\/{2,}/g, "/").replace(/\/$/, "");
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 export function sameReplayMessage(a: SessionMessage, b: SessionMessage): boolean {
   return a.role === b.role &&
-    normalizedReplayText(a.text) === normalizedReplayText(b.text);
+    normalizedReplayText(a.text) === normalizedReplayText(b.text) &&
+    attachmentCompareSignature(a.text) === attachmentCompareSignature(b.text);
 }
 
 export function liveSessionMessages(liveSession: LiveRuntimeSession): SessionMessage[] {
@@ -89,11 +146,35 @@ export function forkVisibleHistoryMessages(
   ancestorMessages: SessionMessage[],
   currentMessages: SessionMessage[],
 ): SessionMessage[] {
-  if (ancestorMessages.length === 0) return currentMessages;
-  if (currentMessages.length === 0) return ancestorMessages;
+  return forkVisibleHistory(ancestorMessages, currentMessages).messages;
+}
+
+type HistoryRange = {
+  start: number;
+  end: number;
+};
+
+function forkVisibleHistory(
+  ancestorMessages: SessionMessage[],
+  currentMessages: SessionMessage[],
+): { messages: SessionMessage[]; currentRange: HistoryRange | null } {
+  if (ancestorMessages.length === 0) {
+    return {
+      messages: currentMessages,
+      currentRange: currentMessages.length > 0 ? { start: 0, end: currentMessages.length } : null,
+    };
+  }
+  if (currentMessages.length === 0) {
+    return { messages: ancestorMessages, currentRange: null };
+  }
 
   const firstCurrentUser = currentMessages.find((message) => message.role === "user");
-  if (!firstCurrentUser) return [...ancestorMessages, ...currentMessages];
+  if (!firstCurrentUser) {
+    return {
+      messages: [...ancestorMessages, ...currentMessages],
+      currentRange: { start: ancestorMessages.length, end: ancestorMessages.length + currentMessages.length },
+    };
+  }
 
   let lastAncestorUserIndex = -1;
   for (let i = ancestorMessages.length - 1; i >= 0; i -= 1) {
@@ -104,16 +185,31 @@ export function forkVisibleHistoryMessages(
       break;
     }
   }
-  if (lastAncestorUserIndex < 0) return [...ancestorMessages, ...currentMessages];
+  if (lastAncestorUserIndex < 0) {
+    return {
+      messages: [...ancestorMessages, ...currentMessages],
+      currentRange: { start: ancestorMessages.length, end: ancestorMessages.length + currentMessages.length },
+    };
+  }
 
   const lastAncestorUser = ancestorMessages[lastAncestorUserIndex];
-  if (normalizedUserMessageText(lastAncestorUser.text) !== normalizedUserMessageText(firstCurrentUser.text)) {
-    return [...ancestorMessages, ...currentMessages];
+  if (
+    normalizedUserMessageText(lastAncestorUser.text) !== normalizedUserMessageText(firstCurrentUser.text) ||
+    attachmentCompareSignature(lastAncestorUser.text) !== attachmentCompareSignature(firstCurrentUser.text)
+  ) {
+    return {
+      messages: [...ancestorMessages, ...currentMessages],
+      currentRange: { start: ancestorMessages.length, end: ancestorMessages.length + currentMessages.length },
+    };
   }
-  return [
+  const messages = [
     ...ancestorMessages.slice(0, lastAncestorUserIndex),
     ...currentMessages,
   ];
+  return {
+    messages,
+    currentRange: { start: lastAncestorUserIndex, end: messages.length },
+  };
 }
 
 // Concatenate live messages onto history, removing the longest tail/head
@@ -122,9 +218,21 @@ export function forkVisibleHistoryMessages(
 export function mergeHistoryWithLiveMessages(
   historyMessages: SessionMessage[],
   liveMessages: SessionMessage[],
+  replayHistoryRange?: HistoryRange | null,
 ): SessionMessage[] {
   if (historyMessages.length === 0) return liveMessages;
   if (liveMessages.length === 0) return historyMessages;
+  let overlap = replayPrefixOverlap(historyMessages, liveMessages);
+  if (overlap === 0 && replayHistoryRange) {
+    overlap = replayPrefixAlreadyInHistory(historyMessages, liveMessages, replayHistoryRange);
+  }
+  return [...historyMessages, ...liveMessages.slice(overlap)];
+}
+
+function replayPrefixOverlap(
+  historyMessages: SessionMessage[],
+  liveMessages: SessionMessage[],
+): number {
   let overlap = 0;
   const maxOverlap = Math.min(historyMessages.length, liveMessages.length);
   for (let count = 1; count <= maxOverlap; count += 1) {
@@ -134,7 +242,38 @@ export function mergeHistoryWithLiveMessages(
       overlap = count;
     }
   }
-  return [...historyMessages, ...liveMessages.slice(overlap)];
+  return overlap;
+}
+
+function replayPrefixAlreadyInHistory(
+  historyMessages: SessionMessage[],
+  liveMessages: SessionMessage[],
+  range: HistoryRange,
+): number {
+  const maxPrefix = Math.min(historyMessages.length, liveMessages.length);
+  let best = 0;
+  const rangeStart = Math.max(0, Math.min(range.start, historyMessages.length));
+  const rangeEnd = Math.max(rangeStart, Math.min(range.end, historyMessages.length));
+  for (let start = rangeStart; start < rangeEnd; start += 1) {
+    let count = 0;
+    while (
+      count < maxPrefix &&
+      start + count < rangeEnd &&
+      sameReplayMessage(historyMessages[start + count], liveMessages[count]) &&
+      compatibleReplayTimestamp(historyMessages[start + count], liveMessages[count])
+    ) {
+      count += 1;
+    }
+    if (count >= 2 && count > best) {
+      best = count;
+    }
+  }
+  return best;
+}
+
+function compatibleReplayTimestamp(a: SessionMessage, b: SessionMessage): boolean {
+  if (a.timestamp == null || b.timestamp == null) return true;
+  return a.timestamp === b.timestamp;
 }
 
 export function crossContextMessages(
@@ -142,11 +281,12 @@ export function crossContextMessages(
   currentMessages: SessionMessage[],
   liveSession: LiveRuntimeSession | null | undefined,
 ): SessionMessage[] {
-  const historyMessages = forkVisibleHistoryMessages(ancestorMessages, currentMessages);
+  const { messages: historyMessages, currentRange } = forkVisibleHistory(ancestorMessages, currentMessages);
   if (!liveSession || liveSession.turns.length === 0) return historyMessages;
   return mergeHistoryWithLiveMessages(
     historyMessages,
     liveSessionMessages(liveSession),
+    currentRange,
   );
 }
 
@@ -240,6 +380,28 @@ function fileMarker(name?: string | null, uri?: string | null): string {
   const safeName = name?.trim() || "attachment";
   const safeUri = uri?.trim();
   return safeUri ? `[file: ${safeName}|${safeUri}]` : `[file: ${safeName}]`;
+}
+
+function imageMarkdown(block: Extract<AcpContentBlock, { type: "image" }>): string {
+  const mimeType = block.mimeType?.trim() || "image";
+  const src = block.uri?.trim() ||
+    (block.data?.trim()
+      ? block.data.trim().startsWith("data:")
+        ? block.data.trim()
+        : `data:${mimeType};base64,${block.data.trim()}`
+      : "");
+  return src ? `![${mimeType}](${src})` : `[image: ${mimeType}]`;
+}
+
+function resourceDisplayName(block: Extract<AcpContentBlock, { type: "resource" | "resource_link" }>): string {
+  if (block.type === "resource_link") {
+    return block.title ?? block.name ?? basenameFromUri(block.uri) ?? "Resource";
+  }
+  return block.name ?? basenameFromUri(block.uri ?? "") ?? "Embedded resource";
+}
+
+function resourceUri(block: Extract<AcpContentBlock, { type: "resource" | "resource_link" }>): string | null {
+  return block.uri?.trim() || null;
 }
 
 function basenameFromUri(uri: string): string | null {

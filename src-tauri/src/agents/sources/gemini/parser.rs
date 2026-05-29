@@ -4,6 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::agents::sources::shared::attachment_text::{
+    sanitize_user_attachment_text, sanitize_user_preview_text,
+};
+use crate::agents::sources::shared::cross_context::{
+    cross_context_lineage_from_payload, cross_context_lineage_from_text,
+};
 use crate::agents::sources::system_time_to_millis;
 use crate::models::{is_system_noise, normalize_preview, Agent, SessionInfo, SessionMessage};
 
@@ -242,12 +248,15 @@ pub fn read_messages_with_locations(
         }
         let role =
             normalize_gemini_role(item.get("type").and_then(|x| x.as_str()).unwrap_or("user"));
-        let text = extract_gemini_message_text(&item).unwrap_or_default();
+        let mut text = extract_gemini_message_text(&item).unwrap_or_default();
         let ts = item
             .get("timestamp")
             .and_then(|x| x.as_str())
             .and_then(parse_iso);
-        if text.is_empty() {
+        if role == "user" {
+            text = sanitize_user_attachment_text(&text);
+        }
+        if text.trim().is_empty() {
             continue;
         }
         out.push((
@@ -495,14 +504,28 @@ fn parse_chat_file(
                 .and_then(|m| m.modified().ok())
                 .and_then(system_time_to_millis)
         });
+    let mut forked_from_agent: Option<Agent> = None;
+    let mut forked_from_id: Option<String> = None;
     let first_user = messages
         .iter()
         .filter(|message| {
             normalize_gemini_role(message.get("type").and_then(|v| v.as_str()).unwrap_or(""))
                 == "user"
         })
-        .find_map(|message| extract_gemini_display_or_message_text(message))
-        .map(|text| normalize_preview(&strip_image_at_references(&text)))
+        .find_map(|message| {
+            if forked_from_id.is_none() {
+                if let Some(lineage) = cross_context_lineage_from_payload(message) {
+                    forked_from_agent = Some(lineage.agent);
+                    forked_from_id = Some(lineage.session_id);
+                }
+            }
+            extract_gemini_display_or_message_text(message)
+        })
+        .map(|text| {
+            normalize_preview(&sanitize_user_preview_text(&strip_image_at_references(
+                &text,
+            )))
+        })
         .filter(|text| !text.trim().is_empty() && !is_system_noise(text));
     let project_path = resolve_chat_project_path(path, base_dir, mappings);
     let project_name = project_path.as_deref().and_then(|p| {
@@ -515,8 +538,8 @@ fn parse_chat_file(
     Ok(Some(SessionInfo {
         id: session_id,
         agent: Agent::Gemini,
-        forked_from_agent: None,
-        forked_from_id: None,
+        forked_from_agent,
+        forked_from_id,
         project_path,
         project_name,
         started_at,
@@ -582,7 +605,18 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
             && !text.trim_start().starts_with('/')
             && !is_system_noise(&text)
         {
-            agg.first_user = Some(normalize_preview(&strip_image_at_references(&text)));
+            if agg.forked_from_id.is_none() {
+                if let Some(lineage) = cross_context_lineage_from_payload(&item) {
+                    agg.forked_from_agent = Some(lineage.agent);
+                    agg.forked_from_id = Some(lineage.session_id);
+                } else if let Some(lineage) = cross_context_lineage_from_text(&text) {
+                    agg.forked_from_agent = Some(lineage.agent);
+                    agg.forked_from_id = Some(lineage.session_id);
+                }
+            }
+            agg.first_user = Some(normalize_preview(&sanitize_user_preview_text(
+                &strip_image_at_references(&text),
+            )));
         }
     }
 
@@ -599,8 +633,8 @@ fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo
         out.push(SessionInfo {
             id: sid,
             agent: Agent::Gemini,
-            forked_from_agent: None,
-            forked_from_id: None,
+            forked_from_agent: agg.forked_from_agent,
+            forked_from_id: agg.forked_from_id,
             project_path: project_path.map(String::from),
             project_name: project_name.clone(),
             started_at: agg.earliest,
@@ -1066,6 +1100,7 @@ fn read_chat_messages_with_locations(
                     text.push_str(&format!("![Image #{}]({})", idx + 1, image));
                 }
             }
+            text = sanitize_user_attachment_text(&text);
             if text.trim().is_empty() || is_system_noise(&text) {
                 continue;
             }
@@ -1290,7 +1325,11 @@ fn scan_json_array_entries(bytes: &[u8]) -> Result<Vec<JsonArrayEntry>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_messages_with_locations, remove_session_from_logs, scan_json_array_entries};
+    use super::{
+        parse_chat_file, parse_logs, read_messages_with_locations, remove_session_from_logs,
+        scan_json_array_entries, ProjectMappings,
+    };
+    use crate::models::Agent;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1701,6 +1740,197 @@ mod tests {
 
         let _ = fs::remove_dir_all(&home);
     }
+
+    #[test]
+    fn read_messages_with_locations_sanitizes_cross_context_attachment_for_user() {
+        let dir = unique_tmp("gemini-cross-context");
+        let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            dir.join(".gemini")
+                .join("tmp")
+                .join("alias")
+                .join(".project_root"),
+            "/tmp/cross-context-project",
+        )
+        .unwrap();
+        let path = chats.join("session-2026-05-28T15-39-cross.jsonl");
+        let line = serde_json::json!({
+            "id": "u1",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "type": "user",
+            "content": [
+                { "text": "不错，写入md文档" },
+                { "text": "[@sessio-cross-context-abc.md](file:///tmp/.cross-context/sessio-cross-context-abc.md)" },
+                { "text": "\n<context ref=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\">\n<sessio-upload-file uri=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\" name=\"sessio-cross-context-abc.md\" mimeType=\"text/markdown\">\n# Continued session from agent\n[user]\nhi\n</sessio-upload-file>\n</context>" }
+            ]
+        })
+        .to_string();
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"sessionId":"cross-jsonl","startTime":"2026-05-28T15:39:00Z","lastUpdated":"2026-05-28T15:39:00Z","kind":"main"}"#,
+                line
+            ),
+        )
+        .unwrap();
+
+        let messages = read_messages_with_locations(&path, "cross-jsonl").unwrap();
+        let user = messages
+            .iter()
+            .find(|(m, _)| m.role == "user")
+            .expect("user message");
+        assert!(user.0.text.contains("不错，写入md文档"), "{}", user.0.text);
+        assert!(
+            user.0
+                .text
+                .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"),
+            "{}",
+            user.0.text
+        );
+        assert!(
+            !user.0.text.contains("<sessio-upload-file"),
+            "{}",
+            user.0.text
+        );
+        assert!(
+            !user.0.text.contains("Continued session from agent"),
+            "{}",
+            user.0.text
+        );
+    }
+
+    #[test]
+    fn read_logs_messages_with_locations_sanitizes_cross_context_attachment_for_user() {
+        let dir = unique_tmp("gemini-logs-cross-context");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("logs.json");
+        let value = serde_json::json!([
+            {
+                "sessionId": "logs-cross",
+                "timestamp": "2026-05-28T15:39:00.000Z",
+                "type": "user",
+                "content": [
+                    { "text": "继续" },
+                    { "text": "[@sessio-cross-context-abc.md](file:///tmp/.cross-context/sessio-cross-context-abc.md)" },
+                    { "text": "\n<context ref=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\">\n<sessio-upload-file uri=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\" name=\"sessio-cross-context-abc.md\" mimeType=\"text/markdown\">\n# Continued session from agent\n[user]\nhi\n</sessio-upload-file>\n</context>" }
+                ]
+            }
+        ]);
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let messages = read_messages_with_locations(&path, "logs-cross").unwrap();
+        let user = messages
+            .iter()
+            .find(|(m, _)| m.role == "user")
+            .expect("user message");
+        assert!(user.0.text.contains("继续"), "{}", user.0.text);
+        assert!(
+            user.0
+                .text
+                .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"),
+            "{}",
+            user.0.text
+        );
+        assert!(
+            !user.0.text.contains("<sessio-upload-file"),
+            "{}",
+            user.0.text
+        );
+        assert!(
+            !user.0.text.contains("Continued session from agent"),
+            "{}",
+            user.0.text
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_chat_file_reads_cross_context_lineage_from_user_attachment() {
+        let dir = unique_tmp("gemini-chat-lineage");
+        let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        fs::write(
+            dir.join(".gemini")
+                .join("tmp")
+                .join("alias")
+                .join(".project_root"),
+            "/tmp/cross-context-project",
+        )
+        .unwrap();
+        let context_path = dir.join("sessio-cross-context-parent.md");
+        fs::write(
+            &context_path,
+            r#"<!-- sessio-cross:start source_agent="claude" source_session_id="claude-parent" source_file_path="/tmp/parent.jsonl" -->"#,
+        )
+        .unwrap();
+        let path = chats.join("session-2026-05-28T15-39-lineage.jsonl");
+        let line = serde_json::json!({
+            "id": "u1",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "type": "user",
+            "content": [
+                { "text": "继续" },
+                { "text": format!("[@ctx](file://{})", context_path.display()) }
+            ]
+        })
+        .to_string();
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"sessionId":"gemini-lineage","startTime":"2026-05-28T15:39:00Z","lastUpdated":"2026-05-28T15:39:00Z","kind":"main"}"#,
+                line
+            ),
+        )
+        .unwrap();
+
+        let mappings = ProjectMappings::default();
+        let info = parse_chat_file(&path, Some(&dir.join(".gemini")), &mappings)
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.forked_from_agent, Some(Agent::Claude));
+        assert_eq!(info.forked_from_id.as_deref(), Some("claude-parent"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_logs_reads_cross_context_lineage_from_user_attachment() {
+        let dir = unique_tmp("gemini-logs-lineage");
+        fs::create_dir_all(&dir).unwrap();
+        let context_path = dir.join("sessio-cross-context-parent.md");
+        fs::write(
+            &context_path,
+            r#"<!-- sessio-cross:start source_agent="codex" source_session_id="codex-parent" source_file_path="/tmp/parent.jsonl" -->"#,
+        )
+        .unwrap();
+        let path = dir.join("logs.json");
+        let value = serde_json::json!([
+            {
+                "sessionId": "logs-lineage",
+                "timestamp": "2026-05-28T15:39:00.000Z",
+                "type": "user",
+                "content": [
+                    { "text": "继续" },
+                    { "text": format!("[@ctx](file://{})", context_path.display()) }
+                ]
+            }
+        ]);
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let sessions = parse_logs(&path, Some("/tmp/project")).unwrap();
+        let info = sessions
+            .iter()
+            .find(|session| session.id == "logs-lineage")
+            .expect("session");
+        assert_eq!(info.forked_from_agent, Some(Agent::Codex));
+        assert_eq!(info.forked_from_id.as_deref(), Some("codex-parent"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 #[derive(Default)]
@@ -1708,6 +1938,8 @@ struct GeminiAgg {
     count: usize,
     earliest: Option<i64>,
     latest: Option<i64>,
+    forked_from_agent: Option<Agent>,
+    forked_from_id: Option<String>,
     first_user: Option<String>,
 }
 
