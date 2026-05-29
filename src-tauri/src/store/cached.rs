@@ -7,7 +7,7 @@ use crate::models::{
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
-    SessionHistoryRecord, SessionStore,
+    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -233,6 +233,28 @@ impl SessionStore for CachedStore {
 
     fn replace_session_history(&self, record: &SessionHistoryRecord) -> Result<()> {
         self.inner.replace_session_history(record)
+    }
+
+    fn get_session_history_snapshots(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+    ) -> Result<Vec<SessionHistorySnapshotRecord>> {
+        self.inner
+            .get_session_history_snapshots(child_agent, child_session_id)
+    }
+
+    fn replace_session_history_snapshots(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+        snapshots: &[SessionHistorySnapshotRecord],
+    ) -> Result<()> {
+        self.inner.replace_session_history_snapshots(
+            child_agent,
+            child_session_id,
+            snapshots,
+        )
     }
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {

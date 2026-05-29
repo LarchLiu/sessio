@@ -134,6 +134,18 @@ export interface SessionHistoryResult {
   turns: SessionHistoryTurn[];
 }
 
+export interface SessionHistorySnapshotGroup {
+  ancestorAgent: Agent;
+  ancestorSessionId: string;
+  ancestorIndex: number;
+  turns: SessionHistoryTurn[];
+}
+
+export interface SessionHistorySnapshotsResult {
+  hasSnapshot: boolean;
+  groups: SessionHistorySnapshotGroup[];
+}
+
 export interface SessionHistoryTurn {
   turnId: string;
   status: RuntimeTurnStatus;
@@ -582,6 +594,28 @@ export async function getSessionAncestors(
   sessionId: string,
 ): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("get_session_ancestors", { agent, sessionId });
+}
+
+export async function getSessionHistorySnapshots(
+  childAgent: Agent,
+  childSessionId: string,
+): Promise<SessionHistorySnapshotsResult> {
+  return invoke<SessionHistorySnapshotsResult>("get_session_history_snapshots", {
+    childAgent,
+    childSessionId,
+  });
+}
+
+export async function saveSessionHistorySnapshots(
+  childAgent: Agent,
+  childSessionId: string,
+  groups: SessionHistorySnapshotGroup[],
+): Promise<void> {
+  return invoke<void>("save_session_history_snapshots", {
+    childAgent,
+    childSessionId,
+    groups,
+  });
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {

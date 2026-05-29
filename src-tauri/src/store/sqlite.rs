@@ -16,7 +16,7 @@ use crate::models::{
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
-    SessionHistoryRecord, SessionStore,
+    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
 };
 
 pub struct SqliteStore {
@@ -320,6 +320,37 @@ const SCHEMA_V10: &str = r#"
 ALTER TABLE session_history ADD COLUMN history_cache_version INTEGER NOT NULL DEFAULT 0;
 "#;
 
+const SCHEMA_V11: &str = r#"
+CREATE TABLE IF NOT EXISTS session_history_snapshots (
+    child_agent           TEXT NOT NULL,
+    child_session_id      TEXT NOT NULL,
+    ancestor_index        INTEGER NOT NULL,
+    ancestor_agent        TEXT NOT NULL,
+    ancestor_session_id   TEXT NOT NULL,
+    history_cache_version INTEGER NOT NULL,
+    created_at            INTEGER NOT NULL,
+    PRIMARY KEY(child_agent, child_session_id, ancestor_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_history_snapshots_child
+    ON session_history_snapshots(child_agent, child_session_id);
+
+CREATE TABLE IF NOT EXISTS session_history_snapshot_turns (
+    child_agent      TEXT NOT NULL,
+    child_session_id TEXT NOT NULL,
+    ancestor_index   INTEGER NOT NULL,
+    turn_index       INTEGER NOT NULL,
+    turn_id          TEXT NOT NULL,
+    started_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    turn_json        TEXT NOT NULL,
+    PRIMARY KEY(child_agent, child_session_id, ancestor_index, turn_index),
+    FOREIGN KEY(child_agent, child_session_id, ancestor_index)
+        REFERENCES session_history_snapshots(child_agent, child_session_id, ancestor_index)
+        ON DELETE CASCADE
+);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -424,10 +455,18 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 11 {
+        conn.execute_batch(SCHEMA_V11)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (11)",
+            [],
+        )?;
+    }
     conn.execute_batch(SCHEMA_V5)?;
     conn.execute_batch(SCHEMA_V7)?;
     conn.execute_batch(SCHEMA_V8)?;
     conn.execute_batch(SCHEMA_V9)?;
+    conn.execute_batch(SCHEMA_V11)?;
     Ok(())
 }
 
@@ -1055,6 +1094,120 @@ fn replace_session_history_inner(conn: &Connection, record: &SessionHistoryRecor
     Ok(())
 }
 
+fn load_session_history_snapshots(
+    conn: &Connection,
+    child_agent: Agent,
+    child_session_id: &str,
+) -> Result<Vec<SessionHistorySnapshotRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT ancestor_index, ancestor_agent, ancestor_session_id,
+                history_cache_version, created_at
+         FROM session_history_snapshots
+         WHERE child_agent = ? AND child_session_id = ?
+         ORDER BY ancestor_index ASC",
+    )?;
+    let rows = stmt.query_map(params![child_agent.as_str(), child_session_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+
+    let mut snapshots = Vec::new();
+    for row in rows {
+        let (
+            ancestor_index,
+            ancestor_agent,
+            ancestor_session_id,
+            history_cache_version,
+            created_at,
+        ) = row?;
+        let Some(ancestor_agent) = Agent::from_db_str(&ancestor_agent) else {
+            continue;
+        };
+        let mut turns_stmt = conn.prepare(
+            "SELECT turn_json
+             FROM session_history_snapshot_turns
+             WHERE child_agent = ? AND child_session_id = ? AND ancestor_index = ?
+             ORDER BY turn_index ASC",
+        )?;
+        let turn_rows = turns_stmt.query_map(
+            params![child_agent.as_str(), child_session_id, ancestor_index],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut turns = Vec::new();
+        for turn_row in turn_rows {
+            turns.push(serde_json::from_str::<SessionHistoryTurn>(&turn_row?)?);
+        }
+        snapshots.push(SessionHistorySnapshotRecord {
+            child_agent,
+            child_session_id: child_session_id.to_string(),
+            ancestor_agent,
+            ancestor_session_id,
+            ancestor_index,
+            history_cache_version,
+            created_at,
+            turns,
+        });
+    }
+
+    Ok(snapshots)
+}
+
+fn replace_session_history_snapshots_inner(
+    conn: &Connection,
+    child_agent: Agent,
+    child_session_id: &str,
+    snapshots: &[SessionHistorySnapshotRecord],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM session_history_snapshots
+         WHERE child_agent = ? AND child_session_id = ?",
+        params![child_agent.as_str(), child_session_id],
+    )?;
+    {
+        let mut header_stmt = conn.prepare(
+            "INSERT INTO session_history_snapshots (
+                child_agent, child_session_id, ancestor_index, ancestor_agent,
+                ancestor_session_id, history_cache_version, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )?;
+        let mut turn_stmt = conn.prepare(
+            "INSERT INTO session_history_snapshot_turns (
+                child_agent, child_session_id, ancestor_index, turn_index, turn_id,
+                started_at, updated_at, turn_json
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )?;
+        for snapshot in snapshots {
+            header_stmt.execute(params![
+                child_agent.as_str(),
+                child_session_id,
+                snapshot.ancestor_index,
+                snapshot.ancestor_agent.as_str(),
+                snapshot.ancestor_session_id.as_str(),
+                snapshot.history_cache_version,
+                snapshot.created_at,
+            ])?;
+            for (index, turn) in snapshot.turns.iter().enumerate() {
+                turn_stmt.execute(params![
+                    child_agent.as_str(),
+                    child_session_id,
+                    snapshot.ancestor_index,
+                    index as i64,
+                    turn.turn_id.as_str(),
+                    turn.started_at,
+                    turn.updated_at,
+                    serde_json::to_string(turn)?,
+                ])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_all_subagents_grouped(
     conn: &Connection,
 ) -> Result<HashMap<(Agent, String), Vec<SubagentInfo>>> {
@@ -1588,6 +1741,28 @@ impl SessionStore for SqliteStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         replace_session_history_inner(&tx, record)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn get_session_history_snapshots(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+    ) -> Result<Vec<SessionHistorySnapshotRecord>> {
+        let conn = self.conn.lock().unwrap();
+        load_session_history_snapshots(&conn, child_agent, child_session_id)
+    }
+
+    fn replace_session_history_snapshots(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+        snapshots: &[SessionHistorySnapshotRecord],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        replace_session_history_snapshots_inner(&tx, child_agent, child_session_id, snapshots)?;
         tx.commit()?;
         Ok(())
     }
@@ -2513,6 +2688,15 @@ mod migration_tests {
             .unwrap();
         assert_eq!(history_table, 1);
 
+        let snapshot_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_history_snapshots'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot_table, 1);
+
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }
@@ -2570,6 +2754,13 @@ mod migration_tests {
         assert!(history_columns.contains(&"message_count".to_string()));
         assert!(history_columns.contains(&"history_cache_version".to_string()));
 
+        let snapshot_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(session_history_snapshots)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(snapshot_columns.contains(&"history_cache_version".to_string()));
+
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }
@@ -2616,6 +2807,53 @@ mod migration_tests {
         assert_eq!(loaded.indexed_through, Some(20));
         assert_eq!(loaded.turns.len(), 1);
         assert_eq!(loaded.turns[0].turn_id, turn.turn_id);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_history_snapshot_roundtrip_stores_versioned_turns() {
+        let path = unique_db("sessio-history-snapshot-roundtrip");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let turn = SessionHistoryTurn {
+            turn_id: "turn-parent".to_string(),
+            status: "completed".to_string(),
+            blocks: Vec::new(),
+            tools: Vec::new(),
+            permissions: Vec::new(),
+            protocol_messages: Vec::new(),
+            stop_reason: None,
+            error: None,
+            started_at: 10,
+            updated_at: 20,
+        };
+        let snapshot = SessionHistorySnapshotRecord {
+            child_agent: Agent::Gemini,
+            child_session_id: "child".to_string(),
+            ancestor_agent: Agent::Codex,
+            ancestor_session_id: "parent".to_string(),
+            ancestor_index: 0,
+            history_cache_version: 12,
+            created_at: 30,
+            turns: vec![turn.clone()],
+        };
+
+        store
+            .replace_session_history_snapshots(Agent::Gemini, "child", &[snapshot])
+            .unwrap();
+        let loaded = store
+            .get_session_history_snapshots(Agent::Gemini, "child")
+            .unwrap();
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].child_agent, Agent::Gemini);
+        assert_eq!(loaded[0].child_session_id, "child");
+        assert_eq!(loaded[0].ancestor_agent, Agent::Codex);
+        assert_eq!(loaded[0].ancestor_session_id, "parent");
+        assert_eq!(loaded[0].history_cache_version, 12);
+        assert_eq!(loaded[0].turns.len(), 1);
+        assert_eq!(loaded[0].turns[0].turn_id, turn.turn_id);
 
         let _ = std::fs::remove_file(&path);
     }

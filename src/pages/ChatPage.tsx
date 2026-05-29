@@ -25,6 +25,7 @@ import "katex/dist/katex.min.css";
 import {
   type AgentAttachment,
   type Agent,
+  type SessionHistorySnapshotGroup,
   type SessionHistoryTurn,
   SessionInfo,
   RuntimeAgentMetadata,
@@ -33,6 +34,7 @@ import {
   SubagentInfo,
   ensureAgentRuntimeSession,
   getSessionHistory,
+  getSessionHistorySnapshots,
   readLocalImageDataUrl,
   readLocalTextFile,
   cancelAgentTurn,
@@ -95,6 +97,7 @@ import {
   stripInjectedContext,
   stripSessioUploadWrapper,
 } from "../historyMerge";
+import { getCachedSessionHistorySnapshots } from "../sessionHistorySnapshots";
 
 interface Props {
   session: SessionInfo;
@@ -135,6 +138,7 @@ export interface PendingAgentSession {
   timestamp: number;
   forkedFromAgent?: Agent | null;
   forkedFromId?: string | null;
+  historySnapshots?: SessionHistorySnapshotGroup[];
 }
 
 function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
@@ -176,6 +180,12 @@ interface AncestorHistoryGroup {
   turns: LiveTurn[];
 }
 
+interface AncestorSnapshotState {
+  loaded: boolean;
+  hasSnapshot: boolean;
+  groups: AncestorHistoryGroup[];
+}
+
 interface HistoryViewCacheEntry {
   sourceKey: string;
   viewMode: ViewMode;
@@ -198,6 +208,37 @@ function cachedAncestorHistoryGroups(sessions: SessionInfo[]): AncestorHistoryGr
     turns:
       historyCache.get(historySourceKey(session.agent, session.filePath, session.id))
         ?.turns ?? [],
+  }));
+}
+
+function snapshotGroupsToAncestorHistoryGroups(
+  groups: SessionHistorySnapshotGroup[],
+  ancestorSessions: SessionInfo[],
+): AncestorHistoryGroup[] {
+  const byIdentity = new Map(
+    ancestorSessions.map((session) => [`${session.agent}:${session.id}`, session]),
+  );
+  return groups.map((group) => ({
+    session: byIdentity.get(`${group.ancestorAgent}:${group.ancestorSessionId}`) ?? {
+      id: group.ancestorSessionId,
+      agent: group.ancestorAgent,
+      forkedFromAgent: null,
+      forkedFromId: null,
+      projectPath: null,
+      projectName: null,
+      startedAt: null,
+      updatedAt: null,
+      messageCount: group.turns.length,
+      title: null,
+      firstUserMessage: null,
+      filePath: "",
+      fileSize: 0,
+      partial: false,
+      available: true,
+      archived: false,
+      subagents: [],
+    },
+    turns: normalizeSessionHistoryTurns(group.turns),
   }));
 }
 
@@ -450,13 +491,26 @@ function MessageStream({
     () => ancestorSessions.filter((session) => session.available && session.filePath),
     [ancestorSessions],
   );
+  const ancestorSnapshotSessionKey = `${agent}:${sessionId}`;
+  const cachedAncestorSnapshots = getCachedSessionHistorySnapshots(agent, sessionId);
+  const [ancestorSnapshotState, setAncestorSnapshotState] = useState<AncestorSnapshotState>({
+    loaded: Boolean(cachedAncestorSnapshots),
+    hasSnapshot: Boolean(cachedAncestorSnapshots),
+    groups: cachedAncestorSnapshots
+      ? snapshotGroupsToAncestorHistoryGroups(cachedAncestorSnapshots, ancestorSessions)
+      : [],
+  });
   const ancestorSourceKeys = useMemo(
     () =>
-      readableAncestorSessions.map((session) => historySourceKey(session.agent, session.filePath, session.id)),
-    [readableAncestorSessions],
+      ancestorSnapshotState.hasSnapshot
+        ? ancestorSnapshotState.groups.map((group) =>
+            `${group.session.agent}:${group.session.id}:snapshot:${ancestorSnapshotSessionKey}`,
+          )
+        : readableAncestorSessions.map((session) => historySourceKey(session.agent, session.filePath, session.id)),
+    [ancestorSnapshotSessionKey, ancestorSnapshotState, readableAncestorSessions],
   );
   const ancestorCacheKey = ancestorSourceKeys.join("->");
-  const allAncestorCacheFresh = readableAncestorSessions.every((session) => {
+  const allAncestorCacheFresh = !ancestorSnapshotState.hasSnapshot && readableAncestorSessions.every((session) => {
       const cached = historyCache.get(historySourceKey(session.agent, session.filePath, session.id));
       return cached?.messageCount === session.messageCount;
     });
@@ -494,15 +548,8 @@ function MessageStream({
     ? liveState.sessions[runtimeSessionId]
     : null;
   const mergedAncestorTurns = useMemo(
-    () =>
-      ancestorHistoryGroups.flatMap((group) => {
-        const historyTurns = group.turns;
-        const runtimeId = runtimeSessionAliases[`${group.session.agent}:${group.session.id}`] ?? group.session.id;
-        const ancestorLiveSession = liveState.sessions[runtimeId];
-        if (!ancestorLiveSession || ancestorLiveSession.turns.length === 0) return historyTurns;
-        return mergeHistoryWithLiveTurns(historyTurns, ancestorLiveSession.turns);
-      }),
-    [ancestorHistoryGroups, liveState.sessions, runtimeSessionAliases],
+    () => ancestorHistoryGroups.flatMap((group) => group.turns),
+    [ancestorHistoryGroups],
   );
   const activeTurnId = useMemo(() => {
     if (!liveSession) return null;
@@ -633,6 +680,49 @@ function MessageStream({
   ]);
 
   useEffect(() => {
+    let cancelled = false;
+    const cached = getCachedSessionHistorySnapshots(agent, sessionId);
+    if (cached) {
+      setAncestorSnapshotState({
+        loaded: true,
+        hasSnapshot: true,
+        groups: snapshotGroupsToAncestorHistoryGroups(cached, ancestorSessions),
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    setAncestorSnapshotState({ loaded: false, hasSnapshot: false, groups: [] });
+    getSessionHistorySnapshots(agent, sessionId)
+      .then((result) => {
+        if (cancelled) return;
+        setAncestorSnapshotState({
+          loaded: true,
+          hasSnapshot: result.hasSnapshot,
+          groups: snapshotGroupsToAncestorHistoryGroups(result.groups, ancestorSessions),
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("load session history snapshots failed", err);
+        setAncestorSnapshotState({ loaded: true, hasSnapshot: false, groups: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agent, ancestorSessions, sessionId]);
+
+  useEffect(() => {
+    if (!ancestorSnapshotState.loaded) {
+      setAncestorHistoryGroups([]);
+      setAncestorsLoading(true);
+      return;
+    }
+    if (ancestorSnapshotState.hasSnapshot) {
+      setAncestorHistoryGroups(ancestorSnapshotState.groups);
+      setAncestorsLoading(false);
+      return;
+    }
     if (readableAncestorSessions.length === 0) {
       setAncestorHistoryGroups([]);
       setAncestorsLoading(false);
@@ -679,7 +769,7 @@ function MessageStream({
     return () => {
       cancelled = true;
     };
-  }, [allAncestorCacheFresh, ancestorCacheKey, readableAncestorSessions]);
+  }, [allAncestorCacheFresh, ancestorCacheKey, ancestorSnapshotState, readableAncestorSessions]);
 
   const acpViewModel = useMemo<AcpViewModel>(() => {
     const historyTurnsForView = forkVisibleHistoryTurns(
@@ -985,6 +1075,15 @@ function MessageStream({
           });
         }
       }
+      const parentSnapshotTurns = sameAgent
+        ? []
+        : mergeHistoryWithLiveTurns(
+            forkVisibleHistoryTurns(
+              mergedAncestorTurns,
+              historyTurns,
+            ),
+            liveSession?.turns ?? [],
+          );
       if (!sameAgent) {
         dispatchSessionStartedFallback({
           dispatch: dispatchLiveEvent,
@@ -1011,6 +1110,14 @@ function MessageStream({
           timestamp,
           forkedFromAgent: agent,
           forkedFromId: sessionId,
+          historySnapshots: [
+            {
+              ancestorAgent: agent,
+              ancestorSessionId: sessionId,
+              ancestorIndex: 0,
+              turns: liveTurnsToSessionHistoryTurns(parentSnapshotTurns),
+            },
+          ],
         });
       }
       const inputAttachmentsWithContext = sameAgent
@@ -1021,13 +1128,7 @@ function MessageStream({
               sourceAgent: agent,
               sourceSessionId: sessionId,
               sourceFilePath: filePath,
-              turns: mergeHistoryWithLiveTurns(
-                forkVisibleHistoryTurns(
-                  mergedAncestorTurns,
-                  historyTurns,
-                ),
-                liveSession?.turns ?? [],
-              ),
+              turns: parentSnapshotTurns,
             }),
           ];
       const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
@@ -3361,6 +3462,10 @@ function cachedHistoryViewModel(
 function normalizeSessionHistoryTurns(turns: SessionHistoryTurn[] | undefined): LiveTurn[] {
   if (!Array.isArray(turns)) return [];
   return turns as LiveTurn[];
+}
+
+function liveTurnsToSessionHistoryTurns(turns: LiveTurn[]): SessionHistoryTurn[] {
+  return turns as SessionHistoryTurn[];
 }
 
 function filterHistoryTurnsForViewMode(turns: LiveTurn[], viewMode: ViewMode): LiveTurn[] {

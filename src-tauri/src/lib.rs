@@ -30,7 +30,7 @@ use models::{
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
-use store::{SessionHistoryRecord, SessionStore};
+use store::{SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -63,6 +63,31 @@ struct UpdateRuntimeAgentPreferencesRequest {
 pub struct SessionHistoryResult {
     pub message_count: usize,
     pub indexed_through: Option<i64>,
+    pub turns: Vec<SessionHistoryTurn>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHistorySnapshotGroup {
+    pub ancestor_agent: Agent,
+    pub ancestor_session_id: String,
+    pub ancestor_index: i64,
+    pub turns: Vec<SessionHistoryTurn>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHistorySnapshotsResult {
+    pub has_snapshot: bool,
+    pub groups: Vec<SessionHistorySnapshotGroup>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSessionHistorySnapshotGroup {
+    pub ancestor_agent: Agent,
+    pub ancestor_session_id: String,
+    pub ancestor_index: i64,
     pub turns: Vec<SessionHistoryTurn>,
 }
 
@@ -324,6 +349,66 @@ fn better_lineage_candidate(candidate: &SessionInfo, current: &SessionInfo) -> b
     }
     candidate.updated_at.or(candidate.started_at).unwrap_or(0)
         > current.updated_at.or(current.started_at).unwrap_or(0)
+}
+
+#[tauri::command]
+fn get_session_history_snapshots(
+    child_agent: Agent,
+    child_session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<SessionHistorySnapshotsResult, String> {
+    let snapshots = store
+        .get_session_history_snapshots(child_agent, &child_session_id)
+        .map_err(|e| e.to_string())?;
+    let has_snapshot = !snapshots.is_empty();
+    if snapshots
+        .iter()
+        .any(|snapshot| snapshot.history_cache_version != HISTORY_CACHE_VERSION)
+    {
+        return Ok(SessionHistorySnapshotsResult {
+            has_snapshot,
+            groups: Vec::new(),
+        });
+    }
+
+    Ok(SessionHistorySnapshotsResult {
+        has_snapshot,
+        groups: snapshots
+            .into_iter()
+            .map(|snapshot| SessionHistorySnapshotGroup {
+                ancestor_agent: snapshot.ancestor_agent,
+                ancestor_session_id: snapshot.ancestor_session_id,
+                ancestor_index: snapshot.ancestor_index,
+                turns: snapshot.turns,
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+fn save_session_history_snapshots(
+    child_agent: Agent,
+    child_session_id: String,
+    groups: Vec<SaveSessionHistorySnapshotGroup>,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    let created_at = now_ms();
+    let snapshots: Vec<SessionHistorySnapshotRecord> = groups
+        .into_iter()
+        .map(|group| SessionHistorySnapshotRecord {
+            child_agent,
+            child_session_id: child_session_id.clone(),
+            ancestor_agent: group.ancestor_agent,
+            ancestor_session_id: group.ancestor_session_id,
+            ancestor_index: group.ancestor_index,
+            history_cache_version: HISTORY_CACHE_VERSION,
+            created_at,
+            turns: group.turns,
+        })
+        .collect();
+    store
+        .replace_session_history_snapshots(child_agent, &child_session_id, &snapshots)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1704,6 +1789,8 @@ pub fn run() {
             link_kanban_item_session,
             unlink_kanban_item_session,
             get_session_ancestors,
+            get_session_history_snapshots,
+            save_session_history_snapshots,
             get_session_history,
             update_session_history_count,
             create_pending_session,

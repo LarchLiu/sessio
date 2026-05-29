@@ -63,6 +63,18 @@ pub struct SessionHistoryRecord {
     pub turns: Vec<SessionHistoryTurn>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionHistorySnapshotRecord {
+    pub child_agent: Agent,
+    pub child_session_id: String,
+    pub ancestor_agent: Agent,
+    pub ancestor_session_id: String,
+    pub ancestor_index: i64,
+    pub history_cache_version: i64,
+    pub created_at: i64,
+    pub turns: Vec<SessionHistoryTurn>,
+}
+
 pub trait SessionStore: Send + Sync {
     fn init(&self) -> Result<()>;
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
@@ -127,6 +139,17 @@ pub trait SessionStore: Send + Sync {
         file_path: &str,
     ) -> Result<Option<SessionHistoryRecord>>;
     fn replace_session_history(&self, record: &SessionHistoryRecord) -> Result<()>;
+    fn get_session_history_snapshots(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+    ) -> Result<Vec<SessionHistorySnapshotRecord>>;
+    fn replace_session_history_snapshots(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+        snapshots: &[SessionHistorySnapshotRecord],
+    ) -> Result<()>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(

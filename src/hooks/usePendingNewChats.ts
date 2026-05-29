@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import {
   createPendingSession,
   linkKanbanItemSession,
+  saveSessionHistorySnapshots,
   updateKanbanItemStatus,
   type Agent,
   type KanbanItem,
@@ -10,6 +11,7 @@ import {
 import { mergePendingSession } from "../appUtils";
 import type { DetailMode, PendingNewChatSession } from "../navigation";
 import type { LiveRuntimeState } from "../runtimeChat";
+import { setCachedSessionHistorySnapshots } from "../sessionHistorySnapshots";
 
 export function usePendingNewChats({
   pendingNewChats,
@@ -54,7 +56,6 @@ export function usePendingNewChats({
       if (writesRef.current.has(pending.sessioRuntimeSessionId)) continue;
 
       writesRef.current.add(pending.sessioRuntimeSessionId);
-      // Flow: persist pending session, link kanban if needed, then select the chat view.
       const pendingSession: SessionInfo = {
         id: agentSessionId,
         agent: pending.agent,
@@ -74,8 +75,36 @@ export function usePendingNewChats({
         archived: false,
         subagents: [],
       };
+      if (pending.historySnapshots && pending.historySnapshots.length > 0) {
+        setCachedSessionHistorySnapshots(
+          pending.agent,
+          agentSessionId,
+          pending.historySnapshots,
+        );
+      }
+      setRuntimeSessionAliases((prev) => ({
+        ...prev,
+        [`${pending.agent}:${agentSessionId}`]: pending.sessioRuntimeSessionId,
+      }));
+      setSessions((prev) => mergePendingSession(prev, pendingSession));
+      setSelected(pendingSession);
+      setDetailMode("chat");
+      setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
+      setPendingNewChats((prev) => {
+        const next = { ...prev };
+        delete next[pending.sessioRuntimeSessionId];
+        return next;
+      });
+
       createPendingSession(pendingSession)
         .then(async () => {
+          if (pending.historySnapshots && pending.historySnapshots.length > 0) {
+            saveSessionHistorySnapshots(
+              pending.agent,
+              agentSessionId,
+              pending.historySnapshots,
+            ).catch((err) => console.warn("save history snapshots failed", err));
+          }
           let linkedKanbanItem: KanbanItem | null = null;
           if (pending.kanbanItemId) {
             linkedKanbanItem = await linkKanbanItemSession(
@@ -98,14 +127,6 @@ export function usePendingNewChats({
           if (linkedKanbanItem) {
             setSelectedProject((current) => (current ? { ...current } : current));
           }
-          setSelected(pendingSession);
-          setDetailMode("chat");
-          setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
-          setPendingNewChats((prev) => {
-            const next = { ...prev };
-            delete next[pending.sessioRuntimeSessionId];
-            return next;
-          });
         })
         .catch((err) => {
           writesRef.current.delete(pending.sessioRuntimeSessionId);
