@@ -51,7 +51,7 @@ import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions }
 import Tooltip from "../components/Tooltip";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
-import type { LiveRuntimeAction, LiveRuntimeState } from "../runtimeChat";
+import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
 
 const KANBAN_STATUSES: KanbanStatus[] = [
   "todo",
@@ -337,24 +337,13 @@ export default function NewChatPage({
         options: runtimeSessionOptions(model, permissionMode, effort),
       });
       const timestamp = Date.now();
-      const existingLiveSession = liveState.sessions[handle.sessioRuntimeSessionId];
-      if (!existingLiveSession) {
-        fallbackRuntimeSequenceRef.current += 1;
-        dispatchLiveEvent({
-          type: "runtime-event",
-          event: {
-            kind: "sessionStarted",
-            sequence: liveState.lastSequence + fallbackRuntimeSequenceRef.current,
-            timestamp,
-            agent: handle.agent,
-            sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-            agentRuntimeSessionId: handle.agentRuntimeSessionId,
-            transport: handle.transport,
-            workspacePath: handle.workspacePath,
-            capabilities: handle.capabilities,
-          },
-        });
-      }
+      dispatchSessionStartedFallback({
+        dispatch: dispatchLiveEvent,
+        handle,
+        liveState,
+        sequenceRef: fallbackRuntimeSequenceRef,
+        timestamp,
+      });
       onPendingSession({
         sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
         agent: handle.agent,

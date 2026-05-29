@@ -78,6 +78,7 @@ import {
   type AcpSessionConfigOption,
   type AcpSessionState,
   type AcpToolCall,
+  dispatchSessionStartedFallback,
   historyTurnsToAcpViewModel,
   liveSessionToAcpViewModel,
   type LiveRuntimeAction,
@@ -488,6 +489,7 @@ function MessageStream({
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
+  const fallbackRuntimeSequenceRef = useRef(0);
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
@@ -984,6 +986,13 @@ function MessageStream({
         }
       }
       if (!sameAgent) {
+        dispatchSessionStartedFallback({
+          dispatch: dispatchLiveEvent,
+          handle,
+          liveState,
+          sequenceRef: fallbackRuntimeSequenceRef,
+          timestamp,
+        });
         dispatchLiveEvent({
           type: "ensure-session",
           session: pendingLiveSession({
@@ -1037,7 +1046,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.sessions, mergedAncestorTurns, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);

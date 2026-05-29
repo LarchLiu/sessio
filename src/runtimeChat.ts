@@ -1,6 +1,7 @@
 import type {
   AcpProtocolMessage,
   Agent,
+  AgentSessionHandle,
   AgentRuntimeEvent,
   RuntimeCapabilitySet,
   RuntimeError,
@@ -307,6 +308,37 @@ export function historyTurnsToAcpViewModel(turns: LiveTurn[]): AcpViewModel {
     protocolMessages: [],
     ended: true,
   };
+}
+
+export function dispatchSessionStartedFallback({
+  dispatch,
+  handle,
+  liveState,
+  sequenceRef,
+  timestamp,
+}: {
+  dispatch: React.Dispatch<LiveRuntimeAction>;
+  handle: AgentSessionHandle;
+  liveState: LiveRuntimeState;
+  sequenceRef: { current: number };
+  timestamp: number;
+}): void {
+  if (liveState.sessions[handle.sessioRuntimeSessionId]) return;
+  sequenceRef.current += 1;
+  dispatch({
+    type: "runtime-event",
+    event: {
+      kind: "sessionStarted",
+      sequence: liveState.lastSequence + sequenceRef.current,
+      timestamp,
+      agent: handle.agent,
+      sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
+      agentRuntimeSessionId: handle.agentRuntimeSessionId,
+      transport: handle.transport,
+      workspacePath: handle.workspacePath,
+      capabilities: handle.capabilities,
+    },
+  });
 }
 
 export function liveSessionActivity(
