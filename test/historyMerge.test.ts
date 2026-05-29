@@ -166,6 +166,53 @@ describe("mergeHistoryWithLiveTurns", () => {
     expect(mergeHistoryWithLiveTurns(history, [replay, next])).toEqual([...history, next]);
   });
 
+  it("drops duplicated live cross-agent user when history already has it", () => {
+    const history = [liveTurn([
+      {
+        kind: "user",
+        blocks: [
+          { type: "resource", uri: "file:///tmp/.cross-context/sessio-cross-context-parent.md", name: "sessio-cross-context-parent.md" },
+          { type: "text", text: "继续" },
+        ],
+        raw: {},
+        timestamp: 1,
+      },
+    ], "history", 1)];
+    const live = [
+      liveTurn([
+        {
+          kind: "user",
+          blocks: [
+            { type: "resource", uri: "file:///tmp/.cross-context/sessio-cross-context-parent.md", name: "sessio-cross-context-parent.md" },
+            { type: "text", text: "继续" },
+          ],
+          raw: { optimistic: true },
+          timestamp: 2,
+        },
+        { kind: "assistant", blocks: [{ type: "text", text: "我继续处理" }], raw: {}, timestamp: 3 },
+      ], "live", 3),
+    ];
+
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([
+      ...history,
+      {
+        ...live[0],
+        blocks: [{ kind: "assistant", blocks: [{ type: "text", text: "我继续处理" }], raw: {}, timestamp: 3 }],
+      },
+    ]);
+  });
+
+  it("does not drop duplicated non-cross-context live user with different turn id", () => {
+    const history = [liveTurn([
+      { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 1 },
+    ], "history", 1)];
+    const live = [liveTurn([
+      { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 2 },
+    ], "live", 2)];
+
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
+  });
+
   it("keeps equivalent content when turn ids differ", () => {
     const history = [liveTurn([
       {

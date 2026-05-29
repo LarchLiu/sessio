@@ -157,10 +157,11 @@ export function mergeHistoryWithLiveTurns(
   if (historyTurns.length === 0) return liveTurns;
   if (liveTurns.length === 0) return historyTurns;
   const historyIds = new Set(historyTurns.map((turn) => turn.turnId));
-  return [
-    ...historyTurns,
-    ...liveTurns.filter((turn) => !historyIds.has(turn.turnId)),
-  ];
+  const nextLiveTurns = removeDuplicatedCrossContextLiveUser(
+    historyTurns,
+    liveTurns.filter((turn) => !historyIds.has(turn.turnId)),
+  );
+  return [...historyTurns, ...nextLiveTurns];
 }
 
 type UserRenderBlock = Extract<AcpRenderBlock, { kind: "user" }>;
@@ -191,6 +192,52 @@ export function sameAcpUserBlocks(a: UserRenderBlock, b: UserRenderBlock): boole
   const right = contentBlocksText(b.blocks);
   return normalizedUserMessageText(left) === normalizedUserMessageText(right) &&
     attachmentCompareSignature(left) === attachmentCompareSignature(right);
+}
+
+function removeDuplicatedCrossContextLiveUser(
+  historyTurns: LiveTurn[],
+  liveTurns: LiveTurn[],
+): LiveTurn[] {
+  if (liveTurns.length === 0) return liveTurns;
+  const historyUser = lastTailUserBlock(historyTurns);
+  if (!historyUser || !hasCrossContextAttachment(historyUser.block)) return liveTurns;
+
+  const firstLiveBlocks = liveTurns[0].blocks;
+  const liveUserIndex = firstLiveBlocks.findIndex((block) => block.kind === "user");
+  if (liveUserIndex < 0) return liveTurns;
+  const liveUser = firstLiveBlocks[liveUserIndex] as UserRenderBlock;
+  if (!sameAcpUserBlocks(historyUser.block, liveUser)) return liveTurns;
+
+  const firstLiveTurn = {
+    ...liveTurns[0],
+    blocks: firstLiveBlocks.filter((_, index) => index !== liveUserIndex),
+  };
+  if (isEmptyRenderableTurn(firstLiveTurn)) {
+    return liveTurns.slice(1);
+  }
+  return [firstLiveTurn, ...liveTurns.slice(1)];
+}
+
+function hasCrossContextAttachment(block: UserRenderBlock): boolean {
+  return block.blocks.some((item) => {
+    if (item.type === "resource_link") {
+      return [item.uri, item.name, item.title].some((value) => value?.includes("sessio-cross-context"));
+    }
+    if (item.type === "resource") {
+      return [item.uri, item.name].some((value) => value?.includes("sessio-cross-context"));
+    }
+    if (item.type === "text") {
+      return item.text.includes("sessio-cross-context");
+    }
+    return false;
+  });
+}
+
+function isEmptyRenderableTurn(turn: LiveTurn): boolean {
+  return turn.blocks.length === 0 &&
+    turn.tools.length === 0 &&
+    turn.permissions.length === 0 &&
+    !turn.error;
 }
 
 export function sanitizeSessioAttachmentText(text: string): string {

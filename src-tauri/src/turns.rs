@@ -1552,10 +1552,12 @@ fn normalize_content_blocks(value: &Value, role: Option<&str>) -> Vec<SessionCon
 }
 
 fn normalize_user_content_blocks(value: &Value) -> Vec<SessionContentBlock> {
-    normalize_content_blocks(value, Some("user"))
-        .into_iter()
-        .flat_map(clean_user_content_block)
-        .collect()
+    dedupe_user_attachment_blocks(
+        normalize_content_blocks(value, Some("user"))
+            .into_iter()
+            .flat_map(clean_user_content_block)
+            .collect(),
+    )
 }
 
 fn clean_user_content_block(mut block: SessionContentBlock) -> Vec<SessionContentBlock> {
@@ -1566,34 +1568,67 @@ fn clean_user_content_block(mut block: SessionContentBlock) -> Vec<SessionConten
             if cleaned.trim().is_empty() || is_system_noise(&cleaned) {
                 Vec::new()
             } else {
-                text_content_blocks(&cleaned)
-                    .into_iter()
-                    .filter(|block| !is_hidden_user_resource(block))
-                    .collect()
+                trim_user_text_blocks(text_content_blocks(&cleaned))
             }
         }
-        "resource" | "resource_link" => {
-            if is_hidden_user_resource(&block) {
-                Vec::new()
-            } else {
-                vec![block]
-            }
-        }
+        "resource" | "resource_link" => vec![block],
         _ => vec![block],
     }
 }
 
-fn is_hidden_user_resource(block: &SessionContentBlock) -> bool {
-    matches!(block.kind.as_str(), "resource" | "resource_link")
-        && is_sessio_cross_context_resource(
-            block.uri.as_deref(),
-            block.name.as_deref(),
-            block.text.as_deref(),
-        )
-}
-
 fn sanitize_user_text_for_display(text: &str) -> String {
     sanitize_sessio_attachment_text(&strip_image_placeholder_tags(text))
+}
+
+fn trim_user_text_blocks(mut blocks: Vec<SessionContentBlock>) -> Vec<SessionContentBlock> {
+    let attachment_flags = blocks
+        .iter()
+        .map(|block| matches!(block.kind.as_str(), "image" | "resource" | "resource_link"))
+        .collect::<Vec<_>>();
+    for (index, block) in blocks.iter_mut().enumerate() {
+        if block.kind != "text" {
+            continue;
+        }
+        let trim_start = index > 0 && attachment_flags[index - 1];
+        let trim_end = attachment_flags.get(index + 1).copied().unwrap_or(false);
+        if trim_start || trim_end {
+            if let Some(current) = block.text.take() {
+                let text = match (trim_start, trim_end) {
+                    (true, true) => current.trim().to_string(),
+                    (true, false) => current.trim_start().to_string(),
+                    (false, true) => current.trim_end().to_string(),
+                    (false, false) => current,
+                };
+                block.text = Some(text);
+            }
+        }
+    }
+    blocks
+        .into_iter()
+        .filter(|block| {
+            block.kind != "text" || block.text.as_deref().is_some_and(|text| !text.is_empty())
+        })
+        .collect()
+}
+
+fn dedupe_user_attachment_blocks(blocks: Vec<SessionContentBlock>) -> Vec<SessionContentBlock> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if matches!(block.kind.as_str(), "image" | "resource" | "resource_link") {
+            let key = format!(
+                "{}\u{1f}{}\u{1f}{}",
+                block.kind,
+                block.uri.as_deref().unwrap_or_default(),
+                block.name.as_deref().unwrap_or_default()
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+        }
+        deduped.push(block);
+    }
+    deduped
 }
 
 fn normalize_content_block(value: &Value, role: Option<&str>) -> Option<SessionContentBlock> {
@@ -1643,9 +1678,6 @@ fn normalize_content_block(value: &Value, role: Option<&str>) -> Option<SessionC
             let uri = string_field(value, "uri").unwrap_or_default();
             let name = string_field(value, "name");
             let mime_type = string_field(value, "mimeType");
-            if is_sessio_cross_context_resource(Some(&uri), name.as_deref(), None) {
-                return None;
-            }
             Some(SessionContentBlock {
                 kind: "resource_link".to_string(),
                 text: None,
@@ -1671,9 +1703,6 @@ fn normalize_content_block(value: &Value, role: Option<&str>) -> Option<SessionC
                 string_field(&resource, "mimeType").or_else(|| string_field(value, "mimeType"));
             let text = string_field(&resource, "text").or_else(|| string_field(value, "text"));
             let blob = string_field(&resource, "blob").or_else(|| string_field(value, "blob"));
-            if is_sessio_cross_context_resource(uri.as_deref(), name.as_deref(), text.as_deref()) {
-                return None;
-            }
             Some(SessionContentBlock {
                 kind: "resource".to_string(),
                 text,
@@ -1725,9 +1754,6 @@ fn optimistic_user_content_blocks(
                     .clone()
                     .filter(|value| !value.trim().is_empty())
                     .or_else(|| basename_from_uri(&attachment.path));
-                if is_sessio_cross_context_resource(Some(&attachment.path), name.as_deref(), None) {
-                    continue;
-                }
                 blocks.push(SessionContentBlock::resource(
                     Some(attachment.path.clone()),
                     name,
@@ -2352,9 +2378,6 @@ fn replace_sessio_upload_file_tags(text: &str) -> String {
             .get("uri")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        if is_sessio_cross_context_resource(uri.as_deref(), None, None) {
-            return String::new();
-        }
         let name = attrs
             .get("name")
             .and_then(Value::as_str)
@@ -2370,9 +2393,6 @@ fn replace_context_tags(text: &str) -> String {
             .get("ref")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        if is_sessio_cross_context_resource(uri.as_deref(), None, None) {
-            return String::new();
-        }
         let name = uri.as_deref().and_then(basename_from_uri);
         file_marker(name.as_deref(), uri.as_deref())
     })
@@ -2480,21 +2500,6 @@ fn collapse_blank_lines(text: &str) -> String {
         out.push('\n');
     }
     out.trim().to_string()
-}
-
-fn is_sessio_cross_context_resource(
-    uri: Option<&str>,
-    name: Option<&str>,
-    text: Option<&str>,
-) -> bool {
-    uri.map(|value| value.contains("sessio-cross-context"))
-        .unwrap_or(false)
-        || name
-            .map(|value| value.contains("sessio-cross-context"))
-            .unwrap_or(false)
-        || text
-            .map(|value| value.contains("<!-- sessio-cross:start"))
-            .unwrap_or(false)
 }
 
 fn basename_from_uri(uri: &str) -> Option<String> {
@@ -3085,7 +3090,7 @@ mod tests {
         let blocks = &state.turns[0].blocks[0].blocks;
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0].kind, "text");
-        assert_eq!(blocks[0].text.as_deref(), Some("图片和文档有关杀没\n"));
+        assert_eq!(blocks[0].text.as_deref(), Some("图片和文档有关杀没"));
         assert_eq!(blocks[1].kind, "image");
         assert_eq!(blocks[1].mime_type.as_deref(), Some("image/png"));
         assert_eq!(
@@ -3177,7 +3182,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_acp_prompt_cleans_cross_context_from_user_display() {
+    fn runtime_acp_prompt_keeps_cross_context_as_user_attachment() {
         let mut state = RuntimeTurnState::new(
             "runtime-1",
             Agent::Codex,
@@ -3225,14 +3230,23 @@ mod tests {
         );
 
         let blocks = &state.turns[0].blocks[0].blocks;
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0].text.as_deref(), Some("继续"));
         assert_eq!(blocks[1].kind, "resource");
-        assert_eq!(blocks[1].name.as_deref(), Some("spec.md"));
+        assert_eq!(
+            blocks[1].name.as_deref(),
+            Some("sessio-cross-context-parent.md")
+        );
+        assert_eq!(
+            blocks[1].uri.as_deref(),
+            Some("file:///tmp/.cross-context/sessio-cross-context-parent.md")
+        );
+        assert_eq!(blocks[2].kind, "resource");
+        assert_eq!(blocks[2].name.as_deref(), Some("spec.md"));
     }
 
     #[test]
-    fn optimistic_user_message_hides_internal_cross_context_attachment() {
+    fn optimistic_user_message_keeps_cross_context_attachment() {
         let mut state = RuntimeTurnState::new(
             "runtime-1",
             Agent::Codex,
@@ -3263,10 +3277,19 @@ mod tests {
         );
 
         let blocks = &state.turns[0].blocks[0].blocks;
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0].text.as_deref(), Some("继续"));
         assert_eq!(blocks[1].kind, "resource");
-        assert_eq!(blocks[1].name.as_deref(), Some("spec.md"));
+        assert_eq!(
+            blocks[1].name.as_deref(),
+            Some("sessio-cross-context-parent.md")
+        );
+        assert_eq!(
+            blocks[1].uri.as_deref(),
+            Some("file:///tmp/.cross-context/sessio-cross-context-parent.md")
+        );
+        assert_eq!(blocks[2].kind, "resource");
+        assert_eq!(blocks[2].name.as_deref(), Some("spec.md"));
     }
 
     #[test]

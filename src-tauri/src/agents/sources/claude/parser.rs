@@ -1782,10 +1782,20 @@ mod tests {
         let turns = crate::turns::session_history_turns_from_acp_messages(&rows);
         let display_text = turns[0].blocks[0].blocks[0].text.as_deref().unwrap();
         assert!(display_text.contains("不错，写入md文档"));
-        assert_eq!(turns[0].blocks[0].blocks.len(), 1);
+        assert_eq!(turns[0].blocks[0].blocks.len(), 2);
         assert!(!display_text.contains("sessio-cross-context-abc.md"));
         assert!(!display_text.contains("<sessio-upload-file"));
         assert!(!display_text.contains("Continued session from agent"));
+        let attachment = &turns[0].blocks[0].blocks[1];
+        assert_eq!(attachment.kind, "resource");
+        assert_eq!(
+            attachment.name.as_deref(),
+            Some("sessio-cross-context-abc.md")
+        );
+        assert_eq!(
+            attachment.uri.as_deref(),
+            Some("file:///tmp/.cross-context/sessio-cross-context-abc.md")
+        );
     }
 
     #[test]
@@ -1835,7 +1845,7 @@ mod tests {
         let turns = crate::turns::session_history_turns_from_acp_messages(&messages);
         let display_text = turns[0].blocks[0].blocks[0].text.as_deref().unwrap();
         assert!(display_text.contains("继续整理"), "{}", display_text);
-        assert_eq!(turns[0].blocks[0].blocks.len(), 1);
+        assert_eq!(turns[0].blocks[0].blocks.len(), 2);
         assert!(
             !display_text.contains("sessio-cross-context-abc.md"),
             "{}",
@@ -1845,6 +1855,16 @@ mod tests {
             !display_text.contains("<sessio-upload-file"),
             "{}",
             display_text
+        );
+        let attachment = &turns[0].blocks[0].blocks[1];
+        assert_eq!(attachment.kind, "resource");
+        assert_eq!(
+            attachment.name.as_deref(),
+            Some("sessio-cross-context-abc.md")
+        );
+        assert_eq!(
+            attachment.uri.as_deref(),
+            Some("file:///tmp/.cross-context/sessio-cross-context-abc.md")
         );
         assert!(
             !display_text.contains("Continued session from agent"),

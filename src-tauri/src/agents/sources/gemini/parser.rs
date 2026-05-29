@@ -1406,7 +1406,7 @@ mod tests {
             "{}",
             display_text
         );
-        assert_eq!(turns[0].blocks[0].blocks.len(), 1);
+        assert_eq!(turns[0].blocks[0].blocks.len(), 2);
         assert!(
             !display_text.contains("sessio-cross-context-abc.md"),
             "{}",
@@ -1421,6 +1421,16 @@ mod tests {
             !display_text.contains("Continued session from agent"),
             "{}",
             display_text
+        );
+        let attachment = &turns[0].blocks[0].blocks[1];
+        assert_eq!(attachment.kind, "resource");
+        assert_eq!(
+            attachment.name.as_deref(),
+            Some("sessio-cross-context-abc.md")
+        );
+        assert_eq!(
+            attachment.uri.as_deref(),
+            Some("file:///tmp/.cross-context/sessio-cross-context-abc.md")
         );
 
         let _ = fs::remove_dir_all(&dir);
