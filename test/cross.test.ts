@@ -67,8 +67,8 @@ describe("buildCrossPromptFromTurns", () => {
       },
     ]);
     expect(prompt).toContain("[user]\nreview these");
-    expect(prompt).toContain("[file: spec.md|file:///tmp/spec.md]");
-    expect(prompt).toContain("![image/png](file:///tmp/screen.png)");
+    expect(prompt).toContain("[file: __sessio_attachment__:spec.md|file:///tmp/spec.md]");
+    expect(prompt).toContain("![__sessio_attachment__:image/png](file:///tmp/screen.png)");
     expect(prompt).not.toContain("[user]\nfallback");
   });
 
@@ -101,8 +101,8 @@ describe("buildCrossPromptFromTurns", () => {
     ]);
 
     expect(prompt).toContain("[user]\nreview these");
-    expect(prompt).toContain("[file: spec.md|file:///tmp/spec.md]");
-    expect(prompt).toContain("![image/png](file:///tmp/screen.png)");
+    expect(prompt).toContain("[file: __sessio_attachment__:spec.md|file:///tmp/spec.md]");
+    expect(prompt).toContain("![__sessio_attachment__:image/png](file:///tmp/screen.png)");
     expect(prompt).toContain("[thinking]\nneed to inspect files");
     expect(prompt).toContain("[assistant]\ndone");
     expect(prompt).not.toContain("tool-1");

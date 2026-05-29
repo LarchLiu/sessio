@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::agents::runtime::types::AcpProtocolMessage;
 use crate::models::SessionContentBlock;
 
 pub type Metadata = BTreeMap<String, Value>;
@@ -35,7 +36,6 @@ pub enum SourceKind {
     MainSession,
     Subagent,
     ProjectIndex,
-    Logs,
     Archive,
     Unknown,
 }
@@ -149,6 +149,16 @@ pub struct MessageEvent {
     pub metadata: Metadata,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryAcpMessage {
+    pub message: AcpProtocolMessage,
+    pub timestamp: Option<i64>,
+    pub location: SourceLocation,
+    #[serde(default)]
+    pub synthetic: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct WatchRoot {
     pub agent: AgentKind,
@@ -161,8 +171,6 @@ pub struct WatchRoot {
 pub enum WatchPurpose {
     Sessions,
     Projects,
-    Logs,
-    ProjectMappings,
 }
 
 #[derive(Debug, Clone)]
@@ -184,5 +192,4 @@ pub enum SourceIndexTask {
     ReindexSource(SessionSource),
     ReindexScope { agent: AgentKind, scope: String },
     MarkSourceUnavailable(SessionSource),
-    RefreshProjectMappings { agent: AgentKind },
 }

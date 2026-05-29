@@ -2,10 +2,10 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use crate::agents::sources::types::{
-    AgentKind, MessageContent, MessageEvent, MessageRole, Metadata, ProjectRef, SessionRecord,
-    SessionSource, SourceKind, SourceLocation, ToolResultEvent, ToolUseEvent,
+    AgentKind, HistoryAcpMessage, MessageContent, MessageEvent, MessageRole, Metadata, ProjectRef,
+    SessionRecord, SessionSource, SourceKind, ToolResultEvent, ToolUseEvent,
 };
-use crate::models::{Agent, SessionContentBlock, SessionInfo, SessionMessage};
+use crate::models::{Agent, SessionContentBlock, SessionInfo};
 
 const TOOL_RESULT_PREVIEW_CHARS: usize = 1200;
 
@@ -96,99 +96,227 @@ pub fn session_source_from_info(info: &SessionInfo) -> SessionSource {
     }
 }
 
-pub fn message_events_from_messages(
+pub fn message_events_from_history_acp_messages(
     source: &SessionSource,
-    messages: Vec<(SessionMessage, SourceLocation)>,
+    events: Vec<HistoryAcpMessage>,
 ) -> Vec<MessageEvent> {
-    messages
+    events
         .into_iter()
         .enumerate()
-        .map(|(turn_index, (message, location))| {
-            let role = message_role(&message.role);
-            let content = message_content(&message.role, &message.text, &message.content_blocks);
+        .map(|(turn_index, event)| {
+            let role = acp_message_role(&event);
+            let content = acp_message_content(&event, role);
+            let text = event_text_for_id(&content);
             MessageEvent {
                 source: source.clone(),
-                event_id: Some(event_id(source, turn_index, &message.role, &message.text)),
+                event_id: Some(event_id(source, turn_index, role_id(role), &text)),
                 turn_index,
                 role,
                 content,
-                timestamp: message.timestamp,
-                location,
+                timestamp: event.timestamp,
+                location: event.location,
                 metadata: Default::default(),
             }
         })
         .collect()
 }
 
-fn message_role(role: &str) -> MessageRole {
-    match role {
-        "user" => MessageRole::User,
-        "assistant" => MessageRole::Assistant,
-        "thinking" => MessageRole::Thinking,
-        "tool" | "tool_use" | "function_call" | "tool_call" | "todo" => MessageRole::ToolUse,
-        "tool_result" | "function_call_output" => MessageRole::ToolResult,
-        "system" => MessageRole::System,
+fn acp_message_role(event: &HistoryAcpMessage) -> MessageRole {
+    let message = &event.message;
+    if message.method == "session/prompt" && message.direction == "client_to_agent" {
+        return MessageRole::User;
+    }
+    if message.method == "session/request_permission" && message.message_kind == "request" {
+        return MessageRole::ToolUse;
+    }
+    if message.method != "session/update" {
+        return MessageRole::Unknown;
+    }
+    match acp_update_type(&message.data, message.update_type.as_deref()).as_deref() {
+        Some("agent_message_chunk") => MessageRole::Assistant,
+        Some("agent_thought_chunk") => MessageRole::Thinking,
+        Some("tool_call") => MessageRole::ToolUse,
+        Some("tool_call_update") => MessageRole::ToolResult,
         _ => MessageRole::Unknown,
     }
 }
 
-fn message_content(role: &str, text: &str, blocks: &[SessionContentBlock]) -> MessageContent {
-    match message_role(role) {
-        MessageRole::ToolUse => {
-            let (name, raw) = if role == "todo" {
-                ("TodoWrite".to_string(), Some(text.to_string()))
-            } else {
-                parse_tool_call_text(text)
-            };
-            MessageContent::ToolUse {
-                tool: ToolUseEvent {
-                    name,
-                    input: raw
-                        .as_deref()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
-                    raw,
-                },
-            }
-        }
-        MessageRole::ToolResult => MessageContent::ToolResult {
-            result: ToolResultEvent {
-                tool_name: None,
-                exit_code: None,
-                success: None,
-                text: compact_tool_result(text),
-                output_hash: Some(hash_text(text)),
-            },
+fn acp_message_content(event: &HistoryAcpMessage, role: MessageRole) -> MessageContent {
+    let message = &event.message;
+    match role {
+        MessageRole::User => MessageContent::Blocks {
+            blocks: content_blocks_from_value(message.data.get("prompt")),
         },
-        _ if !blocks.is_empty() => MessageContent::Blocks {
-            blocks: blocks.to_vec(),
+        MessageRole::Assistant | MessageRole::Thinking => MessageContent::Blocks {
+            blocks: content_blocks_from_value(update_field(&message.data, "content")),
         },
+        MessageRole::ToolUse => tool_use_content(&message.data),
+        MessageRole::ToolResult => tool_result_content(&message.data),
         _ => MessageContent::Text {
-            text: text.to_string(),
+            text: serde_json::to_string(&message.data).unwrap_or_default(),
         },
     }
 }
 
-fn parse_tool_call_text(text: &str) -> (String, Option<String>) {
-    let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix('[') {
-        if let Some(end) = rest.find(']') {
-            let name = rest[..end].trim().to_string();
-            let raw = rest[end + 1..].trim();
-            return (
-                if name.is_empty() {
-                    "tool".to_string()
-                } else {
-                    name
-                },
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(raw.to_string())
-                },
-            );
-        }
+fn tool_use_content(data: &serde_json::Value) -> MessageContent {
+    let update = update_value(data).unwrap_or(data);
+    let tool_call = update
+        .get("toolCall")
+        .or_else(|| update.get("tool_call"))
+        .unwrap_or(update);
+    let fields = tool_call.get("fields").unwrap_or(tool_call);
+    let input = fields
+        .get("rawInput")
+        .or_else(|| fields.get("raw_input"))
+        .or_else(|| update.get("rawInput"))
+        .or_else(|| update.get("input"))
+        .cloned();
+    let raw = input.as_ref().map(|value| {
+        value
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
+    });
+    MessageContent::ToolUse {
+        tool: ToolUseEvent {
+            name: fields
+                .get("title")
+                .or_else(|| fields.get("name"))
+                .or_else(|| update.get("title"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("Tool Use")
+                .to_string(),
+            input,
+            raw,
+        },
     }
-    ("tool".to_string(), Some(trimmed.to_string()))
+}
+
+fn tool_result_content(data: &serde_json::Value) -> MessageContent {
+    let update = update_value(data).unwrap_or(data);
+    let output = update
+        .get("rawOutput")
+        .or_else(|| update.get("output"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let text = output
+        .as_str()
+        .map(String::from)
+        .unwrap_or_else(|| serde_json::to_string(&output).unwrap_or_default());
+    MessageContent::ToolResult {
+        result: ToolResultEvent {
+            tool_name: None,
+            exit_code: None,
+            success: None,
+            text: compact_tool_result(&text),
+            output_hash: Some(hash_text(&text)),
+        },
+    }
+}
+
+fn content_blocks_from_value(value: Option<&serde_json::Value>) -> Vec<SessionContentBlock> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let values = value
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| vec![value.clone()]);
+    values
+        .into_iter()
+        .filter_map(|item| {
+            let kind = item
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("text");
+            match kind {
+                "text" => Some(SessionContentBlock::text(
+                    item.get("text")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                )),
+                "image" => Some(SessionContentBlock::image(
+                    item.get("uri")
+                        .or_else(|| item.get("data"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    item.get("mimeType")
+                        .and_then(|value| value.as_str())
+                        .map(String::from),
+                )),
+                "resource" | "resource_link" => Some(SessionContentBlock::resource(
+                    item.get("uri")
+                        .and_then(|value| value.as_str())
+                        .map(String::from),
+                    item.get("name")
+                        .and_then(|value| value.as_str())
+                        .map(String::from),
+                    item.get("mimeType")
+                        .and_then(|value| value.as_str())
+                        .map(String::from),
+                )),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn update_value(data: &serde_json::Value) -> Option<&serde_json::Value> {
+    data.get("update")
+}
+
+fn update_field<'a>(data: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    update_value(data).and_then(|update| update.get(key))
+}
+
+fn acp_update_type(data: &serde_json::Value, fallback: Option<&str>) -> Option<String> {
+    let update = update_value(data)?;
+    let value = update
+        .get("sessionUpdate")
+        .or_else(|| update.get("session_update"))
+        .and_then(|value| value.as_str())
+        .or(fallback)?;
+    Some(
+        match value {
+            "plan_update" => "plan",
+            other => other,
+        }
+        .to_string(),
+    )
+}
+
+fn role_id(role: MessageRole) -> &'static str {
+    match role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::Thinking => "thinking",
+        MessageRole::System => "system",
+        MessageRole::ToolUse => "tool_use",
+        MessageRole::ToolResult => "tool_result",
+        MessageRole::Unknown => "unknown",
+    }
+}
+
+fn event_text_for_id(content: &MessageContent) -> String {
+    match content {
+        MessageContent::Text { text } => text.clone(),
+        MessageContent::Blocks { blocks } => blocks
+            .iter()
+            .filter_map(|block| block.text.clone().or_else(|| block.uri.clone()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        MessageContent::ToolUse { tool } => {
+            format!("{}:{}", tool.name, tool.raw.clone().unwrap_or_default())
+        }
+        MessageContent::ToolResult { result } => result.text.clone(),
+        MessageContent::Mixed { parts } => parts
+            .iter()
+            .map(event_text_for_id)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
 }
 
 fn compact_tool_result(text: &str) -> String {
@@ -275,11 +403,24 @@ fn scope_for_info(info: &SessionInfo) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{message_events_from_messages, project_key_for_path_or_name};
+    use super::{message_events_from_history_acp_messages, project_key_for_path_or_name};
     use crate::agents::sources::types::{
-        AgentKind, MessageContent, ProjectRef, SessionSource, SourceKind, SourceLocation,
+        AgentKind, HistoryAcpMessage, MessageContent, ProjectRef, SessionSource, SourceKind,
+        SourceLocation,
     };
-    use crate::models::{SessionContentBlock, SessionMessage};
+    use crate::turns::{
+        history_prompt_message, history_tool_call_message, history_tool_result_message,
+    };
+    use serde_json::Value;
+
+    fn row(message: crate::agents::runtime::types::AcpProtocolMessage) -> HistoryAcpMessage {
+        HistoryAcpMessage {
+            message,
+            timestamp: None,
+            location: SourceLocation::file("/tmp/session.jsonl"),
+            synthetic: true,
+        }
+    }
 
     #[test]
     fn converts_tool_messages_to_structured_content() {
@@ -296,17 +437,20 @@ mod tests {
             source_kind: SourceKind::MainSession,
             metadata: Default::default(),
         };
-        let events = message_events_from_messages(
+        let events = message_events_from_history_acp_messages(
             &source,
             vec![
-                (
-                    SessionMessage::new("tool_call", "[shell]\n{\"cmd\":\"cargo check\"}", None),
-                    SourceLocation::file("/tmp/session.jsonl"),
-                ),
-                (
-                    SessionMessage::new("tool_result", "ok ".repeat(1000), None),
-                    SourceLocation::file("/tmp/session.jsonl"),
-                ),
+                row(history_tool_call_message(
+                    None,
+                    "shell",
+                    serde_json::json!({ "cmd": "cargo check" }),
+                    None,
+                )),
+                row(history_tool_result_message(
+                    None,
+                    Value::String("ok ".repeat(1000)),
+                    None,
+                )),
             ],
         );
         match &events[0].content {
@@ -337,20 +481,20 @@ mod tests {
             source_kind: SourceKind::MainSession,
             metadata: Default::default(),
         };
-        let events = message_events_from_messages(
+        let events = message_events_from_history_acp_messages(
             &source,
-            vec![(
-                SessionMessage::new("user", "see [file: spec.md|file:///tmp/spec.md]", None)
-                    .with_content_blocks(vec![
-                        SessionContentBlock::text("see"),
-                        SessionContentBlock::resource(
-                            Some("file:///tmp/spec.md".to_string()),
-                            Some("spec.md".to_string()),
-                            Some("text/markdown".to_string()),
-                        ),
-                    ]),
-                SourceLocation::file("/tmp/session.jsonl"),
-            )],
+            vec![row(history_prompt_message(
+                vec![
+                    serde_json::json!({ "type": "text", "text": "see" }),
+                    serde_json::json!({
+                        "type": "resource_link",
+                        "uri": "file:///tmp/spec.md",
+                        "name": "spec.md",
+                        "mimeType": "text/markdown"
+                    }),
+                ],
+                None,
+            ))],
         );
         match &events[0].content {
             MessageContent::Blocks { blocks } => {

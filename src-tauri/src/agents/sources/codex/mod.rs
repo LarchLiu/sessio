@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::agents::sources::registry::AgentSource;
 use crate::agents::sources::shared::convert::{
-    agent_kind, message_events_from_messages, session_record_from_info, session_source_from_info,
+    agent_kind, message_events_from_history_acp_messages, session_record_from_info,
+    session_source_from_info,
 };
 use crate::agents::sources::types::{
     AgentKind, MessageEvent, PathEvent, PathEventKind, SessionRecord, SessionSource,
@@ -59,8 +60,9 @@ impl AgentSource for CodexSource {
     }
 
     fn read_messages(&self, source: &SessionSource) -> Result<Vec<MessageEvent>> {
-        let messages = parser::read_messages_with_locations(Path::new(&source.file_path))?;
-        Ok(message_events_from_messages(source, messages))
+        let messages =
+            parser::read_history_acp_messages_with_locations(Path::new(&source.file_path))?;
+        Ok(message_events_from_history_acp_messages(source, messages))
     }
 
     fn classify_path_event(&self, event: &PathEvent) -> Option<SourceIndexTask> {

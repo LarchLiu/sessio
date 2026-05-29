@@ -1391,7 +1391,7 @@ Notes:
   sessions list reads from the Sessio index DB by default and falls back to a filesystem scan when the index is empty/unreadable; a stderr warning is printed when the fallback fires.
   memory search omits qmd's raw payload by default; pass --include-raw for debugging.
   memory resolve omits raw JSONL excerpts by default; pass --include-source-excerpt to attach the byte/line range each source points at (Codex / Claude today; Gemini is session-level only).
-  Gemini message lookup requires --session-id because multiple sessions can share one logs.json.
+  Gemini message lookup reads session JSONL files.
   memory covered-by shows which base record covered a given record, if continuation provenance exists.
   memory base lists records covered by a given base record via record_continuations.
 "#

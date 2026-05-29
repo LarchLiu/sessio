@@ -4,16 +4,19 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::agents::sources::shared::attachment_text::{
-    sanitize_user_attachment_text, sanitize_user_preview_text,
-};
-use crate::agents::sources::shared::cross_context::{
-    cross_context_lineage_from_payload, cross_context_lineage_from_text,
-};
+use crate::agents::runtime::types::AcpProtocolMessage;
+use crate::agents::sources::shared::attachment_text::clean_history_user_preview_text;
+use crate::agents::sources::shared::cross_context::cross_context_lineage_from_payload;
 use crate::agents::sources::system_time_to_millis;
-use crate::models::{
-    is_system_noise, normalize_preview, Agent, SessionContentBlock, SessionInfo, SessionMessage,
+use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
+use crate::models::{normalize_preview, Agent, SessionInfo};
+use crate::turns::{
+    history_assistant_message, history_permission_request_message, history_prompt_message,
+    history_session_update_message, history_thought_message, history_tool_call_message,
+    history_tool_result_message, history_user_message,
 };
+use serde_json::json;
+use serde_json::Value;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
     let (tmp_dir, projects_json) = paths()?;
@@ -23,8 +26,7 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
         .unwrap_or_else(|| tmp_dir.clone());
     let mappings = load_project_mappings(&projects_json).unwrap_or_default();
 
-    let mut out = Vec::new();
-    let chat_sessions: Vec<SessionInfo> = collect_chat_files(&base_dir)
+    let out: Vec<SessionInfo> = collect_chat_files(&base_dir)
         .into_iter()
         .filter_map(
             |chat_path| match parse_chat_file(&chat_path, Some(&base_dir), &mappings) {
@@ -36,36 +38,6 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>> {
             },
         )
         .collect();
-    let chat_session_ids: HashSet<String> = chat_sessions
-        .iter()
-        .map(|session| session.id.clone())
-        .collect();
-
-    if tmp_dir.exists() {
-        for entry in fs::read_dir(&tmp_dir)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let dir = entry.path();
-            let logs_path = dir.join("logs.json");
-            if !logs_path.exists() {
-                continue;
-            }
-            let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let project_path = resolve_project_path(dir_name, &mappings);
-
-            match parse_logs(&logs_path, project_path.as_deref()) {
-                Ok(sessions) => out.extend(
-                    sessions
-                        .into_iter()
-                        .filter(|session| !chat_session_ids.contains(&session.id)),
-                ),
-                Err(e) => log::warn!("gemini parse {} failed: {e}", logs_path.display()),
-            }
-        }
-    }
-    out.extend(chat_sessions);
     Ok(out)
 }
 
@@ -77,30 +49,22 @@ pub fn paths() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     ))
 }
 
-pub fn parse_logs_file(path: &Path) -> Result<Vec<SessionInfo>> {
-    if is_chat_file(path) {
-        return Ok(
-            parse_chat_file(path, None, &load_default_project_mappings()?)?
-                .into_iter()
-                .collect(),
-        );
-    }
-    let (_, projects_json) = paths()?;
-    let mappings = load_project_mappings(&projects_json).unwrap_or_default();
-    let dir_name = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let project_path = resolve_project_path(dir_name, &mappings);
-    parse_logs(path, project_path.as_deref())
+pub fn base_dir() -> Result<std::path::PathBuf> {
+    let (tmp_dir, _) = paths()?;
+    Ok(tmp_dir.parent().map(Path::to_path_buf).unwrap_or(tmp_dir))
 }
 
-pub fn read_messages(path: &Path, session_id: &str) -> Result<Vec<SessionMessage>> {
-    Ok(read_messages_with_locations(path, session_id)?
-        .into_iter()
-        .map(|(m, _)| m)
-        .collect())
+pub fn parse_file(path: &Path) -> Result<Vec<SessionInfo>> {
+    if !is_chat_file(path) {
+        return Ok(Vec::new());
+    }
+    Ok(parse_chat_file(
+        path,
+        base_dir().ok().as_deref(),
+        &load_default_project_mappings()?,
+    )?
+    .into_iter()
+    .collect())
 }
 
 pub fn remove_session_from_logs(
@@ -128,151 +92,16 @@ pub fn remove_session_from_logs(
             fs::create_dir_all(parent)?;
         }
         move_file(path, &available_removed_path(removed_path))?;
-        remove_session_from_chat_backing_logs(path, session_id, home, removed_root)?;
         return Ok(true);
     }
-    if !path.is_file() {
-        return Err(anyhow::anyhow!(
-            "session path is not a file: {}",
-            path.display()
-        ));
-    }
-
-    remove_session_entries_from_logs(path, session_id, home, removed_root)
+    Ok(false)
 }
 
-fn remove_session_from_chat_backing_logs(
-    chat_path: &Path,
-    session_id: &str,
-    home: &Path,
-    removed_root: &Path,
-) -> Result<bool> {
-    let mut removed_any = false;
-    for logs_path in backing_logs_for_chat_path(chat_path, home) {
-        if !logs_path.exists() {
-            continue;
-        }
-        removed_any |=
-            remove_session_entries_from_logs(&logs_path, session_id, home, removed_root)?;
-    }
-    Ok(removed_any)
-}
-
-fn backing_logs_for_chat_path(chat_path: &Path, home: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    let mut push = |path: PathBuf| {
-        if seen.insert(path.clone()) {
-            out.push(path);
-        }
-    };
-
-    if let Some(project_dir) = chat_path.parent().and_then(|p| p.parent()) {
-        push(project_dir.join("logs.json"));
-    }
-    if let Some(alias) = project_alias_from_chat_path(chat_path) {
-        push(
-            home.join(".gemini")
-                .join("tmp")
-                .join(alias)
-                .join("logs.json"),
-        );
-    }
-
-    out
-}
-
-fn remove_session_entries_from_logs(
+pub fn read_history_acp_messages_with_locations(
     path: &Path,
     session_id: &str,
-    home: &Path,
-    removed_root: &Path,
-) -> Result<bool> {
-    let text = fs::read(path)?;
-    let entries = scan_json_array_entries(&text)?;
-
-    let mut kept = Vec::with_capacity(entries.len());
-    let mut removed = Vec::new();
-    for entry in entries {
-        let item: serde_json::Value = serde_json::from_slice(&text[entry.start..entry.end])?;
-        let sid = item.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
-        if sid == session_id {
-            removed.push(item);
-        } else {
-            kept.push(item);
-        }
-    }
-
-    if removed.is_empty() {
-        return Ok(false);
-    }
-
-    let relative = path
-        .strip_prefix(home)
-        .map_err(|_| anyhow::anyhow!("session file is outside home: {}", path.display()))?;
-    let removed_path = removed_root.join(relative);
-    if let Some(parent) = removed_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut removed_existing = read_json_array(&removed_path).unwrap_or_default();
-    removed_existing.extend(removed);
-    write_json_array(&removed_path, &removed_existing)?;
-    write_json_array(path, &kept)?;
-    Ok(true)
-}
-
-// Gemini stores all sessions under ~/.gemini/tmp/<dir>/logs.json as a single
-// JSON array. We scan the array boundaries and then deserialize each object
-// from its raw byte range so per-message offsets stay precise without a full
-// custom parser.
-pub fn read_messages_with_locations(
-    path: &Path,
-    session_id: &str,
-) -> Result<
-    Vec<(
-        SessionMessage,
-        crate::agents::sources::types::SourceLocation,
-    )>,
-> {
-    if is_chat_file(path) {
-        return read_chat_messages_with_locations(path, session_id);
-    }
-    let text = fs::read(path)?;
-    let entries = scan_json_array_entries(&text)?;
-    let mut out = Vec::new();
-    let file_path = path.to_string_lossy().to_string();
-    for entry in entries {
-        let item: serde_json::Value = serde_json::from_slice(&text[entry.start..entry.end])?;
-        let sid = item.get("sessionId").and_then(|x| x.as_str()).unwrap_or("");
-        if sid != session_id {
-            continue;
-        }
-        let role =
-            normalize_gemini_role(item.get("type").and_then(|x| x.as_str()).unwrap_or("user"));
-        let mut text = extract_gemini_message_text(&item).unwrap_or_default();
-        let ts = item
-            .get("timestamp")
-            .and_then(|x| x.as_str())
-            .and_then(parse_iso);
-        if role == "user" {
-            text = sanitize_user_attachment_text(&text);
-        }
-        if text.trim().is_empty() {
-            continue;
-        }
-        out.push((
-            SessionMessage::new(role, text, ts),
-            crate::agents::sources::types::SourceLocation {
-                file_path: file_path.clone(),
-                line_start: Some(entry.line_start),
-                line_end: Some(entry.line_end),
-                byte_start: Some(entry.start as u64),
-                byte_end: Some(entry.end as u64),
-            },
-        ));
-    }
-    Ok(out)
+) -> Result<Vec<HistoryAcpMessage>> {
+    read_chat_history_acp_messages_with_locations(path, session_id)
 }
 
 #[derive(Default)]
@@ -322,12 +151,7 @@ fn resolve_project_path(dir_name: &str, mappings: &ProjectMappings) -> Option<St
 }
 
 pub(crate) fn is_chat_file(path: &Path) -> bool {
-    if !path.is_file()
-        || !matches!(
-            path.extension().and_then(|s| s.to_str()),
-            Some("json") | Some("jsonl")
-        )
-    {
+    if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
         return false;
     }
     let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
@@ -405,10 +229,6 @@ fn resolve_chat_project_path(
 
 fn read_chat_file_value(path: &Path) -> Result<serde_json::Value> {
     let text = fs::read_to_string(path)?;
-    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-        return Ok(serde_json::from_str(&text)?);
-    }
-
     let mut session = serde_json::Map::new();
     let mut messages = Vec::new();
     let mut message_index_by_id: HashMap<String, usize> = HashMap::new();
@@ -518,12 +338,8 @@ fn parse_chat_file(
             }
             extract_gemini_display_or_message_text(message)
         })
-        .map(|text| {
-            normalize_preview(&sanitize_user_preview_text(&strip_image_at_references(
-                &text,
-            )))
-        })
-        .filter(|text| !text.trim().is_empty() && !is_system_noise(text));
+        .and_then(|text| clean_history_user_preview_text(&strip_image_at_references(&text)))
+        .map(|text| normalize_preview(&text));
     let project_path = resolve_chat_project_path(path, base_dir, mappings);
     let project_name = project_path.as_deref().and_then(|p| {
         Path::new(p)
@@ -551,107 +367,6 @@ fn parse_chat_file(
         archived: path.components().any(|c| c.as_os_str() == "history"),
         subagents: Vec::new(),
     }))
-}
-
-fn parse_logs(path: &Path, project_path: Option<&str>) -> Result<Vec<SessionInfo>> {
-    let text = fs::read(path)?;
-    let entries = match scan_json_array_entries(&text) {
-        Ok(entries) => entries,
-        Err(e) => {
-            log::warn!("gemini logs.json parse error {}: {e}", path.display());
-            return Ok(Vec::new());
-        }
-    };
-
-    let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let file_path = path.to_string_lossy().into_owned();
-    let file_mtime = fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(system_time_to_millis);
-
-    let mut groups: HashMap<String, GeminiAgg> = HashMap::new();
-    for entry in entries {
-        let item: serde_json::Value = match serde_json::from_slice(&text[entry.start..entry.end]) {
-            Ok(value) => value,
-            Err(e) => {
-                log::warn!("gemini logs.json item parse error {}: {e}", path.display());
-                continue;
-            }
-        };
-        let sid = match item.get("sessionId").and_then(|x| x.as_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let role = normalize_gemini_role(item.get("type").and_then(|x| x.as_str()).unwrap_or(""));
-        let text = extract_gemini_message_text(&item).unwrap_or_default();
-        let ts = item
-            .get("timestamp")
-            .and_then(|x| x.as_str())
-            .and_then(parse_iso);
-
-        let agg = groups.entry(sid).or_default();
-        agg.count += 1;
-        if let Some(t) = ts {
-            agg.earliest = Some(agg.earliest.map_or(t, |e| e.min(t)));
-            agg.latest = Some(agg.latest.map_or(t, |e| e.max(t)));
-        }
-        if agg.first_user.is_none()
-            && role == "user"
-            && !text.trim().is_empty()
-            && !text.trim_start().starts_with('/')
-            && !is_system_noise(&text)
-        {
-            if agg.forked_from_id.is_none() {
-                if let Some(lineage) = cross_context_lineage_from_payload(&item) {
-                    agg.forked_from_agent = Some(lineage.agent);
-                    agg.forked_from_id = Some(lineage.session_id);
-                } else if let Some(lineage) = cross_context_lineage_from_text(&text) {
-                    agg.forked_from_agent = Some(lineage.agent);
-                    agg.forked_from_id = Some(lineage.session_id);
-                }
-            }
-            agg.first_user = Some(normalize_preview(&sanitize_user_preview_text(
-                &strip_image_at_references(&text),
-            )));
-        }
-    }
-
-    let project_name = project_path.and_then(|p| {
-        Path::new(p)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(String::from)
-    });
-
-    let mut out = Vec::with_capacity(groups.len());
-    for (sid, agg) in groups {
-        let title = gemini_session_title(&sid).or_else(|| agg.first_user.clone());
-        out.push(SessionInfo {
-            id: sid,
-            agent: Agent::Gemini,
-            forked_from_agent: agg.forked_from_agent,
-            forked_from_id: agg.forked_from_id,
-            project_path: project_path.map(String::from),
-            project_name: project_name.clone(),
-            started_at: agg.earliest,
-            updated_at: agg.latest.or(file_mtime),
-            message_count: agg.count,
-            title,
-            first_user_message: agg.first_user,
-            file_path: file_path.clone(),
-            file_size,
-            partial: false,
-            available: true,
-            archived: false,
-            subagents: Vec::new(),
-        });
-    }
-    Ok(out)
-}
-
-fn gemini_session_title(_session_id: &str) -> Option<String> {
-    None
 }
 
 fn normalize_gemini_role(role: &str) -> String {
@@ -872,28 +587,59 @@ fn extract_message_images(message: &serde_json::Value) -> Vec<String> {
     dedupe_string_list(images)
 }
 
-fn gemini_user_content_blocks(text: &str, images: &[String]) -> Vec<SessionContentBlock> {
-    let mut blocks = Vec::new();
-    let text_without_images = strip_trailing_markdown_images(text);
-    if !text_without_images.trim().is_empty() {
-        blocks.push(SessionContentBlock::text(
-            text_without_images.trim().to_string(),
-        ));
+fn gemini_user_prompt_content(text: &str, images: &[String]) -> Vec<Value> {
+    let mut content = Vec::new();
+    if !text.trim().is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
     }
     for image in images {
-        blocks.push(SessionContentBlock::image(image.to_string(), None));
+        content.push(json!({
+            "type": "image",
+            "uri": image,
+            "mimeType": image_mime_type(image),
+        }));
     }
-    if blocks.is_empty() {
-        blocks.push(SessionContentBlock::text(text.to_string()));
-    }
-    blocks
+    content
 }
 
-fn strip_trailing_markdown_images(text: &str) -> String {
-    text.lines()
-        .filter(|line| !line.trim_start().starts_with("![Image #"))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn image_mime_type(uri: &str) -> Option<String> {
+    if let Some(rest) = uri.strip_prefix("data:") {
+        return rest
+            .split_once(';')
+            .map(|(mime_type, _)| mime_type)
+            .filter(|mime_type| mime_type.to_ascii_lowercase().starts_with("image/"))
+            .map(String::from);
+    }
+    let normalized = uri
+        .split('?')
+        .next()
+        .unwrap_or(uri)
+        .split('#')
+        .next()
+        .unwrap_or(uri)
+        .to_ascii_lowercase();
+    let mime = if normalized.ends_with(".png") {
+        "image/png"
+    } else if normalized.ends_with(".jpg") || normalized.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if normalized.ends_with(".gif") {
+        "image/gif"
+    } else if normalized.ends_with(".webp") {
+        "image/webp"
+    } else if normalized.ends_with(".bmp") {
+        "image/bmp"
+    } else if normalized.ends_with(".svg") {
+        "image/svg+xml"
+    } else if normalized.ends_with(".avif") {
+        "image/avif"
+    } else if normalized.ends_with(".heic") {
+        "image/heic"
+    } else if normalized.ends_with(".heif") {
+        "image/heif"
+    } else {
+        return None;
+    };
+    Some(mime.to_string())
 }
 
 fn strip_image_at_references(text: &str) -> String {
@@ -925,11 +671,99 @@ fn tool_call_is_error(call: &serde_json::Value, output_preview: Option<&str>) ->
             .unwrap_or(false)
 }
 
+fn gemini_permission_event(
+    message: &serde_json::Value,
+    ts: Option<i64>,
+) -> Option<Vec<AcpProtocolMessage>> {
+    let permission = message
+        .get("permission")
+        .or_else(|| message.get("permissionRequest"))
+        .or_else(|| message.get("permission_request"))
+        .or_else(|| message.get("toolPermission"))
+        .or_else(|| message.get("tool_permission"))
+        .or_else(|| message.get("confirmation"))
+        .or_else(|| message.get("confirmationRequest"))
+        .or_else(|| message.get("confirmation_request"))?;
+    let tool_call = permission
+        .get("toolCall")
+        .or_else(|| permission.get("tool_call"))
+        .cloned();
+    let fields = tool_call
+        .as_ref()
+        .and_then(|tool_call| tool_call.get("fields"))
+        .unwrap_or_else(|| tool_call.as_ref().unwrap_or(permission));
+    let request_id = permission
+        .get("requestId")
+        .or_else(|| permission.get("request_id"))
+        .or_else(|| message.get("id"))
+        .or_else(|| {
+            tool_call
+                .as_ref()
+                .and_then(|tool_call| tool_call.get("toolCallId"))
+        })
+        .or_else(|| {
+            tool_call
+                .as_ref()
+                .and_then(|tool_call| tool_call.get("tool_call_id"))
+        })
+        .and_then(Value::as_str)
+        .map(String::from);
+    let tool_name = string_value(fields, "title")
+        .or_else(|| string_value(fields, "name"))
+        .or_else(|| string_value(permission, "toolName"))
+        .or_else(|| string_value(permission, "tool_name"))
+        .unwrap_or_else(|| "tool".to_string());
+    let input = fields
+        .get("rawInput")
+        .or_else(|| fields.get("raw_input"))
+        .or_else(|| fields.get("input"))
+        .or_else(|| permission.get("args"))
+        .cloned()
+        .unwrap_or_else(|| permission.clone());
+    let options = permission
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let selected = permission
+        .get("selectedOptionId")
+        .or_else(|| permission.get("selected_option_id"))
+        .or_else(|| permission.get("optionId"))
+        .or_else(|| permission.get("option_id"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    let cancelled = permission
+        .get("cancelled")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            permission
+                .get("outcome")
+                .and_then(|outcome| outcome.get("outcome"))
+                .and_then(Value::as_str)
+                .map(|value| value == "cancelled")
+        });
+    Some(history_permission_request_message(
+        request_id,
+        tool_name,
+        input,
+        options,
+        selected,
+        cancelled,
+        tool_call,
+        permission.clone(),
+        ts,
+    ))
+}
+
+fn string_value(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(String::from)
+}
+
 fn gemini_file_edit_message(
     call: &serde_json::Value,
     ts: Option<i64>,
     project_path: Option<&str>,
-) -> Option<SessionMessage> {
+) -> Option<AcpProtocolMessage> {
     let result_display = call.get("resultDisplay")?;
     let file_diff = result_display
         .get("fileDiff")
@@ -1036,7 +870,7 @@ fn file_edit_message(
     source: &str,
     edits: Vec<serde_json::Value>,
     ts: Option<i64>,
-) -> Option<SessionMessage> {
+) -> Option<AcpProtocolMessage> {
     if edits.is_empty() {
         return None;
     }
@@ -1048,26 +882,27 @@ fn file_edit_message(
         .iter()
         .filter_map(|edit| edit.get("deletions").and_then(|value| value.as_i64()))
         .sum();
-    let text = serde_json::json!({
+    let data = serde_json::json!({
         "source": source,
         "files": edits.len(),
         "additions": additions,
         "deletions": deletions,
         "edits": edits,
-    })
-    .to_string();
-    Some(SessionMessage::new("file_edit", text, ts))
+    });
+    Some(history_session_update_message("file_edit", data, ts))
 }
 
-fn read_chat_messages_with_locations(
+fn output_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+fn read_chat_history_acp_messages_with_locations(
     path: &Path,
     session_id: &str,
-) -> Result<
-    Vec<(
-        SessionMessage,
-        crate::agents::sources::types::SourceLocation,
-    )>,
-> {
+) -> Result<Vec<HistoryAcpMessage>> {
     let value = read_chat_file_value(path)?;
     if value
         .get("sessionId")
@@ -1079,7 +914,7 @@ fn read_chat_messages_with_locations(
     }
 
     let file_path = path.to_string_lossy().to_string();
-    let location = crate::agents::sources::types::SourceLocation::file(file_path);
+    let location = SourceLocation::file(file_path);
     let project_path = resolve_chat_project_path(
         path,
         paths()
@@ -1109,27 +944,34 @@ fn read_chat_messages_with_locations(
             let mut text = extract_gemini_display_or_message_text(&raw).unwrap_or_default();
             if !images.is_empty() {
                 text = strip_image_at_references(&text);
-                for (idx, image) in images.iter().enumerate() {
-                    if !text.trim().is_empty() {
-                        text.push('\n');
-                    }
-                    text.push_str(&format!("![Image #{}]({})", idx + 1, image));
-                }
             }
-            text = sanitize_user_attachment_text(&text);
-            if text.trim().is_empty() || is_system_noise(&text) {
-                continue;
-            }
-            let content_blocks = gemini_user_content_blocks(&text, &images);
-            out.push((
-                SessionMessage::new("user", text, ts).with_content_blocks(content_blocks),
-                location.clone(),
-            ));
+            let message = if images.is_empty() {
+                history_user_message(text, ts)
+            } else {
+                history_prompt_message(gemini_user_prompt_content(&text, &images), ts)
+            };
+            out.push(HistoryAcpMessage {
+                message,
+                timestamp: ts,
+                location: location.clone(),
+                synthetic: true,
+            });
             continue;
         }
 
         if role != "assistant" {
             continue;
+        }
+
+        if let Some(permission_messages) = gemini_permission_event(&raw, ts) {
+            for message in permission_messages {
+                out.push(HistoryAcpMessage {
+                    message,
+                    timestamp: ts,
+                    location: location.clone(),
+                    synthetic: true,
+                });
+            }
         }
 
         if let Some(thoughts) = raw.get("thoughts").and_then(|v| v.as_array()) {
@@ -1150,7 +992,12 @@ fn read_chat_messages_with_locations(
                     (None, Some(description)) => description.to_string(),
                     (None, None) => continue,
                 };
-                out.push((SessionMessage::new("thinking", text, ts), location.clone()));
+                out.push(HistoryAcpMessage {
+                    message: history_thought_message(text, ts),
+                    timestamp: ts,
+                    location: location.clone(),
+                    synthetic: true,
+                });
             }
         }
 
@@ -1166,147 +1013,63 @@ fn read_chat_messages_with_locations(
                     .or_else(|| call.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("tool");
-                let input = call
-                    .get("args")
-                    .or_else(|| call.get("input"))
-                    .and_then(|v| serde_json::to_string_pretty(v).ok())
-                    .unwrap_or_default();
-                let text = if input.trim().is_empty() {
-                    format!("[{tool_name}]")
-                } else {
-                    format!("[{tool_name}]\n{input}")
-                };
-                out.push((
-                    SessionMessage::new("tool_call", text, ts)
-                        .with_tool_call_id(Some(tool_id.clone())),
-                    location.clone(),
-                ));
+                out.push(HistoryAcpMessage {
+                    message: history_tool_call_message(
+                        Some(tool_id.clone()),
+                        tool_name,
+                        call.get("args")
+                            .or_else(|| call.get("input"))
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        ts,
+                    ),
+                    timestamp: ts,
+                    location: location.clone(),
+                    synthetic: true,
+                });
 
                 let output = call
                     .get("resultDisplay")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-                    .or_else(|| {
-                        call.get("result")
-                            .and_then(|v| serde_json::to_string_pretty(v).ok())
-                    });
+                    .filter(|v| !v.as_str().map(str::trim).unwrap_or("").is_empty())
+                    .or_else(|| call.get("result"))
+                    .cloned();
                 if let Some(output) = output {
-                    let prefix = if tool_call_is_error(call, Some(&output)) {
-                        "[error]"
+                    let error = tool_call_is_error(call, Some(&output_text(&output)));
+                    let output = if error {
+                        serde_json::json!({ "error": true, "output": output })
                     } else {
-                        "[result]"
+                        output
                     };
-                    out.push((
-                        SessionMessage::new("tool_result", format!("{prefix}\n{output}"), ts)
-                            .with_tool_call_id(Some(tool_id)),
-                        location.clone(),
-                    ));
+                    out.push(HistoryAcpMessage {
+                        message: history_tool_result_message(Some(tool_id), output, ts),
+                        timestamp: ts,
+                        location: location.clone(),
+                        synthetic: true,
+                    });
                 }
                 if let Some(edit_message) =
                     gemini_file_edit_message(call, ts, project_path.as_deref())
                 {
-                    out.push((edit_message, location.clone()));
+                    out.push(HistoryAcpMessage {
+                        message: edit_message,
+                        timestamp: ts,
+                        location: location.clone(),
+                        synthetic: true,
+                    });
                 }
             }
         }
 
         if let Some(text) = extract_gemini_display_or_message_text(&raw) {
             if !text.trim().is_empty() {
-                out.push((SessionMessage::new("assistant", text, ts), location.clone()));
+                out.push(HistoryAcpMessage {
+                    message: history_assistant_message(text, ts),
+                    timestamp: ts,
+                    location: location.clone(),
+                    synthetic: true,
+                });
             }
         }
-    }
-    Ok(out)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct JsonArrayEntry {
-    start: usize,
-    end: usize,
-    line_start: u64,
-    line_end: u64,
-}
-
-fn scan_json_array_entries(bytes: &[u8]) -> Result<Vec<JsonArrayEntry>> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    let len = bytes.len();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut current_start: Option<usize> = None;
-    let mut line = 1u64;
-    let mut entry_line_start = 1u64;
-    let mut saw_array_open = false;
-
-    while i < len {
-        let b = bytes[i];
-        if b == b'\n' {
-            line += 1;
-            if !in_string && depth == 0 {
-                i += 1;
-                continue;
-            }
-        }
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        match b {
-            b'"' => {
-                in_string = true;
-            }
-            b'[' => {
-                if depth == 0 {
-                    saw_array_open = true;
-                }
-                depth += 1;
-            }
-            b']' => {
-                depth -= 1;
-                if depth < 0 {
-                    break;
-                }
-            }
-            b'{' => {
-                if depth == 1 && current_start.is_none() {
-                    current_start = Some(i);
-                    entry_line_start = line;
-                }
-                depth += 1;
-            }
-            b'}' if depth > 0 => {
-                depth -= 1;
-                if depth == 1 {
-                    if let Some(start) = current_start.take() {
-                        out.push(JsonArrayEntry {
-                            start,
-                            end: i + 1,
-                            line_start: entry_line_start,
-                            line_end: line,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    // An empty `[]` is a valid (just uninteresting) Gemini logs file, so
-    // only error out when no top-level array opener was ever seen.
-    if !saw_array_open && bytes.iter().any(|b| !b.is_ascii_whitespace()) {
-        return Err(anyhow::anyhow!("no JSON array found"));
     }
     Ok(out)
 }
@@ -1314,8 +1077,8 @@ fn scan_json_array_entries(bytes: &[u8]) -> Result<Vec<JsonArrayEntry>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_chat_file, parse_logs, read_messages_with_locations, remove_session_from_logs,
-        scan_json_array_entries, ProjectMappings,
+        parse_chat_file, read_history_acp_messages_with_locations, remove_session_from_logs,
+        ProjectMappings,
     };
     use crate::models::Agent;
     use std::fs;
@@ -1333,46 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_json_array_entries_tracks_object_ranges() {
-        let bytes = br#"
-[
-  {"sessionId":"a","type":"user","message":"hello","timestamp":"2026-05-19T00:00:00Z"},
-  {"sessionId":"b","type":"assistant","message":"skip","timestamp":"2026-05-19T00:00:01Z"}
-]
-"#;
-        let entries = scan_json_array_entries(bytes).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(&bytes[entries[0].start..entries[0].end], br#"{"sessionId":"a","type":"user","message":"hello","timestamp":"2026-05-19T00:00:00Z"}"#);
-        assert_eq!(&bytes[entries[1].start..entries[1].end], br#"{"sessionId":"b","type":"assistant","message":"skip","timestamp":"2026-05-19T00:00:01Z"}"#);
-        assert!(entries[0].line_start >= 1);
-        assert!(entries[0].line_end >= entries[0].line_start);
-    }
-
-    #[test]
-    fn read_messages_with_locations_records_precise_offsets() {
-        let dir = unique_tmp("gemini-parser");
-        let path = dir.join("logs.json");
-        fs::write(
-            &path,
-            r#"
-[
-  {"sessionId":"sess-1","type":"user","message":"hello","timestamp":"2026-05-19T00:00:00Z"},
-  {"sessionId":"sess-1","type":"assistant","message":"world","timestamp":"2026-05-19T00:00:01Z"}
-]
-"#,
-        )
-        .unwrap();
-        let messages = read_messages_with_locations(&path, "sess-1").unwrap();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].0.text, "hello");
-        assert!(messages[0].1.byte_start.is_some());
-        assert!(messages[0].1.byte_end.is_some());
-        assert!(messages[0].1.byte_end.unwrap() > messages[0].1.byte_start.unwrap());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_chat_file_and_read_messages_support_new_session_json() {
+    fn parse_chat_file_and_read_messages_support_session_jsonl_with_images() {
         let dir = unique_tmp("gemini-chat-parser");
         let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
         fs::create_dir_all(&chats).unwrap();
@@ -1386,43 +1110,17 @@ mod tests {
         .unwrap();
         let image_path = dir.join("image.png");
         fs::write(&image_path, b"png").unwrap();
-        let path = chats.join("session-new.json");
+        let path = chats.join("session-2026-05-19T00-00-new.jsonl");
         fs::write(
             &path,
             format!(
-                r#"{{
-  "sessionId": "new",
-  "startTime": "2026-05-19T00:00:00Z",
-  "lastUpdated": "2026-05-19T00:00:04Z",
-  "messages": [
-    {{
-      "id": "u1",
-      "type": "user",
-      "timestamp": "2026-05-19T00:00:00Z",
-      "displayContent": "look @{image}",
-      "content": [
-        {{ "text": "look" }},
-        {{ "fileData": {{ "fileUri": "file://{image}", "mimeType": "image/png" }} }}
-      ]
-    }},
-    {{
-      "id": "a1",
-      "type": "model",
-      "timestamp": "2026-05-19T00:00:01Z",
-      "thoughts": [{{ "subject": "Plan", "description": "inspect" }}],
-      "toolCalls": [
-        {{
-          "id": "tool-1",
-          "displayName": "ReadFile",
-          "args": {{ "path": "README.md" }},
-          "resultDisplay": "contents"
-        }}
-      ],
-      "content": {{ "parts": [{{ "text": "done" }}] }}
-    }}
-  ]
-}}"#,
-                image = image_path.to_string_lossy()
+                "{}\n{}\n{}\n",
+                r#"{"sessionId":"new","startTime":"2026-05-19T00:00:00Z","lastUpdated":"2026-05-19T00:00:04Z","kind":"main"}"#,
+                format!(
+                    r#"{{"id":"u1","type":"user","timestamp":"2026-05-19T00:00:00Z","displayContent":"look @{image}","content":[{{"text":"look"}},{{"fileData":{{"fileUri":"file://{image}","mimeType":"image/png"}}}}]}}"#,
+                    image = image_path.to_string_lossy()
+                ),
+                r#"{"id":"a1","type":"model","timestamp":"2026-05-19T00:00:01Z","thoughts":[{"subject":"Plan","description":"inspect"}],"toolCalls":[{"id":"tool-1","displayName":"ReadFile","args":{"path":"README.md"},"resultDisplay":"contents"}],"content":{"parts":[{"text":"done"}]}}"#,
             ),
         )
         .unwrap();
@@ -1435,16 +1133,38 @@ mod tests {
         assert_eq!(info.project_path.as_deref(), Some("/tmp/project"));
         assert_eq!(info.first_user_message.as_deref(), Some("look"));
 
-        let messages = read_messages_with_locations(&path, "new").unwrap();
+        let messages = read_history_acp_messages_with_locations(&path, "new").unwrap();
         assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].0.role, "user");
-        assert!(messages[0].0.text.contains("![Image #1]("));
-        assert_eq!(messages[1].0.role, "thinking");
-        assert_eq!(messages[2].0.role, "tool_call");
-        assert_eq!(messages[2].0.tool_call_id.as_deref(), Some("tool-1"));
-        assert_eq!(messages[3].0.role, "tool_result");
-        assert_eq!(messages[4].0.role, "assistant");
-        assert_eq!(messages[4].0.text, "done");
+        assert_eq!(messages[0].message.method, "session/prompt");
+        assert!(messages[0].message.data["prompt"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["type"].as_str() == Some("image")));
+        assert_eq!(
+            messages[1].message.update_type.as_deref(),
+            Some("agent_thought_chunk")
+        );
+        assert_eq!(
+            messages[2].message.update_type.as_deref(),
+            Some("tool_call")
+        );
+        assert_eq!(
+            messages[2].message.data["update"]["toolCallId"].as_str(),
+            Some("tool-1")
+        );
+        assert_eq!(
+            messages[3].message.update_type.as_deref(),
+            Some("tool_call_update")
+        );
+        assert_eq!(
+            messages[4].message.update_type.as_deref(),
+            Some("agent_message_chunk")
+        );
+        assert_eq!(
+            messages[4].message.data["update"]["content"][0]["text"].as_str(),
+            Some("done")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1483,21 +1203,39 @@ mod tests {
         assert_eq!(info.message_count, 2);
         assert_eq!(info.first_user_message.as_deref(), Some("hello"));
 
-        let messages = read_messages_with_locations(&path, "jsonl").unwrap();
+        let messages = read_history_acp_messages_with_locations(&path, "jsonl").unwrap();
         assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].0.role, "user");
-        assert_eq!(messages[1].0.role, "thinking");
-        assert_eq!(messages[2].0.role, "tool_call");
-        assert_eq!(messages[2].0.tool_call_id.as_deref(), Some("tool-1"));
-        assert_eq!(messages[3].0.role, "tool_result");
-        assert_eq!(messages[4].0.role, "assistant");
-        assert_eq!(messages[4].0.text, "done");
+        assert_eq!(messages[0].message.method, "session/prompt");
+        assert_eq!(
+            messages[1].message.update_type.as_deref(),
+            Some("agent_thought_chunk")
+        );
+        assert_eq!(
+            messages[2].message.update_type.as_deref(),
+            Some("tool_call")
+        );
+        assert_eq!(
+            messages[2].message.data["update"]["toolCallId"].as_str(),
+            Some("tool-1")
+        );
+        assert_eq!(
+            messages[3].message.update_type.as_deref(),
+            Some("tool_call_update")
+        );
+        assert_eq!(
+            messages[4].message.update_type.as_deref(),
+            Some("agent_message_chunk")
+        );
+        assert_eq!(
+            messages[4].message.data["update"]["content"][0]["text"].as_str(),
+            Some("done")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn read_messages_with_locations_adds_file_edit_for_edit_result_display() {
+    fn read_history_acp_messages_with_locations_adds_file_edit_for_edit_result_display() {
         let dir = unique_tmp("gemini-edit-file-summary");
         let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
         fs::create_dir_all(&chats).unwrap();
@@ -1519,13 +1257,13 @@ mod tests {
         )
         .unwrap();
 
-        let messages = read_messages_with_locations(&path, "edit-jsonl").unwrap();
+        let messages = read_history_acp_messages_with_locations(&path, "edit-jsonl").unwrap();
         let file_edit = messages
             .iter()
-            .map(|(message, _)| message)
-            .find(|message| message.role == "file_edit")
+            .map(|row| &row.message)
+            .find(|message| message.update_type.as_deref() == Some("file_edit"))
             .expect("expected Gemini edit result to produce file_edit message");
-        let summary: serde_json::Value = serde_json::from_str(&file_edit.text).unwrap();
+        let summary = &file_edit.data["update"];
         assert_eq!(
             summary.get("source").and_then(|v| v.as_str()),
             Some("gemini")
@@ -1548,101 +1286,36 @@ mod tests {
     }
 
     #[test]
-    fn scan_json_array_entries_accepts_empty_array() {
-        let entries = scan_json_array_entries(b"[]\n").unwrap();
-        assert!(entries.is_empty());
-    }
-
-    #[test]
-    fn scan_json_array_entries_rejects_garbage_without_array_opener() {
-        assert!(scan_json_array_entries(b"not json").is_err());
-    }
-
-    #[test]
-    fn remove_session_from_logs_rewrites_source_and_appends_removed_copy() {
-        let home = unique_tmp("gemini-home");
-        let source = home
-            .join(".gemini")
-            .join("tmp")
-            .join("project")
-            .join("logs.json");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fn read_history_acp_messages_with_locations_parses_structured_permission() {
+        let dir = unique_tmp("gemini-permission-jsonl");
+        let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let path = chats.join("session-2026-05-29T05-38-permission.jsonl");
         fs::write(
-            &source,
-            r#"[
-  {"sessionId":"keep","type":"user","message":"stay","timestamp":"2026-05-19T00:00:00Z"},
-  {"sessionId":"drop","type":"user","message":"gone-1","timestamp":"2026-05-19T00:00:01Z"},
-  {"sessionId":"drop","type":"assistant","message":"gone-2","timestamp":"2026-05-19T00:00:02Z"}
-]
+            &path,
+            r#"{"sessionId":"permission-jsonl","startTime":"2026-05-29T05:38:00Z","lastUpdated":"2026-05-29T05:38:55Z","kind":"main"}
+{"id":"perm-line","timestamp":"2026-05-29T05:38:55Z","type":"gemini","content":"","permission":{"requestId":"perm-1","toolCall":{"toolCallId":"tool-1","fields":{"title":"ShellCommand","rawInput":{"command":"pnpm test"}}},"options":[{"optionId":"allow","name":"Allow","kind":"allow"},{"optionId":"reject","name":"Reject","kind":"reject"}],"selectedOptionId":"allow"}}
 "#,
         )
         .unwrap();
 
-        let removed_root = home.join(".sessio").join("removed-sessions");
-        assert!(remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
+        let messages = read_history_acp_messages_with_locations(&path, "permission-jsonl").unwrap();
+        assert_eq!(messages.len(), 2);
+        let request = &messages[0].message;
+        assert_eq!(request.method, "session/request_permission");
+        assert_eq!(request.request_id.as_deref(), Some("perm-1"));
+        assert_eq!(request.data["toolCall"]["fields"]["title"], "ShellCommand");
+        assert_eq!(
+            request.data["toolCall"]["fields"]["rawInput"]["command"],
+            "pnpm test"
+        );
+        assert_eq!(request.data["options"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            messages[1].message.data["outcome"]["optionId"].as_str(),
+            Some("allow")
+        );
 
-        let rewritten = fs::read_to_string(&source).unwrap();
-        assert!(rewritten.contains(r#""sessionId": "keep""#));
-        assert!(!rewritten.contains(r#""sessionId": "drop""#));
-
-        let removed = fs::read_to_string(
-            removed_root
-                .join(".gemini")
-                .join("tmp")
-                .join("project")
-                .join("logs.json"),
-        )
-        .unwrap();
-        assert!(removed.contains(r#""sessionId": "drop""#));
-        assert!(!removed.contains(r#""sessionId": "keep""#));
-
-        assert!(!remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn remove_session_from_logs_appends_to_existing_removed_file() {
-        let home = unique_tmp("gemini-home-append");
-        let source = home
-            .join(".gemini")
-            .join("tmp")
-            .join("project")
-            .join("logs.json");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(
-            &source,
-            r#"[
-  {"sessionId":"one","type":"user","message":"a","timestamp":"2026-05-19T00:00:00Z"},
-  {"sessionId":"two","type":"user","message":"b","timestamp":"2026-05-19T00:00:01Z"},
-  {"sessionId":"one","type":"assistant","message":"c","timestamp":"2026-05-19T00:00:02Z"}
-]
-"#,
-        )
-        .unwrap();
-
-        let removed_path = home
-            .join(".sessio")
-            .join("removed-sessions")
-            .join(".gemini")
-            .join("tmp")
-            .join("project")
-            .join("logs.json");
-        fs::create_dir_all(removed_path.parent().unwrap()).unwrap();
-        fs::write(
-            &removed_path,
-            r#"[{"sessionId":"existing","type":"user","message":"old"}]
-"#,
-        )
-        .unwrap();
-
-        let removed_root = home.join(".sessio").join("removed-sessions");
-        assert!(remove_session_from_logs(&source, "one", &home, &removed_root).unwrap());
-
-        let removed = fs::read_to_string(&removed_path).unwrap();
-        assert!(removed.contains(r#""sessionId": "existing""#));
-        assert!(removed.contains(r#""sessionId": "one""#));
-
-        let _ = fs::remove_dir_all(&home);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1683,54 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_session_from_chat_jsonl_also_removes_backing_logs_entries() {
-        let home = unique_tmp("gemini-chat-remove-logs");
-        let project_dir = home.join(".gemini").join("tmp").join("project");
-        let chats = project_dir.join("chats");
-        fs::create_dir_all(&chats).unwrap();
-        let source = chats.join("session-2026-05-25T05-14-test.jsonl");
-        let logs = project_dir.join("logs.json");
-        fs::write(
-            &source,
-            r#"{"sessionId":"drop","startTime":"2026-05-25T05:14:25.987Z","lastUpdated":"2026-05-25T05:14:25.987Z","kind":"main"}
-{"id":"i1","timestamp":"2026-05-25T05:15:25.960Z","type":"user","content":"from chat"}
-"#,
-        )
-        .unwrap();
-        fs::write(
-            &logs,
-            r#"[
-  {"sessionId":"keep","type":"user","message":"stay","timestamp":"2026-05-19T00:00:00Z"},
-  {"sessionId":"drop","type":"user","message":"gone","timestamp":"2026-05-19T00:00:01Z"}
-]
-"#,
-        )
-        .unwrap();
-
-        let removed_root = home.join(".sessio").join("removed-sessions");
-        assert!(remove_session_from_logs(&source, "drop", &home, &removed_root).unwrap());
-
-        assert!(!source.exists());
-        let rewritten_logs = fs::read_to_string(&logs).unwrap();
-        assert!(rewritten_logs.contains(r#""sessionId": "keep""#));
-        assert!(!rewritten_logs.contains(r#""sessionId": "drop""#));
-
-        let removed_logs = fs::read_to_string(
-            removed_root
-                .join(".gemini")
-                .join("tmp")
-                .join("project")
-                .join("logs.json"),
-        )
-        .unwrap();
-        assert!(removed_logs.contains(r#""sessionId": "drop""#));
-        assert!(!removed_logs.contains(r#""sessionId": "keep""#));
-
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
-    fn read_messages_with_locations_sanitizes_cross_context_attachment_for_user() {
+    fn read_history_acp_messages_with_locations_sanitizes_cross_context_attachment_for_user() {
         let dir = unique_tmp("gemini-cross-context");
         let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
         fs::create_dir_all(&chats).unwrap();
@@ -1764,72 +1390,37 @@ mod tests {
         )
         .unwrap();
 
-        let messages = read_messages_with_locations(&path, "cross-jsonl").unwrap();
+        let messages = read_history_acp_messages_with_locations(&path, "cross-jsonl").unwrap();
         let user = messages
             .iter()
-            .find(|(m, _)| m.role == "user")
+            .find(|row| row.message.method == "session/prompt")
             .expect("user message");
-        assert!(user.0.text.contains("不错，写入md文档"), "{}", user.0.text);
-        assert!(
-            user.0
-                .text
-                .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"),
-            "{}",
-            user.0.text
-        );
-        assert!(
-            !user.0.text.contains("<sessio-upload-file"),
-            "{}",
-            user.0.text
-        );
-        assert!(
-            !user.0.text.contains("Continued session from agent"),
-            "{}",
-            user.0.text
-        );
-    }
+        let text = user.message.data["prompt"][0]["text"].as_str().unwrap();
+        assert!(text.contains("不错，写入md文档"), "{}", text);
+        assert!(text.contains("sessio-cross-context-abc.md"), "{}", text);
 
-    #[test]
-    fn read_logs_messages_with_locations_sanitizes_cross_context_attachment_for_user() {
-        let dir = unique_tmp("gemini-logs-cross-context");
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("logs.json");
-        let value = serde_json::json!([
-            {
-                "sessionId": "logs-cross",
-                "timestamp": "2026-05-28T15:39:00.000Z",
-                "type": "user",
-                "content": [
-                    { "text": "继续" },
-                    { "text": "[@sessio-cross-context-abc.md](file:///tmp/.cross-context/sessio-cross-context-abc.md)" },
-                    { "text": "\n<context ref=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\">\n<sessio-upload-file uri=\"file:///tmp/.cross-context/sessio-cross-context-abc.md\" name=\"sessio-cross-context-abc.md\" mimeType=\"text/markdown\">\n# Continued session from agent\n[user]\nhi\n</sessio-upload-file>\n</context>" }
-                ]
-            }
-        ]);
-        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-
-        let messages = read_messages_with_locations(&path, "logs-cross").unwrap();
-        let user = messages
-            .iter()
-            .find(|(m, _)| m.role == "user")
-            .expect("user message");
-        assert!(user.0.text.contains("继续"), "{}", user.0.text);
+        let turns = crate::turns::session_history_turns_from_acp_messages(&messages);
+        let display_text = turns[0].blocks[0].blocks[0].text.as_deref().unwrap();
         assert!(
-            user.0
-                .text
-                .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"),
+            display_text.contains("不错，写入md文档"),
             "{}",
-            user.0.text
+            display_text
+        );
+        assert_eq!(turns[0].blocks[0].blocks.len(), 1);
+        assert!(
+            !display_text.contains("sessio-cross-context-abc.md"),
+            "{}",
+            display_text
         );
         assert!(
-            !user.0.text.contains("<sessio-upload-file"),
+            !display_text.contains("<sessio-upload-file"),
             "{}",
-            user.0.text
+            display_text
         );
         assert!(
-            !user.0.text.contains("Continued session from agent"),
+            !display_text.contains("Continued session from agent"),
             "{}",
-            user.0.text
+            display_text
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1886,77 +1477,80 @@ mod tests {
     }
 
     #[test]
-    fn parse_logs_reads_cross_context_lineage_from_user_attachment() {
-        let dir = unique_tmp("gemini-logs-lineage");
-        fs::create_dir_all(&dir).unwrap();
-        let context_path = dir.join("sessio-cross-context-parent.md");
+    fn read_history_acp_messages_strips_leading_ide_context_from_user_prompt() {
+        let dir = unique_tmp("gemini-ide-context");
+        let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let path = chats.join("session-2026-05-28T15-39-ide.jsonl");
+        let line = serde_json::json!({
+            "id": "u1",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "type": "user",
+            "content": "<ide_opened_file>secret.rs</ide_opened_file>\nreal request"
+        })
+        .to_string();
         fs::write(
-            &context_path,
-            r#"<!-- sessio-cross:start source_agent="codex" source_session_id="codex-parent" source_file_path="/tmp/parent.jsonl" -->"#,
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"sessionId":"gemini-ide","startTime":"2026-05-28T15:39:00Z","lastUpdated":"2026-05-28T15:39:00Z","kind":"main"}"#,
+                line
+            ),
         )
         .unwrap();
-        let path = dir.join("logs.json");
-        let value = serde_json::json!([
-            {
-                "sessionId": "logs-lineage",
-                "timestamp": "2026-05-28T15:39:00.000Z",
-                "type": "user",
-                "content": [
-                    { "text": "继续" },
-                    { "text": format!("[@ctx](file://{})", context_path.display()) }
-                ]
-            }
-        ]);
-        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
-        let sessions = parse_logs(&path, Some("/tmp/project")).unwrap();
-        let info = sessions
-            .iter()
-            .find(|session| session.id == "logs-lineage")
-            .expect("session");
-        assert_eq!(info.forked_from_agent, Some(Agent::Codex));
-        assert_eq!(info.forked_from_id.as_deref(), Some("codex-parent"));
+        let messages = read_history_acp_messages_with_locations(&path, "gemini-ide").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message.method, "session/prompt");
+        assert_eq!(
+            messages[0].message.data["prompt"][0]["text"].as_str(),
+            Some("<ide_opened_file>secret.rs</ide_opened_file>\nreal request")
+        );
+        let turns = crate::turns::session_history_turns_from_acp_messages(&messages);
+        assert_eq!(
+            turns[0].blocks[0].blocks[0].text.as_deref(),
+            Some("real request")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
-}
 
-#[derive(Default)]
-struct GeminiAgg {
-    count: usize,
-    earliest: Option<i64>,
-    latest: Option<i64>,
-    forked_from_agent: Option<Agent>,
-    forked_from_id: Option<String>,
-    first_user: Option<String>,
+    #[test]
+    fn read_history_acp_messages_drops_system_noise_after_ide_context() {
+        let dir = unique_tmp("gemini-ide-noise");
+        let chats = dir.join(".gemini").join("tmp").join("alias").join("chats");
+        fs::create_dir_all(&chats).unwrap();
+        let path = chats.join("session-2026-05-28T15-39-ide-noise.jsonl");
+        let line = serde_json::json!({
+            "id": "u1",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "type": "user",
+            "content": "<ide_opened_file>secret.rs</ide_opened_file>\n<environment_context>\nnoise\n</environment_context>"
+        })
+        .to_string();
+        fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"sessionId":"gemini-ide-noise","startTime":"2026-05-28T15:39:00Z","lastUpdated":"2026-05-28T15:39:00Z","kind":"main"}"#,
+                line
+            ),
+        )
+        .unwrap();
+
+        let messages = read_history_acp_messages_with_locations(&path, "gemini-ide-noise").unwrap();
+        assert_eq!(messages.len(), 1);
+        let turns = crate::turns::session_history_turns_from_acp_messages(&messages);
+        assert!(turns[0].blocks.is_empty(), "{turns:#?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 fn parse_iso(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.timestamp_millis())
-}
-
-fn read_json_array(path: &Path) -> Result<Vec<serde_json::Value>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text = fs::read(path)?;
-    let entries = scan_json_array_entries(&text)?;
-    let mut out = Vec::with_capacity(entries.len());
-    for entry in entries {
-        out.push(serde_json::from_slice(&text[entry.start..entry.end])?);
-    }
-    Ok(out)
-}
-
-fn write_json_array(path: &Path, values: &[serde_json::Value]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let text = serde_json::to_string_pretty(values)?;
-    fs::write(path, format!("{text}\n"))?;
-    Ok(())
 }
 
 fn available_removed_path(path: PathBuf) -> PathBuf {

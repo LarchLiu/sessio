@@ -1,3 +1,4 @@
+use crate::models::{is_system_noise, sessio_attachment_marker_name, strip_injected_context};
 use std::collections::HashMap;
 
 pub fn sanitize_user_attachment_text(text: &str) -> String {
@@ -12,6 +13,15 @@ pub fn sanitize_user_preview_text(text: &str) -> String {
     let without_file_links = remove_file_markdown_links(&without_images);
     let without_sessio_files = remove_xmlish_blocks(&without_file_links, "sessio-upload-file");
     remove_xmlish_blocks(&without_sessio_files, "context")
+}
+
+pub fn clean_history_user_preview_text(text: &str) -> Option<String> {
+    let cleaned = strip_injected_context(&sanitize_user_preview_text(text));
+    if cleaned.trim().is_empty() || is_system_noise(&cleaned) {
+        None
+    } else {
+        Some(cleaned)
+    }
 }
 
 pub fn file_name_from_uri(uri: &str) -> Option<String> {
@@ -175,8 +185,7 @@ fn remove_file_markdown_links(text: &str) -> String {
             .trim_matches(['<', '>']);
         let label = &out[open_label + 1..close_label];
         let is_at_prefix = label.trim_start().starts_with('@');
-        let is_cross_context = target.contains("sessio-cross-context");
-        if !target.starts_with("file://") || (!is_at_prefix && !is_cross_context) {
+        if !target.starts_with("file://") || !is_at_prefix {
             search_from = close_target + 1;
             continue;
         }
@@ -209,8 +218,8 @@ fn file_marker(name: Option<&str>, uri: Option<&str>) -> String {
         trimmed
     };
     match uri.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(uri) => format!("[file: {safe_name}|{uri}]"),
-        None => format!("[file: {safe_name}]"),
+        Some(uri) => format!("[file: {}|{uri}]", sessio_attachment_marker_name(safe_name)),
+        None => format!("[file: {}]", sessio_attachment_marker_name(safe_name)),
     }
 }
 
@@ -279,7 +288,7 @@ mod tests {
     fn drops_cross_context_link_even_without_at_prefix() {
         let input = "carry [doc](file:///tmp/.cross-context/sessio-cross-context-abc.md) over";
         let cleaned = sanitize_user_attachment_text(input);
-        assert!(!cleaned.contains("sessio-cross-context"), "{cleaned}");
+        assert!(cleaned.contains("sessio-cross-context"), "{cleaned}");
         assert!(cleaned.contains("carry"));
         assert!(cleaned.contains("over"));
     }

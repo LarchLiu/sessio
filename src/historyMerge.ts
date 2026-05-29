@@ -4,6 +4,8 @@ import type {
   LiveTurn,
 } from "./runtimeChat";
 
+const SESSIO_ATTACHMENT_MARKER = "__sessio_attachment__:";
+
 export function stripImagePlaceholders(s: string): string {
   return s
     .replace(/<image\b[^>]*>[\s\S]*?<\/image>/gi, "")
@@ -42,26 +44,39 @@ export function stripSessioUploadWrapper(text: string): string {
 }
 
 export function contentBlocksText(blocks: AcpContentBlock[]): string {
-  return blocks.map((block) => {
-    if (block.type === "text" && typeof block.text === "string") return block.text;
-    if (block.type === "image") return imageMarkdown(block);
-    if (block.type === "resource" || block.type === "resource_link") {
-      return fileMarker(resourceDisplayName(block), resourceUri(block));
-    }
-    return JSON.stringify(block);
-  }).join("\n");
+  return blocks
+    .map((block) => {
+      if (block.type === "text" && typeof block.text === "string") return block.text;
+      if (block.type === "image") return imageMarkdown(block);
+      if (block.type === "resource" || block.type === "resource_link") {
+        return fileMarker(resourceDisplayName(block), resourceUri(block));
+      }
+      return JSON.stringify(block);
+    })
+    .join("\n");
+}
+
+export function contentBlocksTextWithSessioAttachmentMarkers(blocks: AcpContentBlock[]): string {
+  return blocks
+    .map((block) => {
+      if (block.type === "text" && typeof block.text === "string") return block.text;
+      if (block.type === "image") return imageMarkdown(block, true);
+      if (block.type === "resource" || block.type === "resource_link") {
+        return fileMarker(resourceDisplayName(block), resourceUri(block), true);
+      }
+      return JSON.stringify(block);
+    })
+    .join("\n");
 }
 
 export function normalizedUserMessageText(text: string): string {
   return normalizedMessageBodyText(text);
 }
 
-export function normalizedReplayText(text: string): string {
-  return normalizedMessageBodyText(text);
-}
-
 function normalizedMessageBodyText(text: string): string {
-  return stripAttachmentCompareMarkers(stripInjectedContext(stripSessioUploadWrapper(text)))
+  return stripAttachmentCompareMarkers(
+    stripInjectedContext(stripSessioUploadWrapper(text)),
+  )
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -141,51 +156,11 @@ export function mergeHistoryWithLiveTurns(
 ): LiveTurn[] {
   if (historyTurns.length === 0) return liveTurns;
   if (liveTurns.length === 0) return historyTurns;
-  return [...historyTurns, ...trimLiveReplayPrefix(historyTurns, liveTurns)];
-}
-
-export function trimLiveReplayPrefix(
-  historyTurns: LiveTurn[],
-  liveTurns: LiveTurn[],
-): LiveTurn[] {
-  const overlap = liveReplayPrefixOverlap(historyTurns, liveTurns);
-  if (overlap === 0) return liveTurns;
-
-  let remaining = overlap;
-  const out: LiveTurn[] = [];
-  for (const turn of liveTurns) {
-    if (remaining <= 0) {
-      out.push(turn);
-      continue;
-    }
-
-    const messageBlockCount = turn.blocks.filter(isAcpMessageBlock).length;
-    if (messageBlockCount === 0) {
-      out.push(turn);
-      continue;
-    }
-
-    if (remaining >= messageBlockCount) {
-      remaining -= messageBlockCount;
-      if (isReplayTurnFinished(turn)) continue;
-      const blocks = turn.blocks.filter((block) => !isAcpMessageBlock(block));
-      if (blocks.length > 0 || turn.tools.length > 0 || turn.permissions.length > 0 || turn.error) {
-        out.push({ ...turn, blocks });
-      }
-      continue;
-    }
-
-    const blocks: LiveTurn["blocks"] = [];
-    for (const block of turn.blocks) {
-      if (remaining > 0 && isAcpMessageBlock(block)) {
-        remaining -= 1;
-        continue;
-      }
-      blocks.push(block);
-    }
-    out.push({ ...turn, blocks });
-  }
-  return out;
+  const historyIds = new Set(historyTurns.map((turn) => turn.turnId));
+  return [
+    ...historyTurns,
+    ...liveTurns.filter((turn) => !historyIds.has(turn.turnId)),
+  ];
 }
 
 type UserRenderBlock = Extract<AcpRenderBlock, { kind: "user" }>;
@@ -218,72 +193,16 @@ export function sameAcpUserBlocks(a: UserRenderBlock, b: UserRenderBlock): boole
     attachmentCompareSignature(left) === attachmentCompareSignature(right);
 }
 
-type TurnMessageRole = "user" | "assistant" | "thinking";
-
-interface TurnMessageRef {
-  role: TurnMessageRole;
-  text: string;
-  timestamp: number | null;
-}
-
-function liveReplayPrefixOverlap(historyTurns: LiveTurn[], liveTurns: LiveTurn[]): number {
-  const historyMessages = turnMessageRefs(historyTurns);
-  const liveMessages = turnMessageRefs(liveTurns);
-  let overlap = 0;
-  const maxOverlap = Math.min(historyMessages.length, liveMessages.length);
-  for (let count = 1; count <= maxOverlap; count += 1) {
-    const historyTail = historyMessages.slice(-count);
-    const liveHead = liveMessages.slice(0, count);
-    if (historyTail.every((item, index) => sameAcpReplayRef(item, liveHead[index]))) {
-      overlap = count;
-    }
-  }
-  return overlap;
-}
-
-function turnMessageRefs(turns: LiveTurn[]): TurnMessageRef[] {
-  const refs: TurnMessageRef[] = [];
-  turns.forEach((turn) => {
-    turn.blocks.forEach((block) => {
-      if (!isAcpMessageBlock(block)) return;
-      const text = contentBlocksText(block.blocks).trim();
-      if (!text) return;
-      refs.push({
-        role: block.kind === "thought" ? "thinking" : block.kind,
-        text,
-        timestamp: block.timestamp ?? turn.updatedAt ?? null,
-      });
-    });
-  });
-  return refs;
-}
-
-function sameAcpReplayRef(a: TurnMessageRef, b: TurnMessageRef): boolean {
-  return a.role === b.role &&
-    normalizedReplayText(a.text) === normalizedReplayText(b.text) &&
-    attachmentCompareSignature(a.text) === attachmentCompareSignature(b.text);
-}
-
-function isAcpMessageBlock(
-  block: AcpRenderBlock,
-): block is Extract<AcpRenderBlock, { kind: "user" | "assistant" | "thought" }> {
-  return block.kind === "user" || block.kind === "assistant" || block.kind === "thought";
-}
-
-function isReplayTurnFinished(turn: LiveTurn): boolean {
-  return turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled";
-}
-
 export function sanitizeSessioAttachmentText(text: string): string {
   const withoutFileLinks = removeFileMarkdownLinks(text);
   return replaceXmlishBlocks(
     replaceXmlishBlocks(withoutFileLinks, "sessio-upload-file", (attrs) => {
       const uri = attrs.uri;
       const name = attrs.name ?? basenameFromUri(uri ?? "");
-      return fileMarker(name, uri);
+      return fileMarker(name, uri, true);
     }),
     "context",
-    (attrs) => fileMarker(basenameFromUri(attrs.ref ?? ""), attrs.ref),
+    (attrs) => fileMarker(basenameFromUri(attrs.ref ?? ""), attrs.ref, true),
   );
 }
 
@@ -360,13 +279,17 @@ function parseXmlishAttrs(input: string): Record<string, string> {
   return attrs;
 }
 
-function fileMarker(name?: string | null, uri?: string | null): string {
+function fileMarker(name?: string | null, uri?: string | null, marked = false): string {
   const safeName = name?.trim() || "attachment";
   const safeUri = uri?.trim();
-  return safeUri ? `[file: ${safeName}|${safeUri}]` : `[file: ${safeName}]`;
+  const displayName = marked ? `${SESSIO_ATTACHMENT_MARKER}${safeName}` : safeName;
+  return safeUri ? `[file: ${displayName}|${safeUri}]` : `[file: ${displayName}]`;
 }
 
-function imageMarkdown(block: Extract<AcpContentBlock, { type: "image" }>): string {
+function imageMarkdown(
+  block: Extract<AcpContentBlock, { type: "image" }>,
+  marked = false,
+): string {
   const mimeType = block.mimeType?.trim() || "image";
   const src = block.uri?.trim() ||
     (block.data?.trim()
@@ -374,7 +297,8 @@ function imageMarkdown(block: Extract<AcpContentBlock, { type: "image" }>): stri
         ? block.data.trim()
         : `data:${mimeType};base64,${block.data.trim()}`
       : "");
-  return src ? `![${mimeType}](${src})` : `[image: ${mimeType}]`;
+  const label = marked ? `${SESSIO_ATTACHMENT_MARKER}${mimeType}` : mimeType;
+  return src ? `![${label}](${src})` : `[image: ${mimeType}]`;
 }
 
 function resourceDisplayName(block: Extract<AcpContentBlock, { type: "resource" | "resource_link" }>): string {

@@ -148,17 +148,17 @@ describe("mergeHistoryWithLiveTurns", () => {
     expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
   });
 
-  it("drops completed live replay turns already persisted in history", () => {
+  it("drops live turns whose turn id is already persisted in history", () => {
     const history = [
       liveTurn([
         { kind: "user", blocks: [{ type: "text", text: "hi" }], raw: {}, timestamp: 1 },
         { kind: "assistant", blocks: [{ type: "text", text: "hello" }], raw: {}, timestamp: 2 },
-      ], "history", 2),
+      ], "turn-1", 2),
     ];
     const replay = liveTurn([
       { kind: "user", blocks: [{ type: "text", text: "hi" }], raw: {}, timestamp: 1 },
       { kind: "assistant", blocks: [{ type: "text", text: "hello" }], raw: {}, timestamp: 2 },
-    ], "replay", 2);
+    ], "turn-1", 2);
     const next = liveTurn([
       { kind: "user", blocks: [{ type: "text", text: "next" }], raw: {}, timestamp: 3 },
     ], "next", 3);
@@ -166,7 +166,7 @@ describe("mergeHistoryWithLiveTurns", () => {
     expect(mergeHistoryWithLiveTurns(history, [replay, next])).toEqual([...history, next]);
   });
 
-  it("ignores cosmetic whitespace and IDE-injected blocks when matching overlap", () => {
+  it("keeps equivalent content when turn ids differ", () => {
     const history = [liveTurn([
       {
         kind: "user",
@@ -179,10 +179,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       { kind: "user", blocks: [{ type: "text", text: "hi there" }], raw: {}, timestamp: 2 },
     ], "live", 2)];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(history);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
   });
 
-  it("matches equivalent attachment references across persisted and live block shapes", () => {
+  it("keeps equivalent attachment content when turn ids differ", () => {
     const history = [liveTurn([
       {
         kind: "user",
@@ -206,7 +206,7 @@ describe("mergeHistoryWithLiveTurns", () => {
       },
     ], "live", 2)];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(history);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
   });
 
   it("keeps same-text live replay when attachment references differ", () => {
@@ -236,17 +236,17 @@ describe("mergeHistoryWithLiveTurns", () => {
     expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
   });
 
-  it("keeps non-message live tool data when dropping replayed message blocks", () => {
+  it("drops the full live turn when a matching turn id is already in history", () => {
     const history = [
       liveTurn([
         { kind: "user", blocks: [{ type: "text", text: "hi" }], raw: {}, timestamp: 1 },
-      ], "history", 1),
+      ], "turn-1", 1),
     ];
     const replayWithTool = {
       ...liveTurn([
         { kind: "user", blocks: [{ type: "text", text: "hi" }], raw: {}, timestamp: 1 },
         { kind: "tool", toolId: "tool-1", timestamp: 2 },
-      ], "replay", 2),
+      ], "turn-1", 2),
       status: "streaming" as const,
       tools: [
         {
@@ -265,13 +265,7 @@ describe("mergeHistoryWithLiveTurns", () => {
       ],
     };
 
-    expect(mergeHistoryWithLiveTurns(history, [replayWithTool])).toEqual([
-      ...history,
-      {
-        ...replayWithTool,
-        blocks: [{ kind: "tool", toolId: "tool-1", timestamp: 2 }],
-      },
-    ]);
+    expect(mergeHistoryWithLiveTurns(history, [replayWithTool])).toEqual(history);
   });
 });
 
@@ -307,6 +301,6 @@ describe("sanitizeSessioAttachmentText", () => {
     const cleaned = sanitizeSessioAttachmentText(
       '<sessio-upload-file uri="file:///tmp/x.md" name="x.md">body</sessio-upload-file>',
     );
-    expect(cleaned).toBe("[file: x.md|file:///tmp/x.md]");
+    expect(cleaned).toBe("[file: __sessio_attachment__:x.md|file:///tmp/x.md]");
   });
 });

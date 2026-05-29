@@ -12,7 +12,6 @@ use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
 pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
     thread::spawn(move || {
         let mut claude_index_mtimes: HashMap<PathBuf, Option<i64>> = HashMap::new();
-        let mut gemini_projects_mtime: Option<i64> = None;
         let mut codex_lineage_backfill_checked: HashSet<String> = HashSet::new();
         let mut first_tick = true;
         loop {
@@ -33,7 +32,6 @@ pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
                 store.clone(),
                 &indexer,
                 &mut claude_index_mtimes,
-                &mut gemini_projects_mtime,
                 &mut codex_lineage_backfill_checked,
             ) {
                 log::warn!("polling check failed: {e}");
@@ -46,7 +44,6 @@ fn poll_once(
     store: Arc<dyn SessionStore>,
     indexer: &IndexerHandle,
     claude_index_mtimes: &mut HashMap<PathBuf, Option<i64>>,
-    gemini_projects_mtime: &mut Option<i64>,
     codex_lineage_backfill_checked: &mut HashSet<String>,
 ) -> Result<()> {
     let indexed = store.list_indexed_sessions()?;
@@ -62,7 +59,7 @@ fn poll_once(
     }
     poll_codex(&indexed, indexer, codex_lineage_backfill_checked)?;
     poll_claude(&indexed, claude_index_mtimes, store.as_ref(), indexer)?;
-    poll_gemini(&indexed, store.as_ref(), indexer, gemini_projects_mtime)?;
+    poll_gemini(&indexed, store.as_ref(), indexer)?;
     Ok(())
 }
 
@@ -308,69 +305,21 @@ fn poll_gemini(
     indexed: &[IndexedSessionRecord],
     store: &dyn SessionStore,
     indexer: &IndexerHandle,
-    gemini_projects_mtime: &mut Option<i64>,
 ) -> Result<()> {
-    let (tmp_dir, projects_json) = crate::agents::sources::gemini::parser::paths()?;
+    let base_dir = crate::agents::sources::gemini::parser::base_dir()?;
     let mut by_scope: HashMap<String, Vec<&IndexedSessionRecord>> = HashMap::new();
     for row in indexed.iter().filter(|s| s.agent == Agent::Gemini) {
         by_scope.entry(row.scope.clone()).or_default().push(row);
     }
 
-    let projects_mtime = file_mtime(&projects_json);
-    let projects_changed = projects_json_changed(projects_mtime, indexed, gemini_projects_mtime);
-    if projects_changed {
-        log::info!(
-            "polling: submit {:?} because gemini projects.json changed (mtime={:?})",
-            IndexTask::RefreshGeminiProjectMappings,
-            projects_mtime
-        );
-        indexer.submit(IndexTask::RefreshGeminiProjectMappings)?;
-    }
-
-    if !tmp_dir.exists() {
+    if !base_dir.exists() {
         store.mark_missing_scopes_unavailable(Agent::Gemini, &HashSet::new())?;
         return Ok(());
     }
 
     let mut present_scopes: HashSet<String> = HashSet::new();
 
-    for entry in std::fs::read_dir(&tmp_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let logs = entry.path().join("logs.json");
-        if !logs.exists() {
-            continue;
-        }
-        let scope = logs.to_string_lossy().into_owned();
-        present_scopes.insert(scope.clone());
-        let rows = by_scope.remove(&scope).unwrap_or_default();
-        let live_rows: Vec<&IndexedSessionRecord> = rows
-            .iter()
-            .filter_map(|row| row.available.then_some(*row))
-            .collect();
-        let needs_reindex = rows.is_empty()
-            || rows
-                .iter()
-                .any(|row| file_changed(&logs, row.file_size, row.file_mtime));
-        if needs_reindex {
-            let changed = live_rows
-                .iter()
-                .any(|row| file_changed(&logs, row.file_size, row.file_mtime));
-            log::info!(
-                "polling: submit {:?} for {} (rows={}, live_rows={}, file_changed={})",
-                IndexTask::ReindexGeminiLogs(logs.clone()),
-                scope,
-                rows.len(),
-                live_rows.len(),
-                changed
-            );
-            indexer.submit(IndexTask::ReindexGeminiLogs(logs))?;
-        }
-    }
-
-    for chat_path in gemini_chat_files(&tmp_dir) {
+    for chat_path in gemini_chat_files(&base_dir) {
         let scope = chat_path.to_string_lossy().into_owned();
         present_scopes.insert(scope.clone());
         let rows = by_scope.remove(&scope).unwrap_or_default();
@@ -385,12 +334,12 @@ fn poll_gemini(
         if needs_reindex {
             log::info!(
                 "polling: submit {:?} for {} (rows={}, live_rows={})",
-                IndexTask::ReindexGeminiLogs(chat_path.clone()),
+                IndexTask::ReindexGeminiFile(chat_path.clone()),
                 scope,
                 rows.len(),
                 live_rows.len(),
             );
-            indexer.submit(IndexTask::ReindexGeminiLogs(chat_path))?;
+            indexer.submit(IndexTask::ReindexGeminiFile(chat_path))?;
         }
     }
 
@@ -399,10 +348,7 @@ fn poll_gemini(
     Ok(())
 }
 
-fn gemini_chat_files(tmp_dir: &Path) -> Vec<PathBuf> {
-    let Some(base_dir) = tmp_dir.parent() else {
-        return Vec::new();
-    };
+fn gemini_chat_files(base_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for root in [base_dir.join("tmp"), base_dir.join("history")] {
@@ -426,29 +372,6 @@ fn gemini_chat_files(tmp_dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
-}
-
-fn projects_json_changed(
-    projects_mtime: Option<i64>,
-    indexed: &[IndexedSessionRecord],
-    last_seen_mtime: &mut Option<i64>,
-) -> bool {
-    let Some(projects_mtime) = projects_mtime else {
-        return false;
-    };
-    if last_seen_mtime.is_some_and(|seen| seen == projects_mtime) {
-        return false;
-    }
-    let mut latest_indexed = None;
-    for row in indexed.iter().filter(|s| s.agent == Agent::Gemini) {
-        latest_indexed =
-            Some(latest_indexed.map_or(row.last_indexed_at, |v: i64| v.max(row.last_indexed_at)));
-    }
-    let changed = latest_indexed.is_none_or(|ts| projects_mtime > ts);
-    if changed {
-        *last_seen_mtime = Some(projects_mtime);
-    }
-    changed
 }
 
 fn current_file_meta(path: &Path) -> Option<(u64, Option<i64>)> {
@@ -507,8 +430,8 @@ mod tests {
     #[test]
     fn gemini_poll_should_ignore_unavailable_rows_if_live_row_matches_file() {
         let dir = unique_tmp("gemini-poll");
-        let path = dir.join("logs.json");
-        fs::write(&path, "[]\n").unwrap();
+        let path = dir.join("session-1.jsonl");
+        fs::write(&path, "{\"sessionId\":\"live\"}\n").unwrap();
         let meta = fs::metadata(&path).unwrap();
         let mtime = meta
             .modified()
@@ -566,8 +489,8 @@ mod tests {
     #[test]
     fn gemini_poll_should_not_reindex_unchanged_unavailable_rows() {
         let dir = unique_tmp("gemini-poll-unavailable");
-        let path = dir.join("logs.json");
-        fs::write(&path, "[]\n").unwrap();
+        let path = dir.join("session-1.jsonl");
+        fs::write(&path, "{\"sessionId\":\"gone\"}\n").unwrap();
         let meta = fs::metadata(&path).unwrap();
         let mtime = meta
             .modified()
@@ -609,8 +532,8 @@ mod tests {
     #[test]
     fn gemini_poll_discovers_chat_jsonl_scopes() {
         let dir = unique_tmp("gemini-poll-chat-jsonl");
-        let tmp = dir.join("tmp");
-        let chats = tmp.join("sessio").join("chats");
+        let base = dir.join(".gemini");
+        let chats = base.join("tmp").join("sessio").join("chats");
         fs::create_dir_all(&chats).unwrap();
         let chat = chats.join("session-2026-05-24T12-00-60fcb170.jsonl");
         fs::write(
@@ -621,7 +544,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(gemini_chat_files(&tmp), vec![chat]);
+        assert_eq!(gemini_chat_files(&base), vec![chat]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

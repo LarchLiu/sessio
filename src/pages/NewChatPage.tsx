@@ -337,7 +337,6 @@ export default function NewChatPage({
         options: runtimeSessionOptions(model, permissionMode, effort),
       });
       const timestamp = Date.now();
-      const localTurnId = `local-turn-${timestamp}`;
       const existingLiveSession = liveState.sessions[handle.sessioRuntimeSessionId];
       if (!existingLiveSession) {
         fallbackRuntimeSequenceRef.current += 1;
@@ -356,19 +355,6 @@ export default function NewChatPage({
           },
         });
       }
-      dispatchLiveEvent({
-        type: "optimistic-user-message",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        turnId: localTurnId,
-        text: prompt,
-        attachments: attachments.map(({ path, mimeType, kind, previewDataUrl }) => ({
-          path,
-          mimeType,
-          kind,
-          previewDataUrl,
-        })),
-        timestamp,
-      });
       onPendingSession({
         sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
         agent: handle.agent,
@@ -379,15 +365,9 @@ export default function NewChatPage({
         kanbanItemId: selectedKanbanItem?.id,
         kanbanItemStatus: selectedKanbanItem?.status,
       });
-      const turn = await sendAgentInput(handle.sessioRuntimeSessionId, {
+      await sendAgentInput(handle.sessioRuntimeSessionId, {
         text: prompt,
         attachments: attachments.map(({ path, mimeType, kind }) => ({ path, mimeType, kind })),
-      });
-      dispatchLiveEvent({
-        type: "replace-turn-id",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        from: localTurnId,
-        to: turn.turnId,
       });
       setText("");
       setSelectedKanbanItemId("");

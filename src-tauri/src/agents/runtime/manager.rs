@@ -24,6 +24,10 @@ use super::types::{
 };
 use crate::config;
 use crate::models::Agent;
+use crate::turns::{
+    apply_optimistic_user_message, apply_runtime_event_to_state, LiveRuntimeTurnSnapshotEvent,
+    RuntimeTurnState,
+};
 
 #[derive(Clone)]
 pub struct RuntimeManager {
@@ -41,6 +45,7 @@ struct RuntimeManagerInner {
 struct RuntimeSessionState {
     handle: AgentSessionHandle,
     active_turn_id: Option<String>,
+    turn_state: RuntimeTurnState,
     turn_cancellations: HashMap<String, Arc<AtomicBool>>,
     permission_waiters: HashMap<String, mpsc::Sender<RuntimePermissionDecision>>,
     acp_controller: Option<AcpSessionController>,
@@ -207,6 +212,14 @@ impl RuntimeManager {
                 RuntimeSessionState {
                     handle: handle.clone(),
                     active_turn_id: None,
+                    turn_state: RuntimeTurnState::new(
+                        id.clone(),
+                        handle.agent,
+                        handle.agent_runtime_session_id.clone(),
+                        handle.transport,
+                        handle.workspace_path.clone(),
+                        handle.capabilities.clone(),
+                    ),
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
@@ -337,6 +350,14 @@ impl RuntimeManager {
                 RuntimeSessionState {
                     handle: handle.clone(),
                     active_turn_id: None,
+                    turn_state: RuntimeTurnState::new(
+                        handle.sessio_runtime_session_id.clone(),
+                        handle.agent,
+                        handle.agent_runtime_session_id.clone(),
+                        handle.transport,
+                        handle.workspace_path.clone(),
+                        handle.capabilities.clone(),
+                    ),
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
@@ -380,6 +401,13 @@ impl RuntimeManager {
                 bail!("runtime session already has active turn: {active}");
             }
             state.active_turn_id = Some(turn_id.clone());
+            apply_optimistic_user_message(
+                &mut state.turn_state,
+                &turn_id,
+                &input.text,
+                &input.attachments,
+                now_ms(),
+            );
             state
                 .turn_cancellations
                 .insert(turn_id.clone(), cancel_token.clone());
@@ -814,15 +842,42 @@ impl RuntimeManager {
 
     pub(crate) fn emit(&self, payload: AgentRuntimeEventPayload) -> Result<()> {
         log::info!("[sessio-runtime:backend:event] {:?}", payload);
+        let timestamp = now_ms();
         let event = AgentRuntimeEvent {
             sequence: self.inner.sequence.fetch_add(1, Ordering::Relaxed),
-            timestamp: now_ms(),
+            timestamp,
             payload,
         };
+        let snapshot = self.apply_event_to_turn_state(&event);
         self.inner
             .app
             .emit("agent-runtime-event", event)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        if let Some(snapshot) = snapshot {
+            self.inner
+                .app
+                .emit("agent-runtime-turn-snapshot", snapshot)
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn apply_event_to_turn_state(
+        &self,
+        event: &AgentRuntimeEvent,
+    ) -> Option<LiveRuntimeTurnSnapshotEvent> {
+        let sessio_runtime_session_id = event_session_id(&event.payload)?;
+        let snapshot = {
+            let mut sessions = self.inner.sessions.lock().ok()?;
+            let state = sessions.get_mut(sessio_runtime_session_id)?;
+            apply_runtime_event_to_state(&mut state.turn_state, &event.payload, event.timestamp);
+            state.turn_state.snapshot()
+        };
+        Some(LiveRuntimeTurnSnapshotEvent {
+            sequence: event.sequence,
+            timestamp: event.timestamp,
+            session: snapshot,
+        })
     }
 
     fn next_id(&self, prefix: &str) -> String {
@@ -836,6 +891,74 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn event_session_id(payload: &AgentRuntimeEventPayload) -> Option<&str> {
+    match payload {
+        AgentRuntimeEventPayload::SessionStarted {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::TurnStarted {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::TextDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ReasoningDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolStarted {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolInputDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolOutputDelta {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::ToolStatusChanged {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::SessionUpdate {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::AcpProtocolMessage {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::PermissionRequested {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::PermissionResolved {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::TurnCompleted {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::TurnError {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::TurnCancelled {
+            sessio_runtime_session_id,
+            ..
+        }
+        | AgentRuntimeEventPayload::SessionEnded {
+            sessio_runtime_session_id,
+        } => Some(sessio_runtime_session_id.as_str()),
+    }
 }
 
 fn runtime_config(agent: Agent) -> Option<config::AgentRuntimeConfig> {

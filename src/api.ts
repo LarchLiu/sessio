@@ -626,13 +626,13 @@ export async function getSessionHistory(
   });
 }
 
-export async function updateSessionMessageCount(
+export async function updateSessionHistoryCount(
   agent: Agent,
   filePath: string,
   messageCount: number,
   sessionId?: string
 ): Promise<void> {
-  return invoke<void>("update_session_message_count", {
+  return invoke<void>("update_session_history_count", {
     agent,
     filePath,
     sessionId: sessionId ?? null,

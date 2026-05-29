@@ -4,7 +4,7 @@ import {
   getSessionHistory,
   writeCrossPrompt,
 } from "./api";
-import { contentBlocksText } from "./historyMerge";
+import { contentBlocksTextWithSessioAttachmentMarkers } from "./historyMerge";
 import type { AcpContentBlock } from "./runtimeChat";
 
 export const CROSS_PROMPT_MAX = 16 * 1024;
@@ -144,7 +144,9 @@ function crossPromptEntriesFromTurns(turns: CrossPromptTurn[]): CrossPromptEntry
     turn.blocks.flatMap((block) => {
       const role = crossPromptRole(block.kind);
       if (!role) return [];
-      const text = contentBlocksText(normalizeCrossContentBlocks(block.blocks)).trim();
+      const text = contentBlocksTextWithSessioAttachmentMarkers(
+        normalizeCrossContentBlocks(block.blocks),
+      ).trim();
       return text ? [{ role, text }] : [];
     }),
   );

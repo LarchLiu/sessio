@@ -683,7 +683,6 @@ function KanbanCard({
         options: runtimeSessionOptions(model, "", effort),
       });
       const timestamp = Date.now();
-      const localTurnId = `local-turn-${timestamp}`;
       const existingLiveSession = liveState.sessions[handle.sessioRuntimeSessionId];
       if (!existingLiveSession) {
         fallbackRuntimeSequenceRef.current += 1;
@@ -702,14 +701,6 @@ function KanbanCard({
           },
         });
       }
-      dispatchLiveEvent({
-        type: "optimistic-user-message",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        turnId: localTurnId,
-        text: prompt,
-        attachments: [],
-        timestamp,
-      });
       onPendingSession({
         sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
         agent: handle.agent,
@@ -720,13 +711,7 @@ function KanbanCard({
         kanbanItemId: item.id,
         kanbanItemStatus: item.status,
       });
-      const turn = await sendAgentInput(handle.sessioRuntimeSessionId, { text: prompt });
-      dispatchLiveEvent({
-        type: "replace-turn-id",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        from: localTurnId,
-        to: turn.turnId,
-      });
+      await sendAgentInput(handle.sessioRuntimeSessionId, { text: prompt });
       onChatStarted();
     } catch (err) {
       onError(String(err));

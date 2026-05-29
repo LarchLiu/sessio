@@ -5,7 +5,8 @@ use std::path::Path;
 
 use crate::agents::sources::registry::AgentSource;
 use crate::agents::sources::shared::convert::{
-    agent_kind, message_events_from_messages, session_record_from_info, session_source_from_info,
+    agent_kind, message_events_from_history_acp_messages, session_record_from_info,
+    session_source_from_info,
 };
 use crate::agents::sources::types::{
     AgentKind, MessageEvent, PathEvent, PathEventKind, SessionRecord, SessionSource,
@@ -25,24 +26,13 @@ impl AgentSource for GeminiSource {
     }
 
     fn roots(&self) -> Result<Vec<WatchRoot>> {
-        let (tmp, projects_json) = parser::paths()?;
-        Ok(vec![
-            WatchRoot {
-                agent: self.agent(),
-                path: tmp
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| tmp.clone()),
-                recursive: true,
-                purpose: WatchPurpose::Logs,
-            },
-            WatchRoot {
-                agent: self.agent(),
-                path: projects_json,
-                recursive: false,
-                purpose: WatchPurpose::ProjectMappings,
-            },
-        ])
+        let base = parser::base_dir()?;
+        Ok(vec![WatchRoot {
+            agent: self.agent(),
+            path: base,
+            recursive: true,
+            purpose: WatchPurpose::Sessions,
+        }])
     }
 
     fn discover(&self) -> Result<Vec<SessionSource>> {
@@ -53,7 +43,7 @@ impl AgentSource for GeminiSource {
     }
 
     fn parse_source(&self, source: &SessionSource) -> Result<SessionRecord> {
-        let sessions = parser::parse_logs_file(Path::new(&source.file_path))?;
+        let sessions = parser::parse_file(Path::new(&source.file_path))?;
         let info = sessions
             .into_iter()
             .find(|s| s.id == source.session_id)
@@ -67,37 +57,21 @@ impl AgentSource for GeminiSource {
     }
 
     fn read_messages(&self, source: &SessionSource) -> Result<Vec<MessageEvent>> {
-        let messages =
-            parser::read_messages_with_locations(Path::new(&source.file_path), &source.session_id)?;
-        Ok(message_events_from_messages(source, messages))
+        let events = parser::read_history_acp_messages_with_locations(
+            Path::new(&source.file_path),
+            &source.session_id,
+        )?;
+        Ok(message_events_from_history_acp_messages(source, events))
     }
 
     fn classify_path_event(&self, event: &PathEvent) -> Option<SourceIndexTask> {
-        let (tmp_dir, projects_json) = parser::paths().ok()?;
         let file_name = event
             .path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
-        // projects.json is the global Gemini project-mapping file. We don't
-        // care whether it lives in tmp_dir or its parent; matching by name
-        // and exact path keeps this stable across Gemini versions that move
-        // the file around.
-        if event.path == projects_json || file_name == "projects.json" {
-            return Some(SourceIndexTask::RefreshProjectMappings {
-                agent: self.agent(),
-            });
-        }
-
-        if event.path.starts_with(&tmp_dir) && file_name == "logs.json" {
-            return Some(SourceIndexTask::ReindexScope {
-                agent: self.agent(),
-                scope: event.path.to_string_lossy().to_string(),
-            });
-        }
-
-        if parser::is_chat_file(&event.path) {
+        if file_name.ends_with(".jsonl") && parser::is_chat_file(&event.path) {
             let source = SessionSource {
                 agent: self.agent(),
                 session_id: String::new(),
@@ -113,9 +87,6 @@ impl AgentSource for GeminiSource {
             return Some(SourceIndexTask::ReindexSource(source));
         }
 
-        if !event.path.starts_with(&tmp_dir) {
-            return None;
-        }
         None
     }
 }

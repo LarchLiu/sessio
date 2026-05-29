@@ -25,7 +25,6 @@ import "katex/dist/katex.min.css";
 import {
   type AgentAttachment,
   type Agent,
-  type SessionContentBlock,
   type SessionHistoryTurn,
   SessionInfo,
   RuntimeAgentMetadata,
@@ -42,7 +41,7 @@ import {
   startAgentSession,
   setAgentSessionConfigOption,
   updateRuntimeAgentPreferences,
-  updateSessionMessageCount,
+  updateSessionHistoryCount,
   writeCrossPrompt,
 } from "../api";
 import ScrollArea from "../components/ScrollArea";
@@ -91,7 +90,6 @@ import {
   contentBlocksText,
   forkVisibleHistoryTurns,
   mergeHistoryWithLiveTurns,
-  normalizedUserMessageText,
   stripImagePlaceholders,
   stripInjectedContext,
   stripSessioUploadWrapper,
@@ -496,7 +494,7 @@ function MessageStream({
   const mergedAncestorTurns = useMemo(
     () =>
       ancestorHistoryGroups.flatMap((group) => {
-        const historyTurns = normalizeApiHistoryTurns(group.turns);
+        const historyTurns = group.turns;
         const runtimeId = runtimeSessionAliases[`${group.session.agent}:${group.session.id}`] ?? group.session.id;
         const ancestorLiveSession = liveState.sessions[runtimeId];
         if (!ancestorLiveSession || ancestorLiveSession.turns.length === 0) return historyTurns;
@@ -599,12 +597,12 @@ function MessageStream({
             }
             if (!onMessageCount(agent, filePath, sessionId, result.messageCount)) return;
             window.setTimeout(() => {
-              updateSessionMessageCount(
+              updateSessionHistoryCount(
                 agent,
                 filePath,
                 result.messageCount,
                 sessionId,
-              ).catch((err) => console.warn("update message count failed", err));
+              ).catch((err) => console.warn("update history count failed", err));
             }, 0);
           })
           .catch((err) => {
@@ -684,7 +682,7 @@ function MessageStream({
   const acpViewModel = useMemo<AcpViewModel>(() => {
     const historyTurnsForView = forkVisibleHistoryTurns(
       mergedAncestorTurns,
-      normalizeApiHistoryTurns(historyTurns),
+      historyTurns,
     );
     const historyKey = ancestorCacheKey ? `${ancestorCacheKey}->${sourceKey}` : sourceKey;
     const historyViewModel = cachedHistoryViewModel(historyKey, viewMode, historyTurnsForView);
@@ -919,10 +917,8 @@ function MessageStream({
     setComposerError(null);
     activeRuntimeTurnIdRef.current = null;
     const timestamp = Date.now();
-    const optimisticTurnId = `local-turn-${timestamp}`;
     const targetAgent = composerAgent;
     const sameAgent = targetAgent === agent;
-    let pendingRuntimeSessionId: string | null = sameAgent ? runtimeSessionId : null;
     console.info("[sessio-runtime:frontend:send]", {
       text,
       runtimeSessionId,
@@ -943,14 +939,6 @@ function MessageStream({
     }
     if (sameAgent) {
       beginFollowingLiveStream();
-      dispatchLiveEvent({
-        type: "optimistic-user-message",
-        sessioRuntimeSessionId: runtimeSessionId,
-        turnId: optimisticTurnId,
-        text,
-        attachments: agentAttachments,
-        timestamp,
-      });
       scrollChatToBottom();
     }
     try {
@@ -969,7 +957,6 @@ function MessageStream({
             sourceSessionId: sessionId,
             options: runtimeSessionOptions(composerModel, composerPermissionMode, composerEffort),
           });
-      pendingRuntimeSessionId = handle.sessioRuntimeSessionId;
       if (sameAgent) {
         if (composerModel) {
           await setAgentSessionConfigOption(handle.sessioRuntimeSessionId, {
@@ -1006,14 +993,6 @@ function MessageStream({
             capabilities: handle.capabilities,
           }),
         });
-        dispatchLiveEvent({
-          type: "optimistic-user-message",
-          sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-          turnId: optimisticTurnId,
-          text,
-          attachments: agentAttachments,
-          timestamp,
-        });
         onPendingSession({
           sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
           agent: handle.agent,
@@ -1036,7 +1015,7 @@ function MessageStream({
               turns: mergeHistoryWithLiveTurns(
                 forkVisibleHistoryTurns(
                   mergedAncestorTurns,
-                  normalizeApiHistoryTurns(historyTurns),
+                  historyTurns,
                 ),
                 liveSession?.turns ?? [],
               ),
@@ -1047,12 +1026,6 @@ function MessageStream({
         attachments: inputAttachmentsWithContext,
       });
       activeRuntimeTurnIdRef.current = turn.turnId;
-      dispatchLiveEvent({
-        type: "replace-turn-id",
-        sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
-        from: optimisticTurnId,
-        to: turn.turnId,
-      });
       if (clearComposer) {
         setComposerText("");
         clearAttachments();
@@ -1061,16 +1034,6 @@ function MessageStream({
     } catch (err) {
       const message = String(err);
       setComposerError(message);
-      const failedRuntimeSessionId = pendingRuntimeSessionId;
-      if (failedRuntimeSessionId) {
-        dispatchLiveEvent({
-          type: "turn-error",
-          sessioRuntimeSessionId: failedRuntimeSessionId,
-          turnId: optimisticTurnId,
-          error: { code: "send_failed", message, data: null },
-          timestamp: Date.now(),
-        });
-      }
     } finally {
       setSending(false);
     }
@@ -2084,7 +2047,7 @@ function AcpLiveItem({
     return <LemniscateBloomIndicator />;
   }
   if (item.kind === "tool") {
-    return <AcpToolCard tool={item.tool} onPreviewImage={onPreviewImage} />;
+    return <AcpToolCard tool={item.tool} />;
   }
   if (item.kind === "permission") {
     return (
@@ -2094,9 +2057,6 @@ function AcpLiveItem({
         onRespond={onPermissionResponse}
       />
     );
-  }
-  if (item.kind === "turnFileEdits") {
-    return <FileEditContent text={item.text} />;
   }
   if (item.kind === "error") {
     return (
@@ -2777,7 +2737,6 @@ function AcpContentBlockView({
         <div>
           <MarkdownContent
             text={block.text}
-            imageAlign={imageAlign}
             onPreviewImage={onPreviewImage}
           />
           <AcpMetaBadges value={block} />
@@ -2840,7 +2799,6 @@ function AcpContentBlockView({
           <div className="mt-2">
             <MarkdownContent
               text={text}
-              imageAlign={imageAlign}
               onPreviewImage={onPreviewImage}
             />
           </div>
@@ -2862,34 +2820,29 @@ function AcpContentBlockView({
 
 function AcpToolCard({
   tool,
-  onPreviewImage,
 }: {
   tool: AcpToolCall;
-  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const displayTool = canonicalizeAcpTool(tool);
   if (isHiddenHistoryTool(displayTool)) return null;
-  const todos = parseTodoEntries(displayTool.rawInput);
-  const planItems = parsePlanEntries(displayTool.rawInput);
-  if (planItems.length > 0 || isPlanTool(displayTool)) {
+  const taskEntries = parseTaskEntries(displayTool.rawInput);
+  if (isPlanTool(displayTool)) {
     return (
       <TodoToolCard
         tool={displayTool}
         title={{ main: "Update Plan" }}
         iconName="TaskUpdate"
-        todos={planItems}
-        onPreviewImage={onPreviewImage}
+        todos={taskEntries}
       />
     );
   }
-  if (todos.length > 0 || isTodoTool(displayTool)) {
+  if (isTodoTool(displayTool)) {
     return (
       <TodoToolCard
         tool={displayTool}
         title={{ main: todoToolTitle() }}
         iconName="TodoWrite"
-        todos={todos}
-        onPreviewImage={onPreviewImage}
+        todos={taskEntries}
       />
     );
   }
@@ -2904,7 +2857,6 @@ function AcpToolCard({
           <ToolPairPanel
             input={input}
             output={output}
-            onPreviewImage={onPreviewImage}
           />
         </div>
       )}
@@ -3101,61 +3053,6 @@ function formatObjectEntryValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function acpTurnFileEditText(turn: LiveTurn): string | null {
-  const edits = turn.tools.flatMap((tool) =>
-    tool.content.flatMap(acpToolContentToFileEdits),
-  );
-  if (edits.length === 0) return null;
-  const merged = mergeFileEditItems(
-    edits.map((edit, index) => ({
-      key: `acp-diff-${index}`,
-      message: {
-        role: "file_edit",
-        text: JSON.stringify({
-          source: "acp",
-          edits: [edit],
-        }),
-        timestamp: turn.updatedAt,
-      },
-    })),
-  );
-  return merged?.message.text ?? JSON.stringify({
-    source: "acp",
-    files: edits.length,
-    additions: sumEditNumber(edits, "additions"),
-    deletions: sumEditNumber(edits, "deletions"),
-    edits,
-  });
-}
-
-function acpToolContentToFileEdits(content: unknown): FileEditItem[] {
-  const record = asRecord(content);
-  if (record.type !== "diff") return [];
-  const path = stringValue(record.path) ?? stringValue(record.filePath);
-  const oldContent = stringValue(record.oldText) ?? stringValue(record.old_text);
-  const newContent = stringValue(record.newText) ?? stringValue(record.new_text);
-  if (!path && oldContent === undefined && newContent === undefined) return [];
-  return [{
-    path: path ?? "file",
-    displayPath: path ?? "file",
-    kind: oldContent === undefined ? "create" : "modify",
-    additions: countLines(newContent),
-    deletions: countLines(oldContent),
-    oldContent,
-    newContent,
-    detail: path ? undefined : JSON.stringify(record, null, 2),
-  }];
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function countLines(value: string | undefined): number {
-  if (!value) return 0;
-  return value.split(/\r?\n/).filter((line) => line.length > 0).length;
-}
-
 function AcpPermissionCard({
   sessioRuntimeSessionId,
   permission,
@@ -3332,7 +3229,6 @@ type AcpRenderItem =
   | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
   | { kind: "tool"; turn: LiveTurn; tool: AcpToolCall }
   | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
-  | { kind: "turnFileEdits"; turn: LiveTurn; text: string }
   | { kind: "error"; turn: LiveTurn; error: RuntimeError };
 
 function acpViewModelToRenderItems(
@@ -3344,7 +3240,6 @@ function acpViewModelToRenderItems(
   const latestLiveTurn = latestTurnWithIds(viewModel.turns, liveTurnIds);
   let lastUserIndex = -1;
   for (const turn of viewModel.turns) {
-    const terminalSessionTools = new Map<string, AcpToolCall>();
     const renderedTools = new Set<string>();
     const renderedPermissions = new Set<string>();
     turn.blocks.forEach((block) => {
@@ -3352,20 +3247,7 @@ function acpViewModelToRenderItems(
         const originalTool = turn.tools.find((item) => item.toolId === block.toolId);
         if (!originalTool || renderedTools.has(originalTool.toolId)) return;
         renderedTools.add(originalTool.toolId);
-        const tool = cloneAcpToolCall(originalTool);
-        const pollingSessionId = writeStdinPollingToolSessionId(tool);
-        if (pollingSessionId) {
-          const target = terminalSessionTools.get(pollingSessionId);
-          if (target) {
-            appendToolOutput(target, tool);
-            return;
-          }
-        }
-        items.push({ kind: "tool", turn, tool });
-        const runningSessionId = toolRunningSessionId(tool);
-        if (runningSessionId) {
-          terminalSessionTools.set(runningSessionId, tool);
-        }
+        items.push({ kind: "tool", turn, tool: originalTool });
         return;
       }
       if (block.kind === "permission") {
@@ -3383,13 +3265,6 @@ function acpViewModelToRenderItems(
     });
     if (turn.error) {
       items.push({ kind: "error", turn, error: turn.error });
-    }
-    const turnFileEdits =
-      turn.tools.length > 0 && isTurnFinished(turn)
-        ? acpTurnFileEditText(turn)
-        : null;
-    if (turnFileEdits) {
-      items.push({ kind: "turnFileEdits", turn, text: turnFileEdits });
     }
     if (turn.turnId === workingIndicatorTurnId) {
       items.push({ kind: "workingIndicator", turn });
@@ -3419,118 +3294,16 @@ function liveWorkingIndicatorTurn(liveSession: LiveRuntimeSession | null | undef
   return null;
 }
 
-function writeStdinPollingToolSessionId(tool: AcpToolCall): string | null {
-  if (tool.title !== "write_stdin" && tool.title !== "Write Stdin") return null;
-  const input = parseObjectLike(tool.rawInput);
-  if (!input) return null;
-  const chars = input.chars;
-  if (typeof chars === "string" && chars.length > 0) return null;
-  return sessionIdFromRecord(input);
-}
-
-function toolRunningSessionId(tool: AcpToolCall): string | null {
-  const input = parseObjectLike(tool.rawInput);
-  return toolOutputRunningSessionId(acpToolOutputText(tool)) ??
-    (input ? sessionIdFromRecord(input) : null);
-}
-
-function appendToolOutput(target: AcpToolCall, source: AcpToolCall): void {
-  const left = acpToolOutputText(target).trimEnd();
-  const right = acpToolOutputText(source).trimStart();
-  target.rawOutput = left && right ? `${left}\n\n${right}` : left || right || target.rawOutput;
-  target.updatedAt = Math.max(target.updatedAt, source.updatedAt);
-}
-
-function cloneAcpToolCall(tool: AcpToolCall): AcpToolCall {
-  return {
-    ...tool,
-    content: tool.content.map((content) => ({ ...content })),
-    locations: tool.locations.map((location) => ({ ...location })),
-  };
-}
-
 function mergeHistoryAndLiveViewModels(
   historyViewModel: AcpViewModel,
   liveViewModel: AcpViewModel,
 ): AcpViewModel {
   if (historyViewModel.turns.length === 0) return liveViewModel;
   if (liveViewModel.turns.length === 0) return historyViewModel;
-  const liveTurns = removeLiveUserEchoes(historyViewModel.turns, liveViewModel.turns);
   return {
     ...liveViewModel,
-    turns: [...historyViewModel.turns, ...liveTurns],
+    turns: mergeHistoryWithLiveTurns(historyViewModel.turns, liveViewModel.turns),
   };
-}
-
-function removeLiveUserEchoes(historyTurns: LiveTurn[], liveTurns: LiveTurn[]): LiveTurn[] {
-  const historyUserTexts = new Set<string>();
-  const latestHistoryUpdatedAt = historyTurns.reduce(
-    (latest, turn) => Math.max(latest, turn.updatedAt),
-    0,
-  );
-  for (const turn of historyTurns) {
-    for (const block of turn.blocks) {
-      if (block.kind !== "user") continue;
-      for (const key of normalizedAcpUserBlockKeys(block)) {
-        historyUserTexts.add(key);
-      }
-    }
-  }
-  if (historyUserTexts.size === 0) return liveTurns;
-
-  return liveTurns
-    .map((turn) => {
-      let changed = false;
-      const blocks = turn.blocks.filter((block) => {
-        if (block.kind !== "user") return true;
-        if (turn.startedAt > latestHistoryUpdatedAt + 10_000) return true;
-        const keys = normalizedAcpUserBlockKeys(block);
-        if (!keys.some((key) => historyUserTexts.has(key))) return true;
-        changed = true;
-        return false;
-      });
-      return changed ? { ...turn, blocks } : turn;
-    })
-    .filter(
-      (turn) =>
-        turn.blocks.length > 0 ||
-        turn.tools.length > 0 ||
-        turn.permissions.length > 0 ||
-        turn.error,
-    );
-}
-
-function normalizedAcpUserBlockKeys(block: Extract<AcpRenderBlock, { kind: "user" }>): string[] {
-  const textParts: string[] = [];
-  const allParts = block.blocks
-    .map((part) => {
-      if (part.type === "text") {
-        const text = normalizedUserMessageText(part.text);
-        if (text) textParts.push(text);
-        return text;
-      }
-      if (part.type === "resource" || part.type === "resource_link") {
-        return `[resource:${resourceUriForCompare(part)}]`;
-      }
-      if (part.type === "image") return `[image:${part.uri ?? part.data ?? ""}]`;
-      if (part.type === "audio") return `[audio:${part.uri ?? part.data ?? ""}]`;
-      return "";
-    })
-    .filter(Boolean);
-  const keys = [
-    allParts
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim(),
-    textParts.join(" ").replace(/\s+/g, " ").trim(),
-  ].filter(Boolean);
-  return Array.from(new Set(keys));
-}
-
-function resourceUriForCompare(block: AcpContentBlock): string {
-  if (block.type === "resource_link") return block.uri ?? "";
-  if (block.type === "resource") return block.uri ?? block.name ?? "";
-  return "";
 }
 
 async function crossContextAttachment({
@@ -3578,75 +3351,7 @@ function cachedHistoryViewModel(
 
 function normalizeSessionHistoryTurns(turns: SessionHistoryTurn[] | undefined): LiveTurn[] {
   if (!Array.isArray(turns)) return [];
-  return turns.map((turn, index) => ({
-    turnId: turn.turnId || `history-turn-${index}`,
-    status: turn.status || "completed",
-    blocks: normalizeHistoryRenderBlocks(turn.blocks),
-    tools: normalizeHistoryTools(turn.tools),
-    permissions: normalizeHistoryPermissions(turn.permissions),
-    protocolMessages: Array.isArray(turn.protocolMessages) ? turn.protocolMessages : [],
-    stopReason: turn.stopReason ?? null,
-    error: turn.error ?? null,
-    startedAt: typeof turn.startedAt === "number" ? turn.startedAt : index,
-    updatedAt: typeof turn.updatedAt === "number" ? turn.updatedAt : index,
-  }));
-}
-
-function normalizeHistoryRenderBlocks(blocks: SessionHistoryTurn["blocks"]): LiveTurn["blocks"] {
-  if (!Array.isArray(blocks)) return [];
-  return blocks.flatMap((block) => {
-    if (!block || typeof block !== "object") return [];
-    if (block.kind === "user" || block.kind === "assistant" || block.kind === "thought") {
-      return [{
-        ...block,
-        blocks: normalizeHistoryContentBlocks(block.blocks),
-      } as LiveTurn["blocks"][number]];
-    }
-    return [block as LiveTurn["blocks"][number]];
-  });
-}
-
-function normalizeHistoryTools(tools: SessionHistoryTurn["tools"]): LiveTurn["tools"] {
-  if (!Array.isArray(tools)) return [];
-  return tools.map((tool, index) => ({
-    toolId: tool.toolId || `history-tool-${index}`,
-    title: tool.title || "Tool Use",
-    kind: tool.kind || "tool",
-    status: tool.status || "unknown",
-    content: Array.isArray(tool.content) ? tool.content as LiveTurn["tools"][number]["content"] : [],
-    locations: Array.isArray(tool.locations) ? tool.locations as LiveTurn["tools"][number]["locations"] : [],
-    rawInput: tool.rawInput ?? null,
-    rawOutput: tool.rawOutput ?? null,
-    meta: tool.meta ?? null,
-    raw: tool.raw,
-    updatedAt: typeof tool.updatedAt === "number" ? tool.updatedAt : index,
-  }));
-}
-
-function normalizeHistoryPermissions(
-  permissions: SessionHistoryTurn["permissions"],
-): LiveTurn["permissions"] {
-  if (!Array.isArray(permissions)) return [];
-  return permissions.map((permission, index) => ({
-    requestId: permission.requestId || `history-permission-${index}`,
-    toolCall: permission.toolCall ?? null,
-    toolName: permission.toolName || "Tool Use",
-    input: permission.input ?? null,
-    options: Array.isArray(permission.options)
-      ? permission.options.map((option, optionIndex) => {
-          const record = option && typeof option === "object" ? option as Record<string, unknown> : {};
-          return {
-            optionId: typeof record.optionId === "string" ? record.optionId : `option-${optionIndex}`,
-            name: typeof record.name === "string" ? record.name : "Option",
-            kind: typeof record.kind === "string" ? record.kind : "unknown",
-            meta: record.meta ?? null,
-          };
-        })
-      : [],
-    selectedOptionId: permission.selectedOptionId ?? null,
-    cancelled: Boolean(permission.cancelled),
-    raw: permission.raw,
-  }));
+  return turns as LiveTurn[];
 }
 
 function filterHistoryTurnsForViewMode(turns: LiveTurn[], viewMode: ViewMode): LiveTurn[] {
@@ -3661,82 +3366,6 @@ function filterHistoryTurnsForViewMode(turns: LiveTurn[], viewMode: ViewMode): L
       permissions: [],
     }))
     .filter((turn) => turn.blocks.length > 0);
-}
-
-function normalizeApiHistoryTurns(turns: LiveTurn[]): LiveTurn[] {
-  return turns.map((turn) => moveHistoryFileEditBlocksToTurnEnd(mergeHistoryPollingTools(turn)));
-}
-
-function mergeHistoryPollingTools(turn: LiveTurn): LiveTurn {
-  const tools = turn.tools.map(cloneAcpToolCall);
-  const removeToolIds = new Set<string>();
-  const runningSessions = new Map<string, AcpToolCall>();
-
-  for (const tool of tools) {
-    const pollingSessionId = writeStdinPollingToolSessionId(tool);
-    if (pollingSessionId) {
-      const target = runningSessions.get(pollingSessionId);
-      if (target) {
-        appendToolOutput(target, tool);
-        removeToolIds.add(tool.toolId);
-        continue;
-      }
-    }
-    const runningSessionId = toolRunningSessionId(tool);
-    if (runningSessionId) {
-      runningSessions.set(runningSessionId, tool);
-    }
-  }
-
-  if (removeToolIds.size === 0) return { ...turn, tools };
-  return {
-    ...turn,
-    tools: tools.filter((tool) => !removeToolIds.has(tool.toolId)),
-    blocks: turn.blocks.filter((block) => block.kind !== "tool" || !removeToolIds.has(block.toolId)),
-  };
-}
-
-function moveHistoryFileEditBlocksToTurnEnd(turn: LiveTurn): LiveTurn {
-  const fileEdits = turn.blocks.filter(isFileEditSessionUpdateBlock);
-  if (fileEdits.length <= 1) return turn;
-  const rest = turn.blocks.filter((block) =>
-    !(block.kind === "sessionUpdate" && block.updateType === "file_edit"),
-  );
-  const merged = mergeHistoryFileEditBlocks(fileEdits);
-  return {
-    ...turn,
-    blocks: merged ? [...rest, merged] : rest,
-  };
-}
-
-function isFileEditSessionUpdateBlock(
-  block: AcpRenderBlock,
-): block is Extract<AcpRenderBlock, { kind: "sessionUpdate" }> {
-  return block.kind === "sessionUpdate" && block.updateType === "file_edit";
-}
-
-function mergeHistoryFileEditBlocks(
-  blocks: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>[],
-): Extract<AcpRenderBlock, { kind: "sessionUpdate" }> | null {
-  const items = blocks.map((block, index) => {
-    const data = asRecord(block.data);
-    return {
-      key: `api-file-edit-${index}`,
-      message: {
-        role: "file_edit",
-        text: typeof data.text === "string" ? data.text : "",
-        timestamp: typeof data.timestamp === "number" ? data.timestamp : block.timestamp ?? null,
-      },
-    };
-  });
-  const merged = mergeFileEditItems(items);
-  if (!merged) return null;
-  return {
-    kind: "sessionUpdate",
-    updateType: "file_edit",
-    data: { text: merged.message.text, timestamp: merged.message.timestamp },
-    timestamp: merged.message.timestamp ?? blocks[blocks.length - 1]?.timestamp,
-  };
 }
 
 function cachedAcpRenderItems(
@@ -3794,7 +3423,6 @@ function renderItemKey(item: AcpRenderItem): string {
   if (item.kind === "block") return `acp:${item.turn.turnId}:block`;
   if (item.kind === "tool") return `acp:${item.turn.turnId}:tool:${item.tool.toolId}`;
   if (item.kind === "permission") return `acp:${item.turn.turnId}:permission:${item.permission.requestId}`;
-  if (item.kind === "turnFileEdits") return `acp:${item.turn.turnId}:file-edits`;
   return `acp:${item.turn.turnId}:error`;
 }
 
@@ -3845,119 +3473,11 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
-interface HistoryMessageItem {
-  key: string;
-  message: {
-    role: string;
-    text: string;
-    timestamp: number | null;
-  };
-}
-
 function sessionIdFromRecord(input: Record<string, unknown>): string | null {
   const sessionId = input.session_id ?? input.sessionId;
   return typeof sessionId === "number" || typeof sessionId === "string"
     ? String(sessionId)
     : null;
-}
-
-function toolOutputRunningSessionId(text: string): string | null {
-  const match = text.match(/Process running with session ID\s+(\S+)/);
-  return match?.[1] ?? null;
-}
-
-function normalizeHistoryContentBlocks(blocks: SessionContentBlock[] | undefined): AcpContentBlock[] {
-  if (!Array.isArray(blocks)) return [];
-  return blocks.flatMap((block) => {
-    if (!block || typeof block !== "object") return [];
-    const record = block as Record<string, unknown>;
-    const type = typeof record.type === "string" ? record.type : "unknown";
-    if (type === "text") {
-      return [{ ...record, type, text: typeof record.text === "string" ? record.text : "" } as AcpContentBlock];
-    }
-    if (type === "image" || type === "audio") {
-      return [{
-        ...record,
-        type,
-        uri: typeof record.uri === "string" ? record.uri : undefined,
-        data: typeof record.data === "string" ? record.data : undefined,
-        mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
-      } as AcpContentBlock];
-    }
-    if (type === "resource" || type === "resource_link") {
-      return [{
-        ...record,
-        type,
-        uri: typeof record.uri === "string" ? record.uri : undefined,
-        name: typeof record.name === "string" ? record.name : undefined,
-        title: typeof record.title === "string" ? record.title : undefined,
-        description: typeof record.description === "string" ? record.description : undefined,
-        mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
-        size: typeof record.size === "number" ? record.size : undefined,
-        text: typeof record.text === "string" ? record.text : undefined,
-        blob: typeof record.blob === "string" ? record.blob : undefined,
-        resource: record.resource,
-      } as AcpContentBlock];
-    }
-    return [{ ...record, type: "unknown", originalType: type } as AcpContentBlock];
-  }).filter((block) => {
-    if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
-    return true;
-  });
-}
-
-function mergeFileEditItems(items: HistoryMessageItem[]): HistoryMessageItem | null {
-  if (items.length === 0) return null;
-  const summaries = items
-    .map((item) => parseFileEditSummary(item.message.text))
-    .filter((summary): summary is FileEditSummary => Boolean(summary));
-  if (summaries.length === 0) return items[items.length - 1];
-  const byPath = new Map<string, FileEditItem>();
-  for (const summary of summaries) {
-    for (const edit of summary.edits ?? []) {
-      const key = edit.path || edit.displayPath || "(unknown file)";
-      const existing = byPath.get(key);
-      if (existing) {
-        existing.additions = (existing.additions ?? 0) + (edit.additions ?? 0);
-        existing.deletions = (existing.deletions ?? 0) + (edit.deletions ?? 0);
-        existing.kind = existing.kind === edit.kind ? existing.kind : "mixed";
-        existing.detail = mergeEditDetail(existing.detail, edit.detail);
-        existing.patches = [
-          ...normalizeEditPatches(existing),
-          ...normalizeEditPatches(edit),
-        ];
-        existing.patch = undefined;
-        existing.contentDiffs = [
-          ...normalizeContentDiffs(existing),
-          ...normalizeContentDiffs(edit),
-        ];
-        existing.oldContent = undefined;
-        existing.newContent = undefined;
-      } else {
-        byPath.set(key, { ...edit });
-      }
-    }
-  }
-  const edits = Array.from(byPath.values());
-  const first = items[0].message;
-  const last = items[items.length - 1].message;
-  const source = summaries.find((summary) => summary.source)?.source ?? "session";
-  const text = JSON.stringify({
-    source,
-    files: edits.length,
-    additions: sumEditNumber(edits, "additions"),
-    deletions: sumEditNumber(edits, "deletions"),
-    edits,
-  });
-  return {
-    key: `${items[0].key}:merged-file-edits`,
-    message: {
-      ...first,
-      role: "file_edit",
-      text,
-      timestamp: last.timestamp ?? first.timestamp,
-    },
-  };
 }
 
 function canonicalToolDisplay(name: string, body: unknown, kind?: string): ToolTitleParts {
@@ -4734,14 +4254,6 @@ function useEffectiveThemeType(): "light" | "dark" {
   return themeType;
 }
 
-function mergeEditDetail(a?: string, b?: string): string | undefined {
-  const left = typeof a === "string" ? a.trim() : "";
-  const right = typeof b === "string" ? b.trim() : "";
-  if (!left) return right || undefined;
-  if (!right) return left;
-  return `${left}\n\n${right}`;
-}
-
 interface MarkdownImage {
   alt: string;
   src: string;
@@ -4778,15 +4290,12 @@ function ToolPairRow({
   text,
   expanded,
   maxLines = 3,
-  onPreviewImage,
 }: {
   label: string;
   text: string;
   expanded: boolean;
   maxLines?: number;
-  onPreviewImage: (image: MarkdownImage) => void;
 }) {
-  const media = splitMarkdownImages(text);
   return (
     <div className="border-b border-ink/[0.07] last:border-b-0">
       <div className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2 px-3 py-2">
@@ -4794,18 +4303,7 @@ function ToolPairRow({
           {label}
         </div>
         <div className="min-w-0">
-          {media.images.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-2">
-              {media.images.map((image, i) => (
-                <MarkdownImageButton
-                  key={`${image.src}-${i}`}
-                  image={image}
-                  onPreviewImage={onPreviewImage}
-                />
-              ))}
-            </div>
-          )}
-          {media.text.trim() && (
+          {text.trim() && (
             <pre
               className={
                 "min-w-0 whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75 " +
@@ -4813,7 +4311,7 @@ function ToolPairRow({
                 (!expanded ? `tool-pair-clamp-${maxLines}` : "")
               }
             >
-              <code>{media.text}</code>
+              <code>{text}</code>
             </pre>
           )}
         </div>
@@ -4825,11 +4323,9 @@ function ToolPairRow({
 function ToolPairPanel({
   input,
   output,
-  onPreviewImage,
 }: {
   input: string;
   output: string;
-  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const stateKey = `${input}\u0000${output}`;
@@ -4849,7 +4345,6 @@ function ToolPairPanel({
           text={input}
           expanded={expanded}
           maxLines={3}
-          onPreviewImage={onPreviewImage}
         />
       )}
       {output && (
@@ -4858,7 +4353,6 @@ function ToolPairPanel({
           text={output}
           expanded={expanded}
           maxLines={3}
-          onPreviewImage={onPreviewImage}
         />
       )}
       {canExpand && (
@@ -4881,8 +4375,7 @@ function ToolPairPanel({
 }
 
 function shouldClampToolPairText(text: string, maxLines: number): boolean {
-  const media = splitMarkdownImages(text);
-  const estimatedVisualLines = media.text
+  const estimatedVisualLines = text
     .split(/\r?\n/)
     .reduce((count, line) => count + Math.max(1, Math.ceil(line.length / 72)), 0);
   return estimatedVisualLines > maxLines;
@@ -4899,13 +4392,11 @@ function TodoToolCard({
   title,
   iconName,
   todos,
-  onPreviewImage,
 }: {
   tool: AcpToolCall;
   title: ToolTitleParts;
   iconName: string;
   todos: TodoEntry[];
-  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   if (todos.length === 0) {
     return (
@@ -4913,10 +4404,21 @@ function TodoToolCard({
           tool={tool}
           title={title}
           iconName={iconName}
-          onPreviewImage={onPreviewImage}
         />
       );
   }
+  return <TaskListFrame title={title} iconName={iconName} todos={todos} />;
+}
+
+function TaskListFrame({
+  title,
+  iconName,
+  todos,
+}: {
+  title: ToolTitleParts;
+  iconName: string;
+  todos: TodoEntry[];
+}) {
   return (
     <ToolTimelineFrame title={title} iconName={iconName}>
       <div className="space-y-1 text-body-sm">
@@ -4940,15 +4442,12 @@ function PlanUpdateCard({
 }: {
   plan: unknown;
 }) {
-  const todos = parseLivePlanEntries(plan);
-  const tool = syntheticPlanTool(plan);
+  const todos = parseTaskEntries(plan);
   return (
-    <TodoToolCard
-      tool={tool}
+    <TaskListFrame
       title={{ main: "Update Plan" }}
       iconName="TaskUpdate"
       todos={todos}
-      onPreviewImage={() => {}}
     />
   );
 }
@@ -4957,12 +4456,10 @@ function AcpToolCardFallback({
   tool,
   title,
   iconName,
-  onPreviewImage,
 }: {
   tool: AcpToolCall;
   title: ToolTitleParts;
   iconName: string;
-  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const input = acpToolInputText(tool);
   const output = acpToolOutputText(tool);
@@ -4972,7 +4469,6 @@ function AcpToolCardFallback({
         <ToolPairPanel
           input={input}
           output={output}
-          onPreviewImage={onPreviewImage}
         />
       </div>
     </ToolTimelineFrame>
@@ -5059,46 +4555,11 @@ function ToolTitleIcon({ name }: { name: string }) {
   }
 }
 
-function parseTodoEntries(value: unknown): TodoEntry[] {
-  const parsed = parseJsonLike(value);
-  const todos = Array.isArray(parsed)
-    ? parsed
-    : parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>).todos
-      : null;
-  return parseTaskListEntries(todos, ["content", "activeForm"]);
-}
-
-function parsePlanEntries(value: unknown): TodoEntry[] {
-  const parsed = parseJsonLike(value);
-  const plan = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>).plan
+function parseTaskEntries(value: unknown): TodoEntry[] {
+  const entries = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>).entries
     : null;
-  return parseTaskListEntries(plan, ["step", "content"]);
-}
-
-function parseLivePlanEntries(value: unknown): TodoEntry[] {
-  const parsed = parseJsonLike(value);
-  const entries = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>).entries
-    : null;
-  return parseTaskListEntries(entries, ["content", "step"]);
-}
-
-function syntheticPlanTool(rawInput: unknown): AcpToolCall {
-  return {
-    toolId: "live-plan",
-    title: "TaskUpdate",
-    kind: "plan",
-    status: "completed",
-    content: [],
-    locations: [],
-    rawInput,
-    rawOutput: null,
-    meta: null,
-    raw: rawInput,
-    updatedAt: 0,
-  };
+  return parseTaskListEntries(entries, ["content"]);
 }
 
 function parseTaskListEntries(value: unknown, contentKeys: string[]): TodoEntry[] {
@@ -5130,7 +4591,6 @@ function TodoStatusIcon({ status }: { status?: string }) {
 }
 
 function isTodoTool(tool: AcpToolCall): boolean {
-  if (parseTodoEntries(tool.rawInput).length > 0) return true;
   const meta = tool.meta;
   if (meta && typeof meta === "object" && !Array.isArray(meta)) {
     const role = (meta as Record<string, unknown>).role;
@@ -5147,47 +4607,28 @@ function todoToolTitle(): string {
   return "Update Todos";
 }
 
-function parseJsonLike(value: unknown): unknown {
-  if (typeof value !== "string") return value;
-  try {
-    return JSON.parse(value) as unknown;
-  } catch {
-    return value;
-  }
-}
-
 function MarkdownContent({
   text,
-  imageAlign,
   onPreviewImage,
 }: {
   text: string;
-  imageAlign?: "left" | "right";
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const safeText = stripImagePlaceholders(text);
   if (!safeText.trim()) return null;
-  const media = splitMarkdownImages(safeText);
   const components = useMemo(
     () => createMarkdownComponents(onPreviewImage),
     [onPreviewImage],
   );
   return (
     <div className="markdown-content">
-      {media.images.length > 0 && (
-        <MarkdownImageStrip
-          images={media.images}
-          align={imageAlign}
-          onPreviewImage={onPreviewImage}
-        />
-      )}
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], rehypeKatex]}
         components={components}
         urlTransform={markdownUrlTransform}
       >
-        {media.text}
+        {safeText}
       </ReactMarkdown>
     </div>
   );
@@ -5295,40 +4736,19 @@ function createMarkdownComponents(
         </a>
       );
     },
-    img: ({ src, alt }) => (
-      <MarkdownImageButton
-        image={{ src: src ?? "", alt: alt ?? "image" }}
-        onPreviewImage={onPreviewImage}
-      />
-    ),
-  };
-}
-
-function MarkdownImageStrip({
-  images,
-  align,
-  onPreviewImage,
-}: {
-  images: MarkdownImage[];
-  align?: "left" | "right";
-  onPreviewImage: (image: MarkdownImage) => void;
-}) {
-  return (
-    <div
-      className={
-        "mb-3 flex flex-wrap gap-2 " +
-        (align === "right" ? "justify-end" : "")
+    img: ({ src, alt }) => {
+      const image = { src: src ?? "", alt: alt ?? "image" };
+      if (!isRenderableMarkdownImageSrc(image.src)) {
+        return <MarkdownImageFallback image={image} />;
       }
-    >
-      {images.map((image, i) => (
+      return (
         <MarkdownImageButton
-          key={`${image.src}-${i}`}
           image={image}
           onPreviewImage={onPreviewImage}
         />
-      ))}
-    </div>
-  );
+      );
+    },
+  };
 }
 
 function MarkdownImageButton({
@@ -5341,10 +4761,17 @@ function MarkdownImageButton({
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const resolvedSrc = useResolvedImageSrc(image.src);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setFailed(false);
+  }, [resolvedSrc]);
   const previewImage = useMemo(
     () => ({ ...image, src: resolvedSrc }),
     [image, resolvedSrc],
   );
+  if (failed) {
+    return <MarkdownImageFallback image={image} />;
+  }
   return (
     <button
       type="button"
@@ -5357,8 +4784,17 @@ function MarkdownImageButton({
         alt={image.alt}
         className={"h-28 w-36 " + (cover ? "object-cover" : "object-contain")}
         loading="lazy"
+        onError={() => setFailed(true)}
       />
     </button>
+  );
+}
+
+function MarkdownImageFallback({ image }: { image: MarkdownImage }) {
+  return (
+    <code className="rounded bg-ink/[0.08] px-1 py-0.5 font-mono text-[0.92em] text-ink">
+      {`![${image.alt}](${image.src})`}
+    </code>
   );
 }
 
@@ -5466,31 +4902,12 @@ function FilePreviewNotice({
   );
 }
 
-function splitMarkdownImages(text: string): { text: string; images: MarkdownImage[] } {
-  const images: MarkdownImage[] = [];
-  const stripped = stripImagePlaceholders(text)
-    .split(/\r?\n/)
-    .filter((line) => {
-      const image = parseStandaloneMarkdownImage(line);
-      if (!image) return true;
-      images.push(image);
-      return false;
-    })
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return { text: stripped, images };
-}
-
-function parseStandaloneMarkdownImage(line: string): MarkdownImage | null {
-  const trimmed = line.trim();
-  const match = trimmed.match(/^!\[([^\]]*)\]\((.+)\)$/);
-  if (!match) return null;
-  const rawSrc = match[2].trim();
-  const withoutTitle = rawSrc.replace(/\s+"[^"]*"$/, "").trim();
-  const src = withoutTitle.replace(/^<|>$/g, "");
-  if (!src) return null;
-  return { alt: match[1] || "image", src };
+function isRenderableMarkdownImageSrc(src: string): boolean {
+  const value = src.trim().replace(/^<|>$/g, "");
+  if (/^(https?:|data:image\/|asset:|blob:)/i.test(value)) return true;
+  if (/^file:\/\//i.test(value)) return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(value);
+  if (/^\/|^[A-Za-z]:[\\/]/.test(value)) return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(value);
+  return false;
 }
 
 function markdownUrlTransform(url: string): string {

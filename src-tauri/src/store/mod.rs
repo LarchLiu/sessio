@@ -56,6 +56,7 @@ pub struct SessionHistoryRecord {
     pub file_path: String,
     pub file_size: u64,
     pub file_mtime: Option<i64>,
+    pub history_cache_version: i64,
     pub message_count: usize,
     pub indexed_through: Option<i64>,
     pub updated_at: i64,

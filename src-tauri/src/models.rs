@@ -3,6 +3,8 @@ use serde_json::Value;
 
 use crate::agents::runtime::types::{RuntimeCapabilitySet, RuntimeTransportKind};
 
+const SESSIO_ATTACHMENT_MARKER: &str = "__sessio_attachment__:";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
@@ -258,16 +260,15 @@ impl SessionContentBlock {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionMessage {
-    pub role: String,
-    pub text: String,
-    pub timestamp: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub content_blocks: Vec<SessionContentBlock>,
+pub fn sessio_attachment_marker_name(name: &str) -> String {
+    format!("{SESSIO_ATTACHMENT_MARKER}{name}")
+}
+
+pub fn strip_sessio_attachment_marker_name(name: &str) -> Option<String> {
+    name.strip_prefix(SESSIO_ATTACHMENT_MARKER)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,38 +348,16 @@ pub struct SessionHistoryPermissionOption {
     pub meta: Value,
 }
 
-impl SessionMessage {
-    pub fn new(role: impl Into<String>, text: impl Into<String>, timestamp: Option<i64>) -> Self {
-        let text = text.into();
-        Self {
-            role: role.into(),
-            content_blocks: text_content_blocks(&text),
-            text,
-            timestamp,
-            tool_call_id: None,
-        }
-    }
-
-    pub fn with_tool_call_id(mut self, tool_call_id: Option<String>) -> Self {
-        self.tool_call_id = tool_call_id;
-        self
-    }
-
-    pub fn with_content_blocks(mut self, content_blocks: Vec<SessionContentBlock>) -> Self {
-        self.content_blocks = content_blocks;
-        self
-    }
-}
-
 pub fn text_content_blocks(text: &str) -> Vec<SessionContentBlock> {
     if text.trim().is_empty() {
         return Vec::new();
     }
     let mut blocks = Vec::new();
+    let code_ranges = markdown_code_ranges(text);
     let mut cursor = 0usize;
     while cursor < text.len() {
-        let next_image = text[cursor..].find("![").map(|idx| cursor + idx);
-        let next_file = find_file_marker(text, cursor);
+        let next_image = find_markdown_image_marker(text, cursor, &code_ranges);
+        let next_file = find_file_marker(text, cursor, &code_ranges);
         let next = match (next_image, next_file) {
             (Some(image), Some(file)) => Some(image.min(file)),
             (Some(image), None) => Some(image),
@@ -407,7 +386,7 @@ pub fn text_content_blocks(text: &str) -> Vec<SessionContentBlock> {
     if blocks.is_empty() {
         vec![SessionContentBlock::text(text.to_string())]
     } else {
-        blocks
+        merge_adjacent_text_blocks(blocks)
     }
 }
 
@@ -415,12 +394,54 @@ fn push_text_block(blocks: &mut Vec<SessionContentBlock>, text: &str) {
     if text.trim().is_empty() {
         return;
     }
-    blocks.push(SessionContentBlock::text(text.trim().to_string()));
+    blocks.push(SessionContentBlock::text(text.to_string()));
 }
 
-fn find_file_marker(text: &str, start: usize) -> Option<usize> {
+fn merge_adjacent_text_blocks(blocks: Vec<SessionContentBlock>) -> Vec<SessionContentBlock> {
+    let mut merged: Vec<SessionContentBlock> = Vec::new();
+    for block in blocks {
+        if block.kind == "text" {
+            let text = block.text.clone().unwrap_or_default();
+            if let Some(previous) = merged.last_mut().filter(|previous| previous.kind == "text") {
+                let previous_text = previous.text.get_or_insert_with(String::new);
+                previous_text.push_str(&text);
+                continue;
+            }
+        }
+        merged.push(block);
+    }
+    merged
+}
+
+fn find_markdown_image_marker(
+    text: &str,
+    start: usize,
+    code_ranges: &[(usize, usize)],
+) -> Option<usize> {
+    let mut cursor = start;
+    while cursor < text.len() {
+        let found = text.get(cursor..)?.find("![").map(|idx| cursor + idx)?;
+        if !is_in_range(found, code_ranges) {
+            return Some(found);
+        }
+        cursor = found + 1;
+    }
+    None
+}
+
+fn find_file_marker(text: &str, start: usize, code_ranges: &[(usize, usize)]) -> Option<usize> {
     let haystack = text.get(start..)?.to_ascii_lowercase();
-    haystack.find("[file:").map(|idx| start + idx)
+    let mut cursor = 0usize;
+    while cursor < haystack.len() {
+        let found = haystack[cursor..]
+            .find("[file:")
+            .map(|idx| start + cursor + idx)?;
+        if !is_in_range(found, code_ranges) {
+            return Some(found);
+        }
+        cursor = found - start + 1;
+    }
+    None
 }
 
 fn parse_markdown_image(text: &str, start: usize) -> Option<(SessionContentBlock, usize)> {
@@ -437,15 +458,15 @@ fn parse_markdown_image(text: &str, start: usize) -> Option<(SessionContentBlock
     if uri.is_empty() {
         return None;
     }
-    let mime_type = if alt.contains('/') {
-        Some(alt.to_string())
+    let display_name = strip_sessio_attachment_marker_name(alt)?;
+    let mime_type = if display_name.contains('/') {
+        Some(display_name.clone())
     } else {
         None
     };
-    Some((
-        SessionContentBlock::image(uri.to_string(), mime_type),
-        target_end + 1,
-    ))
+    let mut block = SessionContentBlock::image(uri.to_string(), mime_type);
+    block.name = Some(display_name);
+    Some((block, target_end + 1))
 }
 
 fn parse_file_marker(text: &str, start: usize) -> Option<(SessionContentBlock, usize)> {
@@ -467,18 +488,136 @@ fn parse_file_marker(text: &str, start: usize) -> Option<(SessionContentBlock, u
         .next()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let display_name = name.and_then(strip_sessio_attachment_marker_name)?;
     let uri = parts
         .next()
         .map(str::trim)
         .filter(|value| !value.is_empty());
     Some((
-        SessionContentBlock::resource(
-            uri.map(ToOwned::to_owned),
-            name.map(ToOwned::to_owned),
-            None,
-        ),
+        SessionContentBlock::resource(uri.map(ToOwned::to_owned), Some(display_name), None),
         start + close + 1,
     ))
+}
+
+fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
+    let fence_ranges = markdown_fenced_code_ranges(text);
+    let mut ranges = fence_ranges.clone();
+    let bytes = text.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if is_in_range(cursor, &fence_ranges) {
+            cursor = range_end(cursor, &fence_ranges).unwrap_or(cursor + 1);
+            continue;
+        }
+        if bytes[cursor] != b'`' {
+            cursor += 1;
+            continue;
+        }
+        let tick_count = backtick_run_len(bytes, cursor);
+        let search_from = cursor + tick_count;
+        if let Some(end) = find_closing_backtick_run(bytes, search_from, tick_count, &fence_ranges)
+        {
+            ranges.push((cursor, end + tick_count));
+            cursor = end + tick_count;
+        } else {
+            cursor = search_from;
+        }
+    }
+    ranges.sort_by_key(|(start, _)| *start);
+    ranges
+}
+
+fn markdown_fenced_code_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut fence: Option<(usize, u8, usize)> = None;
+    let mut line_start = 0usize;
+    while line_start < text.len() {
+        let line_end = text[line_start..]
+            .find('\n')
+            .map(|idx| line_start + idx)
+            .unwrap_or(text.len());
+        let line = &text[line_start..line_end];
+        if let Some((marker, marker_len, rest)) = fenced_code_marker(line) {
+            if let Some((start, open_marker, open_marker_len)) = fence {
+                if marker == open_marker && marker_len >= open_marker_len && rest.trim().is_empty()
+                {
+                    fence = None;
+                    let end = if line_end < text.len() {
+                        line_end + 1
+                    } else {
+                        line_end
+                    };
+                    ranges.push((start, end));
+                }
+            } else {
+                fence = Some((line_start, marker, marker_len));
+            }
+        }
+        if line_end == text.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    if let Some((start, _, _)) = fence {
+        ranges.push((start, text.len()));
+    }
+    ranges
+}
+
+fn fenced_code_marker(line: &str) -> Option<(u8, usize, &str)> {
+    let trimmed = line.trim_start();
+    let bytes = trimmed.as_bytes();
+    let marker = *bytes.first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let marker_len = bytes.iter().take_while(|byte| **byte == marker).count();
+    if marker_len < 3 {
+        return None;
+    }
+    let rest = &trimmed[marker_len..];
+    Some((marker, marker_len, rest))
+}
+
+fn find_closing_backtick_run(
+    bytes: &[u8],
+    start: usize,
+    tick_count: usize,
+    excluded_ranges: &[(usize, usize)],
+) -> Option<usize> {
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        if is_in_range(cursor, excluded_ranges) {
+            cursor = range_end(cursor, excluded_ranges).unwrap_or(cursor + 1);
+            continue;
+        }
+        if bytes[cursor] == b'`' && backtick_run_len(bytes, cursor) == tick_count {
+            return Some(cursor);
+        }
+        cursor += 1;
+    }
+    None
+}
+
+fn backtick_run_len(bytes: &[u8], start: usize) -> usize {
+    let mut end = start;
+    while end < bytes.len() && bytes[end] == b'`' {
+        end += 1;
+    }
+    end - start
+}
+
+fn is_in_range(index: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| index >= *start && index < *end)
+}
+
+fn range_end(index: usize, ranges: &[(usize, usize)]) -> Option<usize> {
+    ranges
+        .iter()
+        .find(|(start, end)| index >= *start && index < *end)
+        .map(|(_, end)| *end)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,7 +729,7 @@ pub fn strip_injected_context(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_preview, text_content_blocks};
+    use super::{normalize_preview, sessio_attachment_marker_name, text_content_blocks};
 
     #[test]
     fn normalize_preview_limits_to_50_chars_plus_ellipsis() {
@@ -614,17 +753,68 @@ mod tests {
 
     #[test]
     fn text_content_blocks_parse_markdown_images_and_file_markers() {
-        let blocks = text_content_blocks(
-            "review\n[file: spec.md|file:///tmp/spec.md]\n![image/png](file:///tmp/screen.png)",
-        );
+        let file_name = sessio_attachment_marker_name("spec.md");
+        let image_name = sessio_attachment_marker_name("screen.png");
+        let blocks = text_content_blocks(&format!(
+            "review\n[file: {file_name}|file:///tmp/spec.md]\n![{image_name}](file:///tmp/screen.png)"
+        ));
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0].kind, "text");
-        assert_eq!(blocks[0].text.as_deref(), Some("review"));
+        assert_eq!(blocks[0].text.as_deref(), Some("review\n"));
         assert_eq!(blocks[1].kind, "resource");
         assert_eq!(blocks[1].name.as_deref(), Some("spec.md"));
         assert_eq!(blocks[1].uri.as_deref(), Some("file:///tmp/spec.md"));
         assert_eq!(blocks[2].kind, "image");
-        assert_eq!(blocks[2].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(blocks[2].name.as_deref(), Some("screen.png"));
         assert_eq!(blocks[2].uri.as_deref(), Some("file:///tmp/screen.png"));
+    }
+
+    #[test]
+    fn text_content_blocks_keeps_unmarked_attachment_examples_as_text() {
+        let text = "A hook can inject examples like [file: name|uri], [file: ...], and ![alt](file://...).";
+        let blocks = text_content_blocks(text);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, "text");
+        assert_eq!(blocks[0].text.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn text_content_blocks_keeps_marked_attachments_inside_code_as_text() {
+        let file_name = sessio_attachment_marker_name("spec.md");
+        let image_name = sessio_attachment_marker_name("screen.png");
+        let text = format!(
+            "inline `[file: {file_name}|file:///tmp/spec.md]` and `![{image_name}](file:///tmp/screen.png)`\n```md\n[file: {file_name}|file:///tmp/spec.md]\n![{image_name}](file:///tmp/screen.png)\n```\noutside [file: {file_name}|file:///tmp/spec.md]"
+        );
+        let blocks = text_content_blocks(&text);
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, "text");
+        let display_text = blocks[0].text.as_deref().unwrap_or_default();
+        assert!(display_text.contains("inline `[file:"));
+        assert!(display_text.contains("```md\n[file:"));
+        assert_eq!(blocks[1].kind, "resource");
+        assert_eq!(blocks[1].name.as_deref(), Some("spec.md"));
+        assert_eq!(blocks[1].uri.as_deref(), Some("file:///tmp/spec.md"));
+    }
+
+    #[test]
+    fn text_content_blocks_does_not_extract_when_marked_attachments_are_only_code() {
+        let text = "`[file: __sessio_attachment__:test.md|file:///x]`\n`![__sessio_attachment__:image/png](file:///x.png)`\n\n```md\n[file: __sessio_attachment__:test.md|file:///x]\n![__sessio_attachment__:image/png](file:///x.png)\n```";
+        let blocks = text_content_blocks(text);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, "text");
+        assert_eq!(blocks[0].text.as_deref(), Some(text));
+    }
+
+    #[test]
+    fn text_content_blocks_keeps_marked_attachments_inside_unclosed_outer_fence_as_text() {
+        let text = "```\n`[file: __sessio_attachment__:test.md|file:///x]`\n`![__sessio_attachment__:image/png](file:///x.png)`\n\n```md\n[file: __sessio_attachment__:test.md|file:///x]\n![__sessio_attachment__:image/png](file:///x.png)\n```  这种下面的图片还是会被提取\n";
+        let blocks = text_content_blocks(text);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, "text");
+        assert_eq!(blocks[0].text.as_deref(), Some(text));
     }
 }

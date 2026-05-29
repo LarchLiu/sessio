@@ -287,6 +287,7 @@ CREATE TABLE IF NOT EXISTS session_history (
     file_path       TEXT NOT NULL,
     file_size       INTEGER NOT NULL DEFAULT 0,
     file_mtime      INTEGER,
+    history_cache_version INTEGER NOT NULL DEFAULT 0,
     message_count   INTEGER NOT NULL DEFAULT 0,
     indexed_through INTEGER,
     updated_at      INTEGER NOT NULL,
@@ -313,6 +314,10 @@ CREATE TABLE IF NOT EXISTS session_history_turns (
 
 CREATE INDEX IF NOT EXISTS idx_session_history_turns_turn_id
     ON session_history_turns(agent, session_id, turn_id);
+"#;
+
+const SCHEMA_V10: &str = r#"
+ALTER TABLE session_history ADD COLUMN history_cache_version INTEGER NOT NULL DEFAULT 0;
 "#;
 
 fn now_ms() -> i64 {
@@ -409,6 +414,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V9)?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)",
+            [],
+        )?;
+    }
+    if current < 10 {
+        let _ = conn.execute_batch(SCHEMA_V10);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)",
             [],
         )?;
     }
@@ -932,7 +944,7 @@ fn load_session_history(
 ) -> Result<Option<SessionHistoryRecord>> {
     let header = conn
         .query_row(
-            "SELECT file_size, file_mtime, message_count, indexed_through, updated_at
+            "SELECT file_size, file_mtime, history_cache_version, message_count, indexed_through, updated_at
              FROM session_history
              WHERE agent = ? AND session_id = ? AND file_path = ?",
             params![agent.as_str(), session_id, file_path],
@@ -941,13 +953,22 @@ fn load_session_history(
                     row.get::<_, i64>(0)?,
                     row.get::<_, Option<i64>>(1)?,
                     row.get::<_, i64>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((file_size, file_mtime, message_count, indexed_through, updated_at)) = header else {
+    let Some((
+        file_size,
+        file_mtime,
+        history_cache_version,
+        message_count,
+        indexed_through,
+        updated_at,
+    )) = header
+    else {
         return Ok(None);
     };
 
@@ -972,6 +993,7 @@ fn load_session_history(
         file_path: file_path.to_string(),
         file_size: file_size as u64,
         file_mtime,
+        history_cache_version,
         message_count: message_count as usize,
         indexed_through,
         updated_at,
@@ -982,12 +1004,13 @@ fn load_session_history(
 fn replace_session_history_inner(conn: &Connection, record: &SessionHistoryRecord) -> Result<()> {
     conn.execute(
         "INSERT INTO session_history (
-            agent, session_id, file_path, file_size, file_mtime,
+            agent, session_id, file_path, file_size, file_mtime, history_cache_version,
             message_count, indexed_through, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(agent, session_id, file_path) DO UPDATE SET
             file_size = excluded.file_size,
             file_mtime = excluded.file_mtime,
+            history_cache_version = excluded.history_cache_version,
             message_count = excluded.message_count,
             indexed_through = excluded.indexed_through,
             updated_at = excluded.updated_at",
@@ -997,6 +1020,7 @@ fn replace_session_history_inner(conn: &Connection, record: &SessionHistoryRecor
             record.file_path.as_str(),
             record.file_size as i64,
             record.file_mtime,
+            record.history_cache_version,
             record.message_count as i64,
             record.indexed_through,
             record.updated_at,
@@ -2544,6 +2568,7 @@ mod migration_tests {
         };
         assert!(history_columns.contains(&"indexed_through".to_string()));
         assert!(history_columns.contains(&"message_count".to_string()));
+        assert!(history_columns.contains(&"history_cache_version".to_string()));
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
@@ -2572,6 +2597,7 @@ mod migration_tests {
             file_path: "/tmp/session-a.jsonl".to_string(),
             file_size: 42,
             file_mtime: Some(100),
+            history_cache_version: 12,
             message_count: 3,
             indexed_through: Some(20),
             updated_at: 30,
@@ -2585,6 +2611,7 @@ mod migration_tests {
             .unwrap();
 
         assert_eq!(loaded.file_size, 42);
+        assert_eq!(loaded.history_cache_version, 12);
         assert_eq!(loaded.message_count, 3);
         assert_eq!(loaded.indexed_through, Some(20));
         assert_eq!(loaded.turns.len(), 1);

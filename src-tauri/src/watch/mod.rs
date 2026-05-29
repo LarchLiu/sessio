@@ -6,9 +6,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use crate::agents::sources::types::{
-    PathEvent, PathEventKind, SourceIndexTask, SourceKind, WatchPurpose,
-};
+use crate::agents::sources::types::{PathEvent, PathEventKind, SourceIndexTask, SourceKind};
 use crate::indexer::{IndexTask, IndexerHandle};
 
 pub struct WatcherHandle {
@@ -24,26 +22,12 @@ pub fn spawn(indexer: IndexerHandle) -> Result<WatcherHandle> {
     let watch_roots = registry.watch_roots().context("collect watch roots")?;
 
     for root in &watch_roots {
-        // ProjectMappings roots are typically a single file (e.g. Gemini's
-        // projects.json). We watch the parent dir non-recursively so we can
-        // still catch create/modify/remove events even when the file does
-        // not exist yet.
-        let (watch_path, mode) = match root.purpose {
-            WatchPurpose::ProjectMappings => {
-                let Some(parent) = root.path.parent() else {
-                    continue;
-                };
-                (parent.to_path_buf(), RecursiveMode::NonRecursive)
-            }
-            _ => {
-                let mode = if root.recursive {
-                    RecursiveMode::Recursive
-                } else {
-                    RecursiveMode::NonRecursive
-                };
-                (root.path.clone(), mode)
-            }
+        let mode = if root.recursive {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
         };
+        let watch_path = root.path.clone();
 
         if !watch_path.exists() {
             log::warn!(
@@ -140,7 +124,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                     SourceKind::Subagent => Some(IndexTask::ReindexClaudeSubagentFile(path)),
                     _ => Some(IndexTask::ReindexClaudeFile(path)),
                 },
-                "gemini" => Some(IndexTask::ReindexGeminiLogs(path)),
+                "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
                 _ => None,
             }
         }
@@ -148,7 +132,6 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
             let path = PathBuf::from(&scope);
             match agent.as_str() {
                 "claude" => Some(IndexTask::ReindexClaudeProject(path)),
-                "gemini" => Some(IndexTask::ReindexGeminiLogs(path)),
                 _ => None,
             }
         }
@@ -159,10 +142,6 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                 _ => Some(IndexTask::DeleteFile(path)),
             }
         }
-        SourceIndexTask::RefreshProjectMappings { agent } => match agent.as_str() {
-            "gemini" => Some(IndexTask::RefreshGeminiProjectMappings),
-            _ => None,
-        },
     }
 }
 
@@ -228,13 +207,13 @@ mod tests {
     }
 
     #[test]
-    fn gemini_reindex_source_translates_to_reindex_gemini_logs() {
+    fn gemini_reindex_source_translates_to_reindex_gemini_file() {
         let task = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
             "gemini",
-            "/tmp/gemini/abc/logs.json",
-            SourceKind::Logs,
+            "/tmp/gemini/abc/chats/session-1.jsonl",
+            SourceKind::MainSession,
         )));
-        assert!(matches!(task, Some(IndexTask::ReindexGeminiLogs(_))));
+        assert!(matches!(task, Some(IndexTask::ReindexGeminiFile(_))));
     }
 
     #[test]
@@ -247,12 +226,12 @@ mod tests {
     }
 
     #[test]
-    fn gemini_scope_maps_to_reindex_gemini_logs() {
+    fn gemini_scope_is_not_reindexed() {
         let task = source_task_to_index_task(SourceIndexTask::ReindexScope {
             agent: AgentKind::new("gemini"),
-            scope: "/tmp/gemini/abc/logs.json".to_string(),
+            scope: "/tmp/gemini/abc".to_string(),
         });
-        assert!(matches!(task, Some(IndexTask::ReindexGeminiLogs(_))));
+        assert!(task.is_none());
     }
 
     #[test]
@@ -270,17 +249,6 @@ mod tests {
             SourceKind::Subagent,
         )));
         assert!(matches!(sub, Some(IndexTask::DeleteSubagentFile(_))));
-    }
-
-    #[test]
-    fn refresh_gemini_project_mappings_translates() {
-        let task = source_task_to_index_task(SourceIndexTask::RefreshProjectMappings {
-            agent: AgentKind::new("gemini"),
-        });
-        assert!(matches!(
-            task,
-            Some(IndexTask::RefreshGeminiProjectMappings)
-        ));
     }
 
     #[test]

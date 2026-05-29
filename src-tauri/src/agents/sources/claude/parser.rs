@@ -4,16 +4,19 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crate::agents::sources::shared::attachment_text::{
-    sanitize_user_attachment_text, sanitize_user_preview_text,
-};
+use crate::agents::runtime::types::AcpProtocolMessage;
+use crate::agents::sources::shared::attachment_text::clean_history_user_preview_text;
 use crate::agents::sources::shared::cross_context::cross_context_lineage_from_payload;
 use crate::agents::sources::system_time_to_millis;
-use crate::agents::sources::types::SourceLocation;
-use crate::models::{
-    is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
-    SubagentInfo,
+use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
+use crate::models::{normalize_preview, Agent, SessionInfo, SubagentInfo};
+use crate::turns::{
+    history_assistant_message, history_content_update, history_permission_request_message,
+    history_prompt_message, history_session_update_message, history_thought_message,
+    history_todo_message, history_tool_call_message, history_tool_result_message,
+    history_user_message,
 };
+use serde_json::Value;
 
 const REVERSE_METADATA_CHUNK_SIZE: u64 = 16 * 1024;
 
@@ -200,19 +203,7 @@ pub fn parse_single_file(path: &Path) -> Result<Option<SessionInfo>> {
     Ok(Some(info))
 }
 
-pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
-    Ok(read_messages_with_locations(path)?
-        .into_iter()
-        .map(|(m, _)| m)
-        .collect())
-}
-
-// Same as read_messages but also returns the SourceLocation for each
-// SessionMessage. A single Claude JSONL line can expand into multiple
-// SessionMessage entries (e.g. an assistant turn with text + tool_use);
-// all expansions share the originating line's location so resolve can
-// point back to the exact JSONL line.
-pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, SourceLocation)>> {
+pub fn read_history_acp_messages_with_locations(path: &Path) -> Result<Vec<HistoryAcpMessage>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut out = Vec::new();
@@ -242,14 +233,50 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line_str) else {
             continue;
         };
-        let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
-        if t != "user" && t != "assistant" {
-            continue;
-        }
         let ts = v
             .get("timestamp")
             .and_then(|x| x.as_str())
             .and_then(parse_iso);
+        let location = SourceLocation {
+            file_path: file_path.clone(),
+            line_start: Some(line_number),
+            line_end: Some(line_number),
+            byte_start: Some(line_start_byte),
+            byte_end: Some(line_end_byte),
+        };
+        let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        if t == "permission-mode" {
+            if let Some(mode) = v.get("permissionMode").and_then(|x| x.as_str()) {
+                out.push(HistoryAcpMessage {
+                    message: history_session_update_message(
+                        "current_mode",
+                        serde_json::json!({
+                            "sessionUpdate": "current_mode_update",
+                            "currentModeId": mode,
+                            "raw": v,
+                        }),
+                        ts,
+                    ),
+                    timestamp: ts,
+                    location,
+                    synthetic: true,
+                });
+            }
+            continue;
+        }
+        if let Some(permission_messages) = claude_permission_event(&v, ts) {
+            for message in permission_messages {
+                out.push(HistoryAcpMessage {
+                    message,
+                    timestamp: ts,
+                    location: location.clone(),
+                    synthetic: true,
+                });
+            }
+        }
+        if t != "user" && t != "assistant" {
+            continue;
+        }
         let Some(msg) = v.get("message") else {
             continue;
         };
@@ -258,22 +285,20 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
             .and_then(|x| x.as_str())
             .unwrap_or(t)
             .to_string();
-        let location = SourceLocation {
-            file_path: file_path.clone(),
-            line_start: Some(line_number),
-            line_end: Some(line_number),
-            byte_start: Some(line_start_byte),
-            byte_end: Some(line_end_byte),
-        };
         let tool_result_meta = v.get("toolUseResult");
-        for sm in expand_message(&role_raw, msg, ts, &mut edit_tools, tool_result_meta) {
-            out.push((sm, location.clone()));
+        for message in expand_message(&role_raw, msg, ts, &mut edit_tools, tool_result_meta) {
+            out.push(HistoryAcpMessage {
+                message,
+                timestamp: ts,
+                location: location.clone(),
+                synthetic: true,
+            });
         }
     }
     Ok(out)
 }
 
-// Convert a single Anthropic message into one or more SessionMessage entries:
+// Convert a single Anthropic message into one or more synthetic ACP messages:
 // - assistant text -> {role:"assistant"}
 // - assistant tool_use -> {role:"tool_call"}
 // - user tool_result -> {role:"tool_result"}
@@ -290,24 +315,18 @@ fn expand_message(
     ts: Option<i64>,
     edit_tools: &mut HashMap<String, ClaudeEditTool>,
     tool_result_meta: Option<&serde_json::Value>,
-) -> Vec<SessionMessage> {
+) -> Vec<AcpProtocolMessage> {
     let content = match msg.get("content") {
         Some(c) => c,
         None => return Vec::new(),
     };
 
     if let Some(s) = content.as_str() {
-        if s.trim().is_empty() {
-            return Vec::new();
-        }
-        if role_raw == "user" && is_system_noise(s) {
-            return Vec::new();
-        }
         let text = sanitize_role_text(role_raw, s.to_string());
         if text.trim().is_empty() {
             return Vec::new();
         }
-        return vec![SessionMessage::new(role_raw, text, ts)];
+        return vec![history_role_message(role_raw, text, ts)];
     }
 
     let arr = match content.as_array() {
@@ -318,7 +337,7 @@ fn expand_message(
     let mut out = Vec::new();
     let mut text_parts: Vec<String> = Vec::new();
 
-    let flush_text = |out: &mut Vec<SessionMessage>, text_parts: &mut Vec<String>| {
+    let flush_text = |out: &mut Vec<AcpProtocolMessage>, text_parts: &mut Vec<String>| {
         if text_parts.is_empty() {
             return;
         }
@@ -328,10 +347,7 @@ fn expand_message(
         if cleaned.trim().is_empty() {
             return;
         }
-        if role_raw == "user" && is_system_noise(&cleaned) {
-            return;
-        }
-        out.push(SessionMessage::new(role_raw, cleaned, ts));
+        out.push(history_role_message(role_raw, cleaned, ts));
     };
 
     for item in arr {
@@ -343,15 +359,16 @@ fn expand_message(
                 }
             }
             "image" => {
-                if let Some(markdown) = claude_image_item_to_markdown(item, text_parts.len() + 1) {
-                    text_parts.push(markdown);
+                flush_text(&mut out, &mut text_parts);
+                if let Some(image) = claude_image_item_to_content(item) {
+                    out.push(history_role_content_message(role_raw, vec![image], ts));
                 }
             }
             "thinking" => {
                 flush_text(&mut out, &mut text_parts);
                 if let Some(t) = item.get("thinking").and_then(|x| x.as_str()) {
                     if !t.trim().is_empty() {
-                        out.push(SessionMessage::new("thinking", t.to_string(), ts));
+                        out.push(history_thought_message(t.to_string(), ts));
                     }
                 }
             }
@@ -365,11 +382,7 @@ fn expand_message(
                     .unwrap_or("")
                     .trim();
                 if !reasoning_text.is_empty() {
-                    out.push(SessionMessage::new(
-                        "thinking",
-                        reasoning_text.to_string(),
-                        ts,
-                    ));
+                    out.push(history_thought_message(reasoning_text.to_string(), ts));
                 }
             }
             "tool_use" => {
@@ -388,49 +401,39 @@ fn expand_message(
                 }
                 if name == "TodoWrite" {
                     if let Some(todos) = item.get("input").and_then(|i| i.get("todos")) {
-                        if let Ok(text) = serde_json::to_string(todos) {
-                            out.push(
-                                SessionMessage::new("todo", text, ts).with_tool_call_id(
-                                    item.get("id")
-                                        .or_else(|| item.get("tool_use_id"))
-                                        .or_else(|| item.get("toolUseId"))
-                                        .or_else(|| item.get("tool_useId"))
-                                        .or_else(|| item.get("toolId"))
-                                        .or_else(|| item.get("tool_id"))
-                                        .and_then(|x| x.as_str())
-                                        .map(String::from),
-                                ),
-                            );
-                            continue;
-                        }
+                        out.push(history_todo_message(
+                            todos.clone(),
+                            ts,
+                            item.get("id")
+                                .or_else(|| item.get("tool_use_id"))
+                                .or_else(|| item.get("toolUseId"))
+                                .or_else(|| item.get("tool_useId"))
+                                .or_else(|| item.get("toolId"))
+                                .or_else(|| item.get("tool_id"))
+                                .and_then(|x| x.as_str())
+                                .map(String::from),
+                        ));
+                        continue;
                     }
                 }
-                let input_pretty = item
-                    .get("input")
-                    .and_then(|i| serde_json::to_string_pretty(i).ok())
-                    .unwrap_or_default();
-                let text = if input_pretty.trim().is_empty() || input_pretty.trim() == "{}" {
-                    format!("[{name}]")
-                } else {
-                    format!("[{name}]\n{input_pretty}")
-                };
-                out.push(
-                    SessionMessage::new("tool_call", text, ts).with_tool_call_id(
-                        item.get("id")
-                            .or_else(|| item.get("tool_use_id"))
-                            .or_else(|| item.get("toolUseId"))
-                            .or_else(|| item.get("tool_useId"))
-                            .or_else(|| item.get("toolId"))
-                            .or_else(|| item.get("tool_id"))
-                            .and_then(|x| x.as_str())
-                            .map(String::from),
-                    ),
-                );
+                out.push(history_tool_call_message(
+                    item.get("id")
+                        .or_else(|| item.get("tool_use_id"))
+                        .or_else(|| item.get("toolUseId"))
+                        .or_else(|| item.get("tool_useId"))
+                        .or_else(|| item.get("toolId"))
+                        .or_else(|| item.get("tool_id"))
+                        .and_then(|x| x.as_str())
+                        .map(String::from),
+                    name,
+                    item.get("input").cloned().unwrap_or(Value::Null),
+                    ts,
+                ));
             }
             "tool_result" => {
                 flush_text(&mut out, &mut text_parts);
-                let body = extract_tool_result_text(item);
-                if !body.trim().is_empty() {
+                let output = extract_tool_result_value(item);
+                if !is_empty_tool_result(&output) {
                     let tool_use_id = item
                         .get("tool_use_id")
                         .or_else(|| item.get("toolUseId"))
@@ -441,10 +444,7 @@ fn expand_message(
                         .or_else(|| item.get("id"))
                         .and_then(|x| x.as_str())
                         .map(String::from);
-                    out.push(
-                        SessionMessage::new("tool_result", body, ts)
-                            .with_tool_call_id(tool_use_id.clone()),
-                    );
+                    out.push(history_tool_result_message(tool_use_id.clone(), output, ts));
                     if let Some(id) = tool_use_id {
                         if let Some(edit) = edit_tools.remove(&id) {
                             if let Some(summary) =
@@ -465,9 +465,31 @@ fn expand_message(
     out
 }
 
+fn history_role_message(role: &str, text: String, timestamp: Option<i64>) -> AcpProtocolMessage {
+    match role {
+        "user" => history_user_message(text, timestamp),
+        "assistant" => history_assistant_message(text, timestamp),
+        "thinking" => history_thought_message(text, timestamp),
+        _ => history_assistant_message(text, timestamp),
+    }
+}
+
+fn history_role_content_message(
+    role: &str,
+    content: Vec<Value>,
+    timestamp: Option<i64>,
+) -> AcpProtocolMessage {
+    match role {
+        "user" => history_prompt_message(content, timestamp),
+        "assistant" => history_content_update("agent_message_chunk", content, timestamp),
+        "thinking" => history_content_update("agent_thought_chunk", content, timestamp),
+        _ => history_content_update("agent_message_chunk", content, timestamp),
+    }
+}
+
 fn sanitize_role_text(role_raw: &str, text: String) -> String {
     if role_raw == "user" {
-        sanitize_user_attachment_text(&text)
+        text
     } else {
         text
     }
@@ -483,14 +505,10 @@ fn extract_tool_result_text(item: &serde_json::Value) -> String {
     }
     if let Some(arr) = content.as_array() {
         let mut parts = Vec::new();
-        for (idx, sub) in arr.iter().enumerate() {
+        for sub in arr {
             if sub.get("type").and_then(|x| x.as_str()) == Some("text") {
                 if let Some(t) = sub.get("text").and_then(|x| x.as_str()) {
                     parts.push(t.to_string());
-                }
-            } else if sub.get("type").and_then(|x| x.as_str()) == Some("image") {
-                if let Some(markdown) = claude_image_item_to_markdown(sub, idx + 1) {
-                    parts.push(markdown);
                 }
             } else if let Some(t) = sub.as_str() {
                 parts.push(t.to_string());
@@ -501,7 +519,135 @@ fn extract_tool_result_text(item: &serde_json::Value) -> String {
     String::new()
 }
 
-fn claude_image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String> {
+fn extract_tool_result_value(item: &serde_json::Value) -> Value {
+    let Some(content) = item.get("content") else {
+        return Value::Null;
+    };
+    if let Some(arr) = content.as_array() {
+        let blocks = arr
+            .iter()
+            .filter_map(|sub| {
+                if sub.get("type").and_then(|x| x.as_str()) == Some("image") {
+                    return claude_image_item_to_content(sub);
+                }
+                if sub.get("type").and_then(|x| x.as_str()) == Some("text") {
+                    return sub
+                        .get("text")
+                        .and_then(|x| x.as_str())
+                        .filter(|text| !text.trim().is_empty())
+                        .map(|text| serde_json::json!({ "type": "text", "text": text }));
+                }
+                sub.as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(|text| serde_json::json!({ "type": "text", "text": text }))
+            })
+            .collect::<Vec<_>>();
+        if !blocks.is_empty() {
+            return Value::Array(blocks);
+        }
+    }
+    let text = extract_tool_result_text(item);
+    if text.trim().is_empty() {
+        Value::Null
+    } else {
+        Value::String(text)
+    }
+}
+
+fn is_empty_tool_result(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+fn claude_permission_event(
+    v: &serde_json::Value,
+    ts: Option<i64>,
+) -> Option<Vec<AcpProtocolMessage>> {
+    let permission = v
+        .get("permission")
+        .or_else(|| v.get("permissionRequest"))
+        .or_else(|| v.get("permission_request"))
+        .or_else(|| v.get("toolPermission"))
+        .or_else(|| v.get("tool_permission"))?;
+    let tool_call = permission
+        .get("toolCall")
+        .or_else(|| permission.get("tool_call"))
+        .cloned();
+    let fields = tool_call
+        .as_ref()
+        .and_then(|tool_call| tool_call.get("fields"))
+        .unwrap_or_else(|| tool_call.as_ref().unwrap_or(permission));
+    let request_id = permission
+        .get("requestId")
+        .or_else(|| permission.get("request_id"))
+        .or_else(|| v.get("uuid"))
+        .or_else(|| {
+            tool_call
+                .as_ref()
+                .and_then(|tool_call| tool_call.get("toolCallId"))
+        })
+        .or_else(|| {
+            tool_call
+                .as_ref()
+                .and_then(|tool_call| tool_call.get("tool_call_id"))
+        })
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    let tool_name = string_field(fields, "title")
+        .or_else(|| string_field(fields, "name"))
+        .or_else(|| string_field(permission, "toolName"))
+        .or_else(|| string_field(permission, "tool_name"))
+        .unwrap_or_else(|| "tool".to_string());
+    let input = fields
+        .get("rawInput")
+        .or_else(|| fields.get("raw_input"))
+        .or_else(|| fields.get("input"))
+        .cloned()
+        .unwrap_or_else(|| permission.clone());
+    let options = permission
+        .get("options")
+        .and_then(|x| x.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let selected = permission
+        .get("selectedOptionId")
+        .or_else(|| permission.get("selected_option_id"))
+        .or_else(|| permission.get("optionId"))
+        .or_else(|| permission.get("option_id"))
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    let cancelled = permission
+        .get("cancelled")
+        .and_then(|x| x.as_bool())
+        .or_else(|| {
+            permission
+                .get("outcome")
+                .and_then(|outcome| outcome.get("outcome"))
+                .and_then(|x| x.as_str())
+                .map(|value| value == "cancelled")
+        });
+    Some(history_permission_request_message(
+        request_id,
+        tool_name,
+        input,
+        options,
+        selected,
+        cancelled,
+        tool_call,
+        permission.clone(),
+        ts,
+    ))
+}
+
+fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value.get(key).and_then(|x| x.as_str()).map(String::from)
+}
+
+fn claude_image_item_to_content(item: &serde_json::Value) -> Option<Value> {
     let source = item.get("source")?;
     let source_type = source.get("type").and_then(|x| x.as_str()).unwrap_or("");
     match source_type {
@@ -511,21 +657,69 @@ fn claude_image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option
                 .and_then(|x| x.as_str())
                 .unwrap_or("image/png");
             let data = source.get("data").and_then(|x| x.as_str())?;
-            Some(format!("![Image #{idx}](data:{media_type};base64,{data})"))
+            Some(serde_json::json!({
+                "type": "image",
+                "uri": format!("data:{media_type};base64,{data}"),
+                "mimeType": media_type,
+            }))
         }
         "url" => {
             let url = source.get("url").and_then(|x| x.as_str())?;
-            Some(format!("![Image #{idx}]({url})"))
+            Some(serde_json::json!({
+                "type": "image",
+                "uri": url,
+                "mimeType": image_mime_type(url),
+            }))
         }
         _ => None,
     }
+}
+
+fn image_mime_type(uri: &str) -> Option<String> {
+    if let Some(rest) = uri.strip_prefix("data:") {
+        return rest
+            .split_once(';')
+            .map(|(mime_type, _)| mime_type)
+            .filter(|mime_type| mime_type.to_ascii_lowercase().starts_with("image/"))
+            .map(String::from);
+    }
+    let normalized = uri
+        .split('?')
+        .next()
+        .unwrap_or(uri)
+        .split('#')
+        .next()
+        .unwrap_or(uri)
+        .to_ascii_lowercase();
+    let mime = if normalized.ends_with(".png") {
+        "image/png"
+    } else if normalized.ends_with(".jpg") || normalized.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if normalized.ends_with(".gif") {
+        "image/gif"
+    } else if normalized.ends_with(".webp") {
+        "image/webp"
+    } else if normalized.ends_with(".bmp") {
+        "image/bmp"
+    } else if normalized.ends_with(".svg") {
+        "image/svg+xml"
+    } else if normalized.ends_with(".avif") {
+        "image/avif"
+    } else if normalized.ends_with(".heic") {
+        "image/heic"
+    } else if normalized.ends_with(".heif") {
+        "image/heif"
+    } else {
+        return None;
+    };
+    Some(mime.to_string())
 }
 
 fn claude_file_edit_message(
     edit: &ClaudeEditTool,
     ts: Option<i64>,
     tool_result_meta: Option<&serde_json::Value>,
-) -> Option<SessionMessage> {
+) -> Option<AcpProtocolMessage> {
     let edits = if let Some(meta_edit) = claude_meta_edit(tool_result_meta) {
         vec![meta_edit]
     } else {
@@ -746,7 +940,7 @@ fn file_edit_message(
     source: &str,
     edits: Vec<serde_json::Value>,
     ts: Option<i64>,
-) -> Option<SessionMessage> {
+) -> Option<AcpProtocolMessage> {
     if edits.is_empty() {
         return None;
     }
@@ -758,15 +952,14 @@ fn file_edit_message(
         .iter()
         .filter_map(|e| e.get("deletions").and_then(|x| x.as_i64()))
         .sum();
-    let text = serde_json::json!({
+    let data = serde_json::json!({
         "source": source,
         "files": edits.len(),
         "additions": additions,
         "deletions": deletions,
         "edits": edits,
-    })
-    .to_string();
-    Some(SessionMessage::new("file_edit", text, ts))
+    });
+    Some(history_session_update_message("file_edit", data, ts))
 }
 
 fn line_count(s: &str) -> usize {
@@ -820,12 +1013,8 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
                         forked_from_id = Some(lineage.session_id);
                     }
                 }
-                let text = sanitize_user_preview_text(&extract_message_text(msg));
-                if !text.trim().is_empty() && !is_system_noise(&text) {
-                    let cleaned = strip_injected_context(&text);
-                    if !cleaned.is_empty() {
-                        first_user_message = Some(normalize_preview(&cleaned));
-                    }
+                if let Some(cleaned) = clean_history_user_preview_text(&extract_message_text(msg)) {
+                    first_user_message = Some(normalize_preview(&cleaned));
                 }
             }
         }
@@ -1191,9 +1380,7 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
     let preview = entry
         .first_prompt
         .as_deref()
-        .filter(|s| !s.trim().is_empty() && !is_system_noise(s))
-        .map(strip_injected_context)
-        .filter(|s| !s.is_empty())
+        .and_then(clean_history_user_preview_text)
         .map(|s| normalize_preview(&s));
     let (file_size, available) = if file_path.is_empty() {
         (0, false)
@@ -1235,6 +1422,74 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn prompt_text(row: &HistoryAcpMessage) -> String {
+        row.message.data["prompt"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(block_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn message_role(message: &AcpProtocolMessage) -> &'static str {
+        if message.method == "session/prompt" {
+            return "user";
+        }
+        match message.update_type.as_deref() {
+            Some("agent_thought_chunk") => "thinking",
+            Some("tool_call") => "tool_call",
+            Some("tool_call_update") => "tool_result",
+            Some("file_edit") => "file_edit",
+            _ => "unknown",
+        }
+    }
+
+    fn message_text(message: &AcpProtocolMessage) -> String {
+        update_from_message(message)["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(block_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn block_text(block: &serde_json::Value) -> Option<&str> {
+        block
+            .get("text")
+            .or_else(|| block.get("uri"))
+            .and_then(|value| value.as_str())
+    }
+
+    fn update_from_message(message: &AcpProtocolMessage) -> &serde_json::Value {
+        message.data.get("update").unwrap_or(&message.data)
+    }
+
+    fn tool_call_id(message: &AcpProtocolMessage) -> Option<&str> {
+        update_from_message(message)
+            .get("toolCallId")
+            .and_then(|value| value.as_str())
+    }
+
+    fn tool_title(message: &AcpProtocolMessage) -> Option<&str> {
+        update_from_message(message)
+            .get("title")
+            .and_then(|value| value.as_str())
+    }
+
+    fn raw_input(message: &AcpProtocolMessage) -> &serde_json::Value {
+        update_from_message(message)
+            .get("rawInput")
+            .unwrap_or(&serde_json::Value::Null)
+    }
+
+    fn raw_output(message: &AcpProtocolMessage) -> &serde_json::Value {
+        update_from_message(message)
+            .get("rawOutput")
+            .unwrap_or(&serde_json::Value::Null)
+    }
+
     #[test]
     fn expand_message_converts_todo_write_to_todo_role() {
         let msg = serde_json::json!({
@@ -1266,11 +1521,21 @@ mod tests {
         let out = expand_message("assistant", &msg, Some(1_700_000_000_000), &mut edits, None);
 
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].role, "todo");
-        assert_eq!(out[0].timestamp, Some(1_700_000_000_000));
-        assert_eq!(out[0].tool_call_id.as_deref(), Some("toolu_todos"));
-        assert!(out[0].text.contains("Verify parser todo rendering"));
-        assert!(out[0].text.contains("\"status\":\"completed\""));
+        assert_eq!(message_role(&out[0]), "tool_call");
+        assert_eq!(tool_call_id(&out[0]), Some("toolu_todos"));
+        assert_eq!(tool_title(&out[0]), Some("TodoWrite"));
+        assert_eq!(
+            raw_input(&out[0])
+                .get("entries")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(
+            raw_input(&out[0])["entries"][0]["content"],
+            "Verify parser todo rendering"
+        );
+        assert_eq!(raw_input(&out[0])["entries"][0]["status"], "completed");
     }
 
     #[test]
@@ -1303,16 +1568,19 @@ mod tests {
         let mut edits = HashMap::new();
         let out = expand_message("assistant", &msg, Some(1), &mut edits, None);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].role, "thinking");
-        assert_eq!(out[0].text, "checking aliases");
-        assert_eq!(out[1].role, "tool_call");
-        assert_eq!(out[1].tool_call_id.as_deref(), Some("tool_alias"));
+        assert_eq!(message_role(&out[0]), "thinking");
+        assert_eq!(message_text(&out[0]), "checking aliases");
+        assert_eq!(message_role(&out[1]), "tool_call");
+        assert_eq!(tool_call_id(&out[1]), Some("tool_alias"));
+        assert_eq!(tool_title(&out[1]), Some("Read"));
+        assert_eq!(raw_input(&out[1])["file_path"], "README.md");
 
         let result_out = expand_message("user", &result, Some(2), &mut edits, None);
         assert_eq!(result_out.len(), 1);
-        assert_eq!(result_out[0].role, "tool_result");
-        assert_eq!(result_out[0].tool_call_id.as_deref(), Some("tool_alias"));
-        assert_eq!(result_out[0].text, "ok\ntail");
+        assert_eq!(message_role(&result_out[0]), "tool_result");
+        assert_eq!(tool_call_id(&result_out[0]), Some("tool_alias"));
+        assert_eq!(raw_output(&result_out[0])[0]["text"], "ok");
+        assert_eq!(raw_output(&result_out[0])[1]["text"], "tail");
     }
 
     #[test]
@@ -1423,7 +1691,7 @@ mod tests {
         let mut edits = HashMap::new();
         let tool_events = expand_message("assistant", &msg, Some(1), &mut edits, None);
         assert_eq!(tool_events.len(), 1);
-        assert_eq!(tool_events[0].role, "tool_call");
+        assert_eq!(message_role(&tool_events[0]), "tool_call");
 
         let meta = serde_json::json!({
             "filePath": "/tmp/project/src/app.rs",
@@ -1447,9 +1715,9 @@ mod tests {
         });
         let result_events = expand_message("user", &result, Some(2), &mut edits, Some(&meta));
         assert_eq!(result_events.len(), 2);
-        assert_eq!(result_events[0].role, "tool_result");
-        assert_eq!(result_events[1].role, "file_edit");
-        let value: serde_json::Value = serde_json::from_str(&result_events[1].text).unwrap();
+        assert_eq!(message_role(&result_events[0]), "tool_result");
+        assert_eq!(message_role(&result_events[1]), "file_edit");
+        let value = update_from_message(&result_events[1]);
         assert_eq!(value.get("additions").and_then(|x| x.as_u64()), Some(3));
         assert_eq!(value.get("deletions").and_then(|x| x.as_u64()), Some(2));
         let edit = value
@@ -1481,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_message_replaces_cross_context_attachment_with_file_marker() {
+    fn expand_message_leaves_cross_context_cleanup_to_turn_builder() {
         let msg = serde_json::json!({
             "role": "user",
             "content": [
@@ -1499,13 +1767,25 @@ mod tests {
         let mut edits = HashMap::new();
         let out = expand_message("user", &msg, Some(1), &mut edits, None);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].role, "user");
-        assert!(out[0].text.contains("不错，写入md文档"));
-        assert!(out[0]
-            .text
-            .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"));
-        assert!(!out[0].text.contains("<sessio-upload-file"));
-        assert!(!out[0].text.contains("Continued session from agent"));
+        assert_eq!(out[0].method, "session/prompt");
+        let text = out[0].data["prompt"][0]["text"].as_str().unwrap();
+        assert!(text.contains("不错，写入md文档"));
+        assert!(text.contains("sessio-cross-context-abc.md"));
+        assert!(text.contains("<sessio-upload-file"));
+
+        let rows = vec![HistoryAcpMessage {
+            message: out[0].clone(),
+            timestamp: Some(1),
+            location: SourceLocation::file("/tmp/session.jsonl"),
+            synthetic: true,
+        }];
+        let turns = crate::turns::session_history_turns_from_acp_messages(&rows);
+        let display_text = turns[0].blocks[0].blocks[0].text.as_deref().unwrap();
+        assert!(display_text.contains("不错，写入md文档"));
+        assert_eq!(turns[0].blocks[0].blocks.len(), 1);
+        assert!(!display_text.contains("sessio-cross-context-abc.md"));
+        assert!(!display_text.contains("<sessio-upload-file"));
+        assert!(!display_text.contains("Continued session from agent"));
     }
 
     #[test]
@@ -1543,28 +1823,91 @@ mod tests {
         .to_string();
         fs::write(&path, format!("{line}\n")).unwrap();
 
-        let messages = read_messages_with_locations(&path).unwrap();
+        let messages = read_history_acp_messages_with_locations(&path).unwrap();
         let user = messages
             .iter()
-            .find(|(message, _)| message.role == "user")
+            .find(|row| row.message.method == "session/prompt")
             .expect("user message");
-        assert!(user.0.text.contains("继续整理"), "{}", user.0.text);
-        assert!(user
-            .0
-            .text
-            .contains("[file: sessio-cross-context-abc.md|file:///tmp/.cross-context/sessio-cross-context-abc.md]"));
+        let text = prompt_text(user);
+        assert!(text.contains("继续整理"), "{}", text);
+        assert!(text.contains("sessio-cross-context-abc.md"), "{}", text);
+
+        let turns = crate::turns::session_history_turns_from_acp_messages(&messages);
+        let display_text = turns[0].blocks[0].blocks[0].text.as_deref().unwrap();
+        assert!(display_text.contains("继续整理"), "{}", display_text);
+        assert_eq!(turns[0].blocks[0].blocks.len(), 1);
         assert!(
-            !user.0.text.contains("<sessio-upload-file"),
+            !display_text.contains("sessio-cross-context-abc.md"),
             "{}",
-            user.0.text
+            display_text
         );
         assert!(
-            !user.0.text.contains("Continued session from agent"),
+            !display_text.contains("<sessio-upload-file"),
             "{}",
-            user.0.text
+            display_text
+        );
+        assert!(
+            !display_text.contains("Continued session from agent"),
+            "{}",
+            display_text
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_history_acp_messages_with_locations_parses_structured_permission() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-permission-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("permission-session.jsonl");
+        let line = serde_json::json!({
+            "type": "assistant",
+            "timestamp": "2026-05-29T05:38:55.000Z",
+            "uuid": "perm-line",
+            "permission": {
+                "requestId": "perm-1",
+                "toolCall": {
+                    "toolCallId": "tool-1",
+                    "fields": {
+                        "title": "Bash",
+                        "rawInput": { "command": "pnpm test" }
+                    }
+                },
+                "options": [
+                    { "optionId": "allow", "name": "Allow", "kind": "allow" },
+                    { "optionId": "reject", "name": "Reject", "kind": "reject" }
+                ],
+                "selectedOptionId": "allow"
+            }
+        });
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 2);
+        let event = &events[0].message;
+        assert_eq!(event.method, "session/request_permission");
+        assert_eq!(event.request_id.as_deref(), Some("perm-1"));
+        assert_eq!(event.data["toolCall"]["fields"]["title"], "Bash");
+        assert_eq!(
+            event.data["toolCall"]["fields"]["rawInput"]["command"],
+            "pnpm test"
+        );
+        assert_eq!(
+            events[1].message.data["outcome"]["optionId"].as_str(),
+            Some("allow")
+        );
+        assert_eq!(event.data["options"].as_array().unwrap().len(), 2);
+        assert_eq!(event.data["toolCall"]["toolCallId"], "tool-1");
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
     }
 
     #[test]
@@ -1665,6 +2008,80 @@ mod tests {
 
         fs::remove_file(&path).ok();
         fs::remove_file(&context_path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_history_acp_messages_strips_leading_ide_context_from_user_prompt() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-ide-context-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("ide-context-session.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "message": {
+                "role": "user",
+                "content": "<ide_opened_file>secret.rs</ide_opened_file>\nreal request"
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let messages = read_history_acp_messages_with_locations(&path).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message.method, "session/prompt");
+        assert_eq!(
+            messages[0].message.data["prompt"][0]["text"].as_str(),
+            Some("<ide_opened_file>secret.rs</ide_opened_file>\nreal request")
+        );
+        let turns = crate::turns::session_history_turns_from_acp_messages(&messages);
+        assert_eq!(
+            turns[0].blocks[0].blocks[0].text.as_deref(),
+            Some("real request")
+        );
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_history_acp_messages_drops_system_noise_after_ide_context() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-claude-ide-noise-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("ide-noise-session.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "timestamp": "2026-05-28T15:39:00.000Z",
+            "message": {
+                "role": "user",
+                "content": "<ide_opened_file>secret.rs</ide_opened_file>\n<environment_context>\nnoise\n</environment_context>"
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{line}\n")).unwrap();
+
+        let messages = read_history_acp_messages_with_locations(&path).unwrap();
+        assert_eq!(messages.len(), 1);
+        let turns = crate::turns::session_history_turns_from_acp_messages(&messages);
+        assert!(turns[0].blocks.is_empty(), "{turns:#?}");
+
+        fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
     }
 }

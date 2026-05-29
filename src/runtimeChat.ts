@@ -1,39 +1,17 @@
 import type {
   AcpProtocolMessage,
   Agent,
-  AgentAttachment,
   AgentRuntimeEvent,
   RuntimeCapabilitySet,
   RuntimeError,
   RuntimeTransportKind,
   RuntimeTurnStatus,
 } from "./api";
-import { sanitizeSessioAttachmentText } from "./historyMerge";
 
 export type LiveRuntimeAction =
   | { type: "runtime-event"; event: AgentRuntimeEvent }
+  | { type: "runtime-turn-snapshot"; event: LiveRuntimeTurnSnapshotEvent }
   | { type: "ensure-session"; session: LiveRuntimeSession }
-  | {
-      type: "optimistic-user-message";
-      sessioRuntimeSessionId: string;
-      turnId: string;
-      text: string;
-      attachments?: AgentAttachment[];
-      timestamp: number;
-    }
-  | {
-      type: "replace-turn-id";
-      sessioRuntimeSessionId: string;
-      from: string;
-      to: string;
-    }
-  | {
-      type: "turn-error";
-      sessioRuntimeSessionId: string;
-      turnId: string;
-      error: RuntimeError;
-      timestamp: number;
-    }
   | {
       type: "reconcile-indexed-session";
       sessioRuntimeSessionId: string;
@@ -58,8 +36,13 @@ export interface LiveRuntimeSession {
   ended: boolean;
 }
 
+export interface LiveRuntimeTurnSnapshotEvent {
+  sequence: number;
+  timestamp: number;
+  session: LiveRuntimeSession;
+}
+
 export interface AcpViewModel {
-  source: "live" | "history";
   turns: LiveTurn[];
   sessionState: AcpSessionState;
   protocolMessages: AcpProtocolMessage[];
@@ -310,7 +293,6 @@ export function emptyAcpSessionState(): AcpSessionState {
 
 export function liveSessionToAcpViewModel(session: LiveRuntimeSession): AcpViewModel {
   return {
-    source: "live",
     turns: session.turns,
     sessionState: session.sessionState,
     protocolMessages: session.protocolMessages,
@@ -320,7 +302,6 @@ export function liveSessionToAcpViewModel(session: LiveRuntimeSession): AcpViewM
 
 export function historyTurnsToAcpViewModel(turns: LiveTurn[]): AcpViewModel {
   return {
-    source: "history",
     turns,
     sessionState: emptyAcpSessionState(),
     protocolMessages: [],
@@ -357,11 +338,16 @@ export function normalizeAgentRuntimeEvent(raw: unknown): AgentRuntimeEvent {
   return camelizeKeys(raw) as AgentRuntimeEvent;
 }
 
+export function normalizeRuntimeTurnSnapshot(raw: unknown): LiveRuntimeTurnSnapshotEvent {
+  return camelizeKeys(raw) as LiveRuntimeTurnSnapshotEvent;
+}
+
 export function applyRuntimeAction(
   state: LiveRuntimeState,
   action: LiveRuntimeAction,
 ): LiveRuntimeState {
-  if (action.type === "runtime-event") return applyRuntimeEvent(state, action.event);
+  if (action.type === "runtime-turn-snapshot") return applyRuntimeTurnSnapshot(state, action.event);
+  if (action.type === "runtime-event") return applyRuntimeEventEnvelope(state, action.event);
 
   if (action.type === "ensure-session") {
     return {
@@ -372,22 +358,6 @@ export function applyRuntimeAction(
           state.sessions[action.session.sessioRuntimeSessionId] ?? action.session,
       },
     };
-  }
-
-  if (action.type === "replace-turn-id") {
-    const session = state.sessions[action.sessioRuntimeSessionId];
-    if (!session) return state;
-    const turns = session.turns.map(cloneTurn);
-    const index = turns.findIndex((turn) => turn.turnId === action.from);
-    if (index < 0) return state;
-    const existing = turns.findIndex((turn) => turn.turnId === action.to);
-    if (existing >= 0 && existing !== index) {
-      turns[existing] = mergeTurns(turns[index], turns[existing], action.to);
-      turns.splice(index, 1);
-    } else {
-      turns[index] = { ...turns[index], turnId: action.to };
-    }
-    return updateSession(state, { ...session, turns });
   }
 
   if (action.type === "reconcile-indexed-session") {
@@ -403,56 +373,7 @@ export function applyRuntimeAction(
     return updateSession(state, { ...session, turns });
   }
 
-  const session = state.sessions[action.sessioRuntimeSessionId];
-  if (!session) return state;
-  const { turns, turn } = upsertTurn(session.turns, action.turnId, action.timestamp);
-  if (action.type === "optimistic-user-message") {
-    turn.status = "streaming";
-    turn.updatedAt = action.timestamp;
-    if (!turn.blocks.some((block) => block.kind === "user")) {
-      const blocks = optimisticUserContentBlocks(action.text, action.attachments ?? []);
-      turn.blocks.push({
-        kind: "user",
-        blocks,
-        raw: { optimistic: true, prompt: blocks },
-        timestamp: action.timestamp,
-      });
-    }
-  } else {
-    turn.status = "failed";
-    turn.error = action.error;
-    turn.updatedAt = action.timestamp;
-    turn.blocks.push({ kind: "error", error: action.error, timestamp: action.timestamp });
-  }
-  return updateSession(state, { ...session, turns });
-}
-
-function optimisticUserContentBlocks(
-  text: string,
-  attachments: AgentAttachment[],
-): AcpContentBlock[] {
-  const blocks: AcpContentBlock[] = [{ type: "text", text }];
-  for (const attachment of attachments) {
-    if (attachment.kind === "image") {
-      blocks.push({
-        type: "image",
-        uri: attachment.previewDataUrl ?? attachment.path,
-        mimeType: attachment.mimeType ?? undefined,
-      });
-      continue;
-    }
-    blocks.push({
-      type: "resource",
-      uri: attachment.path,
-      name: attachment.displayName?.trim() || basenameFromPath(attachment.path),
-      mimeType: attachment.mimeType ?? undefined,
-    });
-  }
-  return blocks;
-}
-
-function basenameFromPath(path: string): string {
-  return path.split(/[/\\]/).filter(Boolean).pop() || "attachment";
+  return state;
 }
 
 function camelizeKeys(value: unknown): unknown {
@@ -469,399 +390,90 @@ function snakeToCamel(value: string): string {
   return value.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase());
 }
 
-export function applyRuntimeEvent(
+function applyRuntimeTurnSnapshot(
+  state: LiveRuntimeState,
+  event: LiveRuntimeTurnSnapshotEvent,
+): LiveRuntimeState {
+  if (event.sequence < state.lastSequence) return state;
+  const existing = state.sessions[event.session.sessioRuntimeSessionId];
+  const session = existing
+    ? mergeRuntimeSessionSnapshot(existing, event.session)
+    : event.session;
+  return {
+    sessions: {
+      ...state.sessions,
+      [session.sessioRuntimeSessionId]: session,
+    },
+    lastSequence: event.sequence,
+  };
+}
+
+function applyRuntimeEventEnvelope(
   state: LiveRuntimeState,
   event: AgentRuntimeEvent,
 ): LiveRuntimeState {
-  if (event.sequence <= state.lastSequence) return state;
-  let next: LiveRuntimeState = { sessions: { ...state.sessions }, lastSequence: event.sequence };
-
-  if (event.kind === "sessionStarted") {
-    const existing = next.sessions[event.sessioRuntimeSessionId];
-    const capabilities =
-      existing?.agentRuntimeSessionId === "pending" && isPlaceholderRuntimeCapabilities(event.capabilities)
-        ? existing.capabilities
-        : event.capabilities;
-    next.sessions[event.sessioRuntimeSessionId] = {
-      sessioRuntimeSessionId: event.sessioRuntimeSessionId,
-      agent: event.agent,
-      agentRuntimeSessionId: event.agentRuntimeSessionId,
-      transport: event.transport,
-      workspacePath: event.workspacePath,
-      capabilities,
-      turns: existing?.turns ?? [],
-      sessionState: existing?.sessionState ?? emptyAcpSessionState(),
-      protocolMessages: existing?.protocolMessages ?? [],
-      ended: false,
-    };
-    return next;
+  if (event.sequence < state.lastSequence) return state;
+  if (event.kind !== "sessionStarted" && event.kind !== "sessionEnded") {
+    return { ...state, lastSequence: event.sequence };
   }
-
-  const session = next.sessions[event.sessioRuntimeSessionId];
-  if (!session) return next;
-
   if (event.kind === "sessionEnded") {
-    return updateSession(next, { ...session, ended: true });
+    const session = state.sessions[event.sessioRuntimeSessionId];
+    if (!session) return { ...state, lastSequence: event.sequence };
+    return {
+      sessions: {
+        ...state.sessions,
+        [session.sessioRuntimeSessionId]: { ...session, ended: true },
+      },
+      lastSequence: event.sequence,
+    };
   }
-
-  if (event.kind === "turnStarted") {
-    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
-    turn.status = "streaming";
-    turn.updatedAt = event.timestamp;
-    return updateSession(next, { ...session, turns });
-  }
-
-  if (event.kind === "turnCompleted") {
-    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
-    turn.status = "completed";
-    turn.updatedAt = event.timestamp;
-    return updateSession(next, { ...session, turns });
-  }
-
-  if (event.kind === "turnCancelled") {
-    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
-    turn.status = "cancelled";
-    turn.updatedAt = event.timestamp;
-    return updateSession(next, { ...session, turns });
-  }
-
-  if (event.kind === "turnError") {
-    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
-    turn.status = "failed";
-    turn.error = event.error;
-    turn.updatedAt = event.timestamp;
-    turn.blocks.push({ kind: "error", error: event.error, timestamp: event.timestamp });
-    return updateSession(next, { ...session, turns });
-  }
-
-  if (event.kind === "permissionResolved") {
-    const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
-    const permission = turn.permissions.find((item) => item.requestId === event.requestId);
-    if (permission) {
-      permission.cancelled = false;
-      permission.selectedOptionId =
-        event.optionId ??
-        permission.options.find((option) =>
-          event.approved ? option.kind.startsWith("allow") : option.kind.startsWith("reject"),
-        )?.optionId ??
-        null;
-    }
-    turn.updatedAt = event.timestamp;
-    return updateSession(next, { ...session, turns });
-  }
-
-  if (event.kind !== "acpProtocolMessage") {
-    return next;
-  }
-
-  const message = event.message;
-  const protocolMessages = appendProtocolMessage(session.protocolMessages, message);
-  if (!event.turnId) {
-    return updateSession(next, {
-      ...session,
-      protocolMessages,
-      sessionState: applySessionLevelMessage(session.sessionState, message),
-    });
-  }
-
-  const { turns, turn } = upsertTurn(session.turns, event.turnId, event.timestamp);
-  turn.protocolMessages = appendProtocolMessage(turn.protocolMessages, message);
-  turn.updatedAt = event.timestamp;
-  applyAcpMessageToTurn(turn, message, event.timestamp);
-  return updateSession(next, {
-    ...session,
-    turns,
-    protocolMessages,
-    sessionState: applySessionLevelMessage(session.sessionState, message),
-  });
-}
-
-function applyAcpMessageToTurn(turn: LiveTurn, message: AcpProtocolMessage, timestamp: number): void {
-  if (message.method === "session/prompt" && message.direction === "client_to_agent") {
-    const prompt = asRecord(message.data).prompt;
-    turn.status = "streaming";
-    replaceOrAppendUserBlock(turn, {
-      kind: "user",
-      blocks: normalizeContentBlocks(prompt, "user"),
-      raw: message.data,
-      timestamp,
-    });
-    return;
-  }
-
-  if (message.method === "session/prompt" && message.direction === "agent_to_client") {
-    const stopReason = stringField(message.data, "stopReason");
-    turn.stopReason = stopReason;
-    turn.status = stopReason === "cancelled" ? "cancelled" : "completed";
-    return;
-  }
-
-  if (message.method === "session/request_permission") {
-    if (message.messageKind === "request") {
-      const permission = permissionFromMessage(message);
-      if (permission) upsertPermission(turn, permission);
-      return;
-    }
-    if (message.messageKind === "response") {
-      const optionId = selectedPermissionOptionId(message.data);
-      const latest = turn.permissions[turn.permissions.length - 1];
-      if (latest) {
-        latest.selectedOptionId = optionId;
-        latest.cancelled = !optionId;
-      }
-      return;
-    }
-  }
-
-  if (message.method !== "session/update") return;
-  const update = asRecord(message.data).update;
-  const updateType = sessionUpdateType(update, message.updateType) ?? "unknown";
-
-  switch (updateType) {
-    case "user_message_chunk":
-      appendContentBlock(turn, "user", normalizeContentBlocks(asRecord(update).content, "user"), update, timestamp);
-      break;
-    case "agent_message_chunk":
-      appendContentBlock(turn, "assistant", normalizeContentBlocks(asRecord(update).content, "assistant"), update, timestamp);
-      turn.status = turn.status === "pending" ? "streaming" : turn.status;
-      break;
-    case "agent_thought_chunk":
-      appendContentBlock(turn, "thought", normalizeContentBlocks(asRecord(update).content, "thought"), update, timestamp);
-      break;
-    case "tool_call": {
-      const tool = toolFromValue(update, timestamp);
-      upsertTool(turn, tool);
-      ensureBlock(turn, { kind: "tool", toolId: tool.toolId, timestamp });
-      break;
-    }
-    case "tool_call_update": {
-      const tool = toolUpdateFromValue(update, timestamp);
-      upsertTool(turn, tool);
-      ensureBlock(turn, { kind: "tool", toolId: tool.toolId, timestamp });
-      break;
-    }
-    case "available_commands":
-    case "current_mode":
-    case "config_options":
-    case "session_info":
-      break;
-    case "plan":
-      turn.blocks.push({ kind: "sessionUpdate", updateType, data: update, timestamp });
-      break;
-    default:
-      turn.blocks.push({ kind: "sessionUpdate", updateType, data: update, timestamp });
-      break;
-  }
-}
-
-function applySessionLevelMessage(state: AcpSessionState, message: AcpProtocolMessage): AcpSessionState {
-  const responseState = sessionResponseState(message);
-  if (responseState) return mergeSessionState(state, responseState);
-
-  if (message.method !== "session/update") return state;
-  const update = asRecord(message.data).update;
-  const updateType = sessionUpdateType(update, message.updateType);
-  if (!updateType) return state;
-  switch (updateType) {
-    case "plan":
-      return { ...state, plan: normalizePlan(update) };
-    case "available_commands":
-      return { ...state, availableCommands: arrayField(update, "availableCommands").map(normalizeAvailableCommand) };
-    case "current_mode":
-      return { ...state, currentModeId: stringField(update, "currentModeId") };
-    case "config_options":
-      return {
-        ...state,
-        configOptions: dedupeSessionConfigOptions(
-          arrayField(update, "configOptions").map(normalizeSessionConfigOption),
-        ),
-      };
-    case "session_info":
-      return { ...state, sessionInfo: normalizeSessionInfo(update) };
-    default:
-      return state;
-  }
-}
-
-function sessionResponseState(message: AcpProtocolMessage): Partial<AcpSessionState> | null {
-  if (message.direction !== "agent_to_client" || message.messageKind !== "response") return null;
-  if (!["session/new", "session/load", "session/resume", "session/fork"].includes(message.method)) {
-    return null;
-  }
-  const data = asRecord(message.data);
-  const modes = normalizeModeConfigOption(data.modes);
-  const models = normalizeModelConfigOption(data.models);
-  const configOptions = arrayField(data, "configOptions").map(normalizeSessionConfigOption);
-  const next: Partial<AcpSessionState> = {};
-  const options = [modes, models, ...configOptions].filter(
-    (option): option is AcpSessionConfigOption => Boolean(option),
-  );
-  if (options.length > 0) next.configOptions = dedupeSessionConfigOptions(options);
-  if (modes) next.currentModeId = String(modes.currentValue ?? "") || null;
-  if (data.sessionId || data.session_id) {
-    next.sessionInfo = normalizeSessionInfo({
-      ...(asRecord(data.sessionInfo)),
-      meta: data.meta ?? data._meta ?? null,
-    });
-  }
-  return Object.keys(next).length > 0 ? next : null;
-}
-
-function mergeSessionState(
-  state: AcpSessionState,
-  patch: Partial<AcpSessionState>,
-): AcpSessionState {
+  const existing = state.sessions[event.sessioRuntimeSessionId];
+  const capabilities =
+    existing?.agentRuntimeSessionId === "pending" && isPlaceholderRuntimeCapabilities(event.capabilities)
+      ? existing.capabilities
+      : event.capabilities;
+  const session: LiveRuntimeSession = {
+    sessioRuntimeSessionId: event.sessioRuntimeSessionId,
+    agent: event.agent,
+    agentRuntimeSessionId: event.agentRuntimeSessionId,
+    transport: event.transport,
+    workspacePath: event.workspacePath,
+    capabilities,
+    turns: existing?.turns ?? [],
+    sessionState: existing?.sessionState ?? emptyAcpSessionState(),
+    protocolMessages: existing?.protocolMessages ?? [],
+    ended: false,
+  };
   return {
-    plan: patch.plan !== undefined ? patch.plan : state.plan,
-    availableCommands:
-      patch.availableCommands !== undefined ? patch.availableCommands : state.availableCommands,
-    currentModeId:
-      patch.currentModeId !== undefined ? patch.currentModeId : state.currentModeId,
-    configOptions:
-      patch.configOptions !== undefined ? patch.configOptions : state.configOptions,
-    sessionInfo:
-      patch.sessionInfo !== undefined ? patch.sessionInfo : state.sessionInfo,
+    sessions: {
+      ...state.sessions,
+      [session.sessioRuntimeSessionId]: session,
+    },
+    lastSequence: event.sequence,
   };
 }
 
-function dedupeSessionConfigOptions(options: AcpSessionConfigOption[]): AcpSessionConfigOption[] {
-  const seen = new Set<string>();
-  const out: AcpSessionConfigOption[] = [];
-  for (const option of options) {
-    const key = sessionConfigOptionIdentity(option);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(option);
-  }
-  return out;
-}
-
-function sessionConfigOptionIdentity(option: AcpSessionConfigOption): string {
-  const id = option.id?.trim();
-  if (id) return `id:${id}`;
-  const category = option.category?.trim();
-  if (category) return `category:${category}`;
-  return `name:${option.name.trim()}`;
-}
-
-function normalizeModeConfigOption(value: unknown): AcpSessionConfigOption | null {
-  const record = asRecord(value);
-  const modes = arrayField(record, "availableModes");
-  if (modes.length === 0) return null;
+function mergeRuntimeSessionSnapshot(
+  existing: LiveRuntimeSession,
+  snapshot: LiveRuntimeSession,
+): LiveRuntimeSession {
+  const capabilities =
+    existing.agentRuntimeSessionId === "pending" && isPlaceholderRuntimeCapabilities(snapshot.capabilities)
+      ? existing.capabilities
+      : snapshot.capabilities;
   return {
-    id: "mode",
-    name: "Mode",
-    description: null,
-    category: "mode",
-    type: "select",
-    currentValue: stringField(record, "currentModeId") ?? "",
-    options: modes.map((mode) => {
-      const item = asRecord(mode);
-      const id = stringField(item, "id") ?? "";
-      return {
-        value: id,
-        name: stringField(item, "name") ?? (id || "Mode"),
-        description: stringField(item, "description"),
-        meta: item.meta ?? item._meta ?? null,
-      };
-    }),
-    groups: undefined,
-    meta: record.meta ?? record._meta ?? null,
-    raw: value,
+    ...snapshot,
+    capabilities,
   };
 }
 
-function normalizeModelConfigOption(value: unknown): AcpSessionConfigOption | null {
-  const record = asRecord(value);
-  const models = arrayField(record, "availableModels");
-  if (models.length === 0) return null;
+function updateSession(state: LiveRuntimeState, session: LiveRuntimeSession): LiveRuntimeState {
   return {
-    id: "model",
-    name: "Model",
-    description: null,
-    category: "model",
-    type: "select",
-    currentValue: stringField(record, "currentModelId") ?? "",
-    options: models.map((model) => {
-      const item = asRecord(model);
-      const id = stringField(item, "modelId") ?? stringField(item, "id") ?? "";
-      return {
-        value: id,
-        name: stringField(item, "name") ?? (id || "Model"),
-        description: stringField(item, "description"),
-        meta: item.meta ?? item._meta ?? null,
-      };
-    }),
-    groups: undefined,
-    meta: record.meta ?? record._meta ?? null,
-    raw: value,
-  };
-}
-
-function sessionUpdateType(update: unknown, fallback: string | null | undefined): string | null {
-  const value = stringField(update, "sessionUpdate") ?? fallback ?? null;
-  switch (value) {
-    case "plan_update":
-      return "plan";
-    case "available_commands_update":
-      return "available_commands";
-    case "current_mode_update":
-      return "current_mode";
-    case "config_options_update":
-      return "config_options";
-    case "session_info_update":
-      return "session_info";
-    default:
-      return value;
-  }
-}
-
-function upsertTurn(turns: LiveTurn[], turnId: string, timestamp: number): { turns: LiveTurn[]; turn: LiveTurn } {
-  const next = turns.map(cloneTurn);
-  let index = next.findIndex((turn) => turn.turnId === turnId);
-  if (index < 0) {
-    next.push(newTurn(turnId, timestamp));
-    index = next.length - 1;
-  }
-  return { turns: next, turn: next[index] };
-}
-
-function newTurn(turnId: string, timestamp: number): LiveTurn {
-  return {
-    turnId,
-    status: "pending",
-    blocks: [],
-    tools: [],
-    permissions: [],
-    protocolMessages: [],
-    stopReason: null,
-    error: null,
-    startedAt: timestamp,
-    updatedAt: timestamp,
-  };
-}
-
-function cloneTurn(turn: LiveTurn): LiveTurn {
-  return {
-    ...turn,
-    blocks: turn.blocks.map((block) => ({ ...block })),
-    tools: turn.tools.map((tool) => ({ ...tool })),
-    permissions: turn.permissions.map((permission) => ({ ...permission, options: permission.options.map((option) => ({ ...option })) })),
-    protocolMessages: turn.protocolMessages.map((message) => ({ ...message })),
-  };
-}
-
-function mergeTurns(localTurn: LiveTurn, runtimeTurn: LiveTurn, turnId: string): LiveTurn {
-  return {
-    ...runtimeTurn,
-    turnId,
-    blocks: mergeTurnBlocks(localTurn.blocks, runtimeTurn.blocks),
-    tools: mergeBy(localTurn.tools, runtimeTurn.tools, (tool) => tool.toolId),
-    permissions: mergeBy(localTurn.permissions, runtimeTurn.permissions, (permission) => permission.requestId),
-    protocolMessages: [...localTurn.protocolMessages, ...runtimeTurn.protocolMessages],
-    error: runtimeTurn.error ?? localTurn.error,
-    startedAt: Math.min(localTurn.startedAt, runtimeTurn.startedAt),
-    updatedAt: Math.max(localTurn.updatedAt, runtimeTurn.updatedAt),
+    ...state,
+    sessions: {
+      ...state.sessions,
+      [session.sessioRuntimeSessionId]: session,
+    },
   };
 }
 
@@ -877,481 +489,4 @@ function isPlaceholderRuntimeCapabilities(capabilities: RuntimeCapabilitySet): b
     && !capabilities.supportsEmbeddedContext
     && !capabilities.supportsAttachments
     && !capabilities.supportsModes;
-}
-
-function mergeTurnBlocks(localBlocks: AcpRenderBlock[], runtimeBlocks: AcpRenderBlock[]): AcpRenderBlock[] {
-  if (runtimeBlocks.some((block) => block.kind === "user")) {
-    return [
-      ...localBlocks.filter((block) => block.kind !== "user"),
-      ...runtimeBlocks,
-    ];
-  }
-  return [...localBlocks, ...runtimeBlocks];
-}
-
-function mergeBy<T>(left: T[], right: T[], key: (item: T) => string): T[] {
-  const merged = left.map((item) => ({ ...item }));
-  for (const item of right) {
-    const index = merged.findIndex((existing) => key(existing) === key(item));
-    if (index >= 0) merged[index] = { ...merged[index], ...item };
-    else merged.push({ ...item });
-  }
-  return merged;
-}
-
-function updateSession(state: LiveRuntimeState, session: LiveRuntimeSession): LiveRuntimeState {
-  return {
-    ...state,
-    sessions: {
-      ...state.sessions,
-      [session.sessioRuntimeSessionId]: session,
-    },
-  };
-}
-
-function appendProtocolMessage(messages: AcpProtocolMessage[], message: AcpProtocolMessage): AcpProtocolMessage[] {
-  return [...messages, message].slice(-240);
-}
-
-function replaceOrAppendUserBlock(turn: LiveTurn, block: Extract<AcpRenderBlock, { kind: "user" }>): void {
-  const index = turn.blocks.findIndex((item) => item.kind === "user");
-  if (index >= 0) turn.blocks[index] = block;
-  else turn.blocks.unshift(block);
-}
-
-function appendContentBlock(
-  turn: LiveTurn,
-  kind: "user" | "assistant" | "thought",
-  blocks: AcpContentBlock[],
-  raw: unknown,
-  timestamp: number,
-): void {
-  if (blocks.length === 0) return;
-  const last = turn.blocks[turn.blocks.length - 1];
-  if (last?.kind === kind) {
-    appendBlocksToContentBlockGroup(last, blocks);
-    last.timestamp = last.timestamp ?? timestamp;
-    return;
-  }
-  turn.blocks.push({ kind, blocks: mergeAdjacentTextBlocks(blocks), raw, timestamp });
-}
-
-function appendBlocksToContentBlockGroup(
-  target: Extract<AcpRenderBlock, { kind: "user" | "assistant" | "thought" }>,
-  blocks: AcpContentBlock[],
-): void {
-  target.blocks = mergeAdjacentTextBlocks([...target.blocks, ...blocks]);
-}
-
-function mergeAdjacentTextBlocks(blocks: AcpContentBlock[]): AcpContentBlock[] {
-  const merged: AcpContentBlock[] = [];
-  for (const block of blocks) {
-    const previous = merged[merged.length - 1];
-    if (
-      previous &&
-      previous.type === "text" &&
-      block.type === "text" &&
-      typeof previous.text === "string" &&
-      typeof block.text === "string" &&
-      sameTextBlockShape(previous, block)
-    ) {
-      previous.text += block.text;
-    } else {
-      merged.push({ ...block });
-    }
-  }
-  return merged;
-}
-
-function sameTextBlockShape(left: AcpContentBlock, right: AcpContentBlock): boolean {
-  return JSON.stringify(textBlockMetadata(left)) === JSON.stringify(textBlockMetadata(right));
-}
-
-function textBlockMetadata(block: AcpContentBlock): Record<string, unknown> {
-  const metadata = { ...(block as unknown as Record<string, unknown>) };
-  delete metadata.text;
-  return metadata;
-}
-
-function ensureBlock(turn: LiveTurn, block: Extract<AcpRenderBlock, { kind: "tool" } | { kind: "permission" }>): void {
-  if (block.kind === "tool" && turn.blocks.some((item) => item.kind === "tool" && item.toolId === block.toolId)) return;
-  if (block.kind === "permission" && turn.blocks.some((item) => item.kind === "permission" && item.requestId === block.requestId)) return;
-  turn.blocks.push(block);
-}
-
-type NormalizeContentRole = "user" | "assistant" | "thought";
-
-function normalizeContentBlocks(value: unknown, role: NormalizeContentRole): AcpContentBlock[] {
-  if (Array.isArray(value)) return value.flatMap((item) => normalizeContentBlocks(item, role));
-  if (!value || typeof value !== "object") return [];
-  const record = value as Record<string, unknown>;
-  if (record.content && typeof record.content === "object" && !Array.isArray(record.content)) {
-    return [normalizeContentBlock(record.content, role)];
-  }
-  if (typeof record.type === "string") return [normalizeContentBlock(record, role)];
-  return [];
-}
-
-function normalizeContentBlock(value: unknown, role: NormalizeContentRole | null = null): AcpContentBlock {
-  const record = asRecord(value);
-  const type = stringField(record, "type") ?? "unknown";
-  const meta = record.meta ?? record._meta ?? null;
-  if (type === "text") {
-    return {
-      ...record,
-      type,
-      text: role === "user"
-        ? sanitizeSessioAttachmentText(stringField(record, "text") ?? "")
-        : stringField(record, "text") ?? "",
-      annotations: record.annotations ?? null,
-      meta,
-    };
-  }
-  if (type === "image" || type === "audio") {
-    return {
-      ...record,
-      type,
-      uri: stringField(record, "uri") ?? undefined,
-      data: stringField(record, "data") ?? undefined,
-      mimeType: stringField(record, "mimeType") ?? undefined,
-      annotations: record.annotations ?? null,
-      meta,
-    };
-  }
-  if (type === "resource_link") {
-    const uri = stringField(record, "uri") ?? "";
-    const name = stringField(record, "name") ?? undefined;
-    const mimeType = stringField(record, "mimeType") ?? undefined;
-    if (isSessioCrossContextResource({ uri, name, text: undefined })) {
-      return {
-        type,
-        uri,
-        name,
-        mimeType,
-        annotations: record.annotations ?? null,
-        meta,
-      };
-    }
-    return {
-      ...record,
-      type,
-      uri,
-      name,
-      title: stringField(record, "title") ?? undefined,
-      description: stringField(record, "description") ?? undefined,
-      mimeType,
-      size: numberField(record, "size") ?? undefined,
-      annotations: record.annotations ?? null,
-      meta,
-    };
-  }
-  if (type === "resource") {
-    const resource = asRecord(record.resource);
-    const uri = stringField(resource, "uri") ?? stringField(record, "uri") ?? undefined;
-    const name = stringField(record, "name") ?? basenameFromUri(uri ?? "") ?? undefined;
-    const mimeType = stringField(resource, "mimeType") ?? stringField(record, "mimeType") ?? undefined;
-    const text = stringField(resource, "text") ?? stringField(record, "text") ?? undefined;
-    const blob = stringField(resource, "blob") ?? stringField(record, "blob") ?? undefined;
-    if (isSessioCrossContextResource({ uri, name, text })) {
-      return {
-        type,
-        uri,
-        name,
-        mimeType,
-        annotations: record.annotations ?? null,
-        meta,
-      };
-    }
-    return {
-      ...record,
-      type,
-      uri,
-      name: stringField(record, "name") ?? undefined,
-      mimeType,
-      text,
-      blob,
-      resource: record.resource ?? null,
-      annotations: record.annotations ?? null,
-      meta,
-    };
-  }
-  return { ...record, type: "unknown", originalType: type, meta } as AcpUnknownContentBlock;
-}
-
-function isSessioCrossContextResource({
-  uri,
-  name,
-  text,
-}: {
-  uri?: string;
-  name?: string;
-  text?: string;
-}): boolean {
-  return Boolean(
-    uri?.includes("sessio-cross-context") ||
-    name?.includes("sessio-cross-context") ||
-    text?.includes("<!-- sessio-cross:start"),
-  );
-}
-
-function basenameFromUri(uri: string): string | null {
-  if (!uri) return null;
-  const path = uri.startsWith("file://") ? decodeURIComponent(uri.slice("file://".length)) : uri;
-  return path.split(/[/\\]/).filter(Boolean).pop() || null;
-}
-
-function toolFromValue(value: unknown, timestamp: number): AcpToolCall {
-  const record = asRecord(value);
-  const id = stringField(record, "toolCallId") ?? `tool-${timestamp}`;
-  return {
-    toolId: id,
-    title: stringField(record, "title") ?? "tool",
-    kind: stringField(record, "kind") ?? "other",
-    status: stringField(record, "status") ?? "pending",
-    content: arrayField(record, "content").map(normalizeToolCallContent),
-    locations: arrayField(record, "locations").map(normalizeToolCallLocation),
-    rawInput: record.rawInput ?? null,
-    rawOutput: record.rawOutput ?? null,
-    meta: record.meta ?? null,
-    raw: value,
-    updatedAt: timestamp,
-  };
-}
-
-function toolUpdateFromValue(value: unknown, timestamp: number): AcpToolCall {
-  const record = asRecord(value);
-  return {
-    toolId: stringField(record, "toolCallId") ?? `tool-${timestamp}`,
-    title: stringField(record, "title") ?? "tool",
-    kind: stringField(record, "kind") ?? "other",
-    status: stringField(record, "status") ?? "pending",
-    content: arrayField(record, "content").map(normalizeToolCallContent),
-    locations: arrayField(record, "locations").map(normalizeToolCallLocation),
-    rawInput: record.rawInput ?? null,
-    rawOutput: record.rawOutput ?? null,
-    meta: record.meta ?? null,
-    raw: value,
-    updatedAt: timestamp,
-  };
-}
-
-function normalizeToolCallContent(value: unknown): AcpToolCallContent {
-  const record = asRecord(value);
-  const type = stringField(record, "type") ?? "unknown";
-  const meta = record.meta ?? record._meta ?? null;
-  if (type === "content") {
-    return {
-      ...record,
-      type,
-      content: normalizeContentBlock(record.content),
-      meta,
-    };
-  }
-  if (type === "diff") {
-    return {
-      ...record,
-      type,
-      path: stringField(record, "path") ?? stringField(record, "filePath") ?? undefined,
-      oldText: stringField(record, "oldText") ?? stringField(record, "old_text") ?? null,
-      newText: stringField(record, "newText") ?? stringField(record, "new_text") ?? "",
-      meta,
-    };
-  }
-  if (type === "terminal") {
-    return {
-      ...record,
-      type,
-      terminalId: stringField(record, "terminalId") ?? stringField(record, "terminal_id") ?? "",
-      meta,
-    };
-  }
-  return { ...record, type: "unknown", originalType: type, meta } as AcpUnknownToolContent;
-}
-
-function normalizeToolCallLocation(value: unknown): AcpToolCallLocation {
-  return asRecord(value) as AcpToolCallLocation;
-}
-
-function normalizePlan(value: unknown): AcpPlan {
-  const record = asRecord(value);
-  return {
-    entries: arrayField(record, "entries").map((entry) => {
-      const item = asRecord(entry);
-      return {
-        content: stringField(item, "content") ?? "",
-        priority: stringField(item, "priority") ?? "medium",
-        status: stringField(item, "status") ?? "pending",
-        meta: item.meta ?? item._meta ?? null,
-      };
-    }),
-    meta: record.meta ?? record._meta ?? null,
-  };
-}
-
-function normalizeAvailableCommand(value: unknown): AcpAvailableCommand {
-  const record = asRecord(value);
-  return {
-    name: stringField(record, "name") ?? "command",
-    description: stringField(record, "description") ?? "",
-    input: normalizeAvailableCommandInput(record.input),
-    meta: record.meta ?? record._meta ?? null,
-  };
-}
-
-function normalizeAvailableCommandInput(value: unknown): AcpAvailableCommandInput | null {
-  if (value === null || value === undefined) return null;
-  const record = asRecord(value);
-  const hint = stringField(record, "hint");
-  return {
-    kind: hint !== undefined ? "unstructured" : "unknown",
-    hint,
-    meta: record.meta ?? record._meta ?? null,
-    raw: value,
-  };
-}
-
-function normalizeSessionConfigOption(value: unknown): AcpSessionConfigOption {
-  const record = asRecord(value);
-  const type = stringField(record, "type") ?? undefined;
-  const option: AcpSessionConfigOption = {
-    id: stringField(record, "id") ?? "",
-    name: stringField(record, "name") ?? "Option",
-    description: stringField(record, "description"),
-    category: stringField(record, "category"),
-    type,
-    currentValue: record.currentValue as string | boolean | null | undefined,
-    meta: record.meta ?? record._meta ?? null,
-    raw: value,
-  };
-  if (type === "select") {
-    option.options = normalizeConfigChoices(record.options).options;
-    option.groups = normalizeConfigChoices(record.options).groups;
-  }
-  if (type === "boolean" && typeof record.currentValue === "boolean") {
-    option.currentValue = record.currentValue;
-  }
-  return option;
-}
-
-function normalizeConfigChoices(value: unknown): {
-  options?: AcpSessionConfigChoice[];
-  groups?: AcpSessionConfigChoiceGroup[];
-} {
-  if (!Array.isArray(value)) return {};
-  const first = asRecord(value[0]);
-  if ("options" in first && "group" in first) {
-    return {
-      groups: value.map((groupValue) => {
-        const group = asRecord(groupValue);
-        return {
-          group: stringField(group, "group") ?? "",
-          name: stringField(group, "name") ?? "Group",
-          options: arrayField(group, "options").map(normalizeConfigChoice),
-          meta: group.meta ?? group._meta ?? null,
-        };
-      }),
-    };
-  }
-  return { options: value.map(normalizeConfigChoice) };
-}
-
-function normalizeConfigChoice(value: unknown): AcpSessionConfigChoice {
-  const record = asRecord(value);
-  return {
-    value: stringField(record, "value") ?? "",
-    name: stringField(record, "name") ?? "Option",
-    description: stringField(record, "description"),
-    meta: record.meta ?? record._meta ?? null,
-  };
-}
-
-function normalizeSessionInfo(value: unknown): AcpSessionInfo {
-  const record = asRecord(value);
-  return {
-    title: stringField(record, "title"),
-    updatedAt: stringField(record, "updatedAt"),
-    meta: record.meta ?? record._meta ?? null,
-    raw: record,
-  };
-}
-
-function upsertTool(turn: LiveTurn, nextTool: AcpToolCall): void {
-  const index = turn.tools.findIndex((tool) => tool.toolId === nextTool.toolId);
-  if (index < 0) {
-    turn.tools.push(nextTool);
-    return;
-  }
-  const current = turn.tools[index];
-  turn.tools[index] = {
-    ...current,
-    ...nextTool,
-    title: nextTool.title === "tool" ? current.title : nextTool.title,
-    kind: nextTool.kind === "other" ? current.kind : nextTool.kind,
-    status: nextTool.status === "pending" && current.status ? current.status : nextTool.status,
-    content: nextTool.content.length > 0 ? nextTool.content : current.content,
-    locations: nextTool.locations.length > 0 ? nextTool.locations : current.locations,
-    rawInput: nextTool.rawInput ?? current.rawInput,
-    rawOutput: nextTool.rawOutput ?? current.rawOutput,
-  };
-}
-
-function permissionFromMessage(message: AcpProtocolMessage): AcpPermissionRequest | null {
-  const data = asRecord(message.data);
-  const requestId = message.requestId ?? stringField(asRecord(data.toolCall), "toolCallId");
-  if (!requestId) return null;
-  const toolCall = asRecord(data.toolCall);
-  const fields = asRecord(toolCall.fields ?? toolCall);
-  return {
-    requestId,
-    toolCall: data.toolCall ?? null,
-    toolName: stringField(fields, "title") ?? "tool",
-    input: fields.rawInput ?? null,
-    options: arrayField(data, "options").map((item) => {
-      const option = asRecord(item);
-      return {
-        optionId: stringField(option, "optionId") ?? "",
-        name: stringField(option, "name") ?? "Option",
-        kind: stringField(option, "kind") ?? "unknown",
-        meta: option.meta ?? null,
-      };
-    }),
-    selectedOptionId: null,
-    cancelled: false,
-    raw: message.data,
-  };
-}
-
-function upsertPermission(turn: LiveTurn, permission: AcpPermissionRequest): void {
-  const index = turn.permissions.findIndex((item) => item.requestId === permission.requestId);
-  if (index >= 0) turn.permissions[index] = { ...turn.permissions[index], ...permission };
-  else turn.permissions.push(permission);
-  ensureBlock(turn, { kind: "permission", requestId: permission.requestId });
-}
-
-function selectedPermissionOptionId(value: unknown): string | null {
-  const outcome = asRecord(value).outcome;
-  const record = asRecord(outcome);
-  if (stringField(record, "outcome") === "cancelled") return null;
-  return stringField(record, "optionId");
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function stringField(value: unknown, key: string): string | null {
-  const item = asRecord(value)[key];
-  return typeof item === "string" ? item : null;
-}
-
-function numberField(value: unknown, key: string): number | null {
-  const item = asRecord(value)[key];
-  return typeof item === "number" ? item : null;
-}
-
-function arrayField(value: unknown, key: string): unknown[] {
-  const item = asRecord(value)[key];
-  return Array.isArray(item) ? item : [];
 }

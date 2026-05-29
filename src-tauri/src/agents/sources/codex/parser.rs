@@ -4,18 +4,20 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::agents::sources::shared::attachment_text::{
-    sanitize_user_attachment_text, sanitize_user_preview_text,
-};
+use crate::agents::runtime::types::AcpProtocolMessage;
+use crate::agents::sources::shared::attachment_text::clean_history_user_preview_text;
 use crate::agents::sources::shared::cross_context::{
     cross_context_lineage_from_payload, cross_context_lineage_from_text,
 };
 use crate::agents::sources::system_time_to_millis;
-use crate::agents::sources::types::SourceLocation;
-use crate::models::{
-    is_system_noise, normalize_preview, strip_injected_context, Agent, SessionInfo, SessionMessage,
-    SubagentInfo,
+use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
+use crate::models::{normalize_preview, Agent, SessionInfo, SubagentInfo};
+use crate::turns::{
+    history_content_update, history_permission_request_message, history_prompt_message,
+    history_session_update_message, history_thought_message, history_tool_call_message,
+    history_tool_result_message,
 };
+use serde_json::Value;
 
 const REVERSE_TIMESTAMP_CHUNK_SIZE: u64 = 16 * 1024;
 
@@ -180,18 +182,12 @@ fn group_codex_sessions(parsed: Vec<CodexParsedSession>) -> Vec<SessionInfo> {
     top_level
 }
 
-pub fn read_messages(path: &Path) -> Result<Vec<SessionMessage>> {
-    Ok(read_messages_with_locations(path)?
-        .into_iter()
-        .map(|(m, _)| m)
-        .collect())
-}
-
-// Same as read_messages but also returns the SourceLocation (line + byte
-// range) of the JSONL line each message was parsed from. Some Codex lines can
-// expand into multiple SessionMessage entries (e.g. image_generation_call as
-// tool call + result), all sharing the originating line location.
-pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, SourceLocation)>> {
+// Same as read_messages but returns synthetic ACP protocol messages and the
+// SourceLocation (line + byte range) of the JSONL line each message was parsed
+// from. Some Codex lines can expand into multiple messages (e.g.
+// image_generation_call as tool call + result), all sharing the originating
+// line location.
+pub fn read_history_acp_messages_with_locations(path: &Path) -> Result<Vec<HistoryAcpMessage>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut out = Vec::new();
@@ -200,6 +196,8 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
     let mut byte_offset: u64 = 0;
     let mut line_number: u64 = 0;
     let mut cwd: Option<String> = None;
+    let mut suppressed_tool_result_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     loop {
         buf.clear();
@@ -226,7 +224,7 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
             .get("timestamp")
             .and_then(|t| t.as_str())
             .and_then(parse_iso);
-        let messages = interpret_record(&v, ts, cwd.as_deref());
+        let messages = interpret_record(&v, ts, cwd.as_deref(), &mut suppressed_tool_result_ids);
         if messages.is_empty() {
             continue;
         }
@@ -238,7 +236,12 @@ pub fn read_messages_with_locations(path: &Path) -> Result<Vec<(SessionMessage, 
             byte_end: Some(line_end_byte),
         };
         for message in messages {
-            out.push((message, location.clone()));
+            out.push(HistoryAcpMessage {
+                message,
+                timestamp: ts,
+                location: location.clone(),
+                synthetic: true,
+            });
         }
     }
     Ok(out)
@@ -248,10 +251,11 @@ fn interpret_record(
     v: &serde_json::Value,
     ts: Option<i64>,
     cwd: Option<&str>,
-) -> Vec<SessionMessage> {
+    suppressed_tool_result_ids: &mut std::collections::HashSet<String>,
+) -> Vec<AcpProtocolMessage> {
     match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
         "response_item" => match v.get("payload") {
-            Some(payload) => interpret_payload(payload, ts),
+            Some(payload) => interpret_payload(payload, ts, suppressed_tool_result_ids),
             None => Vec::new(),
         },
         "event_msg" => match v.get("payload") {
@@ -281,7 +285,7 @@ fn interpret_event_payload(
     payload: &serde_json::Value,
     ts: Option<i64>,
     cwd: Option<&str>,
-) -> Vec<SessionMessage> {
+) -> Vec<AcpProtocolMessage> {
     match payload.get("type").and_then(|t| t.as_str()).unwrap_or("") {
         "patch_apply_end" => {
             if payload.get("success").and_then(|x| x.as_bool()) != Some(true) {
@@ -313,11 +317,37 @@ fn interpret_event_payload(
                 .collect();
             file_edit_message("codex", edits, ts).into_iter().collect()
         }
+        "session_update" | "session/update" => {
+            let update = payload
+                .get("update")
+                .cloned()
+                .unwrap_or_else(|| payload.clone());
+            match session_update_type_from_value(&update) {
+                Some("plan") => vec![history_session_update_message(
+                    "plan",
+                    normalize_plan_update_value(update),
+                    ts,
+                )],
+                _ => Vec::new(),
+            }
+        }
+        "plan_update" => vec![history_session_update_message(
+            "plan",
+            normalize_plan_update_value(payload.clone()),
+            ts,
+        )],
+        "permission_request" | "request_permission" | "session/request_permission" => {
+            codex_permission_event(payload, ts).unwrap_or_default()
+        }
         _ => Vec::new(),
     }
 }
 
-fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
+fn interpret_payload(
+    payload: &serde_json::Value,
+    ts: Option<i64>,
+    suppressed_tool_result_ids: &mut std::collections::HashSet<String>,
+) -> Vec<AcpProtocolMessage> {
     let kind = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
     match kind {
         "message" => {
@@ -329,19 +359,16 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
             if role == "developer" {
                 return Vec::new();
             }
-            let raw = extract_message_text(payload).unwrap_or_default();
-            let text = if role == "user" {
-                sanitize_user_attachment_text(&raw)
-            } else {
-                raw
-            };
-            if text.trim().is_empty() {
+            let content = extract_message_content(payload);
+            if content.is_empty() {
                 return Vec::new();
             }
-            if role == "user" && is_system_noise(&text) {
-                return Vec::new();
+            match role.as_str() {
+                "user" => vec![history_prompt_message(content, ts)],
+                "assistant" => vec![history_content_update("agent_message_chunk", content, ts)],
+                "thinking" => vec![history_content_update("agent_thought_chunk", content, ts)],
+                _ => vec![history_content_update("agent_message_chunk", content, ts)],
             }
-            vec![SessionMessage::new(role, text, ts)]
         }
         "function_call" => {
             let name = payload
@@ -352,37 +379,44 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
                 .get("arguments")
                 .and_then(|x| x.as_str())
                 .unwrap_or("");
-            let args_pretty = serde_json::from_str::<serde_json::Value>(args_raw)
-                .ok()
-                .and_then(|v| serde_json::to_string_pretty(&v).ok())
-                .unwrap_or_else(|| args_raw.to_string());
-            let text = if args_pretty.trim().is_empty() {
-                format!("[{name}]")
-            } else {
-                format!("[{name}]\n{args_pretty}")
-            };
-            vec![
-                SessionMessage::new("tool_call", text, ts).with_tool_call_id(
-                    payload
-                        .get("call_id")
-                        .and_then(|x| x.as_str())
-                        .map(String::from),
-                ),
-            ]
+            let input = parse_json_string_or_text(args_raw);
+            if is_codex_plan_tool(name) {
+                if let Some(call_id) = payload.get("call_id").and_then(|x| x.as_str()) {
+                    suppressed_tool_result_ids.insert(call_id.to_string());
+                }
+                return codex_plan_event(input, ts);
+            }
+            vec![history_tool_call_message(
+                payload
+                    .get("call_id")
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+                name,
+                input,
+                ts,
+            )]
         }
         "function_call_output" => {
-            let output = extract_function_call_output_text(payload);
-            if output.trim().is_empty() {
+            if payload
+                .get("call_id")
+                .and_then(|x| x.as_str())
+                .map(|call_id| suppressed_tool_result_ids.remove(call_id))
+                .unwrap_or(false)
+            {
                 return Vec::new();
             }
-            vec![
-                SessionMessage::new("tool_result", output, ts).with_tool_call_id(
-                    payload
-                        .get("call_id")
-                        .and_then(|x| x.as_str())
-                        .map(String::from),
-                ),
-            ]
+            let output = extract_function_call_output_value(payload);
+            if is_empty_tool_output(&output) {
+                return Vec::new();
+            }
+            vec![history_tool_result_message(
+                payload
+                    .get("call_id")
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+                output,
+                ts,
+            )]
         }
         "custom_tool_call" => {
             let name = payload
@@ -391,59 +425,63 @@ fn interpret_payload(payload: &serde_json::Value, ts: Option<i64>) -> Vec<Sessio
                 .unwrap_or("tool");
             let input = payload
                 .get("input")
-                .and_then(|x| x.as_str())
-                .map(String::from)
-                .or_else(|| {
-                    payload
-                        .get("arguments")
-                        .and_then(|x| x.as_str())
-                        .map(String::from)
-                })
-                .or_else(|| {
-                    payload
-                        .get("input")
-                        .and_then(|x| serde_json::to_string_pretty(x).ok())
-                })
-                .unwrap_or_default();
-            let text = if input.trim().is_empty() {
-                format!("[{name}]")
-            } else {
-                format!("[{name}]\n{input}")
-            };
-            vec![
-                SessionMessage::new("tool_call", text, ts).with_tool_call_id(
-                    payload
-                        .get("call_id")
-                        .or_else(|| payload.get("id"))
-                        .and_then(|x| x.as_str())
-                        .map(String::from),
-                ),
-            ]
+                .or_else(|| payload.get("arguments"))
+                .map(history_input_value)
+                .unwrap_or(Value::Null);
+            if is_codex_plan_tool(name) {
+                if let Some(call_id) = payload
+                    .get("call_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|x| x.as_str())
+                {
+                    suppressed_tool_result_ids.insert(call_id.to_string());
+                }
+                return codex_plan_event(input, ts);
+            }
+            vec![history_tool_call_message(
+                payload
+                    .get("call_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+                name,
+                input,
+                ts,
+            )]
         }
         "custom_tool_call_output" => {
-            let output = payload
-                .get("output")
-                .map(extract_tool_output_text)
-                .unwrap_or_default();
-            if output.trim().is_empty() {
+            if payload
+                .get("call_id")
+                .or_else(|| payload.get("id"))
+                .and_then(|x| x.as_str())
+                .map(|call_id| suppressed_tool_result_ids.remove(call_id))
+                .unwrap_or(false)
+            {
                 return Vec::new();
             }
-            vec![
-                SessionMessage::new("tool_result", output, ts).with_tool_call_id(
-                    payload
-                        .get("call_id")
-                        .or_else(|| payload.get("id"))
-                        .and_then(|x| x.as_str())
-                        .map(String::from),
-                ),
-            ]
+            let output = payload
+                .get("output")
+                .map(extract_tool_output_value)
+                .unwrap_or(Value::Null);
+            if is_empty_tool_output(&output) {
+                return Vec::new();
+            }
+            vec![history_tool_result_message(
+                payload
+                    .get("call_id")
+                    .or_else(|| payload.get("id"))
+                    .and_then(|x| x.as_str())
+                    .map(String::from),
+                output,
+                ts,
+            )]
         }
         "reasoning" => {
             let text = extract_reasoning_text(payload);
             if text.trim().is_empty() {
                 return Vec::new();
             }
-            vec![SessionMessage::new("thinking", text, ts)]
+            vec![history_thought_message(text, ts)]
         }
         "web_search_call" => interpret_web_search_call(payload, ts),
         "image_generation_call" => interpret_image_generation_call(payload, ts),
@@ -554,11 +592,8 @@ fn parse_session(
                                 forked_from_id = Some(lineage.session_id);
                             }
                         }
-                        if !is_system_noise(text) {
-                            let cleaned = strip_injected_context(&sanitize_user_preview_text(text));
-                            if !cleaned.is_empty() {
-                                first_user_message = Some(normalize_preview(&cleaned));
-                            }
+                        if let Some(cleaned) = clean_history_user_preview_text(text) {
+                            first_user_message = Some(normalize_preview(&cleaned));
                         }
                     }
                 }
@@ -579,12 +614,7 @@ fn parse_session(
                         }
                     }
                     if let Some(text) = extract_message_preview_text(payload) {
-                        if !is_system_noise(&text) {
-                            let cleaned = strip_injected_context(&text);
-                            if !cleaned.is_empty() {
-                                first_user_message = Some(normalize_preview(&cleaned));
-                            }
-                        }
+                        first_user_message = Some(normalize_preview(&text));
                     }
                 }
             }
@@ -699,10 +729,9 @@ fn load_session_index_titles() -> HashMap<String, String> {
         if id.is_empty() || thread_name.trim().is_empty() {
             continue;
         }
-        let cleaned = strip_injected_context(&sanitize_user_preview_text(thread_name));
-        if cleaned.is_empty() {
+        let Some(cleaned) = clean_history_user_preview_text(thread_name) else {
             continue;
-        }
+        };
         titles.insert(id.to_string(), normalize_preview(&cleaned));
     }
     titles
@@ -759,14 +788,9 @@ fn latest_timestamp_from_file(path: &Path) -> Result<Option<i64>> {
     Ok(None)
 }
 
-fn extract_message_text(payload: &serde_json::Value) -> Option<String> {
-    extract_message_text_inner(payload)
-}
-
 fn extract_message_preview_text(payload: &serde_json::Value) -> Option<String> {
     if let Some(text) = payload.get("content").and_then(|x| x.as_str()) {
-        let cleaned = sanitize_user_preview_text(text);
-        if !cleaned.trim().is_empty() {
+        if let Some(cleaned) = clean_history_user_preview_text(text) {
             return Some(cleaned);
         }
     }
@@ -781,8 +805,7 @@ fn extract_message_preview_text(payload: &serde_json::Value) -> Option<String> {
                     .or_else(|| item.get("content"))
                     .and_then(|x| x.as_str())
                 {
-                    let cleaned = sanitize_user_preview_text(text);
-                    if !cleaned.trim().is_empty() {
+                    if let Some(cleaned) = clean_history_user_preview_text(text) {
                         parts.push(cleaned);
                     }
                 }
@@ -794,8 +817,7 @@ fn extract_message_preview_text(payload: &serde_json::Value) -> Option<String> {
     }
     for key in ["text", "message"] {
         if let Some(text) = payload.get(key).and_then(|x| x.as_str()) {
-            let cleaned = sanitize_user_preview_text(text);
-            if !cleaned.trim().is_empty() {
+            if let Some(cleaned) = clean_history_user_preview_text(text) {
                 return Some(cleaned);
             }
         }
@@ -803,13 +825,11 @@ fn extract_message_preview_text(payload: &serde_json::Value) -> Option<String> {
     None
 }
 
-fn extract_message_text_inner(payload: &serde_json::Value) -> Option<String> {
+fn extract_message_content(payload: &serde_json::Value) -> Vec<Value> {
+    let mut blocks = Vec::new();
     if let Some(text) = payload.get("content").and_then(|x| x.as_str()) {
-        if !text.trim().is_empty() {
-            return Some(text.to_string());
-        }
+        push_text_content(&mut blocks, text);
     }
-    let mut parts = Vec::new();
     if let Some(content) = payload.get("content").and_then(|x| x.as_array()) {
         for item in content {
             let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -820,35 +840,77 @@ fn extract_message_text_inner(payload: &serde_json::Value) -> Option<String> {
                     .or_else(|| item.get("content"))
                     .and_then(|x| x.as_str())
                 {
-                    if !text.trim().is_empty() {
-                        parts.push(text.to_string());
-                    }
+                    push_text_content(&mut blocks, text);
                 }
             } else if matches!(kind, "input_image" | "image_url") {
-                if let Some(markdown) = image_item_to_markdown(item, parts.len() + 1) {
-                    parts.push(markdown);
+                if let Some(image) = image_item_to_content(item) {
+                    blocks.push(image);
                 }
             }
         }
     }
-    if !parts.is_empty() {
-        return Some(parts.join("\n"));
-    }
-    for key in ["text", "message"] {
-        if let Some(text) = payload.get(key).and_then(|x| x.as_str()) {
-            if !text.trim().is_empty() {
-                return Some(text.to_string());
+    if blocks.is_empty() {
+        for key in ["text", "message"] {
+            if let Some(text) = payload.get(key).and_then(|x| x.as_str()) {
+                push_text_content(&mut blocks, text);
+                if !blocks.is_empty() {
+                    break;
+                }
             }
         }
     }
-    None
+    blocks
 }
 
-fn extract_function_call_output_text(payload: &serde_json::Value) -> String {
+fn push_text_content(blocks: &mut Vec<Value>, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    blocks.push(serde_json::json!({ "type": "text", "text": text }));
+}
+
+fn extract_function_call_output_value(payload: &serde_json::Value) -> Value {
     let Some(output) = payload.get("output") else {
-        return String::new();
+        return Value::Null;
     };
-    extract_tool_output_text(output)
+    extract_tool_output_value(output)
+}
+
+fn extract_tool_output_value(output: &serde_json::Value) -> Value {
+    let blocks = extract_tool_output_blocks(output);
+    if !blocks.is_empty() {
+        return Value::Array(blocks);
+    }
+    Value::String(extract_tool_output_text(output))
+}
+
+fn is_empty_tool_output(output: &Value) -> bool {
+    match output {
+        Value::Null => true,
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+fn extract_tool_output_blocks(output: &serde_json::Value) -> Vec<Value> {
+    let Some(arr) = output.as_array() else {
+        return Vec::new();
+    };
+    let mut blocks = Vec::new();
+    for item in arr {
+        let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        if matches!(kind, "text" | "input_text" | "output_text") {
+            if let Some(text) = item.get("text").and_then(|x| x.as_str()) {
+                push_text_content(&mut blocks, text);
+            }
+        } else if matches!(kind, "input_image" | "image_url") {
+            if let Some(image) = image_item_to_content(item) {
+                blocks.push(image);
+            }
+        }
+    }
+    blocks
 }
 
 fn extract_tool_output_text(output: &serde_json::Value) -> String {
@@ -857,15 +919,11 @@ fn extract_tool_output_text(output: &serde_json::Value) -> String {
     }
     if let Some(arr) = output.as_array() {
         let mut parts = Vec::new();
-        for (idx, item) in arr.iter().enumerate() {
+        for item in arr {
             let kind = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
             if matches!(kind, "text" | "input_text" | "output_text") {
                 if let Some(t) = item.get("text").and_then(|x| x.as_str()) {
                     parts.push(t.to_string());
-                }
-            } else if matches!(kind, "input_image" | "image_url") {
-                if let Some(markdown) = image_item_to_markdown(item, idx + 1) {
-                    parts.push(markdown);
                 }
             } else if let Some(t) = item
                 .get("text")
@@ -921,30 +979,32 @@ fn extract_reasoning_text(payload: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
-fn interpret_web_search_call(payload: &serde_json::Value, ts: Option<i64>) -> Vec<SessionMessage> {
+fn interpret_web_search_call(
+    payload: &serde_json::Value,
+    ts: Option<i64>,
+) -> Vec<AcpProtocolMessage> {
     let Some(action) = payload.get("action") else {
         return Vec::new();
     };
-    let args_pretty = match serde_json::to_string_pretty(action) {
-        Ok(s) if !s.trim().is_empty() && s != "null" => s,
-        _ => return Vec::new(),
-    };
-    vec![
-        SessionMessage::new("tool_call", format!("[web_search]\n{args_pretty}"), ts)
-            .with_tool_call_id(
-                payload
-                    .get("id")
-                    .or_else(|| payload.get("call_id"))
-                    .and_then(|x| x.as_str())
-                    .map(String::from),
-            ),
-    ]
+    if action.is_null() {
+        return Vec::new();
+    }
+    vec![history_tool_call_message(
+        payload
+            .get("id")
+            .or_else(|| payload.get("call_id"))
+            .and_then(|x| x.as_str())
+            .map(String::from),
+        "web_search",
+        action.clone(),
+        ts,
+    )]
 }
 
 fn interpret_image_generation_call(
     payload: &serde_json::Value,
     ts: Option<i64>,
-) -> Vec<SessionMessage> {
+) -> Vec<AcpProtocolMessage> {
     let call_id = payload.get("id").and_then(|x| x.as_str()).map(String::from);
     let mut args = serde_json::Map::new();
     if let Some(status) = payload.get("status").and_then(|x| x.as_str()) {
@@ -970,37 +1030,38 @@ fn interpret_image_generation_call(
             serde_json::Value::String(prompt.to_string()),
         );
     }
-    let args_pretty = serde_json::to_string_pretty(&serde_json::Value::Object(args))
-        .unwrap_or_else(|_| "{}".to_string());
-    let mut out = vec![SessionMessage::new(
-        "tool_call",
-        format!("[image_generation]\n{args_pretty}"),
+    let mut out = vec![history_tool_call_message(
+        call_id.clone(),
+        "image_generation",
+        Value::Object(args),
         ts,
-    )
-    .with_tool_call_id(call_id.clone())];
+    )];
     if let Some(result) = payload
         .get("result")
-        .and_then(image_generation_result_to_markdown)
+        .and_then(image_generation_result_to_content)
     {
-        out.push(SessionMessage::new("tool_result", result, ts).with_tool_call_id(call_id));
+        out.push(history_tool_result_message(call_id, result, ts));
     }
     out
 }
 
-fn image_generation_result_to_markdown(result: &serde_json::Value) -> Option<String> {
+fn image_generation_result_to_content(result: &serde_json::Value) -> Option<Value> {
     if let Some(s) = result.as_str().map(str::trim).filter(|s| !s.is_empty()) {
         let src = if looks_like_image_src(s) {
             s.to_string()
         } else {
             format!("data:image/png;base64,{s}")
         };
-        return Some(format!("![Generated Image]({src})"));
+        return Some(Value::Array(vec![serde_json::json!({
+            "type": "image",
+            "uri": src,
+            "mimeType": image_mime_type(&src),
+        })]));
     }
     if let Some(arr) = result.as_array() {
-        let images: Vec<String> = arr
+        let images: Vec<Value> = arr
             .iter()
-            .enumerate()
-            .filter_map(|(idx, item)| {
+            .filter_map(|item| {
                 item.as_str()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -1010,12 +1071,16 @@ fn image_generation_result_to_markdown(result: &serde_json::Value) -> Option<Str
                         } else {
                             format!("data:image/png;base64,{s}")
                         };
-                        format!("![Generated Image #{}]({src})", idx + 1)
+                        serde_json::json!({
+                            "type": "image",
+                            "uri": src,
+                            "mimeType": image_mime_type(&src),
+                        })
                     })
             })
             .collect();
         if !images.is_empty() {
-            return Some(images.join("\n"));
+            return Some(Value::Array(images));
         }
     }
     None
@@ -1034,7 +1099,7 @@ fn file_edit_message(
     source: &str,
     edits: Vec<serde_json::Value>,
     ts: Option<i64>,
-) -> Option<SessionMessage> {
+) -> Option<AcpProtocolMessage> {
     if edits.is_empty() {
         return None;
     }
@@ -1046,15 +1111,161 @@ fn file_edit_message(
         .iter()
         .filter_map(|e| e.get("deletions").and_then(|x| x.as_i64()))
         .sum();
-    let text = serde_json::json!({
+    let data = serde_json::json!({
         "source": source,
         "files": edits.len(),
         "additions": additions,
         "deletions": deletions,
         "edits": edits,
+    });
+    Some(history_session_update_message("file_edit", data, ts))
+}
+
+fn history_input_value(value: &Value) -> Value {
+    value
+        .as_str()
+        .map(parse_json_string_or_text)
+        .unwrap_or_else(|| value.clone())
+}
+
+fn parse_json_string_or_text(text: &str) -> Value {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Value::Null;
+    }
+    serde_json::from_str(trimmed).unwrap_or_else(|_| Value::String(text.to_string()))
+}
+
+fn is_codex_plan_tool(name: &str) -> bool {
+    matches!(name, "update_plan" | "TaskUpdate" | "task_update")
+}
+
+fn codex_plan_event(input: Value, ts: Option<i64>) -> Vec<AcpProtocolMessage> {
+    vec![history_session_update_message(
+        "plan",
+        normalize_plan_update_value(input),
+        ts,
+    )]
+}
+
+fn normalize_plan_update_value(value: Value) -> Value {
+    let plan = value
+        .get("plan")
+        .cloned()
+        .or_else(|| value.get("entries").cloned())
+        .unwrap_or_else(|| value.clone());
+    let entries = plan
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    let content = string_value(item, "content")
+                        .or_else(|| string_value(item, "step"))
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "content": content,
+                        "status": string_value(item, "status").unwrap_or_else(|| "pending".to_string()),
+                        "priority": string_value(item, "priority").unwrap_or_else(|| "medium".to_string()),
+                        "meta": item.get("meta").or_else(|| item.get("_meta")).cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "sessionUpdate": "plan_update",
+        "entries": entries,
+        "source": "plan",
+        "meta": value.get("meta").or_else(|| value.get("_meta")).cloned().unwrap_or(Value::Null),
+        "raw": value,
     })
-    .to_string();
-    Some(SessionMessage::new("file_edit", text, ts))
+}
+
+fn session_update_type_from_value(value: &Value) -> Option<&'static str> {
+    match value
+        .get("sessionUpdate")
+        .or_else(|| value.get("session_update"))
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+    {
+        Some("plan" | "plan_update") => Some("plan"),
+        _ => None,
+    }
+}
+
+fn codex_permission_event(payload: &Value, ts: Option<i64>) -> Option<Vec<AcpProtocolMessage>> {
+    let tool_call = payload
+        .get("toolCall")
+        .or_else(|| payload.get("tool_call"))
+        .cloned();
+    let fields = tool_call
+        .as_ref()
+        .and_then(|tool_call| tool_call.get("fields"))
+        .unwrap_or_else(|| tool_call.as_ref().unwrap_or(payload));
+    let request_id = payload
+        .get("requestId")
+        .or_else(|| payload.get("request_id"))
+        .or_else(|| {
+            tool_call
+                .as_ref()
+                .and_then(|tool_call| tool_call.get("toolCallId"))
+        })
+        .or_else(|| {
+            tool_call
+                .as_ref()
+                .and_then(|tool_call| tool_call.get("tool_call_id"))
+        })
+        .and_then(Value::as_str)
+        .map(String::from);
+    let tool_name = string_value(fields, "title")
+        .or_else(|| string_value(fields, "name"))
+        .or_else(|| string_value(payload, "toolName"))
+        .or_else(|| string_value(payload, "tool_name"))
+        .unwrap_or_else(|| "tool".to_string());
+    let input = fields
+        .get("rawInput")
+        .or_else(|| fields.get("raw_input"))
+        .or_else(|| fields.get("input"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let options = payload
+        .get("options")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let selected = payload
+        .get("selectedOptionId")
+        .or_else(|| payload.get("selected_option_id"))
+        .or_else(|| payload.get("optionId"))
+        .or_else(|| payload.get("option_id"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    let cancelled = payload
+        .get("cancelled")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            payload
+                .get("outcome")
+                .and_then(|outcome| outcome.get("outcome"))
+                .and_then(Value::as_str)
+                .map(|value| value == "cancelled")
+        });
+    Some(history_permission_request_message(
+        request_id,
+        tool_name,
+        input,
+        options,
+        selected,
+        cancelled,
+        tool_call,
+        payload.clone(),
+        ts,
+    ))
+}
+
+fn string_value(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(String::from)
 }
 
 fn display_path(path: &str, cwd: Option<&str>) -> String {
@@ -1152,7 +1363,16 @@ fn unified_diff_counts(diff: &str) -> (usize, usize) {
     (additions, deletions)
 }
 
-fn image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String> {
+fn image_item_to_content(item: &serde_json::Value) -> Option<Value> {
+    let uri = image_item_uri(item)?;
+    Some(serde_json::json!({
+        "type": "image",
+        "uri": uri,
+        "mimeType": image_mime_type(&uri),
+    }))
+}
+
+fn image_item_uri(item: &serde_json::Value) -> Option<String> {
     if let Some(data) = item
         .get("image")
         .or_else(|| item.get("data"))
@@ -1165,19 +1385,57 @@ fn image_item_to_markdown(item: &serde_json::Value, idx: usize) -> Option<String
             .or_else(|| item.get("mime_type"))
             .and_then(|x| x.as_str())
             .unwrap_or("image/png");
-        let src = if looks_like_image_src(data) {
+        return Some(if looks_like_image_src(data) {
             data.to_string()
         } else {
             format!("data:{media_type};base64,{data}")
-        };
-        return Some(format!("![Image #{idx}]({src})"));
+        });
     }
-    let url = item
-        .get("image_url")
+    item.get("image_url")
         .and_then(|x| x.as_str())
         .or_else(|| item.get("url").and_then(|x| x.as_str()))
-        .or_else(|| item.get("path").and_then(|x| x.as_str()))?;
-    Some(format!("![Image #{idx}]({url})"))
+        .or_else(|| item.get("path").and_then(|x| x.as_str()))
+        .map(ToString::to_string)
+}
+
+fn image_mime_type(uri: &str) -> Option<String> {
+    if let Some(rest) = uri.strip_prefix("data:") {
+        return rest
+            .split_once(';')
+            .map(|(mime_type, _)| mime_type)
+            .filter(|mime_type| mime_type.to_ascii_lowercase().starts_with("image/"))
+            .map(String::from);
+    }
+    let normalized = uri
+        .split('?')
+        .next()
+        .unwrap_or(uri)
+        .split('#')
+        .next()
+        .unwrap_or(uri)
+        .to_ascii_lowercase();
+    let mime = if normalized.ends_with(".png") {
+        "image/png"
+    } else if normalized.ends_with(".jpg") || normalized.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if normalized.ends_with(".gif") {
+        "image/gif"
+    } else if normalized.ends_with(".webp") {
+        "image/webp"
+    } else if normalized.ends_with(".bmp") {
+        "image/bmp"
+    } else if normalized.ends_with(".svg") {
+        "image/svg+xml"
+    } else if normalized.ends_with(".avif") {
+        "image/avif"
+    } else if normalized.ends_with(".heic") {
+        "image/heic"
+    } else if normalized.ends_with(".heif") {
+        "image/heif"
+    } else {
+        return None;
+    };
+    Some(mime.to_string())
 }
 
 fn parse_iso(s: &str) -> Option<i64> {
@@ -1188,8 +1446,81 @@ fn parse_iso(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_one_file, read_messages_with_locations};
+    use super::{parse_one_file, read_history_acp_messages_with_locations};
+    use crate::agents::sources::types::HistoryAcpMessage;
+    use serde_json::Value;
     use std::fs;
+
+    fn update(row: &HistoryAcpMessage) -> &Value {
+        row.message.data.get("update").unwrap_or(&row.message.data)
+    }
+
+    fn role(row: &HistoryAcpMessage) -> &'static str {
+        if row.message.method == "session/prompt" {
+            return "user";
+        }
+        match row.message.update_type.as_deref() {
+            Some("agent_message_chunk") => "assistant",
+            Some("agent_thought_chunk") => "thinking",
+            Some("tool_call") => "tool_call",
+            Some("tool_call_update") => "tool_result",
+            Some("file_edit") => "file_edit",
+            Some("plan") => "plan",
+            _ => "unknown",
+        }
+    }
+
+    fn text(row: &HistoryAcpMessage) -> String {
+        if row.message.method == "session/prompt" {
+            return row.message.data["prompt"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(block_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        update(row)["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(block_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn block_text(block: &Value) -> Option<&str> {
+        block
+            .get("text")
+            .or_else(|| block.get("uri"))
+            .and_then(|value| value.as_str())
+    }
+
+    fn tool_call_id(row: &HistoryAcpMessage) -> Option<&str> {
+        update(row)
+            .get("toolCallId")
+            .or_else(|| update(row).get("tool_call_id"))
+            .and_then(|value| value.as_str())
+    }
+
+    fn tool_title(row: &HistoryAcpMessage) -> Option<&str> {
+        update(row)
+            .get("title")
+            .or_else(|| {
+                update(row)
+                    .get("toolCall")
+                    .and_then(|call| call.get("title"))
+            })
+            .and_then(|value| value.as_str())
+    }
+
+    fn raw_input(row: &HistoryAcpMessage) -> &Value {
+        update(row).get("rawInput").unwrap_or(&Value::Null)
+    }
+
+    fn raw_output(row: &HistoryAcpMessage) -> &Value {
+        update(row).get("rawOutput").unwrap_or(&Value::Null)
+    }
 
     #[test]
     fn first_session_meta_id_wins_over_replayed_session_meta() {
@@ -1215,7 +1546,7 @@ mod tests {
     }
 
     #[test]
-    fn read_messages_with_locations_records_line_and_byte_range() {
+    fn read_history_acp_messages_with_locations_records_line_and_byte_range() {
         let dir = std::env::temp_dir().join(format!(
             "sessio-codex-parser-location-test-{}-{}",
             std::process::id(),
@@ -1238,12 +1569,12 @@ mod tests {
         let line1_bytes = line1.len() as u64 + 1; // include the \n
         let line2_bytes = line2.len() as u64 + 1;
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 2, "session_meta line must not yield messages");
 
-        let (user_msg, user_loc) = &events[0];
-        assert_eq!(user_msg.role, "user");
-        assert_eq!(user_msg.text, "hello");
+        let user_loc = &events[0].location;
+        assert_eq!(role(&events[0]), "user");
+        assert_eq!(text(&events[0]), "hello");
         assert_eq!(user_loc.line_start, Some(2));
         assert_eq!(user_loc.line_end, Some(2));
         assert_eq!(user_loc.byte_start, Some(line1_bytes));
@@ -1253,8 +1584,8 @@ mod tests {
             "byte_end should include trailing \\n"
         );
 
-        let (asst_msg, asst_loc) = &events[1];
-        assert_eq!(asst_msg.role, "assistant");
+        let asst_loc = &events[1].location;
+        assert_eq!(role(&events[1]), "assistant");
         assert_eq!(asst_loc.line_start, Some(3));
         assert_eq!(asst_loc.line_end, Some(3));
 
@@ -1270,7 +1601,7 @@ mod tests {
     }
 
     #[test]
-    fn read_messages_with_locations_filters_developer_messages() {
+    fn read_history_acp_messages_with_locations_filters_developer_messages() {
         let dir = std::env::temp_dir().join(format!(
             "sessio-codex-parser-developer-test-{}-{}",
             std::process::id(),
@@ -1285,10 +1616,38 @@ mod tests {
         let user = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real request"}]}}"#;
         fs::write(&path, format!("{developer}\n{user}\n")).unwrap();
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0.role, "user");
-        assert_eq!(events[0].0.text, "real request");
+        assert_eq!(role(&events[0]), "user");
+        assert_eq!(text(&events[0]), "real request");
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_history_acp_messages_converts_update_plan_to_canonical_plan_update() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-plan-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let plan = r#"{"timestamp":"2026-05-29T05:38:55.428Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"Parse Codex plan\",\"status\":\"in_progress\"},{\"step\":\"Render like todos\",\"status\":\"pending\"}],\"explanation\":\"structured\"}","call_id":"call_plan"}}"#;
+        let output = r#"{"timestamp":"2026-05-29T05:38:56.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_plan","output":"ok"}}"#;
+        fs::write(&path, format!("{plan}\n{output}\n")).unwrap();
+
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(role(&events[0]), "plan");
+        let update = update(&events[0]);
+        assert_eq!(update["entries"][0]["content"], "Parse Codex plan");
+        assert_eq!(update["entries"][0]["status"], "in_progress");
+        assert_eq!(update["entries"][1]["content"], "Render like todos");
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
@@ -1311,23 +1670,28 @@ mod tests {
         let tool_output = r#"{"timestamp":"2026-05-18T05:09:17.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"data:image/png;base64,def","detail":"original"}]}}"#;
         fs::write(&path, format!("{user}\n{reasoning}\n{tool_output}\n")).unwrap();
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 3);
-        assert_eq!(events[0].0.role, "user");
-        assert!(!events[0].0.text.contains("<image"));
-        assert!(!events[0].0.text.contains("</image>"));
-        assert!(events[0]
-            .0
+        assert_eq!(role(&events[0]), "user");
+        assert!(text(&events[0]).contains("<image"));
+        let turns = crate::turns::session_history_turns_from_acp_messages(&[events[0].clone()]);
+        assert!(!turns[0].blocks[0].blocks[0]
             .text
-            .contains("![Image #2](data:image/png;base64,abc)"));
-        assert_eq!(events[1].0.role, "thinking");
-        assert_eq!(events[1].0.text, "checking the screenshot");
-        assert_eq!(events[2].0.role, "tool_result");
-        assert_eq!(events[2].0.tool_call_id.as_deref(), Some("call_1"));
-        assert!(events[2]
-            .0
-            .text
-            .contains("![Image #1](data:image/png;base64,def)"));
+            .as_deref()
+            .unwrap()
+            .contains("<image"));
+        assert_eq!(
+            events[0].message.data["prompt"][1]["uri"].as_str(),
+            Some("data:image/png;base64,abc")
+        );
+        assert_eq!(role(&events[1]), "thinking");
+        assert_eq!(text(&events[1]), "checking the screenshot");
+        assert_eq!(role(&events[2]), "tool_result");
+        assert_eq!(tool_call_id(&events[2]), Some("call_1"));
+        assert_eq!(
+            raw_output(&events[2])[0]["uri"].as_str(),
+            Some("data:image/png;base64,def")
+        );
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
@@ -1348,19 +1712,19 @@ mod tests {
         let image_generation = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"image_generation_call","id":"ig_1","status":"completed","revised_prompt":"draw a small icon","result":"abc123"}}"#;
         fs::write(&path, format!("{image_generation}\n")).unwrap();
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].0.role, "tool_call");
-        assert_eq!(events[0].0.tool_call_id.as_deref(), Some("ig_1"));
-        assert!(events[0].0.text.contains("[image_generation]"));
-        assert!(events[0].0.text.contains("draw a small icon"));
-        assert_eq!(events[1].0.role, "tool_result");
-        assert_eq!(events[1].0.tool_call_id.as_deref(), Some("ig_1"));
-        assert!(events[1]
-            .0
-            .text
-            .contains("![Generated Image](data:image/png;base64,abc123)"));
-        assert_eq!(events[0].1.line_start, events[1].1.line_start);
+        assert_eq!(role(&events[0]), "tool_call");
+        assert_eq!(tool_call_id(&events[0]), Some("ig_1"));
+        assert_eq!(tool_title(&events[0]), Some("image_generation"));
+        assert_eq!(raw_input(&events[0])["revised_prompt"], "draw a small icon");
+        assert_eq!(role(&events[1]), "tool_result");
+        assert_eq!(tool_call_id(&events[1]), Some("ig_1"));
+        assert_eq!(
+            raw_output(&events[1])[0]["uri"].as_str(),
+            Some("data:image/png;base64,abc123")
+        );
+        assert_eq!(events[0].location.line_start, events[1].location.line_start);
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
@@ -1388,21 +1752,20 @@ mod tests {
         )
         .unwrap();
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].0.role, "tool_call");
-        assert!(events[0].0.tool_call_id.is_none());
-        assert!(events[0].0.text.contains("[web_search]"));
-        assert!(events[0]
-            .0
-            .text
-            .contains("Bun runtime Rust rewrite news May 2026"));
-        assert!(!events[0].0.text.contains("completed"));
-        assert_eq!(events[1].0.role, "tool_call");
-        assert!(events[1]
-            .0
-            .text
-            .contains("https://github.com/oven-sh/bun/pull/30412"));
+        assert_eq!(role(&events[0]), "tool_call");
+        assert!(tool_call_id(&events[0]).is_some());
+        assert_eq!(tool_title(&events[0]), Some("web_search"));
+        assert_eq!(
+            raw_input(&events[0])["queries"][0],
+            "Bun runtime Rust rewrite news May 2026"
+        );
+        assert_eq!(role(&events[1]), "tool_call");
+        assert_eq!(
+            raw_input(&events[1])["url"],
+            "https://github.com/oven-sh/bun/pull/30412"
+        );
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
@@ -1424,14 +1787,18 @@ mod tests {
         let output = r#"{"timestamp":"2026-05-18T05:09:16.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_custom","output":{"content":[{"text":"Done"}]}}}"#;
         fs::write(&path, format!("{call}\n{output}\n")).unwrap();
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].0.role, "tool_call");
-        assert_eq!(events[0].0.tool_call_id.as_deref(), Some("call_custom"));
-        assert!(events[0].0.text.contains("[apply_patch]"));
-        assert_eq!(events[1].0.role, "tool_result");
-        assert_eq!(events[1].0.tool_call_id.as_deref(), Some("call_custom"));
-        assert_eq!(events[1].0.text, "Done");
+        assert_eq!(role(&events[0]), "tool_call");
+        assert_eq!(tool_call_id(&events[0]), Some("call_custom"));
+        assert_eq!(tool_title(&events[0]), Some("apply_patch"));
+        assert_eq!(
+            raw_input(&events[0]),
+            &serde_json::Value::String("*** Begin Patch\n*** End Patch".to_string())
+        );
+        assert_eq!(role(&events[1]), "tool_result");
+        assert_eq!(tool_call_id(&events[1]), Some("call_custom"));
+        assert_eq!(raw_output(&events[1]).as_str(), Some("Done"));
 
         fs::remove_file(&path).ok();
         fs::remove_dir(&dir).ok();
@@ -1453,10 +1820,10 @@ mod tests {
         let patch = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"event_msg","payload":{"type":"patch_apply_end","success":true,"call_id":"call_1","changes":{"/tmp/project/src/app.rs":{"type":"update","unified_diff":"@@ -1,2 +1,3 @@\n use a;\n-old\n+new\n+more\n","move_path":null}}}}"#;
         fs::write(&path, format!("{meta}\n{patch}\n")).unwrap();
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0.role, "file_edit");
-        let value: serde_json::Value = serde_json::from_str(&events[0].0.text).unwrap();
+        assert_eq!(role(&events[0]), "file_edit");
+        let value = update(&events[0]);
         assert_eq!(value.get("files").and_then(|x| x.as_u64()), Some(1));
         assert_eq!(value.get("additions").and_then(|x| x.as_u64()), Some(2));
         assert_eq!(value.get("deletions").and_then(|x| x.as_u64()), Some(1));
@@ -1491,10 +1858,10 @@ mod tests {
         let add = r#"{"timestamp":"2026-05-18T05:09:16.000Z","type":"event_msg","payload":{"type":"patch_apply_end","success":true,"call_id":"call_2","changes":{"/tmp/project/src/app.rs":{"type":"add","content":"new\nfile\nmore\n"}}}}"#;
         fs::write(&path, format!("{meta}\n{delete}\n{add}\n")).unwrap();
 
-        let events = read_messages_with_locations(&path).unwrap();
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
         assert_eq!(events.len(), 2);
 
-        let deleted: serde_json::Value = serde_json::from_str(&events[0].0.text).unwrap();
+        let deleted = update(&events[0]);
         assert_eq!(deleted.get("additions").and_then(|x| x.as_u64()), Some(0));
         assert_eq!(deleted.get("deletions").and_then(|x| x.as_u64()), Some(2));
         assert!(deleted
@@ -1506,7 +1873,7 @@ mod tests {
             .unwrap_or("")
             .starts_with("--- deleted content\nold"));
 
-        let added: serde_json::Value = serde_json::from_str(&events[1].0.text).unwrap();
+        let added = update(&events[1]);
         assert_eq!(added.get("additions").and_then(|x| x.as_u64()), Some(3));
         assert_eq!(added.get("deletions").and_then(|x| x.as_u64()), Some(0));
         assert!(added
@@ -1751,5 +2118,61 @@ hello
             grouped[0].subagents[0].agent_type.as_deref(),
             Some("worker")
         );
+    }
+
+    #[test]
+    fn read_history_acp_messages_strips_leading_ide_context_from_user_prompt() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-ide-context-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let user = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<ide_opened_file>secret.rs</ide_opened_file>\nreal request"}]}}"#;
+        fs::write(&path, format!("{user}\n")).unwrap();
+
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message.method, "session/prompt");
+        assert_eq!(
+            events[0].message.data["prompt"][0]["text"].as_str(),
+            Some("<ide_opened_file>secret.rs</ide_opened_file>\nreal request")
+        );
+        let turns = crate::turns::session_history_turns_from_acp_messages(&events);
+        assert_eq!(
+            turns[0].blocks[0].blocks[0].text.as_deref(),
+            Some("real request")
+        );
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn read_history_acp_messages_drops_system_noise_after_ide_context() {
+        let dir = std::env::temp_dir().join(format!(
+            "sessio-codex-parser-ide-noise-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        let user = r#"{"timestamp":"2026-05-18T05:09:15.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<ide_opened_file>secret.rs</ide_opened_file>\n<environment_context>\nnoise\n</environment_context>"}]}}"#;
+        fs::write(&path, format!("{user}\n")).unwrap();
+
+        let events = read_history_acp_messages_with_locations(&path).unwrap();
+        assert_eq!(events.len(), 1);
+        let turns = crate::turns::session_history_turns_from_acp_messages(&events);
+        assert!(turns[0].blocks.is_empty(), "{turns:#?}");
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir(&dir).ok();
     }
 }

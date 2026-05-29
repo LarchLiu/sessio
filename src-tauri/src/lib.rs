@@ -6,6 +6,7 @@ pub mod memory;
 pub mod models;
 pub mod polling;
 pub mod store;
+pub mod turns;
 pub mod watch;
 
 use std::collections::{HashMap, HashSet};
@@ -25,11 +26,8 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionHistoryBlock,
-    SessionHistoryPermissionOption, SessionHistoryPermissionRequest, SessionHistoryToolCall,
-    SessionHistoryTurn, SessionInfo, SessionMessage,
+    Agent, KanbanItem, KanbanStatus, ProjectInfo, ProjectType, SessionHistoryTurn, SessionInfo,
 };
-use serde_json::{json, Value};
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::{SessionHistoryRecord, SessionStore};
@@ -38,6 +36,8 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
 };
+
+const HISTORY_CACHE_VERSION: i64 = 0;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -329,6 +329,21 @@ fn better_lineage_candidate(candidate: &SessionInfo, current: &SessionInfo) -> b
 #[cfg(test)]
 mod ancestor_tests {
     use super::*;
+    use crate::agents::runtime::types::AcpProtocolMessage;
+    use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
+    use crate::turns::{
+        history_assistant_message, history_session_update_message, history_tool_call_message,
+        history_tool_result_message, history_user_message,
+    };
+
+    fn row(message: AcpProtocolMessage, timestamp: Option<i64>) -> HistoryAcpMessage {
+        HistoryAcpMessage {
+            message,
+            timestamp,
+            location: SourceLocation::file("/tmp/session.jsonl"),
+            synthetic: true,
+        }
+    }
 
     fn session(
         agent: Agent,
@@ -360,7 +375,13 @@ mod ancestor_tests {
 
     #[test]
     fn session_ancestors_from_db_follows_multihop_agent_lineage() {
-        let root = session(Agent::Gemini, "root", None, None, "/tmp/gemini/logs.json");
+        let root = session(
+            Agent::Gemini,
+            "root",
+            None,
+            None,
+            "/tmp/gemini/project/chats/session-root.jsonl",
+        );
         let middle = session(
             Agent::Claude,
             "middle",
@@ -394,19 +415,41 @@ mod ancestor_tests {
     #[test]
     fn session_history_turns_emit_acp_like_blocks_and_tools() {
         let messages = vec![
-            SessionMessage::new(
-                "user",
-                "review\n[file: spec.md|file:///tmp/spec.md]",
+            row(
+                history_user_message(
+                    "review\n[file: __sessio_attachment__:spec.md|file:///tmp/spec.md]",
+                    Some(10),
+                ),
                 Some(10),
             ),
-            SessionMessage::new("tool_call", "[Read]\n{\"path\":\"spec.md\"}", Some(20))
-                .with_tool_call_id(Some("tool-1".to_string())),
-            SessionMessage::new("tool_result", "contents", Some(21))
-                .with_tool_call_id(Some("tool-1".to_string())),
-            SessionMessage::new("file_edit", "{\"edits\":[]}", Some(22)),
-            SessionMessage::new("assistant", "done", Some(30)),
+            row(
+                history_tool_call_message(
+                    Some("tool-1".to_string()),
+                    "Read",
+                    serde_json::json!({ "path": "spec.md" }),
+                    Some(20),
+                ),
+                Some(20),
+            ),
+            row(
+                history_tool_result_message(
+                    Some("tool-1".to_string()),
+                    serde_json::Value::String("contents".to_string()),
+                    Some(21),
+                ),
+                Some(21),
+            ),
+            row(
+                history_session_update_message(
+                    "file_edit",
+                    serde_json::json!({ "edits": [] }),
+                    Some(22),
+                ),
+                Some(22),
+            ),
+            row(history_assistant_message("done", Some(30)), Some(30)),
         ];
-        let turns = session_history_turns(&messages);
+        let turns = turns::session_history_turns_from_acp_messages(&messages);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].turn_id, "history-turn-0");
         assert_eq!(turns[0].blocks.len(), 4);
@@ -417,10 +460,11 @@ mod ancestor_tests {
         assert_eq!(turns[0].blocks[2].kind, "sessionUpdate");
         assert_eq!(turns[0].blocks[2].update_type.as_deref(), Some("file_edit"));
         assert_eq!(turns[0].blocks[3].kind, "assistant");
+        assert_eq!(turns[0].blocks[3].blocks[0].text.as_deref(), Some("done"));
         assert_eq!(turns[0].tools[0].tool_id, "tool-1");
         assert_eq!(
             turns[0].tools[0].raw_output,
-            Value::String("contents".to_string())
+            serde_json::Value::String("contents".to_string())
         );
     }
 
@@ -429,9 +473,11 @@ mod ancestor_tests {
         let result = SessionHistoryResult {
             message_count: 1,
             indexed_through: Some(10),
-            turns: session_history_turns(&[SessionMessage::new(
-                "user",
-                "review\n[file: spec.md|file:///tmp/spec.md]",
+            turns: turns::session_history_turns_from_acp_messages(&[row(
+                history_user_message(
+                    "review\n[file: __sessio_attachment__:spec.md|file:///tmp/spec.md]",
+                    Some(10),
+                ),
                 Some(10),
             )]),
         };
@@ -485,6 +531,7 @@ mod ancestor_tests {
                 file_path: source_path_text.clone(),
                 file_size: file_size_for(&source_path_text).unwrap(),
                 file_mtime: file_mtime_for_history(&source_path_text),
+                history_cache_version: HISTORY_CACHE_VERSION,
                 message_count: 7,
                 indexed_through: Some(20),
                 updated_at: 30,
@@ -504,6 +551,73 @@ mod ancestor_tests {
         assert_eq!(result.indexed_through, Some(20));
         assert_eq!(result.turns.len(), 1);
         assert_eq!(result.turns[0].turn_id, "db-turn");
+
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn session_history_api_rebuilds_stale_cache_version() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!(
+            "sessio-history-version-{}-{suffix}.db",
+            std::process::id()
+        ));
+        let source_path = std::env::temp_dir().join(format!(
+            "sessio-history-version-{}-{suffix}.jsonl",
+            std::process::id()
+        ));
+
+        std::fs::write(&source_path, "not-jsonl\n").unwrap();
+        let source_path_text = source_path.to_string_lossy().to_string();
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+        store
+            .replace_session_history(&SessionHistoryRecord {
+                agent: Agent::Codex,
+                session_id: "session-db".to_string(),
+                file_path: source_path_text.clone(),
+                file_size: file_size_for(&source_path_text).unwrap(),
+                file_mtime: file_mtime_for_history(&source_path_text),
+                history_cache_version: HISTORY_CACHE_VERSION - 1,
+                message_count: 7,
+                indexed_through: Some(20),
+                updated_at: 30,
+                turns: vec![SessionHistoryTurn {
+                    turn_id: "stale-db-turn".to_string(),
+                    status: "completed".to_string(),
+                    blocks: Vec::new(),
+                    tools: Vec::new(),
+                    permissions: Vec::new(),
+                    protocol_messages: Vec::new(),
+                    stop_reason: None,
+                    error: None,
+                    started_at: 10,
+                    updated_at: 20,
+                }],
+            })
+            .unwrap();
+
+        let result = read_session_history_result_with_store(
+            &store,
+            Agent::Codex,
+            &source_path_text,
+            Some("session-db"),
+        )
+        .unwrap();
+
+        assert_ne!(
+            result.turns.first().map(|turn| turn.turn_id.as_str()),
+            Some("stale-db-turn")
+        );
+        let reloaded = store
+            .get_session_history(Agent::Codex, "session-db", &source_path_text)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.history_cache_version, HISTORY_CACHE_VERSION);
 
         let _ = std::fs::remove_file(&source_path);
         let _ = std::fs::remove_file(&db_path);
@@ -838,22 +952,6 @@ fn record_id_from_text(text: String) -> Option<String> {
 }
 
 #[tauri::command]
-fn get_session_messages(
-    agent: Agent,
-    file_path: String,
-    session_id: Option<String>,
-    store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<SessionHistoryResult, String> {
-    read_session_history_result_with_store(
-        store.inner().as_ref(),
-        agent,
-        &file_path,
-        session_id.as_deref(),
-    )
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn get_session_history(
     agent: Agent,
     file_path: String,
@@ -904,6 +1002,7 @@ fn read_session_history_result_with_store(
             file_path: file_path.to_string(),
             file_size: file_size_for(file_path).unwrap_or_default(),
             file_mtime: file_mtime_for_history(file_path),
+            history_cache_version: HISTORY_CACHE_VERSION,
             message_count: result.message_count,
             indexed_through: result.indexed_through,
             updated_at: now_ms(),
@@ -915,7 +1014,8 @@ fn read_session_history_result_with_store(
 }
 
 fn session_history_record_is_fresh(record: &SessionHistoryRecord, file_path: &str) -> bool {
-    record.file_size == file_size_for(file_path).unwrap_or_default()
+    record.history_cache_version == HISTORY_CACHE_VERSION
+        && record.file_size == file_size_for(file_path).unwrap_or_default()
         && record.file_mtime == file_mtime_for_history(file_path)
 }
 
@@ -959,29 +1059,36 @@ fn read_session_history_result_from_source(
     }
     let (messages, message_count) = match agent {
         Agent::Codex => {
-            let rows = crate::agents::sources::codex::parser::read_messages_with_locations(&path)
+            let rows =
+                crate::agents::sources::codex::parser::read_history_acp_messages_with_locations(
+                    &path,
+                )
                 .map_err(anyhow::Error::from)?;
             let count = count_source_lines(&rows);
-            let messages = rows.into_iter().map(|(m, _)| m).collect();
-            (messages, count)
+            (rows, count)
         }
         Agent::Claude => {
-            let rows = crate::agents::sources::claude::parser::read_messages_with_locations(&path)
+            let rows =
+                crate::agents::sources::claude::parser::read_history_acp_messages_with_locations(
+                    &path,
+                )
                 .map_err(anyhow::Error::from)?;
             let count = count_source_lines(&rows);
-            let messages = rows.into_iter().map(|(m, _)| m).collect();
-            (messages, count)
+            (rows, count)
         }
         Agent::Gemini => {
             let sid = session_id.unwrap_or_default();
-            let messages = crate::agents::sources::gemini::parser::read_messages(&path, &sid)
+            let rows =
+                crate::agents::sources::gemini::parser::read_history_acp_messages_with_locations(
+                    &path, &sid,
+                )
                 .map_err(anyhow::Error::from)?;
-            let count = messages.len();
-            (messages, count)
+            let count = rows.len();
+            (rows, count)
         }
     };
-    let indexed_through = latest_message_timestamp(&messages);
-    let turns = session_history_turns(&messages);
+    let indexed_through = latest_history_event_timestamp(&messages);
+    let turns = turns::session_history_turns_from_acp_messages(&messages);
     Ok(SessionHistoryResult {
         message_count,
         indexed_through,
@@ -989,303 +1096,14 @@ fn read_session_history_result_from_source(
     })
 }
 
-fn latest_message_timestamp(messages: &[SessionMessage]) -> Option<i64> {
-    messages
-        .iter()
-        .filter_map(|message| message.timestamp)
-        .max()
-}
-
-fn session_history_turns(messages: &[SessionMessage]) -> Vec<SessionHistoryTurn> {
-    let mut turns = Vec::new();
-    let mut current: Option<SessionHistoryTurn> = None;
-    let mut tool_result_indices = HashSet::new();
-
-    for (index, message) in messages.iter().enumerate() {
-        if is_tool_result_role(&message.role) && tool_result_indices.contains(&index) {
-            continue;
-        }
-        let timestamp = message.timestamp.unwrap_or(index as i64);
-        if message.role == "user" || current.is_none() {
-            if let Some(turn) = current.take() {
-                turns.push(turn);
-            }
-            current = Some(new_session_history_turn(index, timestamp));
-        }
-        let turn = current.get_or_insert_with(|| new_session_history_turn(index, timestamp));
-        turn.started_at = turn.started_at.min(timestamp);
-        turn.updated_at = turn.updated_at.max(timestamp);
-        append_session_history_message(turn, messages, index, message, &mut tool_result_indices);
-    }
-
-    if let Some(turn) = current {
-        turns.push(turn);
-    }
-    turns
-}
-
-fn new_session_history_turn(index: usize, timestamp: i64) -> SessionHistoryTurn {
-    SessionHistoryTurn {
-        turn_id: format!("history-turn-{index}"),
-        status: "completed".to_string(),
-        blocks: Vec::new(),
-        tools: Vec::new(),
-        permissions: Vec::new(),
-        protocol_messages: Vec::new(),
-        stop_reason: None,
-        error: None,
-        started_at: timestamp,
-        updated_at: timestamp,
-    }
-}
-
-fn append_session_history_message(
-    turn: &mut SessionHistoryTurn,
-    messages: &[SessionMessage],
-    index: usize,
-    message: &SessionMessage,
-    tool_result_indices: &mut HashSet<usize>,
-) {
-    let timestamp = message.timestamp.unwrap_or(index as i64);
-    match message.role.as_str() {
-        "user" => turn
-            .blocks
-            .push(history_message_block("user", message, timestamp)),
-        "assistant" => turn
-            .blocks
-            .push(history_message_block("assistant", message, timestamp)),
-        "thinking" => turn
-            .blocks
-            .push(history_message_block("thought", message, timestamp)),
-        "file_edit" => turn.blocks.push(history_session_update_block(
-            "file_edit",
-            message,
-            timestamp,
-        )),
-        "runtime_status" | "turn_note" => turn.blocks.push(history_session_update_block(
-            &message.role,
-            message,
-            timestamp,
-        )),
-        "permission_request" => {
-            let request_id = message
-                .tool_call_id
-                .as_deref()
-                .unwrap_or("")
-                .split('|')
-                .find_map(|part| part.strip_prefix("request:"))
-                .unwrap_or("");
-            let request_id = if request_id.is_empty() {
-                format!("history-permission-{index}")
-            } else {
-                request_id.to_string()
-            };
-            turn.permissions.push(SessionHistoryPermissionRequest {
-                request_id: request_id.clone(),
-                tool_call: Value::Null,
-                tool_name: history_tool_name(&message.text),
-                input: Value::String(history_tool_body(&message.text)),
-                options: vec![
-                    SessionHistoryPermissionOption {
-                        option_id: "allow_once".to_string(),
-                        name: "Allow once".to_string(),
-                        kind: "allow_once".to_string(),
-                        meta: Value::Null,
-                    },
-                    SessionHistoryPermissionOption {
-                        option_id: "reject_once".to_string(),
-                        name: "Reject once".to_string(),
-                        kind: "reject_once".to_string(),
-                        meta: Value::Null,
-                    },
-                ],
-                selected_option_id: Some("history_resolved".to_string()),
-                cancelled: false,
-                raw: json!({ "source": "history", "message": message }),
-            });
-            turn.blocks.push(SessionHistoryBlock {
-                kind: "permission".to_string(),
-                blocks: Vec::new(),
-                raw: None,
-                tool_id: None,
-                request_id: Some(request_id),
-                update_type: None,
-                data: None,
-                error: None,
-                timestamp: Some(timestamp),
-            });
-        }
-        role if is_tool_call_role(role) => {
-            let result_index = find_tool_result_index(messages, index);
-            if let Some(result_index) = result_index {
-                tool_result_indices.insert(result_index);
-            }
-            let result = result_index.and_then(|idx| messages.get(idx));
-            let tool_id = message
-                .tool_call_id
-                .clone()
-                .unwrap_or_else(|| format!("history-tool-{index}"));
-            turn.tools
-                .push(history_tool_json(message, result, index, &tool_id, role));
-            turn.blocks.push(history_tool_block(tool_id, timestamp));
-        }
-        role if is_tool_result_role(role) => {
-            let tool_id = message
-                .tool_call_id
-                .clone()
-                .unwrap_or_else(|| format!("history-tool-{index}"));
-            turn.tools.push(history_tool_json(
-                message,
-                None,
-                index,
-                &tool_id,
-                "tool_result",
-            ));
-            turn.blocks.push(history_tool_block(tool_id, timestamp));
-        }
-        _ => turn
-            .blocks
-            .push(history_message_block("assistant", message, timestamp)),
-    }
-}
-
-fn history_message_block(
-    kind: &str,
-    message: &SessionMessage,
-    timestamp: i64,
-) -> SessionHistoryBlock {
-    SessionHistoryBlock {
-        kind: kind.to_string(),
-        blocks: message.content_blocks.clone(),
-        raw: Some(json!({ "source": "history", "message": message })),
-        tool_id: None,
-        request_id: None,
-        update_type: None,
-        data: None,
-        error: None,
-        timestamp: Some(timestamp),
-    }
-}
-
-fn history_session_update_block(
-    update_type: &str,
-    message: &SessionMessage,
-    timestamp: i64,
-) -> SessionHistoryBlock {
-    SessionHistoryBlock {
-        kind: "sessionUpdate".to_string(),
-        blocks: Vec::new(),
-        raw: None,
-        tool_id: None,
-        request_id: None,
-        update_type: Some(update_type.to_string()),
-        data: Some(json!({ "text": message.text, "timestamp": message.timestamp })),
-        error: None,
-        timestamp: Some(timestamp),
-    }
-}
-
-fn history_tool_block(tool_id: String, timestamp: i64) -> SessionHistoryBlock {
-    SessionHistoryBlock {
-        kind: "tool".to_string(),
-        blocks: Vec::new(),
-        raw: None,
-        tool_id: Some(tool_id),
-        request_id: None,
-        update_type: None,
-        data: None,
-        error: None,
-        timestamp: Some(timestamp),
-    }
-}
-
-fn history_tool_json(
-    message: &SessionMessage,
-    result: Option<&SessionMessage>,
-    index: usize,
-    tool_id: &str,
-    kind: &str,
-) -> SessionHistoryToolCall {
-    let title = history_tool_name(&message.text);
-    let raw_input = history_tool_body(&message.text);
-    SessionHistoryToolCall {
-        tool_id: tool_id.to_string(),
-        title,
-        kind: kind.to_string(),
-        status: if result.is_some() || kind == "todo" {
-            "completed".to_string()
-        } else {
-            "unknown".to_string()
-        },
-        content: Vec::new(),
-        locations: Vec::new(),
-        raw_input: Value::String(raw_input),
-        raw_output: result
-            .map(|message| Value::String(message.text.clone()))
-            .unwrap_or(Value::Null),
-        meta: json!({ "source": "history", "role": message.role }),
-        raw: json!({ "source": "history", "message": message, "toolResult": result }),
-        updated_at: message.timestamp.unwrap_or(index as i64),
-    }
-}
-
-fn find_tool_result_index(messages: &[SessionMessage], call_index: usize) -> Option<usize> {
-    let call = messages.get(call_index)?;
-    if let Some(call_id) = &call.tool_call_id {
-        for (index, candidate) in messages.iter().enumerate().skip(call_index + 1) {
-            if is_tool_result_role(&candidate.role)
-                && candidate.tool_call_id.as_ref() == Some(call_id)
-            {
-                return Some(index);
-            }
-            if is_tool_call_role(&candidate.role)
-                && candidate.tool_call_id.as_ref() == Some(call_id)
-            {
-                break;
-            }
-        }
-        return None;
-    }
-    let next_index = call_index + 1;
-    messages
-        .get(next_index)
-        .filter(|candidate| {
-            is_tool_result_role(&candidate.role) && candidate.tool_call_id.is_none()
-        })
-        .map(|_| next_index)
-}
-
-fn is_tool_call_role(role: &str) -> bool {
-    matches!(
-        role,
-        "tool" | "tool_call" | "tool_use" | "function_call" | "todo"
-    )
-}
-
-fn is_tool_result_role(role: &str) -> bool {
-    matches!(role, "tool_result" | "function_call_output")
-}
-
-fn history_tool_name(text: &str) -> String {
-    if let Some(rest) = text.strip_prefix('[') {
-        if let Some(close) = rest.find(']') {
-            return rest[..close].to_string();
-        }
-    }
-    "Tool Use".to_string()
-}
-
-fn history_tool_body(text: &str) -> String {
-    if let Some(rest) = text.strip_prefix('[') {
-        if let Some(close) = rest.find(']') {
-            return rest[close + 1..].trim_start_matches('\n').to_string();
-        }
-    }
-    text.to_string()
+fn latest_history_event_timestamp(
+    messages: &[crate::agents::sources::types::HistoryAcpMessage],
+) -> Option<i64> {
+    messages.iter().filter_map(|event| event.timestamp).max()
 }
 
 #[tauri::command]
-fn update_session_message_count(
+fn update_session_history_count(
     agent: Agent,
     file_path: String,
     session_id: Option<String>,
@@ -1312,15 +1130,10 @@ fn create_pending_session(
     Ok(())
 }
 
-fn count_source_lines(
-    rows: &[(
-        SessionMessage,
-        crate::agents::sources::types::SourceLocation,
-    )],
-) -> usize {
+fn count_source_lines(rows: &[crate::agents::sources::types::HistoryAcpMessage]) -> usize {
     let mut lines = HashSet::new();
-    for (_, location) in rows {
-        if let Some(line) = location.line_start {
+    for row in rows {
+        if let Some(line) = row.location.line_start {
             lines.insert(line);
         }
     }
@@ -1892,8 +1705,7 @@ pub fn run() {
             unlink_kanban_item_session,
             get_session_ancestors,
             get_session_history,
-            get_session_messages,
-            update_session_message_count,
+            update_session_history_count,
             create_pending_session,
             read_local_image_data_url,
             read_local_text_file,
