@@ -399,7 +399,6 @@ export default function App() {
   const sidebar = (
     <AppSidebar
       isMac={IS_MAC}
-      sidebarOpen={sidebarOpen}
       projectSectionExpanded={expandProject}
       projectGroups={projectGroups}
       expandedProjects={expandedProjects}
@@ -544,7 +543,13 @@ export default function App() {
   }
 
   return (
-    <AppLayout sidebar={sidebar} header={header} overlays={overlays}>
+    <AppLayout
+      sidebar={sidebar}
+      header={header}
+      sidebarOpen={sidebarOpen}
+      onSidebarOpenChange={setSidebarOpen}
+      overlays={overlays}
+    >
       <AppMain
         error={error}
         activeProject={activeProject}

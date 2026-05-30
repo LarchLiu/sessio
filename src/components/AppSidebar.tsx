@@ -42,7 +42,6 @@ const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 
 type AppSidebarProps = {
   isMac: boolean;
-  sidebarOpen: boolean;
   projectSectionExpanded: boolean;
   projectGroups: ProjectGroup[];
   expandedProjects: Set<string>;
@@ -75,7 +74,6 @@ type AppSidebarProps = {
 
 export default function AppSidebar({
   isMac,
-  sidebarOpen,
   projectSectionExpanded,
   projectGroups,
   expandedProjects,
@@ -106,10 +104,7 @@ export default function AppSidebar({
 
   return (
     <aside
-      className={
-        "shrink-0 border-r border-ink/5 bg-surface-sidebar flex flex-col overflow-hidden transition-[width] duration-600 ease-in-out " +
-        (sidebarOpen ? "w-[300px]" : "w-0")
-      }
+      className="flex h-full min-w-0 flex-col overflow-hidden border-r border-ink/5 bg-surface-sidebar"
     >
       <div data-tauri-drag-region className="relative h-12 w-full shrink-0">
         {!isMac && (
@@ -190,7 +185,6 @@ export default function AppSidebar({
       </nav>
 
       <SidebarFooter
-        sidebarOpen={sidebarOpen}
         update={update}
         indexing={indexing}
         onError={onError}
@@ -273,13 +267,11 @@ function StatusDot({
 }
 
 function SidebarFooter({
-  sidebarOpen,
   update,
   indexing,
   onError,
   onOpenSettings,
 }: {
-  sidebarOpen: boolean;
   update: ReturnType<typeof useUpdateCheck>;
   indexing: boolean;
   onError: (error: string | null) => void;
@@ -295,7 +287,6 @@ function SidebarFooter({
             <button
               type="button"
               aria-label={t("sidebar.settings")}
-              disabled={!sidebarOpen}
               onClick={onOpenSettings}
               className="p-1 text-ink/55 hover:text-ink transition rounded-md"
             >

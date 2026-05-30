@@ -98,6 +98,29 @@ body {
   display: none;
 }
 
+.app-sidebar-resize-handle {
+  position: relative;
+  z-index: 10;
+  width: 1px;
+  outline: none;
+}
+
+.app-sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: -3px;
+  width: 6px;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+
+.app-sidebar-resize-handle:hover::before,
+.app-sidebar-resize-handle:focus-visible::before,
+.app-sidebar-resize-handle[data-separator="active"]::before {
+  background: rgb(var(--color-fg) / 0.12);
+}
+
 .tool-pair-clamp-1,
 .tool-pair-clamp-3 {
   overflow: hidden;
