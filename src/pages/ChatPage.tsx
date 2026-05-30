@@ -2157,7 +2157,7 @@ function AcpLiveItem({
     return <LemniscateBloomIndicator />;
   }
   if (item.kind === "tool") {
-    return <AcpToolCard tool={item.tool} />;
+    return <AcpToolCard tool={item.tool} onPreviewImage={onPreviewImage} />;
   }
   if (item.kind === "permission") {
     return (
@@ -2930,30 +2930,34 @@ function AcpContentBlockView({
 
 function AcpToolCard({
   tool,
+  onPreviewImage,
 }: {
   tool: AcpToolCall;
+  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const displayTool = canonicalizeAcpTool(tool);
   if (isHiddenHistoryTool(displayTool)) return null;
   const taskEntries = parseTaskEntries(displayTool.rawInput);
   if (isPlanTool(displayTool)) {
     return (
-      <TodoToolCard
-        tool={displayTool}
-        title={{ main: "Update Plan" }}
-        iconName="TaskUpdate"
-        todos={taskEntries}
-      />
+        <TodoToolCard
+          tool={displayTool}
+          title={{ main: "Update Plan" }}
+          iconName="TaskUpdate"
+          todos={taskEntries}
+          onPreviewImage={onPreviewImage}
+        />
     );
   }
   if (isTodoTool(displayTool)) {
     return (
-      <TodoToolCard
-        tool={displayTool}
-        title={{ main: todoToolTitle() }}
-        iconName="TodoWrite"
-        todos={taskEntries}
-      />
+        <TodoToolCard
+          tool={displayTool}
+          title={{ main: todoToolTitle() }}
+          iconName="TodoWrite"
+          todos={taskEntries}
+          onPreviewImage={onPreviewImage}
+        />
     );
   }
   const detail = acpToolDisplayDetail(displayTool);
@@ -2967,6 +2971,8 @@ function AcpToolCard({
           <ToolPairPanel
             input={input}
             output={output}
+            outputContent={toolOutputContentBlocks(displayTool.rawOutput)}
+            onPreviewImage={onPreviewImage}
           />
         </div>
       )}
@@ -2984,8 +2990,77 @@ function acpToolInputText(tool: AcpToolCall): string {
 
 function acpToolOutputText(tool: AcpToolCall): string {
   if (typeof tool.rawOutput === "string") return tool.rawOutput;
+  if (toolOutputContentBlocks(tool.rawOutput).length > 0) return "";
   if (tool.rawOutput !== null) return JSON.stringify(tool.rawOutput, null, 2);
   return "";
+}
+
+function toolOutputContentBlocks(value: unknown): AcpContentBlock[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => normalizeToolOutputContentBlock(item));
+}
+
+function normalizeToolOutputContentBlock(value: unknown): AcpContentBlock[] {
+  const record = parseObjectLike(value);
+  if (!record) return [];
+  const nested = record.content;
+  if (nested !== undefined && nested !== value) {
+    const nestedBlocks = normalizeToolOutputContentBlock(nested);
+    if (nestedBlocks.length > 0) return nestedBlocks;
+  }
+  const type = pickString(record.type) ?? pickString(record.kind);
+  if (type === "text") {
+    const text = pickString(record.text);
+    return text ? [{ type: "text", text }] : [];
+  }
+  if (type === "image") {
+    const uri = pickString(record.uri) ?? pickString(record.image_url) ?? pickString(record.url);
+    const data = pickString(record.data);
+    const mimeType =
+      pickString(record.mimeType) ??
+      pickString(record.mime_type) ??
+      imageMimeTypeFromSrc(uri ?? "") ??
+      "image/png";
+    if (!uri && !data) return [];
+    return [{
+      type: "image",
+      uri: uri ?? undefined,
+      data: data ?? undefined,
+      mimeType,
+      meta: record.meta ?? null,
+      annotations: record.annotations ?? null,
+    }];
+  }
+  if (type === "input_image" || type === "image_url") {
+    const src =
+      pickString(record.image_url) ??
+      pickString(record.url) ??
+      pickString(record.uri) ??
+      pickString(record.data);
+    if (!src) return [];
+    const mimeType =
+      pickString(record.mimeType) ??
+      pickString(record.mime_type) ??
+      imageMimeTypeFromSrc(src) ??
+      "image/png";
+    return [{
+      type: "image",
+      uri: src.startsWith("data:") || isLikelyImageUrl(src) ? src : undefined,
+      data: src.startsWith("data:") || isLikelyImageUrl(src) ? undefined : src,
+      mimeType,
+      meta: record.meta ?? null,
+    }];
+  }
+  return [];
+}
+
+function imageMimeTypeFromSrc(src: string): string | null {
+  const match = src.match(/^data:([^;]+);/i);
+  return match?.[1]?.toLowerCase().startsWith("image/") ? match[1] : null;
+}
+
+function isLikelyImageUrl(src: string): boolean {
+  return /^(https?:|asset:|blob:|file:\/\/|\/|[A-Za-z]:[\\/])/i.test(src);
 }
 
 function canonicalizeAcpTool(tool: AcpToolCall): AcpToolCall {
@@ -4404,11 +4479,15 @@ function ToolPairRow({
   text,
   expanded,
   maxLines = 3,
+  content = [],
+  onPreviewImage,
 }: {
   label: string;
   text: string;
   expanded: boolean;
   maxLines?: number;
+  content?: AcpContentBlock[];
+  onPreviewImage?: (image: MarkdownImage) => void;
 }) {
   return (
     <div className="border-b border-card-border/[0.12] last:border-b-0">
@@ -4428,6 +4507,18 @@ function ToolPairRow({
               <code>{text}</code>
             </pre>
           )}
+          {content.length > 0 && onPreviewImage && (
+            <div className={text.trim() ? "mt-2 space-y-2" : "space-y-2"}>
+              {content.map((block, index) => (
+                <AcpContentBlockView
+                  key={`tool-output-content-${index}`}
+                  block={block}
+                  coverImage
+                  onPreviewImage={onPreviewImage}
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -4437,12 +4528,16 @@ function ToolPairRow({
 function ToolPairPanel({
   input,
   output,
+  outputContent = [],
+  onPreviewImage,
 }: {
   input: string;
   output: string;
+  outputContent?: AcpContentBlock[];
+  onPreviewImage?: (image: MarkdownImage) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const stateKey = `${input}\u0000${output}`;
+  const stateKey = `${input}\u0000${output}\u0000${outputContent.length}`;
   const [expandedState, setExpandedState] = useState(() => ({
     key: stateKey,
     expanded: false,
@@ -4450,7 +4545,9 @@ function ToolPairPanel({
   const expanded =
     expandedState.key === stateKey ? expandedState.expanded : false;
   const canExpand =
-    shouldClampToolPairText(input, 3) || shouldClampToolPairText(output, 3);
+    shouldClampToolPairText(input, 3) ||
+    shouldClampToolPairText(output, 3) ||
+    outputContent.length > 1;
   return (
     <div ref={panelRef}>
       {input && (
@@ -4461,12 +4558,14 @@ function ToolPairPanel({
           maxLines={3}
         />
       )}
-      {output && (
+      {(output || outputContent.length > 0) && (
         <ToolPairRow
           label="OUT"
           text={output}
           expanded={expanded}
           maxLines={3}
+          content={outputContent}
+          onPreviewImage={onPreviewImage}
         />
       )}
       {canExpand && (
@@ -4506,11 +4605,13 @@ function TodoToolCard({
   title,
   iconName,
   todos,
+  onPreviewImage,
 }: {
   tool: AcpToolCall;
   title: ToolTitleParts;
   iconName: string;
   todos: TodoEntry[];
+  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   if (todos.length === 0) {
     return (
@@ -4518,6 +4619,7 @@ function TodoToolCard({
           tool={tool}
           title={title}
           iconName={iconName}
+          onPreviewImage={onPreviewImage}
         />
       );
   }
@@ -4570,10 +4672,12 @@ function AcpToolCardFallback({
   tool,
   title,
   iconName,
+  onPreviewImage,
 }: {
   tool: AcpToolCall;
   title: ToolTitleParts;
   iconName: string;
+  onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const input = acpToolInputText(tool);
   const output = acpToolOutputText(tool);
@@ -4583,6 +4687,8 @@ function AcpToolCardFallback({
         <ToolPairPanel
           input={input}
           output={output}
+          outputContent={toolOutputContentBlocks(tool.rawOutput)}
+          onPreviewImage={onPreviewImage}
         />
       </div>
     </ToolTimelineFrame>
@@ -5026,6 +5132,8 @@ function isRenderableMarkdownImageSrc(src: string): boolean {
 
 function markdownUrlTransform(url: string): string {
   const raw = url.trim().replace(/^<|>$/g, "");
+  const assetPath = localAssetImagePath(raw);
+  if (assetPath) return convertFileSrc(assetPath);
   if (/^(https?:|mailto:|data:|asset:|blob:)/i.test(raw)) return raw;
   if (/^file:\/\//i.test(raw)) return convertFileSrc(decodeFileUri(raw));
   if (/^\/|^[A-Za-z]:[\\/]/.test(raw)) return convertFileSrc(raw);
@@ -5058,6 +5166,8 @@ function useResolvedImageSrc(rawSrc: string): string {
 
 function resolveImageSrc(rawSrc: string): string {
   const src = rawSrc.trim().replace(/^<|>$/g, "");
+  const assetPath = localAssetImagePath(src);
+  if (assetPath) return convertFileSrc(assetPath);
   if (/^(https?:|data:|asset:|blob:)/i.test(src)) return src;
   if (/^file:\/\//i.test(src)) return convertFileSrc(decodeFileUri(src));
   if (/^\/|^[A-Za-z]:[\\/]/.test(src)) return convertFileSrc(src);
@@ -5066,9 +5176,21 @@ function resolveImageSrc(rawSrc: string): string {
 
 function localImagePath(rawSrc: string): string | null {
   const src = rawSrc.trim().replace(/^<|>$/g, "");
+  const assetPath = localAssetImagePath(src);
+  if (assetPath) return assetPath;
   if (/^file:\/\//i.test(src)) return decodeFileUri(src);
   if (/^\/|^[A-Za-z]:[\\/]/.test(src)) return src;
   return null;
+}
+
+function localAssetImagePath(src: string): string | null {
+  const match = src.match(/^asset:\/\/localhost\/(.+)$/i);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }
 
 function decodeFileUri(uri: string): string {
