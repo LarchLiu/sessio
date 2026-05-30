@@ -146,6 +146,7 @@ body {
   position: relative;
   z-index: 10;
   width: 1px;
+  cursor: col-resize;
   outline: none;
   touch-action: none;
 }
@@ -157,12 +158,23 @@ body {
   left: -3px;
   width: 6px;
   background: transparent;
-  transition: background-color 120ms ease;
+  cursor: col-resize;
 }
 
-.app-sidebar-resize-handle:hover::before,
-.app-sidebar-resize-handle:focus-visible::before,
-.app-sidebar-resize-handle[aria-valuenow]:active::before {
+.app-sidebar-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 1px;
+  background: transparent;
+  transition: background-color 120ms ease;
+  cursor: col-resize;
+}
+
+.app-sidebar-resize-handle:hover::after,
+.app-sidebar-resize-handle:focus-visible::after,
+.app-sidebar-resize-handle[aria-valuenow]:active::after {
   background: rgb(var(--color-fg) / 0.12);
 }
 
