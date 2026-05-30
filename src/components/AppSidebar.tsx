@@ -638,6 +638,7 @@ function ProjectActionsButton({
                 value={form.workflowId}
                 options={workflowOptions(workflows)}
                 onChange={(value) => setForm({ ...form, workflowId: value })}
+                portalZIndex={100}
               />
             </div>
             <div className="flex justify-end gap-2">

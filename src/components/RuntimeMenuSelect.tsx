@@ -12,6 +12,7 @@ export interface RuntimeMenuSelectProps {
   menuPlacement?: "auto" | "bottom" | "top" | "left" | "right";
   minMenuWidth?: number;
   maxWidthClassName?: string;
+  portalZIndex?: number;
 }
 
 export function RuntimeMenuSelect({
@@ -23,6 +24,7 @@ export function RuntimeMenuSelect({
   menuPlacement = "auto",
   minMenuWidth = 180,
   maxWidthClassName = "max-w-[220px]",
+  portalZIndex,
 }: RuntimeMenuSelectProps) {
   return (
     <div className={`flex min-w-0 ${maxWidthClassName} items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink`}>
@@ -38,6 +40,7 @@ export function RuntimeMenuSelect({
         menuClassName="bg-surface-panel"
         minMenuWidth={minMenuWidth}
         emptyContent={ariaLabel}
+        portalZIndex={portalZIndex}
       />
     </div>
   );

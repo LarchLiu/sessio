@@ -48,6 +48,7 @@ export interface InlineMenuSelectProps {
   menuClassName?: string;
   minMenuWidth?: number;
   emptyContent?: ReactNode;
+  portalZIndex?: number;
 }
 
 export default function InlineMenuSelect({
@@ -62,6 +63,7 @@ export default function InlineMenuSelect({
   menuClassName = "",
   minMenuWidth = 180,
   emptyContent,
+  portalZIndex = 80,
 }: InlineMenuSelectProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<MenuPosition | null>(null);
@@ -206,7 +208,8 @@ export default function InlineMenuSelect({
         pos &&
         createPortal(
           <div
-            className="fixed inset-0 z-[79] bg-transparent"
+            className="fixed inset-0 bg-transparent"
+            style={{ zIndex: portalZIndex - 1 }}
             onMouseDown={() => setOpen(false)}
           />,
           document.body,
@@ -219,7 +222,7 @@ export default function InlineMenuSelect({
             onWheel={(e) => e.stopPropagation()}
             onScroll={(e) => e.stopPropagation()}
             className={
-              "fixed z-[80] rounded-md border border-ink/10 bg-surface-panel shadow-[0_20px_60px_rgba(0,0,0,0.22)] overflow-hidden " +
+              "fixed rounded-md border border-ink/10 bg-surface-panel shadow-[0_20px_60px_rgba(0,0,0,0.22)] overflow-hidden " +
               menuClassName
             }
             style={{
@@ -227,6 +230,7 @@ export default function InlineMenuSelect({
               left: pos.left,
               width: pos.width,
               maxHeight: MENU_MAX_HEIGHT,
+              zIndex: portalZIndex,
             }}
           >
             <ScrollArea
