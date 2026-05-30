@@ -5,12 +5,10 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::memory::build::default_artifacts_root;
-use crate::models::Agent;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
     pub memory: MemoryConfig,
-    pub agents: AgentsConfig,
     pub debug: DebugConfig,
 }
 
@@ -18,54 +16,6 @@ pub struct AppConfig {
 #[serde(rename_all = "camelCase")]
 pub struct DebugConfig {
     pub acp_config: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct AgentsConfig {
-    pub runtime: RuntimeAgentsConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct RuntimeAgentsConfig {
-    pub codex: AgentRuntimeConfig,
-    pub claude: AgentRuntimeConfig,
-    pub gemini: AgentRuntimeConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct AgentRuntimeConfig {
-    pub enabled: bool,
-    pub transport: Option<String>,
-    pub model: Option<String>,
-    pub models: Vec<AgentRuntimeOptionConfig>,
-    pub effort: Option<String>,
-    pub efforts: Vec<AgentRuntimeOptionConfig>,
-    pub permission_mode: Option<String>,
-    pub permission_modes: Vec<AgentRuntimeOptionConfig>,
-    pub sandbox: Option<String>,
-    pub command: AgentRuntimeCommandConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct AgentRuntimeOptionConfig {
-    pub value: String,
-    pub label: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct AgentRuntimeCommandConfig {
-    pub session: Option<String>,
-    pub version: Option<String>,
-}
-
-impl RuntimeAgentsConfig {
-    pub fn get(&self, agent: Agent) -> &AgentRuntimeConfig {
-        match agent {
-            Agent::Codex => &self.codex,
-            Agent::Claude => &self.claude,
-            Agent::Gemini => &self.gemini,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -86,45 +36,12 @@ pub struct QmdBackendConfig {
 #[derive(Debug, Clone, Default)]
 struct RawConfig {
     memory: RawMemoryConfig,
-    agents: RawAgentsConfig,
     debug: RawDebugConfig,
 }
 
 #[derive(Debug, Clone, Default)]
 struct RawDebugConfig {
     acp_config: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawAgentsConfig {
-    runtime: RawRuntimeAgentsConfig,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawRuntimeAgentsConfig {
-    codex: RawAgentRuntimeConfig,
-    claude: RawAgentRuntimeConfig,
-    gemini: RawAgentRuntimeConfig,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawAgentRuntimeConfig {
-    enabled: Option<bool>,
-    transport: Option<String>,
-    model: Option<String>,
-    models: Option<String>,
-    effort: Option<String>,
-    efforts: Option<String>,
-    permission_mode: Option<String>,
-    permission_modes: Option<String>,
-    sandbox: Option<String>,
-    command: RawAgentRuntimeCommandConfig,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawAgentRuntimeCommandConfig {
-    session: Option<String>,
-    version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -174,48 +91,6 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     }
     fs::write(&path, serialize_app_config(config))
         .with_context(|| format!("write config {}", path.display()))
-}
-
-pub fn update_agent_runtime_preferences(
-    agent: Agent,
-    update: AgentRuntimePreferencesUpdate,
-) -> Result<AppConfig> {
-    let mut config = load_config()?;
-    let runtime = match agent {
-        Agent::Codex => &mut config.agents.runtime.codex,
-        Agent::Claude => &mut config.agents.runtime.claude,
-        Agent::Gemini => &mut config.agents.runtime.gemini,
-    };
-    if let Some(model) = normalize_optional_string(update.model) {
-        runtime.model = Some(model);
-    }
-    if let Some(effort) = normalize_optional_string(update.effort) {
-        runtime.effort = Some(effort);
-    }
-    if let Some(permission_mode) = normalize_optional_string(update.permission_mode) {
-        runtime.permission_mode = Some(permission_mode);
-    }
-    for option in update.models {
-        upsert_runtime_option(&mut runtime.models, option);
-    }
-    for option in update.efforts {
-        upsert_runtime_option(&mut runtime.efforts, option);
-    }
-    for option in update.permission_modes {
-        upsert_runtime_option(&mut runtime.permission_modes, option);
-    }
-    save_config(&config)?;
-    Ok(config)
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct AgentRuntimePreferencesUpdate {
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub permission_mode: Option<String>,
-    pub models: Vec<AgentRuntimeOptionConfig>,
-    pub efforts: Vec<AgentRuntimeOptionConfig>,
-    pub permission_modes: Vec<AgentRuntimeOptionConfig>,
 }
 
 pub fn expand_path(value: &str) -> Result<PathBuf> {
@@ -279,36 +154,6 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
                 other => bail!("unknown key in [debug]: {other}"),
             },
-            Section::AgentRuntime(agent) => {
-                let target = raw_runtime_agent_mut(&mut raw, agent);
-                match key {
-                    "enabled" => target.enabled = value.map(parse_bool).transpose()?,
-                    "transport" => target.transport = value,
-                    "model" => target.model = value,
-                    "models" => target.models = value,
-                    "effort" => target.effort = value,
-                    "efforts" => target.efforts = value,
-                    "permission_mode" => target.permission_mode = value,
-                    "permission_modes" => target.permission_modes = value,
-                    "sandbox" => target.sandbox = value,
-                    "command" => target.command.session = value,
-                    other => bail!(
-                        "unknown key in [agents.runtime.{}]: {other}",
-                        agent.as_str()
-                    ),
-                }
-            }
-            Section::AgentRuntimeCommand(agent) => {
-                let target = raw_runtime_agent_mut(&mut raw, agent);
-                match key {
-                    "session" => target.command.session = value,
-                    "version" => target.command.version = value,
-                    other => bail!(
-                        "unknown key in [agents.runtime.{}.command]: {other}",
-                        agent.as_str()
-                    ),
-                }
-            }
             Section::Root | Section::Ignored => {}
         }
     }
@@ -322,8 +167,6 @@ enum Section {
     Memory,
     MemoryBackendsQmd,
     Debug,
-    AgentRuntime(Agent),
-    AgentRuntimeCommand(Agent),
     Ignored,
 }
 
@@ -345,18 +188,6 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
         [a] if a == "memory" => Section::Memory,
         [a] if a == "debug" => Section::Debug,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
-        [a, b, c] if a == "agents" && b == "runtime" => match c.as_str() {
-            "codex" => Section::AgentRuntime(Agent::Codex),
-            "claude" => Section::AgentRuntime(Agent::Claude),
-            "gemini" => Section::AgentRuntime(Agent::Gemini),
-            _ => Section::Ignored,
-        },
-        [a, b, c, d] if a == "agents" && b == "runtime" && d == "command" => match c.as_str() {
-            "codex" => Section::AgentRuntimeCommand(Agent::Codex),
-            "claude" => Section::AgentRuntimeCommand(Agent::Claude),
-            "gemini" => Section::AgentRuntimeCommand(Agent::Gemini),
-            _ => Section::Ignored,
-        },
         _ => Section::Ignored,
     }))
 }
@@ -427,7 +258,6 @@ fn strip_comment(line: &str) -> &str {
 fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
     Ok(AppConfig {
         memory: resolve_memory_config_inner(raw.clone(), apply_env)?,
-        agents: resolve_agents_config(raw.clone())?,
         debug: resolve_debug_config(raw),
     })
 }
@@ -530,266 +360,13 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
         &mut changed,
     );
 
-    merge_raw_agent_runtime_defaults(
-        &mut raw.agents.runtime.codex,
-        defaults.agents.runtime.codex,
-        &mut changed,
-    )?;
-    merge_raw_agent_runtime_defaults(
-        &mut raw.agents.runtime.claude,
-        defaults.agents.runtime.claude,
-        &mut changed,
-    )?;
-    merge_raw_agent_runtime_defaults(
-        &mut raw.agents.runtime.gemini,
-        defaults.agents.runtime.gemini,
-        &mut changed,
-    )?;
-
     Ok((raw, changed))
-}
-
-fn merge_raw_agent_runtime_defaults(
-    target: &mut RawAgentRuntimeConfig,
-    defaults: RawAgentRuntimeConfig,
-    changed: &mut bool,
-) -> Result<()> {
-    merge_option(&mut target.enabled, defaults.enabled, changed);
-    merge_option(&mut target.transport, defaults.transport, changed);
-    merge_option(&mut target.model, defaults.model, changed);
-    merge_runtime_options_string(&mut target.models, defaults.models, changed)?;
-    merge_option(&mut target.effort, defaults.effort, changed);
-    merge_runtime_options_string(&mut target.efforts, defaults.efforts, changed)?;
-    merge_option(
-        &mut target.permission_mode,
-        defaults.permission_mode,
-        changed,
-    );
-    merge_runtime_options_string(
-        &mut target.permission_modes,
-        defaults.permission_modes,
-        changed,
-    )?;
-    merge_option(&mut target.sandbox, defaults.sandbox, changed);
-    merge_option(
-        &mut target.command.session,
-        defaults.command.session,
-        changed,
-    );
-    merge_option(
-        &mut target.command.version,
-        defaults.command.version,
-        changed,
-    );
-    Ok(())
 }
 
 fn merge_option<T>(target: &mut Option<T>, default: Option<T>, changed: &mut bool) {
     if target.is_none() && default.is_some() {
         *target = default;
         *changed = true;
-    }
-}
-
-fn merge_runtime_options_string(
-    target: &mut Option<String>,
-    default: Option<String>,
-    changed: &mut bool,
-) -> Result<()> {
-    let Some(default) = default.filter(|value| !value.trim().is_empty()) else {
-        return Ok(());
-    };
-    let Some(current) = target.as_mut() else {
-        *target = Some(default);
-        *changed = true;
-        return Ok(());
-    };
-    if current.trim().is_empty() {
-        *current = default;
-        *changed = true;
-        return Ok(());
-    }
-
-    let mut options = parse_runtime_options(Some(current))?;
-    let defaults = parse_runtime_options(Some(&default))?;
-    let mut options_changed = false;
-    for default_option in defaults {
-        if options
-            .iter()
-            .any(|option| option.value == default_option.value)
-        {
-            continue;
-        }
-        options.push(default_option);
-        options_changed = true;
-    }
-    if options_changed {
-        *current = serialize_runtime_options(&options);
-        *changed = true;
-    }
-    Ok(())
-}
-
-fn resolve_agents_config(raw: RawConfig) -> Result<AgentsConfig> {
-    Ok(AgentsConfig {
-        runtime: RuntimeAgentsConfig {
-            codex: resolve_agent_runtime_config(raw.agents.runtime.codex)?,
-            claude: resolve_agent_runtime_config(raw.agents.runtime.claude)?,
-            gemini: resolve_agent_runtime_config(raw.agents.runtime.gemini)?,
-        },
-    })
-}
-
-fn resolve_agent_runtime_config(raw: RawAgentRuntimeConfig) -> Result<AgentRuntimeConfig> {
-    let transport = raw.transport.filter(|value| !value.trim().is_empty());
-    if let Some(transport) = &transport {
-        match transport.as_str() {
-            "fake" | "acp" | "cliStreamJson" | "plainCli" => {}
-            other => bail!("unsupported runtime transport in config: {other}"),
-        }
-    }
-    Ok(AgentRuntimeConfig {
-        enabled: raw.enabled.unwrap_or(false),
-        transport,
-        model: raw.model.filter(|value| !value.trim().is_empty()),
-        models: parse_runtime_options(raw.models.as_deref())?,
-        effort: raw.effort.filter(|value| !value.trim().is_empty()),
-        efforts: parse_runtime_options(raw.efforts.as_deref())?,
-        permission_mode: raw.permission_mode.filter(|value| !value.trim().is_empty()),
-        permission_modes: parse_runtime_options(raw.permission_modes.as_deref())?,
-        sandbox: raw.sandbox.filter(|value| !value.trim().is_empty()),
-        command: AgentRuntimeCommandConfig {
-            session: raw.command.session.filter(|value| !value.trim().is_empty()),
-            version: raw.command.version.filter(|value| !value.trim().is_empty()),
-        },
-    })
-}
-
-fn parse_runtime_options(value: Option<&str>) -> Result<Vec<AgentRuntimeOptionConfig>> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    for entry in split_escaped(value, ',') {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        let mut parts = split_escaped(entry, '|').into_iter();
-        let value = unescape_runtime_option_part(parts.next().unwrap_or_default().trim())?;
-        if value.is_empty() {
-            continue;
-        }
-        let label = parts
-            .next()
-            .map(|part| unescape_runtime_option_part(part.trim()))
-            .transpose()?
-            .filter(|label| !label.trim().is_empty())
-            .unwrap_or_else(|| value.clone());
-        out.push(AgentRuntimeOptionConfig { value, label });
-    }
-    Ok(out)
-}
-
-fn serialize_runtime_options(options: &[AgentRuntimeOptionConfig]) -> String {
-    options
-        .iter()
-        .filter(|option| !option.value.trim().is_empty())
-        .map(|option| {
-            let label = if option.label.trim().is_empty() {
-                option.value.as_str()
-            } else {
-                option.label.as_str()
-            };
-            format!(
-                "{}|{}",
-                escape_runtime_option_part(option.value.trim()),
-                escape_runtime_option_part(label.trim())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn split_escaped(value: &str, delimiter: char) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut escaped = false;
-    for (idx, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == delimiter {
-            out.push(&value[start..idx]);
-            start = idx + ch.len_utf8();
-        }
-    }
-    out.push(&value[start..]);
-    out
-}
-
-fn escape_runtime_option_part(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace(',', "\\,")
-}
-
-fn unescape_runtime_option_part(value: &str) -> Result<String> {
-    let mut out = String::new();
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        let Some(next) = chars.next() else {
-            bail!("unfinished runtime option escape sequence");
-        };
-        out.push(next);
-    }
-    Ok(out)
-}
-
-fn normalize_optional_string(value: Option<String>) -> Option<String> {
-    value
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn upsert_runtime_option(
-    options: &mut Vec<AgentRuntimeOptionConfig>,
-    option: AgentRuntimeOptionConfig,
-) {
-    let value = option.value.trim();
-    if value.is_empty() {
-        return;
-    }
-    let label = if option.label.trim().is_empty() {
-        value.to_string()
-    } else {
-        option.label.trim().to_string()
-    };
-    if let Some(existing) = options.iter_mut().find(|existing| existing.value == value) {
-        existing.label = label;
-        return;
-    }
-    options.push(AgentRuntimeOptionConfig {
-        value: value.to_string(),
-        label,
-    });
-}
-
-fn raw_runtime_agent_mut(raw: &mut RawConfig, agent: Agent) -> &mut RawAgentRuntimeConfig {
-    match agent {
-        Agent::Codex => &mut raw.agents.runtime.codex,
-        Agent::Claude => &mut raw.agents.runtime.claude,
-        Agent::Gemini => &mut raw.agents.runtime.gemini,
     }
 }
 
@@ -811,7 +388,6 @@ fn write_default_config_file(path: &Path) -> Result<()> {
 fn default_app_config() -> Result<AppConfig> {
     Ok(AppConfig {
         memory: default_memory_config()?,
-        agents: default_agents_config(),
         debug: DebugConfig { acp_config: false },
     })
 }
@@ -827,85 +403,6 @@ fn default_memory_config() -> Result<MemoryConfig> {
             install_command: "npm install -g @tobilu/qmd".to_string(),
         },
     })
-}
-
-fn default_agents_config() -> AgentsConfig {
-    AgentsConfig {
-        runtime: RuntimeAgentsConfig {
-            codex: AgentRuntimeConfig {
-                enabled: true,
-                transport: Some("acp".to_string()),
-                model: Some("gpt-5.3-codex".to_string()),
-                models: vec![
-                    runtime_option_config("gpt-5.5", "5.5"),
-                    runtime_option_config("gpt-5.4", "5.4"),
-                    runtime_option_config("gpt-5.3-codex", "5.3 Codex"),
-                ],
-                effort: None,
-                efforts: Vec::new(),
-                permission_mode: Some("read-only".to_string()),
-                permission_modes: vec![
-                    runtime_option_config("read-only", "Default permissions"),
-                    runtime_option_config("auto", "Auto-review"),
-                    runtime_option_config("full-access", "Full access"),
-                ],
-                sandbox: None,
-                command: AgentRuntimeCommandConfig {
-                    session: Some("npx -y @zed-industries/codex-acp@latest".to_string()),
-                    version: Some("codex --version".to_string()),
-                },
-            },
-            claude: AgentRuntimeConfig {
-                enabled: true,
-                transport: Some("acp".to_string()),
-                model: Some("claude-opus-4-7".to_string()),
-                models: vec![
-                    runtime_option_config("claude-opus-4-7", "Opus 4.7"),
-                    runtime_option_config("claude-opus-4-6", "Opus 4.6"),
-                ],
-                effort: None,
-                efforts: Vec::new(),
-                permission_mode: Some("default".to_string()),
-                permission_modes: vec![
-                    runtime_option_config("default", "Ask before edits"),
-                    runtime_option_config("acceptEdits", "Edit automatically"),
-                    runtime_option_config("plan", "Plan mode"),
-                    runtime_option_config("dontAsk", "Don't Ask"),
-                ],
-                sandbox: None,
-                command: AgentRuntimeCommandConfig {
-                    session: Some(
-                        "npx -y @agentclientprotocol/claude-agent-acp@latest".to_string(),
-                    ),
-                    version: Some("claude --version".to_string()),
-                },
-            },
-            gemini: AgentRuntimeConfig {
-                enabled: false,
-                transport: Some("acp".to_string()),
-                model: None,
-                models: Vec::new(),
-                effort: None,
-                efforts: Vec::new(),
-                permission_mode: None,
-                permission_modes: Vec::new(),
-                sandbox: None,
-                command: AgentRuntimeCommandConfig {
-                    session: Some(
-                        "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
-                    ),
-                    version: Some("gemini --version".to_string()),
-                },
-            },
-        },
-    }
-}
-
-fn runtime_option_config(value: &str, label: &str) -> AgentRuntimeOptionConfig {
-    AgentRuntimeOptionConfig {
-        value: value.to_string(),
-        label: label.to_string(),
-    }
 }
 
 fn serialize_memory_config(config: &MemoryConfig) -> String {
@@ -947,8 +444,6 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     out.push_str(&serialize_memory_config(&config.memory));
     out.push('\n');
     out.push_str(&serialize_debug_config(&config.debug));
-    out.push('\n');
-    out.push_str(&serialize_agents_config(&config.agents));
     out
 }
 
@@ -961,99 +456,10 @@ fn serialize_debug_config(config: &DebugConfig) -> String {
     out
 }
 
-fn serialize_agents_config(config: &AgentsConfig) -> String {
-    let mut out = String::new();
-    for (name, runtime) in [
-        ("codex", &config.runtime.codex),
-        ("claude", &config.runtime.claude),
-        ("gemini", &config.runtime.gemini),
-    ] {
-        if !runtime.enabled
-            && runtime.transport.is_none()
-            && runtime.model.is_none()
-            && runtime.models.is_empty()
-            && runtime.effort.is_none()
-            && runtime.efforts.is_empty()
-            && runtime.permission_mode.is_none()
-            && runtime.permission_modes.is_empty()
-            && runtime.sandbox.is_none()
-            && runtime.command.session.is_none()
-            && runtime.command.version.is_none()
-        {
-            continue;
-        }
-        out.push_str("[agents.runtime.");
-        out.push_str(name);
-        out.push_str("]\n");
-        out.push_str("enabled = ");
-        out.push_str(if runtime.enabled { "true" } else { "false" });
-        out.push('\n');
-        if let Some(transport) = &runtime.transport {
-            out.push_str("transport = ");
-            out.push_str(&toml_string(transport));
-            out.push('\n');
-        }
-        if let Some(model) = &runtime.model {
-            out.push_str("model = ");
-            out.push_str(&toml_string(model));
-            out.push('\n');
-        }
-        if !runtime.models.is_empty() {
-            out.push_str("models = ");
-            out.push_str(&toml_string(&serialize_runtime_options(&runtime.models)));
-            out.push('\n');
-        }
-        if let Some(effort) = &runtime.effort {
-            out.push_str("effort = ");
-            out.push_str(&toml_string(effort));
-            out.push('\n');
-        }
-        if !runtime.efforts.is_empty() {
-            out.push_str("efforts = ");
-            out.push_str(&toml_string(&serialize_runtime_options(&runtime.efforts)));
-            out.push('\n');
-        }
-        if let Some(permission_mode) = &runtime.permission_mode {
-            out.push_str("permission_mode = ");
-            out.push_str(&toml_string(permission_mode));
-            out.push('\n');
-        }
-        if !runtime.permission_modes.is_empty() {
-            out.push_str("permission_modes = ");
-            out.push_str(&toml_string(&serialize_runtime_options(
-                &runtime.permission_modes,
-            )));
-            out.push('\n');
-        }
-        if let Some(sandbox) = &runtime.sandbox {
-            out.push_str("sandbox = ");
-            out.push_str(&toml_string(sandbox));
-            out.push('\n');
-        }
-        if runtime.command.session.is_some() || runtime.command.version.is_some() {
-            out.push_str("[agents.runtime.");
-            out.push_str(name);
-            out.push_str(".command]\n");
-            if let Some(command) = &runtime.command.session {
-                out.push_str("session = ");
-                out.push_str(&toml_string(command));
-                out.push('\n');
-            }
-            if let Some(command) = &runtime.command.version {
-                out.push_str("version = ");
-                out.push_str(&toml_string(command));
-                out.push('\n');
-            }
-        }
-        out.push('\n');
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        default_app_config, parse_raw_config, raw_config_with_defaults, resolve_agents_config,
+        default_app_config, parse_raw_config, raw_config_with_defaults,
         resolve_memory_config_inner, serialize_app_config,
     };
 
@@ -1131,6 +537,13 @@ mod tests {
             [unrelated.section]
             key = "value"
 
+            [agents.runtime.codex]
+            enabled = false
+            model = "ignored"
+
+            [agents.runtime.codex.command]
+            session = "ignored"
+
             [memory]
             backend = "qmd"
             "#,
@@ -1154,152 +567,26 @@ mod tests {
     }
 
     #[test]
-    fn parses_agent_runtime_config() {
-        let raw = parse_raw_config(
-            r#"
-            [agents.runtime.codex]
-            enabled = true
-            transport = "acp"
-            model = "gpt-5"
-            models = "gpt-5|GPT 5,gpt-5-codex|GPT 5 Codex"
-            permission_mode = "read-only"
-            permission_modes = "read-only|Default permissions,auto|Auto-review,full-access|Full access"
-            sandbox = "workspace-write"
-            [agents.runtime.codex.command]
-            session = "npx -y @zed-industries/codex-acp@latest"
-            version = "codex --version"
-            "#,
-        )
-        .unwrap();
-        let config = resolve_agents_config(raw).unwrap();
-
-        assert!(config.runtime.codex.enabled);
-        assert_eq!(config.runtime.codex.transport.as_deref(), Some("acp"));
-        assert_eq!(config.runtime.codex.model.as_deref(), Some("gpt-5"));
-        assert_eq!(config.runtime.codex.models.len(), 2);
-        assert_eq!(config.runtime.codex.models[0].value, "gpt-5");
-        assert_eq!(config.runtime.codex.models[0].label, "GPT 5");
-        assert_eq!(
-            config.runtime.codex.permission_mode.as_deref(),
-            Some("read-only")
-        );
-        assert_eq!(config.runtime.codex.permission_modes.len(), 3);
-        assert_eq!(config.runtime.codex.permission_modes[0].value, "read-only");
-        assert_eq!(
-            config.runtime.codex.permission_modes[0].label,
-            "Default permissions"
-        );
-        assert_eq!(
-            config.runtime.codex.sandbox.as_deref(),
-            Some("workspace-write")
-        );
-        assert_eq!(
-            config.runtime.codex.command.session.as_deref(),
-            Some("npx -y @zed-industries/codex-acp@latest")
-        );
-        assert_eq!(
-            config.runtime.codex.command.version.as_deref(),
-            Some("codex --version")
-        );
-    }
-
-    #[test]
-    fn default_app_config_serializes_runtime_agents() {
+    fn default_app_config_serializes_memory_and_debug_only() {
         let config = default_app_config().unwrap();
         let serialized = serialize_app_config(&config);
         let raw = parse_raw_config(&serialized).unwrap();
-        let agents = resolve_agents_config(raw).unwrap();
+        let config = super::resolve_app_config(raw, false).unwrap();
 
-        assert!(serialized.contains("[agents.runtime.codex]"));
-        assert!(serialized.contains("[agents.runtime.claude]"));
-        assert!(serialized.contains("[agents.runtime.gemini]"));
-        assert!(agents.runtime.codex.enabled);
-        assert!(agents.runtime.claude.enabled);
-        assert!(!agents.runtime.gemini.enabled);
-        assert_eq!(agents.runtime.codex.transport.as_deref(), Some("acp"));
-        assert_eq!(
-            agents.runtime.claude.permission_mode.as_deref(),
-            Some("default")
-        );
-        assert_eq!(
-            agents.runtime.gemini.command.session.as_deref(),
-            Some("npx -y -- @google/gemini-cli@latest --experimental-acp")
-        );
+        assert!(serialized.contains("[memory]"));
+        assert!(serialized.contains("[debug]"));
+        assert!(!serialized.contains("[agents.runtime"));
+        assert_eq!(config.memory.backend, "qmd");
     }
 
     #[test]
-    fn empty_config_is_completed_with_default_runtime_agents() {
+    fn empty_config_is_completed_with_memory_and_debug_defaults() {
         let raw = parse_raw_config("").unwrap();
         let (raw, changed) = raw_config_with_defaults(raw).unwrap();
         let config = super::resolve_app_config(raw, false).unwrap();
 
         assert!(changed);
-        assert!(config.agents.runtime.codex.enabled);
-        assert!(config.agents.runtime.claude.enabled);
-        assert!(!config.agents.runtime.gemini.enabled);
-        assert_eq!(
-            config.agents.runtime.codex.transport.as_deref(),
-            Some("acp")
-        );
-        assert_eq!(
-            config.agents.runtime.codex.command.session.as_deref(),
-            Some("npx -y @zed-industries/codex-acp@latest")
-        );
-        assert_eq!(
-            config.agents.runtime.claude.command.session.as_deref(),
-            Some("npx -y @agentclientprotocol/claude-agent-acp@latest")
-        );
-        assert_eq!(config.agents.runtime.claude.permission_modes.len(), 4);
-    }
-
-    #[test]
-    fn existing_config_is_completed_without_overwriting_user_values() {
-        let raw = parse_raw_config(
-            r#"
-            [agents.runtime.codex]
-            enabled = false
-            model = "custom-codex"
-            models = "custom-codex|Custom Codex"
-
-            [agents.runtime.claude]
-            enabled = true
-            permission_modes = "default|Ask before edits"
-            [agents.runtime.claude.command]
-            session = "custom-claude-acp"
-            "#,
-        )
-        .unwrap();
-        let (raw, changed) = raw_config_with_defaults(raw).unwrap();
-        let config = super::resolve_app_config(raw, false).unwrap();
-
-        assert!(changed);
-        assert!(!config.agents.runtime.codex.enabled);
-        assert_eq!(
-            config.agents.runtime.codex.model.as_deref(),
-            Some("custom-codex")
-        );
-        assert_eq!(config.agents.runtime.codex.models[0].value, "custom-codex");
-        assert!(config
-            .agents
-            .runtime
-            .codex
-            .models
-            .iter()
-            .any(|option| option.value == "gpt-5.3-codex"));
-        assert_eq!(
-            config.agents.runtime.claude.command.session.as_deref(),
-            Some("custom-claude-acp")
-        );
-        assert!(config
-            .agents
-            .runtime
-            .claude
-            .permission_modes
-            .iter()
-            .any(|option| option.value == "dontAsk"));
-        assert_eq!(
-            config.agents.runtime.gemini.command.version.as_deref(),
-            Some("gemini --version")
-        );
+        assert_eq!(config.memory.backend, "qmd");
+        assert!(!config.debug.acp_config);
     }
 }

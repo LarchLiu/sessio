@@ -120,6 +120,51 @@ pub struct ProjectInfo {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
+pub enum AgentType {
+    Builtin,
+    Custom,
+}
+
+impl AgentType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgentType::Builtin => "builtin",
+            AgentType::Custom => "custom",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "builtin" => Some(AgentType::Builtin),
+            "custom" => Some(AgentType::Custom),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    pub id: String,
+    pub name: String,
+    pub icon: Option<String>,
+    pub model: Option<String>,
+    pub models: Vec<RuntimeAgentOptionMetadata>,
+    pub effort: Option<String>,
+    pub efforts: Vec<RuntimeAgentOptionMetadata>,
+    pub permission_mode: Option<String>,
+    pub permission_modes: Vec<RuntimeAgentOptionMetadata>,
+    #[serde(rename = "type")]
+    pub agent_type: AgentType,
+    pub enabled: bool,
+    pub transport: RuntimeTransportKind,
+    pub commands: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
 pub enum AssistantType {
     Builtin,
     Custom,
@@ -144,18 +189,35 @@ impl AssistantType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AssistantInfo {
+pub struct AssistantAgentInfo {
     pub id: String,
     pub name: String,
     pub model: String,
-    pub permission_mode: String,
+    pub mode: String,
     pub effort: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantInfo {
+    pub id: String,
+    pub name: String,
+    pub agent: AssistantAgentInfo,
     pub system_prompt: Option<String>,
     #[serde(rename = "type")]
     pub assistant_type: AssistantType,
     pub project_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageAssistantInfo {
+    pub assistant_id: String,
+    pub name: String,
+    pub agent: AssistantAgentInfo,
+    pub order: i64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -194,14 +256,60 @@ impl StageType {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectStageType {
+    Builtin,
+    Custom,
+}
+
+impl ProjectStageType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProjectStageType::Builtin => "builtin",
+            ProjectStageType::Custom => "custom",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "builtin" => Some(ProjectStageType::Builtin),
+            "custom" => Some(ProjectStageType::Custom),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectStageInfo {
+    pub id: String,
+    pub project_id: Option<String>,
+    #[serde(rename = "type")]
+    pub stage_type: ProjectStageType,
+    pub kind: Option<StageType>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StageInfo {
     pub id: String,
     pub thread_id: String,
-    pub assistant_id: String,
+    pub stage_id: String,
+    pub project_id: String,
+    pub assistant_ids: Vec<String>,
+    #[serde(default)]
+    pub assistants: Vec<StageAssistantInfo>,
     #[serde(rename = "type")]
-    pub stage_type: StageType,
+    pub stage_type: ProjectStageType,
+    pub kind: Option<StageType>,
+    pub name: Option<String>,
+    pub description: Option<String>,
     pub order: i64,
     pub created_at: i64,
     pub updated_at: i64,

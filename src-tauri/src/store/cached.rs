@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectType,
-    SessionInfo, StageInfo, StageType, SubagentInfo, ThreadInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
+    ProjectInfo, ProjectStageInfo, ProjectType, RuntimeAgentOptionMetadata, SessionInfo, StageInfo,
+    SubagentInfo, ThreadInfo,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -163,6 +164,31 @@ impl SessionStore for CachedStore {
         self.inner.archive_project(project_id)
     }
 
+    fn list_agents(&self) -> Result<Vec<AgentInfo>> {
+        self.inner.list_agents()
+    }
+
+    fn update_builtin_agent_preferences(
+        &self,
+        agent: Agent,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+        models: Option<&[RuntimeAgentOptionMetadata]>,
+        efforts: Option<&[RuntimeAgentOptionMetadata]>,
+        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+    ) -> Result<AgentInfo> {
+        self.inner.update_builtin_agent_preferences(
+            agent,
+            model,
+            effort,
+            permission_mode,
+            models,
+            efforts,
+            permission_modes,
+        )
+    }
+
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
         self.inner.list_assistants(project_id)
     }
@@ -170,22 +196,28 @@ impl SessionStore for CachedStore {
     fn create_assistant(
         &self,
         name: &str,
-        model: &str,
-        permission_mode: &str,
-        effort: &str,
+        agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
         assistant_type: AssistantType,
         project_id: Option<&str>,
     ) -> Result<AssistantInfo> {
-        self.inner.create_assistant(
-            name,
-            model,
-            permission_mode,
-            effort,
-            system_prompt,
-            assistant_type,
-            project_id,
-        )
+        self.inner
+            .create_assistant(name, agent, system_prompt, assistant_type, project_id)
+    }
+
+    fn update_assistant(
+        &self,
+        assistant_id: &str,
+        name: Option<&str>,
+        agent: Option<AssistantAgentInfo>,
+        system_prompt: Option<Option<&str>>,
+    ) -> Result<AssistantInfo> {
+        self.inner
+            .update_assistant(assistant_id, name, agent, system_prompt)
+    }
+
+    fn delete_assistant(&self, assistant_id: &str) -> Result<()> {
+        self.inner.delete_assistant(assistant_id)
     }
 
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>> {
@@ -201,35 +233,104 @@ impl SessionStore for CachedStore {
         self.inner.create_thread(project_id, goal, description)
     }
 
-    fn add_stage(
+    fn update_thread(
         &self,
         thread_id: &str,
-        assistant_id: &str,
-        stage_type: StageType,
-    ) -> Result<StageInfo> {
-        self.inner.add_stage(thread_id, assistant_id, stage_type)
+        goal: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<ThreadInfo> {
+        self.inner.update_thread(thread_id, goal, description)
     }
 
-    fn set_thread_stage(&self, thread_id: &str, stage_id: &str) -> Result<ThreadInfo> {
-        self.inner.set_thread_stage(thread_id, stage_id)
+    fn delete_thread(&self, thread_id: &str) -> Result<()> {
+        self.inner.delete_thread(thread_id)
+    }
+
+    fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>> {
+        self.inner.list_project_stages(project_id)
+    }
+
+    fn create_project_stage(
+        &self,
+        project_id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProjectStageInfo> {
+        self.inner
+            .create_project_stage(project_id, name, description)
+    }
+
+    fn update_project_stage(
+        &self,
+        stage_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+        order: Option<i64>,
+    ) -> Result<ProjectStageInfo> {
+        self.inner
+            .update_project_stage(stage_id, name, description, order)
+    }
+
+    fn delete_project_stage(&self, stage_id: &str) -> Result<()> {
+        self.inner.delete_project_stage(stage_id)
+    }
+
+    fn add_thread_stage(
+        &self,
+        thread_id: &str,
+        stage_id: &str,
+        assistant_ids: &[String],
+    ) -> Result<StageInfo> {
+        self.inner
+            .add_thread_stage(thread_id, stage_id, assistant_ids)
+    }
+
+    fn update_thread_stage(
+        &self,
+        thread_stage_id: &str,
+        assistant_ids: Option<&[String]>,
+        order: Option<i64>,
+    ) -> Result<StageInfo> {
+        self.inner
+            .update_thread_stage(thread_stage_id, assistant_ids, order)
+    }
+
+    fn update_thread_stage_assistant_agent(
+        &self,
+        thread_stage_id: &str,
+        assistant_id: &str,
+        agent: AssistantAgentInfo,
+    ) -> Result<StageInfo> {
+        self.inner
+            .update_thread_stage_assistant_agent(thread_stage_id, assistant_id, agent)
+    }
+
+    fn delete_thread_stage(&self, thread_stage_id: &str) -> Result<()> {
+        self.inner.delete_thread_stage(thread_stage_id)
+    }
+
+    fn set_thread_stage(&self, thread_id: &str, thread_stage_id: &str) -> Result<ThreadInfo> {
+        self.inner.set_thread_stage(thread_id, thread_stage_id)
     }
 
     fn link_stage_session(
         &self,
-        stage_id: &str,
+        thread_stage_id: &str,
         agent: Agent,
         session_id: &str,
     ) -> Result<StageInfo> {
-        self.inner.link_stage_session(stage_id, agent, session_id)
+        self.inner
+            .link_stage_session(thread_stage_id, agent, session_id)
     }
 
     fn unlink_stage_session(
         &self,
-        stage_id: &str,
+        thread_stage_id: &str,
         agent: Agent,
         session_id: &str,
     ) -> Result<StageInfo> {
-        self.inner.unlink_stage_session(stage_id, agent, session_id)
+        self.inner
+            .unlink_stage_session(thread_stage_id, agent, session_id)
     }
 
     fn list_kanban_items(&self, project_id: &str) -> Result<Vec<KanbanItem>> {

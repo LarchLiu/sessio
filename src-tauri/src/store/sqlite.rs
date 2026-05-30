@@ -11,8 +11,10 @@ use crate::memory::{
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{
-    Agent, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectType,
-    SessionHistoryTurn, SessionInfo, StageInfo, StageType, SubagentInfo, ThreadInfo,
+    Agent, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem,
+    KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType, ProjectType,
+    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo,
+    StageType, SubagentInfo, ThreadInfo,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -355,9 +357,7 @@ const SCHEMA_V12: &str = r#"
 CREATE TABLE IF NOT EXISTS assistants (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
-    model           TEXT NOT NULL,
-    permission_mode TEXT NOT NULL,
-    effort          TEXT NOT NULL,
+    agent_json      TEXT NOT NULL,
     system_prompt   TEXT,
     type            TEXT NOT NULL,
     project_id      TEXT,
@@ -380,7 +380,7 @@ CREATE TABLE IF NOT EXISTS threads (
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
-    FOREIGN KEY(stage_id) REFERENCES stages(id) ON DELETE SET NULL
+    FOREIGN KEY(stage_id) REFERENCES thread_stages(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_threads_project_updated
@@ -390,36 +390,91 @@ CREATE INDEX IF NOT EXISTS idx_threads_stage
 
 CREATE TABLE IF NOT EXISTS stages (
     id           TEXT PRIMARY KEY,
-    thread_id    TEXT NOT NULL,
-    assistant_id TEXT NOT NULL,
+    project_id   TEXT,
     type         TEXT NOT NULL,
+    kind         TEXT,
+    name         TEXT,
+    description  TEXT,
     "order"      INTEGER NOT NULL,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL,
-    CHECK(type IN ('research', 'plan', 'build', 'review', 'human', 'done')),
-    UNIQUE(thread_id, "order"),
-    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
-    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
+    CHECK(type IN ('builtin', 'custom')),
+    CHECK(kind IS NULL OR kind IN ('research', 'plan', 'build', 'review', 'human', 'done')),
+    CHECK((type = 'builtin' AND project_id IS NULL AND kind IS NOT NULL AND name IS NULL)
+       OR (type = 'custom' AND project_id IS NOT NULL AND kind IS NULL AND name IS NOT NULL)),
+    UNIQUE(project_id, "order"),
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_stages_thread_order
-    ON stages(thread_id, "order");
-CREATE INDEX IF NOT EXISTS idx_stages_assistant
-    ON stages(assistant_id);
+CREATE INDEX IF NOT EXISTS idx_stages_project
+    ON stages(project_id, type, "order", kind, name);
 
-CREATE TABLE IF NOT EXISTS stage_sessions (
-    stage_id   TEXT NOT NULL,
-    agent      TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY(stage_id, agent, session_id),
+CREATE TABLE IF NOT EXISTS thread_stages (
+    id           TEXT PRIMARY KEY,
+    thread_id    TEXT NOT NULL,
+    stage_id     TEXT NOT NULL,
+    "order"      INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    UNIQUE(thread_id, stage_id),
+    UNIQUE(thread_id, "order"),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
     FOREIGN KEY(stage_id) REFERENCES stages(id) ON DELETE CASCADE
 );
 
+CREATE INDEX IF NOT EXISTS idx_thread_stages_stage
+    ON thread_stages(stage_id);
+
+CREATE TABLE IF NOT EXISTS thread_stage_assistants (
+    thread_stage_id TEXT NOT NULL,
+    assistant_id    TEXT NOT NULL,
+    agent_json      TEXT NOT NULL,
+    "order"         INTEGER NOT NULL,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY(thread_stage_id, assistant_id),
+    FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE CASCADE,
+    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_stage_assistants_assistant
+    ON thread_stage_assistants(assistant_id);
+
+CREATE TABLE IF NOT EXISTS stage_sessions (
+    thread_stage_id TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(thread_stage_id, agent, session_id),
+    FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_stage_sessions_stage
-    ON stage_sessions(stage_id, created_at);
+    ON stage_sessions(thread_stage_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_stage_sessions_session
     ON stage_sessions(agent, session_id);
+
+CREATE TABLE IF NOT EXISTS agents (
+    id               TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    icon             TEXT,
+    model            TEXT,
+    models_json      TEXT NOT NULL DEFAULT '[]',
+    effort           TEXT,
+    efforts_json     TEXT NOT NULL DEFAULT '[]',
+    permission_mode  TEXT,
+    permission_modes_json TEXT NOT NULL DEFAULT '[]',
+    type             TEXT NOT NULL,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    transport        TEXT NOT NULL DEFAULT 'acp',
+    commands_json    TEXT NOT NULL DEFAULT '[]',
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    CHECK(type IN ('builtin', 'custom'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_type_enabled
+    ON agents(type, enabled, name COLLATE NOCASE);
 "#;
 
 fn now_ms() -> i64 {
@@ -546,6 +601,166 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_V9)?;
     conn.execute_batch(SCHEMA_V11)?;
     conn.execute_batch(SCHEMA_V12)?;
+    seed_builtin_project_stages(conn)?;
+    seed_builtin_agents(conn)?;
+    Ok(())
+}
+
+fn seed_builtin_project_stages(conn: &Connection) -> Result<()> {
+    let now = now_ms();
+    for (index, kind) in [
+        StageType::Research,
+        StageType::Plan,
+        StageType::Build,
+        StageType::Review,
+        StageType::Human,
+        StageType::Done,
+    ]
+    .iter()
+    .copied()
+    .enumerate()
+    {
+        let id = format!("stage-builtin-{}", kind.as_str());
+        conn.execute(
+            "INSERT INTO stages (id, project_id, type, kind, name, description, \"order\", created_at, updated_at)
+             VALUES (?, NULL, 'builtin', ?, NULL, NULL, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                type = excluded.type,
+                kind = excluded.kind,
+                name = excluded.name,
+                description = excluded.description,
+                \"order\" = excluded.\"order\",
+                updated_at = excluded.updated_at",
+            params![id, kind.as_str(), index as i64, now, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn runtime_option(value: &str, label: &str) -> RuntimeAgentOptionMetadata {
+    RuntimeAgentOptionMetadata {
+        value: value.to_string(),
+        label: label.to_string(),
+    }
+}
+
+fn seed_builtin_agent(
+    conn: &Connection,
+    agent: Agent,
+    model: Option<&str>,
+    models: Vec<RuntimeAgentOptionMetadata>,
+    effort: Option<&str>,
+    efforts: Vec<RuntimeAgentOptionMetadata>,
+    permission_mode: Option<&str>,
+    permission_modes: Vec<RuntimeAgentOptionMetadata>,
+    enabled: bool,
+    transport: RuntimeTransportKind,
+    commands: Vec<&str>,
+    now: i64,
+) -> Result<()> {
+    let id = agent.as_str();
+    conn.execute(
+        "INSERT INTO agents (
+            id, name, icon, model, models_json, effort, efforts_json,
+            permission_mode, permission_modes_json, type, enabled, transport,
+            commands_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            icon = COALESCE(agents.icon, excluded.icon),
+            model = COALESCE(agents.model, excluded.model),
+            models_json = excluded.models_json,
+            effort = COALESCE(agents.effort, excluded.effort),
+            efforts_json = excluded.efforts_json,
+            permission_mode = COALESCE(agents.permission_mode, excluded.permission_mode),
+            permission_modes_json = excluded.permission_modes_json,
+            type = excluded.type,
+            enabled = agents.enabled,
+            transport = COALESCE(agents.transport, excluded.transport),
+            commands_json = excluded.commands_json,
+            updated_at = excluded.updated_at",
+        params![
+            id,
+            runtime_agent_name(agent),
+            id,
+            model,
+            serde_json::to_string(&models)?,
+            effort,
+            serde_json::to_string(&efforts)?,
+            permission_mode,
+            serde_json::to_string(&permission_modes)?,
+            AgentType::Builtin.as_str(),
+            enabled as i64,
+            transport_kind_to_db(transport),
+            serde_json::to_string(&commands)?,
+            now,
+            now,
+        ],
+    )?;
+    upsert_builtin_assistant_for_agent(conn, id, now)?;
+    Ok(())
+}
+
+fn seed_builtin_agents(conn: &Connection) -> Result<()> {
+    let now = now_ms();
+    seed_builtin_agent(
+        conn,
+        Agent::Codex,
+        Some("gpt-5.3-codex"),
+        vec![
+            runtime_option("gpt-5.5", "5.5"),
+            runtime_option("gpt-5.4", "5.4"),
+            runtime_option("gpt-5.3-codex", "5.3 Codex"),
+        ],
+        None,
+        Vec::new(),
+        Some("read-only"),
+        vec![
+            runtime_option("read-only", "Default permissions"),
+            runtime_option("auto", "Auto-review"),
+            runtime_option("full-access", "Full access"),
+        ],
+        true,
+        RuntimeTransportKind::Acp,
+        vec!["npx -y @zed-industries/codex-acp@latest"],
+        now,
+    )?;
+    seed_builtin_agent(
+        conn,
+        Agent::Claude,
+        Some("claude-opus-4-7"),
+        vec![
+            runtime_option("claude-opus-4-7", "Opus 4.7"),
+            runtime_option("claude-opus-4-6", "Opus 4.6"),
+        ],
+        None,
+        Vec::new(),
+        Some("default"),
+        vec![
+            runtime_option("default", "Ask before edits"),
+            runtime_option("acceptEdits", "Edit automatically"),
+            runtime_option("plan", "Plan mode"),
+            runtime_option("dontAsk", "Don't Ask"),
+        ],
+        true,
+        RuntimeTransportKind::Acp,
+        vec!["npx -y @agentclientprotocol/claude-agent-acp@latest"],
+        now,
+    )?;
+    seed_builtin_agent(
+        conn,
+        Agent::Gemini,
+        None,
+        Vec::new(),
+        None,
+        Vec::new(),
+        None,
+        Vec::new(),
+        false,
+        RuntimeTransportKind::Acp,
+        vec!["npx -y -- @google/gemini-cli@latest --experimental-acp"],
+        now,
+    )?;
     Ok(())
 }
 
@@ -564,6 +779,14 @@ fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
         "plainCli" => RuntimeTransportKind::PlainCli,
         "fake" => RuntimeTransportKind::Fake,
         _ => RuntimeTransportKind::Acp,
+    }
+}
+
+fn runtime_agent_name(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "Codex",
+        Agent::Claude => "Claude",
+        Agent::Gemini => "Gemini",
     }
 }
 
@@ -897,19 +1120,37 @@ fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
     )
 }
 
-fn stable_stage_id(
+fn stable_project_stage_id(
+    project_id: Option<&str>,
+    stage_name: &str,
+    order: i64,
+    now: i64,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.unwrap_or("").as_bytes());
+    hasher.update(stage_name.as_bytes());
+    hasher.update(order.to_string().as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    format!("stage-{}", hex::encode(hasher.finalize())[..16].to_string())
+}
+
+fn stable_thread_stage_id(
     thread_id: &str,
+    stage_id: &str,
     assistant_id: &str,
-    stage_type: StageType,
     order: i64,
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(thread_id.as_bytes());
+    hasher.update(stage_id.as_bytes());
     hasher.update(assistant_id.as_bytes());
-    hasher.update(stage_type.as_str().as_bytes());
     hasher.update(order.to_string().as_bytes());
-    format!("stage-{}", hex::encode(hasher.finalize())[..16].to_string())
+    format!(
+        "thread-stage-{}",
+        hex::encode(hasher.finalize())[..16].to_string()
+    )
 }
 
 #[cfg(test)]
@@ -945,33 +1186,98 @@ fn kanban_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KanbanItem>
     })
 }
 
-fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo> {
-    let assistant_type_raw: String = row.get(6)?;
-    Ok(AssistantInfo {
+fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
+    let models_json: String = row.get(4)?;
+    let efforts_json: String = row.get(6)?;
+    let permission_modes_json: String = row.get(8)?;
+    let agent_type_raw: String = row.get(9)?;
+    let transport_raw: String = row.get(11)?;
+    let commands_json: String = row.get(12)?;
+    let models =
+        serde_json::from_str::<Vec<RuntimeAgentOptionMetadata>>(&models_json).unwrap_or_default();
+    let efforts =
+        serde_json::from_str::<Vec<RuntimeAgentOptionMetadata>>(&efforts_json).unwrap_or_default();
+    let permission_modes =
+        serde_json::from_str::<Vec<RuntimeAgentOptionMetadata>>(&permission_modes_json)
+            .unwrap_or_default();
+    Ok(AgentInfo {
         id: row.get(0)?,
         name: row.get(1)?,
-        model: row.get(2)?,
-        permission_mode: row.get(3)?,
-        effort: row.get(4)?,
-        system_prompt: row.get(5)?,
-        assistant_type: AssistantType::from_db_str(&assistant_type_raw)
-            .unwrap_or(AssistantType::Custom),
-        project_id: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        icon: row.get(2)?,
+        model: row.get(3)?,
+        models,
+        effort: row.get(5)?,
+        efforts,
+        permission_mode: row.get(7)?,
+        permission_modes,
+        agent_type: AgentType::from_db_str(&agent_type_raw).unwrap_or(AgentType::Custom),
+        enabled: row.get::<_, i64>(10)? != 0,
+        transport: transport_kind_from_db(&transport_raw),
+        commands: serde_json::from_str::<Vec<String>>(&commands_json).unwrap_or_default(),
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
-fn stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo> {
-    let stage_type_raw: String = row.get(3)?;
+fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo> {
+    let agent_json: String = row.get(2)?;
+    let assistant_type_raw: String = row.get(4)?;
+    Ok(AssistantInfo {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        agent: serde_json::from_str::<AssistantAgentInfo>(&agent_json).unwrap_or_else(|_| {
+            AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: String::new(),
+                mode: String::new(),
+                effort: String::new(),
+            }
+        }),
+        system_prompt: row.get(3)?,
+        assistant_type: AssistantType::from_db_str(&assistant_type_raw)
+            .unwrap_or(AssistantType::Custom),
+        project_id: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectStageInfo> {
+    let stage_type_raw: String = row.get(2)?;
+    let stage_kind_raw: Option<String> = row.get(3)?;
+    Ok(ProjectStageInfo {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        stage_type: ProjectStageType::from_db_str(&stage_type_raw)
+            .unwrap_or(ProjectStageType::Custom),
+        kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
+        name: row.get(4)?,
+        description: row.get(5)?,
+        order: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo> {
+    let stage_type_raw: String = row.get(4)?;
+    let stage_kind_raw: Option<String> = row.get(5)?;
     Ok(StageInfo {
         id: row.get(0)?,
         thread_id: row.get(1)?,
-        assistant_id: row.get(2)?,
-        stage_type: StageType::from_db_str(&stage_type_raw).unwrap_or(StageType::Build),
-        order: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        stage_id: row.get(2)?,
+        project_id: row.get(3)?,
+        assistant_ids: Vec::new(),
+        assistants: Vec::new(),
+        stage_type: ProjectStageType::from_db_str(&stage_type_raw)
+            .unwrap_or(ProjectStageType::Custom),
+        kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
+        name: row.get(6)?,
+        description: row.get(7)?,
+        order: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
         sessions: Vec::new(),
     })
 }
@@ -1004,10 +1310,35 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
     .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))
 }
 
+fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
+    conn.query_row(
+        "SELECT id, name, icon, model, models_json, effort, efforts_json,
+                permission_mode, permission_modes_json, type, enabled, transport,
+                commands_json, created_at, updated_at
+         FROM agents
+         WHERE id = ?",
+        params![agent_id],
+        agent_info_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("agent not found: {agent_id}"))
+}
+
+fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, icon, model, models_json, effort, efforts_json,
+                permission_mode, permission_modes_json, type, enabled, transport,
+                commands_json, created_at, updated_at
+         FROM agents
+         ORDER BY type ASC, name COLLATE NOCASE ASC",
+    )?;
+    let rows = stmt.query_map([], agent_info_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
     conn.query_row(
-        "SELECT id, name, model, permission_mode, effort, system_prompt,
-                type, project_id, created_at, updated_at
+        "SELECT id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
          FROM assistants
          WHERE id = ?",
         params![assistant_id],
@@ -1032,19 +1363,252 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
     Ok(thread)
 }
 
-fn load_stage_by_id(conn: &Connection, stage_id: &str) -> Result<StageInfo> {
+fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
+    conn.query_row(
+        "SELECT id, project_id, type, kind, name, description, \"order\", created_at, updated_at
+         FROM stages
+         WHERE id = ?",
+        params![stage_id],
+        project_stage_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("project stage not found: {stage_id}"))
+}
+
+fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<StageInfo> {
     let mut stage = conn
         .query_row(
-            "SELECT id, thread_id, assistant_id, type, \"order\", created_at, updated_at
-             FROM stages
-             WHERE id = ?",
-            params![stage_id],
-            stage_from_row,
+            "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.kind, s.name, s.description,
+                    ts.\"order\", ts.created_at, ts.updated_at
+             FROM thread_stages ts
+             INNER JOIN threads t ON t.id = ts.thread_id
+             INNER JOIN stages s ON s.id = ts.stage_id
+             WHERE ts.id = ?",
+            params![thread_stage_id],
+            thread_stage_from_row,
         )
         .optional()?
-        .ok_or_else(|| anyhow::anyhow!("stage not found: {stage_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!("thread stage not found: {thread_stage_id}"))?;
+    stage.assistants = load_stage_assistants(conn, &stage.id)?;
+    stage.assistant_ids = stage
+        .assistants
+        .iter()
+        .map(|assistant| assistant.assistant_id.clone())
+        .collect();
     stage.sessions = load_stage_sessions(conn, &stage.id)?;
     Ok(stage)
+}
+
+fn validate_assistant_for_project(
+    conn: &Connection,
+    project_id: &str,
+    assistant_id: &str,
+) -> Result<AssistantInfo> {
+    let assistant = load_assistant_by_id(conn, assistant_id)?;
+    if assistant.assistant_type == AssistantType::Custom
+        && assistant.project_id.as_deref() != Some(project_id)
+    {
+        anyhow::bail!("custom assistant does not belong to this project");
+    }
+    Ok(assistant)
+}
+
+fn validate_assistants_for_project(
+    conn: &Connection,
+    project_id: &str,
+    assistant_ids: &[String],
+) -> Result<Vec<AssistantInfo>> {
+    let mut seen = HashSet::new();
+    let mut assistants = Vec::new();
+    for assistant_id in assistant_ids {
+        let assistant_id = assistant_id.trim();
+        if assistant_id.is_empty() || !seen.insert(assistant_id.to_string()) {
+            continue;
+        }
+        assistants.push(validate_assistant_for_project(
+            conn,
+            project_id,
+            assistant_id,
+        )?);
+    }
+    if assistants.is_empty() {
+        anyhow::bail!("thread stage requires at least one assistant");
+    }
+    Ok(assistants)
+}
+
+fn load_stage_assistants(
+    conn: &Connection,
+    thread_stage_id: &str,
+) -> Result<Vec<StageAssistantInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT tsa.assistant_id, a.name, tsa.agent_json, tsa.\"order\"
+         FROM thread_stage_assistants tsa
+         INNER JOIN assistants a ON a.id = tsa.assistant_id
+         WHERE tsa.thread_stage_id = ?
+         ORDER BY tsa.\"order\" ASC, tsa.created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![thread_stage_id], |row| {
+        let agent_json: String = row.get(2)?;
+        Ok(StageAssistantInfo {
+            assistant_id: row.get(0)?,
+            name: row.get(1)?,
+            agent: serde_json::from_str::<AssistantAgentInfo>(&agent_json).unwrap_or_else(|_| {
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: String::new(),
+                    mode: String::new(),
+                    effort: String::new(),
+                }
+            }),
+            order: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn stage_assistant_from_assistant(assistant: AssistantInfo, order: i64) -> StageAssistantInfo {
+    StageAssistantInfo {
+        assistant_id: assistant.id,
+        name: assistant.name,
+        agent: assistant.agent,
+        order,
+    }
+}
+
+fn normalize_assistant_agent(
+    conn: &Connection,
+    mut agent: AssistantAgentInfo,
+) -> Result<AssistantAgentInfo> {
+    agent.id = agent.id.trim().to_string();
+    agent.name = agent.name.trim().to_string();
+    agent.model = agent.model.trim().to_string();
+    agent.mode = agent.mode.trim().to_string();
+    agent.effort = agent.effort.trim().to_string();
+    if agent.id.is_empty() {
+        anyhow::bail!("assistant agent id cannot be empty");
+    }
+    if agent.model.is_empty() {
+        anyhow::bail!("assistant model cannot be empty");
+    }
+    if agent.mode.is_empty() {
+        anyhow::bail!("assistant permission mode cannot be empty");
+    }
+    if agent.effort.is_empty() {
+        anyhow::bail!("assistant effort cannot be empty");
+    }
+    let db_agent = load_agent_by_id(conn, &agent.id)?;
+    agent.name = db_agent.name;
+    Ok(agent)
+}
+
+fn replace_thread_stage_assistants(
+    conn: &Connection,
+    thread_stage_id: &str,
+    assistants: &[StageAssistantInfo],
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM thread_stage_assistants WHERE thread_stage_id = ?",
+        params![thread_stage_id],
+    )?;
+    for (index, assistant) in assistants.iter().enumerate() {
+        let agent_json = serde_json::to_string(&assistant.agent)?;
+        conn.execute(
+            "INSERT INTO thread_stage_assistants (thread_stage_id, assistant_id, agent_json, \"order\", created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                thread_stage_id,
+                assistant.assistant_id,
+                agent_json,
+                index as i64,
+                now,
+                now
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn upsert_builtin_assistant_for_agent(conn: &Connection, agent_id: &str, now: i64) -> Result<()> {
+    let agent = load_agent_by_id(conn, agent_id)?;
+    let Some(model) = agent
+        .model
+        .clone()
+        .or_else(|| agent.models.first().map(|option| option.value.clone()))
+    else {
+        return Ok(());
+    };
+    let Some(mode) = agent.permission_mode.clone().or_else(|| {
+        agent
+            .permission_modes
+            .first()
+            .map(|option| option.value.clone())
+    }) else {
+        return Ok(());
+    };
+    let effort = agent
+        .effort
+        .clone()
+        .or_else(|| agent.efforts.first().map(|option| option.value.clone()))
+        .unwrap_or_default();
+    let assistant_agent = AssistantAgentInfo {
+        id: agent.id.clone(),
+        name: agent.name.clone(),
+        model,
+        mode,
+        effort,
+    };
+    let assistant_id = format!("assistant-builtin-{}", agent.id);
+    let agent_json = serde_json::to_string(&assistant_agent)?;
+    conn.execute(
+        "INSERT INTO assistants (
+            id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
+         ) VALUES (?, ?, ?, NULL, 'builtin', NULL, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            agent_json = excluded.agent_json,
+            type = excluded.type,
+            project_id = excluded.project_id,
+            updated_at = excluded.updated_at",
+        params![assistant_id, agent.name, agent_json, now, now],
+    )?;
+    Ok(())
+}
+
+fn next_thread_stage_id(conn: &Connection, thread_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT id
+         FROM thread_stages
+         WHERE thread_id = ?
+         ORDER BY \"order\" ASC, created_at ASC
+         LIMIT 1",
+        params![thread_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn compact_stage_order(conn: &Connection, thread_id: &str) -> Result<()> {
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT id
+             FROM thread_stages
+             WHERE thread_id = ?
+             ORDER BY \"order\" ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![thread_id], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE thread_stages SET \"order\" = ? WHERE id = ?",
+            params![index as i64, id],
+        )?;
+    }
+    Ok(())
 }
 
 fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem> {
@@ -1110,7 +1674,7 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
     Ok(sessions)
 }
 
-fn load_stage_sessions(conn: &Connection, stage_id: &str) -> Result<Vec<SessionInfo>> {
+fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
     let mut stmt = conn.prepare(
         "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
@@ -1118,11 +1682,11 @@ fn load_stage_sessions(conn: &Connection, stage_id: &str) -> Result<Vec<SessionI
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM stage_sessions ss
          INNER JOIN sessions s ON s.agent = ss.agent AND s.session_id = ss.session_id
-         WHERE ss.stage_id = ? AND s.available = 1
+         WHERE ss.thread_stage_id = ? AND s.available = 1
          ORDER BY ss.created_at ASC, s.updated_at DESC, s.started_at DESC",
     )?;
     let mut sessions: Vec<SessionInfo> = stmt
-        .query_map(params![stage_id], |row| {
+        .query_map(params![thread_stage_id], |row| {
             let agent_str: String = row.get(0)?;
             let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
             Ok(SessionInfo {
@@ -1160,15 +1724,24 @@ fn load_stage_sessions(conn: &Connection, stage_id: &str) -> Result<Vec<SessionI
 
 fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, thread_id, assistant_id, type, \"order\", created_at, updated_at
-         FROM stages
-         WHERE thread_id = ?
-         ORDER BY \"order\" ASC, created_at ASC",
+        "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.kind, s.name, s.description,
+                ts.\"order\", ts.created_at, ts.updated_at
+         FROM thread_stages ts
+         INNER JOIN threads t ON t.id = ts.thread_id
+         INNER JOIN stages s ON s.id = ts.stage_id
+         WHERE ts.thread_id = ?
+         ORDER BY ts.\"order\" ASC, ts.created_at ASC",
     )?;
     let mut stages = stmt
-        .query_map(params![thread_id], stage_from_row)?
+        .query_map(params![thread_id], thread_stage_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stage in stages.iter_mut() {
+        stage.assistants = load_stage_assistants(conn, &stage.id)?;
+        stage.assistant_ids = stage
+            .assistants
+            .iter()
+            .map(|assistant| assistant.assistant_id.clone())
+            .collect();
         stage.sessions = load_stage_sessions(conn, &stage.id)?;
     }
     Ok(stages)
@@ -1789,13 +2362,76 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
+    fn list_agents(&self) -> Result<Vec<AgentInfo>> {
+        let conn = self.conn.lock().unwrap();
+        load_agents(&conn)
+    }
+
+    fn update_builtin_agent_preferences(
+        &self,
+        agent: Agent,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+        models: Option<&[RuntimeAgentOptionMetadata]>,
+        efforts: Option<&[RuntimeAgentOptionMetadata]>,
+        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+    ) -> Result<AgentInfo> {
+        let conn = self.conn.lock().unwrap();
+        let id = agent.as_str();
+        let current = load_agent_by_id(&conn, id)?;
+        if current.agent_type != AgentType::Builtin {
+            anyhow::bail!("agent is not builtin: {id}");
+        }
+        let next_model = model.map(str::trim).filter(|value| !value.is_empty());
+        let next_effort = effort.map(str::trim).filter(|value| !value.is_empty());
+        let next_permission_mode = permission_mode
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let next_models = match models {
+            Some(values) => serde_json::to_string(values)?,
+            None => serde_json::to_string(&current.models)?,
+        };
+        let next_efforts = match efforts {
+            Some(values) => serde_json::to_string(values)?,
+            None => serde_json::to_string(&current.efforts)?,
+        };
+        let next_permission_modes = match permission_modes {
+            Some(values) => serde_json::to_string(values)?,
+            None => serde_json::to_string(&current.permission_modes)?,
+        };
+        let now = now_ms();
+        conn.execute(
+            "UPDATE agents
+             SET model = COALESCE(?, model),
+                 models_json = ?,
+                 effort = COALESCE(?, effort),
+                 efforts_json = ?,
+                 permission_mode = COALESCE(?, permission_mode),
+                 permission_modes_json = ?,
+                 updated_at = ?
+             WHERE id = ? AND type = 'builtin'",
+            params![
+                next_model,
+                next_models,
+                next_effort,
+                next_efforts,
+                next_permission_mode,
+                next_permission_modes,
+                now,
+                id,
+            ],
+        )?;
+        upsert_builtin_assistant_for_agent(&conn, id, now)?;
+        load_agent_by_id(&conn, id)
+    }
+
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
         let conn = self.conn.lock().unwrap();
         let assistants = if let Some(project_id) = project_id {
             load_project_by_id(&conn, project_id)?;
             let mut stmt = conn.prepare(
-                "SELECT id, name, model, permission_mode, effort, system_prompt,
-                        type, project_id, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
                  FROM assistants
                  WHERE type = 'builtin' OR project_id = ?
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
@@ -1804,8 +2440,7 @@ impl SessionStore for SqliteStore {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, name, model, permission_mode, effort, system_prompt,
-                        type, project_id, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
                  FROM assistants
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
@@ -1818,9 +2453,7 @@ impl SessionStore for SqliteStore {
     fn create_assistant(
         &self,
         name: &str,
-        model: &str,
-        permission_mode: &str,
-        effort: &str,
+        agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
         assistant_type: AssistantType,
         project_id: Option<&str>,
@@ -1829,20 +2462,31 @@ impl SessionStore for SqliteStore {
         if name.is_empty() {
             anyhow::bail!("assistant name cannot be empty");
         }
-        let model = model.trim();
-        if model.is_empty() {
+        let mut agent = agent;
+        agent.id = agent.id.trim().to_string();
+        agent.name = agent.name.trim().to_string();
+        agent.model = agent.model.trim().to_string();
+        agent.mode = agent.mode.trim().to_string();
+        agent.effort = agent.effort.trim().to_string();
+        if agent.id.is_empty() {
+            anyhow::bail!("assistant agent id cannot be empty");
+        }
+        if agent.name.is_empty() {
+            anyhow::bail!("assistant agent name cannot be empty");
+        }
+        if agent.model.is_empty() {
             anyhow::bail!("assistant model cannot be empty");
         }
-        let permission_mode = permission_mode.trim();
-        if permission_mode.is_empty() {
+        if agent.mode.is_empty() {
             anyhow::bail!("assistant permission mode cannot be empty");
         }
-        let effort = effort.trim();
-        if effort.is_empty() {
+        if agent.effort.is_empty() {
             anyhow::bail!("assistant effort cannot be empty");
         }
         let system_prompt = system_prompt.map(str::trim).filter(|s| !s.is_empty());
         let conn = self.conn.lock().unwrap();
+        let db_agent = load_agent_by_id(&conn, &agent.id)?;
+        agent.name = db_agent.name;
         match assistant_type {
             AssistantType::Builtin => {
                 if project_id.is_some() {
@@ -1857,18 +2501,16 @@ impl SessionStore for SqliteStore {
             }
         }
         let now = now_ms();
-        let id = stable_assistant_id(assistant_type, project_id, name, model, now);
+        let id = stable_assistant_id(assistant_type, project_id, name, &agent.model, now);
+        let agent_json = serde_json::to_string(&agent)?;
         conn.execute(
             "INSERT INTO assistants (
-                id, name, model, permission_mode, effort, system_prompt,
-                type, project_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 name,
-                model,
-                permission_mode,
-                effort,
+                agent_json,
                 system_prompt,
                 assistant_type.as_str(),
                 project_id,
@@ -1877,6 +2519,90 @@ impl SessionStore for SqliteStore {
             ],
         )?;
         load_assistant_by_id(&conn, &id)
+    }
+
+    fn update_assistant(
+        &self,
+        assistant_id: &str,
+        name: Option<&str>,
+        agent: Option<AssistantAgentInfo>,
+        system_prompt: Option<Option<&str>>,
+    ) -> Result<AssistantInfo> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_assistant_by_id(&conn, assistant_id)?;
+        let next_agent = match agent {
+            Some(mut value) => {
+                value.id = value.id.trim().to_string();
+                value.name = value.name.trim().to_string();
+                value.model = value.model.trim().to_string();
+                value.mode = value.mode.trim().to_string();
+                value.effort = value.effort.trim().to_string();
+                if value.id.is_empty() {
+                    anyhow::bail!("assistant agent id cannot be empty");
+                }
+                if value.model.is_empty() {
+                    anyhow::bail!("assistant model cannot be empty");
+                }
+                if value.mode.is_empty() {
+                    anyhow::bail!("assistant permission mode cannot be empty");
+                }
+                if value.effort.is_empty() {
+                    anyhow::bail!("assistant effort cannot be empty");
+                }
+                let db_agent = load_agent_by_id(&conn, &value.id)?;
+                value.name = db_agent.name;
+                value
+            }
+            None => current.agent,
+        };
+        let next_name = match name {
+            Some(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    anyhow::bail!("assistant name cannot be empty");
+                }
+                value.to_string()
+            }
+            None => current.name,
+        };
+        let next_system_prompt = match system_prompt {
+            Some(Some(value)) => value
+                .trim()
+                .is_empty()
+                .then(|| None)
+                .unwrap_or_else(|| Some(value.trim().to_string())),
+            Some(None) => None,
+            None => current.system_prompt,
+        };
+        let next_agent_json = serde_json::to_string(&next_agent)?;
+        conn.execute(
+            "UPDATE assistants
+             SET name = ?, agent_json = ?, system_prompt = ?, updated_at = ?
+             WHERE id = ?",
+            params![
+                next_name,
+                next_agent_json,
+                next_system_prompt,
+                now_ms(),
+                assistant_id,
+            ],
+        )?;
+        load_assistant_by_id(&conn, assistant_id)
+    }
+
+    fn delete_assistant(&self, assistant_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        load_assistant_by_id(&conn, assistant_id)?;
+        let stage_count: i64 = conn.query_row(
+            "SELECT count(*) FROM thread_stage_assistants WHERE assistant_id = ?",
+            params![assistant_id],
+            |row| row.get(0),
+        )?;
+        if stage_count > 0 {
+            anyhow::bail!("assistant is used by stages");
+        }
+        conn.execute("DELETE FROM assistants WHERE id = ?", params![assistant_id])?;
+        Ok(())
     }
 
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>> {
@@ -1920,44 +2646,221 @@ impl SessionStore for SqliteStore {
         load_thread_by_id(&conn, &id)
     }
 
-    fn add_stage(
+    fn update_thread(
         &self,
         thread_id: &str,
-        assistant_id: &str,
-        stage_type: StageType,
+        goal: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<ThreadInfo> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_thread_by_id(&conn, thread_id)?;
+        let next_goal = match goal {
+            Some(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    anyhow::bail!("thread goal cannot be empty");
+                }
+                value.to_string()
+            }
+            None => current.goal,
+        };
+        let next_description = match description {
+            Some(Some(value)) => value
+                .trim()
+                .is_empty()
+                .then(|| None)
+                .unwrap_or_else(|| Some(value.trim().to_string())),
+            Some(None) => None,
+            None => current.description,
+        };
+        conn.execute(
+            "UPDATE threads
+             SET goal = ?, description = ?, updated_at = ?
+             WHERE id = ?",
+            params![next_goal, next_description, now_ms(), thread_id],
+        )?;
+        load_thread_by_id(&conn, thread_id)
+    }
+
+    fn delete_thread(&self, thread_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute("DELETE FROM threads WHERE id = ?", params![thread_id])?;
+        if changed == 0 {
+            anyhow::bail!("thread not found: {thread_id}");
+        }
+        Ok(())
+    }
+
+    fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>> {
+        let conn = self.conn.lock().unwrap();
+        load_project_by_id(&conn, project_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, type, kind, name, description, \"order\", created_at, updated_at
+             FROM stages
+             WHERE type = 'builtin' OR project_id = ?
+             ORDER BY type ASC, \"order\" ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], project_stage_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn create_project_stage(
+        &self,
+        project_id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProjectStageInfo> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("project stage name cannot be empty");
+        }
+        let description = description.map(str::trim).filter(|value| !value.is_empty());
+        let conn = self.conn.lock().unwrap();
+        load_project_by_id(&conn, project_id)?;
+        let next_order: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(\"order\"), -1) + 1 FROM stages WHERE project_id = ? AND type = 'custom'",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let now = now_ms();
+        let id = stable_project_stage_id(Some(project_id), name, next_order, now);
+        conn.execute(
+            "INSERT INTO stages (id, project_id, type, kind, name, description, \"order\", created_at, updated_at)
+             VALUES (?, ?, 'custom', NULL, ?, ?, ?, ?, ?)",
+            params![id, project_id, name, description, next_order, now, now],
+        )?;
+        load_project_stage_by_id(&conn, &id)
+    }
+
+    fn update_project_stage(
+        &self,
+        stage_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+        order: Option<i64>,
+    ) -> Result<ProjectStageInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let current = load_project_stage_by_id(&tx, stage_id)?;
+        if current.stage_type != ProjectStageType::Custom {
+            anyhow::bail!("builtin project stage cannot be updated");
+        }
+        let Some(project_id) = current.project_id.as_deref() else {
+            anyhow::bail!("custom project stage requires a project");
+        };
+        let next_name = match name {
+            Some(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    anyhow::bail!("project stage name cannot be empty");
+                }
+                value.to_string()
+            }
+            None => current.name.unwrap_or_default(),
+        };
+        let next_description = match description {
+            Some(Some(value)) => value
+                .trim()
+                .is_empty()
+                .then(|| None)
+                .unwrap_or_else(|| Some(value.trim().to_string())),
+            Some(None) => None,
+            None => current.description,
+        };
+        let max_order: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(\"order\"), 0) FROM stages WHERE project_id = ? AND type = 'custom'",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let next_order = order.unwrap_or(current.order).clamp(0, max_order);
+        if next_order != current.order {
+            tx.execute(
+                "UPDATE stages SET \"order\" = -1 WHERE id = ?",
+                params![stage_id],
+            )?;
+            if next_order < current.order {
+                tx.execute(
+                    "UPDATE stages
+                     SET \"order\" = \"order\" + 1
+                     WHERE project_id = ? AND type = 'custom' AND \"order\" >= ? AND \"order\" < ? AND id != ?",
+                    params![project_id, next_order, current.order, stage_id],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE stages
+                     SET \"order\" = \"order\" - 1
+                     WHERE project_id = ? AND type = 'custom' AND \"order\" <= ? AND \"order\" > ? AND id != ?",
+                    params![project_id, next_order, current.order, stage_id],
+                )?;
+            }
+        }
+        let now = now_ms();
+        tx.execute(
+            "UPDATE stages SET name = ?, description = ?, \"order\" = ?, updated_at = ? WHERE id = ?",
+            params![next_name, next_description, next_order, now, stage_id],
+        )?;
+        let stage = load_project_stage_by_id(&tx, stage_id)?;
+        tx.commit()?;
+        Ok(stage)
+    }
+
+    fn delete_project_stage(&self, stage_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_project_stage_by_id(&conn, stage_id)?;
+        if current.stage_type != ProjectStageType::Custom {
+            anyhow::bail!("builtin project stage cannot be deleted");
+        }
+        let changed = conn.execute("DELETE FROM stages WHERE id = ?", params![stage_id])?;
+        if changed == 0 {
+            anyhow::bail!("project stage not found: {stage_id}");
+        }
+        Ok(())
+    }
+
+    fn add_thread_stage(
+        &self,
+        thread_id: &str,
+        stage_id: &str,
+        assistant_ids: &[String],
     ) -> Result<StageInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let thread = load_thread_by_id(&tx, thread_id)?;
-        let assistant = load_assistant_by_id(&tx, assistant_id)?;
-        if assistant.assistant_type == AssistantType::Custom
-            && assistant.project_id.as_deref() != Some(thread.project_id.as_str())
+        let project_stage = load_project_stage_by_id(&tx, stage_id)?;
+        if project_stage.stage_type == ProjectStageType::Custom
+            && project_stage.project_id.as_deref() != Some(thread.project_id.as_str())
         {
-            anyhow::bail!("custom assistant does not belong to this thread's project");
+            anyhow::bail!("project stage does not belong to this thread's project");
         }
+        let assistant_bindings =
+            validate_assistants_for_project(&tx, &thread.project_id, assistant_ids)?
+                .into_iter()
+                .enumerate()
+                .map(|(index, assistant)| stage_assistant_from_assistant(assistant, index as i64))
+                .collect::<Vec<_>>();
+        let assistant_ids = assistant_bindings
+            .iter()
+            .map(|assistant| assistant.assistant_id.clone())
+            .collect::<Vec<_>>();
         let next_order: i64 = tx
             .query_row(
-                "SELECT COALESCE(MAX(\"order\"), -1) + 1 FROM stages WHERE thread_id = ?",
+                "SELECT COALESCE(MAX(\"order\"), -1) + 1 FROM thread_stages WHERE thread_id = ?",
                 params![thread_id],
                 |row| row.get(0),
             )
             .unwrap_or(0);
         let now = now_ms();
-        let id = stable_stage_id(thread_id, assistant_id, stage_type, next_order);
+        let id = stable_thread_stage_id(thread_id, stage_id, &assistant_ids.join(","), next_order);
         tx.execute(
-            "INSERT INTO stages (
-                id, thread_id, assistant_id, type, \"order\", created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![
-                id,
-                thread_id,
-                assistant_id,
-                stage_type.as_str(),
-                next_order,
-                now,
-                now,
-            ],
+            "INSERT INTO thread_stages (id, thread_id, stage_id, \"order\", created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![id, thread_id, stage_id, next_order, now, now],
         )?;
+        replace_thread_stage_assistants(&tx, &id, &assistant_bindings, now)?;
         if thread.stage_id.is_none() {
             tx.execute(
                 "UPDATE threads SET stage_id = ?, updated_at = ? WHERE id = ?",
@@ -1969,36 +2872,182 @@ impl SessionStore for SqliteStore {
                 params![now, thread_id],
             )?;
         }
-        let stage = load_stage_by_id(&tx, &id)?;
+        let stage = load_thread_stage_by_id(&tx, &id)?;
         tx.commit()?;
         Ok(stage)
     }
 
-    fn set_thread_stage(&self, thread_id: &str, stage_id: &str) -> Result<ThreadInfo> {
+    fn update_thread_stage(
+        &self,
+        thread_stage_id: &str,
+        assistant_ids: Option<&[String]>,
+        order: Option<i64>,
+    ) -> Result<StageInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let current = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        let next_assistant_bindings = match assistant_ids {
+            Some(ids) => Some(
+                validate_assistants_for_project(&tx, &current.project_id, ids)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, assistant)| {
+                        stage_assistant_from_assistant(assistant, index as i64)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            None => None,
+        };
+        let max_order: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(\"order\"), 0) FROM thread_stages WHERE thread_id = ?",
+                params![current.thread_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let next_order = order.unwrap_or(current.order).clamp(0, max_order);
+        if next_order != current.order {
+            tx.execute(
+                "UPDATE thread_stages SET \"order\" = -1 WHERE id = ?",
+                params![thread_stage_id],
+            )?;
+            if next_order < current.order {
+                tx.execute(
+                    "UPDATE thread_stages
+                     SET \"order\" = \"order\" + 1
+                     WHERE thread_id = ? AND \"order\" >= ? AND \"order\" < ? AND id != ?",
+                    params![
+                        current.thread_id,
+                        next_order,
+                        current.order,
+                        thread_stage_id
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE thread_stages
+                     SET \"order\" = \"order\" - 1
+                     WHERE thread_id = ? AND \"order\" <= ? AND \"order\" > ? AND id != ?",
+                    params![
+                        current.thread_id,
+                        next_order,
+                        current.order,
+                        thread_stage_id
+                    ],
+                )?;
+            }
+        }
+        let now = now_ms();
+        tx.execute(
+            "UPDATE thread_stages
+             SET \"order\" = ?, updated_at = ?
+             WHERE id = ?",
+            params![next_order, now, thread_stage_id],
+        )?;
+        if let Some(next_assistant_bindings) = next_assistant_bindings {
+            replace_thread_stage_assistants(&tx, thread_stage_id, &next_assistant_bindings, now)?;
+        }
+        compact_stage_order(&tx, &current.thread_id)?;
+        tx.execute(
+            "UPDATE threads SET updated_at = ? WHERE id = ?",
+            params![now, current.thread_id],
+        )?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        tx.commit()?;
+        Ok(stage)
+    }
+
+    fn update_thread_stage_assistant_agent(
+        &self,
+        thread_stage_id: &str,
+        assistant_id: &str,
+        agent: AssistantAgentInfo,
+    ) -> Result<StageInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let current = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        validate_assistant_for_project(&tx, &current.project_id, assistant_id)?;
+        let exists: i64 = tx.query_row(
+            "SELECT count(*) FROM thread_stage_assistants WHERE thread_stage_id = ? AND assistant_id = ?",
+            params![thread_stage_id, assistant_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            anyhow::bail!("assistant is not linked to this thread stage");
+        }
+        let agent = normalize_assistant_agent(&tx, agent)?;
+        let agent_json = serde_json::to_string(&agent)?;
+        let now = now_ms();
+        tx.execute(
+            "UPDATE thread_stage_assistants
+             SET agent_json = ?, updated_at = ?
+             WHERE thread_stage_id = ? AND assistant_id = ?",
+            params![agent_json, now, thread_stage_id, assistant_id],
+        )?;
+        tx.execute(
+            "UPDATE thread_stages SET updated_at = ? WHERE id = ?",
+            params![now, thread_stage_id],
+        )?;
+        tx.execute(
+            "UPDATE threads SET updated_at = ? WHERE id = ?",
+            params![now, current.thread_id],
+        )?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        tx.commit()?;
+        Ok(stage)
+    }
+
+    fn delete_thread_stage(&self, thread_stage_id: &str) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        tx.execute(
+            "DELETE FROM thread_stages WHERE id = ?",
+            params![thread_stage_id],
+        )?;
+        compact_stage_order(&tx, &stage.thread_id)?;
+        let current_stage_id: Option<String> = tx.query_row(
+            "SELECT stage_id FROM threads WHERE id = ?",
+            params![stage.thread_id],
+            |row| row.get(0),
+        )?;
+        let next_stage_id = if current_stage_id.as_deref() == Some(thread_stage_id) {
+            next_thread_stage_id(&tx, &stage.thread_id)?
+        } else {
+            current_stage_id
+        };
+        tx.execute(
+            "UPDATE threads SET stage_id = ?, updated_at = ? WHERE id = ?",
+            params![next_stage_id, now_ms(), stage.thread_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn set_thread_stage(&self, thread_id: &str, thread_stage_id: &str) -> Result<ThreadInfo> {
         let conn = self.conn.lock().unwrap();
         load_thread_by_id(&conn, thread_id)?;
-        let stage = load_stage_by_id(&conn, stage_id)?;
+        let stage = load_thread_stage_by_id(&conn, thread_stage_id)?;
         if stage.thread_id != thread_id {
             anyhow::bail!("stage does not belong to this thread");
         }
         conn.execute(
             "UPDATE threads SET stage_id = ?, updated_at = ? WHERE id = ?",
-            params![stage_id, now_ms(), thread_id],
+            params![thread_stage_id, now_ms(), thread_id],
         )?;
         load_thread_by_id(&conn, thread_id)
     }
 
     fn link_stage_session(
         &self,
-        stage_id: &str,
+        thread_stage_id: &str,
         agent: Agent,
         session_id: &str,
     ) -> Result<StageInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let stage = load_stage_by_id(&tx, stage_id)?;
-        let thread = load_thread_by_id(&tx, &stage.thread_id)?;
-        let project = load_project_by_id(&tx, &thread.project_id)?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        let project = load_project_by_id(&tx, &stage.project_id)?;
         let session_project_path = session_project_path(&tx, agent, session_id)?
             .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
         if session_project_path != project.path {
@@ -2006,47 +3055,47 @@ impl SessionStore for SqliteStore {
         }
         let now = now_ms();
         tx.execute(
-            "INSERT OR IGNORE INTO stage_sessions (stage_id, agent, session_id, created_at)
+            "INSERT OR IGNORE INTO stage_sessions (thread_stage_id, agent, session_id, created_at)
              VALUES (?, ?, ?, ?)",
-            params![stage_id, agent.as_str(), session_id, now],
+            params![thread_stage_id, agent.as_str(), session_id, now],
         )?;
         tx.execute(
-            "UPDATE stages SET updated_at = ? WHERE id = ?",
-            params![now, stage_id],
+            "UPDATE thread_stages SET updated_at = ? WHERE id = ?",
+            params![now, thread_stage_id],
         )?;
         tx.execute(
-            "UPDATE threads SET stage_id = ?, updated_at = ? WHERE id = ?",
-            params![stage_id, now, thread.id],
+            "UPDATE threads SET updated_at = ? WHERE id = ?",
+            params![now, stage.thread_id],
         )?;
-        let stage = load_stage_by_id(&tx, stage_id)?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
         tx.commit()?;
         Ok(stage)
     }
 
     fn unlink_stage_session(
         &self,
-        stage_id: &str,
+        thread_stage_id: &str,
         agent: Agent,
         session_id: &str,
     ) -> Result<StageInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let stage = load_stage_by_id(&tx, stage_id)?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
         tx.execute(
             "DELETE FROM stage_sessions
-             WHERE stage_id = ? AND agent = ? AND session_id = ?",
-            params![stage_id, agent.as_str(), session_id],
+             WHERE thread_stage_id = ? AND agent = ? AND session_id = ?",
+            params![thread_stage_id, agent.as_str(), session_id],
         )?;
         let now = now_ms();
         tx.execute(
-            "UPDATE stages SET updated_at = ? WHERE id = ?",
-            params![now, stage_id],
+            "UPDATE thread_stages SET updated_at = ? WHERE id = ?",
+            params![now, thread_stage_id],
         )?;
         tx.execute(
             "UPDATE threads SET updated_at = ? WHERE id = ?",
             params![now, stage.thread_id],
         )?;
-        let stage = load_stage_by_id(&tx, stage_id)?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
         tx.commit()?;
         Ok(stage)
     }
@@ -3302,7 +4351,14 @@ mod migration_tests {
         };
         assert!(snapshot_columns.contains(&"history_cache_version".to_string()));
 
-        for table in ["assistants", "threads", "stages", "stage_sessions"] {
+        for table in [
+            "agents",
+            "assistants",
+            "threads",
+            "stages",
+            "thread_stages",
+            "stage_sessions",
+        ] {
             let exists: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
@@ -3762,6 +4818,10 @@ mod migration_tests {
         let path = unique_db("sessio-thread-stage-links");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
+        let agents = store.list_agents().unwrap();
+        let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
+        assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
+        assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.3-codex"));
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-parent");
         std::fs::create_dir(&parent).unwrap();
 
@@ -3771,16 +4831,51 @@ mod migration_tests {
         let assistant = store
             .create_assistant(
                 "Builder",
-                "gpt-5-codex",
-                "workspace-write",
-                "high",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
                 Some("Build carefully"),
                 AssistantType::Custom,
                 Some(&project.id),
             )
             .unwrap();
         assert_eq!(assistant.project_id.as_deref(), Some(project.id.as_str()));
-        assert_eq!(store.list_assistants(Some(&project.id)).unwrap().len(), 1);
+        assert_eq!(assistant.agent.id, "codex");
+        assert_eq!(assistant.agent.name, "Codex");
+        assert_eq!(assistant.agent.model, "gpt-5.3-codex");
+        assert_eq!(assistant.agent.mode, "read-only");
+        assert_eq!(assistant.agent.effort, "medium");
+        let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
+        assert_eq!(project_assistants.len(), 3);
+        assert_eq!(
+            project_assistants
+                .iter()
+                .filter(|item| item.assistant_type == AssistantType::Builtin)
+                .count(),
+            2
+        );
+        assert!(project_assistants
+            .iter()
+            .any(|item| item.id == assistant.id));
+        let reviewer = store
+            .create_assistant(
+                "Reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                Some(&project.id),
+            )
+            .unwrap();
 
         let thread = store
             .create_thread(&project.id, "Ship thread workflow", Some("first pass"))
@@ -3788,25 +4883,176 @@ mod migration_tests {
         assert_eq!(thread.project_id, project.id);
         assert!(thread.stage_id.is_none());
 
+        let builtin_stages = store.list_project_stages(&project.id).unwrap();
+        assert_eq!(builtin_stages.len(), 6);
+        let research_option = builtin_stages
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap()
+            .clone();
+        let build_option = store
+            .create_project_stage(&project.id, "Implementation", Some("Implementation notes"))
+            .unwrap();
+        assert_eq!(build_option.stage_type, ProjectStageType::Custom);
+        assert_eq!(build_option.name.as_deref(), Some("Implementation"));
+        assert_eq!(
+            build_option.description.as_deref(),
+            Some("Implementation notes")
+        );
+        assert_eq!(store.list_project_stages(&project.id).unwrap().len(), 7);
+        let assistant_ids = vec![assistant.id.clone(), reviewer.id.clone()];
         let research = store
-            .add_stage(&thread.id, &assistant.id, StageType::Research)
+            .add_thread_stage(&thread.id, &research_option.id, &assistant_ids)
             .unwrap();
         assert_eq!(research.order, 0);
+        assert_eq!(research.stage_id, research_option.id);
+        assert_eq!(research.assistant_ids, assistant_ids);
+        let builder_only_ids = vec![assistant.id.clone()];
         let build = store
-            .add_stage(&thread.id, &assistant.id, StageType::Build)
+            .add_thread_stage(&thread.id, &build_option.id, &builder_only_ids)
             .unwrap();
         assert_eq!(build.order, 1);
+        assert_eq!(build.assistant_ids, builder_only_ids);
+        assert_eq!(build.assistants[0].agent.id, "codex");
+        let build = store
+            .update_thread_stage_assistant_agent(
+                &build.id,
+                &assistant.id,
+                AssistantAgentInfo {
+                    id: "claude".to_string(),
+                    name: "Claude".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    mode: "workspace-write".to_string(),
+                    effort: "high".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(build.assistants[0].assistant_id, assistant.id);
+        assert_eq!(build.assistants[0].agent.id, "claude");
+        assert_eq!(build.assistants[0].agent.name, "Claude");
+        assert_eq!(build.assistants[0].agent.model, "claude-sonnet-4-5");
+        let unchanged_assistant = store
+            .list_assistants(Some(&project.id))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == assistant.id)
+            .unwrap();
+        assert_eq!(unchanged_assistant.agent.id, "codex");
+        let unchanged_research = store
+            .list_threads(&project.id)
+            .unwrap()
+            .into_iter()
+            .flat_map(|thread| thread.stages)
+            .find(|stage| stage.id == research.id)
+            .unwrap();
+        assert_eq!(unchanged_research.assistants[0].agent.id, "codex");
+        let reviewed = store
+            .update_project_stage(&build_option.id, Some("Review Pass"), Some(None), None)
+            .unwrap();
+        assert_eq!(reviewed.name.as_deref(), Some("Review Pass"));
+        assert_eq!(reviewed.description, None);
+        let review_option = builtin_stages
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Review))
+            .unwrap()
+            .clone();
+        let review_thread = store
+            .create_thread(&project.id, "Review thread workflow", Some("second lane"))
+            .unwrap();
+        let review_stage_assistant_ids = vec![assistant.id.clone(), reviewer.id.clone()];
+        let review_stage = store
+            .add_thread_stage(
+                &review_thread.id,
+                &review_option.id,
+                &review_stage_assistant_ids,
+            )
+            .unwrap();
+        assert_eq!(review_stage.thread_id, review_thread.id);
+        assert_eq!(review_stage.stage_id, review_option.id);
+        assert_eq!(review_stage.assistant_ids, review_stage_assistant_ids);
+        assert_eq!(review_stage.assistants.len(), 2);
+        assert_eq!(review_stage.assistants[0].agent.id, "codex");
+        let review_stage = store
+            .update_thread_stage_assistant_agent(
+                &review_stage.id,
+                &assistant.id,
+                AssistantAgentInfo {
+                    id: "gemini".to_string(),
+                    name: "Gemini".to_string(),
+                    model: "gemini-3-pro".to_string(),
+                    mode: "workspace-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(review_stage.assistants[0].assistant_id, assistant.id);
+        assert_eq!(review_stage.assistants[0].agent.id, "gemini");
+        assert_eq!(review_stage.assistants[0].agent.name, "Gemini");
+        assert_eq!(review_stage.assistants[1].assistant_id, reviewer.id);
+        assert_eq!(review_stage.assistants[1].agent.id, "codex");
+        let thread_lanes = store.list_threads(&project.id).unwrap();
+        assert_eq!(thread_lanes.len(), 2);
+        let build_lane = thread_lanes
+            .iter()
+            .find(|item| item.id == thread.id)
+            .unwrap();
+        let review_lane = thread_lanes
+            .iter()
+            .find(|item| item.id == review_thread.id)
+            .unwrap();
+        assert_eq!(build_lane.stages.len(), 2);
+        assert_eq!(review_lane.stages.len(), 1);
+        assert_eq!(
+            build_lane
+                .stages
+                .iter()
+                .find(|stage| stage.id == build.id)
+                .unwrap()
+                .assistants[0]
+                .agent
+                .id,
+            "claude"
+        );
+        assert_eq!(review_lane.stages[0].assistants[0].agent.id, "gemini");
+        assert_eq!(
+            store
+                .list_assistants(Some(&project.id))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == assistant.id)
+                .unwrap()
+                .agent
+                .id,
+            "codex"
+        );
+        let build = store.update_thread_stage(&build.id, None, Some(0)).unwrap();
+        assert_eq!(build.name.as_deref(), Some("Review Pass"));
+        assert_eq!(build.order, 0);
+        assert_eq!(build.assistants[0].agent.id, "claude");
 
         let listed_threads = store.list_threads(&project.id).unwrap();
-        assert_eq!(listed_threads.len(), 1);
+        assert_eq!(listed_threads.len(), 2);
+        let listed_build_lane = listed_threads
+            .iter()
+            .find(|item| item.id == thread.id)
+            .unwrap();
         assert_eq!(
-            listed_threads[0].stage_id.as_deref(),
+            listed_build_lane.stage_id.as_deref(),
             Some(research.id.as_str())
         );
-        assert_eq!(listed_threads[0].stages.len(), 2);
+        assert_eq!(listed_build_lane.stages.len(), 2);
+        assert_eq!(listed_build_lane.stages[0].id, build.id);
+        assert_eq!(listed_build_lane.stages[1].assistant_ids, assistant_ids);
+        let reordered_ids = vec![reviewer.id.clone(), assistant.id.clone()];
+        let research = store
+            .update_thread_stage(&research.id, Some(&reordered_ids), None)
+            .unwrap();
+        assert_eq!(research.assistant_ids, reordered_ids);
 
         let switched = store.set_thread_stage(&thread.id, &build.id).unwrap();
         assert_eq!(switched.stage_id.as_deref(), Some(build.id.as_str()));
+        let switched = store.set_thread_stage(&thread.id, &research.id).unwrap();
+        assert_eq!(switched.stage_id.as_deref(), Some(research.id.as_str()));
 
         let session = SessionInfo {
             id: "session-a".to_string(),
@@ -3837,22 +5083,65 @@ mod migration_tests {
             .unwrap();
         assert_eq!(linked.sessions.len(), 1);
         assert_eq!(linked.sessions[0].id, session.id);
+        assert_eq!(
+            store
+                .list_threads(&project.id)
+                .unwrap()
+                .into_iter()
+                .find(|item| item.id == thread.id)
+                .unwrap()
+                .stage_id
+                .as_deref(),
+            Some(research.id.as_str())
+        );
 
         let listed_threads = store.list_threads(&project.id).unwrap();
-        let build_stage = listed_threads[0]
+        let current_thread = listed_threads
+            .iter()
+            .find(|item| item.id == thread.id)
+            .unwrap();
+        let build_stage = current_thread
             .stages
             .iter()
             .find(|stage| stage.id == build.id)
             .unwrap();
         assert_eq!(build_stage.sessions.len(), 1);
 
-        let current_thread = listed_threads.first().unwrap();
-        assert_eq!(current_thread.stage_id.as_deref(), Some(build.id.as_str()));
+        assert_eq!(
+            current_thread.stage_id.as_deref(),
+            Some(research.id.as_str())
+        );
 
         let unlinked = store
             .unlink_stage_session(&build.id, Agent::Codex, &session.id)
             .unwrap();
         assert!(unlinked.sessions.is_empty());
+
+        let edited_thread = store
+            .update_thread(&thread.id, Some("Ship edited workflow"), Some(Some("")))
+            .unwrap();
+        assert_eq!(edited_thread.goal, "Ship edited workflow");
+        assert_eq!(edited_thread.description, None);
+        let edited_assistant = store
+            .update_assistant(
+                &assistant.id,
+                Some("Builder Prime"),
+                Some(AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Ignored".to_string(),
+                    model: "gpt-5".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                }),
+                Some(None),
+            )
+            .unwrap();
+        assert_eq!(edited_assistant.name, "Builder Prime");
+        assert_eq!(edited_assistant.agent.name, "Codex");
+        assert_eq!(edited_assistant.agent.model, "gpt-5");
+        assert_eq!(edited_assistant.agent.mode, "read-only");
+        assert_eq!(edited_assistant.agent.effort, "medium");
+        assert_eq!(edited_assistant.system_prompt, None);
 
         let other_parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-other-parent");
         std::fs::create_dir(&other_parent).unwrap();
@@ -3880,9 +5169,13 @@ mod migration_tests {
         let other_assistant = store
             .create_assistant(
                 "Other Builder",
-                "gpt-5-codex",
-                "workspace-write",
-                "high",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
                 None,
                 AssistantType::Custom,
                 Some(&other_project.id),
@@ -3891,28 +5184,63 @@ mod migration_tests {
         let other_thread = store
             .create_thread(&other_project.id, "Other thread", None)
             .unwrap();
+        let other_stage_option = store
+            .create_project_stage(&other_project.id, "Other Plan", None)
+            .unwrap();
+        let other_assistant_ids = vec![other_assistant.id.clone()];
         let other_stage = store
-            .add_stage(&other_thread.id, &other_assistant.id, StageType::Plan)
+            .add_thread_stage(
+                &other_thread.id,
+                &other_stage_option.id,
+                &other_assistant_ids,
+            )
             .unwrap();
         assert!(store.set_thread_stage(&thread.id, &other_stage.id).is_err());
+        store.delete_thread_stage(&research.id).unwrap();
+        let after_delete_stage = store.list_threads(&project.id).unwrap();
+        let after_delete_build_lane = after_delete_stage
+            .iter()
+            .find(|item| item.id == thread.id)
+            .unwrap();
+        assert_eq!(after_delete_build_lane.stages.len(), 1);
+        assert_eq!(after_delete_build_lane.stages[0].order, 0);
+        assert!(store.delete_assistant(&assistant.id).is_err());
+        store.delete_thread(&review_thread.id).unwrap();
+        store.delete_thread(&thread.id).unwrap();
+        assert!(store.list_threads(&project.id).unwrap().is_empty());
+        store.delete_assistant(&assistant.id).unwrap();
+        store.delete_assistant(&reviewer.id).unwrap();
+        let remaining_assistants = store.list_assistants(Some(&project.id)).unwrap();
+        assert_eq!(remaining_assistants.len(), 2);
+        assert!(remaining_assistants
+            .iter()
+            .all(|item| item.assistant_type == AssistantType::Builtin));
 
         assert!(store
             .create_assistant(
                 "Invalid",
-                "gpt-5-codex",
-                "workspace-write",
-                "high",
+                AssistantAgentInfo {
+                    id: "missing".to_string(),
+                    name: "Missing".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
                 None,
                 AssistantType::Custom,
-                None,
+                Some(&project.id),
             )
             .is_err());
         assert!(store
             .create_assistant(
                 "Invalid builtin",
-                "gpt-5-codex",
-                "workspace-write",
-                "high",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
                 None,
                 AssistantType::Builtin,
                 Some(&project.id),

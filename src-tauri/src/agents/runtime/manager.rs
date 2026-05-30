@@ -17,12 +17,11 @@ use super::acp::{
 use super::acp_transport::{self, AcpSessionController};
 use super::fake;
 use super::types::{
-    AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionConfigChange,
-    AgentSessionHandle, AgentTurnHandle, EnsureAgentRuntimeSession, RuntimeCapabilitySet,
-    RuntimeError, RuntimeSessionStatus, RuntimeStatus, RuntimeTransportKind, RuntimeTurnStatus,
-    StartAgentSession,
+    AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentRuntimeSessionConfig,
+    AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle, EnsureAgentRuntimeSession,
+    RuntimeCapabilitySet, RuntimeError, RuntimeSessionStatus, RuntimeStatus, RuntimeTransportKind,
+    RuntimeTurnStatus, StartAgentSession,
 };
-use crate::config;
 use crate::models::Agent;
 use crate::turns::{
     apply_optimistic_user_message, apply_runtime_event_to_state, LiveRuntimeTurnSnapshotEvent,
@@ -69,13 +68,9 @@ impl RuntimeManager {
     }
 
     pub fn status(&self, agent: Agent) -> RuntimeStatus {
-        let transport = runtime_config(agent)
-            .as_ref()
-            .map(acp_transport::transport_from_config)
-            .unwrap_or(RuntimeTransportKind::Acp);
         RuntimeStatus {
             agent,
-            transport,
+            transport: RuntimeTransportKind::Acp,
             available: true,
             status: RuntimeSessionStatus::Idle,
             capabilities: RuntimeCapabilitySet::fake(),
@@ -85,17 +80,12 @@ impl RuntimeManager {
     }
 
     pub fn configured_transport(&self, agent: Agent) -> RuntimeTransportKind {
-        runtime_config(agent)
-            .as_ref()
-            .map(acp_transport::transport_from_config)
-            .unwrap_or(RuntimeTransportKind::Acp)
+        let _ = agent;
+        RuntimeTransportKind::Acp
     }
 
     pub fn configured_session_command(&self, agent: Agent) -> String {
-        runtime_config(agent)
-            .as_ref()
-            .map(|config| acp_transport::command_from_config(agent, config))
-            .unwrap_or_else(|| acp_transport::command_from_options(agent, &Default::default()))
+        acp_transport::command_from_options(agent, &Default::default())
     }
 
     pub fn status_for_session(
@@ -142,33 +132,18 @@ impl RuntimeManager {
             bail!("workspace_path does not exist: {}", req.workspace_path);
         }
 
-        let runtime_config =
-            runtime_config(req.agent).map(|config| normalize_runtime_config(req.agent, config));
-        let effective_runtime_config =
-            runtime_config.map(|config| apply_session_options(req.agent, config, &req.options));
         let transport = if req.options.contains_key("transport") {
             acp_transport::transport_requested(&req.options)
         } else {
-            effective_runtime_config
-                .as_ref()
-                .map(acp_transport::transport_from_config)
-                .unwrap_or(RuntimeTransportKind::Acp)
+            RuntimeTransportKind::Acp
         };
+        let runtime_config = session_config_from_options(req.agent, &req.options);
         let id = self.next_id("runtime");
         let agent_session_id = self.next_id("fake-agent-session");
         let capabilities = RuntimeCapabilitySet::fake();
         let mut acp_controller = None;
         if transport == RuntimeTransportKind::Acp {
-            let command = if req.options.contains_key("command")
-                || req.options.contains_key("acpCommand")
-            {
-                acp_transport::command_from_options(req.agent, &req.options)
-            } else {
-                effective_runtime_config
-                    .as_ref()
-                    .map(|config| acp_transport::command_from_config(req.agent, config))
-                    .unwrap_or_else(|| acp_transport::command_from_options(req.agent, &req.options))
-            };
+            let command = acp_transport::command_from_options(req.agent, &req.options);
             let start = match (&req.source_session_id, req.source_agent) {
                 (Some(source_session_id), Some(source_agent)) if source_agent == req.agent => {
                     acp_transport::AcpSessionStart::Fork {
@@ -183,7 +158,7 @@ impl RuntimeManager {
                 req.agent,
                 req.workspace_path.clone(),
                 command,
-                effective_runtime_config.clone(),
+                Some(runtime_config),
                 start,
             ));
         }
@@ -278,11 +253,12 @@ impl RuntimeManager {
             }
         }
 
-        let runtime_config = runtime_config(req.agent);
-        let transport = runtime_config
-            .as_ref()
-            .map(acp_transport::transport_from_config)
-            .unwrap_or(RuntimeTransportKind::Acp);
+        let transport = if req.options.contains_key("transport") {
+            acp_transport::transport_requested(&req.options)
+        } else {
+            RuntimeTransportKind::Acp
+        };
+        let runtime_config = session_config_from_options(req.agent, &req.options);
         let agent_session_id = req
             .agent_runtime_session_id
             .clone()
@@ -311,13 +287,8 @@ impl RuntimeManager {
                 req.sessio_runtime_session_id.clone(),
                 req.agent,
                 req.workspace_path.clone(),
-                runtime_config
-                    .as_ref()
-                    .map(|config| acp_transport::command_from_config(req.agent, config))
-                    .unwrap_or_else(|| {
-                        acp_transport::command_from_options(req.agent, &Default::default())
-                    }),
-                runtime_config.clone(),
+                acp_transport::command_from_options(req.agent, &req.options),
+                Some(runtime_config),
                 start,
             ));
         }
@@ -961,43 +932,19 @@ fn event_session_id(payload: &AgentRuntimeEventPayload) -> Option<&str> {
     }
 }
 
-fn runtime_config(agent: Agent) -> Option<config::AgentRuntimeConfig> {
-    config::load_config()
-        .ok()
-        .map(|config| config.agents.runtime.get(agent).clone())
-}
-
-fn normalize_runtime_config(
+fn session_config_from_options(
     agent: Agent,
-    mut config: config::AgentRuntimeConfig,
-) -> config::AgentRuntimeConfig {
-    if let Some(permission_mode) = config.permission_mode.take() {
-        config.permission_mode = Some(normalize_runtime_permission_mode(agent, &permission_mode));
-    }
-    config
-}
-
-fn apply_session_options(
-    agent: Agent,
-    config: config::AgentRuntimeConfig,
     options: &super::types::RuntimeMetadata,
-) -> config::AgentRuntimeConfig {
-    let mut config = normalize_runtime_config(agent, config);
-    if let Some(model) = option_string(options, "model") {
-        config.model = Some(model);
+) -> AgentRuntimeSessionConfig {
+    AgentRuntimeSessionConfig {
+        model: option_string(options, "model"),
+        effort: option_string(options, "effort")
+            .or_else(|| option_string(options, "reasoningEffort"))
+            .or_else(|| option_string(options, "reasoning_effort")),
+        permission_mode: option_string(options, "permissionMode")
+            .or_else(|| option_string(options, "permission_mode"))
+            .map(|mode| normalize_runtime_permission_mode(agent, &mode)),
     }
-    if let Some(effort) = option_string(options, "effort")
-        .or_else(|| option_string(options, "reasoningEffort"))
-        .or_else(|| option_string(options, "reasoning_effort"))
-    {
-        config.effort = Some(effort);
-    }
-    if let Some(permission_mode) = option_string(options, "permissionMode")
-        .or_else(|| option_string(options, "permission_mode"))
-    {
-        config.permission_mode = Some(normalize_runtime_permission_mode(agent, &permission_mode));
-    }
-    config
 }
 
 fn normalize_runtime_permission_mode(agent: Agent, value: &str) -> String {

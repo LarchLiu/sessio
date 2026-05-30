@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agents::runtime::metadata::{
-    runtime_agents_with_detected_capabilities, startup_probe_runtime_agents, RuntimeAgentsCache,
+    runtime_agents_from_db, startup_probe_runtime_agents, RuntimeAgentsCache,
 };
 use agents::runtime::types::{
     AgentInput, AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle,
@@ -26,8 +26,9 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectType,
-    SessionHistoryTurn, SessionInfo, StageInfo, StageType, ThreadInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
+    ProjectInfo, ProjectStageInfo, ProjectType, RuntimeAgentMetadata, SessionHistoryTurn,
+    SessionInfo, StageInfo, ThreadInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -206,6 +207,101 @@ fn archive_project(
 }
 
 #[tauri::command]
+fn list_agents(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<AgentInfo>, String> {
+    store.list_agents().map_err(|e| e.to_string())
+}
+
+fn runtime_option_inputs_to_metadata(
+    options: Option<Vec<RuntimeAgentOptionInput>>,
+) -> Option<Vec<models::RuntimeAgentOptionMetadata>> {
+    options.map(|options| {
+        options
+            .into_iter()
+            .map(|option| models::RuntimeAgentOptionMetadata {
+                value: option.value,
+                label: option.label,
+            })
+            .collect()
+    })
+}
+
+fn db_runtime_agents(
+    store: &Arc<dyn SessionStore>,
+    cache: &[RuntimeAgentMetadata],
+) -> Result<Vec<RuntimeAgentMetadata>, String> {
+    runtime_agents_from_db(store.clone(), cache).map_err(|e| e.to_string())
+}
+
+fn insert_option_if_missing(
+    options: &mut agents::runtime::types::RuntimeMetadata,
+    key: &str,
+    value: Option<String>,
+) {
+    if options.contains_key(key) {
+        return;
+    }
+    if let Some(value) = value.map(|value| value.trim().to_string()) {
+        if !value.is_empty() {
+            options.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    }
+}
+
+fn runtime_transport_option(transport: agents::runtime::types::RuntimeTransportKind) -> String {
+    match transport {
+        agents::runtime::types::RuntimeTransportKind::Acp => "acp",
+        agents::runtime::types::RuntimeTransportKind::CliStreamJson => "cliStreamJson",
+        agents::runtime::types::RuntimeTransportKind::PlainCli => "plainCli",
+        agents::runtime::types::RuntimeTransportKind::Fake => "fake",
+    }
+    .to_string()
+}
+
+fn hydrate_start_request_from_db(
+    req: &mut StartAgentSession,
+    store: &Arc<dyn SessionStore>,
+) -> anyhow::Result<()> {
+    let Some(agent) = store
+        .list_agents()?
+        .into_iter()
+        .find(|agent| agent.id == req.agent.as_str())
+    else {
+        return Ok(());
+    };
+    insert_option_if_missing(&mut req.options, "model", agent.model);
+    insert_option_if_missing(&mut req.options, "effort", agent.effort);
+    insert_option_if_missing(&mut req.options, "permissionMode", agent.permission_mode);
+    insert_option_if_missing(
+        &mut req.options,
+        "transport",
+        Some(runtime_transport_option(agent.transport)),
+    );
+    if !req.options.contains_key("command") && !req.options.contains_key("acpCommand") {
+        if let Some(command) = agent.commands.first().cloned() {
+            insert_option_if_missing(&mut req.options, "command", Some(command));
+        }
+    }
+    Ok(())
+}
+
+fn hydrate_ensure_request_from_db(
+    req: &mut EnsureAgentRuntimeSession,
+    store: &Arc<dyn SessionStore>,
+) -> anyhow::Result<()> {
+    let mut start_req = StartAgentSession {
+        agent: req.agent,
+        workspace_path: req.workspace_path.clone(),
+        initial_prompt: None,
+        source_session_id: None,
+        source_agent: req.source_agent,
+        options: std::mem::take(&mut req.options),
+    };
+    hydrate_start_request_from_db(&mut start_req, store)?;
+    req.options = start_req.options;
+    Ok(())
+}
+
+#[tauri::command]
 fn list_assistants(
     project_id: Option<String>,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -218,9 +314,7 @@ fn list_assistants(
 #[tauri::command]
 fn create_assistant(
     name: String,
-    model: String,
-    permission_mode: String,
-    effort: String,
+    agent: AssistantAgentInfo,
     system_prompt: Option<String>,
     assistant_type: AssistantType,
     project_id: Option<String>,
@@ -230,9 +324,7 @@ fn create_assistant(
     let assistant = store
         .create_assistant(
             &name,
-            &model,
-            &permission_mode,
-            &effort,
+            agent,
             system_prompt.as_deref(),
             assistant_type,
             project_id.as_deref(),
@@ -241,6 +333,38 @@ fn create_assistant(
     app.emit("assistants_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(assistant)
+}
+
+#[tauri::command]
+fn update_assistant(
+    assistant_id: String,
+    name: Option<String>,
+    agent: Option<AssistantAgentInfo>,
+    system_prompt: Option<Option<String>>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<AssistantInfo, String> {
+    let system_prompt_ref = system_prompt.as_ref().map(|value| value.as_deref());
+    let assistant = store
+        .update_assistant(&assistant_id, name.as_deref(), agent, system_prompt_ref)
+        .map_err(|e| e.to_string())?;
+    app.emit("assistants_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(assistant)
+}
+
+#[tauri::command]
+fn delete_assistant(
+    assistant_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .delete_assistant(&assistant_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("assistants_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -267,18 +391,143 @@ fn create_thread(
 }
 
 #[tauri::command]
-fn add_stage(
+fn update_thread(
     thread_id: String,
-    assistant_id: String,
-    stage_type: StageType,
+    goal: Option<String>,
+    description: Option<Option<String>>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ThreadInfo, String> {
+    let description_ref = description.as_ref().map(|value| value.as_deref());
+    let thread = store
+        .update_thread(&thread_id, goal.as_deref(), description_ref)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(thread)
+}
+
+#[tauri::command]
+fn delete_thread(
+    thread_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store.delete_thread(&thread_id).map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_project_stages(
+    project_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<ProjectStageInfo>, String> {
+    store
+        .list_project_stages(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_project_stage(
+    project_id: String,
+    name: String,
+    description: Option<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ProjectStageInfo, String> {
+    let stage = store
+        .create_project_stage(&project_id, &name, description.as_deref())
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn update_project_stage(
+    stage_id: String,
+    name: Option<String>,
+    description: Option<Option<String>>,
+    order: Option<i64>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ProjectStageInfo, String> {
+    let description_ref = description.as_ref().map(|value| value.as_deref());
+    let stage = store
+        .update_project_stage(&stage_id, name.as_deref(), description_ref, order)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn delete_project_stage(
+    stage_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .delete_project_stage(&stage_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn add_thread_stage(
+    thread_id: String,
+    stage_id: String,
+    assistant_ids: Vec<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<StageInfo, String> {
     let stage = store
-        .add_stage(&thread_id, &assistant_id, stage_type)
+        .add_thread_stage(&thread_id, &stage_id, &assistant_ids)
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
+}
+
+#[tauri::command]
+fn update_thread_stage(
+    thread_stage_id: String,
+    assistant_ids: Option<Vec<String>>,
+    order: Option<i64>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageInfo, String> {
+    let stage = store
+        .update_thread_stage(&thread_stage_id, assistant_ids.as_deref(), order)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn update_thread_stage_assistant_agent(
+    thread_stage_id: String,
+    assistant_id: String,
+    agent: AssistantAgentInfo,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageInfo, String> {
+    let stage = store
+        .update_thread_stage_assistant_agent(&thread_stage_id, &assistant_id, agent)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn delete_thread_stage(
+    thread_stage_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .delete_thread_stage(&thread_stage_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1473,8 +1722,9 @@ fn get_agent_runtime_status(
 #[tauri::command]
 fn list_runtime_agents(
     cache: State<'_, RuntimeAgentsCache>,
+    store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Vec<models::RuntimeAgentMetadata>, String> {
-    Ok(cache.get())
+    db_runtime_agents(store.inner(), &cache.get())
 }
 
 #[tauri::command]
@@ -1489,50 +1739,28 @@ fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
     cache: State<'_, RuntimeAgentsCache>,
+    store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<models::RuntimeAgentMetadata, String> {
-    let update = config::AgentRuntimePreferencesUpdate {
-        model: req.model,
-        effort: req.effort,
-        permission_mode: req.permission_mode,
-        models: req
-            .models
-            .unwrap_or_default()
-            .into_iter()
-            .map(|option| config::AgentRuntimeOptionConfig {
-                value: option.value,
-                label: option.label,
-            })
-            .collect(),
-        efforts: req
-            .efforts
-            .unwrap_or_default()
-            .into_iter()
-            .map(|option| config::AgentRuntimeOptionConfig {
-                value: option.value,
-                label: option.label,
-            })
-            .collect(),
-        permission_modes: req
-            .permission_modes
-            .unwrap_or_default()
-            .into_iter()
-            .map(|option| config::AgentRuntimeOptionConfig {
-                value: option.value,
-                label: option.label,
-            })
-            .collect(),
-    };
-    config::update_agent_runtime_preferences(req.agent, update).map_err(|e| e.to_string())?;
-    let agents = runtime_agents_with_detected_capabilities(
-        app.state::<Arc<dyn SessionStore>>().inner().clone(),
-    )
-    .map_err(|e| e.to_string())?;
+    let models = runtime_option_inputs_to_metadata(req.models);
+    let efforts = runtime_option_inputs_to_metadata(req.efforts);
+    let permission_modes = runtime_option_inputs_to_metadata(req.permission_modes);
+    store
+        .update_builtin_agent_preferences(
+            req.agent,
+            req.model.as_deref(),
+            req.effort.as_deref(),
+            req.permission_mode.as_deref(),
+            models.as_deref(),
+            efforts.as_deref(),
+            permission_modes.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+    let agents = db_runtime_agents(store.inner(), &cache.get())?;
     let updated = agents
         .iter()
         .find(|metadata| metadata.agent == req.agent)
         .cloned()
         .ok_or_else(|| format!("runtime agent is not configured: {}", req.agent.as_str()))?;
-    cache.set(agents);
     app.emit("runtime_agents_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(updated)
@@ -1540,15 +1768,18 @@ fn update_runtime_agent_preferences(
 
 #[tauri::command]
 fn start_agent_session(
-    req: StartAgentSession,
+    mut req: StartAgentSession,
+    store: State<'_, Arc<dyn SessionStore>>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
+    hydrate_start_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
     runtime.start_session(req).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn fork_agent_session(
-    req: StartAgentSession,
+    mut req: StartAgentSession,
+    store: State<'_, Arc<dyn SessionStore>>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
     if req
@@ -1560,14 +1791,17 @@ fn fork_agent_session(
     {
         return Err("source_session_id is required".to_string());
     }
+    hydrate_start_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
     runtime.start_session(req).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn ensure_agent_runtime_session(
-    req: EnsureAgentRuntimeSession,
+    mut req: EnsureAgentRuntimeSession,
+    store: State<'_, Arc<dyn SessionStore>>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
+    hydrate_ensure_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
     runtime.ensure_session(req).map_err(|e| e.to_string())
 }
 
@@ -1578,17 +1812,19 @@ fn load_agent_session(
     workspace_path: String,
     agent_runtime_session_id: Option<String>,
     source_agent: Option<Agent>,
+    store: State<'_, Arc<dyn SessionStore>>,
     runtime: State<'_, RuntimeManager>,
 ) -> Result<AgentSessionHandle, String> {
-    runtime
-        .ensure_session(EnsureAgentRuntimeSession {
-            agent,
-            sessio_runtime_session_id: runtime_session_id,
-            workspace_path,
-            agent_runtime_session_id,
-            source_agent,
-        })
-        .map_err(|e| e.to_string())
+    let mut req = EnsureAgentRuntimeSession {
+        agent,
+        sessio_runtime_session_id: runtime_session_id,
+        workspace_path,
+        agent_runtime_session_id,
+        source_agent,
+        options: Default::default(),
+    };
+    hydrate_ensure_request_from_db(&mut req, store.inner()).map_err(|e| e.to_string())?;
+    runtime.ensure_session(req).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1838,8 +2074,9 @@ pub fn run() {
             app.manage(indexer_handle);
             let runtime_probe_store = store.clone();
             let runtime_agents_cache = RuntimeAgentsCache::default();
-            runtime_agents_cache
-                .set(runtime_agents_with_detected_capabilities(store.clone()).unwrap_or_default());
+            let initial_runtime_agents =
+                runtime_agents_from_db(store.clone(), &[]).unwrap_or_default();
+            runtime_agents_cache.set(initial_runtime_agents);
             app.manage(RuntimeManager::new(app.handle().clone()));
             app.manage(runtime_agents_cache);
             let app_handle = app.handle().clone();
@@ -1902,11 +2139,23 @@ pub fn run() {
             create_default_project,
             update_project,
             archive_project,
+            list_agents,
             list_assistants,
             create_assistant,
+            update_assistant,
+            delete_assistant,
             list_threads,
             create_thread,
-            add_stage,
+            update_thread,
+            delete_thread,
+            list_project_stages,
+            create_project_stage,
+            update_project_stage,
+            delete_project_stage,
+            add_thread_stage,
+            update_thread_stage,
+            update_thread_stage_assistant_agent,
+            delete_thread_stage,
             set_thread_stage,
             link_stage_session,
             unlink_stage_session,

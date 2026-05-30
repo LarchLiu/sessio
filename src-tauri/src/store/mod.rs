@@ -6,8 +6,9 @@ use std::collections::HashSet;
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
-    Agent, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectType,
-    SessionHistoryTurn, SessionInfo, StageInfo, StageType, SubagentInfo, ThreadInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
+    ProjectInfo, ProjectStageInfo, ProjectType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
+    SessionInfo, StageInfo, SubagentInfo, ThreadInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -100,17 +101,34 @@ pub trait SessionStore: Send + Sync {
         project_type: Option<ProjectType>,
     ) -> Result<ProjectInfo>;
     fn archive_project(&self, project_id: &str) -> Result<()>;
+    fn list_agents(&self) -> Result<Vec<AgentInfo>>;
+    fn update_builtin_agent_preferences(
+        &self,
+        agent: Agent,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+        models: Option<&[RuntimeAgentOptionMetadata]>,
+        efforts: Option<&[RuntimeAgentOptionMetadata]>,
+        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+    ) -> Result<AgentInfo>;
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>>;
     fn create_assistant(
         &self,
         name: &str,
-        model: &str,
-        permission_mode: &str,
-        effort: &str,
+        agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
         assistant_type: AssistantType,
         project_id: Option<&str>,
     ) -> Result<AssistantInfo>;
+    fn update_assistant(
+        &self,
+        assistant_id: &str,
+        name: Option<&str>,
+        agent: Option<AssistantAgentInfo>,
+        system_prompt: Option<Option<&str>>,
+    ) -> Result<AssistantInfo>;
+    fn delete_assistant(&self, assistant_id: &str) -> Result<()>;
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>>;
     fn create_thread(
         &self,
@@ -118,22 +136,57 @@ pub trait SessionStore: Send + Sync {
         goal: &str,
         description: Option<&str>,
     ) -> Result<ThreadInfo>;
-    fn add_stage(
+    fn update_thread(
         &self,
         thread_id: &str,
-        assistant_id: &str,
-        stage_type: StageType,
-    ) -> Result<StageInfo>;
-    fn set_thread_stage(&self, thread_id: &str, stage_id: &str) -> Result<ThreadInfo>;
-    fn link_stage_session(
+        goal: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<ThreadInfo>;
+    fn delete_thread(&self, thread_id: &str) -> Result<()>;
+    fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>>;
+    fn create_project_stage(
+        &self,
+        project_id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProjectStageInfo>;
+    fn update_project_stage(
         &self,
         stage_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+        order: Option<i64>,
+    ) -> Result<ProjectStageInfo>;
+    fn delete_project_stage(&self, stage_id: &str) -> Result<()>;
+    fn add_thread_stage(
+        &self,
+        thread_id: &str,
+        stage_id: &str,
+        assistant_ids: &[String],
+    ) -> Result<StageInfo>;
+    fn update_thread_stage(
+        &self,
+        thread_stage_id: &str,
+        assistant_ids: Option<&[String]>,
+        order: Option<i64>,
+    ) -> Result<StageInfo>;
+    fn update_thread_stage_assistant_agent(
+        &self,
+        thread_stage_id: &str,
+        assistant_id: &str,
+        agent: AssistantAgentInfo,
+    ) -> Result<StageInfo>;
+    fn delete_thread_stage(&self, thread_stage_id: &str) -> Result<()>;
+    fn set_thread_stage(&self, thread_id: &str, thread_stage_id: &str) -> Result<ThreadInfo>;
+    fn link_stage_session(
+        &self,
+        thread_stage_id: &str,
         agent: Agent,
         session_id: &str,
     ) -> Result<StageInfo>;
     fn unlink_stage_session(
         &self,
-        stage_id: &str,
+        thread_stage_id: &str,
         agent: Agent,
         session_id: &str,
     ) -> Result<StageInfo>;

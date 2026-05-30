@@ -76,6 +76,13 @@ pub struct RuntimeStatus {
     pub metadata: RuntimeMetadata,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AgentRuntimeSessionConfig {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartAgentSession {
@@ -98,6 +105,8 @@ pub struct EnsureAgentRuntimeSession {
     pub agent_runtime_session_id: Option<String>,
     #[serde(default)]
     pub source_agent: Option<Agent>,
+    #[serde(default)]
+    pub options: RuntimeMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

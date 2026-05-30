@@ -19,19 +19,52 @@ export interface ProjectInfo {
   sessionCount: number;
 }
 
+export type AgentType = "builtin" | "custom";
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  icon: string | null;
+  model: string | null;
+  models: RuntimeAgentOptionMetadata[];
+  effort: string | null;
+  efforts: RuntimeAgentOptionMetadata[];
+  permissionMode: string | null;
+  permissionModes: RuntimeAgentOptionMetadata[];
+  type: AgentType;
+  enabled: boolean;
+  transport: RuntimeTransportKind;
+  commands: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type AssistantType = "builtin" | "custom";
+
+export interface AssistantAgentInfo {
+  id: string;
+  name: string;
+  model: string;
+  mode: string;
+  effort: string;
+}
 
 export interface AssistantInfo {
   id: string;
   name: string;
-  model: string;
-  permissionMode: string;
-  effort: string;
+  agent: AssistantAgentInfo;
   systemPrompt: string | null;
   type: AssistantType;
   projectId: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface StageAssistantInfo {
+  assistantId: string;
+  name: string;
+  agent: AssistantAgentInfo;
+  order: number;
 }
 
 export type StageType =
@@ -42,15 +75,35 @@ export type StageType =
   | "human"
   | "done";
 
+export type ProjectStageType = "builtin" | "custom";
+
 export interface StageInfo {
   id: string;
   threadId: string;
-  assistantId: string;
-  type: StageType;
+  stageId: string;
+  projectId: string;
+  assistantIds: string[];
+  assistants: StageAssistantInfo[];
+  type: ProjectStageType;
+  kind: StageType | null;
+  name: string | null;
+  description: string | null;
   order: number;
   createdAt: number;
   updatedAt: number;
   sessions: SessionInfo[];
+}
+
+export interface ProjectStageInfo {
+  id: string;
+  projectId: string | null;
+  type: ProjectStageType;
+  kind: StageType | null;
+  name: string | null;
+  description: string | null;
+  order: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ThreadInfo {
@@ -570,28 +623,53 @@ export async function archiveProject(projectId: string): Promise<void> {
   return invoke<void>("archive_project", { projectId });
 }
 
+export async function listAgents(): Promise<AgentInfo[]> {
+  return invoke<AgentInfo[]>("list_agents");
+}
+
 export async function listAssistants(projectId?: string | null): Promise<AssistantInfo[]> {
   return invoke<AssistantInfo[]>("list_assistants", { projectId: projectId ?? null });
 }
 
 export async function createAssistant(input: {
+  agent: AssistantAgentInfo;
   name: string;
-  model: string;
-  permissionMode: string;
-  effort: string;
   systemPrompt?: string | null;
   type: AssistantType;
   projectId?: string | null;
 }): Promise<AssistantInfo> {
   return invoke<AssistantInfo>("create_assistant", {
     name: input.name,
-    model: input.model,
-    permissionMode: input.permissionMode,
-    effort: input.effort,
+    agent: input.agent,
     systemPrompt: input.systemPrompt ?? null,
     assistantType: input.type,
     projectId: input.projectId ?? null,
   });
+}
+
+export async function updateAssistant(
+  assistantId: string,
+  patch: {
+    name?: string | null;
+    agent?: AssistantAgentInfo | null;
+    systemPrompt?: string | null;
+  },
+): Promise<AssistantInfo> {
+  return invoke<AssistantInfo>("update_assistant", {
+    assistantId,
+    name: patch.name ?? null,
+    agent: patch.agent ?? null,
+    systemPrompt:
+      Object.prototype.hasOwnProperty.call(patch, "systemPrompt")
+        ? patch.systemPrompt === null
+          ? null
+          : patch.systemPrompt ?? ""
+        : null,
+  });
+}
+
+export async function deleteAssistant(assistantId: string): Promise<void> {
+  return invoke<void>("delete_assistant", { assistantId });
 }
 
 export async function listThreads(projectId: string): Promise<ThreadInfo[]> {
@@ -610,12 +688,94 @@ export async function createThread(
   });
 }
 
-export async function addStage(
+export async function updateThread(
   threadId: string,
-  assistantId: string,
-  stageType: StageType,
+  patch: { goal?: string | null; description?: string | null },
+): Promise<ThreadInfo> {
+  return invoke<ThreadInfo>("update_thread", {
+    threadId,
+    goal: patch.goal ?? null,
+    description:
+      Object.prototype.hasOwnProperty.call(patch, "description")
+        ? patch.description === null
+          ? null
+          : patch.description ?? ""
+        : null,
+  });
+}
+
+export async function deleteThread(threadId: string): Promise<void> {
+  return invoke<void>("delete_thread", { threadId });
+}
+
+export async function listProjectStages(projectId: string): Promise<ProjectStageInfo[]> {
+  return invoke<ProjectStageInfo[]>("list_project_stages", { projectId });
+}
+
+export async function createProjectStage(
+  projectId: string,
+  name: string,
+  description?: string | null,
+): Promise<ProjectStageInfo> {
+  return invoke<ProjectStageInfo>("create_project_stage", { projectId, name, description: description ?? null });
+}
+
+export async function updateProjectStage(
+  stageId: string,
+  patch: {
+    name?: string | null;
+    description?: string | null;
+    order?: number | null;
+  },
+): Promise<ProjectStageInfo> {
+  const payload: {
+    stageId: string;
+    name?: string | null;
+    description?: string | null;
+    order?: number | null;
+  } = { stageId };
+  if ("name" in patch) payload.name = patch.name ?? null;
+  if ("description" in patch) payload.description = patch.description ?? null;
+  if ("order" in patch) payload.order = patch.order ?? null;
+  return invoke<ProjectStageInfo>("update_project_stage", payload);
+}
+
+export async function deleteProjectStage(stageId: string): Promise<void> {
+  return invoke<void>("delete_project_stage", { stageId });
+}
+
+export async function addThreadStage(
+  threadId: string,
+  stageId: string,
+  assistantIds: string[],
 ): Promise<StageInfo> {
-  return invoke<StageInfo>("add_stage", { threadId, assistantId, stageType });
+  return invoke<StageInfo>("add_thread_stage", { threadId, stageId, assistantIds });
+}
+
+export async function updateThreadStage(
+  threadStageId: string,
+  patch: {
+    assistantIds?: string[] | null;
+    order?: number | null;
+  },
+): Promise<StageInfo> {
+  return invoke<StageInfo>("update_thread_stage", {
+    threadStageId,
+    assistantIds: patch.assistantIds ?? null,
+    order: patch.order ?? null,
+  });
+}
+
+export async function updateThreadStageAssistantAgent(
+  threadStageId: string,
+  assistantId: string,
+  agent: AssistantAgentInfo,
+): Promise<StageInfo> {
+  return invoke<StageInfo>("update_thread_stage_assistant_agent", { threadStageId, assistantId, agent });
+}
+
+export async function deleteThreadStage(threadStageId: string): Promise<void> {
+  return invoke<void>("delete_thread_stage", { threadStageId });
 }
 
 export async function setThreadStage(

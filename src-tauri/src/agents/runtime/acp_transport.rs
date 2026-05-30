@@ -18,10 +18,9 @@ use super::acp::{
 };
 use super::manager::{RuntimeManager, RuntimePermissionDecision};
 use super::types::{
-    AgentAttachment, AgentAttachmentKind, AgentInput, RuntimeCapabilitySet, RuntimeError,
-    RuntimeMetadata, RuntimeTransportKind,
+    AgentAttachment, AgentAttachmentKind, AgentInput, AgentRuntimeSessionConfig,
+    RuntimeCapabilitySet, RuntimeError, RuntimeMetadata, RuntimeTransportKind,
 };
-use crate::config::AgentRuntimeConfig;
 use crate::models::Agent;
 
 #[derive(Debug, Clone)]
@@ -88,21 +87,13 @@ pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {
         .unwrap_or_else(|| default_acp_command(agent).to_string())
 }
 
-pub fn command_from_config(agent: Agent, config: &AgentRuntimeConfig) -> String {
-    config
-        .command
-        .session
-        .clone()
-        .unwrap_or_else(|| default_acp_command(agent).to_string())
-}
-
 pub fn spawn_session(
     manager: RuntimeManager,
     sessio_runtime_session_id: String,
     agent: Agent,
     workspace_path: String,
     command: String,
-    runtime_config: Option<AgentRuntimeConfig>,
+    runtime_config: Option<AgentRuntimeSessionConfig>,
     start: AcpSessionStart,
 ) -> AcpSessionController {
     let (command_tx, command_rx) = tauri::async_runtime::channel(32);
@@ -212,7 +203,7 @@ async fn run_session(
     agent: Agent,
     workspace_path: String,
     command: String,
-    runtime_config: Option<AgentRuntimeConfig>,
+    runtime_config: Option<AgentRuntimeSessionConfig>,
     start: AcpSessionStart,
     command_rx: tauri::async_runtime::Receiver<AcpWorkerCommand>,
 ) -> Result<()> {
@@ -591,7 +582,7 @@ async fn run_session(
 fn new_session_request(
     agent: Agent,
     workspace_path: String,
-    config: Option<&AgentRuntimeConfig>,
+    config: Option<&AgentRuntimeSessionConfig>,
 ) -> NewSessionRequest {
     let mut request = NewSessionRequest::new(workspace_path);
     if agent != Agent::Claude {
@@ -639,7 +630,7 @@ async fn apply_initial_session_config(
     sessio_runtime_session_id: &str,
     connection: &ConnectionTo<AcpAgentRole>,
     acp_session_id: &SessionId,
-    config: Option<&AgentRuntimeConfig>,
+    config: Option<&AgentRuntimeSessionConfig>,
 ) -> Result<(), agent_client_protocol::Error> {
     let Some(config) = config else {
         return Ok(());
@@ -1170,7 +1161,6 @@ fn extension_lower(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AgentRuntimeCommandConfig, AgentRuntimeConfig};
 
     #[test]
     fn text_attachment_becomes_embedded_resource() {
@@ -1263,24 +1253,12 @@ mod tests {
 
     #[test]
     fn codex_config_keeps_acp_adapter_command_clean() {
-        let command = command_from_config(
-            Agent::Codex,
-            &AgentRuntimeConfig {
-                enabled: true,
-                transport: Some("acp".to_string()),
-                model: Some("gpt-5".to_string()),
-                models: Vec::new(),
-                effort: None,
-                efforts: Vec::new(),
-                permission_mode: Some("on-request".to_string()),
-                permission_modes: Vec::new(),
-                sandbox: Some("workspace-write".to_string()),
-                command: AgentRuntimeCommandConfig {
-                    session: Some("npx -y @zed-industries/codex-acp@latest".to_string()),
-                    version: None,
-                },
-            },
+        let mut options = RuntimeMetadata::default();
+        options.insert(
+            "command".to_string(),
+            serde_json::Value::String("npx -y @zed-industries/codex-acp@latest".to_string()),
         );
+        let command = command_from_options(Agent::Codex, &options);
 
         assert_eq!(command, "npx -y @zed-industries/codex-acp@latest");
     }
@@ -1358,24 +1336,12 @@ mod tests {
 
     #[test]
     fn claude_config_keeps_acp_adapter_command_clean() {
-        let command = command_from_config(
-            Agent::Claude,
-            &AgentRuntimeConfig {
-                enabled: true,
-                transport: Some("acp".to_string()),
-                model: Some("sonnet".to_string()),
-                models: Vec::new(),
-                effort: None,
-                efforts: Vec::new(),
-                permission_mode: Some("acceptEdits".to_string()),
-                permission_modes: Vec::new(),
-                sandbox: Some("ignored-for-claude".to_string()),
-                command: AgentRuntimeCommandConfig {
-                    session: Some("npx -y @zed-industries/claude-code-acp@latest".to_string()),
-                    version: None,
-                },
-            },
+        let mut options = RuntimeMetadata::default();
+        options.insert(
+            "command".to_string(),
+            serde_json::Value::String("npx -y @zed-industries/claude-code-acp@latest".to_string()),
         );
+        let command = command_from_options(Agent::Claude, &options);
 
         assert_eq!(command, "npx -y @zed-industries/claude-code-acp@latest");
     }
@@ -1422,7 +1388,7 @@ fn json_id_to_string(value: serde_json::Value) -> String {
     }
 }
 
-fn default_acp_command(agent: Agent) -> &'static str {
+pub(crate) fn default_acp_command(agent: Agent) -> &'static str {
     match agent {
         Agent::Codex => "npx -y @zed-industries/codex-acp@latest",
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest",
@@ -1438,14 +1404,6 @@ pub fn transport_requested(options: &RuntimeMetadata) -> RuntimeTransportKind {
     options
         .get("transport")
         .and_then(|value| value.as_str())
-        .map(transport_from_str)
-        .unwrap_or(RuntimeTransportKind::Acp)
-}
-
-pub fn transport_from_config(config: &AgentRuntimeConfig) -> RuntimeTransportKind {
-    config
-        .transport
-        .as_deref()
         .map(transport_from_str)
         .unwrap_or(RuntimeTransportKind::Acp)
 }
