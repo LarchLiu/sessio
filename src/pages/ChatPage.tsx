@@ -4529,9 +4529,23 @@ function parseFileEditSummary(value: unknown): FileEditSummary | null {
     return null;
   }
   const record = parsed as FileEditSummary & { text?: unknown };
-  if (Array.isArray(record.edits)) return record;
+  if (Array.isArray(record.edits)) return normalizeFileEditSummary(record);
   if (typeof record.text === "string") return parseFileEditSummary(record.text);
   return null;
+}
+
+function normalizeFileEditSummary(summary: FileEditSummary): FileEditSummary {
+  const edits: FileEditItem[] = [];
+  for (const edit of summary.edits ?? []) {
+    mergeFileEditItem(edits, edit);
+  }
+  return {
+    ...summary,
+    files: edits.length,
+    additions: sumEditNumber(edits, "additions"),
+    deletions: sumEditNumber(edits, "deletions"),
+    edits,
+  };
 }
 
 function stableDisplayText(value: unknown): string {

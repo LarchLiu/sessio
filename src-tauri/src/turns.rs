@@ -1254,7 +1254,7 @@ fn append_tool_diff_file_edit_block(turn: &mut SessionHistoryTurn) {
     if !is_turn_finished(turn) || has_file_edit_block(turn) {
         return;
     }
-    let edits = tool_diff_file_edits(turn);
+    let edits = merge_file_edit_items(tool_diff_file_edits(turn));
     if edits.is_empty() {
         return;
     }
@@ -1282,8 +1282,62 @@ fn has_file_edit_block(turn: &SessionHistoryTurn) -> bool {
 fn tool_diff_file_edits(turn: &SessionHistoryTurn) -> Vec<Value> {
     turn.tools
         .iter()
+        .filter(|tool| tool_diff_file_edit_succeeded(tool))
         .flat_map(|tool| tool.content.iter().filter_map(tool_content_to_file_edit))
         .collect()
+}
+
+fn tool_diff_file_edit_succeeded(tool: &SessionHistoryToolCall) -> bool {
+    let status = tool.status.to_ascii_lowercase();
+    let has_success_status = matches!(status.as_str(), "completed" | "success" | "succeeded");
+    has_success_status && !tool_output_indicates_failed_edit(&tool.raw_output)
+}
+
+fn tool_output_indicates_failed_edit(output: &Value) -> bool {
+    fn text_indicates_failure(text: &str) -> bool {
+        let normalized = text.trim_start().to_ascii_lowercase();
+        normalized.starts_with("error")
+            || normalized.starts_with("failed")
+            || normalized.starts_with("failure")
+            || normalized.starts_with("cancelled")
+            || normalized.starts_with("canceled")
+            || normalized.starts_with("aborted")
+            || normalized.contains("permission denied")
+            || normalized.contains("denied by user")
+            || normalized.contains("rejected by user")
+            || normalized.contains("not approved")
+    }
+
+    match output {
+        Value::String(text) => text_indicates_failure(text),
+        Value::Array(items) => items.iter().any(tool_output_indicates_failed_edit),
+        Value::Object(object) => {
+            if object
+                .get("isError")
+                .or_else(|| object.get("is_error"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                return true;
+            }
+            if string_field(output, "status")
+                .map(|status| {
+                    matches!(
+                        status.to_ascii_lowercase().as_str(),
+                        "error" | "failed" | "failure" | "cancelled" | "canceled" | "rejected"
+                    )
+                })
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            ["error", "message", "text", "content", "output", "stderr"]
+                .iter()
+                .filter_map(|key| object.get(*key))
+                .any(tool_output_indicates_failed_edit)
+        }
+        _ => false,
+    }
 }
 
 fn tool_content_to_file_edit(content: &Value) -> Option<Value> {
@@ -1345,12 +1399,11 @@ fn file_edit_summary_from_value(value: &Value) -> Option<FileEditSummary> {
 }
 
 fn merged_file_edit_update(summaries: &[FileEditSummary]) -> Value {
-    let mut edits: Vec<Value> = Vec::new();
-    for summary in summaries {
-        for edit in &summary.edits {
-            merge_file_edit_item(&mut edits, edit.clone());
-        }
-    }
+    let edits = merge_file_edit_items(
+        summaries
+            .iter()
+            .flat_map(|summary| summary.edits.iter().cloned()),
+    );
     let source = summaries
         .iter()
         .find_map(|summary| summary.source.clone())
@@ -1362,6 +1415,17 @@ fn merged_file_edit_update(summaries: &[FileEditSummary]) -> Value {
         "deletions": sum_edit_number(&edits, "deletions"),
         "edits": edits,
     })
+}
+
+fn merge_file_edit_items<I>(items: I) -> Vec<Value>
+where
+    I: IntoIterator<Item = Value>,
+{
+    let mut edits = Vec::new();
+    for edit in items {
+        merge_file_edit_item(&mut edits, edit);
+    }
+    edits
 }
 
 fn merge_file_edit_item(edits: &mut Vec<Value>, next: Value) {
@@ -2902,6 +2966,155 @@ mod tests {
         assert_eq!(data["edits"][0]["path"], "src/main.rs");
         assert_eq!(data["edits"][0]["additions"], 2);
         assert_eq!(data["edits"][0]["deletions"], 1);
+    }
+
+    #[test]
+    fn runtime_builder_merges_tool_diff_file_edits_by_file() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call",
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "title": "edit",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "diff",
+                                "path": "src/main.rs",
+                                "oldText": "old\n",
+                                "newText": "new\nmore\n"
+                            },
+                            {
+                                "type": "diff",
+                                "path": "src/main.rs",
+                                "oldText": "before\nagain\n",
+                                "newText": "after\n"
+                            }
+                        ]
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnCompleted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                result: None,
+            },
+            30,
+        );
+
+        let file_edit = state.turns[0]
+            .blocks
+            .iter()
+            .find(|block| block.update_type.as_deref() == Some("file_edit"))
+            .expect("file_edit block");
+        let data = file_edit.data.as_ref().unwrap();
+        assert_eq!(data["files"], 1);
+        assert_eq!(data["additions"], 3);
+        assert_eq!(data["deletions"], 3);
+        assert_eq!(data["edits"].as_array().unwrap().len(), 1);
+        assert_eq!(data["edits"][0]["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn runtime_builder_skips_failed_tool_diff_file_edits() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call",
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "title": "edit",
+                        "status": "completed",
+                        "content": [{
+                            "type": "diff",
+                            "path": "src/main.rs",
+                            "oldText": "old\n",
+                            "newText": "new\n"
+                        }]
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call_update",
+                    json!({
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "tool-1",
+                        "status": "completed",
+                        "rawOutput": "aborted by user after 560.5s"
+                    }),
+                    Some(21),
+                ),
+            },
+            21,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnCompleted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                result: None,
+            },
+            30,
+        );
+
+        assert!(state.turns[0]
+            .blocks
+            .iter()
+            .all(|block| block.update_type.as_deref() != Some("file_edit")));
     }
 
     #[test]
