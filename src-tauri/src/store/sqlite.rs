@@ -230,13 +230,7 @@ CREATE TABLE IF NOT EXISTS runtime_agent_capabilities (
     raw_capabilities_json TEXT NOT NULL,
     updated_at           INTEGER NOT NULL
 );
-"#;
 
-const SCHEMA_V6: &str = r#"
-ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
-"#;
-
-const SCHEMA_V7: &str = r#"
 CREATE TABLE IF NOT EXISTS projects (
     id         TEXT PRIMARY KEY,
     path       TEXT NOT NULL UNIQUE,
@@ -264,9 +258,7 @@ CREATE TABLE IF NOT EXISTS kanban_items (
 
 CREATE INDEX IF NOT EXISTS idx_kanban_items_project_status_order
     ON kanban_items(project_id, status, sort_order, created_at);
-"#;
 
-const SCHEMA_V8: &str = r#"
 CREATE TABLE IF NOT EXISTS kanban_item_sessions (
     item_id    TEXT NOT NULL,
     agent      TEXT NOT NULL,
@@ -280,9 +272,7 @@ CREATE INDEX IF NOT EXISTS idx_kanban_item_sessions_item
     ON kanban_item_sessions(item_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_kanban_item_sessions_session
     ON kanban_item_sessions(agent, session_id);
-"#;
 
-const SCHEMA_V9: &str = r#"
 CREATE TABLE IF NOT EXISTS session_history (
     agent           TEXT NOT NULL,
     session_id      TEXT NOT NULL,
@@ -316,13 +306,7 @@ CREATE TABLE IF NOT EXISTS session_history_turns (
 
 CREATE INDEX IF NOT EXISTS idx_session_history_turns_turn_id
     ON session_history_turns(agent, session_id, turn_id);
-"#;
 
-const SCHEMA_V10: &str = r#"
-ALTER TABLE session_history ADD COLUMN history_cache_version INTEGER NOT NULL DEFAULT 0;
-"#;
-
-const SCHEMA_V11: &str = r#"
 CREATE TABLE IF NOT EXISTS session_history_snapshots (
     child_agent           TEXT NOT NULL,
     child_session_id      TEXT NOT NULL,
@@ -351,9 +335,7 @@ CREATE TABLE IF NOT EXISTS session_history_snapshot_turns (
         REFERENCES session_history_snapshots(child_agent, child_session_id, ancestor_index)
         ON DELETE CASCADE
 );
-"#;
 
-const SCHEMA_V12: &str = r#"
 CREATE TABLE IF NOT EXISTS workflows (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
@@ -523,7 +505,8 @@ CREATE INDEX IF NOT EXISTS idx_agents_type_enabled
     ON agents(type, enabled, name COLLATE NOCASE);
 "#;
 
-const SCHEMA_V12_PATCH: &str = r#"
+const SCHEMA_V5_PATCH: &str = r#"
+ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
 ALTER TABLE projects ADD COLUMN workflow_id TEXT NOT NULL DEFAULT 'code';
 ALTER TABLE assistants ADD COLUMN workflow_id TEXT;
 ALTER TABLE stages ADD COLUMN workflow_id TEXT;
@@ -598,70 +581,17 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    if current < 6 {
-        let _ = conn.execute_batch(SCHEMA_V6);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
-            [],
-        )?;
-    }
-    if current < 7 {
-        conn.execute_batch(SCHEMA_V7)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
-            [],
-        )?;
-    }
-    if current < 8 {
-        conn.execute_batch(SCHEMA_V8)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)",
-            [],
-        )?;
-    }
-    if current < 9 {
-        conn.execute_batch(SCHEMA_V9)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)",
-            [],
-        )?;
-    }
-    if current < 10 {
-        let _ = conn.execute_batch(SCHEMA_V10);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)",
-            [],
-        )?;
-    }
-    if current < 11 {
-        conn.execute_batch(SCHEMA_V11)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (11)",
-            [],
-        )?;
-    }
-    if current < 12 {
-        conn.execute_batch(SCHEMA_V12)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (12)",
-            [],
-        )?;
-    }
     conn.execute_batch(SCHEMA_V5)?;
-    conn.execute_batch(SCHEMA_V7)?;
-    conn.execute_batch(SCHEMA_V8)?;
-    conn.execute_batch(SCHEMA_V9)?;
-    conn.execute_batch(SCHEMA_V11)?;
-    conn.execute_batch(SCHEMA_V12)?;
-    apply_v12_patch(conn);
+    apply_v5_patch(conn);
+    conn.execute("DELETE FROM schema_migrations WHERE version > 5", [])?;
     seed_builtin_workflows(conn)?;
     seed_builtin_workflow_stages(conn)?;
     seed_builtin_agents(conn)?;
     Ok(())
 }
 
-fn apply_v12_patch(conn: &Connection) {
-    for statement in SCHEMA_V12_PATCH
+fn apply_v5_patch(conn: &Connection) {
+    for statement in SCHEMA_V5_PATCH
         .split(';')
         .map(str::trim)
         .filter(|statement| !statement.is_empty())
@@ -4704,6 +4634,13 @@ mod migration_tests {
         store.init().unwrap();
 
         let conn = store.conn.lock().unwrap();
+        let latest_schema_version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(latest_schema_version, 5);
+
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
             let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
