@@ -209,6 +209,8 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
       : orientation === "horizontal"
         ? "overflow-x-scroll overflow-y-hidden"
         : "overflow-y-scroll overflow-x-hidden";
+  const viewportFlexClass =
+    orientation === "horizontal" ? "flex-none" : "flex-1";
 
   return (
     <div
@@ -220,7 +222,8 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
         ref={viewportRef}
         onScroll={handleScroll}
         className={
-          "flex-1 min-h-0 w-full hide-native-scrollbar " +
+          viewportFlexClass +
+          " min-h-0 w-full hide-native-scrollbar " +
           overflowClass +
           " " +
           (viewportClassName ?? "")

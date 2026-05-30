@@ -3280,9 +3280,11 @@ function AcpPermissionCard({
           {permissionStatusText(permission, pendingChoice)}
         </div>
         {detail.command && (
-          <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75">
-            <code>{detail.command}</code>
-          </pre>
+          <CodeScrollArea className="w-full">
+            <pre className="whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75">
+              <code>{detail.command}</code>
+            </pre>
+          </CodeScrollArea>
         )}
         {!resolved && (
           <div className="overflow-hidden rounded-md border border-status-warn/35 bg-status-warn/[0.06]">
@@ -4451,9 +4453,32 @@ interface MarkdownImage {
 function PlainTextContent({ text }: { text: string }) {
   if (!text.trim()) return null;
   return (
-    <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-caption leading-relaxed">
-      <code>{text}</code>
-    </pre>
+    <CodeScrollArea className="w-full">
+      <pre className="whitespace-pre-wrap break-words font-mono text-caption leading-relaxed">
+        <code>{text}</code>
+      </pre>
+    </CodeScrollArea>
+  );
+}
+
+function CodeScrollArea({
+  children,
+  className = "",
+  viewportClassName = "",
+}: {
+  children: ReactNode;
+  className?: string;
+  viewportClassName?: string;
+}) {
+  return (
+    <ScrollArea
+      className={"min-w-0 " + className}
+      viewportClassName={"pb-2 " + viewportClassName}
+      orientation="horizontal"
+      persistScrollbars
+    >
+      {children}
+    </ScrollArea>
   );
 }
 
@@ -4489,6 +4514,14 @@ function ToolPairRow({
   content?: AcpContentBlock[];
   onPreviewImage?: (image: MarkdownImage) => void;
 }) {
+  const shouldClampContent =
+    !expanded && shouldClampToolPairContent(content, maxLines);
+  const contentClassName = [
+    text.trim() ? "mt-2 space-y-2" : "space-y-2",
+    shouldClampContent ? `tool-pair-clamp-${maxLines}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <div className="border-b border-card-border/[0.12] last:border-b-0">
       <div className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2 px-3 py-2">
@@ -4497,18 +4530,25 @@ function ToolPairRow({
         </div>
         <div className="min-w-0">
           {text.trim() && (
-            <pre
-              className={
-                "min-w-0 whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75 " +
-                (!expanded ? "" : "overflow-x-auto ") +
-                (!expanded ? `tool-pair-clamp-${maxLines}` : "")
-              }
-            >
-              <code>{text}</code>
-            </pre>
+            expanded ? (
+              <CodeScrollArea className="w-full">
+                <pre className="min-w-0 whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75">
+                  <code>{text}</code>
+                </pre>
+              </CodeScrollArea>
+            ) : (
+              <pre
+                className={
+                  "min-w-0 whitespace-pre-wrap break-words font-mono text-caption leading-relaxed text-ink/75 " +
+                  `tool-pair-clamp-${maxLines}`
+                }
+              >
+                <code>{text}</code>
+              </pre>
+            )
           )}
           {content.length > 0 && onPreviewImage && (
-            <div className={text.trim() ? "mt-2 space-y-2" : "space-y-2"}>
+            <div className={contentClassName}>
               {content.map((block, index) => (
                 <AcpContentBlockView
                   key={`tool-output-content-${index}`}
@@ -4547,7 +4587,7 @@ function ToolPairPanel({
   const canExpand =
     shouldClampToolPairText(input, 3) ||
     shouldClampToolPairText(output, 3) ||
-    outputContent.length > 1;
+    shouldClampToolPairContent(outputContent, 3);
   return (
     <div ref={panelRef}>
       {input && (
@@ -4592,6 +4632,29 @@ function shouldClampToolPairText(text: string, maxLines: number): boolean {
     .split(/\r?\n/)
     .reduce((count, line) => count + Math.max(1, Math.ceil(line.length / 72)), 0);
   return estimatedVisualLines > maxLines;
+}
+
+function shouldClampToolPairContent(
+  content: AcpContentBlock[],
+  maxLines: number,
+): boolean {
+  if (content.length === 0) return false;
+  const text = contentTextForClamp(content);
+  return (
+    (text.trim() ? shouldClampToolPairText(text, maxLines) : false) ||
+    content.length > 1
+  );
+}
+
+function contentTextForClamp(content: AcpContentBlock[]): string {
+  return content
+    .map((block) => {
+      if (block.type === "text") return block.text;
+      if (block.type === "resource") return block.text ?? "";
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 type TodoEntry = {
@@ -4928,9 +4991,14 @@ function createMarkdownComponents(
     li: ({ children }) => <li>{children}</li>,
     hr: () => <hr className="border-ink/10 my-3" />,
     pre: ({ children }) => (
-      <pre className="overflow-x-auto rounded-md bg-bg-panel-alt border border-card-border/[0.16] px-3 py-2 text-caption leading-relaxed my-2">
-        {children}
-      </pre>
+      <CodeScrollArea
+        className="my-2 w-full rounded-md border border-card-border/[0.16] bg-bg-panel-alt"
+        viewportClassName="px-3 pt-2"
+      >
+        <pre className="text-caption leading-relaxed">
+          {children}
+        </pre>
+      </CodeScrollArea>
     ),
     code: ({ children, className }) => {
       if (className) {
