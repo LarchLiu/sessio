@@ -2467,7 +2467,7 @@ function AcpAttachmentPill({
       onClick={() => {
         void handleClick();
       }}
-      className="my-1 inline-flex max-w-[180px] items-center gap-1.5 rounded-full border border-ink/8 bg-bg-panel px-2.5 py-1 text-caption font-medium text-ink/70 shadow-sm transition hover:border-ink/18 hover:text-ink focus:outline-none focus:ring-2 focus:ring-ink/15"
+      className="my-1 inline-flex max-w-[180px] items-center gap-1.5 rounded-full border border-ink/[0.085] bg-ink/[0.055] px-2.5 py-1 text-caption font-medium text-ink/72 shadow-sm transition hover:border-ink/[0.15] hover:bg-ink/[0.07] hover:text-ink focus:outline-none focus:ring-2 focus:ring-ink/15"
       title={label}
     >
       <FileText className="h-3.5 w-3.5 shrink-0 text-ink/45" />
@@ -2963,7 +2963,7 @@ function AcpToolCard({
   return (
     <ToolTimelineFrame title={detail.title} iconName={displayTool.title}>
       {(input || output) && (
-        <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-bg-panel/65 text-body-sm">
+        <div className="overflow-hidden rounded-md border border-card-border/[0.14] bg-bg-panel/65 text-body-sm">
           <ToolPairPanel
             input={input}
             output={output}
@@ -4411,7 +4411,7 @@ function ToolPairRow({
   maxLines?: number;
 }) {
   return (
-    <div className="border-b border-ink/[0.07] last:border-b-0">
+    <div className="border-b border-card-border/[0.12] last:border-b-0">
       <div className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2 px-3 py-2">
         <div className="font-mono text-[10px] leading-relaxed text-ink/35">
           {label}
@@ -4472,7 +4472,7 @@ function ToolPairPanel({
       {canExpand && (
         <button
           type="button"
-          className="flex w-full items-center gap-1 border-t border-ink/[0.07] px-3 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
+          className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
           onClick={() => {
             if (expanded) {
               scrollBlockStartIntoView(panelRef.current);
@@ -4579,7 +4579,7 @@ function AcpToolCardFallback({
   const output = acpToolOutputText(tool);
   return (
     <ToolTimelineFrame title={title} iconName={iconName}>
-      <div className="overflow-hidden rounded-md border border-ink/[0.08] bg-bg-panel/65 text-body-sm">
+      <div className="overflow-hidden rounded-md border border-card-border/[0.14] bg-bg-panel/65 text-body-sm">
         <ToolPairPanel
           input={input}
           output={output}
@@ -4822,7 +4822,7 @@ function createMarkdownComponents(
     li: ({ children }) => <li>{children}</li>,
     hr: () => <hr className="border-ink/10 my-3" />,
     pre: ({ children }) => (
-      <pre className="overflow-x-auto rounded-md bg-bg-panel-alt border border-ink/[0.08] px-3 py-2 text-caption leading-relaxed my-2">
+      <pre className="overflow-x-auto rounded-md bg-bg-panel-alt border border-card-border/[0.16] px-3 py-2 text-caption leading-relaxed my-2">
         {children}
       </pre>
     ),
@@ -4890,7 +4890,7 @@ function MarkdownImageButton({
     <button
       type="button"
       onClick={() => onPreviewImage(previewImage)}
-      className="my-1 block overflow-hidden rounded-md border border-ink/10 bg-bg-panel-alt hover:border-ink/25 focus:outline-none focus:ring-2 focus:ring-ink/20 transition"
+      className="my-1 block overflow-hidden rounded-md border border-card-border/[0.16] bg-bg-panel-alt hover:border-card-border/25 focus:outline-none focus:ring-2 focus:ring-ink/20 transition"
       title={image.alt}
     >
       <img

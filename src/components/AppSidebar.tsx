@@ -108,10 +108,10 @@ export default function AppSidebar({
     <aside
       className={
         "shrink-0 border-r border-ink/5 bg-surface-sidebar flex flex-col overflow-hidden transition-[width] duration-600 ease-in-out " +
-        (sidebarOpen ? "w-64" : "w-0")
+        (sidebarOpen ? "w-[300px]" : "w-0")
       }
     >
-      <div data-tauri-drag-region className="relative h-12 shrink-0 w-64">
+      <div data-tauri-drag-region className="relative h-12 w-full shrink-0">
         {!isMac && (
           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-title font-semibold text-ink/85 pointer-events-none select-none">
             Sessio
@@ -130,7 +130,7 @@ export default function AppSidebar({
         </Tooltip>
       </div>
 
-      <nav className="flex-1 min-h-0 w-64 p-2 pb-0 flex flex-col gap-0.5">
+      <nav className="flex-1 min-h-0 w-full p-2 pb-0 flex flex-col gap-0.5">
         <button
           type="button"
           onClick={onNewChat}
@@ -288,7 +288,7 @@ function SidebarFooter({
   const { t } = useI18n();
 
   return (
-    <div className="relative w-64 border-t border-ink/10">
+    <div className="relative w-full border-t border-ink/10">
       <div className="px-3 py-2 flex items-center justify-between gap-2">
         <div className="shrink-0 flex items-center gap-1">
           <Tooltip content={t("sidebar.settings")} placement="top">

@@ -3,13 +3,30 @@
 @tailwind utilities;
 
 :root {
-  --color-fg: 255 255 255;
-  --color-bg: 15 16 20;
-  --color-bg-sidebar: 34 37 46;
-  --color-bg-panel: 11 12 16;
-  --color-bg-panel-alt: 10 11 15;
-  --color-tooltip-bg: 28 28 32;
-  --color-tooltip-fg: 255 255 255;
+  --color-fg: 218 224 234;
+  --color-bg: 37 42 51;
+  --color-bg-sidebar: 30 35 44;
+  --color-bg-panel: 35 40 49;
+  --color-bg-panel-alt: 43 49 59;
+  --color-card-bg: var(--color-bg-panel-alt);
+  --color-card-panel-bg: var(--color-bg-panel);
+  --color-card-border: var(--color-fg);
+  --color-card-hover: var(--color-bg-panel-alt);
+  --color-card-action-hover: var(--color-fg);
+  --color-card-active: var(--color-bg-panel-alt);
+  --color-card-fg: var(--color-fg);
+  --color-card-muted: var(--color-fg);
+  --color-card-subtle: var(--color-fg);
+  --color-card-icon: var(--color-fg);
+  --color-card-chip-bg: var(--color-fg);
+  --color-card-chip-fg: var(--color-fg);
+  --color-input-bg: var(--color-bg-panel);
+  --color-input-border: var(--color-fg);
+  --color-input-fg: var(--color-fg);
+  --color-input-placeholder: var(--color-fg);
+  --color-input-focus-border: var(--color-fg);
+  --color-tooltip-bg: 43 49 59;
+  --color-tooltip-fg: 235 239 246;
   --color-accent-purple: 167 139 250;
   --color-emerald: 16 163 127;
   --color-orange: 217 119 87;
@@ -21,13 +38,30 @@
 }
 
 :root[data-theme="light"] {
-  --color-fg: 28 28 32;
-  --color-bg: 245 245 247;
-  --color-bg-sidebar: 232 232 237;
-  --color-bg-panel: 255 255 255;
-  --color-bg-panel-alt: 241 241 244;
-  --color-tooltip-bg: 255 255 255;
-  --color-tooltip-fg: 28 28 32;
+  --color-fg: 31 35 43;
+  --color-bg: 246 246 244;
+  --color-bg-sidebar: 238 238 236;
+  --color-bg-panel: 246 246 244;
+  --color-bg-panel-alt: 252 252 250;
+  --color-card-bg: var(--color-bg-panel-alt);
+  --color-card-panel-bg: var(--color-bg-panel);
+  --color-card-border: var(--color-fg);
+  --color-card-hover: var(--color-bg-panel-alt);
+  --color-card-action-hover: var(--color-fg);
+  --color-card-active: var(--color-bg-panel-alt);
+  --color-card-fg: var(--color-fg);
+  --color-card-muted: var(--color-fg);
+  --color-card-subtle: var(--color-fg);
+  --color-card-icon: var(--color-fg);
+  --color-card-chip-bg: var(--color-fg);
+  --color-card-chip-fg: var(--color-fg);
+  --color-input-bg: var(--color-bg-panel);
+  --color-input-border: var(--color-fg);
+  --color-input-fg: var(--color-fg);
+  --color-input-placeholder: var(--color-fg);
+  --color-input-focus-border: var(--color-fg);
+  --color-tooltip-bg: 252 252 250;
+  --color-tooltip-fg: 31 35 43;
   --color-accent-purple: 109 40 217;
   --color-emerald: 13 138 106;
   --color-orange: 196 90 53;
@@ -84,6 +118,32 @@ body {
 
 .session-chat-scroll-viewport {
   overflow-anchor: none;
+}
+
+.workflow-list-item {
+  position: relative;
+  color: rgb(var(--color-card-fg) / 0.76);
+}
+
+.workflow-list-item:hover {
+  background: rgb(var(--color-card-fg) / 0.07);
+  color: rgb(var(--color-card-fg) / 0.92);
+}
+
+.workflow-list-item-active {
+  background: rgb(var(--color-card-fg) / 0.105);
+  color: rgb(var(--color-card-fg) / 0.92);
+}
+
+.workflow-list-item-active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  border-radius: 0;
+  background: rgb(var(--color-card-fg) / 0.36);
 }
 
 .chat-composer-textarea {

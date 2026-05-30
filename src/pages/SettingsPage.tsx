@@ -59,7 +59,7 @@ export default function SettingsPage({
 
   return (
     <div className="flex h-screen text-body text-ink">
-      <aside className="flex w-[300px] shrink-0 flex-col border-r border-ink/5 bg-surface-sidebar">
+      <aside className="flex w-[300px] shrink-0 flex-col bg-surface-sidebar">
         <header data-tauri-drag-region className="h-12 shrink-0 select-none bg-surface-sidebar" />
         <div className="min-h-0 flex-1 px-2">
           <button
@@ -81,7 +81,7 @@ export default function SettingsPage({
                   onClick={() => setSection(id)}
                   className={
                   "flex h-8 items-center gap-2 rounded-md px-2.5 text-left text-body-sm transition " +
-                  (active ? "bg-ink/10 text-ink" : "text-ink/72 hover:bg-ink/5 hover:text-ink")
+                  (active ? "bg-ink/[0.065] text-ink/88" : "text-ink/72 hover:bg-ink/5 hover:text-ink")
                   }
                 >
                   <Icon className="h-4 w-4 shrink-0" />
@@ -93,7 +93,7 @@ export default function SettingsPage({
         </div>
       </aside>
       <main className="relative flex min-w-0 flex-1 flex-col">
-        <header data-tauri-drag-region className="grid h-12 shrink-0 select-none grid-cols-3 items-center border-b border-ink/10 bg-surface px-5">
+        <header data-tauri-drag-region className="grid h-12 shrink-0 select-none grid-cols-3 items-center border-b border-ink/[0.12] bg-surface px-5">
           <h1 data-tauri-drag-region className="col-start-2 justify-self-center truncate text-title font-semibold text-ink/85">{sectionTitle}</h1>
         </header>
         <ScrollArea className="min-h-0 flex-1 bg-surface-panel" viewportClassName="px-10 pb-16 pt-6">
@@ -262,7 +262,7 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
         <div className="grid gap-2">
           <div className="grid grid-cols-[minmax(0,1fr)_180px] gap-2">
             <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("assistant.name")} className={inputClassName} />
-            <InlineMenuSelect value={workflowId} options={workflows.map((workflow) => ({ value: workflow.id, label: workflow.name }))} onChange={setWorkflowId} ariaLabel={t("project.workflowId")} className="h-9 max-w-none rounded-md border border-ink/10 bg-surface-panel px-2" minMenuWidth={220} />
+            <InlineMenuSelect value={workflowId} options={workflows.map((workflow) => ({ value: workflow.id, label: workflow.name }))} onChange={setWorkflowId} ariaLabel={t("project.workflowId")} className="h-9 max-w-none rounded-md border border-input-border/[0.16] bg-input px-2" minMenuWidth={220} />
           </div>
           <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
           <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} placeholder={t("assistant.system_prompt")} rows={4} className={textareaClassName} />
@@ -377,16 +377,16 @@ function WorkflowsSettings({ onError }: { onError: (error: string | null) => voi
       <div className="grid grid-cols-[240px_minmax(0,1fr)] gap-5">
         <div className="min-w-0">
           <SettingsGroup title={t("settings.workflows")} flush>
-            <div className="divide-y divide-ink/10">
+            <div className="divide-y divide-card-border/10">
               {workflows.map((workflow) => (
                 <Tooltip key={workflow.id} content={workflowDescription(workflow)} placement="right">
                   <button
                     type="button"
                     onClick={() => setSelectedWorkflowId(workflow.id)}
-                    className={"flex h-10 w-full min-w-0 items-center justify-between px-3 text-left text-body-sm transition " + (workflow.id === selectedWorkflowId ? "bg-ink/[0.12] font-medium text-ink" : "text-ink/65 hover:bg-ink/[0.055] hover:text-ink")}
+                    className={"workflow-list-item flex h-10 w-full min-w-0 items-center justify-between px-3 text-left text-body-sm transition " + (workflow.id === selectedWorkflowId ? "workflow-list-item-active" : "")}
                   >
                     <span className="truncate">{workflow.name}</span>
-                    <span className="rounded bg-ink/8 px-1.5 py-0.5 text-meta text-ink/40">{workflow.type}</span>
+                    <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{workflow.type}</span>
                   </button>
                 </Tooltip>
               ))}
@@ -608,38 +608,38 @@ function StageTemplateRow({
       className={
         "relative rounded-lg border p-2 transition duration-150 " +
         (isDragSource
-          ? "z-20 cursor-grabbing border-ink/25 bg-surface-panel shadow-[0_16px_36px_rgba(var(--color-ink),0.16)]"
+          ? "z-20 cursor-grabbing border-card-border/25 bg-card shadow-[0_16px_36px_rgba(0,0,0,0.24)]"
           : isDropTarget
-            ? "border-ink/45 bg-ink/[0.09] shadow-[inset_3px_0_0_rgba(var(--color-ink),0.42),0_8px_24px_rgba(var(--color-ink),0.08)]"
-            : "border-ink/10 bg-ink/[0.025]")
+            ? "border-card-border/45 bg-card-active shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.38),0_8px_24px_rgba(0,0,0,0.18)]"
+            : "border-card-border/[0.12] bg-card")
       }
     >
       <div className="flex items-start gap-2">
-        <button ref={handleRef} type="button" className="mt-1.5 cursor-grab touch-none rounded p-0.5 text-ink/25 hover:bg-ink/5 hover:text-ink/55 active:cursor-grabbing">
+        <button ref={handleRef} type="button" className="mt-1.5 cursor-grab touch-none rounded p-0.5 text-card-subtle/35 hover:bg-card-action-hover/5 hover:text-card-fg/60 active:cursor-grabbing">
           <GripVertical className="h-4 w-4" />
         </button>
         <button type="button" onClick={() => setExpanded((value) => !value)} className="min-w-0 flex-1 text-left">
           <div className="flex min-w-0 items-center gap-2">
-            <ListChecks className="h-4 w-4 shrink-0 text-ink/40" />
-            <span className="truncate text-body-sm font-medium text-ink/75">{label}</span>
-            <span className="rounded bg-ink/8 px-1.5 py-0.5 text-meta text-ink/40">{stage.type}</span>
+            <ListChecks className="h-4 w-4 shrink-0 text-card-icon/55" />
+            <span className="truncate text-body-sm font-medium text-card-fg/85">{label}</span>
+            <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{stage.type}</span>
           </div>
-          {stage.description && <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-ink/45">{stage.description}</div>}
+          {stage.description && <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-card-muted/60">{stage.description}</div>}
           <AssistantSummary assistants={stage.assistants} />
         </button>
         <div className="flex shrink-0 items-center gap-1">
           <>
-            <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><ChevronDown className="h-4 w-4 rotate-180" /></button>
-            <button type="button" onClick={() => void onMove(stage, 1)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><ChevronDown className="h-4 w-4" /></button>
+            <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4 rotate-180" /></button>
+            <button type="button" onClick={() => void onMove(stage, 1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4" /></button>
             {custom && (
-              <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
+              <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
             )}
           </>
-          <button type="button" onClick={() => setExpanded((value) => !value)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-4 w-4" /></button>
+          <button type="button" onClick={() => setExpanded((value) => !value)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><Pencil className="h-4 w-4" /></button>
         </div>
       </div>
       {expanded && (
-        <div className="mt-3 grid gap-2 border-t border-ink/10 pt-3">
+        <div className="mt-3 grid gap-2 border-t border-card-border/10 pt-3">
           {custom && (
             <>
               <input value={name} onChange={(event) => setName(event.target.value)} onBlur={() => void save()} className={inputClassName} />
@@ -647,18 +647,18 @@ function StageTemplateRow({
             </>
           )}
           <div>
-            <div className="mb-1.5 text-caption text-ink/45">{t("assistant.title")}</div>
+            <div className="mb-1.5 text-caption text-card-muted/60">{t("assistant.title")}</div>
             <div className="flex flex-wrap gap-1.5">
               {assistantOptions.map((option) => {
                 const active = selectedAssistantIds.includes(option.value);
                 return (
-                  <button key={option.value} type="button" onClick={() => void toggleAssistant(option.value)} className={"inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " + (active ? "border-ink/20 bg-ink/8 text-ink" : "border-ink/10 bg-surface-panel text-ink/55 hover:text-ink")}>
+                  <button key={option.value} type="button" onClick={() => void toggleAssistant(option.value)} className={"inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " + (active ? "border-card-border/[0.18] bg-card-chip/[0.06] text-card-fg/88" : "border-card-border/[0.12] bg-card-panel text-card-muted/60 hover:text-card-fg")}>
                     {active && <Check className="h-3 w-3" />}
                     {option.label}
                   </button>
                 );
               })}
-              {assistantOptions.length === 0 && <span className="text-caption text-ink/35">{t("assistant.empty")}</span>}
+              {assistantOptions.length === 0 && <span className="text-caption text-card-subtle/55">{t("assistant.empty")}</span>}
             </div>
           </div>
         </div>
@@ -715,7 +715,7 @@ function AssistantCard({
   };
 
   return (
-    <div className="rounded-lg border border-ink/10 bg-ink/[0.025] p-3">
+    <div className="rounded-lg border border-card-border/[0.12] bg-card p-3">
       {editing ? (
         <div className="grid gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} className={inputClassName} />
@@ -728,19 +728,19 @@ function AssistantCard({
         </div>
       ) : (
         <div className="flex items-start gap-3">
-          <Bot className="mt-0.5 h-4 w-4 shrink-0 text-ink/40" />
+          <Bot className="mt-0.5 h-4 w-4 shrink-0 text-card-icon/55" />
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-body-sm font-medium text-ink/75">{assistant.name}</span>
-              <span className="rounded bg-ink/8 px-1.5 py-0.5 text-meta text-ink/40">{assistant.type}</span>
+              <span className="truncate text-body-sm font-medium text-card-fg/75">{assistant.name}</span>
+              <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{assistant.type}</span>
             </div>
-            <div className="mt-1 truncate text-caption text-ink/45">{assistant.agent.name} · {assistant.agent.model} · {assistant.agent.mode} · {assistant.agent.effort}</div>
-            {assistant.systemPrompt && <div className="mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">{assistant.systemPrompt}</div>}
+            <div className="mt-1 truncate text-caption text-card-muted/60">{assistant.agent.name} · {assistant.agent.model} · {assistant.agent.mode} · {assistant.agent.effort}</div>
+            {assistant.systemPrompt && <div className="mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-card-muted/60">{assistant.systemPrompt}</div>}
           </div>
           {!readonly && (
             <div className="flex shrink-0 items-center gap-1">
-              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-4 w-4" /></button>
-              <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
+              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><Pencil className="h-4 w-4" /></button>
+              <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
             </div>
           )}
         </div>
@@ -752,12 +752,12 @@ function AssistantCard({
 function AssistantSummary({ assistants }: { assistants: StageAssistantInfo[] }) {
   const { t } = useI18n();
   if (assistants.length === 0) {
-    return <div className="mt-1 text-caption text-ink/35">{t("assistant.empty")}</div>;
+    return <div className="mt-1 text-caption text-card-subtle/55">{t("assistant.empty")}</div>;
   }
   return (
     <div className="mt-2 flex flex-wrap gap-1.5">
       {assistants.map((assistant) => (
-        <span key={assistant.assistantId} className="rounded bg-surface-panel px-1.5 py-0.5 text-meta text-ink/45">
+        <span key={assistant.assistantId} className="rounded bg-card-panel px-1.5 py-0.5 text-meta text-card-chip-fg/60">
           {assistant.name}
         </span>
       ))}
@@ -768,8 +768,8 @@ function AssistantSummary({ assistants }: { assistants: StageAssistantInfo[] }) 
 function SettingsGroup({ title, children, flush = false }: { title: string; children: ReactNode; flush?: boolean }) {
   return (
     <div className="mb-8">
-      <h2 className="mb-3 text-body-sm font-medium text-ink/85">{title}</h2>
-      <div className={"overflow-hidden rounded-lg border border-ink/10 bg-surface-panel " + (flush ? "" : "p-3")}>{children}</div>
+      <h2 className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{title}</h2>
+      <div className={"overflow-hidden rounded-lg border border-card-border/[0.12] bg-card " + (flush ? "" : "p-3")}>{children}</div>
     </div>
   );
 }
@@ -786,12 +786,12 @@ function SettingsRow({
   children: ReactNode;
 }) {
   return (
-    <div className="grid min-h-[72px] grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-ink/10 px-3 py-3 last:border-b-0">
+    <div className="grid min-h-[72px] grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-ink/[0.12] px-3 py-3 last:border-b-0">
       <div className="flex min-w-0 gap-3">
         <span className="mt-0.5 text-ink/55">{icon}</span>
         <span className="min-w-0">
           <span className="block text-body-sm font-medium text-ink/75">{label}</span>
-          <span className="mt-1 block text-caption leading-relaxed text-ink/45">{description}</span>
+          <span className="mt-1 block text-caption leading-relaxed text-ink/60">{description}</span>
         </span>
       </div>
       {children}
@@ -815,7 +815,7 @@ function SegmentedControl({
           key={option.value}
           type="button"
           onClick={() => onChange(option.value)}
-          className={"h-7 min-w-9 rounded px-2 text-body-sm transition " + (value === option.value ? "bg-surface-panel text-ink shadow-sm" : "text-ink/45 hover:text-ink/75")}
+          className={"h-7 min-w-9 rounded px-2 text-body-sm transition " + (value === option.value ? "bg-ink/[0.06] text-ink/85" : "text-ink/45 hover:text-ink/75")}
         >
           {option.label}
         </button>
@@ -838,7 +838,7 @@ function ThemeSelector({ mode, onChange }: { mode: ThemeMode; onChange: (mode: T
           <button
             type="button"
             onClick={() => onChange(value)}
-            className={"flex h-7 w-8 items-center justify-center rounded transition " + (mode === value ? "bg-surface-panel text-ink shadow-sm" : "text-ink/45 hover:text-ink/75")}
+            className={"flex h-7 w-8 items-center justify-center rounded transition " + (mode === value ? "bg-ink/[0.06] text-ink/85" : "text-ink/45 hover:text-ink/75")}
           >
             <Icon className="h-4 w-4" />
           </button>
@@ -852,5 +852,5 @@ function EmptyState({ label }: { label: string }) {
   return <div className="rounded-md border border-dashed border-ink/10 py-8 text-center text-body-sm text-ink/35">{label}</div>;
 }
 
-const inputClassName = "h-9 min-w-0 rounded-md border border-ink/10 bg-surface-panel px-3 text-body-sm text-ink outline-none placeholder:text-ink/35 focus:border-ink/25";
-const textareaClassName = "min-w-0 resize-none rounded-md border border-ink/10 bg-surface-panel px-3 py-2 text-body-sm text-ink outline-none placeholder:text-ink/35 focus:border-ink/25";
+const inputClassName = "h-9 min-w-0 rounded-md border border-input-border/[0.16] bg-input px-3 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";
+const textareaClassName = "min-w-0 resize-none rounded-md border border-input-border/[0.16] bg-input px-3 py-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30";
