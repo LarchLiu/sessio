@@ -27,6 +27,7 @@ import AppMain from "./components/AppMain";
 import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
 import AppSidebar from "./components/AppSidebar";
 import MemoryBackendMissingButton from "./components/MemoryBackendMissingButton";
+import SettingsPage from "./pages/SettingsPage";
 import { useAppData } from "./hooks/useAppData";
 import { usePendingNewChats } from "./hooks/usePendingNewChats";
 import { useProjectGroups } from "./hooks/useProjectGroups";
@@ -85,6 +86,7 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [viewMode] = useState<ViewMode>(() => readViewMode());
   const [detailMode, setDetailMode] = useState<DetailMode>("chat");
   const [metaPopoverOpen, setMetaPopoverOpen] = useState(false);
@@ -408,10 +410,7 @@ export default function App() {
       liveState={liveRuntimeState}
       runtimeSessionAliases={runtimeSessionAliases}
       unreadSessionIds={unreadSessionIds}
-      lang={lang}
-      themeMode={mode}
       update={update}
-      rebuilding={rebuilding}
       indexing={indexing}
       onCloseSidebar={() => setSidebarOpen(false)}
       onNewChat={() => {
@@ -474,10 +473,8 @@ export default function App() {
       onSessionContextMenu={(session, pos) => {
         void openSessionMenu(session, pos);
       }}
-      onLangChange={setLang}
-      onThemeModeChange={setMode}
+      onOpenSettings={() => setSettingsOpen(true)}
       onError={setError}
-      onRebuildFinished={refreshMemoryBackend}
     />
   );
 
@@ -527,6 +524,24 @@ export default function App() {
       }}
     />
   );
+
+  if (settingsOpen) {
+    return (
+      <div className="h-screen text-body">
+        <SettingsPage
+          lang={lang}
+          onLangChange={setLang}
+          themeMode={mode}
+          onThemeModeChange={setMode}
+          rebuilding={rebuilding}
+          indexing={indexing}
+          onBack={() => setSettingsOpen(false)}
+          onError={setError}
+          onRebuildFinished={refreshMemoryBackend}
+        />
+      </div>
+    );
+  }
 
   return (
     <AppLayout sidebar={sidebar} header={header} overlays={overlays}>

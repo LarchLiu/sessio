@@ -339,6 +339,7 @@ CREATE TABLE IF NOT EXISTS session_history_snapshot_turns (
 CREATE TABLE IF NOT EXISTS workflows (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
+    description TEXT,
     type       TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -373,7 +374,7 @@ CREATE TABLE IF NOT EXISTS assistants (
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
-    CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND project_id IS NULL)
+    CHECK((type = 'builtin' AND project_id IS NULL)
        OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
     FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -436,6 +437,20 @@ CREATE TABLE IF NOT EXISTS stages (
 
 CREATE INDEX IF NOT EXISTS idx_stages_project
     ON stages(workflow_id, project_id, type, "order", kind, name);
+
+CREATE TABLE IF NOT EXISTS stage_assistants (
+    stage_id     TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    "order"      INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY(stage_id, assistant_id),
+    FOREIGN KEY(stage_id) REFERENCES stages(id) ON DELETE CASCADE,
+    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_stage_assistants_assistant
+    ON stage_assistants(assistant_id);
 
 CREATE TABLE IF NOT EXISTS thread_stages (
     id           TEXT PRIMARY KEY,
@@ -507,9 +522,22 @@ CREATE INDEX IF NOT EXISTS idx_agents_type_enabled
 
 const SCHEMA_V5_PATCH: &str = r#"
 ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
+ALTER TABLE workflows ADD COLUMN description TEXT;
 ALTER TABLE projects ADD COLUMN workflow_id TEXT NOT NULL DEFAULT 'code';
 ALTER TABLE assistants ADD COLUMN workflow_id TEXT;
 ALTER TABLE stages ADD COLUMN workflow_id TEXT;
+CREATE TABLE IF NOT EXISTS stage_assistants (
+    stage_id     TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    "order"      INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY(stage_id, assistant_id),
+    FOREIGN KEY(stage_id) REFERENCES stages(id) ON DELETE CASCADE,
+    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_stage_assistants_assistant
+    ON stage_assistants(assistant_id);
 "#;
 
 fn now_ms() -> i64 {
@@ -602,15 +630,16 @@ fn apply_v5_patch(conn: &Connection) {
 
 fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
     let now = now_ms();
-    for (id, name) in BUILTIN_WORKFLOW_SEEDS {
+    for (id, name, description) in BUILTIN_WORKFLOW_SEEDS {
         conn.execute(
-            "INSERT INTO workflows (id, name, type, created_at, updated_at)
-             VALUES (?, ?, 'builtin', ?, ?)
+            "INSERT INTO workflows (id, name, description, type, created_at, updated_at)
+             VALUES (?, ?, ?, 'builtin', ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
+                description = excluded.description,
                 type = excluded.type,
                 updated_at = excluded.updated_at",
-            params![id, name, now, now],
+            params![id, name, description, now, now],
         )?;
     }
     Ok(())
@@ -619,7 +648,7 @@ fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
 fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
     let now = now_ms();
     delete_legacy_builtin_workflow_stages(conn)?;
-    for (workflow_id, _) in BUILTIN_WORKFLOW_SEEDS {
+    for (workflow_id, _, _) in BUILTIN_WORKFLOW_SEEDS {
         for (index, (kind, description)) in builtin_workflow_stage_seeds(workflow_id)
             .iter()
             .copied()
@@ -635,14 +664,13 @@ fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
                     kind = excluded.kind,
                     name = excluded.name,
                     description = excluded.description,
-                    \"order\" = excluded.\"order\",
                     updated_at = excluded.updated_at",
                 params![
                     id,
                     workflow_id,
                     kind.as_str(),
                     description,
-                    index as i64,
+                    (index as i64 + 1) * 1000,
                     now,
                     now
                 ],
@@ -652,12 +680,16 @@ fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const BUILTIN_WORKFLOW_SEEDS: [(&str, &str); 5] = [
-    ("code", "Code"),
-    ("writing", "Writing"),
-    ("research", "Research"),
-    ("general", "General"),
-    ("video_production", "Video production"),
+const BUILTIN_WORKFLOW_SEEDS: [(&str, &str, &str); 5] = [
+    ("code", "Code", "workflow.description.code"),
+    ("writing", "Writing", "workflow.description.writing"),
+    ("research", "Research", "workflow.description.research"),
+    ("general", "General", "workflow.description.general"),
+    (
+        "video_production",
+        "Video production",
+        "workflow.description.video_production",
+    ),
 ];
 
 fn delete_legacy_builtin_workflow_stages(conn: &Connection) -> Result<()> {
@@ -1268,6 +1300,17 @@ fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
     )
 }
 
+fn stable_workflow_id(name: &str, now: i64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    format!(
+        "workflow-{}",
+        hex::encode(hasher.finalize())[..16].to_string()
+    )
+}
+
 fn stable_assistant_id(
     assistant_type: AssistantType,
     workflow_id: Option<&str>,
@@ -1355,14 +1398,15 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectInfo> {
 }
 
 fn workflow_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowInfo> {
-    let workflow_type_raw: String = row.get(2)?;
+    let workflow_type_raw: String = row.get(3)?;
     Ok(WorkflowInfo {
         id: row.get(0)?,
         name: row.get(1)?,
+        description: row.get(2)?,
         workflow_type: WorkflowType::from_db_str(&workflow_type_raw)
             .unwrap_or(WorkflowType::Custom),
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
     })
 }
 
@@ -1462,6 +1506,7 @@ fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectSt
         order: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        assistants: Vec::new(),
     })
 }
 
@@ -1531,6 +1576,18 @@ fn ensure_workflow_exists(conn: &Connection, workflow_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn load_workflow_by_id(conn: &Connection, workflow_id: &str) -> Result<WorkflowInfo> {
+    conn.query_row(
+        "SELECT id, name, description, type, created_at, updated_at
+         FROM workflows
+         WHERE id = ?",
+        params![workflow_id],
+        workflow_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("workflow not found: {workflow_id}"))
+}
+
 fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
     conn.query_row(
         "SELECT id, name, icon, model, models_json, effort, efforts_json,
@@ -1585,7 +1642,7 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
 }
 
 fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
-    conn.query_row(
+    let mut stage = conn.query_row(
         "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
          FROM stages
          WHERE id = ?",
@@ -1593,7 +1650,9 @@ fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<Project
         project_stage_from_row,
     )
     .optional()?
-    .ok_or_else(|| anyhow::anyhow!("project stage not found: {stage_id}"))
+    .ok_or_else(|| anyhow::anyhow!("project stage not found: {stage_id}"))?;
+    stage.assistants = load_project_stage_assistants(conn, &stage.id)?;
+    Ok(stage)
 }
 
 fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<StageInfo> {
@@ -1630,7 +1689,10 @@ fn validate_assistant_for_project(
     if assistant.project_id.as_deref() == Some(project_id) {
         return Ok(assistant);
     }
-    if assistant.project_id.is_none() && assistant.workflow_id == Some(project.workflow_id) {
+    if assistant.project_id.is_none()
+        && (assistant.workflow_id.is_none()
+            || assistant.workflow_id.as_deref() == Some(project.workflow_id.as_str()))
+    {
         return Ok(assistant);
     }
     anyhow::bail!("assistant is not available for this project")
@@ -1660,6 +1722,40 @@ fn validate_assistants_for_project(
     Ok(assistants)
 }
 
+fn validate_assistant_for_stage(
+    conn: &Connection,
+    stage: &ProjectStageInfo,
+    assistant_id: &str,
+) -> Result<AssistantInfo> {
+    let assistant = load_assistant_by_id(conn, assistant_id)?;
+    if stage.project_id.is_some() && assistant.project_id == stage.project_id {
+        return Ok(assistant);
+    }
+    if assistant.project_id.is_none()
+        && (assistant.workflow_id.is_none() || assistant.workflow_id == stage.workflow_id)
+    {
+        return Ok(assistant);
+    }
+    anyhow::bail!("assistant is not available for this stage")
+}
+
+fn validate_assistants_for_stage(
+    conn: &Connection,
+    stage: &ProjectStageInfo,
+    assistant_ids: &[String],
+) -> Result<Vec<AssistantInfo>> {
+    let mut seen = HashSet::new();
+    let mut assistants = Vec::new();
+    for assistant_id in assistant_ids {
+        let assistant_id = assistant_id.trim();
+        if assistant_id.is_empty() || !seen.insert(assistant_id.to_string()) {
+            continue;
+        }
+        assistants.push(validate_assistant_for_stage(conn, stage, assistant_id)?);
+    }
+    Ok(assistants)
+}
+
 fn load_stage_assistants(
     conn: &Connection,
     thread_stage_id: &str,
@@ -1672,6 +1768,37 @@ fn load_stage_assistants(
          ORDER BY tsa.\"order\" ASC, tsa.created_at ASC",
     )?;
     let rows = stmt.query_map(params![thread_stage_id], |row| {
+        let agent_json: String = row.get(2)?;
+        Ok(StageAssistantInfo {
+            assistant_id: row.get(0)?,
+            name: row.get(1)?,
+            agent: serde_json::from_str::<AssistantAgentInfo>(&agent_json).unwrap_or_else(|_| {
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: String::new(),
+                    mode: String::new(),
+                    effort: String::new(),
+                }
+            }),
+            order: row.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_project_stage_assistants(
+    conn: &Connection,
+    stage_id: &str,
+) -> Result<Vec<StageAssistantInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT sa.assistant_id, a.name, a.agent_json, sa.\"order\"
+         FROM stage_assistants sa
+         INNER JOIN assistants a ON a.id = sa.assistant_id
+         WHERE sa.stage_id = ?
+         ORDER BY sa.\"order\" ASC, sa.created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![stage_id], |row| {
         let agent_json: String = row.get(2)?;
         Ok(StageAssistantInfo {
             assistant_id: row.get(0)?,
@@ -1754,6 +1881,26 @@ fn replace_thread_stage_assistants(
     Ok(())
 }
 
+fn replace_project_stage_assistants(
+    conn: &Connection,
+    stage_id: &str,
+    assistants: &[AssistantInfo],
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM stage_assistants WHERE stage_id = ?",
+        params![stage_id],
+    )?;
+    for (index, assistant) in assistants.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO stage_assistants (stage_id, assistant_id, \"order\", created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![stage_id, assistant.id, index as i64, now, now],
+        )?;
+    }
+    Ok(())
+}
+
 fn assistant_agent_from_db_agent(agent: &AgentInfo) -> Option<AssistantAgentInfo> {
     let Some(model) = agent
         .model
@@ -1790,10 +1937,8 @@ fn seed_builtin_assistants(conn: &Connection, now: i64) -> Result<()> {
     let Some(assistant_agent) = assistant_agent_from_db_agent(&codex_agent) else {
         return Ok(());
     };
-    for (workflow_id, _) in BUILTIN_WORKFLOW_SEEDS {
-        for seed in builtin_assistant_seeds() {
-            upsert_builtin_assistant(conn, workflow_id, seed, &assistant_agent, now)?;
-        }
+    for seed in builtin_assistant_seeds() {
+        upsert_builtin_assistant(conn, seed, &assistant_agent, now)?;
     }
     Ok(())
 }
@@ -1811,7 +1956,7 @@ fn delete_legacy_agent_builtin_assistants(conn: &Connection) -> Result<()> {
              'assistant-builtin-builder',
              'assistant-builtin-reviewer'
            )
-           OR (type = 'builtin' AND workflow_id IS NULL)",
+           OR (type = 'builtin' AND id LIKE 'assistant-builtin-%-%')",
         [],
     )?;
     Ok(())
@@ -1823,44 +1968,105 @@ struct BuiltinAssistantSeed {
     system_prompt: &'static str,
 }
 
-fn builtin_assistant_seeds() -> [BuiltinAssistantSeed; 4] {
-    [
-        BuiltinAssistantSeed {
-            id: "assistant-builtin-researcher",
+fn builtin_assistant_seeds() -> Vec<BuiltinAssistantSeed> {
+    builtin_assistant_kinds()
+        .into_iter()
+        .map(builtin_assistant_seed_for_kind)
+        .collect()
+}
+
+fn builtin_assistant_kinds() -> Vec<StageType> {
+    let mut seen = HashSet::new();
+    BUILTIN_WORKFLOW_SEEDS
+        .iter()
+        .flat_map(|(workflow_id, _, _)| builtin_workflow_stage_seeds(workflow_id))
+        .map(|(kind, _)| kind)
+        .filter(|kind| !matches!(kind, StageType::Human | StageType::Done))
+        .filter(|kind| seen.insert(*kind))
+        .collect()
+}
+
+fn builtin_assistant_seed_for_kind(kind: StageType) -> BuiltinAssistantSeed {
+    match kind {
+        StageType::Research => BuiltinAssistantSeed {
+            id: "assistant-builtin-research",
             name: "Researcher",
             system_prompt: "Research the problem space before implementation. Gather relevant context, inspect existing project behavior, identify constraints and unknowns, and report concise findings with sources or file references when available.",
         },
-        BuiltinAssistantSeed {
-            id: "assistant-builtin-planner",
+        StageType::Plan => BuiltinAssistantSeed {
+            id: "assistant-builtin-plan",
             name: "Planner",
             system_prompt: "Create a clear execution plan from the thread goal. Break the work into ordered steps, call out dependencies and risks, and keep the plan focused on decisions that unblock implementation.",
         },
-        BuiltinAssistantSeed {
-            id: "assistant-builtin-builder",
-            name: "Builder",
-            system_prompt: "Implement the selected plan. Make scoped changes, follow the existing project patterns, keep behavior coherent across the stack, and verify the result with the most relevant checks.",
+        StageType::Develop => BuiltinAssistantSeed {
+            id: "assistant-builtin-develop",
+            name: "Developer",
+            system_prompt: "Implement the planned code changes. Follow existing project patterns, keep behavior coherent across the stack, and verify the result with relevant checks.",
         },
-        BuiltinAssistantSeed {
-            id: "assistant-builtin-reviewer",
+        StageType::Build => BuiltinAssistantSeed {
+            id: "assistant-builtin-build",
+            name: "Builder",
+            system_prompt: "Implement the planned work and keep the thread moving toward a working result. Make scoped changes and verify the result with the most relevant checks.",
+        },
+        StageType::Writing => BuiltinAssistantSeed {
+            id: "assistant-builtin-writing",
+            name: "Writer",
+            system_prompt: "Draft the requested content in the selected voice, structure, and level of detail while preserving the goal, audience, and constraints.",
+        },
+        StageType::Editing => BuiltinAssistantSeed {
+            id: "assistant-builtin-editing",
+            name: "Editor",
+            system_prompt: "Revise the draft for clarity, flow, accuracy, structure, and fit to the intended audience while preserving the authorial intent.",
+        },
+        StageType::Review => BuiltinAssistantSeed {
+            id: "assistant-builtin-review",
             name: "Reviewer",
             system_prompt: "Review the completed work for correctness, regressions, data model consistency, edge cases, and missing tests. Prioritize actionable findings and confirm when no blocking issues remain.",
         },
-    ]
+        StageType::Proofreading => BuiltinAssistantSeed {
+            id: "assistant-builtin-proofreading",
+            name: "Proofreader",
+            system_prompt: "Check grammar, spelling, formatting, terminology, consistency, and final polish before delivery.",
+        },
+        StageType::Screenplay => BuiltinAssistantSeed {
+            id: "assistant-builtin-screenplay",
+            name: "Screenwriter",
+            system_prompt: "Write or refine scripts, scenes, narration, dialogue, and beats for the video production goal.",
+        },
+        StageType::Storyboard => BuiltinAssistantSeed {
+            id: "assistant-builtin-storyboard",
+            name: "Storyboarder",
+            system_prompt: "Map scenes into shots, visual flow, timing, framing, transitions, and production notes.",
+        },
+        StageType::Design => BuiltinAssistantSeed {
+            id: "assistant-builtin-design",
+            name: "Designer",
+            system_prompt: "Define visual style, assets, graphics, motion language, and production look for the project.",
+        },
+        StageType::Production => BuiltinAssistantSeed {
+            id: "assistant-builtin-production",
+            name: "Producer",
+            system_prompt: "Produce and assemble the planned assets or shots into a working result that matches the production plan.",
+        },
+        StageType::Human | StageType::Done => BuiltinAssistantSeed {
+            id: "assistant-builtin-done",
+            name: "Done",
+            system_prompt: "Close the completed thread.",
+        },
+    }
 }
 
 fn upsert_builtin_assistant(
     conn: &Connection,
-    workflow_id: &str,
     seed: BuiltinAssistantSeed,
     assistant_agent: &AssistantAgentInfo,
     now: i64,
 ) -> Result<()> {
-    let id = format!("{}-{}", seed.id, workflow_id);
     let agent_json = serde_json::to_string(&assistant_agent)?;
     conn.execute(
         "INSERT INTO assistants (
             id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, 'builtin', ?, NULL, ?, ?)
+         ) VALUES (?, ?, ?, ?, 'builtin', NULL, NULL, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             agent_json = excluded.agent_json,
@@ -1870,11 +2076,10 @@ fn upsert_builtin_assistant(
             project_id = excluded.project_id,
             updated_at = excluded.updated_at",
         params![
-            id,
+            seed.id,
             seed.name,
             agent_json,
             seed.system_prompt,
-            workflow_id,
             now,
             now
         ],
@@ -1914,6 +2119,73 @@ fn compact_stage_order(conn: &Connection, thread_id: &str) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn reorder_project_stage_scope(
+    conn: &Connection,
+    stage_id: &str,
+    workflow_id: &str,
+    project_id: Option<&str>,
+    target_order: i64,
+) -> Result<i64> {
+    let rows: Vec<(String, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, \"order\"
+             FROM stages
+             WHERE workflow_id = ?
+               AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
+             ORDER BY \"order\" ASC, type ASC, project_id IS NOT NULL ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![workflow_id, project_id, project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let Some(current_index) = rows.iter().position(|(id, _)| id == stage_id) else {
+        anyhow::bail!("project stage not found in reorder scope: {stage_id}");
+    };
+    let Some(target_index) = rows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != current_index)
+        .find(|(_, (_, order))| *order == target_order)
+        .map(|(index, _)| index)
+    else {
+        return Ok(rows[current_index].1);
+    };
+    if current_index == target_index {
+        return Ok(rows[current_index].1);
+    }
+
+    let mut ids = rows
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let id = ids.remove(current_index);
+    let insert_index = if current_index < target_index {
+        target_index
+    } else {
+        target_index
+    };
+    ids.insert(insert_index, id);
+
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE stages SET \"order\" = ? WHERE id = ?",
+            params![-((index as i64) + 1), id],
+        )?;
+    }
+    let mut next_order = 0;
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE stages SET \"order\" = ? WHERE id = ?",
+            params![index as i64, id],
+        )?;
+        if id == stage_id {
+            next_order = index as i64;
+        }
+    }
+    Ok(next_order)
 }
 
 fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem> {
@@ -2580,12 +2852,103 @@ impl SessionStore for SqliteStore {
     fn list_workflows(&self) -> Result<Vec<WorkflowInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, type, created_at, updated_at
+            "SELECT id, name, description, type, created_at, updated_at
              FROM workflows
              ORDER BY type ASC, name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], workflow_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn create_workflow(&self, name: &str, description: Option<&str>) -> Result<WorkflowInfo> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("workflow name cannot be empty");
+        }
+        let description = description.map(str::trim).filter(|value| !value.is_empty());
+        let now = now_ms();
+        let id = stable_workflow_id(name, now);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO workflows (id, name, description, type, created_at, updated_at)
+             VALUES (?, ?, ?, 'custom', ?, ?)",
+            params![id, name, description, now, now],
+        )?;
+        load_workflow_by_id(&conn, &id)
+    }
+
+    fn update_workflow(
+        &self,
+        workflow_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<WorkflowInfo> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_workflow_by_id(&conn, workflow_id)?;
+        if current.workflow_type == WorkflowType::Builtin {
+            anyhow::bail!("builtin workflow cannot be updated");
+        }
+        let next_name = match name {
+            Some(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    anyhow::bail!("workflow name cannot be empty");
+                }
+                value.to_string()
+            }
+            None => current.name,
+        };
+        let next_description = match description {
+            Some(Some(value)) => value
+                .trim()
+                .is_empty()
+                .then(|| None)
+                .unwrap_or_else(|| Some(value.trim().to_string())),
+            Some(None) => None,
+            None => current.description,
+        };
+        conn.execute(
+            "UPDATE workflows SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+            params![next_name, next_description, now_ms(), workflow_id],
+        )?;
+        load_workflow_by_id(&conn, workflow_id)
+    }
+
+    fn delete_workflow(&self, workflow_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_workflow_by_id(&conn, workflow_id)?;
+        if current.workflow_type == WorkflowType::Builtin {
+            anyhow::bail!("builtin workflow cannot be deleted");
+        }
+        let project_count: i64 = conn.query_row(
+            "SELECT count(*) FROM projects WHERE workflow_id = ? AND archived = 0",
+            params![workflow_id],
+            |row| row.get(0),
+        )?;
+        if project_count > 0 {
+            anyhow::bail!("workflow is used by projects");
+        }
+        let assistant_count: i64 = conn.query_row(
+            "SELECT count(*) FROM assistants WHERE workflow_id = ?",
+            params![workflow_id],
+            |row| row.get(0),
+        )?;
+        if assistant_count > 0 {
+            anyhow::bail!("workflow is used by assistants");
+        }
+        let stage_count: i64 = conn.query_row(
+            "SELECT count(*) FROM stages WHERE workflow_id = ?",
+            params![workflow_id],
+            |row| row.get(0),
+        )?;
+        if stage_count > 0 {
+            anyhow::bail!("workflow is used by stages");
+        }
+        let changed = conn.execute("DELETE FROM workflows WHERE id = ?", params![workflow_id])?;
+        if changed == 0 {
+            anyhow::bail!("workflow not found: {workflow_id}");
+        }
+        Ok(())
     }
 
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
@@ -2751,7 +3114,7 @@ impl SessionStore for SqliteStore {
             let mut stmt = conn.prepare(
                 "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
                  FROM assistants
-                 WHERE (project_id IS NULL AND workflow_id = ?) OR project_id = ?
+                 WHERE (project_id IS NULL AND (workflow_id IS NULL OR workflow_id = ?)) OR project_id = ?
                  ORDER BY type ASC, project_id IS NOT NULL ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
             let rows = stmt.query_map(
@@ -2818,9 +3181,6 @@ impl SessionStore for SqliteStore {
             AssistantType::Builtin => {
                 if project_id.is_some() {
                     anyhow::bail!("builtin assistant cannot be linked to a project");
-                }
-                if resolved_workflow_id.is_none() {
-                    anyhow::bail!("builtin assistant requires a workflow");
                 }
             }
             AssistantType::Custom => {
@@ -2934,8 +3294,10 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         load_assistant_by_id(&conn, assistant_id)?;
         let stage_count: i64 = conn.query_row(
-            "SELECT count(*) FROM thread_stage_assistants WHERE assistant_id = ?",
-            params![assistant_id],
+            "SELECT
+                (SELECT count(*) FROM thread_stage_assistants WHERE assistant_id = ?) +
+                (SELECT count(*) FROM stage_assistants WHERE assistant_id = ?)",
+            params![assistant_id, assistant_id],
             |row| row.get(0),
         )?;
         if stage_count > 0 {
@@ -3038,13 +3400,34 @@ impl SessionStore for SqliteStore {
             "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
              FROM stages
              WHERE (project_id IS NULL AND workflow_id = ?) OR project_id = ?
-             ORDER BY type ASC, project_id IS NOT NULL ASC, \"order\" ASC, created_at ASC",
+             ORDER BY \"order\" ASC, type ASC, project_id IS NOT NULL ASC, created_at ASC",
         )?;
         let rows = stmt.query_map(
             params![project.workflow_id.as_str(), project_id],
             project_stage_from_row,
         )?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut stages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for stage in stages.iter_mut() {
+            stage.assistants = load_project_stage_assistants(&conn, &stage.id)?;
+        }
+        Ok(stages)
+    }
+
+    fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>> {
+        let conn = self.conn.lock().unwrap();
+        ensure_workflow_exists(&conn, workflow_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
+             FROM stages
+             WHERE project_id IS NULL AND workflow_id = ?
+             ORDER BY \"order\" ASC, type ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![workflow_id], project_stage_from_row)?;
+        let mut stages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for stage in stages.iter_mut() {
+            stage.assistants = load_project_stage_assistants(&conn, &stage.id)?;
+        }
+        Ok(stages)
     }
 
     fn create_project_stage(
@@ -3060,11 +3443,18 @@ impl SessionStore for SqliteStore {
         }
         let description = description.map(str::trim).filter(|value| !value.is_empty());
         let conn = self.conn.lock().unwrap();
-        let project = load_project_by_id(&conn, project_id)?;
         let requested_workflow_id = workflow_id;
+        let project = if requested_workflow_id.is_none() {
+            Some(load_project_by_id(&conn, project_id)?)
+        } else if project_id.trim().is_empty() {
+            None
+        } else {
+            Some(load_project_by_id(&conn, project_id)?)
+        };
         let resolved_workflow_id = requested_workflow_id
             .as_deref()
-            .unwrap_or(project.workflow_id.as_str());
+            .or_else(|| project.as_ref().map(|project| project.workflow_id.as_str()))
+            .ok_or_else(|| anyhow::anyhow!("project stage requires a project or workflow"))?;
         ensure_workflow_exists(&conn, resolved_workflow_id)?;
         let template_project_id = if requested_workflow_id.is_some() {
             None
@@ -3074,8 +3464,7 @@ impl SessionStore for SqliteStore {
         let next_order: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(\"order\"), -1) + 1 FROM stages
-                 WHERE type = 'custom'
-                   AND workflow_id = ?
+                 WHERE workflow_id = ?
                    AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)",
                 params![
                     resolved_workflow_id,
@@ -3120,11 +3509,12 @@ impl SessionStore for SqliteStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let current = load_project_stage_by_id(&tx, stage_id)?;
-        if current.stage_type != ProjectStageType::Custom {
-            anyhow::bail!("builtin project stage cannot be updated");
+        if current.stage_type != ProjectStageType::Custom && (name.is_some() || description.is_some())
+        {
+            anyhow::bail!("builtin project stage details cannot be updated");
         }
         let Some(scope_workflow_id) = current.workflow_id else {
-            anyhow::bail!("custom project stage requires a workflow");
+            anyhow::bail!("project stage requires a workflow");
         };
         let scope_project_id = current.project_id.as_deref();
         let next_name = match name {
@@ -3146,66 +3536,47 @@ impl SessionStore for SqliteStore {
             Some(None) => None,
             None => current.description,
         };
-        let max_order: i64 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(\"order\"), 0) FROM stages
-                 WHERE type = 'custom'
-                   AND workflow_id = ?
-                   AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)",
-                params![
-                    scope_workflow_id.as_str(),
-                    scope_project_id,
-                    scope_project_id
-                ],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        let next_order = order.unwrap_or(current.order).clamp(0, max_order);
-        if next_order != current.order {
-            tx.execute(
-                "UPDATE stages SET \"order\" = -1 WHERE id = ?",
-                params![stage_id],
-            )?;
-            if next_order < current.order {
-                tx.execute(
-                    "UPDATE stages
-                     SET \"order\" = \"order\" + 1
-                     WHERE type = 'custom'
-                       AND workflow_id = ?
-                       AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
-                       AND \"order\" >= ? AND \"order\" < ? AND id != ?",
-                    params![
-                        scope_workflow_id.as_str(),
-                        scope_project_id,
-                        scope_project_id,
-                        next_order,
-                        current.order,
-                        stage_id
-                    ],
-                )?;
-            } else {
-                tx.execute(
-                    "UPDATE stages
-                     SET \"order\" = \"order\" - 1
-                     WHERE type = 'custom'
-                       AND workflow_id = ?
-                       AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
-                       AND \"order\" <= ? AND \"order\" > ? AND id != ?",
-                    params![
-                        scope_workflow_id.as_str(),
-                        scope_project_id,
-                        scope_project_id,
-                        next_order,
-                        current.order,
-                        stage_id
-                    ],
-                )?;
-            }
-        }
+        let next_order = match order {
+            Some(target_order) if target_order != current.order => reorder_project_stage_scope(
+                &tx,
+                stage_id,
+                scope_workflow_id.as_str(),
+                scope_project_id,
+                target_order,
+            )?,
+            _ => current.order,
+        };
         let now = now_ms();
+        if current.stage_type == ProjectStageType::Custom {
+            tx.execute(
+                "UPDATE stages SET name = ?, description = ?, \"order\" = ?, updated_at = ? WHERE id = ?",
+                params![next_name, next_description, next_order, now, stage_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE stages SET \"order\" = ?, updated_at = ? WHERE id = ?",
+                params![next_order, now, stage_id],
+            )?;
+        }
+        let stage = load_project_stage_by_id(&tx, stage_id)?;
+        tx.commit()?;
+        Ok(stage)
+    }
+
+    fn update_project_stage_assistants(
+        &self,
+        stage_id: &str,
+        assistant_ids: &[String],
+    ) -> Result<ProjectStageInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let stage = load_project_stage_by_id(&tx, stage_id)?;
+        let assistants = validate_assistants_for_stage(&tx, &stage, assistant_ids)?;
+        let now = now_ms();
+        replace_project_stage_assistants(&tx, stage_id, &assistants, now)?;
         tx.execute(
-            "UPDATE stages SET name = ?, description = ?, \"order\" = ?, updated_at = ? WHERE id = ?",
-            params![next_name, next_description, next_order, now, stage_id],
+            "UPDATE stages SET updated_at = ? WHERE id = ?",
+            params![now, stage_id],
         )?;
         let stage = load_project_stage_by_id(&tx, stage_id)?;
         tx.commit()?;
@@ -3239,12 +3610,21 @@ impl SessionStore for SqliteStore {
         let stage_available = project_stage.project_id.as_deref()
             == Some(thread.project_id.as_str())
             || (project_stage.project_id.is_none()
-                && project_stage.workflow_id == Some(project.workflow_id));
+                && project_stage.workflow_id.as_deref() == Some(project.workflow_id.as_str()));
         if !stage_available {
             anyhow::bail!("project stage does not belong to this thread's project");
         }
+        let default_assistant_ids = if assistant_ids.is_empty() {
+            project_stage
+                .assistants
+                .iter()
+                .map(|assistant| assistant.assistant_id.clone())
+                .collect::<Vec<_>>()
+        } else {
+            assistant_ids.to_vec()
+        };
         let assistant_bindings =
-            validate_assistants_for_project(&tx, &thread.project_id, assistant_ids)?
+            validate_assistants_for_project(&tx, &thread.project_id, &default_assistant_ids)?
                 .into_iter()
                 .enumerate()
                 .map(|(index, assistant)| stage_assistant_from_assistant(assistant, index as i64))
@@ -3253,6 +3633,9 @@ impl SessionStore for SqliteStore {
             .iter()
             .map(|assistant| assistant.assistant_id.clone())
             .collect::<Vec<_>>();
+        if assistant_ids.is_empty() {
+            anyhow::bail!("thread stage requires at least one assistant");
+        }
         let next_order: i64 = tx
             .query_row(
                 "SELECT COALESCE(MAX(\"order\"), -1) + 1 FROM thread_stages WHERE thread_id = ?",
@@ -5245,6 +5628,62 @@ mod migration_tests {
     }
 
     #[test]
+    fn builtin_workflow_stage_order_can_be_reordered_and_survives_seed() {
+        let path = unique_db("sessio-builtin-stage-order");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-builtin-stage-order-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let project = store
+            .create_project(&parent.to_string_lossy(), "code-flow", "code".to_string())
+            .unwrap();
+
+        let stages = store.list_project_stages(&project.id).unwrap();
+        let research = stages
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap()
+            .clone();
+        let plan = stages
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Plan))
+            .unwrap()
+            .clone();
+
+        let moved = store
+            .update_project_stage(&research.id, None, None, Some(plan.order))
+            .unwrap();
+        assert_eq!(moved.order, 1);
+        assert_eq!(
+            stage_kinds(store.list_project_stages(&project.id).unwrap()),
+            vec![
+                StageType::Plan,
+                StageType::Research,
+                StageType::Develop,
+                StageType::Review,
+                StageType::Human,
+                StageType::Done,
+            ]
+        );
+
+        store.init().unwrap();
+        assert_eq!(
+            stage_kinds(store.list_project_stages(&project.id).unwrap()),
+            vec![
+                StageType::Plan,
+                StageType::Research,
+                StageType::Develop,
+                StageType::Review,
+                StageType::Human,
+                StageType::Done,
+            ]
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
     fn kanban_items_link_and_aggregate_sessions() {
         let path = unique_db("sessio-kanban-session-links");
         let store = SqliteStore::open(&path).unwrap();
@@ -5393,25 +5832,25 @@ mod migration_tests {
         assert_eq!(assistant.agent.mode, "read-only");
         assert_eq!(assistant.agent.effort, "medium");
         let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
-        assert_eq!(project_assistants.len(), 5);
+        assert_eq!(project_assistants.len(), 13);
         assert_eq!(
             project_assistants
                 .iter()
                 .filter(|item| item.assistant_type == AssistantType::Builtin)
                 .count(),
-            4
+            12
         );
         let builtin_builder = project_assistants
             .iter()
-            .find(|item| item.id == "assistant-builtin-builder-code")
+            .find(|item| item.id == "assistant-builtin-develop")
             .unwrap();
-        assert_eq!(builtin_builder.name, "Builder");
+        assert_eq!(builtin_builder.name, "Developer");
         assert_eq!(builtin_builder.agent.id, "codex");
         assert!(builtin_builder
             .system_prompt
             .as_deref()
             .unwrap()
-            .contains("Implement the selected plan"));
+            .contains("Implement the planned code changes"));
         assert!(project_assistants
             .iter()
             .any(|item| item.id == assistant.id));
@@ -5456,6 +5895,67 @@ mod migration_tests {
         assert!(builtin_stages
             .iter()
             .all(|stage| stage.kind != Some(StageType::Build)));
+        let builtin_researcher = project_assistants
+            .iter()
+            .find(|item| item.id == "assistant-builtin-research")
+            .unwrap();
+        let default_stage = store
+            .update_project_stage_assistants(&research_option.id, &[builtin_researcher.id.clone()])
+            .unwrap();
+        assert_eq!(default_stage.assistants.len(), 1);
+        assert_eq!(
+            default_stage.assistants[0].assistant_id,
+            builtin_researcher.id
+        );
+        let default_thread = store
+            .create_thread(&project.id, "Default stage assistants", None)
+            .unwrap();
+        let default_research = store
+            .add_thread_stage(&default_thread.id, &research_option.id, &[])
+            .unwrap();
+        assert_eq!(
+            default_research.assistant_ids,
+            vec![builtin_researcher.id.clone()]
+        );
+        assert_eq!(default_research.assistants[0].agent.id, "codex");
+        let custom_workflow = store
+            .create_workflow("Custom Flow", Some("Custom workflow description"))
+            .unwrap();
+        assert_eq!(custom_workflow.workflow_type, WorkflowType::Custom);
+        assert_eq!(
+            custom_workflow.description.as_deref(),
+            Some("Custom workflow description")
+        );
+        let renamed_workflow = store
+            .update_workflow(
+                &custom_workflow.id,
+                Some("Custom Flow Prime"),
+                Some(Some("Updated custom workflow description")),
+            )
+            .unwrap();
+        assert_eq!(renamed_workflow.name, "Custom Flow Prime");
+        assert_eq!(
+            renamed_workflow.description.as_deref(),
+            Some("Updated custom workflow description")
+        );
+        let workflow_stage = store
+            .create_project_stage(
+                "",
+                Some(custom_workflow.id.clone()),
+                "Workflow Custom Stage",
+                Some("Template stage"),
+            )
+            .unwrap();
+        assert_eq!(
+            workflow_stage.workflow_id.as_deref(),
+            Some(custom_workflow.id.as_str())
+        );
+        assert_eq!(workflow_stage.project_id, None);
+        let workflow_stages = store.list_workflow_stages(&custom_workflow.id).unwrap();
+        assert_eq!(workflow_stages.len(), 1);
+        assert_eq!(workflow_stages[0].id, workflow_stage.id);
+        store.delete_project_stage(&workflow_stage.id).unwrap();
+        store.delete_workflow(&custom_workflow.id).unwrap();
         let build_option = store
             .create_project_stage(
                 &project.id,
@@ -5562,7 +6062,7 @@ mod migration_tests {
         assert_eq!(review_stage.assistants[1].assistant_id, reviewer.id);
         assert_eq!(review_stage.assistants[1].agent.id, "codex");
         let thread_lanes = store.list_threads(&project.id).unwrap();
-        assert_eq!(thread_lanes.len(), 2);
+        assert_eq!(thread_lanes.len(), 3);
         let build_lane = thread_lanes
             .iter()
             .find(|item| item.id == thread.id)
@@ -5602,7 +6102,7 @@ mod migration_tests {
         assert_eq!(build.assistants[0].agent.id, "claude");
 
         let listed_threads = store.list_threads(&project.id).unwrap();
-        assert_eq!(listed_threads.len(), 2);
+        assert_eq!(listed_threads.len(), 3);
         let listed_build_lane = listed_threads
             .iter()
             .find(|item| item.id == thread.id)
@@ -5779,11 +6279,12 @@ mod migration_tests {
         assert!(store.delete_assistant(&assistant.id).is_err());
         store.delete_thread(&review_thread.id).unwrap();
         store.delete_thread(&thread.id).unwrap();
+        store.delete_thread(&default_thread.id).unwrap();
         assert!(store.list_threads(&project.id).unwrap().is_empty());
         store.delete_assistant(&assistant.id).unwrap();
         store.delete_assistant(&reviewer.id).unwrap();
         let remaining_assistants = store.list_assistants(Some(&project.id)).unwrap();
-        assert_eq!(remaining_assistants.len(), 4);
+        assert_eq!(remaining_assistants.len(), 12);
         assert!(remaining_assistants
             .iter()
             .all(|item| item.assistant_type == AssistantType::Builtin));

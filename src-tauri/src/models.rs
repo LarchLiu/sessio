@@ -101,6 +101,7 @@ impl WorkflowType {
 pub struct WorkflowInfo {
     pub id: String,
     pub name: String,
+    pub description: Option<String>,
     #[serde(rename = "type")]
     pub workflow_type: WorkflowType,
     pub created_at: i64,
@@ -327,6 +328,8 @@ pub struct ProjectStageInfo {
     pub order: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub assistants: Vec<StageAssistantInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -82,6 +82,14 @@ pub trait SessionStore: Send + Sync {
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
     fn list_workflows(&self) -> Result<Vec<WorkflowInfo>>;
+    fn create_workflow(&self, name: &str, description: Option<&str>) -> Result<WorkflowInfo>;
+    fn update_workflow(
+        &self,
+        workflow_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<WorkflowInfo>;
+    fn delete_workflow(&self, workflow_id: &str) -> Result<()>;
     fn list_projects(&self) -> Result<Vec<ProjectInfo>>;
     fn add_project(
         &self,
@@ -146,6 +154,7 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<ThreadInfo>;
     fn delete_thread(&self, thread_id: &str) -> Result<()>;
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>>;
+    fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>>;
     fn create_project_stage(
         &self,
         project_id: &str,
@@ -159,6 +168,11 @@ pub trait SessionStore: Send + Sync {
         name: Option<&str>,
         description: Option<Option<&str>>,
         order: Option<i64>,
+    ) -> Result<ProjectStageInfo>;
+    fn update_project_stage_assistants(
+        &self,
+        stage_id: &str,
+        assistant_ids: &[String],
     ) -> Result<ProjectStageInfo>;
     fn delete_project_stage(&self, stage_id: &str) -> Result<()>;
     fn add_thread_stage(

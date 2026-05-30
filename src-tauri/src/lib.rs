@@ -115,6 +115,55 @@ fn list_workflows(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<Workflo
 }
 
 #[tauri::command]
+fn create_workflow(
+    name: String,
+    description: Option<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<WorkflowInfo, String> {
+    let workflow = store
+        .create_workflow(&name, description.as_deref())
+        .map_err(|e| e.to_string())?;
+    app.emit("workflows_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(workflow)
+}
+
+#[tauri::command]
+fn update_workflow(
+    workflow_id: String,
+    name: Option<String>,
+    description: Option<Option<String>>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<WorkflowInfo, String> {
+    let workflow = store
+        .update_workflow(
+            &workflow_id,
+            name.as_deref(),
+            description.as_ref().map(|value| value.as_deref()),
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("workflows_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(workflow)
+}
+
+#[tauri::command]
+fn delete_workflow(
+    workflow_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .delete_workflow(&workflow_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("workflows_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn list_projects(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<ProjectInfo>, String> {
     store.list_projects().map_err(|e| e.to_string())
 }
@@ -439,6 +488,16 @@ fn list_project_stages(
 }
 
 #[tauri::command]
+fn list_workflow_stages(
+    workflow_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<ProjectStageInfo>, String> {
+    store
+        .list_workflow_stages(&workflow_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn create_project_stage(
     project_id: String,
     workflow_id: Option<String>,
@@ -466,6 +525,20 @@ fn update_project_stage(
     let description_ref = description.as_ref().map(|value| value.as_deref());
     let stage = store
         .update_project_stage(&stage_id, name.as_deref(), description_ref, order)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn update_project_stage_assistants(
+    stage_id: String,
+    assistant_ids: Vec<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ProjectStageInfo, String> {
+    let stage = store
+        .update_project_stage_assistants(&stage_id, &assistant_ids)
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
@@ -2146,6 +2219,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             list_workflows,
+            create_workflow,
+            update_workflow,
+            delete_workflow,
             list_projects,
             add_existing_project,
             create_project,
@@ -2162,8 +2238,10 @@ pub fn run() {
             update_thread,
             delete_thread,
             list_project_stages,
+            list_workflow_stages,
             create_project_stage,
             update_project_stage,
+            update_project_stage_assistants,
             delete_project_stage,
             add_thread_stage,
             update_thread_stage,

@@ -11,14 +11,10 @@ import {
   Key,
   LoaderCircle,
   MailPlus,
-  Monitor,
-  Moon,
   PanelLeftClose,
-  RefreshCw,
   Settings,
   SquareKanban,
   SquarePen,
-  Sun,
   X,
 } from "lucide-react";
 import {
@@ -28,15 +24,13 @@ import {
   addExistingProject,
   createDefaultProject,
   listWorkflows,
-  rebuildSessionIndex,
 } from "../api";
-import { Lang, useI18n } from "../i18n";
+import { useI18n } from "../i18n";
 import type { ProjectGroup } from "../navigation";
 import {
   liveSessionActivity,
   type LiveRuntimeState,
 } from "../runtimeChat";
-import { ThemeMode } from "../theme";
 import { openReleasePage, useUpdateCheck } from "../updater";
 import { AgentGlyph } from "./AgentIcon";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
@@ -59,10 +53,7 @@ type AppSidebarProps = {
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
-  lang: Lang;
-  themeMode: ThemeMode;
   update: ReturnType<typeof useUpdateCheck>;
-  rebuilding: boolean;
   indexing: boolean;
   onCloseSidebar: () => void;
   onNewChat: () => void;
@@ -78,10 +69,8 @@ type AppSidebarProps = {
     session: SessionInfo,
     pos: { x: number; y: number },
   ) => void;
-  onLangChange: (lang: Lang) => void;
-  onThemeModeChange: (mode: ThemeMode) => void;
+  onOpenSettings: () => void;
   onError: (error: string | null) => void;
-  onRebuildFinished: () => Promise<void> | void;
 };
 
 export default function AppSidebar({
@@ -97,10 +86,7 @@ export default function AppSidebar({
   liveState,
   runtimeSessionAliases,
   unreadSessionIds,
-  lang,
-  themeMode,
   update,
-  rebuilding,
   indexing,
   onCloseSidebar,
   onNewChat,
@@ -113,10 +99,8 @@ export default function AppSidebar({
   onToggleProjectSessions,
   onProjectContextMenu,
   onSessionContextMenu,
-  onLangChange,
-  onThemeModeChange,
+  onOpenSettings,
   onError,
-  onRebuildFinished,
 }: AppSidebarProps) {
   const { t } = useI18n();
 
@@ -207,15 +191,10 @@ export default function AppSidebar({
 
       <SidebarFooter
         sidebarOpen={sidebarOpen}
-        lang={lang}
-        onLangChange={onLangChange}
-        themeMode={themeMode}
-        onThemeModeChange={onThemeModeChange}
         update={update}
-        rebuilding={rebuilding}
         indexing={indexing}
         onError={onError}
-        onRebuildFinished={onRebuildFinished}
+        onOpenSettings={onOpenSettings}
       />
     </aside>
   );
@@ -295,122 +274,32 @@ function StatusDot({
 
 function SidebarFooter({
   sidebarOpen,
-  lang,
-  onLangChange,
-  themeMode,
-  onThemeModeChange,
   update,
-  rebuilding,
   indexing,
   onError,
-  onRebuildFinished,
+  onOpenSettings,
 }: {
   sidebarOpen: boolean;
-  lang: Lang;
-  onLangChange: (lang: Lang) => void;
-  themeMode: ThemeMode;
-  onThemeModeChange: (mode: ThemeMode) => void;
   update: ReturnType<typeof useUpdateCheck>;
-  rebuilding: boolean;
   indexing: boolean;
   onError: (error: string | null) => void;
-  onRebuildFinished: () => Promise<void> | void;
+  onOpenSettings: () => void;
 }) {
   const { t } = useI18n();
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
-  useEffect(() => {
-    if (!sidebarOpen) setSettingsOpen(false);
-  }, [sidebarOpen]);
 
   return (
     <div className="relative w-64 border-t border-ink/10">
-      <div
-        className={
-          "absolute left-0 bottom-full w-64 origin-bottom transition-[opacity,transform] duration-200 ease-out " +
-          (settingsOpen
-            ? "translate-y-0 scale-y-100 opacity-100 pointer-events-auto"
-            : "translate-y-2 scale-y-95 opacity-0 pointer-events-none")
-        }
-      >
-        <div className="border-y border-ink/10 bg-surface">
-          <div className="px-3 pt-3 pb-2 flex items-center justify-between gap-3">
-            <span className="text-caption uppercase tracking-[0.12em] text-ink/40">
-              {t("sidebar.settings")}
-              <Tooltip content={t("sidebar.check_update")} placement="top">
-                <button
-                  type="button"
-                  aria-label={t("sidebar.check_update")}
-                  onClick={() => update.check()}
-                  disabled={update.checking}
-                  className={
-                    "ml-2 normal-case tracking-normal transition " +
-                    (update.checking
-                      ? "text-ink/50 animate-pulse"
-                      : "text-ink/30 hover:text-ink/70 cursor-pointer")
-                  }
-                >
-                  v{__APP_VERSION__}
-                </button>
-              </Tooltip>
-            </span>
-            <button
-              type="button"
-              aria-label={t("sidebar.close_settings")}
-              onClick={() => setSettingsOpen(false)}
-              className="p-1 -m-1 text-ink/40 hover:text-ink transition rounded-md"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-          <div className="mx-3 border-t border-ink/10" />
-          <div className="px-3 pt-3 pb-3 flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-body-sm text-ink/55">{t("sidebar.language")}</span>
-              <LanguageSwitcher lang={lang} onChange={onLangChange} />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-body-sm text-ink/55">{t("sidebar.theme")}</span>
-              <ThemeSwitcher mode={themeMode} onChange={onThemeModeChange} />
-            </div>
-            <div className="flex items-center justify-between gap-3 text-body-sm text-ink/55">
-              <span>{t("sidebar.rebuild_index")}</span>
-              <button
-                type="button"
-                aria-label={t("sidebar.rebuild_index")}
-                onClick={() => {
-                  rebuildSessionIndex()
-                    .catch((err) => {
-                      onError(String(err));
-                    })
-                    .finally(() => {
-                      void onRebuildFinished();
-                    });
-                }}
-                className="p-1 -m-1 text-ink/55 transition hover:text-ink rounded-md"
-              >
-                <RefreshCw className={"w-4 h-4 shrink-0 " + (rebuilding ? "animate-spin" : "")} />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <div className="px-3 py-2 flex items-center justify-between gap-2">
         <div className="shrink-0 flex items-center gap-1">
           <Tooltip content={t("sidebar.settings")} placement="top">
             <button
               type="button"
               aria-label={t("sidebar.settings")}
-              onClick={() => setSettingsOpen((v) => !v)}
+              disabled={!sidebarOpen}
+              onClick={onOpenSettings}
               className="p-1 text-ink/55 hover:text-ink transition rounded-md"
             >
-              <Settings
-                className={
-                  "w-4 h-4 transition-transform duration-200 " +
-                  (settingsOpen ? "rotate-90" : "")
-                }
-              />
+              <Settings className="w-4 h-4" />
             </button>
           </Tooltip>
           {update.hasUpdate && update.latestVersion && (
@@ -907,83 +796,6 @@ function SidebarSessionStatus({
     <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
       <MailPlus className="h-3 w-3" />
     </span>
-  );
-}
-
-function ThemeSwitcher({
-  mode,
-  onChange,
-}: {
-  mode: ThemeMode;
-  onChange: (m: ThemeMode) => void;
-}) {
-  const { t } = useI18n();
-  const items: { value: ThemeMode; icon: typeof Sun; label: string }[] = [
-    { value: "light", icon: Sun, label: t("theme.light") },
-    { value: "dark", icon: Moon, label: t("theme.dark") },
-    { value: "system", icon: Monitor, label: t("theme.system") },
-  ];
-  return (
-    <div className="flex items-center gap-0.5 rounded-md bg-ink/[0.04] p-0.5">
-      {items.map(({ value, icon: Icon, label }) => {
-        const active = mode === value;
-        return (
-          <Tooltip key={value} content={label} placement="top">
-            <button
-              type="button"
-              onClick={() => onChange(value)}
-              aria-label={label}
-              className={
-                "p-1 rounded transition " +
-                (active
-                  ? "bg-ink/10 text-ink"
-                  : "text-ink/45 hover:text-ink/80")
-              }
-            >
-              <Icon className="w-3.5 h-3.5" />
-            </button>
-          </Tooltip>
-        );
-      })}
-    </div>
-  );
-}
-
-function LanguageSwitcher({
-  lang,
-  onChange,
-}: {
-  lang: Lang;
-  onChange: (l: Lang) => void;
-}) {
-  const { t } = useI18n();
-  const items: { value: Lang; label: string; tip: string }[] = [
-    { value: "en", label: "EN", tip: t("lang.english") },
-    { value: "zh", label: "中", tip: t("lang.chinese") },
-  ];
-  return (
-    <div className="flex items-center gap-0.5 rounded-md bg-ink/[0.04] p-0.5">
-      {items.map(({ value, label, tip }) => {
-        const active = lang === value;
-        return (
-          <Tooltip key={value} content={tip} placement="top">
-            <button
-              type="button"
-              onClick={() => onChange(value)}
-              aria-label={tip}
-              className={
-                "px-1.5 h-[22px] min-w-[22px] flex items-center justify-center rounded text-caption font-medium leading-none transition " +
-                (active
-                  ? "bg-ink/10 text-ink"
-                  : "text-ink/45 hover:text-ink/80")
-              }
-            >
-              {label}
-            </button>
-          </Tooltip>
-        );
-      })}
-    </div>
   );
 }
 

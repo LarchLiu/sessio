@@ -7,6 +7,7 @@ export type WorkflowType = "builtin" | "custom";
 export interface WorkflowInfo {
   id: string;
   name: string;
+  description: string | null;
   type: WorkflowType;
   createdAt: number;
   updatedAt: number;
@@ -123,6 +124,7 @@ export interface ProjectStageInfo {
   order: number;
   createdAt: number;
   updatedAt: number;
+  assistants: StageAssistantInfo[];
 }
 
 export interface ThreadInfo {
@@ -597,6 +599,25 @@ export async function listWorkflows(): Promise<WorkflowInfo[]> {
   return invoke<WorkflowInfo[]>("list_workflows");
 }
 
+export async function createWorkflow(name: string, description?: string | null): Promise<WorkflowInfo> {
+  return invoke<WorkflowInfo>("create_workflow", { name, description: description ?? null });
+}
+
+export async function updateWorkflow(
+  workflowId: string,
+  patch: { name?: string | null; description?: string | null },
+): Promise<WorkflowInfo> {
+  return invoke<WorkflowInfo>("update_workflow", {
+    workflowId,
+    name: patch.name ?? null,
+    description: patch.description === undefined ? undefined : patch.description,
+  });
+}
+
+export async function deleteWorkflow(workflowId: string): Promise<void> {
+  return invoke<void>("delete_workflow", { workflowId });
+}
+
 export async function addExistingProject(
   path: string,
   name?: string | null,
@@ -737,6 +758,10 @@ export async function listProjectStages(projectId: string): Promise<ProjectStage
   return invoke<ProjectStageInfo[]>("list_project_stages", { projectId });
 }
 
+export async function listWorkflowStages(workflowId: string): Promise<ProjectStageInfo[]> {
+  return invoke<ProjectStageInfo[]>("list_workflow_stages", { workflowId });
+}
+
 export async function createProjectStage(
   projectId: string,
   name: string,
@@ -769,6 +794,16 @@ export async function updateProjectStage(
   if ("description" in patch) payload.description = patch.description ?? null;
   if ("order" in patch) payload.order = patch.order ?? null;
   return invoke<ProjectStageInfo>("update_project_stage", payload);
+}
+
+export async function updateProjectStageAssistants(
+  stageId: string,
+  assistantIds: string[],
+): Promise<ProjectStageInfo> {
+  return invoke<ProjectStageInfo>("update_project_stage_assistants", {
+    stageId,
+    assistantIds,
+  });
 }
 
 export async function deleteProjectStage(stageId: string): Promise<void> {

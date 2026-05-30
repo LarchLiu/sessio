@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { Bot, Check, Clapperboard, Copy, FilePenLine, GitBranch, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Save, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
-import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, SessionInfo, StageInfo, StageType, ThreadInfo, WorkflowInfo } from "../api";
+import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, StageType, ThreadInfo, WorkflowInfo } from "../api";
 import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateRuntimeAgentPreferences, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import {
@@ -19,7 +19,8 @@ import {
   runtimeEffortOptions,
 } from "../components/AgentSelect";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "../components/InlineMenuSelect";
-import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
+import { RuntimeEffortControl, RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
+import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
 import { localeTag, useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
 import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
@@ -61,10 +62,6 @@ const STAGE_TYPE_ICONS: Record<StageType, LucideIcon> = {
   done: CircleCheck,
 };
 
-function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
-  return agent?.model ?? agent?.models[0]?.value ?? "";
-}
-
 function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
   return {
     transport: "acp",
@@ -72,6 +69,10 @@ function runtimeSessionOptions(model: string, permissionMode: string, effort = "
     ...(effort ? { effort } : {}),
     ...(permissionMode ? { permissionMode } : {}),
   };
+}
+
+function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
+  return agent?.model ?? agent?.models[0]?.value ?? "";
 }
 
 function sessionIdentityKey(s: SessionInfo): string {
@@ -605,51 +606,6 @@ function normalizeAssistantIds(ids: string[], assistants: AssistantInfo[]): stri
   return ids.filter((id) => available.has(id) && !seen.has(id) && seen.add(id));
 }
 
-function optionValue(options: RuntimeAgentOptionMetadata[], fallback: string) {
-  return options[0]?.value ?? fallback;
-}
-
-function dbAgentsAsRuntimeAgents(agents: AgentInfo[]): RuntimeAgentMetadata[] {
-  return agents
-    .filter((agent) => agent.enabled && (agent.id === "codex" || agent.id === "claude" || agent.id === "gemini"))
-    .map((agent) => ({
-      agent: agent.id as Agent,
-      enabled: agent.enabled,
-      configured: agent.commands.session.length > 0,
-      transport: agent.transport,
-      model: agent.model,
-      models: agent.models,
-      effort: agent.effort,
-      efforts: agent.efforts,
-      permissionMode: agent.permissionMode,
-      permissionModes: agent.permissionModes,
-      sessionCommand: agent.commands.session[0] ?? null,
-      versionCommand: agent.commands.version[0] ?? null,
-      detectedVersion: null,
-      capabilities: null,
-      updatedAt: agent.updatedAt,
-    }));
-}
-
-function assistantAgentPayloadFromRuntime(runtimeAgent: RuntimeAgentMetadata | null | undefined, model: string, mode: string, effort: string): AssistantAgentInfo {
-  return {
-    id: runtimeAgent?.agent ?? "",
-    name: runtimeAgent ? AGENT_LABEL[runtimeAgent.agent] : "",
-    model,
-    mode,
-    effort,
-  };
-}
-
-function defaultAssistantAgent(runtimeAgent: RuntimeAgentMetadata | null | undefined): AssistantAgentInfo {
-  return assistantAgentPayloadFromRuntime(
-    runtimeAgent,
-    initialRuntimeModel(runtimeAgent ?? null),
-    runtimeAgent?.permissionMode ?? runtimeAgent?.permissionModes[0]?.value ?? "",
-    initialRuntimeEffort(runtimeAgent ?? null),
-  );
-}
-
 function removeStageFromThread(thread: ThreadInfo, stageId: string): ThreadInfo {
   const stages = thread.stages
     .filter((stage) => stage.id !== stageId)
@@ -1164,71 +1120,6 @@ function AssistantMultiPicker({
           ))
         )}
       </div>
-    </div>
-  );
-}
-
-function AssistantAgentSelector({
-  agent,
-  agents,
-  onChange,
-  compact = false,
-}: {
-  agent: AssistantAgentInfo;
-  agents: AgentInfo[];
-  onChange: (agent: AssistantAgentInfo) => void;
-  compact?: boolean;
-}) {
-  const { t } = useI18n();
-  const runtimeAgents = useMemo(() => dbAgentsAsRuntimeAgents(agents), [agents]);
-  const agentKey = (agent.id === "claude" || agent.id === "gemini" ? agent.id : "codex") as Agent;
-  const selectedAgent = runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent.id) ?? null;
-  const agentModelValue = agentModelSelectValue(
-    agentKey,
-    agent.model,
-  );
-  const agentModelOptions = agentModelSelectOptions(
-    runtimeAgents,
-    Object.fromEntries(
-      runtimeAgents.map((runtimeAgent) => [
-        runtimeAgent.agent,
-        <RuntimeEffortControl
-          value={runtimeAgent.agent === agent.id ? agent.effort : initialRuntimeEffort(runtimeAgent)}
-          options={runtimeEffortOptions(runtimeAgent)}
-          onChange={(effort) => {
-            if (runtimeAgent.agent !== agent.id) return;
-            onChange({ ...agent, effort });
-          }}
-        />,
-      ]),
-    ) as Partial<Record<Agent, ReactNode>>,
-    { [agentKey]: agent.effort },
-  );
-  const permissionOptions = runtimePermissionModeOptions(
-    selectedAgent?.permissionModes ?? [],
-    agent.mode,
-    selectedAgent?.agent,
-  );
-
-  const selectAgentModel = (value: string) => {
-    const parsed = parseAgentModelSelectValue(value);
-    if (!parsed) return;
-    const next = runtimeAgents.find((agent) => agent.agent === parsed.agent);
-    if (!next) return;
-    onChange(
-      assistantAgentPayloadFromRuntime(
-        next,
-        parsed.model || optionValue(next.models, agent.model),
-        optionValue(next.permissionModes, agent.mode),
-        next.agent === agent.id ? agent.effort : initialRuntimeEffort(next),
-      ),
-    );
-  };
-
-  return (
-    <div className={(compact ? "grid grid-cols-2 gap-1" : "grid grid-cols-[minmax(0,1fr)_minmax(0,0.72fr)] gap-2")}>
-      <RuntimeMenuSelect ariaLabel={t("agent.title")} value={agentModelValue} options={agentModelOptions} onChange={selectAgentModel} minMenuWidth={220} maxWidthClassName="max-w-none" />
-      <RuntimeMenuSelect ariaLabel={t("assistant.permission_mode")} value={agent.mode} options={permissionOptions} onChange={(mode) => onChange({ ...agent, mode })} minMenuWidth={180} maxWidthClassName="max-w-none" />
     </div>
   );
 }

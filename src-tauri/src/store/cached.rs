@@ -133,6 +133,23 @@ impl SessionStore for CachedStore {
         self.inner.list_workflows()
     }
 
+    fn create_workflow(&self, name: &str, description: Option<&str>) -> Result<WorkflowInfo> {
+        self.inner.create_workflow(name, description)
+    }
+
+    fn update_workflow(
+        &self,
+        workflow_id: &str,
+        name: Option<&str>,
+        description: Option<Option<&str>>,
+    ) -> Result<WorkflowInfo> {
+        self.inner.update_workflow(workflow_id, name, description)
+    }
+
+    fn delete_workflow(&self, workflow_id: &str) -> Result<()> {
+        self.inner.delete_workflow(workflow_id)
+    }
+
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         self.inner.list_projects()
     }
@@ -261,6 +278,10 @@ impl SessionStore for CachedStore {
         self.inner.list_project_stages(project_id)
     }
 
+    fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>> {
+        self.inner.list_workflow_stages(workflow_id)
+    }
+
     fn create_project_stage(
         &self,
         project_id: &str,
@@ -281,6 +302,15 @@ impl SessionStore for CachedStore {
     ) -> Result<ProjectStageInfo> {
         self.inner
             .update_project_stage(stage_id, name, description, order)
+    }
+
+    fn update_project_stage_assistants(
+        &self,
+        stage_id: &str,
+        assistant_ids: &[String],
+    ) -> Result<ProjectStageInfo> {
+        self.inner
+            .update_project_stage_assistants(stage_id, assistant_ids)
     }
 
     fn delete_project_stage(&self, stage_id: &str) -> Result<()> {
