@@ -1,5 +1,6 @@
 import {
   memo,
+  isValidElement,
   startTransition,
   forwardRef,
   useCallback,
@@ -12,7 +13,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -20,6 +21,24 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { createHighlighterCore, type HighlighterCore, type ThemedToken } from "shiki/core";
+import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+import cssLang from "shiki/langs/css.mjs";
+import htmlLang from "shiki/langs/html.mjs";
+import javascriptLang from "shiki/langs/javascript.mjs";
+import jsonLang from "shiki/langs/json.mjs";
+import jsoncLang from "shiki/langs/jsonc.mjs";
+import jsxLang from "shiki/langs/jsx.mjs";
+import markdownLang from "shiki/langs/markdown.mjs";
+import pythonLang from "shiki/langs/python.mjs";
+import rustLang from "shiki/langs/rust.mjs";
+import shellLang from "shiki/langs/shellscript.mjs";
+import tsxLang from "shiki/langs/tsx.mjs";
+import typescriptLang from "shiki/langs/typescript.mjs";
+import xmlLang from "shiki/langs/xml.mjs";
+import yamlLang from "shiki/langs/yaml.mjs";
+import githubDarkTheme from "shiki/themes/github-dark.mjs";
+import githubLightTheme from "shiki/themes/github-light.mjs";
 import type { Options as SanitizeSchema } from "rehype-sanitize";
 import "katex/dist/katex.min.css";
 import {
@@ -5277,19 +5296,15 @@ function createMarkdownComponents(
     ol: ({ children }) => <ol className="list-decimal pl-5 my-2 space-y-1">{children}</ol>,
     li: ({ children }) => <li>{children}</li>,
     hr: () => <hr className="border-ink/10 my-3" />,
-    pre: ({ children }) => (
-      <CodeScrollArea
-        className="my-2 w-full rounded-md border border-card-border/[0.16] bg-bg-panel-alt"
-        viewportClassName="px-3 pt-2"
-      >
-        <pre className="text-caption leading-relaxed">
-          {children}
-        </pre>
-      </CodeScrollArea>
-    ),
+    pre: ({ children }) => <>{children}</>,
     code: ({ children, className }) => {
       if (className) {
-        return <code className={className}>{children}</code>;
+        return (
+          <MarkdownCodeBlock
+            code={codeTextFromChildren(children)}
+            language={codeLanguageFromClassName(className)}
+          />
+        );
       }
       return (
         <code className="rounded bg-ink/[0.08] px-1 py-0.5 font-mono text-[0.92em] text-ink">
@@ -5324,6 +5339,265 @@ function createMarkdownComponents(
       );
     },
   };
+}
+
+function MarkdownCodeBlock({
+  code,
+  language,
+}: {
+  code: string;
+  language: string;
+}) {
+  const label = languageLabel(language);
+  const color = codeLanguageColor(language);
+  const themeType = useEffectiveThemeType();
+  const highlighted = useShikiHighlightedCode(code, language, themeType);
+  const [copied, setCopied] = useState(false);
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(code.replace(/\n$/, ""));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch (err) {
+      console.error("copy code block failed", err);
+    }
+  };
+  return (
+    <div
+      className={
+        "my-2 overflow-hidden rounded-md border shadow-sm " +
+        (themeType === "light"
+          ? "border-black/[0.08] bg-[#f6f6f3] text-[#242424]"
+          : "border-card-border/[0.12] bg-card text-card-fg")
+      }
+      style={{ "--code-accent": color } as React.CSSProperties}
+    >
+      <div
+        className={
+          "flex h-8 items-center justify-between gap-3 border-b px-3 " +
+          (themeType === "light" ? "border-black/[0.07]" : "border-card-border/[0.08] bg-card-panel/35")
+        }
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            className="h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ backgroundColor: color }}
+          />
+          <span
+            className={
+              "truncate font-mono text-caption " +
+              (themeType === "light" ? "text-black/55" : "text-card-muted/60")
+            }
+          >
+            {label}
+          </span>
+        </div>
+        <Tooltip content={copied ? "Copied" : "Copy code"} delayMs={300}>
+          <button
+            type="button"
+            onClick={copyCode}
+            className={
+              "flex h-6 w-6 shrink-0 items-center justify-center rounded transition focus-visible:outline-none focus-visible:ring-2 " +
+              (themeType === "light"
+                ? "text-black/45 hover:bg-black/[0.06] hover:text-black/75 focus-visible:ring-black/15"
+                : "text-card-muted/55 hover:bg-card-action-hover/[0.07] hover:text-card-fg focus-visible:ring-card-fg/20")
+            }
+            aria-label={copied ? "Copied code" : "Copy code"}
+          >
+            {copied ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </Tooltip>
+      </div>
+      <CodeScrollArea className="w-full" viewportClassName="px-3 py-2">
+        <pre className="min-w-max font-mono text-caption leading-relaxed">
+          <code>{highlighted ?? code}</code>
+        </pre>
+      </CodeScrollArea>
+    </div>
+  );
+}
+
+type ShikiHighlightedLine = ThemedToken[];
+
+let shikiHighlighterPromise: Promise<HighlighterCore> | null = null;
+
+function useShikiHighlightedCode(
+  code: string,
+  language: string,
+  themeType: "light" | "dark",
+): ReactNode[] | null {
+  const [lines, setLines] = useState<ShikiHighlightedLine[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const lang = shikiLanguage(language);
+    const theme = shikiTheme(themeType);
+    setLines(null);
+    getShikiHighlighter()
+      .then((highlighter) => {
+        const tokens = highlighter.codeToTokensBase(code, { lang, theme });
+        if (!cancelled) setLines(tokens);
+      })
+      .catch((err) => {
+        console.error("highlight code block failed", err);
+        if (!cancelled) setLines(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [code, language, themeType]);
+
+  return useMemo(() => {
+    if (!lines) return null;
+    return renderShikiLines(lines);
+  }, [lines]);
+}
+
+function getShikiHighlighter(): Promise<HighlighterCore> {
+  shikiHighlighterPromise ??= createHighlighterCore({
+    themes: [githubLightTheme, githubDarkTheme],
+    langs: [
+      cssLang,
+      htmlLang,
+      javascriptLang,
+      jsonLang,
+      jsoncLang,
+      jsxLang,
+      markdownLang,
+      pythonLang,
+      rustLang,
+      shellLang,
+      tsxLang,
+      typescriptLang,
+      xmlLang,
+      yamlLang,
+    ],
+    engine: createJavaScriptRegexEngine(),
+  });
+  return shikiHighlighterPromise;
+}
+
+function shikiTheme(themeType: "light" | "dark"): string {
+  return themeType === "light" ? "github-light" : "github-dark";
+}
+
+function shikiLanguage(language: string): string {
+  return shikiLanguageAlias(language) ?? "shell";
+}
+
+function shikiLanguageAlias(language: string): string | null {
+  const normalized = language.trim().toLowerCase();
+  if (!normalized) return null;
+  const aliases: Record<string, string> = {
+    bash: "shell",
+    shell: "shell",
+    sh: "shell",
+    zsh: "shell",
+    js: "javascript",
+    jsx: "jsx",
+    ts: "typescript",
+    tsx: "tsx",
+    py: "python",
+    rs: "rust",
+    md: "markdown",
+    yml: "yaml",
+  };
+  const supported = new Set([
+    "css",
+    "html",
+    "javascript",
+    "json",
+    "jsonc",
+    "jsx",
+    "markdown",
+    "python",
+    "rust",
+    "shell",
+    "tsx",
+    "typescript",
+    "xml",
+    "yaml",
+  ]);
+  const mapped = aliases[normalized] ?? normalized;
+  return supported.has(mapped) ? mapped : null;
+}
+
+function renderShikiLines(lines: ShikiHighlightedLine[]): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  lines.forEach((line, lineIndex) => {
+    if (lineIndex > 0) nodes.push("\n");
+    if (!line.length) return;
+    line.forEach((token, tokenIndex) => {
+      nodes.push(
+        <span
+          key={`${lineIndex}-${tokenIndex}`}
+          style={{
+            color: token.color,
+            fontStyle: shikiFontStyle(token.fontStyle),
+            fontWeight: token.fontStyle !== undefined && (token.fontStyle & 2) ? 600 : undefined,
+            textDecorationLine: token.fontStyle !== undefined && (token.fontStyle & 4) ? "underline" : undefined,
+          }}
+        >
+          {token.content}
+        </span>,
+      );
+    });
+  });
+  return nodes;
+}
+
+function shikiFontStyle(fontStyle?: number): React.CSSProperties["fontStyle"] {
+  return fontStyle !== undefined && (fontStyle & 1) ? "italic" : undefined;
+}
+
+function codeLanguageFromClassName(className?: string): string {
+  return className
+    ?.split(/\s+/)
+    .map((item) => item.match(/^language-(.+)$/)?.[1])
+    .find(Boolean)
+    ?.toLowerCase() ?? "";
+}
+
+function codeTextFromChildren(children: ReactNode): string {
+  if (typeof children === "string" || typeof children === "number") return String(children);
+  if (Array.isArray(children)) return children.map(codeTextFromChildren).join("");
+  if (isValidElement<{ children?: ReactNode }>(children)) {
+    return codeTextFromChildren(children.props.children);
+  }
+  return "";
+}
+
+function languageLabel(language: string): string {
+  const labels: Record<string, string> = {
+    js: "JavaScript",
+    jsx: "JSX",
+    ts: "TypeScript",
+    tsx: "TSX",
+    sh: "Shell",
+    shell: "Shell",
+    zsh: "zsh",
+    bash: "bash",
+    py: "Python",
+    rs: "Rust",
+    md: "Markdown",
+    yml: "YAML",
+  };
+  return labels[language] ?? (language || "code");
+}
+
+function codeLanguageColor(language: string): string {
+  if (["bash", "sh", "shell", "zsh"].includes(language)) return "#f5a623";
+  if (["ts", "tsx", "js", "jsx"].includes(language)) return "#62a8ff";
+  if (["rs", "rust"].includes(language)) return "#ff8a4c";
+  if (["py", "python"].includes(language)) return "#7cc7ff";
+  if (["json", "jsonc"].includes(language)) return "#9cdc78";
+  if (["css", "scss"].includes(language)) return "#c586ff";
+  if (["html", "xml"].includes(language)) return "#ff7b72";
+  if (["md", "markdown"].includes(language)) return "#dcdcaa";
+  return "#8fd6c8";
 }
 
 function MarkdownImageButton({

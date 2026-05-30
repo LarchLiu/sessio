@@ -54,7 +54,8 @@
     "rehype-sanitize": "^6.0.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "shiki": "^4.1.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.4.0",
