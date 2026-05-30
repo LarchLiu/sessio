@@ -41,7 +41,7 @@ use tauri::{
     AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent,
 };
 
-const HISTORY_CACHE_VERSION: i64 = 0;
+const HISTORY_CACHE_VERSION: i64 = 1;
 
 fn default_workflow_id() -> String {
     "code".to_string()

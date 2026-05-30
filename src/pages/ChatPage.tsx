@@ -2157,7 +2157,16 @@ function AcpLiveItem({
     return <LemniscateBloomIndicator />;
   }
   if (item.kind === "tool") {
-    return <AcpToolCard tool={item.tool} onPreviewImage={onPreviewImage} />;
+    return (
+      <AcpToolCard
+        tool={item.tool}
+        defaultCollapsed={item.history}
+        onPreviewImage={onPreviewImage}
+      />
+    );
+  }
+  if (item.kind === "toolGroup") {
+    return <AcpToolGroup tools={item.tools} onPreviewImage={onPreviewImage} />;
   }
   if (item.kind === "permission") {
     return (
@@ -2214,7 +2223,7 @@ function AcpSessionUpdateView({
   if (update.updateType === "file_edit") {
     return (
       <div className="text-body leading-relaxed break-words py-1">
-        <FileEditContent text={text} />
+        <FileEditContent value={update.data} />
       </div>
     );
   }
@@ -2285,7 +2294,7 @@ function AcpContentBlockGroup({
   const messageGroupRef = useRef<HTMLDivElement>(null);
   const messageBodyRef = useRef<HTMLDivElement>(null);
   const label =
-    isThought ? "Thinking" : block.kind === "assistant" ? "assistant" : "user";
+    isThought ? "Thought" : block.kind === "assistant" ? "assistant" : "user";
   const userAttachmentBlocks = isUser ? block.blocks.filter(isUserAttachmentContentBlock) : [];
   const bodyBlocks = isUser
     ? block.blocks.filter((item) => !isUserAttachmentContentBlock(item))
@@ -2930,9 +2939,11 @@ function AcpContentBlockView({
 
 function AcpToolCard({
   tool,
+  defaultCollapsed = false,
   onPreviewImage,
 }: {
   tool: AcpToolCall;
+  defaultCollapsed?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
 }) {
   const displayTool = canonicalizeAcpTool(tool);
@@ -2964,9 +2975,15 @@ function AcpToolCard({
   const showToolPairs = !isFileToolWithoutPairs(displayTool.title);
   const input = showToolPairs ? detail.command : "";
   const output = showToolPairs ? acpToolOutputText(displayTool) : "";
+  const hasBody = Boolean(input || output || toolOutputContentBlocks(displayTool.rawOutput).length > 0);
   return (
-    <ToolTimelineFrame title={detail.title} iconName={displayTool.title}>
-      {(input || output) && (
+    <ToolTimelineFrame
+      title={detail.title}
+      iconName={displayTool.title}
+      collapsible={defaultCollapsed && hasBody}
+      defaultExpanded={!defaultCollapsed}
+    >
+      {hasBody && (
         <div className="overflow-hidden rounded-md border border-card-border/[0.14] bg-bg-panel/65 text-body-sm">
           <ToolPairPanel
             input={input}
@@ -2977,6 +2994,59 @@ function AcpToolCard({
         </div>
       )}
     </ToolTimelineFrame>
+  );
+}
+
+function AcpToolGroup({
+  tools,
+  onPreviewImage,
+}: {
+  tools: AcpToolCall[];
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleTools = useMemo(
+    () => tools.map((tool) => canonicalizeAcpTool(tool)).filter((tool) => !isHiddenHistoryTool(tool)),
+    [tools],
+  );
+  if (visibleTools.length === 0) return null;
+  if (visibleTools.length === 1) {
+    return (
+      <AcpToolCard
+        tool={visibleTools[0]}
+        defaultCollapsed
+        onPreviewImage={onPreviewImage}
+      />
+    );
+  }
+  const summary = toolGroupSummary(visibleTools);
+  return (
+    <div className="text-body-sm">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center gap-2 rounded-md px-0 py-1 text-left text-ink/55 transition hover:text-ink/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
+        aria-expanded={expanded}
+      >
+        <ChevronRight
+          className={"h-3.5 w-3.5 shrink-0 transition-transform " + (expanded ? "rotate-90" : "")}
+          aria-hidden
+        />
+        <span className="min-w-0 truncate">{summary}</span>
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-3">
+          {visibleTools.map((tool) => (
+            <AcpToolCard
+              key={tool.toolId}
+              tool={tool}
+              defaultCollapsed
+              onPreviewImage={onPreviewImage}
+            />
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3140,6 +3210,7 @@ function historyToolTitleDetail(tool: AcpToolCall): string | null {
 }
 
 function isHiddenHistoryTool(tool: AcpToolCall): boolean {
+  if (isTodoTool(tool)) return false;
   const meta = parseObjectLike(tool.meta);
   return meta?.hidden === true;
 }
@@ -3414,7 +3485,8 @@ type AcpRenderItem =
   | { kind: "turnStatus"; turn: LiveTurn }
   | { kind: "workingIndicator"; turn: LiveTurn }
   | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
-  | { kind: "tool"; turn: LiveTurn; tool: AcpToolCall }
+  | { kind: "tool"; turn: LiveTurn; tool: AcpToolCall; history: boolean }
+  | { kind: "toolGroup"; turn: LiveTurn; tools: AcpToolCall[] }
   | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
   | { kind: "error"; turn: LiveTurn; error: RuntimeError };
 
@@ -3429,14 +3501,31 @@ function acpViewModelToRenderItems(
   for (const turn of viewModel.turns) {
     const renderedTools = new Set<string>();
     const renderedPermissions = new Set<string>();
+    const groupHistoryTools = !liveTurnIds.has(turn.turnId);
+    let pendingTools: AcpToolCall[] = [];
+    const pendingFileEditBlocks: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>[] = [];
+    const flushPendingTools = () => {
+      if (pendingTools.length === 0) return;
+      if (pendingTools.length === 1) {
+        items.push({ kind: "tool", turn, tool: pendingTools[0], history: true });
+      } else {
+        items.push({ kind: "toolGroup", turn, tools: pendingTools });
+      }
+      pendingTools = [];
+    };
     turn.blocks.forEach((block) => {
       if (block.kind === "tool") {
         const originalTool = turn.tools.find((item) => item.toolId === block.toolId);
         if (!originalTool || renderedTools.has(originalTool.toolId)) return;
         renderedTools.add(originalTool.toolId);
-        items.push({ kind: "tool", turn, tool: originalTool });
+        if (groupHistoryTools) {
+          pendingTools.push(originalTool);
+        } else {
+          items.push({ kind: "tool", turn, tool: originalTool, history: false });
+        }
         return;
       }
+      flushPendingTools();
       if (block.kind === "permission") {
         const permission = turn.permissions.find((item) => item.requestId === block.requestId);
         if (!permission || renderedPermissions.has(permission.requestId)) return;
@@ -3445,11 +3534,20 @@ function acpViewModelToRenderItems(
         return;
       }
       if (block.kind === "error") return;
+      if (block.kind === "sessionUpdate" && block.updateType === "file_edit") {
+        pendingFileEditBlocks.push(block);
+        return;
+      }
       items.push({ kind: "block", turn, block });
       if (block.kind === "user") {
         lastUserIndex = items.length;
       }
     });
+    flushPendingTools();
+    const fileEditBlock = mergedFileEditRenderBlock(pendingFileEditBlocks);
+    if (fileEditBlock) {
+      items.push({ kind: "block", turn, block: fileEditBlock });
+    }
     if (turn.error) {
       items.push({ kind: "error", turn, error: turn.error });
     }
@@ -3551,7 +3649,10 @@ function filterHistoryTurnsForViewMode(turns: LiveTurn[], viewMode: ViewMode): L
     .map((turn) => ({
       ...turn,
       blocks: turn.blocks.filter((block) =>
-        block.kind === "user" || block.kind === "assistant" || block.kind === "thought",
+        block.kind === "user" ||
+        block.kind === "assistant" ||
+        block.kind === "thought" ||
+        (block.kind === "sessionUpdate" && block.updateType === "file_edit"),
       ),
       tools: [],
       permissions: [],
@@ -3613,6 +3714,9 @@ function renderItemKey(item: AcpRenderItem): string {
   if (item.kind === "workingIndicator") return `acp:${item.turn.turnId}:working`;
   if (item.kind === "block") return `acp:${item.turn.turnId}:block`;
   if (item.kind === "tool") return `acp:${item.turn.turnId}:tool:${item.tool.toolId}`;
+  if (item.kind === "toolGroup") {
+    return `acp:${item.turn.turnId}:tool-group:${item.tools.map((tool) => tool.toolId).join(":")}`;
+  }
   if (item.kind === "permission") return `acp:${item.turn.turnId}:permission:${item.permission.requestId}`;
   return `acp:${item.turn.turnId}:error`;
 }
@@ -4057,6 +4161,65 @@ function toolDisplayName(name: string): string {
   return name;
 }
 
+function toolGroupSummary(tools: AcpToolCall[]): string {
+  const counts = new Map<string, number>();
+  const order: string[] = [];
+  for (const tool of tools) {
+    const detail = acpToolDisplayDetail(tool);
+    const key = toolGroupSummaryKey(detail.title.main);
+    if (!counts.has(key)) order.push(key);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const parts = order
+    .map((key, index) => toolGroupCountPartForKey(
+      key,
+      counts.get(key) ?? 0,
+      index === 0,
+    ))
+    .filter(Boolean);
+  return parts.length > 0
+    ? parts.join(", ")
+    : toolGroupCountPart(tools.length, "Used", "tool");
+}
+
+function toolGroupSummaryKey(name: string): "explored" | "searched" | "edited" | "ran" | "used" {
+  if (name === "Read" || name === "List" || name === "Glob") return "explored";
+  if (name === "Grep" || name === "Search" || name === "WebSearch" || name === "WebFetch") {
+    return "searched";
+  }
+  if (name === "Edit" || name === "Write" || name === "MultiEdit" || name === "Delete" || name === "Move") {
+    return "edited";
+  }
+  if (name === "Bash") return "ran";
+  return "used";
+}
+
+function toolGroupCountPart(
+  count: number,
+  verb: string,
+  noun: string,
+): string {
+  if (count <= 0) return "";
+  return `${verb} ${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function toolGroupCountPartForKey(
+  key: string,
+  count: number,
+  capitalize: boolean,
+): string {
+  const label =
+    key === "explored" ? { verb: "explored", noun: "file" } :
+    key === "searched" ? { verb: "searched", noun: "search" } :
+    key === "edited" ? { verb: "edited", noun: "file" } :
+    key === "ran" ? { verb: "ran", noun: "command" } :
+    { verb: "used", noun: "tool" };
+  const verb = capitalize
+    ? label.verb.charAt(0).toUpperCase() + label.verb.slice(1)
+    : label.verb;
+  return toolGroupCountPart(count, verb, label.noun);
+}
+
 interface FileEditSummary {
   source?: string;
   files?: number;
@@ -4084,8 +4247,9 @@ interface FileEditContentDiff {
   newContent?: string | null;
 }
 
-function FileEditContent({ text }: { text: string }) {
-  const summary = parseFileEditSummary(text);
+function FileEditContent({ value }: { value: unknown }) {
+  const summary = parseFileEditSummary(value);
+  const text = stableDisplayText(value);
   if (!summary) return <PlainTextContent text={text} />;
   const edits = summary.edits ?? [];
   const fileCount = summary.files ?? edits.length;
@@ -4293,17 +4457,112 @@ function FileEditContent({ text }: { text: string }) {
   );
 }
 
-function parseFileEditSummary(text: string): FileEditSummary | null {
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+function parseFileEditSummary(value: unknown): FileEditSummary | null {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
       return null;
     }
-    const record = parsed as FileEditSummary;
-    return Array.isArray(record.edits) ? record : null;
-  } catch {
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return null;
   }
+  const record = parsed as FileEditSummary & { text?: unknown };
+  if (Array.isArray(record.edits)) return record;
+  if (typeof record.text === "string") return parseFileEditSummary(record.text);
+  return null;
+}
+
+function stableDisplayText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? "";
+  } catch {
+    return String(value);
+  }
+}
+
+function mergedFileEditRenderBlock(
+  blocks: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>[],
+): Extract<AcpRenderBlock, { kind: "sessionUpdate" }> | null {
+  if (blocks.length === 0) return null;
+  if (blocks.length === 1) return blocks[0];
+  const summaries = blocks.map((block) => parseFileEditSummary(block.data));
+  if (summaries.some((summary) => !summary)) {
+    return blocks[blocks.length - 1];
+  }
+  const edits: FileEditItem[] = [];
+  for (const summary of summaries) {
+    for (const edit of summary?.edits ?? []) {
+      mergeFileEditItem(edits, edit);
+    }
+  }
+  const source = summaries.find((summary) => summary?.source)?.source ?? "session";
+  const data: FileEditSummary = {
+    source,
+    files: edits.length,
+    additions: sumEditNumber(edits, "additions"),
+    deletions: sumEditNumber(edits, "deletions"),
+    edits,
+  };
+  return {
+    ...blocks[blocks.length - 1],
+    data,
+  };
+}
+
+function mergeFileEditItem(edits: FileEditItem[], next: FileEditItem) {
+  const key = fileEditKey(next);
+  const existing = edits.find((edit) => fileEditKey(edit) === key);
+  if (!existing) {
+    edits.push({ ...next });
+    return;
+  }
+  mergeFileEditValues(existing, next);
+}
+
+function fileEditKey(edit: FileEditItem): string {
+  return edit.path || edit.displayPath || "(unknown file)";
+}
+
+function mergeFileEditValues(existing: FileEditItem, next: FileEditItem) {
+  if (existing.kind && next.kind && existing.kind !== next.kind) {
+    existing.kind = "mixed";
+  }
+  existing.additions = (existing.additions ?? 0) + (next.additions ?? 0);
+  existing.deletions = (existing.deletions ?? 0) + (next.deletions ?? 0);
+  existing.detail = mergeOptionalText(existing.detail, next.detail);
+  const patches = mergeStringLists(
+    normalizeEditPatches(existing),
+    normalizeEditPatches(next),
+  );
+  if (patches.length > 0) {
+    existing.patches = patches;
+    existing.patch = null;
+  }
+  const contentDiffs = [
+    ...normalizeContentDiffs(existing),
+    ...normalizeContentDiffs(next),
+  ];
+  if (contentDiffs.length > 0) {
+    existing.contentDiffs = contentDiffs;
+    existing.oldContent = null;
+    existing.newContent = null;
+  }
+}
+
+function mergeOptionalText(left?: string, right?: string): string | undefined {
+  const parts = [left, right]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value));
+  if (parts.length === 0) return undefined;
+  return Array.from(new Set(parts)).join("\n\n");
+}
+
+function mergeStringLists(left: string[], right: string[]): string[] {
+  return Array.from(new Set([...left, ...right]));
 }
 
 function sumEditNumber(edits: FileEditItem[], key: "additions" | "deletions"): number {
@@ -4762,27 +5021,55 @@ function ToolTimelineFrame({
   title,
   iconName,
   children,
+  collapsible = false,
+  defaultExpanded = true,
 }: {
   title: ToolTitleParts;
   iconName: string;
   children: ReactNode;
+  collapsible?: boolean;
+  defaultExpanded?: boolean;
 }) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const showChildren = !collapsible || expanded;
+  const titleContent = (
+    <>
+      <span className="flex w-4 shrink-0 justify-center">
+        <ToolTitleIcon name={iconName} />
+      </span>
+      <span className="min-w-0 truncate text-ink/70">
+        <span className="font-medium text-ink/75">{title.main}</span>
+        {title.detail && (
+          <span className="ml-1 font-normal text-ink/50">{title.detail}</span>
+        )}
+      </span>
+    </>
+  );
   return (
     <div className="text-body-sm">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="flex w-4 shrink-0 justify-center">
-          <ToolTitleIcon name={iconName} />
-        </span>
-        <span className="min-w-0 truncate text-ink/70">
-          <span className="font-medium text-ink/75">{title.main}</span>
-          {title.detail && (
-            <span className="ml-1 font-normal text-ink/50">{title.detail}</span>
-          )}
-        </span>
-      </div>
-      <div className="ml-6">
-        {children}
-      </div>
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="mb-2 flex w-full items-center gap-2 rounded-md text-left transition hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
+          aria-expanded={expanded}
+        >
+          {titleContent}
+          <ChevronRight
+            className={"h-3.5 w-3.5 shrink-0 text-ink/45 transition-transform " + (expanded ? "rotate-90" : "")}
+            aria-hidden
+          />
+        </button>
+      ) : (
+        <div className="mb-2 flex items-center gap-2">
+          {titleContent}
+        </div>
+      )}
+      {showChildren && (
+        <div className="ml-6">
+          {children}
+        </div>
+      )}
     </div>
   );
 }
