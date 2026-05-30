@@ -9,6 +9,7 @@ use crate::models::{
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
+    RuntimeAgentSelection,
     SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
 };
 
@@ -208,6 +209,21 @@ impl SessionStore for CachedStore {
             efforts,
             permission_modes,
         )
+    }
+
+    fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>> {
+        self.inner.get_last_runtime_agent_selection()
+    }
+
+    fn set_last_runtime_agent_selection(
+        &self,
+        agent: Agent,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+    ) -> Result<RuntimeAgentSelection> {
+        self.inner
+            .set_last_runtime_agent_selection(agent, model, effort, permission_mode)
     }
 
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {

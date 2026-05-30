@@ -66,6 +66,25 @@ struct UpdateRuntimeAgentPreferencesRequest {
     permission_modes: Option<Vec<RuntimeAgentOptionInput>>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeAgentSelectionDto {
+    agent: Agent,
+    model: Option<String>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
+    updated_at: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetRuntimeAgentSelectionRequest {
+    agent: Agent,
+    model: Option<String>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHistoryResult {
@@ -283,6 +302,18 @@ fn runtime_option_inputs_to_metadata(
             })
             .collect()
     })
+}
+
+fn runtime_agent_selection_to_dto(
+    selection: store::RuntimeAgentSelection,
+) -> RuntimeAgentSelectionDto {
+    RuntimeAgentSelectionDto {
+        agent: selection.agent,
+        model: selection.model,
+        effort: selection.effort,
+        permission_mode: selection.permission_mode,
+        updated_at: selection.updated_at,
+    }
 }
 
 fn db_runtime_agents(
@@ -1815,6 +1846,32 @@ fn list_runtime_agents(
 }
 
 #[tauri::command]
+fn get_last_runtime_agent_selection(
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Option<RuntimeAgentSelectionDto>, String> {
+    store
+        .get_last_runtime_agent_selection()
+        .map(|selection| selection.map(runtime_agent_selection_to_dto))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_last_runtime_agent_selection(
+    req: SetRuntimeAgentSelectionRequest,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<RuntimeAgentSelectionDto, String> {
+    store
+        .set_last_runtime_agent_selection(
+            req.agent,
+            req.model.as_deref(),
+            req.effort.as_deref(),
+            req.permission_mode.as_deref(),
+        )
+        .map(runtime_agent_selection_to_dto)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_debug_config() -> Result<config::DebugConfig, String> {
     config::load_config()
         .map(|config| config.debug)
@@ -2343,6 +2400,8 @@ pub fn run() {
             write_cross_prompt,
             get_agent_runtime_status,
             list_runtime_agents,
+            get_last_runtime_agent_selection,
+            set_last_runtime_agent_selection,
             get_debug_config,
             update_runtime_agent_preferences,
             start_agent_session,

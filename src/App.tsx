@@ -107,7 +107,11 @@ export default function App() {
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
-  const { agents: runtimeAgents } = useRuntimeAgents();
+  const {
+    agents: runtimeAgents,
+    lastSelection: lastRuntimeAgentSelection,
+    rememberSelection: rememberRuntimeAgentSelection,
+  } = useRuntimeAgents();
   const [debugAcpConfig, setDebugAcpConfig] = useState(false);
   const update = useUpdateCheck(__APP_VERSION__);
   const indexing = indexPhase !== "idle";
@@ -558,6 +562,8 @@ export default function App() {
         viewMode={viewMode}
         liveState={liveRuntimeState}
         runtimeAgents={runtimeAgents}
+        lastRuntimeAgentSelection={lastRuntimeAgentSelection}
+        rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
         debugAcpConfig={debugAcpConfig}
         runtimeSessionAliases={runtimeSessionAliases}
         selectedAncestorSessions={selectedAncestorSessions}

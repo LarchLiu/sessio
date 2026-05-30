@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from "react";
-import type { Agent, ProjectInfo, RuntimeAgentMetadata, SessionInfo } from "../api";
+import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo } from "../api";
 import type { ActiveMessageMeta } from "../pages/ChatPage";
 import ChatPage from "../pages/ChatPage";
 import NewChatPage from "../pages/NewChatPage";
@@ -20,6 +20,8 @@ export default function AppMain({
   viewMode,
   liveState,
   runtimeAgents,
+  lastRuntimeAgentSelection,
+  rememberRuntimeAgentSelection,
   debugAcpConfig,
   runtimeSessionAliases,
   selectedAncestorSessions,
@@ -46,6 +48,8 @@ export default function AppMain({
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
+  lastRuntimeAgentSelection: RuntimeAgentSelection | null;
+  rememberRuntimeAgentSelection: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
   debugAcpConfig: boolean;
   runtimeSessionAliases: Record<string, string>;
   selectedAncestorSessions: SessionInfo[];
@@ -124,6 +128,8 @@ export default function AppMain({
         projects={projectGroups}
         initialProjectKey={newChatProjectKey}
         runtimeAgents={runtimeAgents}
+        lastRuntimeAgentSelection={lastRuntimeAgentSelection}
+        rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
         liveState={liveState}
         dispatchLiveEvent={dispatchLiveEvent}
         onError={onError}
@@ -146,6 +152,7 @@ export default function AppMain({
           viewMode={viewMode}
           liveState={liveState}
           runtimeAgents={runtimeAgents}
+          rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
           debugAcpConfig={debugAcpConfig}
           runtimeSessionAliases={runtimeSessionAliases}
           ancestorSessions={selectedAncestorSessions}

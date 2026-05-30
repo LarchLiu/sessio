@@ -46,6 +46,7 @@ import {
   type Agent,
   type SessionHistorySnapshotGroup,
   type SessionHistoryTurn,
+  type SetRuntimeAgentSelectionRequest,
   SessionInfo,
   RuntimeAgentMetadata,
   RuntimeCapabilitySet,
@@ -123,6 +124,7 @@ interface Props {
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
+  rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
   debugAcpConfig?: boolean;
   runtimeSessionAliases?: Record<string, string>;
   ancestorSessions?: SessionInfo[];
@@ -266,6 +268,7 @@ function ChatPage({
   viewMode,
   liveState,
   runtimeAgents,
+  rememberRuntimeAgentSelection,
   debugAcpConfig = false,
   runtimeSessionAliases = {},
   ancestorSessions = [],
@@ -385,6 +388,7 @@ function ChatPage({
           viewMode={viewMode}
           liveState={liveState}
           runtimeAgents={runtimeAgents}
+          rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
           debugAcpConfig={debugAcpConfig}
           runtimeSessionAliases={runtimeSessionAliases}
           dispatchLiveEvent={dispatchLiveEvent}
@@ -473,6 +477,7 @@ function MessageStream({
   viewMode,
   liveState,
   runtimeAgents,
+  rememberRuntimeAgentSelection,
   debugAcpConfig,
   runtimeSessionAliases,
   dispatchLiveEvent,
@@ -494,6 +499,7 @@ function MessageStream({
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
+  rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
   debugAcpConfig: boolean;
   runtimeSessionAliases: Record<string, string>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
@@ -593,10 +599,18 @@ function MessageStream({
     if (targetAgent === composerAgent) setComposerEffort(nextValue);
     try {
       await updateRuntimeAgentPreferences({ agent: targetAgent, effort: nextValue });
+      if (targetAgent === composerAgent) {
+        await rememberRuntimeAgentSelection?.({
+          agent: targetAgent,
+          model: composerModel,
+          effort: nextValue,
+          permissionMode: composerPermissionMode,
+        });
+      }
     } catch (err) {
       setComposerError(String(err));
     }
-  }, [composerAgent]);
+  }, [composerAgent, composerModel, composerPermissionMode, rememberRuntimeAgentSelection]);
   const agentModelOptions = useMemo(
     () =>
       agentModelSelectOptions(
@@ -979,20 +993,32 @@ function MessageStream({
     setComposerPermissionMode(initialRuntimePermission(targetRuntimeAgent));
     try {
       await updateRuntimeAgentPreferences({ agent: parsed.agent, model: parsed.model });
+      await rememberRuntimeAgentSelection?.({
+        agent: parsed.agent,
+        model: parsed.model,
+        effort: initialRuntimeEffort(targetRuntimeAgent),
+        permissionMode: initialRuntimePermission(targetRuntimeAgent),
+      });
     } catch (err) {
       setComposerError(String(err));
     }
-  }, [runtimeAgents]);
+  }, [rememberRuntimeAgentSelection, runtimeAgents]);
 
   const handleComposerPermissionChange = useCallback(async (nextValue: string) => {
     if (!selectedComposerAgent) return;
     setComposerPermissionMode(nextValue);
     try {
       await updateRuntimeAgentPreferences({ agent: composerAgent, permissionMode: nextValue });
+      await rememberRuntimeAgentSelection?.({
+        agent: composerAgent,
+        model: composerModel,
+        effort: composerEffort,
+        permissionMode: nextValue,
+      });
     } catch (err) {
       setComposerError(String(err));
     }
-  }, [composerAgent, selectedComposerAgent]);
+  }, [composerAgent, composerEffort, composerModel, rememberRuntimeAgentSelection, selectedComposerAgent]);
 
   const handleSendText = useCallback(async (
     rawText: string,
@@ -1102,6 +1128,12 @@ function MessageStream({
           });
         }
       }
+      await rememberRuntimeAgentSelection?.({
+        agent: targetAgent,
+        model: composerModel,
+        effort: composerEffort,
+        permissionMode: composerPermissionMode,
+      });
       const parentSnapshotTurns = sameAgent
         ? []
         : mergeHistoryWithLiveTurns(
@@ -1174,7 +1206,7 @@ function MessageStream({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);

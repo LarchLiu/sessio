@@ -51,6 +51,15 @@ pub struct RuntimeAgentCapabilityRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct RuntimeAgentSelection {
+    pub agent: Agent,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionHistoryRecord {
     pub agent: Agent,
     pub session_id: String,
@@ -121,6 +130,14 @@ pub trait SessionStore: Send + Sync {
         efforts: Option<&[RuntimeAgentOptionMetadata]>,
         permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
     ) -> Result<AgentInfo>;
+    fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>>;
+    fn set_last_runtime_agent_selection(
+        &self,
+        agent: Agent,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+    ) -> Result<RuntimeAgentSelection>;
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>>;
     fn create_assistant(
         &self,

@@ -27,6 +27,8 @@ import {
   type KanbanItem,
   type KanbanStatus,
   type RuntimeAgentMetadata,
+  type RuntimeAgentSelection,
+  type SetRuntimeAgentSelectionRequest,
   listKanbanItems,
   sendAgentInput,
   startAgentSession,
@@ -52,6 +54,12 @@ import Tooltip from "../components/Tooltip";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
 import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
+import {
+  runtimeAgentForSelection,
+  selectionEffort,
+  selectionModel,
+  selectionPermissionMode,
+} from "../runtimeAgents";
 
 const KANBAN_STATUSES: KanbanStatus[] = [
   "todo",
@@ -77,6 +85,8 @@ interface NewChatPageProps {
   projects: ProjectGroup[];
   initialProjectKey: string | null;
   runtimeAgents: RuntimeAgentMetadata[];
+  lastRuntimeAgentSelection: RuntimeAgentSelection | null;
+  rememberRuntimeAgentSelection: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onError: (error: string | null) => void;
@@ -87,21 +97,31 @@ export default function NewChatPage({
   projects,
   initialProjectKey,
   runtimeAgents,
+  lastRuntimeAgentSelection,
+  rememberRuntimeAgentSelection,
   liveState,
   dispatchLiveEvent,
   onError,
   onPendingSession,
 }: NewChatPageProps) {
   const { t } = useI18n();
+  const initialRuntimeAgent =
+    runtimeAgentForSelection(runtimeAgents, lastRuntimeAgentSelection) ?? runtimeAgents[0] ?? null;
   const [text, setText] = useState("");
   const [projectKeyValue, setProjectKeyValue] = useState(() => initialProjectKey ?? projects[0]?.key ?? "");
-  const [agent, setAgent] = useState<Agent>(
-    () => runtimeAgents[0]?.agent ?? "codex",
+  const [agent, setAgent] = useState<Agent | "">(
+    () => initialRuntimeAgent?.agent ?? "",
   );
-  const [model, setModel] = useState(() => initialRuntimeModel(runtimeAgents[0] ?? null));
-  const [effort, setEffort] = useState(() => initialRuntimeEffort(runtimeAgents[0] ?? null));
+  const [model, setModel] = useState(() =>
+    initialRuntimeAgent ? selectionModel(initialRuntimeAgent, lastRuntimeAgentSelection) : "",
+  );
+  const [effort, setEffort] = useState(() =>
+    initialRuntimeAgent
+      ? selectionEffort(initialRuntimeAgent, lastRuntimeAgentSelection, initialRuntimeEffort)
+      : "",
+  );
   const [permissionMode, setPermissionMode] = useState(() =>
-    initialRuntimePermission(runtimeAgents[0] ?? null),
+    initialRuntimeAgent ? selectionPermissionMode(initialRuntimeAgent, lastRuntimeAgentSelection) : "",
   );
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
@@ -114,19 +134,27 @@ export default function NewChatPage({
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
   const projectId = project?.project.id ?? null;
-  const selectedAgentModelValue = agentModelSelectValue(agent, model);
+  const selectedAgentModelValue = agent ? agentModelSelectValue(agent, model) : "";
   const selectedRuntimeAgent =
-    runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null;
+    agent ? runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent) ?? null : null;
   const handleEffortChange = useCallback(async (targetAgent: Agent, nextValue: string) => {
     if (targetAgent === agent) setEffort(nextValue);
     try {
       await updateRuntimeAgentPreferences({ agent: targetAgent, effort: nextValue });
+      if (targetAgent === agent && selectedRuntimeAgent) {
+        await rememberRuntimeAgentSelection({
+          agent: targetAgent,
+          model,
+          effort: nextValue,
+          permissionMode,
+        });
+      }
     } catch (err) {
       const message = String(err);
       setComposerError(message);
       onError(message);
     }
-  }, [agent, onError]);
+  }, [agent, model, onError, permissionMode, rememberRuntimeAgentSelection, selectedRuntimeAgent]);
   const agentModelOptions = useMemo(
     () =>
       agentModelSelectOptions(
@@ -142,7 +170,7 @@ export default function NewChatPage({
             />,
           ]),
         ) as Partial<Record<Agent, ReactNode>>,
-        { [agent]: effort },
+        agent ? { [agent]: effort } : {},
       ),
     [agent, effort, handleEffortChange, runtimeAgents, sending],
   );
@@ -212,14 +240,18 @@ export default function NewChatPage({
 
   useEffect(() => {
     if (agentModelOptions.some((option) => option.value === selectedAgentModelValue)) return;
-    const current = runtimeAgents.find((item) => item.agent === agent) ?? null;
-    const next = current ?? runtimeAgents[0] ?? null;
+    const current = agent ? runtimeAgents.find((item) => item.agent === agent) ?? null : null;
+    const next =
+      current ??
+      runtimeAgentForSelection(runtimeAgents, lastRuntimeAgentSelection) ??
+      runtimeAgents[0] ??
+      null;
     if (!next) return;
     setAgent(next.agent);
-    setModel(initialRuntimeModel(next));
-    setEffort(initialRuntimeEffort(next));
-    setPermissionMode(initialRuntimePermission(next));
-  }, [agent, agentModelOptions, runtimeAgents, selectedAgentModelValue]);
+    setModel(selectionModel(next, lastRuntimeAgentSelection));
+    setEffort(selectionEffort(next, lastRuntimeAgentSelection, initialRuntimeEffort));
+    setPermissionMode(selectionPermissionMode(next, lastRuntimeAgentSelection));
+  }, [agent, agentModelOptions, lastRuntimeAgentSelection, runtimeAgents, selectedAgentModelValue]);
 
   useEffect(() => {
     if (!selectedRuntimeAgent) return;
@@ -297,6 +329,12 @@ export default function NewChatPage({
     setPermissionMode(initialRuntimePermission(targetRuntimeAgent));
     try {
       await updateRuntimeAgentPreferences({ agent: parsed.agent, model: parsed.model });
+      await rememberRuntimeAgentSelection({
+        agent: parsed.agent,
+        model: parsed.model,
+        effort: initialRuntimeEffort(targetRuntimeAgent),
+        permissionMode: initialRuntimePermission(targetRuntimeAgent),
+      });
     } catch (err) {
       const message = String(err);
       setComposerError(message);
@@ -308,7 +346,13 @@ export default function NewChatPage({
     if (!selectedRuntimeAgent) return;
     setPermissionMode(nextValue);
     try {
-      await updateRuntimeAgentPreferences({ agent, permissionMode: nextValue });
+      await updateRuntimeAgentPreferences({ agent: selectedRuntimeAgent.agent, permissionMode: nextValue });
+      await rememberRuntimeAgentSelection({
+        agent: selectedRuntimeAgent.agent,
+        model,
+        effort,
+        permissionMode: nextValue,
+      });
     } catch (err) {
       const message = String(err);
       setComposerError(message);
@@ -327,6 +371,10 @@ export default function NewChatPage({
       setComposerError("No configured runtime agent available");
       return;
     }
+    if (!agent) {
+      setComposerError("No configured runtime agent available");
+      return;
+    }
     setSending(true);
     setComposerError(null);
     onError(null);
@@ -335,6 +383,12 @@ export default function NewChatPage({
         agent,
         workspacePath,
         options: runtimeSessionOptions(model, permissionMode, effort),
+      });
+      await rememberRuntimeAgentSelection({
+        agent,
+        model,
+        effort,
+        permissionMode,
       });
       const timestamp = Date.now();
       dispatchSessionStartedFallback({
@@ -503,10 +557,6 @@ export default function NewChatPage({
       </div>
     </div>
   );
-}
-
-function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
-  return agent?.model ?? agent?.models[0]?.value ?? "";
 }
 
 function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {

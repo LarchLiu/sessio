@@ -18,6 +18,7 @@ use crate::models::{
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
+    RuntimeAgentSelection,
     SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
 };
 
@@ -95,6 +96,19 @@ CREATE TABLE IF NOT EXISTS subagents (
 
 CREATE INDEX IF NOT EXISTS idx_subagents_parent ON subagents(parent_agent, parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
+"#;
+
+const RUNTIME_SELECTION_KEY: &str = "last";
+
+const RUNTIME_SELECTION_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS runtime_agent_selections (
+    key             TEXT PRIMARY KEY,
+    agent           TEXT NOT NULL,
+    model           TEXT,
+    effort          TEXT,
+    permission_mode TEXT,
+    updated_at      INTEGER NOT NULL
+);
 "#;
 
 // v2: subagents.available column (subagents can now be soft-deleted
@@ -610,6 +624,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute_batch(SCHEMA_V5)?;
+    conn.execute_batch(RUNTIME_SELECTION_SCHEMA)?;
     apply_v5_patch(conn);
     conn.execute("DELETE FROM schema_migrations WHERE version > 5", [])?;
     seed_builtin_workflows(conn)?;
@@ -895,18 +910,18 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
     seed_builtin_agent(
         conn,
         Agent::Codex,
-        Some("gpt-5.3-codex"),
+        Some("gpt-5.5"),
         vec![
             runtime_option("gpt-5.5", "5.5"),
             runtime_option("gpt-5.4", "5.4"),
             runtime_option("gpt-5.3-codex", "5.3 Codex"),
         ],
-        Some("medium"),
+        Some("high"),
         vec![
-            runtime_option("minimal", "Minimal"),
             runtime_option("low", "Low"),
             runtime_option("medium", "Medium"),
             runtime_option("high", "High"),
+            runtime_option("xhigh", "Extra High"),
         ],
         Some("read-only"),
         vec![
@@ -930,11 +945,13 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
             runtime_option("claude-opus-4-7", "Opus 4.7"),
             runtime_option("claude-opus-4-6", "Opus 4.6"),
         ],
-        Some("medium"),
+        Some("high"),
         vec![
             runtime_option("low", "Low"),
             runtime_option("medium", "Medium"),
             runtime_option("high", "High"),
+            runtime_option("xhigh", "Extra High"),
+            runtime_option("max", "Max"),
         ],
         Some("default"),
         vec![
@@ -956,7 +973,7 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         Agent::Gemini,
         None,
         Vec::new(),
-        Some("medium"),
+        Some("high"),
         vec![
             runtime_option("low", "Low"),
             runtime_option("medium", "Medium"),
@@ -1612,6 +1629,18 @@ fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
     )?;
     let rows = stmt.query_map([], agent_info_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn runtime_agent_selection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeAgentSelection> {
+    let agent_str: String = row.get(0)?;
+    let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+    Ok(RuntimeAgentSelection {
+        agent,
+        model: row.get(1)?,
+        effort: row.get(2)?,
+        permission_mode: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
 }
 
 fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
@@ -3105,6 +3134,59 @@ impl SessionStore for SqliteStore {
         )?;
         seed_builtin_assistants(&conn, now)?;
         load_agent_by_id(&conn, id)
+    }
+
+    fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT agent, model, effort, permission_mode, updated_at
+             FROM runtime_agent_selections
+             WHERE key = ?",
+            params![RUNTIME_SELECTION_KEY],
+            runtime_agent_selection_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn set_last_runtime_agent_selection(
+        &self,
+        agent: Agent,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+    ) -> Result<RuntimeAgentSelection> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms();
+        let model = model.map(str::trim).filter(|value| !value.is_empty());
+        let effort = effort.map(str::trim).filter(|value| !value.is_empty());
+        let permission_mode = permission_mode.map(str::trim).filter(|value| !value.is_empty());
+        conn.execute(
+            "INSERT INTO runtime_agent_selections (
+                key, agent, model, effort, permission_mode, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET
+                agent = excluded.agent,
+                model = excluded.model,
+                effort = excluded.effort,
+                permission_mode = excluded.permission_mode,
+                updated_at = excluded.updated_at",
+            params![
+                RUNTIME_SELECTION_KEY,
+                agent.as_str(),
+                model,
+                effort,
+                permission_mode,
+                now,
+            ],
+        )?;
+        Ok(RuntimeAgentSelection {
+            agent,
+            model: model.map(str::to_string),
+            effort: effort.map(str::to_string),
+            permission_mode: permission_mode.map(str::to_string),
+            updated_at: now,
+        })
     }
 
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
@@ -5775,34 +5857,34 @@ mod migration_tests {
         let agents = store.list_agents().unwrap();
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
-        assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(codex_agent.commands.session.len(), 1);
         assert_eq!(
             codex_agent.commands.version.first().map(String::as_str),
             Some("codex --version")
         );
-        assert_eq!(codex_agent.effort.as_deref(), Some("medium"));
+        assert_eq!(codex_agent.effort.as_deref(), Some("high"));
         assert!(codex_agent
             .efforts
             .iter()
-            .any(|option| option.value == "high"));
+            .any(|option| option.value == "xhigh"));
         let claude_agent = agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(
             claude_agent.commands.version.first().map(String::as_str),
             Some("claude --version")
         );
-        assert_eq!(claude_agent.effort.as_deref(), Some("medium"));
+        assert_eq!(claude_agent.effort.as_deref(), Some("high"));
         assert!(claude_agent
             .efforts
             .iter()
-            .any(|option| option.value == "high"));
+            .any(|option| option.value == "max"));
         let gemini_agent = agents.iter().find(|agent| agent.id == "gemini").unwrap();
         assert_eq!(
             gemini_agent.commands.version.first().map(String::as_str),
             Some("gemini --version")
         );
         assert_eq!(gemini_agent.model, None);
-        assert_eq!(gemini_agent.effort.as_deref(), Some("medium"));
+        assert_eq!(gemini_agent.effort.as_deref(), Some("high"));
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-parent");
         std::fs::create_dir(&parent).unwrap();
 
@@ -6325,5 +6407,33 @@ mod migration_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
         let _ = std::fs::remove_dir_all(&other_parent);
+    }
+
+    #[test]
+    fn runtime_agent_selection_roundtrip() {
+        let path = unique_db("sessio-runtime-selection");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let saved = store
+            .set_last_runtime_agent_selection(
+                Agent::Codex,
+                Some("gpt-5.5"),
+                Some("high"),
+                Some("read-only"),
+            )
+            .unwrap();
+        assert_eq!(saved.agent, Agent::Codex);
+        assert_eq!(saved.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(saved.effort.as_deref(), Some("high"));
+        assert_eq!(saved.permission_mode.as_deref(), Some("read-only"));
+
+        let loaded = store.get_last_runtime_agent_selection().unwrap().unwrap();
+        assert_eq!(loaded.agent, Agent::Codex);
+        assert_eq!(loaded.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(loaded.effort.as_deref(), Some("high"));
+        assert_eq!(loaded.permission_mode.as_deref(), Some("read-only"));
+
+        let _ = std::fs::remove_file(&path);
     }
 }
