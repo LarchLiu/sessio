@@ -321,6 +321,13 @@ function ChatPage({
     onActiveMessageMeta,
   ]);
 
+  const mainRuntimeSessionId =
+    runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id;
+  const hasMainLiveSession = Boolean(liveState.sessions[mainRuntimeSessionId]);
+  const mainMessageStreamKey = hasMainLiveSession
+    ? `live:${session.agent}:${session.id}:${mainRuntimeSessionId}`
+    : historySourceKey(session.agent, session.filePath, session.id);
+
   return (
     <div className="h-full min-h-0 bg-surface-panel flex flex-col">
         {session.subagents.length > 0 && (
@@ -358,7 +365,7 @@ function ChatPage({
         <MessageStream
           key={
             tab.kind === "main"
-              ? historySourceKey(session.agent, session.filePath, session.id)
+              ? mainMessageStreamKey
               : historySourceKey(session.agent, tab.sub.filePath, `${session.id}:${tab.sub.id}`)
           }
           agent={session.agent}
@@ -367,7 +374,7 @@ function ChatPage({
           ancestorSessions={tab.kind === "main" ? ancestorSessions : []}
           available={
             tab.kind === "main"
-              ? session.available || Boolean(liveState.sessions[runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id])
+              ? session.available || hasMainLiveSession
               : tab.sub.filePath !== ""
           }
           emptyHint={
@@ -388,7 +395,7 @@ function ChatPage({
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
-          skipHistoryLoad={tab.kind === "main" && !session.filePath && Boolean(liveState.sessions[runtimeSessionAliases[`${session.agent}:${session.id}`] ?? session.id])}
+          skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
         />
 
         {previewImage && (
@@ -566,6 +573,7 @@ function MessageStream({
   const liveSession = runtimeSessionId
     ? liveState.sessions[runtimeSessionId]
     : null;
+  const isLiveSessionVisible = Boolean(liveSession);
   const mergedAncestorTurns = useMemo(
     () => ancestorHistoryGroups.flatMap((group) => group.turns),
     [ancestorHistoryGroups],
@@ -1192,7 +1200,7 @@ function MessageStream({
           className="flex-1 min-h-0"
           viewportClassName={
             "px-10 py-4 session-chat-scroll-viewport transition-opacity duration-75 " +
-            (positionReady ? "opacity-100" : "opacity-0")
+            (positionReady || isLiveSessionVisible ? "opacity-100" : "opacity-0")
           }
           onScroll={saveScrollSnapshot}
         >
