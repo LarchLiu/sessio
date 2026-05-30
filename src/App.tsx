@@ -547,7 +547,6 @@ export default function App() {
       sidebar={sidebar}
       header={header}
       sidebarOpen={sidebarOpen}
-      onSidebarOpenChange={setSidebarOpen}
       overlays={overlays}
     >
       <AppMain

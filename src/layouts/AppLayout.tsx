@@ -1,87 +1,147 @@
-import { useEffect, type ReactNode } from "react";
-import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 interface AppLayoutProps {
   sidebar: ReactNode;
   header: ReactNode;
   sidebarOpen: boolean;
-  onSidebarOpenChange: (open: boolean) => void;
   rightSidebar?: ReactNode;
   overlays?: ReactNode;
   children: ReactNode;
+}
+
+const SIDEBAR_DEFAULT_WIDTH = 300;
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 520;
+
+function clampSidebarWidth(width: number) {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width));
 }
 
 export default function AppLayout({
   sidebar,
   header,
   sidebarOpen,
-  onSidebarOpenChange,
   rightSidebar,
   overlays,
   children,
 }: AppLayoutProps) {
-  const sidebarPanelRef = usePanelRef();
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
+  const [dragging, setDragging] = useState(false);
+  const dragStartRef = useRef<{ x: number; width: number } | null>(null);
 
   useEffect(() => {
-    const sidebarPanel = sidebarPanelRef.current;
-    if (!sidebarPanel) return;
+    if (!sidebarOpen) setDragging(false);
+  }, [sidebarOpen]);
 
-    if (sidebarOpen) {
-      if (sidebarPanel.isCollapsed()) sidebarPanel.expand();
-    } else if (!sidebarPanel.isCollapsed()) {
-      sidebarPanel.collapse();
-    }
-  }, [sidebarOpen, sidebarPanelRef]);
+  const startSidebarResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (!sidebarOpen || event.button !== 0) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      dragStartRef.current = { x: event.clientX, width: sidebarWidth };
+      setDragging(true);
+    },
+    [sidebarOpen, sidebarWidth],
+  );
+
+  const resizeSidebar = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const start = dragStartRef.current;
+    if (!start) return;
+    setSidebarWidth(clampSidebarWidth(start.width + event.clientX - start.x));
+  }, []);
+
+  const stopSidebarResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragStartRef.current) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    dragStartRef.current = null;
+    setDragging(false);
+  }, []);
+
+  const nudgeSidebarWidth = (delta: number) => {
+    if (!sidebarOpen) return;
+    setSidebarWidth((width) => clampSidebarWidth(width + delta));
+  };
 
   return (
-    <Group className="h-screen text-body" orientation="horizontal">
-      <Panel
+    <div
+      className={
+        "app-layout h-screen text-body " +
+        (rightSidebar ? "app-layout-with-right-sidebar " : "") +
+        (dragging ? "app-layout-resizing " : "") +
+        (sidebarOpen ? "app-layout-sidebar-open" : "app-layout-sidebar-closed")
+      }
+      data-sidebar-open={sidebarOpen}
+      style={
+        {
+          "--app-sidebar-width": `${sidebarWidth}px`,
+        } as CSSProperties
+      }
+    >
+      <div
         id="app-sidebar"
-        panelRef={sidebarPanelRef}
-        className="min-w-0"
-        collapsible
-        collapsedSize="0px"
-        defaultSize="300px"
-        minSize="240px"
-        maxSize="520px"
-        groupResizeBehavior="preserve-pixel-size"
-        onResize={(size) => onSidebarOpenChange(size.inPixels > 1)}
+        className="app-sidebar-panel min-w-0 overflow-hidden"
+        aria-hidden={!sidebarOpen}
       >
         {sidebar}
-      </Panel>
-      <Separator
+      </div>
+      <div
         id="app-sidebar-resize-handle"
         aria-label="Resize sidebar"
+        aria-orientation="vertical"
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        aria-valuenow={sidebarWidth}
         className="app-sidebar-resize-handle"
+        role="separator"
+        tabIndex={sidebarOpen ? 0 : -1}
+        onPointerDown={startSidebarResize}
+        onPointerMove={resizeSidebar}
+        onPointerUp={stopSidebarResize}
+        onPointerCancel={stopSidebarResize}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            nudgeSidebarWidth(-16);
+          } else if (event.key === "ArrowRight") {
+            event.preventDefault();
+            nudgeSidebarWidth(16);
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            setSidebarWidth(SIDEBAR_MIN_WIDTH);
+          } else if (event.key === "End") {
+            event.preventDefault();
+            setSidebarWidth(SIDEBAR_MAX_WIDTH);
+          }
+        }}
       />
-      <Panel id="app-main" minSize="360px" className="min-w-0">
-        <main className="relative flex h-full min-w-0 flex-col">
-          {header}
-          {children}
-          {overlays}
-        </main>
-      </Panel>
+      <main id="app-main" className="relative flex h-full min-w-0 flex-col">
+        {header}
+        {children}
+        {overlays}
+      </main>
       {rightSidebar && (
         <>
-          <Separator
+          <div
             id="app-right-sidebar-resize-handle"
             aria-label="Resize details sidebar"
+            aria-orientation="vertical"
             className="app-sidebar-resize-handle"
+            role="separator"
           />
-          <Panel
+          <aside
             id="app-right-sidebar"
-            defaultSize="320px"
-            minSize="260px"
-            maxSize="520px"
-            groupResizeBehavior="preserve-pixel-size"
-            className="min-w-0"
+            className="h-full min-w-0 border-l border-ink/5 bg-surface-sidebar"
           >
-            <aside className="h-full border-l border-ink/5 bg-surface-sidebar">
-              {rightSidebar}
-            </aside>
-          </Panel>
+            {rightSidebar}
+          </aside>
         </>
       )}
-    </Group>
+    </div>
   );
 }

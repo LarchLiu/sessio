@@ -12,6 +12,8 @@ pub mod watch;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::{thread, time::Duration};
 
 use agents::runtime::metadata::{
     runtime_agents_from_db, startup_probe_runtime_agents, RuntimeAgentsCache,
@@ -36,7 +38,7 @@ use store::{SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent,
 };
 
 const HISTORY_CACHE_VERSION: i64 = 0;
@@ -2101,11 +2103,78 @@ fn install_appearance_observer(handle: AppHandle) {
     }
 }
 
+fn set_window_alpha(window: &WebviewWindow, alpha: f64) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{msg_send, runtime::AnyObject};
+
+        let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())?;
+        if ns_window_ptr.is_null() {
+            return Err("ns_window is null".into());
+        }
+        unsafe {
+            let ns_window = ns_window_ptr as *mut AnyObject;
+            let _: () = msg_send![ns_window, setAlphaValue: alpha];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, alpha);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn animate_window_alpha(window: WebviewWindow, from: f64, to: f64, duration_ms: u64) {
+    const STEPS: u64 = 10;
+    thread::spawn(move || {
+        for step in 0..=STEPS {
+            let t = step as f64 / STEPS as f64;
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let alpha = from + (to - from) * eased;
+            let w = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                let _ = set_window_alpha(&w, alpha);
+            });
+            thread::sleep(Duration::from_millis(duration_ms / STEPS));
+        }
+    });
+}
+
+fn hide_main_window(window: WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        animate_window_alpha(window.clone(), 1.0, 0.0, 140);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            let w = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                let _ = w.hide();
+                let _ = set_window_alpha(&w, 1.0);
+            });
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window.hide();
+    }
+}
+
 fn show_main_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        let was_visible = w.is_visible().unwrap_or(false);
+        #[cfg(target_os = "macos")]
+        if !was_visible {
+            let _ = set_window_alpha(&w, 0.0);
+        }
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        #[cfg(target_os = "macos")]
+        if !was_visible {
+            animate_window_alpha(w, 0.0, 1.0, 170);
+        }
     }
 }
 
@@ -2209,7 +2278,7 @@ pub fn run() {
                 win.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
-                        let _ = w.hide();
+                        hide_main_window(w.clone());
                     }
                 });
             }
