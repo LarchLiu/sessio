@@ -44,8 +44,8 @@ pub fn runtime_metadata_from_agent_info(
         efforts: agent.efforts,
         permission_mode: agent.permission_mode,
         permission_modes: agent.permission_modes,
-        session_command: agent.commands.first().cloned(),
-        version_command: None,
+        session_command: agent.commands.session.first().cloned(),
+        version_command: agent.commands.version.first().cloned(),
         detected_version: cached.and_then(|metadata| metadata.detected_version.clone()),
         capabilities: cached.and_then(|metadata| metadata.capabilities.clone()),
         updated_at: Some(agent.updated_at),
@@ -86,9 +86,11 @@ pub fn startup_probe_runtime_agents(
         };
         let session_command = agent
             .commands
+            .session
             .first()
             .cloned()
             .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent).to_string());
+        let version_command = agent.commands.version.first().cloned();
         let cached = store.get_runtime_agent_capability(runtime_agent)?;
 
         let should_probe = cached.is_none();
@@ -137,7 +139,7 @@ pub fn startup_probe_runtime_agents(
             permission_mode: agent.permission_mode,
             permission_modes: agent.permission_modes,
             session_command: Some(session_command),
-            version_command: None,
+            version_command,
             detected_version: capability_record
                 .as_ref()
                 .and_then(|record| record.version.clone()),

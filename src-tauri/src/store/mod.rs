@@ -7,8 +7,8 @@ use std::collections::HashSet;
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, ProjectType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
-    SessionInfo, StageInfo, SubagentInfo, ThreadInfo,
+    ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo,
+    StageInfo, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -81,24 +81,25 @@ pub trait SessionStore: Send + Sync {
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
+    fn list_workflows(&self) -> Result<Vec<WorkflowInfo>>;
     fn list_projects(&self) -> Result<Vec<ProjectInfo>>;
     fn add_project(
         &self,
         path: &str,
         name: Option<&str>,
-        project_type: ProjectType,
+        workflow_id: String,
     ) -> Result<ProjectInfo>;
     fn create_project(
         &self,
         parent_path: &str,
         name: &str,
-        project_type: ProjectType,
+        workflow_id: String,
     ) -> Result<ProjectInfo>;
     fn update_project(
         &self,
         project_id: &str,
         name: Option<&str>,
-        project_type: Option<ProjectType>,
+        workflow_id: Option<String>,
     ) -> Result<ProjectInfo>;
     fn archive_project(&self, project_id: &str) -> Result<()>;
     fn list_agents(&self) -> Result<Vec<AgentInfo>>;
@@ -119,6 +120,7 @@ pub trait SessionStore: Send + Sync {
         agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
         assistant_type: AssistantType,
+        workflow_id: Option<String>,
         project_id: Option<&str>,
     ) -> Result<AssistantInfo>;
     fn update_assistant(
@@ -147,6 +149,7 @@ pub trait SessionStore: Send + Sync {
     fn create_project_stage(
         &self,
         project_id: &str,
+        workflow_id: Option<String>,
         name: &str,
         description: Option<&str>,
     ) -> Result<ProjectStageInfo>;

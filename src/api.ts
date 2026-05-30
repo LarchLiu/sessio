@@ -2,18 +2,21 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Agent = "codex" | "claude" | "gemini";
 
-export type ProjectType =
-  | "code"
-  | "writing"
-  | "research"
-  | "general"
-  | "video_production";
+export type WorkflowType = "builtin" | "custom";
+
+export interface WorkflowInfo {
+  id: string;
+  name: string;
+  type: WorkflowType;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export interface ProjectInfo {
   id: string;
   path: string;
   name: string;
-  type: ProjectType;
+  workflowId: string;
   createdAt: number;
   updatedAt: number;
   sessionCount: number;
@@ -34,9 +37,14 @@ export interface AgentInfo {
   type: AgentType;
   enabled: boolean;
   transport: RuntimeTransportKind;
-  commands: string[];
+  commands: AgentCommandsInfo;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface AgentCommandsInfo {
+  session: string[];
+  version: string[];
 }
 
 export type AssistantType = "builtin" | "custom";
@@ -55,6 +63,7 @@ export interface AssistantInfo {
   agent: AssistantAgentInfo;
   systemPrompt: string | null;
   type: AssistantType;
+  workflowId: string | null;
   projectId: string | null;
   createdAt: number;
   updatedAt: number;
@@ -70,8 +79,16 @@ export interface StageAssistantInfo {
 export type StageType =
   | "research"
   | "plan"
+  | "develop"
   | "build"
+  | "writing"
+  | "editing"
   | "review"
+  | "proofreading"
+  | "screenplay"
+  | "storyboard"
+  | "design"
+  | "production"
   | "human"
   | "done";
 
@@ -85,6 +102,7 @@ export interface StageInfo {
   assistantIds: string[];
   assistants: StageAssistantInfo[];
   type: ProjectStageType;
+  workflowId: string | null;
   kind: StageType | null;
   name: string | null;
   description: string | null;
@@ -98,6 +116,7 @@ export interface ProjectStageInfo {
   id: string;
   projectId: string | null;
   type: ProjectStageType;
+  workflowId: string | null;
   kind: StageType | null;
   name: string | null;
   description: string | null;
@@ -574,48 +593,52 @@ export async function listProjects(): Promise<ProjectInfo[]> {
   return invoke<ProjectInfo[]>("list_projects");
 }
 
+export async function listWorkflows(): Promise<WorkflowInfo[]> {
+  return invoke<WorkflowInfo[]>("list_workflows");
+}
+
 export async function addExistingProject(
   path: string,
   name?: string | null,
-  projectType?: ProjectType | null,
+  workflowId?: string | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("add_existing_project", {
     path,
     name: name ?? null,
-    projectType: projectType ?? null,
+    workflowId: workflowId ?? null,
   });
 }
 
 export async function createProject(
   parentPath: string,
   name: string,
-  projectType?: ProjectType | null,
+  workflowId?: string | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("create_project", {
     parentPath,
     name,
-    projectType: projectType ?? null,
+    workflowId: workflowId ?? null,
   });
 }
 
 export async function createDefaultProject(
   name: string,
-  projectType?: ProjectType | null,
+  workflowId?: string | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("create_default_project", {
     name,
-    projectType: projectType ?? null,
+    workflowId: workflowId ?? null,
   });
 }
 
 export async function updateProject(
   projectId: string,
-  patch: { name?: string | null; type?: ProjectType | null },
+  patch: { name?: string | null; workflowId?: string | null },
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("update_project", {
     projectId,
     name: patch.name ?? null,
-    projectType: patch.type ?? null,
+    workflowId: patch.workflowId ?? null,
   });
 }
 
@@ -636,6 +659,7 @@ export async function createAssistant(input: {
   name: string;
   systemPrompt?: string | null;
   type: AssistantType;
+  workflowId?: string | null;
   projectId?: string | null;
 }): Promise<AssistantInfo> {
   return invoke<AssistantInfo>("create_assistant", {
@@ -643,6 +667,7 @@ export async function createAssistant(input: {
     agent: input.agent,
     systemPrompt: input.systemPrompt ?? null,
     assistantType: input.type,
+    workflowId: input.workflowId ?? null,
     projectId: input.projectId ?? null,
   });
 }
@@ -716,8 +741,14 @@ export async function createProjectStage(
   projectId: string,
   name: string,
   description?: string | null,
+  workflowId?: string | null,
 ): Promise<ProjectStageInfo> {
-  return invoke<ProjectStageInfo>("create_project_stage", { projectId, name, description: description ?? null });
+  return invoke<ProjectStageInfo>("create_project_stage", {
+    projectId,
+    workflowId: workflowId ?? null,
+    name,
+    description: description ?? null,
+  });
 }
 
 export async function updateProjectStage(

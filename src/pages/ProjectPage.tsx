@@ -7,9 +7,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { Bot, Check, Copy, GitBranch, Kanban, Link2, ListChecks, LoaderCircle, Pencil, Plus, Save, Send, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
-import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectType, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, SessionInfo, StageAssistantInfo, StageInfo, StageType, ThreadInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateRuntimeAgentPreferences, updateThread, updateThreadStage, updateThreadStageAssistantAgent } from "../api";
+import { Bot, Check, Clapperboard, Copy, FilePenLine, GitBranch, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Save, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
+import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, SessionInfo, StageInfo, StageType, ThreadInfo, WorkflowInfo } from "../api";
+import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateRuntimeAgentPreferences, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import {
   agentModelSelectOptions,
@@ -19,7 +19,7 @@ import {
   runtimeEffortOptions,
 } from "../components/AgentSelect";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "../components/InlineMenuSelect";
-import { RuntimeEffortControl, RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
+import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import { localeTag, useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
 import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
@@ -47,19 +47,19 @@ const KANBAN_STATUS_ICONS: Record<KanbanStatus, LucideIcon> = {
 const STAGE_TYPE_ICONS: Record<StageType, LucideIcon> = {
   research: CircleGauge,
   plan: ListChecks,
+  develop: GitBranch,
   build: GitBranch,
+  writing: FilePenLine,
+  editing: Scissors,
   review: CircleDot,
+  proofreading: SpellCheck,
+  screenplay: FilePenLine,
+  storyboard: Clapperboard,
+  design: Palette,
+  production: Clapperboard,
   human: CircleUserRound,
   done: CircleCheck,
 };
-
-const PROJECT_TYPES: ProjectType[] = [
-  "code",
-  "writing",
-  "research",
-  "general",
-  "video_production",
-];
 
 function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
   return agent?.model ?? agent?.models[0]?.value ?? "";
@@ -76,10 +76,6 @@ function runtimeSessionOptions(model: string, permissionMode: string, effort = "
 
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
-}
-
-function projectTypeLabel(type: ProjectType, t: (key: string) => string): string {
-  return t(`project.type.${type}`);
 }
 
 function kanbanStatusLabel(status: KanbanStatus, t: (key: string) => string): string {
@@ -101,10 +97,10 @@ function projectStageIcon(stage: ProjectStageInfo) {
   return <Icon className="h-3.5 w-3.5" />;
 }
 
-function projectTypeOptions(t: (key: string) => string): InlineMenuSelectOption[] {
-  return PROJECT_TYPES.map((type) => ({
-    value: type,
-    label: projectTypeLabel(type, t),
+function workflowOptions(workflows: WorkflowInfo[]): InlineMenuSelectOption[] {
+  return workflows.map((workflow) => ({
+    value: workflow.id,
+    label: workflow.name,
   }));
 }
 
@@ -287,18 +283,19 @@ export function ProjectWorkbenchPage({
   const [projectStages, setProjectStages] = useState<ProjectStageInfo[]>([]);
   const [assistants, setAssistants] = useState<AssistantInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [workflowLoading, setWorkflowLoading] = useState(true);
-  const [activeView, setActiveView] = useState<"threads" | "kanban" | "assistants">("threads");
+  const [activeView, setActiveView] = useState<"threads" | "stages" | "assistants" | "kanban">("threads");
   const [newTitle, setNewTitle] = useState("");
   const [editingName, setEditingName] = useState(project.name);
-  const [editingType, setEditingType] = useState<ProjectType>(project.type);
+  const [editingWorkflowId, setEditingWorkflowId] = useState(project.workflowId);
   const [projectSaving, setProjectSaving] = useState(false);
 
   useEffect(() => {
     setEditingName(project.name);
-    setEditingType(project.type);
-  }, [project.id, project.name, project.type]);
+    setEditingWorkflowId(project.workflowId);
+  }, [project.id, project.name, project.workflowId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -321,13 +318,14 @@ export function ProjectWorkbenchPage({
   useEffect(() => {
     let cancelled = false;
     setWorkflowLoading(true);
-    Promise.all([listThreads(project.id), listProjectStages(project.id), listAssistants(project.id), listAgents()])
-      .then(([threadRows, projectStageRows, assistantRows, agentRows]) => {
+    Promise.all([listThreads(project.id), listProjectStages(project.id), listAssistants(project.id), listAgents(), listWorkflows()])
+      .then(([threadRows, projectStageRows, assistantRows, agentRows, workflowRows]) => {
         if (cancelled) return;
         setThreads(threadRows);
         setProjectStages(projectStageRows);
         setAssistants(assistantRows);
         setAgents(agentRows);
+        setWorkflows(workflowRows);
       })
       .catch((err) => {
         if (!cancelled) onError(String(err));
@@ -359,7 +357,7 @@ export function ProjectWorkbenchPage({
     try {
       const updated = await updateProject(project.id, {
         name: editingName,
-        type: editingType,
+        workflowId: editingWorkflowId,
       });
       onProjectUpdated(updated);
     } catch (err) {
@@ -431,10 +429,10 @@ export function ProjectWorkbenchPage({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <RuntimeMenuSelect
-              ariaLabel={t("project.type")}
-              value={editingType}
-              options={projectTypeOptions(t)}
-              onChange={(value) => setEditingType(value as ProjectType)}
+              ariaLabel={t("project.workflowId")}
+              value={editingWorkflowId}
+              options={workflowOptions(workflows)}
+              onChange={setEditingWorkflowId}
             />
             <Tooltip content={t("project.save")} placement="bottom">
               <button
@@ -463,8 +461,9 @@ export function ProjectWorkbenchPage({
           <div className="mb-4 inline-flex rounded-lg bg-ink/[0.06] p-1">
             {([
               ["threads", t("thread.title"), GitBranch],
-              ["kanban", t("project.workbench"), Kanban],
+              ["stages", t("stage.project_stages"), ListChecks],
               ["assistants", t("assistant.title"), Bot],
+              ["kanban", t("project.workbench"), Kanban],
             ] as const).map(([view, label, Icon]) => (
               <button
                 key={view}
@@ -486,15 +485,11 @@ export function ProjectWorkbenchPage({
               threads={threads}
               projectStages={projectStages}
               assistants={assistants}
-              agents={agents}
               sessions={sessions}
               loading={workflowLoading}
               onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
               onThreadUpdated={patchThread}
               onThreadDeleted={(threadId) => setThreads((prev) => prev.filter((thread) => thread.id !== threadId))}
-              onProjectStageCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
-              onProjectStageUpdated={patchProjectStage}
-              onProjectStageDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
               onStageAdded={(stage) =>
                 setThreads((prev) =>
                   prev.map((thread) =>
@@ -516,10 +511,17 @@ export function ProjectWorkbenchPage({
                   ),
                 )
               }
-              onAssistantCreated={(assistant) => setAssistants((prev) => [...prev, assistant])}
-              onAssistantUpdated={patchAssistant}
-              onAssistantDeleted={(assistantId) => setAssistants((prev) => prev.filter((assistant) => assistant.id !== assistantId))}
               onSelectSession={onSelectSession}
+              onError={onError}
+            />
+          )}
+          {activeView === "stages" && (
+            <ProjectStagePicker
+              project={project}
+              stages={projectStages}
+              onCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
+              onUpdated={patchProjectStage}
+              onDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
               onError={onError}
             />
           )}
@@ -603,47 +605,49 @@ function normalizeAssistantIds(ids: string[], assistants: AssistantInfo[]): stri
   return ids.filter((id) => available.has(id) && !seen.has(id) && seen.add(id));
 }
 
-function agentOptions(agents: AgentInfo[]): InlineMenuSelectOption[] {
-  return agents
-    .filter((agent) => agent.enabled)
-    .map((agent) => ({
-      value: agent.id,
-      label: agent.name,
-      suffix: agent.transport,
-      icon: agentIcon(agent),
-    }));
-}
-
-function optionLabel(options: RuntimeAgentOptionMetadata[], value: string): string {
-  return options.find((option) => option.value === value)?.label ?? value;
-}
-
 function optionValue(options: RuntimeAgentOptionMetadata[], fallback: string) {
   return options[0]?.value ?? fallback;
 }
 
-function selectOptions(options: RuntimeAgentOptionMetadata[], current: string): InlineMenuSelectOption[] {
-  const mapped = options.map((option) => ({ value: option.value, label: option.label }));
-  if (mapped.length > 0 || !current) return mapped;
-  return [{ value: current, label: current }];
+function dbAgentsAsRuntimeAgents(agents: AgentInfo[]): RuntimeAgentMetadata[] {
+  return agents
+    .filter((agent) => agent.enabled && (agent.id === "codex" || agent.id === "claude" || agent.id === "gemini"))
+    .map((agent) => ({
+      agent: agent.id as Agent,
+      enabled: agent.enabled,
+      configured: agent.commands.session.length > 0,
+      transport: agent.transport,
+      model: agent.model,
+      models: agent.models,
+      effort: agent.effort,
+      efforts: agent.efforts,
+      permissionMode: agent.permissionMode,
+      permissionModes: agent.permissionModes,
+      sessionCommand: agent.commands.session[0] ?? null,
+      versionCommand: agent.commands.version[0] ?? null,
+      detectedVersion: null,
+      capabilities: null,
+      updatedAt: agent.updatedAt,
+    }));
 }
 
-function assistantAgentPayload(agent: AgentInfo | null | undefined, model: string, mode: string, effort: string): AssistantAgentInfo {
+function assistantAgentPayloadFromRuntime(runtimeAgent: RuntimeAgentMetadata | null | undefined, model: string, mode: string, effort: string): AssistantAgentInfo {
   return {
-    id: agent?.id ?? "",
-    name: agent?.name ?? "",
+    id: runtimeAgent?.agent ?? "",
+    name: runtimeAgent ? AGENT_LABEL[runtimeAgent.agent] : "",
     model,
     mode,
     effort,
   };
 }
 
-function agentIcon(agent: AgentInfo) {
-  const id = agent.icon ?? agent.id;
-  if (id === "codex" || id === "claude" || id === "gemini") {
-    return <AgentGlyph agent={id as Agent} className="h-3.5 w-3.5" />;
-  }
-  return <Bot className="h-3.5 w-3.5" />;
+function defaultAssistantAgent(runtimeAgent: RuntimeAgentMetadata | null | undefined): AssistantAgentInfo {
+  return assistantAgentPayloadFromRuntime(
+    runtimeAgent,
+    initialRuntimeModel(runtimeAgent ?? null),
+    runtimeAgent?.permissionMode ?? runtimeAgent?.permissionModes[0]?.value ?? "",
+    initialRuntimeEffort(runtimeAgent ?? null),
+  );
 }
 
 function removeStageFromThread(thread: ThreadInfo, stageId: string): ThreadInfo {
@@ -663,21 +667,14 @@ function ThreadWorkflowPanel({
   threads,
   projectStages,
   assistants,
-  agents,
   sessions,
   loading,
   onThreadCreated,
   onThreadUpdated,
   onThreadDeleted,
-  onProjectStageCreated,
-  onProjectStageUpdated,
-  onProjectStageDeleted,
   onStageAdded,
   onStageUpdated,
   onStageDeleted,
-  onAssistantCreated,
-  onAssistantUpdated,
-  onAssistantDeleted,
   onSelectSession,
   onError,
 }: {
@@ -685,21 +682,14 @@ function ThreadWorkflowPanel({
   threads: ThreadInfo[];
   projectStages: ProjectStageInfo[];
   assistants: AssistantInfo[];
-  agents: AgentInfo[];
   sessions: SessionInfo[];
   loading: boolean;
   onThreadCreated: (thread: ThreadInfo) => void;
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
-  onProjectStageCreated: (stage: ProjectStageInfo) => void;
-  onProjectStageUpdated: (stage: ProjectStageInfo) => void;
-  onProjectStageDeleted: (stageId: string) => void;
   onStageAdded: (stage: StageInfo) => void;
   onStageUpdated: (stage: StageInfo) => void;
   onStageDeleted: (threadId: string, stageId: string) => void;
-  onAssistantCreated: (assistant: AssistantInfo) => void;
-  onAssistantUpdated: (assistant: AssistantInfo) => void;
-  onAssistantDeleted: (assistantId: string) => void;
   onSelectSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
 }) {
@@ -726,16 +716,7 @@ function ThreadWorkflowPanel({
   };
 
   return (
-    <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(260px,320px)] gap-4 max-xl:grid-cols-1">
-      <div className="min-w-0">
-        <ProjectStagePicker
-          project={project}
-          stages={projectStages}
-          onCreated={onProjectStageCreated}
-          onUpdated={onProjectStageUpdated}
-          onDeleted={onProjectStageDeleted}
-          onError={onError}
-        />
+    <div className="min-w-0">
         <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-lg border border-ink/10 bg-ink/[0.035] p-3">
           <div className="grid min-w-0 gap-2">
             <input
@@ -778,7 +759,6 @@ function ThreadWorkflowPanel({
                 thread={thread}
                 projectStages={projectStages}
                 assistants={assistants}
-                agents={agents}
                 sessions={sessions}
                 onThreadUpdated={onThreadUpdated}
                 onThreadDeleted={onThreadDeleted}
@@ -791,19 +771,6 @@ function ThreadWorkflowPanel({
             ))}
           </div>
         )}
-      </div>
-      <AssistantManagementPanel
-        project={project}
-        assistants={assistants}
-        agents={agents}
-        runtimeAgents={[]}
-        loading={loading}
-        compact
-        onAssistantCreated={onAssistantCreated}
-        onAssistantUpdated={onAssistantUpdated}
-        onAssistantDeleted={onAssistantDeleted}
-        onError={onError}
-      />
     </div>
   );
 }
@@ -812,7 +779,6 @@ function ThreadCard({
   thread,
   projectStages,
   assistants,
-  agents,
   sessions,
   onThreadUpdated,
   onThreadDeleted,
@@ -825,7 +791,6 @@ function ThreadCard({
   thread: ThreadInfo;
   projectStages: ProjectStageInfo[];
   assistants: AssistantInfo[];
-  agents: AgentInfo[];
   sessions: SessionInfo[];
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
@@ -894,7 +859,7 @@ function ThreadCard({
     return {
       value: stage.id,
       label: stage.kind ? stageTypeLabel(stage.kind, t) : stage.name || t("stage.custom"),
-      suffix: assistantNames(stage.assistantIds, assistants, t),
+      description: stage.description ?? undefined,
       icon: <Icon className="h-3.5 w-3.5" />,
     };
   });
@@ -904,6 +869,7 @@ function ThreadCard({
       return {
         value: stage.id,
         label: projectStageLabel(stage, t),
+        description: stage.description ?? undefined,
         suffix: stage.type === "builtin" ? t("stage.builtin") : t("stage.custom"),
         icon: projectStageIcon(stage),
       };
@@ -996,8 +962,6 @@ function ThreadCard({
               key={stage.id}
               thread={thread}
               stage={stage}
-              assistants={assistants}
-              agents={agents}
               sessions={sessions}
               active={stage.id === thread.stageId}
               onThreadUpdated={onThreadUpdated}
@@ -1055,60 +1019,67 @@ function ProjectStagePicker({
         {stages.map((stage) => {
           const custom = stage.type === "custom";
           return (
-            <div key={stage.id} className="inline-flex min-h-7 items-center gap-1 rounded-md bg-surface-panel px-1.5 py-0.5 text-caption text-ink/65">
-              {projectStageIcon(stage)}
-              {custom ? (
-                <div className="flex items-center gap-1">
-                  <input
-                    defaultValue={stage.name ?? ""}
-                    onBlur={async (event) => {
-                      const nextName = event.target.value.trim();
-                      if (!nextName || nextName === stage.name) return;
-                      try {
-                        onUpdated(await updateProjectStage(stage.id, { name: nextName }));
-                      } catch (err) {
-                        onError(String(err));
-                      }
-                    }}
-                    className="h-6 w-24 rounded bg-ink/5 px-1 text-caption text-ink outline-none"
-                  />
-                  <input
-                    defaultValue={stage.description ?? ""}
-                    placeholder={t("stage.description")}
-                    onBlur={async (event) => {
-                      const nextDescription = event.target.value.trim();
-                      if ((stage.description ?? "") === nextDescription) return;
-                      try {
-                        onUpdated(await updateProjectStage(stage.id, { description: nextDescription || null }));
-                      } catch (err) {
-                        onError(String(err));
-                      }
-                    }}
-                    className="h-6 w-32 rounded bg-ink/5 px-1 text-caption text-ink outline-none placeholder:text-ink/30"
-                  />
+            <div key={stage.id} className="grid max-w-[260px] gap-1 rounded-md bg-surface-panel px-1.5 py-1 text-caption text-ink/65">
+              <div className="flex min-h-6 items-center gap-1">
+                {projectStageIcon(stage)}
+                {custom ? (
+                  <div className="flex min-w-0 items-center gap-1">
+                    <input
+                      defaultValue={stage.name ?? ""}
+                      onBlur={async (event) => {
+                        const nextName = event.target.value.trim();
+                        if (!nextName || nextName === stage.name) return;
+                        try {
+                          onUpdated(await updateProjectStage(stage.id, { name: nextName }));
+                        } catch (err) {
+                          onError(String(err));
+                        }
+                      }}
+                      className="h-6 w-24 rounded bg-ink/5 px-1 text-caption text-ink outline-none"
+                    />
+                    <input
+                      defaultValue={stage.description ?? ""}
+                      placeholder={t("stage.description")}
+                      onBlur={async (event) => {
+                        const nextDescription = event.target.value.trim();
+                        if ((stage.description ?? "") === nextDescription) return;
+                        try {
+                          onUpdated(await updateProjectStage(stage.id, { description: nextDescription || null }));
+                        } catch (err) {
+                          onError(String(err));
+                        }
+                      }}
+                      className="h-6 w-32 rounded bg-ink/5 px-1 text-caption text-ink outline-none placeholder:text-ink/30"
+                    />
+                  </div>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate px-1">{projectStageLabel(stage, t)}</span>
+                )}
+                <span className="rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">
+                  {stage.type === "builtin" ? t("stage.builtin") : t("stage.custom")}
+                </span>
+                <button
+                  type="button"
+                  disabled={!custom}
+                  onClick={async () => {
+                    if (!custom) return;
+                    try {
+                      await deleteProjectStage(stage.id);
+                      onDeleted(stage.id);
+                    } catch (err) {
+                      onError(String(err));
+                    }
+                  }}
+                  className="rounded p-0.5 text-ink/25 hover:bg-status-error/10 hover:text-status-error disabled:opacity-25"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
+              {stage.description && !custom && (
+                <div className="line-clamp-2 pl-5 text-meta leading-snug text-ink/40">
+                  {stage.description}
                 </div>
-              ) : (
-                <span className="px-1">{projectStageLabel(stage, t)}</span>
               )}
-              <span className="rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">
-                {stage.type === "builtin" ? t("stage.builtin") : t("stage.custom")}
-              </span>
-              <button
-                type="button"
-                disabled={!custom}
-                onClick={async () => {
-                  if (!custom) return;
-                  try {
-                    await deleteProjectStage(stage.id);
-                    onDeleted(stage.id);
-                  } catch (err) {
-                    onError(String(err));
-                  }
-                }}
-                className="rounded p-0.5 text-ink/25 hover:bg-status-error/10 hover:text-status-error disabled:opacity-25"
-              >
-                <Trash2 className="h-3 w-3" />
-              </button>
             </div>
           );
         })}
@@ -1180,7 +1151,14 @@ function AssistantMultiPicker({
                 {selected.has(assistant.id) && <Check className="h-3 w-3" />}
               </span>
               <Bot className="h-3.5 w-3.5 text-ink/35" />
-              <span className="min-w-0 flex-1 truncate">{assistant.name}</span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{assistant.name}</span>
+                {assistant.systemPrompt && (
+                  <span className="mt-0.5 block line-clamp-2 text-ink/40">
+                    {assistant.systemPrompt}
+                  </span>
+                )}
+              </span>
               <span className="text-meta text-ink/35">{assistant.type === "builtin" ? t("assistant.builtin") : t("assistant.custom")}</span>
             </button>
           ))
@@ -1190,55 +1168,67 @@ function AssistantMultiPicker({
   );
 }
 
-function StageAssistantAgentControls({
-  stage,
-  binding,
+function AssistantAgentSelector({
+  agent,
   agents,
-  onStageUpdated,
-  onError,
+  onChange,
+  compact = false,
 }: {
-  stage: StageInfo;
-  binding: StageAssistantInfo;
+  agent: AssistantAgentInfo;
   agents: AgentInfo[];
-  onStageUpdated: (stage: StageInfo) => void;
-  onError: (error: string | null) => void;
+  onChange: (agent: AssistantAgentInfo) => void;
+  compact?: boolean;
 }) {
   const { t } = useI18n();
-  const selectedAgent = agents.find((agent) => agent.id === binding.agent.id) ?? null;
+  const runtimeAgents = useMemo(() => dbAgentsAsRuntimeAgents(agents), [agents]);
+  const agentKey = (agent.id === "claude" || agent.id === "gemini" ? agent.id : "codex") as Agent;
+  const selectedAgent = runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent.id) ?? null;
+  const agentModelValue = agentModelSelectValue(
+    agentKey,
+    agent.model,
+  );
+  const agentModelOptions = agentModelSelectOptions(
+    runtimeAgents,
+    Object.fromEntries(
+      runtimeAgents.map((runtimeAgent) => [
+        runtimeAgent.agent,
+        <RuntimeEffortControl
+          value={runtimeAgent.agent === agent.id ? agent.effort : initialRuntimeEffort(runtimeAgent)}
+          options={runtimeEffortOptions(runtimeAgent)}
+          onChange={(effort) => {
+            if (runtimeAgent.agent !== agent.id) return;
+            onChange({ ...agent, effort });
+          }}
+        />,
+      ]),
+    ) as Partial<Record<Agent, ReactNode>>,
+    { [agentKey]: agent.effort },
+  );
+  const permissionOptions = runtimePermissionModeOptions(
+    selectedAgent?.permissionModes ?? [],
+    agent.mode,
+    selectedAgent?.agent,
+  );
 
-  const save = async (nextAgent: AssistantAgentInfo) => {
-    try {
-      onStageUpdated(await updateThreadStageAssistantAgent(stage.id, binding.assistantId, nextAgent));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const selectAgent = (agentId: string) => {
-    const next = agents.find((agent) => agent.id === agentId);
+  const selectAgentModel = (value: string) => {
+    const parsed = parseAgentModelSelectValue(value);
+    if (!parsed) return;
+    const next = runtimeAgents.find((agent) => agent.agent === parsed.agent);
     if (!next) return;
-    void save(
-      assistantAgentPayload(
+    onChange(
+      assistantAgentPayloadFromRuntime(
         next,
-        optionValue(next.models, binding.agent.model),
-        optionValue(next.permissionModes, binding.agent.mode),
-        optionValue(next.efforts, binding.agent.effort),
+        parsed.model || optionValue(next.models, agent.model),
+        optionValue(next.permissionModes, agent.mode),
+        next.agent === agent.id ? agent.effort : initialRuntimeEffort(next),
       ),
     );
   };
 
   return (
-    <div className="grid gap-1.5 rounded bg-surface-panel px-1.5 py-1">
-      <div className="flex min-w-0 items-center gap-1.5 text-caption text-ink/55">
-        <Bot className="h-3.5 w-3.5 shrink-0 text-ink/35" />
-        <span className="min-w-0 flex-1 truncate">{binding.name}</span>
-      </div>
-      <div className="grid grid-cols-4 gap-1">
-        <RuntimeMenuSelect ariaLabel={t("agent.title")} value={binding.agent.id} options={agentOptions(agents)} onChange={selectAgent} minMenuWidth={180} maxWidthClassName="max-w-none" />
-        <RuntimeMenuSelect ariaLabel={t("assistant.model")} value={binding.agent.model} options={selectOptions(selectedAgent?.models ?? [], binding.agent.model)} onChange={(model) => void save({ ...binding.agent, model })} minMenuWidth={180} maxWidthClassName="max-w-none" />
-        <RuntimeMenuSelect ariaLabel={t("assistant.permission_mode")} value={binding.agent.mode} options={selectOptions(selectedAgent?.permissionModes ?? [], binding.agent.mode)} onChange={(mode) => void save({ ...binding.agent, mode })} minMenuWidth={180} maxWidthClassName="max-w-none" />
-        <RuntimeMenuSelect ariaLabel={t("assistant.effort")} value={binding.agent.effort} options={selectOptions(selectedAgent?.efforts ?? [], binding.agent.effort)} onChange={(effort) => void save({ ...binding.agent, effort })} minMenuWidth={140} maxWidthClassName="max-w-none" />
-      </div>
+    <div className={(compact ? "grid grid-cols-2 gap-1" : "grid grid-cols-[minmax(0,1fr)_minmax(0,0.72fr)] gap-2")}>
+      <RuntimeMenuSelect ariaLabel={t("agent.title")} value={agentModelValue} options={agentModelOptions} onChange={selectAgentModel} minMenuWidth={220} maxWidthClassName="max-w-none" />
+      <RuntimeMenuSelect ariaLabel={t("assistant.permission_mode")} value={agent.mode} options={permissionOptions} onChange={(mode) => onChange({ ...agent, mode })} minMenuWidth={180} maxWidthClassName="max-w-none" />
     </div>
   );
 }
@@ -1246,8 +1236,6 @@ function StageAssistantAgentControls({
 function StageRow({
   thread,
   stage,
-  assistants,
-  agents,
   sessions,
   active,
   onThreadUpdated,
@@ -1258,8 +1246,6 @@ function StageRow({
 }: {
   thread: ThreadInfo;
   stage: StageInfo;
-  assistants: AssistantInfo[];
-  agents: AgentInfo[];
   sessions: SessionInfo[];
   active: boolean;
   onThreadUpdated: (thread: ThreadInfo) => void;
@@ -1326,18 +1312,6 @@ function StageRow({
           {active && <span className="rounded bg-ink/10 px-1.5 py-0.5 text-meta text-ink/50">{t("thread.active")}</span>}
         </button>
         <div className="flex items-center gap-1">
-          <AssistantMultiPicker
-            assistantIds={stage.assistantIds}
-            assistants={assistants}
-            onChange={async (assistantIds) => {
-              try {
-                onStageUpdated(await updateThreadStage(stage.id, { assistantIds }));
-              } catch (err) {
-                onError(String(err));
-              }
-            }}
-            className="max-w-[160px] rounded px-1"
-          />
           <button
             type="button"
             onClick={async () => {
@@ -1355,8 +1329,6 @@ function StageRow({
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
-        <Bot className="h-3.5 w-3.5" />
-        <span>{assistantNames(stage.assistantIds, assistants, t)}</span>
         <InlineMenuSelect
           value=""
           options={availableSessionOptions}
@@ -1368,20 +1340,6 @@ function StageRow({
           emptyContent={t("kanban.no_unlinked_sessions")}
         />
       </div>
-      {stage.assistants.length > 0 && (
-        <div className="mt-2 grid gap-1.5">
-          {stage.assistants.map((binding) => (
-            <StageAssistantAgentControls
-              key={binding.assistantId}
-              stage={stage}
-              binding={binding}
-              agents={agents}
-              onStageUpdated={onStageUpdated}
-              onError={onError}
-            />
-          ))}
-        </div>
-      )}
       {stage.sessions.length > 0 && (
         <div className="mt-2 flex flex-col gap-1">
           {stage.sessions.map((session) => (
@@ -1434,34 +1392,20 @@ function AssistantManagementPanel({
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
-  const firstRuntime = runtimeAgents[0] ?? null;
-  const firstAgent = agents.find((agent) => agent.enabled) ?? null;
-  const [agentId, setAgentId] = useState(firstAgent?.id ?? "");
+  const runtimeAgentOptions = useMemo(() => dbAgentsAsRuntimeAgents(agents), [agents]);
+  const firstRuntime = runtimeAgentOptions[0] ?? runtimeAgents[0] ?? null;
   const [name, setName] = useState("");
-  const selectedAgent = agents.find((agent) => agent.id === agentId) ?? firstAgent;
-  const [model, setModel] = useState(firstAgent?.model ?? firstAgent?.models[0]?.value ?? firstRuntime?.model ?? firstRuntime?.models[0]?.value ?? "gpt-5-codex");
-  const [permissionMode, setPermissionMode] = useState(firstAgent?.permissionMode ?? firstAgent?.permissionModes[0]?.value ?? "workspace-write");
-  const [effort, setEffort] = useState(firstAgent?.effort ?? firstAgent?.efforts[0]?.value ?? firstRuntime?.effort ?? "medium");
+  const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(() => defaultAssistantAgent(firstRuntime));
   const [systemPrompt, setSystemPrompt] = useState("");
-  const visibleAssistants = assistants.filter((assistant) => assistant.type === "custom" && assistant.projectId === project.id);
+  const builtinAssistants = assistants.filter((assistant) => assistant.type === "builtin");
+  const customAssistants = assistants.filter((assistant) => assistant.type === "custom" && assistant.projectId === project.id);
 
   useEffect(() => {
-    if (agentId && agents.some((agent) => agent.id === agentId)) return;
-    setAgentId(firstAgent?.id ?? "");
-  }, [agentId, agents, firstAgent?.id]);
-
-  useEffect(() => {
-    if (!selectedAgent) return;
-    if (!selectedAgent.models.some((option) => option.value === model)) {
-      setModel(selectedAgent.models[0]?.value ?? model);
+    if (runtimeAgentOptions.some((agent) => agent.agent === agentDraft.id)) return;
+    if (firstRuntime) {
+      setAgentDraft(defaultAssistantAgent(firstRuntime));
     }
-    if (!selectedAgent.permissionModes.some((option) => option.value === permissionMode)) {
-      setPermissionMode(selectedAgent.permissionModes[0]?.value ?? permissionMode);
-    }
-    if (!selectedAgent.efforts.some((option) => option.value === effort)) {
-      setEffort(selectedAgent.efforts[0]?.value ?? effort);
-    }
-  }, [effort, model, permissionMode, selectedAgent]);
+  }, [agentDraft.id, firstRuntime, runtimeAgentOptions]);
 
   const create = async () => {
     const nextName = name.trim();
@@ -1469,7 +1413,7 @@ function AssistantManagementPanel({
     try {
       const assistant = await createAssistant({
         name: nextName,
-        agent: assistantAgentPayload(selectedAgent, model, permissionMode, effort),
+        agent: agentDraft,
         systemPrompt,
         type: "custom" satisfies AssistantType,
         projectId: project.id,
@@ -1488,14 +1432,22 @@ function AssistantManagementPanel({
         <Bot className="h-4 w-4 text-ink/45" />
         {t("assistant.title")}
       </div>
+      {builtinAssistants.length > 0 && (
+        <div className="mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-3">
+          <div className="mb-2 flex items-center gap-2 text-body-sm font-medium text-ink/65">
+            <Bot className="h-4 w-4 text-ink/40" />
+            {t("assistant.builtin")}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {builtinAssistants.map((assistant) => (
+              <AssistantBuiltinChip key={assistant.id} assistant={assistant} />
+            ))}
+          </div>
+        </div>
+      )}
       <div className="grid gap-2 rounded-lg border border-ink/10 bg-ink/[0.035] p-3">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("assistant.name")} className="rounded-md border border-ink/10 bg-surface-panel px-2 py-1.5 text-body-sm text-ink outline-none placeholder:text-ink/35" />
-        <div className="grid grid-cols-4 gap-2">
-          <RuntimeMenuSelect ariaLabel={t("agent.title")} value={agentId} options={agentOptions(agents)} onChange={setAgentId} minMenuWidth={180} maxWidthClassName="max-w-none" />
-          <RuntimeMenuSelect ariaLabel={t("assistant.model")} value={model} options={selectOptions(selectedAgent?.models ?? [], model)} onChange={setModel} minMenuWidth={180} maxWidthClassName="max-w-none" />
-          <RuntimeMenuSelect ariaLabel={t("assistant.permission_mode")} value={permissionMode} options={selectOptions(selectedAgent?.permissionModes ?? [], permissionMode)} onChange={setPermissionMode} minMenuWidth={180} maxWidthClassName="max-w-none" />
-          <RuntimeMenuSelect ariaLabel={t("assistant.effort")} value={effort} options={selectOptions(selectedAgent?.efforts ?? [], effort)} onChange={setEffort} minMenuWidth={140} maxWidthClassName="max-w-none" />
-        </div>
+        <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
         {!compact && (
           <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} placeholder={t("assistant.system_prompt")} rows={3} className="resize-none rounded-md border border-ink/10 bg-surface-panel px-2 py-1.5 text-body-sm text-ink outline-none placeholder:text-ink/35" />
         )}
@@ -1506,11 +1458,11 @@ function AssistantManagementPanel({
       </div>
       {loading ? (
         <div className="py-8 text-center text-body-sm text-ink/40">{t("memory_search.searching")}</div>
-      ) : visibleAssistants.length === 0 ? (
+      ) : customAssistants.length === 0 ? (
         <div className="py-8 text-center text-body-sm text-ink/35">{t("assistant.empty")}</div>
       ) : (
         <div className="mt-3 grid gap-2">
-          {visibleAssistants.map((assistant) => (
+          {customAssistants.map((assistant) => (
             <AssistantRow
               key={assistant.id}
               assistant={assistant}
@@ -1524,6 +1476,27 @@ function AssistantManagementPanel({
         </div>
       )}
     </aside>
+  );
+}
+
+function AssistantBuiltinChip({ assistant }: { assistant: AssistantInfo }) {
+  const { t } = useI18n();
+  return (
+    <div className="grid max-w-[260px] gap-1 rounded-md bg-surface-panel px-2 py-1.5 text-caption text-ink/65">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <Bot className="h-3.5 w-3.5 shrink-0 text-ink/35" />
+        <span className="min-w-0 flex-1 truncate font-medium text-ink/70">{assistant.name}</span>
+        <span className="shrink-0 rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">{t("assistant.builtin")}</span>
+      </div>
+      <div className="truncate pl-5 text-meta text-ink/40">
+        {assistant.agent.name} · {assistant.agent.model} · {assistant.agent.mode} · {assistant.agent.effort}
+      </div>
+      {assistant.systemPrompt && (
+        <div className="line-clamp-3 pl-5 text-meta leading-snug text-ink/45">
+          {assistant.systemPrompt}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1543,40 +1516,22 @@ function AssistantRow({
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
+  const builtin = assistant.type === "builtin";
   const [editing, setEditing] = useState(false);
-  const [agentId, setAgentId] = useState(assistant.agent.id);
   const [name, setName] = useState(assistant.name);
-  const [model, setModel] = useState(assistant.agent.model);
-  const [permissionMode, setPermissionMode] = useState(assistant.agent.mode);
-  const [effort, setEffort] = useState(assistant.agent.effort);
+  const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(assistant.agent);
   const [systemPrompt, setSystemPrompt] = useState(assistant.systemPrompt ?? "");
-  const selectedAgent = agents.find((agent) => agent.id === agentId) ?? null;
 
   useEffect(() => {
-    setAgentId(assistant.agent.id);
     setName(assistant.name);
-    setModel(assistant.agent.model);
-    setPermissionMode(assistant.agent.mode);
-    setEffort(assistant.agent.effort);
+    setAgentDraft(assistant.agent);
     setSystemPrompt(assistant.systemPrompt ?? "");
   }, [assistant]);
 
-  useEffect(() => {
-    if (!selectedAgent) return;
-    if (!selectedAgent.models.some((option) => option.value === model)) {
-      setModel(optionValue(selectedAgent.models, model));
-    }
-    if (!selectedAgent.permissionModes.some((option) => option.value === permissionMode)) {
-      setPermissionMode(optionValue(selectedAgent.permissionModes, permissionMode));
-    }
-    if (!selectedAgent.efforts.some((option) => option.value === effort)) {
-      setEffort(optionValue(selectedAgent.efforts, effort));
-    }
-  }, [effort, model, permissionMode, selectedAgent]);
-
   const save = async () => {
+    if (builtin) return;
     try {
-      onUpdated(await updateAssistant(assistant.id, { name, agent: assistantAgentPayload(selectedAgent, model, permissionMode, effort), systemPrompt }));
+      onUpdated(await updateAssistant(assistant.id, { name, agent: agentDraft, systemPrompt }));
       setEditing(false);
     } catch (err) {
       onError(String(err));
@@ -1584,6 +1539,7 @@ function AssistantRow({
   };
 
   const remove = async () => {
+    if (builtin) return;
     try {
       await deleteAssistant(assistant.id);
       onDeleted(assistant.id);
@@ -1597,12 +1553,7 @@ function AssistantRow({
       {editing ? (
         <div className="grid gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} className="rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
-          <div className="grid grid-cols-4 gap-1.5">
-            <RuntimeMenuSelect ariaLabel={t("agent.title")} value={agentId} options={agentOptions(agents)} onChange={setAgentId} minMenuWidth={180} maxWidthClassName="max-w-none" />
-            <RuntimeMenuSelect ariaLabel={t("assistant.model")} value={model} options={selectOptions(selectedAgent?.models ?? [], model)} onChange={setModel} minMenuWidth={180} maxWidthClassName="max-w-none" />
-            <RuntimeMenuSelect ariaLabel={t("assistant.permission_mode")} value={permissionMode} options={selectOptions(selectedAgent?.permissionModes ?? [], permissionMode)} onChange={setPermissionMode} minMenuWidth={180} maxWidthClassName="max-w-none" />
-            <RuntimeMenuSelect ariaLabel={t("assistant.effort")} value={effort} options={selectOptions(selectedAgent?.efforts ?? [], effort)} onChange={setEffort} minMenuWidth={140} maxWidthClassName="max-w-none" />
-          </div>
+          <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} compact={compact} />
           {!compact && <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows={3} className="resize-none rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />}
           <div className="flex justify-end gap-1">
             <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
@@ -1612,15 +1563,27 @@ function AssistantRow({
       ) : (
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <div className="truncate text-body-sm font-medium text-ink/75">{assistant.name}</div>
-            <div className="mt-1 truncate text-caption text-ink/45">
-              {assistant.agent.name} · {optionLabel(selectedAgent?.models ?? [], assistant.agent.model)} · {optionLabel(selectedAgent?.permissionModes ?? [], assistant.agent.mode)} · {optionLabel(selectedAgent?.efforts ?? [], assistant.agent.effort)}
+            <div className="flex min-w-0 items-center gap-1.5">
+              <div className="truncate text-body-sm font-medium text-ink/75">{assistant.name}</div>
+              <span className="shrink-0 rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">
+                {builtin ? t("assistant.builtin") : t("assistant.custom")}
+              </span>
             </div>
+            <div className="mt-1 truncate text-caption text-ink/45">
+              {assistant.agent.name} · {assistant.agent.model} · {assistant.agent.mode} · {assistant.agent.effort}
+            </div>
+            {assistant.systemPrompt && (
+              <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">
+                {assistant.systemPrompt}
+              </div>
+            )}
           </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
-            <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-3.5 w-3.5" /></button>
-          </div>
+          {!builtin && (
+            <div className="flex shrink-0 items-center gap-1">
+              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
+              <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-3.5 w-3.5" /></button>
+            </div>
+          )}
         </div>
       )}
     </div>

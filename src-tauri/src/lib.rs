@@ -27,8 +27,8 @@ use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, ProjectType, RuntimeAgentMetadata, SessionHistoryTurn,
-    SessionInfo, StageInfo, ThreadInfo,
+    ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo,
+    StageInfo, ThreadInfo, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -40,6 +40,10 @@ use tauri::{
 };
 
 const HISTORY_CACHE_VERSION: i64 = 0;
+
+fn default_workflow_id() -> String {
+    "code".to_string()
+}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +110,11 @@ fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionI
 }
 
 #[tauri::command]
+fn list_workflows(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<WorkflowInfo>, String> {
+    store.list_workflows().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_projects(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<ProjectInfo>, String> {
     store.list_projects().map_err(|e| e.to_string())
 }
@@ -114,7 +123,7 @@ fn list_projects(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<ProjectI
 fn add_existing_project(
     path: String,
     name: Option<String>,
-    project_type: Option<ProjectType>,
+    workflow_id: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
@@ -122,7 +131,7 @@ fn add_existing_project(
         .add_project(
             &path,
             name.as_deref(),
-            project_type.unwrap_or(ProjectType::Code),
+            workflow_id.unwrap_or_else(default_workflow_id),
         )
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
@@ -134,7 +143,7 @@ fn add_existing_project(
 fn create_project(
     parent_path: String,
     name: String,
-    project_type: Option<ProjectType>,
+    workflow_id: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
@@ -142,7 +151,7 @@ fn create_project(
         .create_project(
             &parent_path,
             &name,
-            project_type.unwrap_or(ProjectType::Code),
+            workflow_id.unwrap_or_else(default_workflow_id),
         )
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
@@ -153,7 +162,7 @@ fn create_project(
 #[tauri::command]
 fn create_default_project(
     name: String,
-    project_type: Option<ProjectType>,
+    workflow_id: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
@@ -166,7 +175,7 @@ fn create_default_project(
         .create_project(
             &parent.to_string_lossy(),
             &name,
-            project_type.unwrap_or(ProjectType::Code),
+            workflow_id.unwrap_or_else(default_workflow_id),
         )
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
@@ -178,12 +187,12 @@ fn create_default_project(
 fn update_project(
     project_id: String,
     name: Option<String>,
-    project_type: Option<ProjectType>,
+    workflow_id: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
     let project = store
-        .update_project(&project_id, name.as_deref(), project_type)
+        .update_project(&project_id, name.as_deref(), workflow_id)
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
         .map_err(|e| e.to_string())?;
@@ -277,7 +286,7 @@ fn hydrate_start_request_from_db(
         Some(runtime_transport_option(agent.transport)),
     );
     if !req.options.contains_key("command") && !req.options.contains_key("acpCommand") {
-        if let Some(command) = agent.commands.first().cloned() {
+        if let Some(command) = agent.commands.session.first().cloned() {
             insert_option_if_missing(&mut req.options, "command", Some(command));
         }
     }
@@ -317,6 +326,7 @@ fn create_assistant(
     agent: AssistantAgentInfo,
     system_prompt: Option<String>,
     assistant_type: AssistantType,
+    workflow_id: Option<String>,
     project_id: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -327,6 +337,7 @@ fn create_assistant(
             agent,
             system_prompt.as_deref(),
             assistant_type,
+            workflow_id,
             project_id.as_deref(),
         )
         .map_err(|e| e.to_string())?;
@@ -430,13 +441,14 @@ fn list_project_stages(
 #[tauri::command]
 fn create_project_stage(
     project_id: String,
+    workflow_id: Option<String>,
     name: String,
     description: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectStageInfo, String> {
     let stage = store
-        .create_project_stage(&project_id, &name, description.as_deref())
+        .create_project_stage(&project_id, workflow_id, &name, description.as_deref())
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
@@ -2133,6 +2145,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            list_workflows,
             list_projects,
             add_existing_project,
             create_project,

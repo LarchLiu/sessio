@@ -20,6 +20,7 @@ type MenuPosition = { top: number; left: number; width: number };
 export interface InlineMenuSelectOption {
   value: string;
   label: string;
+  description?: string;
   suffix?: string;
   icon?: ReactNode;
   menuIcon?: ReactNode;
@@ -279,7 +280,14 @@ export default function InlineMenuSelect({
                           }
                         >
                           {menuIcon && <span className="shrink-0">{menuIcon}</span>}
-                          <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate">{option.label}</span>
+                            {option.description && (
+                              <span className="mt-0.5 block line-clamp-2 text-caption leading-snug text-ink/40">
+                                {option.description}
+                              </span>
+                            )}
+                          </span>
                           {option.value === value && (
                             <Check className="h-3.5 w-3.5 shrink-0 text-ink/65" />
                           )}

@@ -23,10 +23,11 @@ import {
 } from "lucide-react";
 import {
   ProjectInfo,
-  ProjectType,
+  WorkflowInfo,
   SessionInfo,
   addExistingProject,
   createDefaultProject,
+  listWorkflows,
   rebuildSessionIndex,
 } from "../api";
 import { Lang, useI18n } from "../i18n";
@@ -42,14 +43,6 @@ import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
 import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
-
-const PROJECT_TYPES: ProjectType[] = [
-  "code",
-  "writing",
-  "research",
-  "general",
-  "video_production",
-];
 
 const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 
@@ -494,14 +487,10 @@ function Chevron({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-function projectTypeLabel(type: ProjectType, t: (key: string) => string): string {
-  return t(`project.type.${type}`);
-}
-
-function projectTypeOptions(t: (key: string) => string) {
-  return PROJECT_TYPES.map((type) => ({
-    value: type,
-    label: projectTypeLabel(type, t),
+function workflowOptions(workflows: WorkflowInfo[]) {
+  return workflows.map((workflow) => ({
+    value: workflow.id,
+    label: workflow.name,
   }));
 }
 
@@ -514,7 +503,8 @@ function ProjectActionsButton({
 }) {
   const { t } = useI18n();
   const [openMenu, setOpenMenu] = useState(false);
-  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; type: ProjectType }>(null);
+  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; workflowId: string }>(null);
+  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -537,17 +527,25 @@ function ProjectActionsButton({
     try {
       const selection = await open({ directory: true, multiple: false });
       if (typeof selection !== "string") return;
+      const workflowRows = workflows.length > 0 ? workflows : await listWorkflows();
+      setWorkflows(workflowRows);
       const defaultName = selection.split(/[\\/]/).filter(Boolean).pop() ?? "";
-      setForm({ mode: "existing", basePath: selection, name: defaultName, type: "code" });
+      setForm({ mode: "existing", basePath: selection, name: defaultName, workflowId: workflowRows[0]?.id ?? "code" });
     } catch (err) {
       onError(String(err));
     }
   };
 
-  const openNewProjectForm = () => {
+  const openNewProjectForm = async () => {
     setOpenMenu(false);
     setFormError(null);
-    setForm({ mode: "new", basePath: null, name: "", type: "code" });
+    try {
+      const workflowRows = workflows.length > 0 ? workflows : await listWorkflows();
+      setWorkflows(workflowRows);
+      setForm({ mode: "new", basePath: null, name: "", workflowId: workflowRows[0]?.id ?? "code" });
+    } catch (err) {
+      onError(String(err));
+    }
   };
 
   const save = async () => {
@@ -563,8 +561,8 @@ function ProjectActionsButton({
     try {
       const project =
         form.mode === "existing"
-          ? await addExistingProject(form.basePath ?? "", name, form.type)
-          : await createDefaultProject(name, form.type);
+          ? await addExistingProject(form.basePath ?? "", name, form.workflowId)
+          : await createDefaultProject(name, form.workflowId);
       onProjectAdded(project);
       setForm(null);
     } catch (err) {
@@ -595,7 +593,7 @@ function ProjectActionsButton({
           onClose={() => setOpenMenu(false)}
           onSelect={(key) => {
             if (key === "existing") void pickExistingProject();
-            else openNewProjectForm();
+            else void openNewProjectForm();
           }}
         />
       )}
@@ -634,12 +632,12 @@ function ProjectActionsButton({
               </div>
             )}
             <div className="mb-4 flex items-center justify-between gap-3">
-              <span className="text-body-sm text-ink/55">{t("project.type")}</span>
+              <span className="text-body-sm text-ink/55">{t("project.workflowId")}</span>
               <RuntimeMenuSelect
-                ariaLabel={t("project.type")}
-                value={form.type}
-                options={projectTypeOptions(t)}
-                onChange={(value) => setForm({ ...form, type: value as ProjectType })}
+                ariaLabel={t("project.workflowId")}
+                value={form.workflowId}
+                options={workflowOptions(workflows)}
+                onChange={(value) => setForm({ ...form, workflowId: value })}
               />
             </div>
             <div className="flex justify-end gap-2">

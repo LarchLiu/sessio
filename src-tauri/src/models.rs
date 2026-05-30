@@ -73,36 +73,38 @@ pub struct SubagentInfo {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectType {
-    Code,
-    Writing,
-    Research,
-    General,
-    VideoProduction,
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowType {
+    Builtin,
+    Custom,
 }
 
-impl ProjectType {
+impl WorkflowType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ProjectType::Code => "code",
-            ProjectType::Writing => "writing",
-            ProjectType::Research => "research",
-            ProjectType::General => "general",
-            ProjectType::VideoProduction => "video_production",
+            WorkflowType::Builtin => "builtin",
+            WorkflowType::Custom => "custom",
         }
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "code" => Some(ProjectType::Code),
-            "writing" => Some(ProjectType::Writing),
-            "research" => Some(ProjectType::Research),
-            "general" => Some(ProjectType::General),
-            "video_production" => Some(ProjectType::VideoProduction),
+            "builtin" => Some(WorkflowType::Builtin),
+            "custom" => Some(WorkflowType::Custom),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub workflow_type: WorkflowType,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,8 +113,7 @@ pub struct ProjectInfo {
     pub id: String,
     pub path: String,
     pub name: String,
-    #[serde(rename = "type")]
-    pub project_type: ProjectType,
+    pub workflow_id: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub session_count: usize,
@@ -158,9 +159,16 @@ pub struct AgentInfo {
     pub agent_type: AgentType,
     pub enabled: bool,
     pub transport: RuntimeTransportKind,
-    pub commands: Vec<String>,
+    pub commands: AgentCommandsInfo,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandsInfo {
+    pub session: Vec<String>,
+    pub version: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -206,6 +214,7 @@ pub struct AssistantInfo {
     pub system_prompt: Option<String>,
     #[serde(rename = "type")]
     pub assistant_type: AssistantType,
+    pub workflow_id: Option<String>,
     pub project_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -225,8 +234,16 @@ pub struct StageAssistantInfo {
 pub enum StageType {
     Research,
     Plan,
+    Develop,
     Build,
+    Writing,
+    Editing,
     Review,
+    Proofreading,
+    Screenplay,
+    Storyboard,
+    Design,
+    Production,
     Human,
     Done,
 }
@@ -236,8 +253,16 @@ impl StageType {
         match self {
             StageType::Research => "research",
             StageType::Plan => "plan",
+            StageType::Develop => "develop",
             StageType::Build => "build",
+            StageType::Writing => "writing",
+            StageType::Editing => "editing",
             StageType::Review => "review",
+            StageType::Proofreading => "proofreading",
+            StageType::Screenplay => "screenplay",
+            StageType::Storyboard => "storyboard",
+            StageType::Design => "design",
+            StageType::Production => "production",
             StageType::Human => "human",
             StageType::Done => "done",
         }
@@ -247,8 +272,16 @@ impl StageType {
         match value {
             "research" => Some(StageType::Research),
             "plan" => Some(StageType::Plan),
+            "develop" => Some(StageType::Develop),
             "build" => Some(StageType::Build),
+            "writing" => Some(StageType::Writing),
+            "editing" => Some(StageType::Editing),
             "review" => Some(StageType::Review),
+            "proofreading" => Some(StageType::Proofreading),
+            "screenplay" => Some(StageType::Screenplay),
+            "storyboard" => Some(StageType::Storyboard),
+            "design" => Some(StageType::Design),
+            "production" => Some(StageType::Production),
             "human" => Some(StageType::Human),
             "done" => Some(StageType::Done),
             _ => None,
@@ -287,6 +320,7 @@ pub struct ProjectStageInfo {
     pub project_id: Option<String>,
     #[serde(rename = "type")]
     pub stage_type: ProjectStageType,
+    pub workflow_id: Option<String>,
     pub kind: Option<StageType>,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -307,6 +341,7 @@ pub struct StageInfo {
     pub assistants: Vec<StageAssistantInfo>,
     #[serde(rename = "type")]
     pub stage_type: ProjectStageType,
+    pub workflow_id: Option<String>,
     pub kind: Option<StageType>,
     pub name: Option<String>,
     pub description: Option<String>,

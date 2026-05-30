@@ -11,10 +11,10 @@ use crate::memory::{
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{
-    Agent, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem,
-    KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType, ProjectType,
+    Agent, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo,
+    AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType,
     RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo,
-    StageType, SubagentInfo, ThreadInfo,
+    StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -241,7 +241,7 @@ CREATE TABLE IF NOT EXISTS projects (
     id         TEXT PRIMARY KEY,
     path       TEXT NOT NULL UNIQUE,
     name       TEXT NOT NULL,
-    type       TEXT NOT NULL DEFAULT 'code',
+    workflow_id TEXT NOT NULL DEFAULT 'code',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     archived   INTEGER NOT NULL DEFAULT 0
@@ -354,22 +354,51 @@ CREATE TABLE IF NOT EXISTS session_history_snapshot_turns (
 "#;
 
 const SCHEMA_V12: &str = r#"
+CREATE TABLE IF NOT EXISTS workflows (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK(type IN ('builtin', 'custom'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflows_type_name
+    ON workflows(type, name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id         TEXT PRIMARY KEY,
+    path       TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    workflow_id TEXT NOT NULL DEFAULT 'code',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(workflow_id) REFERENCES workflows(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_archived_updated ON projects(archived, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
+
 CREATE TABLE IF NOT EXISTS assistants (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     agent_json      TEXT NOT NULL,
     system_prompt   TEXT,
     type            TEXT NOT NULL,
+    workflow_id    TEXT,
     project_id      TEXT,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
-    CHECK((type = 'builtin' AND project_id IS NULL) OR (type = 'custom' AND project_id IS NOT NULL)),
+    CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND project_id IS NULL)
+       OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
+    FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_assistants_project
-    ON assistants(project_id, updated_at DESC);
+    ON assistants(workflow_id, project_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS threads (
     id          TEXT PRIMARY KEY,
@@ -392,6 +421,7 @@ CREATE TABLE IF NOT EXISTS stages (
     id           TEXT PRIMARY KEY,
     project_id   TEXT,
     type         TEXT NOT NULL,
+    workflow_id  TEXT,
     kind         TEXT,
     name         TEXT,
     description  TEXT,
@@ -399,15 +429,31 @@ CREATE TABLE IF NOT EXISTS stages (
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
-    CHECK(kind IS NULL OR kind IN ('research', 'plan', 'build', 'review', 'human', 'done')),
-    CHECK((type = 'builtin' AND project_id IS NULL AND kind IS NOT NULL AND name IS NULL)
-       OR (type = 'custom' AND project_id IS NOT NULL AND kind IS NULL AND name IS NOT NULL)),
-    UNIQUE(project_id, "order"),
+    CHECK(kind IS NULL OR kind IN (
+        'research',
+        'plan',
+        'develop',
+        'build',
+        'writing',
+        'editing',
+        'review',
+        'proofreading',
+        'screenplay',
+        'storyboard',
+        'design',
+        'production',
+        'human',
+        'done'
+    )),
+    CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND project_id IS NULL AND kind IS NOT NULL AND name IS NULL)
+       OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL) AND kind IS NULL AND name IS NOT NULL)),
+    UNIQUE(workflow_id, project_id, "order"),
+    FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_stages_project
-    ON stages(project_id, type, "order", kind, name);
+    ON stages(workflow_id, project_id, type, "order", kind, name);
 
 CREATE TABLE IF NOT EXISTS thread_stages (
     id           TEXT PRIMARY KEY,
@@ -467,7 +513,7 @@ CREATE TABLE IF NOT EXISTS agents (
     type             TEXT NOT NULL,
     enabled          INTEGER NOT NULL DEFAULT 1,
     transport        TEXT NOT NULL DEFAULT 'acp',
-    commands_json    TEXT NOT NULL DEFAULT '[]',
+    commands_json    TEXT NOT NULL DEFAULT '{"session":[],"version":[]}',
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom'))
@@ -475,6 +521,12 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE INDEX IF NOT EXISTS idx_agents_type_enabled
     ON agents(type, enabled, name COLLATE NOCASE);
+"#;
+
+const SCHEMA_V12_PATCH: &str = r#"
+ALTER TABLE projects ADD COLUMN workflow_id TEXT NOT NULL DEFAULT 'code';
+ALTER TABLE assistants ADD COLUMN workflow_id TEXT;
+ALTER TABLE stages ADD COLUMN workflow_id TEXT;
 "#;
 
 fn now_ms() -> i64 {
@@ -601,40 +653,216 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA_V9)?;
     conn.execute_batch(SCHEMA_V11)?;
     conn.execute_batch(SCHEMA_V12)?;
-    seed_builtin_project_stages(conn)?;
+    apply_v12_patch(conn);
+    seed_builtin_workflows(conn)?;
+    seed_builtin_workflow_stages(conn)?;
     seed_builtin_agents(conn)?;
     Ok(())
 }
 
-fn seed_builtin_project_stages(conn: &Connection) -> Result<()> {
-    let now = now_ms();
-    for (index, kind) in [
-        StageType::Research,
-        StageType::Plan,
-        StageType::Build,
-        StageType::Review,
-        StageType::Human,
-        StageType::Done,
-    ]
-    .iter()
-    .copied()
-    .enumerate()
+fn apply_v12_patch(conn: &Connection) {
+    for statement in SCHEMA_V12_PATCH
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
     {
-        let id = format!("stage-builtin-{}", kind.as_str());
+        let _ = conn.execute(statement, []);
+    }
+}
+
+fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
+    let now = now_ms();
+    for (id, name) in BUILTIN_WORKFLOW_SEEDS {
         conn.execute(
-            "INSERT INTO stages (id, project_id, type, kind, name, description, \"order\", created_at, updated_at)
-             VALUES (?, NULL, 'builtin', ?, NULL, NULL, ?, ?, ?)
+            "INSERT INTO workflows (id, name, type, created_at, updated_at)
+             VALUES (?, ?, 'builtin', ?, ?)
              ON CONFLICT(id) DO UPDATE SET
-                type = excluded.type,
-                kind = excluded.kind,
                 name = excluded.name,
-                description = excluded.description,
-                \"order\" = excluded.\"order\",
+                type = excluded.type,
                 updated_at = excluded.updated_at",
-            params![id, kind.as_str(), index as i64, now, now],
+            params![id, name, now, now],
         )?;
     }
     Ok(())
+}
+
+fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
+    let now = now_ms();
+    delete_legacy_builtin_workflow_stages(conn)?;
+    for (workflow_id, _) in BUILTIN_WORKFLOW_SEEDS {
+        for (index, (kind, description)) in builtin_workflow_stage_seeds(workflow_id)
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
+            conn.execute(
+                "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at)
+                 VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    type = excluded.type,
+                    workflow_id = excluded.workflow_id,
+                    kind = excluded.kind,
+                    name = excluded.name,
+                    description = excluded.description,
+                    \"order\" = excluded.\"order\",
+                    updated_at = excluded.updated_at",
+                params![
+                    id,
+                    workflow_id,
+                    kind.as_str(),
+                    description,
+                    index as i64,
+                    now,
+                    now
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+const BUILTIN_WORKFLOW_SEEDS: [(&str, &str); 5] = [
+    ("code", "Code"),
+    ("writing", "Writing"),
+    ("research", "Research"),
+    ("general", "General"),
+    ("video_production", "Video production"),
+];
+
+fn delete_legacy_builtin_workflow_stages(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM stages
+         WHERE type = 'builtin'
+           AND workflow_id IS NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+fn builtin_workflow_stage_seeds(workflow_id: &str) -> Vec<(StageType, &'static str)> {
+    match workflow_id {
+        "code" => vec![
+            (
+                StageType::Research,
+                "Gather technical context, codebase constraints, dependencies, and open questions before implementation.",
+            ),
+            (
+                StageType::Plan,
+                "Turn the engineering goal into a concrete implementation plan with scope, sequencing, and validation.",
+            ),
+            (
+                StageType::Develop,
+                "Implement the planned code changes and keep the thread moving toward a working result.",
+            ),
+            (
+                StageType::Review,
+                "Inspect the code for correctness, regressions, edge cases, and missing validation.",
+            ),
+            (
+                StageType::Human,
+                "Pause for human input, approval, product judgment, or external information.",
+            ),
+            (
+                StageType::Done,
+                "Close the thread after the goal has been completed and verified.",
+            ),
+        ],
+        "writing" => vec![
+            (
+                StageType::Research,
+                "Gather references, audience context, constraints, and source material before drafting.",
+            ),
+            (
+                StageType::Plan,
+                "Shape the writing brief into structure, angle, outline, and acceptance criteria.",
+            ),
+            (
+                StageType::Writing,
+                "Draft the content in the selected voice, structure, and level of detail.",
+            ),
+            (
+                StageType::Editing,
+                "Revise the draft for clarity, flow, accuracy, and fit to the intended audience.",
+            ),
+            (
+                StageType::Proofreading,
+                "Check grammar, spelling, formatting, terminology, and final polish before delivery.",
+            ),
+            (
+                StageType::Human,
+                "Pause for human input, approval, editorial judgment, or external information.",
+            ),
+            (
+                StageType::Done,
+                "Close the thread after the writing goal has been completed and verified.",
+            ),
+        ],
+        "video_production" => vec![
+            (
+                StageType::Research,
+                "Gather references, audience context, production constraints, and creative direction.",
+            ),
+            (
+                StageType::Plan,
+                "Turn the video goal into production scope, sequencing, responsibilities, and success criteria.",
+            ),
+            (
+                StageType::Screenplay,
+                "Write or refine the script, scenes, narration, dialogue, and beats.",
+            ),
+            (
+                StageType::Storyboard,
+                "Map scenes into shots, visual flow, timing, framing, and transitions.",
+            ),
+            (
+                StageType::Design,
+                "Define visual style, assets, graphics, motion language, and production look.",
+            ),
+            (
+                StageType::Production,
+                "Produce the video assets and assemble the planned shots into the working result.",
+            ),
+            (
+                StageType::Review,
+                "Review the cut for story, pacing, accuracy, visual quality, and delivery requirements.",
+            ),
+            (
+                StageType::Human,
+                "Pause for human input, approval, creative judgment, or external information.",
+            ),
+            (
+                StageType::Done,
+                "Close the thread after the video production goal has been completed and verified.",
+            ),
+        ],
+        _ => vec![
+            (
+                StageType::Research,
+                "Gather context, constraints, references, and open questions before committing to an approach.",
+            ),
+            (
+                StageType::Plan,
+                "Turn the goal into a concrete execution plan with scope, sequencing, and success criteria.",
+            ),
+            (
+                StageType::Build,
+                "Implement the planned work and keep the thread moving toward a working result.",
+            ),
+            (
+                StageType::Review,
+                "Inspect the result for correctness, regressions, edge cases, and missing validation.",
+            ),
+            (
+                StageType::Human,
+                "Pause for human input, approval, product judgment, or external information.",
+            ),
+            (
+                StageType::Done,
+                "Close the thread after the goal has been completed and verified.",
+            ),
+        ],
+    }
 }
 
 fn runtime_option(value: &str, label: &str) -> RuntimeAgentOptionMetadata {
@@ -655,7 +883,7 @@ fn seed_builtin_agent(
     permission_modes: Vec<RuntimeAgentOptionMetadata>,
     enabled: bool,
     transport: RuntimeTransportKind,
-    commands: Vec<&str>,
+    commands: AgentCommandsInfo,
     now: i64,
 ) -> Result<()> {
     let id = agent.as_str();
@@ -697,7 +925,6 @@ fn seed_builtin_agent(
             now,
         ],
     )?;
-    upsert_builtin_assistant_for_agent(conn, id, now)?;
     Ok(())
 }
 
@@ -712,8 +939,13 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
             runtime_option("gpt-5.4", "5.4"),
             runtime_option("gpt-5.3-codex", "5.3 Codex"),
         ],
-        None,
-        Vec::new(),
+        Some("medium"),
+        vec![
+            runtime_option("minimal", "Minimal"),
+            runtime_option("low", "Low"),
+            runtime_option("medium", "Medium"),
+            runtime_option("high", "High"),
+        ],
         Some("read-only"),
         vec![
             runtime_option("read-only", "Default permissions"),
@@ -722,7 +954,10 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         ],
         true,
         RuntimeTransportKind::Acp,
-        vec!["npx -y @zed-industries/codex-acp@latest"],
+        AgentCommandsInfo {
+            session: vec!["npx -y @zed-industries/codex-acp@latest".to_string()],
+            version: vec!["codex --version".to_string()],
+        },
         now,
     )?;
     seed_builtin_agent(
@@ -733,8 +968,12 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
             runtime_option("claude-opus-4-7", "Opus 4.7"),
             runtime_option("claude-opus-4-6", "Opus 4.6"),
         ],
-        None,
-        Vec::new(),
+        Some("medium"),
+        vec![
+            runtime_option("low", "Low"),
+            runtime_option("medium", "Medium"),
+            runtime_option("high", "High"),
+        ],
         Some("default"),
         vec![
             runtime_option("default", "Ask before edits"),
@@ -744,7 +983,10 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         ],
         true,
         RuntimeTransportKind::Acp,
-        vec!["npx -y @agentclientprotocol/claude-agent-acp@latest"],
+        AgentCommandsInfo {
+            session: vec!["npx -y @agentclientprotocol/claude-agent-acp@latest".to_string()],
+            version: vec!["claude --version".to_string()],
+        },
         now,
     )?;
     seed_builtin_agent(
@@ -752,15 +994,23 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         Agent::Gemini,
         None,
         Vec::new(),
-        None,
-        Vec::new(),
+        Some("medium"),
+        vec![
+            runtime_option("low", "Low"),
+            runtime_option("medium", "Medium"),
+            runtime_option("high", "High"),
+        ],
         None,
         Vec::new(),
         false,
         RuntimeTransportKind::Acp,
-        vec!["npx -y -- @google/gemini-cli@latest --experimental-acp"],
+        AgentCommandsInfo {
+            session: vec!["npx -y -- @google/gemini-cli@latest --experimental-acp".to_string()],
+            version: vec!["gemini --version".to_string()],
+        },
         now,
     )?;
+    seed_builtin_assistants(conn, now)?;
     Ok(())
 }
 
@@ -1090,6 +1340,7 @@ fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
 
 fn stable_assistant_id(
     assistant_type: AssistantType,
+    workflow_id: Option<&str>,
     project_id: Option<&str>,
     name: &str,
     model: &str,
@@ -1098,6 +1349,7 @@ fn stable_assistant_id(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(assistant_type.as_str().as_bytes());
+    hasher.update(workflow_id.unwrap_or("").as_bytes());
     hasher.update(project_id.unwrap_or("").as_bytes());
     hasher.update(name.as_bytes());
     hasher.update(model.as_bytes());
@@ -1121,6 +1373,7 @@ fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
 }
 
 fn stable_project_stage_id(
+    workflow_id: Option<&str>,
     project_id: Option<&str>,
     stage_name: &str,
     order: i64,
@@ -1128,6 +1381,7 @@ fn stable_project_stage_id(
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
+    hasher.update(workflow_id.unwrap_or("").as_bytes());
     hasher.update(project_id.unwrap_or("").as_bytes());
     hasher.update(stage_name.as_bytes());
     hasher.update(order.to_string().as_bytes());
@@ -1159,15 +1413,26 @@ fn temp_child_path(parent: &Path, name: &str) -> std::path::PathBuf {
 }
 
 fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectInfo> {
-    let project_type_raw: String = row.get(3)?;
     Ok(ProjectInfo {
         id: row.get(0)?,
         path: row.get(1)?,
         name: row.get(2)?,
-        project_type: ProjectType::from_db_str(&project_type_raw).unwrap_or(ProjectType::Code),
+        workflow_id: row.get(3)?,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         session_count: row.get::<_, i64>(6)? as usize,
+    })
+}
+
+fn workflow_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowInfo> {
+    let workflow_type_raw: String = row.get(2)?;
+    Ok(WorkflowInfo {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        workflow_type: WorkflowType::from_db_str(&workflow_type_raw)
+            .unwrap_or(WorkflowType::Custom),
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
     })
 }
 
@@ -1200,6 +1465,12 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
     let permission_modes =
         serde_json::from_str::<Vec<RuntimeAgentOptionMetadata>>(&permission_modes_json)
             .unwrap_or_default();
+    let commands = serde_json::from_str::<AgentCommandsInfo>(&commands_json).unwrap_or_else(|_| {
+        AgentCommandsInfo {
+            session: serde_json::from_str::<Vec<String>>(&commands_json).unwrap_or_default(),
+            version: Vec::new(),
+        }
+    });
     Ok(AgentInfo {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -1213,7 +1484,7 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
         agent_type: AgentType::from_db_str(&agent_type_raw).unwrap_or(AgentType::Custom),
         enabled: row.get::<_, i64>(10)? != 0,
         transport: transport_kind_from_db(&transport_raw),
-        commands: serde_json::from_str::<Vec<String>>(&commands_json).unwrap_or_default(),
+        commands,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
     })
@@ -1222,6 +1493,7 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
 fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo> {
     let agent_json: String = row.get(2)?;
     let assistant_type_raw: String = row.get(4)?;
+    let workflow_id_raw: Option<String> = row.get(5)?;
     Ok(AssistantInfo {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -1237,32 +1509,36 @@ fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo
         system_prompt: row.get(3)?,
         assistant_type: AssistantType::from_db_str(&assistant_type_raw)
             .unwrap_or(AssistantType::Custom),
-        project_id: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-    })
-}
-
-fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectStageInfo> {
-    let stage_type_raw: String = row.get(2)?;
-    let stage_kind_raw: Option<String> = row.get(3)?;
-    Ok(ProjectStageInfo {
-        id: row.get(0)?,
-        project_id: row.get(1)?,
-        stage_type: ProjectStageType::from_db_str(&stage_type_raw)
-            .unwrap_or(ProjectStageType::Custom),
-        kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
-        name: row.get(4)?,
-        description: row.get(5)?,
-        order: row.get(6)?,
+        workflow_id: workflow_id_raw,
+        project_id: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
 }
 
+fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectStageInfo> {
+    let stage_type_raw: String = row.get(2)?;
+    let workflow_id_raw: Option<String> = row.get(3)?;
+    let stage_kind_raw: Option<String> = row.get(4)?;
+    Ok(ProjectStageInfo {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        stage_type: ProjectStageType::from_db_str(&stage_type_raw)
+            .unwrap_or(ProjectStageType::Custom),
+        workflow_id: workflow_id_raw,
+        kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
+        name: row.get(5)?,
+        description: row.get(6)?,
+        order: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
 fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo> {
     let stage_type_raw: String = row.get(4)?;
-    let stage_kind_raw: Option<String> = row.get(5)?;
+    let workflow_id_raw: Option<String> = row.get(5)?;
+    let stage_kind_raw: Option<String> = row.get(6)?;
     Ok(StageInfo {
         id: row.get(0)?,
         thread_id: row.get(1)?,
@@ -1272,12 +1548,13 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
         assistants: Vec::new(),
         stage_type: ProjectStageType::from_db_str(&stage_type_raw)
             .unwrap_or(ProjectStageType::Custom),
+        workflow_id: workflow_id_raw,
         kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
-        name: row.get(6)?,
-        description: row.get(7)?,
-        order: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        name: row.get(7)?,
+        description: row.get(8)?,
+        order: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
         sessions: Vec::new(),
     })
 }
@@ -1297,7 +1574,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
 
 fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo> {
     conn.query_row(
-        "SELECT p.id, p.path, p.name, p.type, p.created_at, p.updated_at,
+        "SELECT p.id, p.path, p.name, p.workflow_id, p.created_at, p.updated_at,
                 COUNT(s.session_id) AS session_count
          FROM projects p
          LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
@@ -1308,6 +1585,20 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
     )
     .optional()?
     .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))
+}
+
+fn ensure_workflow_exists(conn: &Connection, workflow_id: &str) -> Result<()> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM workflows WHERE id = ? LIMIT 1",
+            params![workflow_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        anyhow::bail!("workflow not found: {workflow_id}");
+    }
+    Ok(())
 }
 
 fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
@@ -1338,7 +1629,7 @@ fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
 
 fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
     conn.query_row(
-        "SELECT id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
+        "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
          FROM assistants
          WHERE id = ?",
         params![assistant_id],
@@ -1365,7 +1656,7 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
 
 fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
     conn.query_row(
-        "SELECT id, project_id, type, kind, name, description, \"order\", created_at, updated_at
+        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
          FROM stages
          WHERE id = ?",
         params![stage_id],
@@ -1378,7 +1669,7 @@ fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<Project
 fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<StageInfo> {
     let mut stage = conn
         .query_row(
-            "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.kind, s.name, s.description,
+            "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description,
                     ts.\"order\", ts.created_at, ts.updated_at
              FROM thread_stages ts
              INNER JOIN threads t ON t.id = ts.thread_id
@@ -1404,13 +1695,15 @@ fn validate_assistant_for_project(
     project_id: &str,
     assistant_id: &str,
 ) -> Result<AssistantInfo> {
+    let project = load_project_by_id(conn, project_id)?;
     let assistant = load_assistant_by_id(conn, assistant_id)?;
-    if assistant.assistant_type == AssistantType::Custom
-        && assistant.project_id.as_deref() != Some(project_id)
-    {
-        anyhow::bail!("custom assistant does not belong to this project");
+    if assistant.project_id.as_deref() == Some(project_id) {
+        return Ok(assistant);
     }
-    Ok(assistant)
+    if assistant.project_id.is_none() && assistant.workflow_id == Some(project.workflow_id) {
+        return Ok(assistant);
+    }
+    anyhow::bail!("assistant is not available for this project")
 }
 
 fn validate_assistants_for_project(
@@ -1531,14 +1824,13 @@ fn replace_thread_stage_assistants(
     Ok(())
 }
 
-fn upsert_builtin_assistant_for_agent(conn: &Connection, agent_id: &str, now: i64) -> Result<()> {
-    let agent = load_agent_by_id(conn, agent_id)?;
+fn assistant_agent_from_db_agent(agent: &AgentInfo) -> Option<AssistantAgentInfo> {
     let Some(model) = agent
         .model
         .clone()
         .or_else(|| agent.models.first().map(|option| option.value.clone()))
     else {
-        return Ok(());
+        return None;
     };
     let Some(mode) = agent.permission_mode.clone().or_else(|| {
         agent
@@ -1546,33 +1838,116 @@ fn upsert_builtin_assistant_for_agent(conn: &Connection, agent_id: &str, now: i6
             .first()
             .map(|option| option.value.clone())
     }) else {
-        return Ok(());
+        return None;
     };
     let effort = agent
         .effort
         .clone()
         .or_else(|| agent.efforts.first().map(|option| option.value.clone()))
         .unwrap_or_default();
-    let assistant_agent = AssistantAgentInfo {
+    Some(AssistantAgentInfo {
         id: agent.id.clone(),
         name: agent.name.clone(),
         model,
         mode,
         effort,
+    })
+}
+
+fn seed_builtin_assistants(conn: &Connection, now: i64) -> Result<()> {
+    delete_legacy_agent_builtin_assistants(conn)?;
+    let codex_agent = load_agent_by_id(conn, Agent::Codex.as_str())?;
+    let Some(assistant_agent) = assistant_agent_from_db_agent(&codex_agent) else {
+        return Ok(());
     };
-    let assistant_id = format!("assistant-builtin-{}", agent.id);
+    for (workflow_id, _) in BUILTIN_WORKFLOW_SEEDS {
+        for seed in builtin_assistant_seeds() {
+            upsert_builtin_assistant(conn, workflow_id, seed, &assistant_agent, now)?;
+        }
+    }
+    Ok(())
+}
+
+fn delete_legacy_agent_builtin_assistants(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM assistants
+         WHERE type = 'builtin'
+           AND id IN (
+             'assistant-builtin-codex',
+             'assistant-builtin-claude',
+             'assistant-builtin-gemini',
+             'assistant-builtin-researcher',
+             'assistant-builtin-planner',
+             'assistant-builtin-builder',
+             'assistant-builtin-reviewer'
+           )
+           OR (type = 'builtin' AND workflow_id IS NULL)",
+        [],
+    )?;
+    Ok(())
+}
+
+struct BuiltinAssistantSeed {
+    id: &'static str,
+    name: &'static str,
+    system_prompt: &'static str,
+}
+
+fn builtin_assistant_seeds() -> [BuiltinAssistantSeed; 4] {
+    [
+        BuiltinAssistantSeed {
+            id: "assistant-builtin-researcher",
+            name: "Researcher",
+            system_prompt: "Research the problem space before implementation. Gather relevant context, inspect existing project behavior, identify constraints and unknowns, and report concise findings with sources or file references when available.",
+        },
+        BuiltinAssistantSeed {
+            id: "assistant-builtin-planner",
+            name: "Planner",
+            system_prompt: "Create a clear execution plan from the thread goal. Break the work into ordered steps, call out dependencies and risks, and keep the plan focused on decisions that unblock implementation.",
+        },
+        BuiltinAssistantSeed {
+            id: "assistant-builtin-builder",
+            name: "Builder",
+            system_prompt: "Implement the selected plan. Make scoped changes, follow the existing project patterns, keep behavior coherent across the stack, and verify the result with the most relevant checks.",
+        },
+        BuiltinAssistantSeed {
+            id: "assistant-builtin-reviewer",
+            name: "Reviewer",
+            system_prompt: "Review the completed work for correctness, regressions, data model consistency, edge cases, and missing tests. Prioritize actionable findings and confirm when no blocking issues remain.",
+        },
+    ]
+}
+
+fn upsert_builtin_assistant(
+    conn: &Connection,
+    workflow_id: &str,
+    seed: BuiltinAssistantSeed,
+    assistant_agent: &AssistantAgentInfo,
+    now: i64,
+) -> Result<()> {
+    let id = format!("{}-{}", seed.id, workflow_id);
     let agent_json = serde_json::to_string(&assistant_agent)?;
     conn.execute(
         "INSERT INTO assistants (
-            id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
-         ) VALUES (?, ?, ?, NULL, 'builtin', NULL, ?, ?)
+            id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'builtin', ?, NULL, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             agent_json = excluded.agent_json,
+            system_prompt = excluded.system_prompt,
             type = excluded.type,
+            workflow_id = excluded.workflow_id,
             project_id = excluded.project_id,
             updated_at = excluded.updated_at",
-        params![assistant_id, agent.name, agent_json, now, now],
+        params![
+            id,
+            seed.name,
+            agent_json,
+            seed.system_prompt,
+            workflow_id,
+            now,
+            now
+        ],
     )?;
     Ok(())
 }
@@ -1724,7 +2099,7 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
 
 fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.kind, s.name, s.description,
+        "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description,
                 ts.\"order\", ts.created_at, ts.updated_at
          FROM thread_stages ts
          INNER JOIN threads t ON t.id = ts.thread_id
@@ -2272,10 +2647,21 @@ impl SessionStore for SqliteStore {
         Ok(sessions)
     }
 
+    fn list_workflows(&self) -> Result<Vec<WorkflowInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, type, created_at, updated_at
+             FROM workflows
+             ORDER BY type ASC, name COLLATE NOCASE ASC",
+        )?;
+        let rows = stmt.query_map([], workflow_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT p.id, p.path, p.name, p.type, p.created_at, p.updated_at,
+            "SELECT p.id, p.path, p.name, p.workflow_id, p.created_at, p.updated_at,
                     COUNT(s.session_id) AS session_count
              FROM projects p
              LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
@@ -2291,17 +2677,18 @@ impl SessionStore for SqliteStore {
         &self,
         path: &str,
         name: Option<&str>,
-        project_type: ProjectType,
+        workflow_id: String,
     ) -> Result<ProjectInfo> {
         let canonical = canonical_project_path(path)?;
         let name = clean_project_name(name, &canonical)?;
         let id = stable_project_id(&canonical);
         let now = now_ms();
         let conn = self.conn.lock().unwrap();
+        ensure_workflow_exists(&conn, &workflow_id)?;
         conn.execute(
-            "INSERT INTO projects (id, path, name, type, created_at, updated_at, archived)
+            "INSERT INTO projects (id, path, name, workflow_id, created_at, updated_at, archived)
              VALUES (?, ?, ?, ?, ?, ?, 0)",
-            params![id, canonical, name, project_type.as_str(), now, now],
+            params![id, canonical, name, workflow_id.as_str(), now, now],
         )
         .with_context(|| "add project")?;
         load_project_by_id(&conn, &id)
@@ -2311,7 +2698,7 @@ impl SessionStore for SqliteStore {
         &self,
         parent_path: &str,
         name: &str,
-        project_type: ProjectType,
+        workflow_id: String,
     ) -> Result<ProjectInfo> {
         let parent = canonical_project_path(parent_path)?;
         let clean_name = clean_child_project_name(name)?;
@@ -2325,14 +2712,14 @@ impl SessionStore for SqliteStore {
         std::fs::create_dir(&project_path)
             .with_context(|| format!("create project directory {}", project_path.display()))?;
         let path = canonical_project_path(&project_path.to_string_lossy())?;
-        self.add_project(&path, Some(&clean_name), project_type)
+        self.add_project(&path, Some(&clean_name), workflow_id)
     }
 
     fn update_project(
         &self,
         project_id: &str,
         name: Option<&str>,
-        project_type: Option<ProjectType>,
+        workflow_id: Option<String>,
     ) -> Result<ProjectInfo> {
         let conn = self.conn.lock().unwrap();
         let current = load_project_by_id(&conn, project_id)?;
@@ -2340,12 +2727,13 @@ impl SessionStore for SqliteStore {
             Some(value) => clean_project_name(Some(value), &current.path)?,
             None => current.name,
         };
-        let next_type = project_type.unwrap_or(current.project_type);
+        let next_workflow_id = workflow_id.unwrap_or(current.workflow_id);
+        ensure_workflow_exists(&conn, &next_workflow_id)?;
         conn.execute(
             "UPDATE projects
-             SET name = ?, type = ?, updated_at = ?
+             SET name = ?, workflow_id = ?, updated_at = ?
              WHERE id = ? AND archived = 0",
-            params![next_name, next_type.as_str(), now_ms(), project_id],
+            params![next_name, next_workflow_id.as_str(), now_ms(), project_id],
         )?;
         load_project_by_id(&conn, project_id)
     }
@@ -2422,25 +2810,28 @@ impl SessionStore for SqliteStore {
                 id,
             ],
         )?;
-        upsert_builtin_assistant_for_agent(&conn, id, now)?;
+        seed_builtin_assistants(&conn, now)?;
         load_agent_by_id(&conn, id)
     }
 
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
         let conn = self.conn.lock().unwrap();
         let assistants = if let Some(project_id) = project_id {
-            load_project_by_id(&conn, project_id)?;
+            let project = load_project_by_id(&conn, project_id)?;
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
                  FROM assistants
-                 WHERE type = 'builtin' OR project_id = ?
-                 ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
+                 WHERE (project_id IS NULL AND workflow_id = ?) OR project_id = ?
+                 ORDER BY type ASC, project_id IS NOT NULL ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
-            let rows = stmt.query_map(params![project_id], assistant_from_row)?;
+            let rows = stmt.query_map(
+                params![project.workflow_id.as_str(), project_id],
+                assistant_from_row,
+            )?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
                  FROM assistants
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
@@ -2456,6 +2847,7 @@ impl SessionStore for SqliteStore {
         agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
         assistant_type: AssistantType,
+        workflow_id: Option<String>,
         project_id: Option<&str>,
     ) -> Result<AssistantInfo> {
         let name = name.trim();
@@ -2487,32 +2879,50 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let db_agent = load_agent_by_id(&conn, &agent.id)?;
         agent.name = db_agent.name;
+        let project = project_id
+            .map(|project_id| load_project_by_id(&conn, project_id))
+            .transpose()?;
+        let resolved_workflow_id =
+            workflow_id.or_else(|| project.as_ref().map(|project| project.workflow_id.clone()));
         match assistant_type {
             AssistantType::Builtin => {
                 if project_id.is_some() {
                     anyhow::bail!("builtin assistant cannot be linked to a project");
                 }
+                if resolved_workflow_id.is_none() {
+                    anyhow::bail!("builtin assistant requires a workflow");
+                }
             }
             AssistantType::Custom => {
-                let Some(project_id) = project_id else {
-                    anyhow::bail!("custom assistant requires a project");
-                };
-                load_project_by_id(&conn, project_id)?;
+                if project_id.is_none() && resolved_workflow_id.is_none() {
+                    anyhow::bail!("custom assistant requires a project or workflow");
+                }
             }
         }
+        if let Some(workflow_id) = resolved_workflow_id.as_deref() {
+            ensure_workflow_exists(&conn, workflow_id)?;
+        }
         let now = now_ms();
-        let id = stable_assistant_id(assistant_type, project_id, name, &agent.model, now);
+        let id = stable_assistant_id(
+            assistant_type,
+            resolved_workflow_id.as_deref(),
+            project_id,
+            name,
+            &agent.model,
+            now,
+        );
         let agent_json = serde_json::to_string(&agent)?;
         conn.execute(
             "INSERT INTO assistants (
-                id, name, agent_json, system_prompt, type, project_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 name,
                 agent_json,
                 system_prompt,
                 assistant_type.as_str(),
+                resolved_workflow_id.as_deref(),
                 project_id,
                 now,
                 now,
@@ -2693,20 +3103,24 @@ impl SessionStore for SqliteStore {
 
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>> {
         let conn = self.conn.lock().unwrap();
-        load_project_by_id(&conn, project_id)?;
+        let project = load_project_by_id(&conn, project_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, type, kind, name, description, \"order\", created_at, updated_at
+            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
              FROM stages
-             WHERE type = 'builtin' OR project_id = ?
-             ORDER BY type ASC, \"order\" ASC, created_at ASC",
+             WHERE (project_id IS NULL AND workflow_id = ?) OR project_id = ?
+             ORDER BY type ASC, project_id IS NOT NULL ASC, \"order\" ASC, created_at ASC",
         )?;
-        let rows = stmt.query_map(params![project_id], project_stage_from_row)?;
+        let rows = stmt.query_map(
+            params![project.workflow_id.as_str(), project_id],
+            project_stage_from_row,
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn create_project_stage(
         &self,
         project_id: &str,
+        workflow_id: Option<String>,
         name: &str,
         description: Option<&str>,
     ) -> Result<ProjectStageInfo> {
@@ -2716,20 +3130,52 @@ impl SessionStore for SqliteStore {
         }
         let description = description.map(str::trim).filter(|value| !value.is_empty());
         let conn = self.conn.lock().unwrap();
-        load_project_by_id(&conn, project_id)?;
+        let project = load_project_by_id(&conn, project_id)?;
+        let requested_workflow_id = workflow_id;
+        let resolved_workflow_id = requested_workflow_id
+            .as_deref()
+            .unwrap_or(project.workflow_id.as_str());
+        ensure_workflow_exists(&conn, resolved_workflow_id)?;
+        let template_project_id = if requested_workflow_id.is_some() {
+            None
+        } else {
+            Some(project_id)
+        };
         let next_order: i64 = conn
             .query_row(
-                "SELECT COALESCE(MAX(\"order\"), -1) + 1 FROM stages WHERE project_id = ? AND type = 'custom'",
-                params![project_id],
+                "SELECT COALESCE(MAX(\"order\"), -1) + 1 FROM stages
+                 WHERE type = 'custom'
+                   AND workflow_id = ?
+                   AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)",
+                params![
+                    resolved_workflow_id,
+                    template_project_id,
+                    template_project_id
+                ],
                 |row| row.get(0),
             )
             .unwrap_or(0);
         let now = now_ms();
-        let id = stable_project_stage_id(Some(project_id), name, next_order, now);
+        let id = stable_project_stage_id(
+            Some(resolved_workflow_id),
+            template_project_id,
+            name,
+            next_order,
+            now,
+        );
         conn.execute(
-            "INSERT INTO stages (id, project_id, type, kind, name, description, \"order\", created_at, updated_at)
-             VALUES (?, ?, 'custom', NULL, ?, ?, ?, ?, ?)",
-            params![id, project_id, name, description, next_order, now, now],
+            "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at)
+             VALUES (?, ?, 'custom', ?, NULL, ?, ?, ?, ?, ?)",
+            params![
+                id,
+                template_project_id,
+                resolved_workflow_id,
+                name,
+                description,
+                next_order,
+                now,
+                now
+            ],
         )?;
         load_project_stage_by_id(&conn, &id)
     }
@@ -2747,9 +3193,10 @@ impl SessionStore for SqliteStore {
         if current.stage_type != ProjectStageType::Custom {
             anyhow::bail!("builtin project stage cannot be updated");
         }
-        let Some(project_id) = current.project_id.as_deref() else {
-            anyhow::bail!("custom project stage requires a project");
+        let Some(scope_workflow_id) = current.workflow_id else {
+            anyhow::bail!("custom project stage requires a workflow");
         };
+        let scope_project_id = current.project_id.as_deref();
         let next_name = match name {
             Some(value) => {
                 let value = value.trim();
@@ -2771,8 +3218,15 @@ impl SessionStore for SqliteStore {
         };
         let max_order: i64 = tx
             .query_row(
-                "SELECT COALESCE(MAX(\"order\"), 0) FROM stages WHERE project_id = ? AND type = 'custom'",
-                params![project_id],
+                "SELECT COALESCE(MAX(\"order\"), 0) FROM stages
+                 WHERE type = 'custom'
+                   AND workflow_id = ?
+                   AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)",
+                params![
+                    scope_workflow_id.as_str(),
+                    scope_project_id,
+                    scope_project_id
+                ],
                 |row| row.get(0),
             )
             .unwrap_or(0);
@@ -2786,15 +3240,35 @@ impl SessionStore for SqliteStore {
                 tx.execute(
                     "UPDATE stages
                      SET \"order\" = \"order\" + 1
-                     WHERE project_id = ? AND type = 'custom' AND \"order\" >= ? AND \"order\" < ? AND id != ?",
-                    params![project_id, next_order, current.order, stage_id],
+                     WHERE type = 'custom'
+                       AND workflow_id = ?
+                       AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
+                       AND \"order\" >= ? AND \"order\" < ? AND id != ?",
+                    params![
+                        scope_workflow_id.as_str(),
+                        scope_project_id,
+                        scope_project_id,
+                        next_order,
+                        current.order,
+                        stage_id
+                    ],
                 )?;
             } else {
                 tx.execute(
                     "UPDATE stages
                      SET \"order\" = \"order\" - 1
-                     WHERE project_id = ? AND type = 'custom' AND \"order\" <= ? AND \"order\" > ? AND id != ?",
-                    params![project_id, next_order, current.order, stage_id],
+                     WHERE type = 'custom'
+                       AND workflow_id = ?
+                       AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
+                       AND \"order\" <= ? AND \"order\" > ? AND id != ?",
+                    params![
+                        scope_workflow_id.as_str(),
+                        scope_project_id,
+                        scope_project_id,
+                        next_order,
+                        current.order,
+                        stage_id
+                    ],
                 )?;
             }
         }
@@ -2830,10 +3304,13 @@ impl SessionStore for SqliteStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let thread = load_thread_by_id(&tx, thread_id)?;
+        let project = load_project_by_id(&tx, &thread.project_id)?;
         let project_stage = load_project_stage_by_id(&tx, stage_id)?;
-        if project_stage.stage_type == ProjectStageType::Custom
-            && project_stage.project_id.as_deref() != Some(thread.project_id.as_str())
-        {
+        let stage_available = project_stage.project_id.as_deref()
+            == Some(thread.project_id.as_str())
+            || (project_stage.project_id.is_none()
+                && project_stage.workflow_id == Some(project.workflow_id));
+        if !stage_available {
             anyhow::bail!("project stage does not belong to this thread's project");
         }
         let assistant_bindings =
@@ -4662,9 +5139,9 @@ mod migration_tests {
         assert_eq!(store.list_all_sessions().unwrap().len(), 1);
 
         let project = store
-            .add_project(&project_path, Some("Visible"), ProjectType::Research)
+            .add_project(&project_path, Some("Visible"), "research".to_string())
             .unwrap();
-        assert_eq!(project.project_type, ProjectType::Research);
+        assert_eq!(project.workflow_id, "research");
         assert_eq!(store.list_sessions().unwrap().len(), 1);
 
         let _ = std::fs::remove_file(&path);
@@ -4683,18 +5160,18 @@ mod migration_tests {
             .create_project(
                 &parent.to_string_lossy(),
                 "video-plan",
-                ProjectType::VideoProduction,
+                "video_production".to_string(),
             )
             .unwrap();
         assert_eq!(created.name, "video-plan");
-        assert_eq!(created.project_type, ProjectType::VideoProduction);
+        assert_eq!(created.workflow_id, "video_production");
         assert!(Path::new(&created.path).exists());
 
         let updated = store
-            .update_project(&created.id, Some("Video Plan"), Some(ProjectType::General))
+            .update_project(&created.id, Some("Video Plan"), Some("general".to_string()))
             .unwrap();
         assert_eq!(updated.name, "Video Plan");
-        assert_eq!(updated.project_type, ProjectType::General);
+        assert_eq!(updated.workflow_id, "general");
 
         let item = store
             .create_kanban_item(&created.id, "Draft outline", Some("scene beats"))
@@ -4730,6 +5207,107 @@ mod migration_tests {
     }
 
     #[test]
+    fn builtin_workflow_stage_kinds_are_workflow_specific() {
+        let path = unique_db("sessio-workflow-stage-kinds");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-workflow-stage-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let code = store
+            .create_project(&parent.to_string_lossy(), "code-flow", "code".to_string())
+            .unwrap();
+        let writing = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "writing-flow",
+                "writing".to_string(),
+            )
+            .unwrap();
+        let video = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "video-flow",
+                "video_production".to_string(),
+            )
+            .unwrap();
+        let general = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "general-flow",
+                "general".to_string(),
+            )
+            .unwrap();
+
+        let code_kinds = stage_kinds(store.list_project_stages(&code.id).unwrap());
+        assert_eq!(
+            code_kinds,
+            vec![
+                StageType::Research,
+                StageType::Plan,
+                StageType::Develop,
+                StageType::Review,
+                StageType::Human,
+                StageType::Done,
+            ]
+        );
+
+        let writing_kinds = stage_kinds(store.list_project_stages(&writing.id).unwrap());
+        assert_eq!(
+            writing_kinds,
+            vec![
+                StageType::Research,
+                StageType::Plan,
+                StageType::Writing,
+                StageType::Editing,
+                StageType::Proofreading,
+                StageType::Human,
+                StageType::Done,
+            ]
+        );
+
+        let video_kinds = stage_kinds(store.list_project_stages(&video.id).unwrap());
+        assert_eq!(
+            video_kinds,
+            vec![
+                StageType::Research,
+                StageType::Plan,
+                StageType::Screenplay,
+                StageType::Storyboard,
+                StageType::Design,
+                StageType::Production,
+                StageType::Review,
+                StageType::Human,
+                StageType::Done,
+            ]
+        );
+
+        let general_kinds = stage_kinds(store.list_project_stages(&general.id).unwrap());
+        assert_eq!(
+            general_kinds,
+            vec![
+                StageType::Research,
+                StageType::Plan,
+                StageType::Build,
+                StageType::Review,
+                StageType::Human,
+                StageType::Done,
+            ]
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    fn stage_kinds(stages: Vec<ProjectStageInfo>) -> Vec<StageType> {
+        stages
+            .into_iter()
+            .filter(|stage| stage.stage_type == ProjectStageType::Builtin)
+            .filter_map(|stage| stage.kind)
+            .collect()
+    }
+
+    #[test]
     fn kanban_items_link_and_aggregate_sessions() {
         let path = unique_db("sessio-kanban-session-links");
         let store = SqliteStore::open(&path).unwrap();
@@ -4738,7 +5316,7 @@ mod migration_tests {
         std::fs::create_dir(&parent).unwrap();
 
         let project = store
-            .create_project(&parent.to_string_lossy(), "linked", ProjectType::Code)
+            .create_project(&parent.to_string_lossy(), "linked", "code".to_string())
             .unwrap();
         let session = SessionInfo {
             id: "session-a".to_string(),
@@ -4788,7 +5366,7 @@ mod migration_tests {
         let other_parent = temp_child_path(&std::env::temp_dir(), "sessio-kanban-other-parent");
         std::fs::create_dir(&other_parent).unwrap();
         let other_project = store
-            .create_project(&other_parent.to_string_lossy(), "other", ProjectType::Code)
+            .create_project(&other_parent.to_string_lossy(), "other", "code".to_string())
             .unwrap();
         let other_session = SessionInfo {
             id: "session-b".to_string(),
@@ -4822,11 +5400,38 @@ mod migration_tests {
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
         assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.3-codex"));
+        assert_eq!(codex_agent.commands.session.len(), 1);
+        assert_eq!(
+            codex_agent.commands.version.first().map(String::as_str),
+            Some("codex --version")
+        );
+        assert_eq!(codex_agent.effort.as_deref(), Some("medium"));
+        assert!(codex_agent
+            .efforts
+            .iter()
+            .any(|option| option.value == "high"));
+        let claude_agent = agents.iter().find(|agent| agent.id == "claude").unwrap();
+        assert_eq!(
+            claude_agent.commands.version.first().map(String::as_str),
+            Some("claude --version")
+        );
+        assert_eq!(claude_agent.effort.as_deref(), Some("medium"));
+        assert!(claude_agent
+            .efforts
+            .iter()
+            .any(|option| option.value == "high"));
+        let gemini_agent = agents.iter().find(|agent| agent.id == "gemini").unwrap();
+        assert_eq!(
+            gemini_agent.commands.version.first().map(String::as_str),
+            Some("gemini --version")
+        );
+        assert_eq!(gemini_agent.model, None);
+        assert_eq!(gemini_agent.effort.as_deref(), Some("medium"));
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-parent");
         std::fs::create_dir(&parent).unwrap();
 
         let project = store
-            .create_project(&parent.to_string_lossy(), "threaded", ProjectType::Code)
+            .create_project(&parent.to_string_lossy(), "threaded", "code".to_string())
             .unwrap();
         let assistant = store
             .create_assistant(
@@ -4840,6 +5445,7 @@ mod migration_tests {
                 },
                 Some("Build carefully"),
                 AssistantType::Custom,
+                None,
                 Some(&project.id),
             )
             .unwrap();
@@ -4850,14 +5456,25 @@ mod migration_tests {
         assert_eq!(assistant.agent.mode, "read-only");
         assert_eq!(assistant.agent.effort, "medium");
         let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
-        assert_eq!(project_assistants.len(), 3);
+        assert_eq!(project_assistants.len(), 5);
         assert_eq!(
             project_assistants
                 .iter()
                 .filter(|item| item.assistant_type == AssistantType::Builtin)
                 .count(),
-            2
+            4
         );
+        let builtin_builder = project_assistants
+            .iter()
+            .find(|item| item.id == "assistant-builtin-builder-code")
+            .unwrap();
+        assert_eq!(builtin_builder.name, "Builder");
+        assert_eq!(builtin_builder.agent.id, "codex");
+        assert!(builtin_builder
+            .system_prompt
+            .as_deref()
+            .unwrap()
+            .contains("Implement the selected plan"));
         assert!(project_assistants
             .iter()
             .any(|item| item.id == assistant.id));
@@ -4873,6 +5490,7 @@ mod migration_tests {
                 },
                 None,
                 AssistantType::Custom,
+                None,
                 Some(&project.id),
             )
             .unwrap();
@@ -4890,8 +5508,24 @@ mod migration_tests {
             .find(|stage| stage.kind == Some(StageType::Research))
             .unwrap()
             .clone();
+        assert!(research_option
+            .description
+            .as_deref()
+            .unwrap()
+            .contains("technical context"));
+        assert!(builtin_stages
+            .iter()
+            .any(|stage| stage.kind == Some(StageType::Develop)));
+        assert!(builtin_stages
+            .iter()
+            .all(|stage| stage.kind != Some(StageType::Build)));
         let build_option = store
-            .create_project_stage(&project.id, "Implementation", Some("Implementation notes"))
+            .create_project_stage(
+                &project.id,
+                None,
+                "Implementation",
+                Some("Implementation notes"),
+            )
             .unwrap();
         assert_eq!(build_option.stage_type, ProjectStageType::Custom);
         assert_eq!(build_option.name.as_deref(), Some("Implementation"));
@@ -5146,7 +5780,7 @@ mod migration_tests {
         let other_parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-other-parent");
         std::fs::create_dir(&other_parent).unwrap();
         let other_project = store
-            .create_project(&other_parent.to_string_lossy(), "other", ProjectType::Code)
+            .create_project(&other_parent.to_string_lossy(), "other", "code".to_string())
             .unwrap();
         let other_session = SessionInfo {
             id: "session-b".to_string(),
@@ -5178,6 +5812,7 @@ mod migration_tests {
                 },
                 None,
                 AssistantType::Custom,
+                None,
                 Some(&other_project.id),
             )
             .unwrap();
@@ -5185,7 +5820,7 @@ mod migration_tests {
             .create_thread(&other_project.id, "Other thread", None)
             .unwrap();
         let other_stage_option = store
-            .create_project_stage(&other_project.id, "Other Plan", None)
+            .create_project_stage(&other_project.id, None, "Other Plan", None)
             .unwrap();
         let other_assistant_ids = vec![other_assistant.id.clone()];
         let other_stage = store
@@ -5211,7 +5846,7 @@ mod migration_tests {
         store.delete_assistant(&assistant.id).unwrap();
         store.delete_assistant(&reviewer.id).unwrap();
         let remaining_assistants = store.list_assistants(Some(&project.id)).unwrap();
-        assert_eq!(remaining_assistants.len(), 2);
+        assert_eq!(remaining_assistants.len(), 4);
         assert!(remaining_assistants
             .iter()
             .all(|item| item.assistant_type == AssistantType::Builtin));
@@ -5228,6 +5863,7 @@ mod migration_tests {
                 },
                 None,
                 AssistantType::Custom,
+                None,
                 Some(&project.id),
             )
             .is_err());
@@ -5243,6 +5879,7 @@ mod migration_tests {
                 },
                 None,
                 AssistantType::Builtin,
+                None,
                 Some(&project.id),
             )
             .is_err());

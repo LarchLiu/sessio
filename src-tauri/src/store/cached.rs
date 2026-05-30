@@ -4,8 +4,8 @@ use std::sync::{Arc, RwLock};
 
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, ProjectType, RuntimeAgentOptionMetadata, SessionInfo, StageInfo,
-    SubagentInfo, ThreadInfo,
+    ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, SessionInfo, StageInfo,
+    SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -129,6 +129,10 @@ impl SessionStore for CachedStore {
         Ok(self.snapshot.read().unwrap().to_vec())
     }
 
+    fn list_workflows(&self) -> Result<Vec<WorkflowInfo>> {
+        self.inner.list_workflows()
+    }
+
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         self.inner.list_projects()
     }
@@ -137,27 +141,27 @@ impl SessionStore for CachedStore {
         &self,
         path: &str,
         name: Option<&str>,
-        project_type: ProjectType,
+        workflow_id: String,
     ) -> Result<ProjectInfo> {
-        self.inner.add_project(path, name, project_type)
+        self.inner.add_project(path, name, workflow_id)
     }
 
     fn create_project(
         &self,
         parent_path: &str,
         name: &str,
-        project_type: ProjectType,
+        workflow_id: String,
     ) -> Result<ProjectInfo> {
-        self.inner.create_project(parent_path, name, project_type)
+        self.inner.create_project(parent_path, name, workflow_id)
     }
 
     fn update_project(
         &self,
         project_id: &str,
         name: Option<&str>,
-        project_type: Option<ProjectType>,
+        workflow_id: Option<String>,
     ) -> Result<ProjectInfo> {
-        self.inner.update_project(project_id, name, project_type)
+        self.inner.update_project(project_id, name, workflow_id)
     }
 
     fn archive_project(&self, project_id: &str) -> Result<()> {
@@ -199,10 +203,17 @@ impl SessionStore for CachedStore {
         agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
         assistant_type: AssistantType,
+        workflow_id: Option<String>,
         project_id: Option<&str>,
     ) -> Result<AssistantInfo> {
-        self.inner
-            .create_assistant(name, agent, system_prompt, assistant_type, project_id)
+        self.inner.create_assistant(
+            name,
+            agent,
+            system_prompt,
+            assistant_type,
+            workflow_id,
+            project_id,
+        )
     }
 
     fn update_assistant(
@@ -253,11 +264,12 @@ impl SessionStore for CachedStore {
     fn create_project_stage(
         &self,
         project_id: &str,
+        workflow_id: Option<String>,
         name: &str,
         description: Option<&str>,
     ) -> Result<ProjectStageInfo> {
         self.inner
-            .create_project_stage(project_id, name, description)
+            .create_project_stage(project_id, workflow_id, name, description)
     }
 
     fn update_project_stage(
