@@ -217,6 +217,7 @@ pub struct AssistantInfo {
     pub assistant_type: AssistantType,
     pub workflow_id: Option<String>,
     pub project_id: Option<String>,
+    pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -326,6 +327,7 @@ pub struct ProjectStageInfo {
     pub name: Option<String>,
     pub description: Option<String>,
     pub order: i64,
+    pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
@@ -349,6 +351,7 @@ pub struct StageInfo {
     pub name: Option<String>,
     pub description: Option<String>,
     pub order: i64,
+    pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
@@ -363,10 +366,13 @@ pub struct ThreadInfo {
     pub goal: String,
     pub description: Option<String>,
     pub stage_id: Option<String>,
+    pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
     pub stages: Vec<StageInfo>,
+    #[serde(default)]
+    pub sessions: Vec<SessionInfo>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

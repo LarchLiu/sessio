@@ -10,7 +10,7 @@ import {
 import HashIcon from "@iconify-react/mynaui/hash";
 import { Bot, Check, Clapperboard, Copy, FilePenLine, GitBranch, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Save, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
 import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, StageType, ThreadInfo, WorkflowInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateRuntimeAgentPreferences, updateThread } from "../api";
+import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, linkThreadSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, unlinkThreadSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateRuntimeAgentPreferences, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import {
   agentModelSelectOptions,
@@ -656,6 +656,16 @@ function ThreadWorkflowPanel({
   const [goal, setGoal] = useState("");
   const [description, setDescription] = useState("");
   const [creating, setCreating] = useState(false);
+  const linkedSessionKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const thread of threads) {
+      for (const session of thread.sessions) keys.add(sessionIdentityKey(session));
+      for (const stage of thread.stages) {
+        for (const session of stage.sessions) keys.add(sessionIdentityKey(session));
+      }
+    }
+    return keys;
+  }, [threads]);
 
   const create = async () => {
     const nextGoal = goal.trim();
@@ -719,6 +729,7 @@ function ThreadWorkflowPanel({
                 projectStages={projectStages}
                 assistants={assistants}
                 sessions={sessions}
+                linkedSessionKeys={linkedSessionKeys}
                 onThreadUpdated={onThreadUpdated}
                 onThreadDeleted={onThreadDeleted}
                 onStageAdded={onStageAdded}
@@ -739,6 +750,7 @@ function ThreadCard({
   projectStages,
   assistants,
   sessions,
+  linkedSessionKeys,
   onThreadUpdated,
   onThreadDeleted,
   onStageAdded,
@@ -751,6 +763,7 @@ function ThreadCard({
   projectStages: ProjectStageInfo[];
   assistants: AssistantInfo[];
   sessions: SessionInfo[];
+  linkedSessionKeys: Set<string>;
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
   onStageAdded: (stage: StageInfo) => void;
@@ -764,7 +777,27 @@ function ThreadCard({
   const [goal, setGoal] = useState(thread.goal);
   const [description, setDescription] = useState(thread.description ?? "");
   const [newStageId, setNewStageId] = useState(projectStages[0]?.id ?? "");
-  const [newAssistantIds, setNewAssistantIds] = useState<string[]>(() => (assistants[0]?.id ? [assistants[0].id] : []));
+  const enabledAssistants = useMemo(
+    () => assistants.filter((assistant) => assistant.projectId === thread.projectId && assistant.enabled),
+    [assistants, thread.projectId],
+  );
+  const [newAssistantIds, setNewAssistantIds] = useState<string[]>(() => (enabledAssistants[0]?.id ? [enabledAssistants[0].id] : []));
+  const sessionByKey = useMemo(() => {
+    const map = new Map<string, SessionInfo>();
+    for (const session of sessions) map.set(sessionIdentityKey(session), session);
+    return map;
+  }, [sessions]);
+  const availableSessionOptions = useMemo(
+    () =>
+      sessions
+        .filter((session) => !linkedSessionKeys.has(sessionIdentityKey(session)))
+        .map((session) => ({
+          value: sessionIdentityKey(session),
+          label: session.title ?? session.firstUserMessage ?? t("list.no_user_message"),
+          icon: <AgentGlyph agent={session.agent} className="h-3.5 w-3.5" />,
+        })),
+    [linkedSessionKeys, sessions, t],
+  );
 
   useEffect(() => {
     setGoal(thread.goal);
@@ -773,11 +806,11 @@ function ThreadCard({
 
   useEffect(() => {
     setNewAssistantIds((current) => {
-      const normalized = normalizeAssistantIds(current, assistants);
-      if (normalized.length > 0 || !assistants[0]?.id) return normalized;
-      return [assistants[0].id];
+      const normalized = normalizeAssistantIds(current, enabledAssistants);
+      if (normalized.length > 0 || !enabledAssistants[0]?.id) return normalized;
+      return [enabledAssistants[0].id];
     });
-  }, [assistants]);
+  }, [enabledAssistants]);
 
   useEffect(() => {
     const availableStages = projectStages.filter((stage) => !thread.stages.some((threadStage) => threadStage.stageId === stage.id));
@@ -807,6 +840,24 @@ function ThreadCard({
     if (!newStageId || newAssistantIds.length === 0) return;
     try {
       onStageAdded(await addThreadStage(thread.id, newStageId, newAssistantIds));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const linkSession = async (value: string) => {
+    const session = sessionByKey.get(value);
+    if (!session) return;
+    try {
+      onThreadUpdated(await linkThreadSession(thread.id, session.agent, session.id));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const unlinkSession = async (session: SessionInfo) => {
+    try {
+      onThreadUpdated(await unlinkThreadSession(thread.id, session.agent, session.id));
     } catch (err) {
       onError(String(err));
     }
@@ -871,6 +922,46 @@ function ThreadCard({
           )}
         </div>
       </div>
+      <div className="mt-3 border-t border-ink/10 pt-3">
+        <div className="flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
+          <Link2 className="h-3.5 w-3.5 text-ink/30" />
+          <span>{t("kanban.sessions_count", { count: thread.sessions.length })}</span>
+          <InlineMenuSelect
+            value=""
+            options={availableSessionOptions}
+            onChange={(value) => void linkSession(value)}
+            ariaLabel={t("kanban.link_session")}
+            placeholder={t("kanban.link_session")}
+            minMenuWidth={220}
+            className="ml-auto h-6 max-w-[110px] border-r-0 px-1 py-0 text-caption text-ink/45 hover:text-ink"
+            emptyContent={t("kanban.no_unlinked_sessions")}
+          />
+        </div>
+        {thread.sessions.length > 0 && (
+          <div className="mt-2 flex flex-col gap-1">
+            {thread.sessions.map((session) => (
+              <div key={sessionIdentityKey(session)} className="group flex min-w-0 items-center gap-1.5 rounded bg-ink/[0.035] px-1.5 py-1">
+                <button
+                  type="button"
+                  onClick={() => onSelectSession(session)}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-caption text-ink/60 hover:text-ink"
+                >
+                  <AgentGlyph agent={session.agent} className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{session.title ?? session.firstUserMessage ?? t("list.no_user_message")}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={t("kanban.unlink_session")}
+                  onClick={() => void unlinkSession(session)}
+                  className="rounded p-0.5 text-ink/25 opacity-0 transition hover:bg-ink/8 hover:text-ink/65 group-hover:opacity-100"
+                >
+                  <Unlink className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3">
         <InlineMenuSelect
           value={currentStageId}
@@ -900,7 +991,7 @@ function ThreadCard({
         />
         <AssistantMultiPicker
           assistantIds={newAssistantIds}
-          assistants={assistants}
+          assistants={enabledAssistants}
           onChange={setNewAssistantIds}
           className="max-w-[200px] rounded-md bg-ink/[0.05] px-2"
         />
@@ -922,6 +1013,7 @@ function ThreadCard({
               thread={thread}
               stage={stage}
               sessions={sessions}
+              linkedSessionKeys={linkedSessionKeys}
               active={stage.id === thread.stageId}
               onThreadUpdated={onThreadUpdated}
               onStageUpdated={onStageUpdated}
@@ -1019,19 +1111,18 @@ function ProjectStagePicker({
                 </span>
                 <button
                   type="button"
-                  disabled={!custom}
                   onClick={async () => {
-                    if (!custom) return;
                     try {
-                      await deleteProjectStage(stage.id);
+                      if (custom) await deleteProjectStage(stage.id);
+                      else await updateProjectStage(stage.id, { enabled: false });
                       onDeleted(stage.id);
                     } catch (err) {
                       onError(String(err));
                     }
                   }}
-                  className="rounded p-0.5 text-ink/25 hover:bg-status-error/10 hover:text-status-error disabled:opacity-25"
+                  className="rounded p-0.5 text-ink/25 hover:bg-status-error/10 hover:text-status-error"
                 >
-                  <Trash2 className="h-3 w-3" />
+                  {custom ? <Trash2 className="h-3 w-3" /> : <CircleSlash className="h-3 w-3" />}
                 </button>
               </div>
               {stage.description && !custom && (
@@ -1131,6 +1222,7 @@ function StageRow({
   thread,
   stage,
   sessions,
+  linkedSessionKeys,
   active,
   onThreadUpdated,
   onStageUpdated,
@@ -1141,6 +1233,7 @@ function StageRow({
   thread: ThreadInfo;
   stage: StageInfo;
   sessions: SessionInfo[];
+  linkedSessionKeys: Set<string>;
   active: boolean;
   onThreadUpdated: (thread: ThreadInfo) => void;
   onStageUpdated: (stage: StageInfo) => void;
@@ -1149,7 +1242,6 @@ function StageRow({
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
-  const linkedSessionKeys = useMemo(() => new Set(stage.sessions.map(sessionIdentityKey)), [stage.sessions]);
   const sessionByKey = useMemo(() => {
     const map = new Map<string, SessionInfo>();
     for (const session of sessions) map.set(sessionIdentityKey(session), session);
@@ -1291,8 +1383,9 @@ function AssistantManagementPanel({
   const [name, setName] = useState("");
   const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(() => defaultAssistantAgent(firstRuntime));
   const [systemPrompt, setSystemPrompt] = useState("");
-  const builtinAssistants = assistants.filter((assistant) => assistant.type === "builtin");
-  const customAssistants = assistants.filter((assistant) => assistant.type === "custom" && assistant.projectId === project.id);
+  const projectAssistants = assistants.filter((assistant) => assistant.projectId === project.id);
+  const builtinAssistants = projectAssistants.filter((assistant) => assistant.type === "builtin");
+  const customAssistants = projectAssistants.filter((assistant) => assistant.type === "custom");
 
   useEffect(() => {
     if (runtimeAgentOptions.some((agent) => agent.agent === agentDraft.id)) return;

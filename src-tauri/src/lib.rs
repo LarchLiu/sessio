@@ -194,6 +194,7 @@ fn add_existing_project(
     path: String,
     name: Option<String>,
     workflow_id: Option<String>,
+    enabled_stage_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
@@ -202,6 +203,7 @@ fn add_existing_project(
             &path,
             name.as_deref(),
             workflow_id.unwrap_or_else(default_workflow_id),
+            enabled_stage_ids.as_deref(),
         )
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
@@ -214,6 +216,7 @@ fn create_project(
     parent_path: String,
     name: String,
     workflow_id: Option<String>,
+    enabled_stage_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
@@ -222,6 +225,7 @@ fn create_project(
             &parent_path,
             &name,
             workflow_id.unwrap_or_else(default_workflow_id),
+            enabled_stage_ids.as_deref(),
         )
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
@@ -233,6 +237,7 @@ fn create_project(
 fn create_default_project(
     name: String,
     workflow_id: Option<String>,
+    enabled_stage_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
@@ -246,6 +251,7 @@ fn create_default_project(
             &parent.to_string_lossy(),
             &name,
             workflow_id.unwrap_or_else(default_workflow_id),
+            enabled_stage_ids.as_deref(),
         )
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
@@ -434,12 +440,19 @@ fn update_assistant(
     name: Option<String>,
     agent: Option<AssistantAgentInfo>,
     system_prompt: Option<Option<String>>,
+    enabled: Option<bool>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<AssistantInfo, String> {
     let system_prompt_ref = system_prompt.as_ref().map(|value| value.as_deref());
     let assistant = store
-        .update_assistant(&assistant_id, name.as_deref(), agent, system_prompt_ref)
+        .update_assistant(
+            &assistant_id,
+            name.as_deref(),
+            agent,
+            system_prompt_ref,
+            enabled,
+        )
         .map_err(|e| e.to_string())?;
     app.emit("assistants_updated", ())
         .map_err(|e| e.to_string())?;
@@ -488,12 +501,13 @@ fn update_thread(
     thread_id: String,
     goal: Option<String>,
     description: Option<Option<String>>,
+    enabled: Option<bool>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ThreadInfo, String> {
     let description_ref = description.as_ref().map(|value| value.as_deref());
     let thread = store
-        .update_thread(&thread_id, goal.as_deref(), description_ref)
+        .update_thread(&thread_id, goal.as_deref(), description_ref, enabled)
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(thread)
@@ -552,12 +566,13 @@ fn update_project_stage(
     name: Option<String>,
     description: Option<Option<String>>,
     order: Option<i64>,
+    enabled: Option<bool>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectStageInfo, String> {
     let description_ref = description.as_ref().map(|value| value.as_deref());
     let stage = store
-        .update_project_stage(&stage_id, name.as_deref(), description_ref, order)
+        .update_project_stage(&stage_id, name.as_deref(), description_ref, order, enabled)
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
@@ -610,11 +625,12 @@ fn update_thread_stage(
     thread_stage_id: String,
     assistant_ids: Option<Vec<String>>,
     order: Option<i64>,
+    enabled: Option<bool>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<StageInfo, String> {
     let stage = store
-        .update_thread_stage(&thread_stage_id, assistant_ids.as_deref(), order)
+        .update_thread_stage(&thread_stage_id, assistant_ids.as_deref(), order, enabled)
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
@@ -657,6 +673,36 @@ fn set_thread_stage(
 ) -> Result<ThreadInfo, String> {
     let thread = store
         .set_thread_stage(&thread_id, &stage_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(thread)
+}
+
+#[tauri::command]
+fn link_thread_session(
+    thread_id: String,
+    agent: Agent,
+    session_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ThreadInfo, String> {
+    let thread = store
+        .link_thread_session(&thread_id, agent, &session_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(thread)
+}
+
+#[tauri::command]
+fn unlink_thread_session(
+    thread_id: String,
+    agent: Agent,
+    session_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ThreadInfo, String> {
+    let thread = store
+        .unlink_thread_session(&thread_id, agent, &session_id)
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(thread)
@@ -2374,6 +2420,8 @@ pub fn run() {
             update_thread_stage_assistant_agent,
             delete_thread_stage,
             set_thread_stage,
+            link_thread_session,
+            unlink_thread_session,
             link_stage_session,
             unlink_stage_session,
             list_kanban_items,

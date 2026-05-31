@@ -1,10 +1,11 @@
-import { type MouseEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { createPortal } from "react-dom";
 import HashIcon from "@iconify-react/mynaui/hash";
 import {
   ChevronDown,
+  Check,
   CircleAlert,
   Download,
   Folder,
@@ -26,8 +27,10 @@ import {
   WorkflowInfo,
   addExistingProject,
   createDefaultProject,
+  listWorkflowStages,
   listThreads,
   listWorkflows,
+  type ProjectStageInfo,
   type ThreadInfo,
 } from "../api";
 import { useI18n } from "../i18n";
@@ -44,6 +47,11 @@ import ScrollArea from "./ScrollArea";
 import Tooltip from "./Tooltip";
 
 const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
+
+type SidebarSessionEntry = {
+  session: SessionInfo;
+  source: "project" | "thread";
+};
 
 type AppSidebarProps = {
   isMac: boolean;
@@ -129,13 +137,23 @@ export default function AppSidebar({
   useEffect(() => {
     const unlisten = listen("threads_updated", () => {
       for (const project of projectGroups) {
-        if (projectListModes[project.key] === "threads") refreshProjectThreads(project);
+        if (expandedProjects.has(project.key) || projectListModes[project.key] === "threads") {
+          refreshProjectThreads(project);
+        }
       }
     });
     return () => {
       unlisten.then((f) => f()).catch(() => {});
     };
-  }, [projectGroups, projectListModes]);
+  }, [expandedProjects, projectGroups, projectListModes]);
+
+  useEffect(() => {
+    for (const project of projectGroups) {
+      if (!expandedProjects.has(project.key)) continue;
+      if (projectThreads[project.key] || loadingProjectThreads.has(project.key)) continue;
+      refreshProjectThreads(project);
+    }
+  }, [expandedProjects, loadingProjectThreads, projectGroups, projectThreads]);
 
   const toggleProjectListMode = (project: ProjectGroup) => {
     setProjectListModes((prev) => {
@@ -432,8 +450,9 @@ function ProjectActionsButton({
 }) {
   const { t } = useI18n();
   const [openMenu, setOpenMenu] = useState(false);
-  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; workflowId: string }>(null);
+  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; workflowId: string; enabledStageIds: string[] }>(null);
   const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
+  const [workflowStages, setWorkflowStages] = useState<Record<string, ProjectStageInfo[]>>({});
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -450,6 +469,35 @@ function ProjectActionsButton({
     },
   ];
 
+  const defaultEnabledStageIds = (stages: ProjectStageInfo[]) =>
+    stages.filter((stage) => stage.type === "builtin" && stage.enabled).map((stage) => stage.id);
+
+  const loadWorkflowStages = async (workflowId: string) => {
+    if (workflowStages[workflowId]) return workflowStages[workflowId];
+    const stages = await listWorkflowStages(workflowId);
+    setWorkflowStages((prev) => ({ ...prev, [workflowId]: stages }));
+    return stages;
+  };
+
+  const updateWorkflow = async (workflowId: string) => {
+    const stages = await loadWorkflowStages(workflowId);
+    setForm((current) =>
+      current
+        ? { ...current, workflowId, enabledStageIds: defaultEnabledStageIds(stages) }
+        : current,
+    );
+  };
+
+  const toggleStage = (stageId: string) => {
+    setForm((current) => {
+      if (!current) return current;
+      const selected = new Set(current.enabledStageIds);
+      if (selected.has(stageId)) selected.delete(stageId);
+      else selected.add(stageId);
+      return { ...current, enabledStageIds: Array.from(selected) };
+    });
+  };
+
   const pickExistingProject = async () => {
     setOpenMenu(false);
     setFormError(null);
@@ -458,8 +506,10 @@ function ProjectActionsButton({
       if (typeof selection !== "string") return;
       const workflowRows = workflows.length > 0 ? workflows : await listWorkflows();
       setWorkflows(workflowRows);
+      const workflowId = workflowRows[0]?.id ?? "code";
+      const stages = await loadWorkflowStages(workflowId);
       const defaultName = selection.split(/[\\/]/).filter(Boolean).pop() ?? "";
-      setForm({ mode: "existing", basePath: selection, name: defaultName, workflowId: workflowRows[0]?.id ?? "code" });
+      setForm({ mode: "existing", basePath: selection, name: defaultName, workflowId, enabledStageIds: defaultEnabledStageIds(stages) });
     } catch (err) {
       onError(String(err));
     }
@@ -471,7 +521,9 @@ function ProjectActionsButton({
     try {
       const workflowRows = workflows.length > 0 ? workflows : await listWorkflows();
       setWorkflows(workflowRows);
-      setForm({ mode: "new", basePath: null, name: "", workflowId: workflowRows[0]?.id ?? "code" });
+      const workflowId = workflowRows[0]?.id ?? "code";
+      const stages = await loadWorkflowStages(workflowId);
+      setForm({ mode: "new", basePath: null, name: "", workflowId, enabledStageIds: defaultEnabledStageIds(stages) });
     } catch (err) {
       onError(String(err));
     }
@@ -490,8 +542,8 @@ function ProjectActionsButton({
     try {
       const project =
         form.mode === "existing"
-          ? await addExistingProject(form.basePath ?? "", name, form.workflowId)
-          : await createDefaultProject(name, form.workflowId);
+          ? await addExistingProject(form.basePath ?? "", name, form.workflowId, form.enabledStageIds)
+          : await createDefaultProject(name, form.workflowId, form.enabledStageIds);
       onProjectAdded(project);
       setForm(null);
     } catch (err) {
@@ -566,9 +618,33 @@ function ProjectActionsButton({
                 ariaLabel={t("project.workflowId")}
                 value={form.workflowId}
                 options={workflowOptions(workflows)}
-                onChange={(value) => setForm({ ...form, workflowId: value })}
+                onChange={(value) => void updateWorkflow(value)}
                 portalZIndex={100}
               />
+            </div>
+            <div className="mb-4">
+              <div className="mb-2 text-body-sm text-ink/55">{t("stage.project_stages")}</div>
+              <div className="flex flex-wrap gap-1.5">
+                {(workflowStages[form.workflowId] ?? []).filter((stage) => stage.type === "builtin").map((stage) => {
+                  const selected = form.enabledStageIds.includes(stage.id);
+                  return (
+                    <button
+                      key={stage.id}
+                      type="button"
+                      onClick={() => toggleStage(stage.id)}
+                      className={
+                        "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " +
+                        (selected
+                          ? "border-ink/18 bg-ink/8 text-ink/80"
+                          : "border-ink/10 bg-ink/[0.03] text-ink/45 hover:text-ink/70")
+                      }
+                    >
+                      {selected && <Check className="h-3 w-3" />}
+                      {stage.kind ? t(`stage.type.${stage.kind}`) : stage.name || t("stage.custom")}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setForm(null)} className="rounded-md px-3 py-1.5 text-body-sm text-ink/60 hover:bg-ink/5 hover:text-ink">
@@ -633,11 +709,27 @@ function ProjectSidebarGroup({
   const { t } = useI18n();
   const projectButtonRef = useRef<HTMLButtonElement>(null);
   const FolderIcon = expanded ? FolderOpen : Folder;
+  const sessionEntries = useMemo(() => {
+    const byKey = new Map<string, SidebarSessionEntry>();
+    for (const session of project.sessions) {
+      byKey.set(sessionIdentityKey(session), { session, source: "project" });
+    }
+    for (const thread of threads) {
+      for (const session of thread.sessions) {
+        byKey.set(sessionIdentityKey(session), { session, source: "thread" });
+      }
+    }
+    return Array.from(byKey.values()).sort((a, b) => {
+      const left = a.session.updatedAt ?? a.session.startedAt ?? 0;
+      const right = b.session.updatedAt ?? b.session.startedAt ?? 0;
+      return right - left;
+    });
+  }, [project.sessions, threads]);
   const visibleSessions = sessionsExpanded
-    ? project.sessions
-    : project.sessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+    ? sessionEntries
+    : sessionEntries.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
   const canToggleSessionLimit =
-    listMode === "sessions" && project.sessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+    listMode === "sessions" && sessionEntries.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
   const displayCount = listMode === "threads" ? threads.length : project.count;
   const ProjectListModeIcon = listMode === "threads" ? MessageSquareText : HashIcon;
   const toggleSessionLimit = () => {
@@ -764,7 +856,7 @@ function ProjectSidebarGroup({
                 ))
               )
             ) : (
-              visibleSessions.map((session) => {
+              visibleSessions.map(({ session, source }) => {
                 const key = sessionKey(session);
                 const unreadKeys = sessionUnreadKeys(session, runtimeSessionAliases);
                 const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)] ?? session.id;
@@ -773,6 +865,7 @@ function ProjectSidebarGroup({
                   <SidebarSessionItem
                     key={key}
                     item={session}
+                    source={source}
                     active={selectedKey === key || selectedIdentityKey === sessionIdentityKey(session)}
                     liveActivity={liveActivity}
                     unread={intersectsSet(unreadKeys, unreadSessionIds)}
@@ -803,6 +896,7 @@ function ProjectSidebarGroup({
 
 function SidebarSessionItem({
   item,
+  source,
   active,
   liveActivity,
   unread,
@@ -810,6 +904,7 @@ function SidebarSessionItem({
   onContextMenu,
 }: {
   item: SessionInfo;
+  source: "project" | "thread";
   active: boolean;
   liveActivity: ReturnType<typeof liveSessionActivity>;
   unread: boolean;
@@ -833,8 +928,17 @@ function SidebarSessionItem({
       }
     >
       <SidebarSessionStatus activity={liveActivity} unread={unread} />
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-        <AgentGlyph agent={item.agent} className="h-3.5 w-3.5" />
+      <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+        {source === "thread" && (
+          <HashIcon className="absolute -left-1 top-1/2 h-3 w-3 -translate-y-1/2 text-ink/45" />
+        )}
+        <AgentGlyph
+          agent={item.agent}
+          className={
+            "h-3.5 w-3.5 " +
+            (source === "thread" ? "relative z-10 translate-x-1" : "")
+          }
+        />
       </span>
       <span
         className={

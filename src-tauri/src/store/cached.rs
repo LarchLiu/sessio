@@ -9,8 +9,7 @@ use crate::models::{
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection,
-    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
+    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -160,8 +159,10 @@ impl SessionStore for CachedStore {
         path: &str,
         name: Option<&str>,
         workflow_id: String,
+        enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
-        self.inner.add_project(path, name, workflow_id)
+        self.inner
+            .add_project(path, name, workflow_id, enabled_stage_ids)
     }
 
     fn create_project(
@@ -169,8 +170,10 @@ impl SessionStore for CachedStore {
         parent_path: &str,
         name: &str,
         workflow_id: String,
+        enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
-        self.inner.create_project(parent_path, name, workflow_id)
+        self.inner
+            .create_project(parent_path, name, workflow_id, enabled_stage_ids)
     }
 
     fn update_project(
@@ -255,9 +258,10 @@ impl SessionStore for CachedStore {
         name: Option<&str>,
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
+        enabled: Option<bool>,
     ) -> Result<AssistantInfo> {
         self.inner
-            .update_assistant(assistant_id, name, agent, system_prompt)
+            .update_assistant(assistant_id, name, agent, system_prompt, enabled)
     }
 
     fn delete_assistant(&self, assistant_id: &str) -> Result<()> {
@@ -282,8 +286,10 @@ impl SessionStore for CachedStore {
         thread_id: &str,
         goal: Option<&str>,
         description: Option<Option<&str>>,
+        enabled: Option<bool>,
     ) -> Result<ThreadInfo> {
-        self.inner.update_thread(thread_id, goal, description)
+        self.inner
+            .update_thread(thread_id, goal, description, enabled)
     }
 
     fn delete_thread(&self, thread_id: &str) -> Result<()> {
@@ -315,9 +321,10 @@ impl SessionStore for CachedStore {
         name: Option<&str>,
         description: Option<Option<&str>>,
         order: Option<i64>,
+        enabled: Option<bool>,
     ) -> Result<ProjectStageInfo> {
         self.inner
-            .update_project_stage(stage_id, name, description, order)
+            .update_project_stage(stage_id, name, description, order, enabled)
     }
 
     fn update_project_stage_assistants(
@@ -348,9 +355,10 @@ impl SessionStore for CachedStore {
         thread_stage_id: &str,
         assistant_ids: Option<&[String]>,
         order: Option<i64>,
+        enabled: Option<bool>,
     ) -> Result<StageInfo> {
         self.inner
-            .update_thread_stage(thread_stage_id, assistant_ids, order)
+            .update_thread_stage(thread_stage_id, assistant_ids, order, enabled)
     }
 
     fn update_thread_stage_assistant_agent(
@@ -369,6 +377,25 @@ impl SessionStore for CachedStore {
 
     fn set_thread_stage(&self, thread_id: &str, thread_stage_id: &str) -> Result<ThreadInfo> {
         self.inner.set_thread_stage(thread_id, thread_stage_id)
+    }
+
+    fn link_thread_session(
+        &self,
+        thread_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<ThreadInfo> {
+        self.inner.link_thread_session(thread_id, agent, session_id)
+    }
+
+    fn unlink_thread_session(
+        &self,
+        thread_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<ThreadInfo> {
+        self.inner
+            .unlink_thread_session(thread_id, agent, session_id)
     }
 
     fn link_stage_session(

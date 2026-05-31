@@ -66,6 +66,7 @@ export interface AssistantInfo {
   type: AssistantType;
   workflowId: string | null;
   projectId: string | null;
+  enabled: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -108,6 +109,7 @@ export interface StageInfo {
   name: string | null;
   description: string | null;
   order: number;
+  enabled: boolean;
   createdAt: number;
   updatedAt: number;
   sessions: SessionInfo[];
@@ -122,6 +124,7 @@ export interface ProjectStageInfo {
   name: string | null;
   description: string | null;
   order: number;
+  enabled: boolean;
   createdAt: number;
   updatedAt: number;
   assistants: StageAssistantInfo[];
@@ -133,9 +136,11 @@ export interface ThreadInfo {
   goal: string;
   description: string | null;
   stageId: string | null;
+  enabled: boolean;
   createdAt: number;
   updatedAt: number;
   stages: StageInfo[];
+  sessions: SessionInfo[];
 }
 
 export type KanbanStatus =
@@ -637,11 +642,13 @@ export async function addExistingProject(
   path: string,
   name?: string | null,
   workflowId?: string | null,
+  enabledStageIds?: string[] | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("add_existing_project", {
     path,
     name: name ?? null,
     workflowId: workflowId ?? null,
+    enabledStageIds: enabledStageIds ?? null,
   });
 }
 
@@ -649,21 +656,25 @@ export async function createProject(
   parentPath: string,
   name: string,
   workflowId?: string | null,
+  enabledStageIds?: string[] | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("create_project", {
     parentPath,
     name,
     workflowId: workflowId ?? null,
+    enabledStageIds: enabledStageIds ?? null,
   });
 }
 
 export async function createDefaultProject(
   name: string,
   workflowId?: string | null,
+  enabledStageIds?: string[] | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("create_default_project", {
     name,
     workflowId: workflowId ?? null,
+    enabledStageIds: enabledStageIds ?? null,
   });
 }
 
@@ -714,12 +725,14 @@ export async function updateAssistant(
     name?: string | null;
     agent?: AssistantAgentInfo | null;
     systemPrompt?: string | null;
+    enabled?: boolean | null;
   },
 ): Promise<AssistantInfo> {
   return invoke<AssistantInfo>("update_assistant", {
     assistantId,
     name: patch.name ?? null,
     agent: patch.agent ?? null,
+    enabled: patch.enabled ?? null,
     systemPrompt:
       Object.prototype.hasOwnProperty.call(patch, "systemPrompt")
         ? patch.systemPrompt === null
@@ -751,11 +764,12 @@ export async function createThread(
 
 export async function updateThread(
   threadId: string,
-  patch: { goal?: string | null; description?: string | null },
+  patch: { goal?: string | null; description?: string | null; enabled?: boolean | null },
 ): Promise<ThreadInfo> {
   return invoke<ThreadInfo>("update_thread", {
     threadId,
     goal: patch.goal ?? null,
+    enabled: patch.enabled ?? null,
     description:
       Object.prototype.hasOwnProperty.call(patch, "description")
         ? patch.description === null
@@ -797,6 +811,7 @@ export async function updateProjectStage(
     name?: string | null;
     description?: string | null;
     order?: number | null;
+    enabled?: boolean | null;
   },
 ): Promise<ProjectStageInfo> {
   const payload: {
@@ -804,10 +819,12 @@ export async function updateProjectStage(
     name?: string | null;
     description?: string | null;
     order?: number | null;
+    enabled?: boolean | null;
   } = { stageId };
   if ("name" in patch) payload.name = patch.name ?? null;
   if ("description" in patch) payload.description = patch.description ?? null;
   if ("order" in patch) payload.order = patch.order ?? null;
+  if ("enabled" in patch) payload.enabled = patch.enabled ?? null;
   return invoke<ProjectStageInfo>("update_project_stage", payload);
 }
 
@@ -838,12 +855,14 @@ export async function updateThreadStage(
   patch: {
     assistantIds?: string[] | null;
     order?: number | null;
+    enabled?: boolean | null;
   },
 ): Promise<StageInfo> {
   return invoke<StageInfo>("update_thread_stage", {
     threadStageId,
     assistantIds: patch.assistantIds ?? null,
     order: patch.order ?? null,
+    enabled: patch.enabled ?? null,
   });
 }
 
@@ -864,6 +883,22 @@ export async function setThreadStage(
   stageId: string,
 ): Promise<ThreadInfo> {
   return invoke<ThreadInfo>("set_thread_stage", { threadId, stageId });
+}
+
+export async function linkThreadSession(
+  threadId: string,
+  agent: Agent,
+  sessionId: string,
+): Promise<ThreadInfo> {
+  return invoke<ThreadInfo>("link_thread_session", { threadId, agent, sessionId });
+}
+
+export async function unlinkThreadSession(
+  threadId: string,
+  agent: Agent,
+  sessionId: string,
+): Promise<ThreadInfo> {
+  return invoke<ThreadInfo>("unlink_thread_session", { threadId, agent, sessionId });
 }
 
 export async function linkStageSession(

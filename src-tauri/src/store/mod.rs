@@ -105,12 +105,14 @@ pub trait SessionStore: Send + Sync {
         path: &str,
         name: Option<&str>,
         workflow_id: String,
+        enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo>;
     fn create_project(
         &self,
         parent_path: &str,
         name: &str,
         workflow_id: String,
+        enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo>;
     fn update_project(
         &self,
@@ -154,6 +156,7 @@ pub trait SessionStore: Send + Sync {
         name: Option<&str>,
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
+        enabled: Option<bool>,
     ) -> Result<AssistantInfo>;
     fn delete_assistant(&self, assistant_id: &str) -> Result<()>;
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>>;
@@ -168,6 +171,7 @@ pub trait SessionStore: Send + Sync {
         thread_id: &str,
         goal: Option<&str>,
         description: Option<Option<&str>>,
+        enabled: Option<bool>,
     ) -> Result<ThreadInfo>;
     fn delete_thread(&self, thread_id: &str) -> Result<()>;
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>>;
@@ -185,6 +189,7 @@ pub trait SessionStore: Send + Sync {
         name: Option<&str>,
         description: Option<Option<&str>>,
         order: Option<i64>,
+        enabled: Option<bool>,
     ) -> Result<ProjectStageInfo>;
     fn update_project_stage_assistants(
         &self,
@@ -203,6 +208,7 @@ pub trait SessionStore: Send + Sync {
         thread_stage_id: &str,
         assistant_ids: Option<&[String]>,
         order: Option<i64>,
+        enabled: Option<bool>,
     ) -> Result<StageInfo>;
     fn update_thread_stage_assistant_agent(
         &self,
@@ -212,6 +218,18 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<StageInfo>;
     fn delete_thread_stage(&self, thread_stage_id: &str) -> Result<()>;
     fn set_thread_stage(&self, thread_id: &str, thread_stage_id: &str) -> Result<ThreadInfo>;
+    fn link_thread_session(
+        &self,
+        thread_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<ThreadInfo>;
+    fn unlink_thread_session(
+        &self,
+        thread_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<ThreadInfo>;
     fn link_stage_session(
         &self,
         thread_stage_id: &str,

@@ -592,6 +592,14 @@ function StageTemplateRow({
     }
   };
 
+  const toggleEnabled = async () => {
+    try {
+      onUpdated(await updateProjectStage(stage.id, { enabled: !stage.enabled }));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
   const remove = async () => {
     if (!custom) return;
     try {
@@ -629,6 +637,29 @@ function StageTemplateRow({
         </button>
         <div className="flex shrink-0 items-center gap-1">
           <>
+            <Tooltip content={stage.enabled ? t("stage.enabled") : t("stage.disabled")} placement="top">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={stage.enabled}
+                onClick={() => void toggleEnabled()}
+                className={
+                  "relative h-5 w-9 rounded-full border transition " +
+                  (stage.enabled
+                    ? "border-card-border/[0.18] bg-card-chip/[0.22]"
+                    : "border-card-border/[0.12] bg-card-panel")
+                }
+              >
+                <span
+                  className={
+                    "absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full transition " +
+                    (stage.enabled
+                      ? "left-[18px] bg-card-fg/75"
+                      : "left-1 bg-card-subtle/45")
+                  }
+                />
+              </button>
+            </Tooltip>
             <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4 rotate-180" /></button>
             <button type="button" onClick={() => void onMove(stage, 1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4" /></button>
             {custom && (

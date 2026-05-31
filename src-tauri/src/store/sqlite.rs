@@ -18,8 +18,7 @@ use crate::models::{
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection,
-    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
+    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
 };
 
 pub struct SqliteStore {
@@ -385,6 +384,7 @@ CREATE TABLE IF NOT EXISTS assistants (
     type            TEXT NOT NULL,
     workflow_id    TEXT,
     project_id      TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
@@ -403,6 +403,7 @@ CREATE TABLE IF NOT EXISTS threads (
     goal        TEXT NOT NULL,
     description TEXT,
     stage_id    TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -423,6 +424,7 @@ CREATE TABLE IF NOT EXISTS stages (
     name         TEXT,
     description  TEXT,
     "order"      INTEGER NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 1,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
@@ -442,7 +444,7 @@ CREATE TABLE IF NOT EXISTS stages (
         'human',
         'done'
     )),
-    CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND project_id IS NULL AND kind IS NOT NULL AND name IS NULL)
+    CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND kind IS NOT NULL AND name IS NULL)
        OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL) AND kind IS NULL AND name IS NOT NULL)),
     UNIQUE(workflow_id, project_id, "order"),
     FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
@@ -497,6 +499,20 @@ CREATE TABLE IF NOT EXISTS thread_stage_assistants (
 CREATE INDEX IF NOT EXISTS idx_thread_stage_assistants_assistant
     ON thread_stage_assistants(assistant_id);
 
+CREATE TABLE IF NOT EXISTS thread_sessions (
+    thread_id  TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(thread_id, agent, session_id),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_sessions_thread
+    ON thread_sessions(thread_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_thread_sessions_session
+    ON thread_sessions(agent, session_id);
+
 CREATE TABLE IF NOT EXISTS stage_sessions (
     thread_stage_id TEXT NOT NULL,
     agent      TEXT NOT NULL,
@@ -540,6 +556,9 @@ ALTER TABLE workflows ADD COLUMN description TEXT;
 ALTER TABLE projects ADD COLUMN workflow_id TEXT NOT NULL DEFAULT 'code';
 ALTER TABLE assistants ADD COLUMN workflow_id TEXT;
 ALTER TABLE stages ADD COLUMN workflow_id TEXT;
+ALTER TABLE assistants ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE threads ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE stages ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 CREATE TABLE IF NOT EXISTS stage_assistants (
     stage_id     TEXT NOT NULL,
     assistant_id TEXT NOT NULL,
@@ -552,6 +571,18 @@ CREATE TABLE IF NOT EXISTS stage_assistants (
 );
 CREATE INDEX IF NOT EXISTS idx_stage_assistants_assistant
     ON stage_assistants(assistant_id);
+CREATE TABLE IF NOT EXISTS thread_sessions (
+    thread_id  TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(thread_id, agent, session_id),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_thread_sessions_thread
+    ON thread_sessions(thread_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_thread_sessions_session
+    ON thread_sessions(agent, session_id);
 "#;
 
 fn now_ms() -> i64 {
@@ -583,6 +614,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         .ok()
         .flatten();
     let current = current.unwrap_or(0);
+    let had_stage_assistants_table = table_exists(conn, "stage_assistants")?;
     if current < 1 {
         conn.execute_batch(SCHEMA_V1)?;
         conn.execute(
@@ -630,7 +662,23 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     seed_builtin_workflows(conn)?;
     seed_builtin_workflow_stages(conn)?;
     seed_builtin_agents(conn)?;
+    if !had_stage_assistants_table {
+        seed_builtin_workflow_stage_assistants(conn, now_ms())?;
+    }
+    backfill_project_builtin_stages(conn)?;
     Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            params![name],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok(exists)
 }
 
 fn apply_v5_patch(conn: &Connection) {
@@ -641,6 +689,74 @@ fn apply_v5_patch(conn: &Connection) {
     {
         let _ = conn.execute(statement, []);
     }
+    let _ = rebuild_stages_table_for_project_builtin_stages(conn);
+}
+
+fn rebuild_stages_table_for_project_builtin_stages(conn: &Connection) -> Result<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stages'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(create_sql) = create_sql else {
+        return Ok(());
+    };
+    if !create_sql.contains("type = 'builtin' AND workflow_id IS NOT NULL AND project_id IS NULL") {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE IF NOT EXISTS stages_new (
+            id           TEXT PRIMARY KEY,
+            project_id   TEXT,
+            type         TEXT NOT NULL,
+            workflow_id  TEXT,
+            kind         TEXT,
+            name         TEXT,
+            description  TEXT,
+            "order"      INTEGER NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL,
+            CHECK(type IN ('builtin', 'custom')),
+            CHECK(kind IS NULL OR kind IN (
+                'research',
+                'plan',
+                'develop',
+                'build',
+                'writing',
+                'editing',
+                'review',
+                'proofreading',
+                'screenplay',
+                'storyboard',
+                'design',
+                'production',
+                'human',
+                'done'
+            )),
+            CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND kind IS NOT NULL AND name IS NULL)
+               OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL) AND kind IS NULL AND name IS NOT NULL)),
+            UNIQUE(workflow_id, project_id, "order"),
+            FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO stages_new (
+            id, project_id, type, workflow_id, kind, name, description, "order", enabled, created_at, updated_at
+        )
+        SELECT id, project_id, type, workflow_id, kind, name, description, "order", COALESCE(enabled, 1), created_at, updated_at
+        FROM stages;
+        DROP TABLE stages;
+        ALTER TABLE stages_new RENAME TO stages;
+        CREATE INDEX IF NOT EXISTS idx_stages_project
+            ON stages(workflow_id, project_id, type, "order", kind, name);
+        PRAGMA foreign_keys = ON;
+        "#,
+    )?;
+    Ok(())
 }
 
 fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
@@ -671,8 +787,8 @@ fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
         {
             let id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
             conn.execute(
-                "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at)
-                 VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, ?, ?, ?)
+                "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at)
+                 VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, ?, 1, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                     type = excluded.type,
                     workflow_id = excluded.workflow_id,
@@ -689,6 +805,27 @@ fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
                     now,
                     now
                 ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn seed_builtin_workflow_stage_assistants(conn: &Connection, now: i64) -> Result<()> {
+    for (workflow_id, _, _) in BUILTIN_WORKFLOW_SEEDS {
+        for (kind, _) in builtin_workflow_stage_seeds(workflow_id) {
+            if matches!(kind, StageType::Human | StageType::Done) {
+                continue;
+            }
+            let stage_id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
+            if stage_has_assistants(conn, &stage_id)? {
+                continue;
+            }
+            let assistant_id = builtin_assistant_seed_for_kind(kind).id;
+            conn.execute(
+                "INSERT OR IGNORE INTO stage_assistants (stage_id, assistant_id, \"order\", created_at, updated_at)
+                 VALUES (?, ?, 0, ?, ?)",
+                params![stage_id, assistant_id, now, now],
             )?;
         }
     }
@@ -1379,6 +1516,14 @@ fn stable_project_stage_id(
     format!("stage-{}", hex::encode(hasher.finalize())[..16].to_string())
 }
 
+fn stable_project_builtin_stage_id(project_id: &str, template_stage_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.as_bytes());
+    hasher.update(template_stage_id.as_bytes());
+    format!("stage-{}", hex::encode(hasher.finalize())[..16].to_string())
+}
+
 fn stable_thread_stage_id(
     thread_id: &str,
     stage_id: &str,
@@ -1502,8 +1647,9 @@ fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo
             .unwrap_or(AssistantType::Custom),
         workflow_id: workflow_id_raw,
         project_id: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        enabled: row.get::<_, i64>(7)? != 0,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -1521,8 +1667,9 @@ fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectSt
         name: row.get(5)?,
         description: row.get(6)?,
         order: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        enabled: row.get::<_, i64>(8)? != 0,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
         assistants: Vec::new(),
     })
 }
@@ -1545,8 +1692,9 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
         name: row.get(7)?,
         description: row.get(8)?,
         order: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        enabled: row.get::<_, i64>(10)? != 0,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
         sessions: Vec::new(),
     })
 }
@@ -1558,9 +1706,11 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
         goal: row.get(2)?,
         description: row.get(3)?,
         stage_id: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        enabled: row.get::<_, i64>(5)? != 0,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
         stages: Vec::new(),
+        sessions: Vec::new(),
     })
 }
 
@@ -1631,7 +1781,9 @@ fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn runtime_agent_selection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeAgentSelection> {
+fn runtime_agent_selection_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RuntimeAgentSelection> {
     let agent_str: String = row.get(0)?;
     let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
     Ok(RuntimeAgentSelection {
@@ -1645,7 +1797,7 @@ fn runtime_agent_selection_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
 
 fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
     conn.query_row(
-        "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
+        "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
          FROM assistants
          WHERE id = ?",
         params![assistant_id],
@@ -1658,7 +1810,7 @@ fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<Assista
 fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
     let mut thread = conn
         .query_row(
-            "SELECT id, project_id, goal, description, stage_id, created_at, updated_at
+            "SELECT id, project_id, goal, description, stage_id, enabled, created_at, updated_at
              FROM threads
              WHERE id = ?",
             params![thread_id],
@@ -1667,12 +1819,13 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?;
     thread.stages = load_thread_stages(conn, &thread.id)?;
+    thread.sessions = load_thread_sessions(conn, &thread.id)?;
     Ok(thread)
 }
 
 fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
     let mut stage = conn.query_row(
-        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
+        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
          FROM stages
          WHERE id = ?",
         params![stage_id],
@@ -1684,11 +1837,186 @@ fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<Project
     Ok(stage)
 }
 
+fn instantiate_project_builtin_stages(
+    conn: &Connection,
+    project_id: &str,
+    workflow_id: &str,
+    enabled_stage_ids: Option<&[String]>,
+    now: i64,
+) -> Result<()> {
+    let selected_template_ids = enabled_stage_ids.map(|ids| {
+        ids.iter()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .collect::<HashSet<_>>()
+    });
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
+         FROM stages
+         WHERE project_id IS NULL AND workflow_id = ? AND type = 'builtin'
+         ORDER BY \"order\" ASC, created_at ASC",
+    )?;
+    let templates = stmt
+        .query_map(params![workflow_id], project_stage_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for template in templates {
+        let selected = selected_template_ids
+            .as_ref()
+            .map(|ids| ids.contains(template.id.as_str()))
+            .unwrap_or(template.enabled);
+        if !selected {
+            continue;
+        }
+        let Some(kind) = template.kind else {
+            continue;
+        };
+        let id = stable_project_builtin_stage_id(project_id, &template.id);
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO stages (
+                id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
+             ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, 1, ?, ?)",
+            params![
+                id,
+                project_id,
+                workflow_id,
+                kind.as_str(),
+                template.description,
+                template.order,
+                now,
+                now
+            ],
+        )?;
+        if inserted > 0 {
+            copy_project_stage_assistants(conn, &template.id, &id, now)?;
+        }
+    }
+    Ok(())
+}
+
+fn stage_has_assistants(conn: &Connection, stage_id: &str) -> Result<bool> {
+    let existing_count: i64 = conn.query_row(
+        "SELECT count(*) FROM stage_assistants WHERE stage_id = ?",
+        params![stage_id],
+        |row| row.get(0),
+    )?;
+    Ok(existing_count > 0)
+}
+
+fn copy_project_stage_assistants(
+    conn: &Connection,
+    from_stage_id: &str,
+    to_stage_id: &str,
+    now: i64,
+) -> Result<()> {
+    if stage_has_assistants(conn, to_stage_id)? {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO stage_assistants (stage_id, assistant_id, \"order\", created_at, updated_at)
+         SELECT ?, assistant_id, \"order\", ?, ?
+         FROM stage_assistants
+         WHERE stage_id = ?",
+        params![to_stage_id, now, now, from_stage_id],
+    )?;
+    Ok(())
+}
+
+fn backfill_project_builtin_stages(conn: &Connection) -> Result<()> {
+    let projects = {
+        let mut stmt = conn.prepare("SELECT id, workflow_id, created_at FROM projects")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (project_id, workflow_id, created_at) in projects {
+        let existing_count: i64 = conn.query_row(
+            "SELECT count(*) FROM stages WHERE project_id = ? AND type = 'builtin'",
+            params![project_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if existing_count == 0 {
+            instantiate_project_builtin_stages(
+                conn,
+                &project_id,
+                &workflow_id,
+                None,
+                created_at.max(now_ms()),
+            )?;
+        }
+    }
+    let redirects = {
+        let mut stmt = conn.prepare(
+            "SELECT ts.id, t.project_id, s.id, s.workflow_id, s.kind, s.description, s.\"order\", s.enabled, s.created_at
+             FROM thread_stages ts
+             INNER JOIN threads t ON t.id = ts.thread_id
+             INNER JOIN stages s ON s.id = ts.stage_id
+             WHERE s.project_id IS NULL AND s.type = 'builtin'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (
+        thread_stage_id,
+        project_id,
+        template_stage_id,
+        workflow_id,
+        kind,
+        description,
+        order,
+        enabled,
+        created_at,
+    ) in redirects
+    {
+        let project_stage_id = stable_project_builtin_stage_id(&project_id, &template_stage_id);
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO stages (
+                id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
+             ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, ?, ?, ?)",
+            params![
+                project_stage_id,
+                project_id,
+                workflow_id,
+                kind,
+                description,
+                order,
+                enabled,
+                created_at,
+                now_ms()
+            ],
+        )?;
+        if inserted > 0 {
+            copy_project_stage_assistants(conn, &template_stage_id, &project_stage_id, now_ms())?;
+        }
+        conn.execute(
+            "UPDATE thread_stages SET stage_id = ? WHERE id = ?",
+            params![project_stage_id, thread_stage_id],
+        )?;
+    }
+    Ok(())
+}
+
 fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<StageInfo> {
     let mut stage = conn
         .query_row(
             "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description,
-                    ts.\"order\", ts.created_at, ts.updated_at
+                    ts.\"order\", s.enabled, ts.created_at, ts.updated_at
              FROM thread_stages ts
              INNER JOIN threads t ON t.id = ts.thread_id
              INNER JOIN stages s ON s.id = ts.stage_id
@@ -1715,6 +2043,9 @@ fn validate_assistant_for_project(
 ) -> Result<AssistantInfo> {
     let project = load_project_by_id(conn, project_id)?;
     let assistant = load_assistant_by_id(conn, assistant_id)?;
+    if !assistant.enabled {
+        anyhow::bail!("assistant is disabled");
+    }
     if assistant.project_id.as_deref() == Some(project_id) {
         return Ok(assistant);
     }
@@ -1757,6 +2088,9 @@ fn validate_assistant_for_stage(
     assistant_id: &str,
 ) -> Result<AssistantInfo> {
     let assistant = load_assistant_by_id(conn, assistant_id)?;
+    if !assistant.enabled {
+        anyhow::bail!("assistant is disabled");
+    }
     if stage.project_id.is_some() && assistant.project_id == stage.project_id {
         return Ok(assistant);
     }
@@ -2094,8 +2428,8 @@ fn upsert_builtin_assistant(
     let agent_json = serde_json::to_string(&assistant_agent)?;
     conn.execute(
         "INSERT INTO assistants (
-            id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, 'builtin', NULL, NULL, ?, ?)
+            id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'builtin', NULL, NULL, 1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             agent_json = excluded.agent_json,
@@ -2186,10 +2520,7 @@ fn reorder_project_stage_scope(
         return Ok(rows[current_index].1);
     }
 
-    let mut ids = rows
-        .iter()
-        .map(|(id, _)| id.clone())
-        .collect::<Vec<_>>();
+    let mut ids = rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
     let id = ids.remove(current_index);
     let insert_index = if current_index < target_index {
         target_index
@@ -2280,6 +2611,54 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
     Ok(sessions)
 }
 
+fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<SessionInfo>> {
+    let mut subs_by_parent = load_all_subagents_grouped(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
+                s.started_at, s.updated_at, s.message_count, s.title, s.first_user_message,
+                s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
+         FROM thread_sessions ts
+         INNER JOIN sessions s ON s.agent = ts.agent AND s.session_id = ts.session_id
+         WHERE ts.thread_id = ? AND s.available = 1
+         ORDER BY ts.created_at ASC, s.updated_at DESC, s.started_at DESC",
+    )?;
+    let mut sessions: Vec<SessionInfo> = stmt
+        .query_map(params![thread_id], |row| {
+            let agent_str: String = row.get(0)?;
+            let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+            Ok(SessionInfo {
+                id: row.get(1)?,
+                agent,
+                forked_from_agent: row
+                    .get::<_, Option<String>>(14)?
+                    .and_then(|value| Agent::from_db_str(&value)),
+                forked_from_id: row.get(15)?,
+                file_path: row.get(2)?,
+                project_path: row.get(3)?,
+                project_name: row.get(4)?,
+                started_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                message_count: row.get::<_, i64>(7)? as usize,
+                title: row.get(8)?,
+                first_user_message: row.get(9)?,
+                file_size: row.get::<_, i64>(10)? as u64,
+                partial: row.get::<_, i64>(11)? != 0,
+                available: row.get::<_, i64>(12)? != 0,
+                archived: row.get::<_, i64>(13)? != 0,
+                subagents: Vec::new(),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    sessions.retain(|s| !is_codex_guardian_index_row(s));
+    dedupe_sessions(&mut sessions);
+    for session in sessions.iter_mut() {
+        session.subagents = subs_by_parent
+            .remove(&(session.agent, session.id.clone()))
+            .unwrap_or_default();
+    }
+    Ok(sessions)
+}
+
 fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
     let mut stmt = conn.prepare(
@@ -2331,7 +2710,7 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
 fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
     let mut stmt = conn.prepare(
         "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description,
-                ts.\"order\", ts.created_at, ts.updated_at
+                ts.\"order\", s.enabled, ts.created_at, ts.updated_at
          FROM thread_stages ts
          INNER JOIN threads t ON t.id = ts.thread_id
          INNER JOIN stages s ON s.id = ts.stage_id
@@ -2381,6 +2760,24 @@ fn session_project_path(
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn ensure_session_not_linked_to_thread_workflow(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+) -> Result<()> {
+    let linked_count: i64 = conn.query_row(
+        "SELECT
+            (SELECT count(*) FROM thread_sessions WHERE agent = ? AND session_id = ?) +
+            (SELECT count(*) FROM stage_sessions WHERE agent = ? AND session_id = ?)",
+        params![agent.as_str(), session_id, agent.as_str(), session_id],
+        |row| row.get(0),
+    )?;
+    if linked_count > 0 {
+        anyhow::bail!("session is already linked to a thread or stage");
+    }
+    Ok(())
 }
 
 fn read_record_kind(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<MemoryRecordKind> {
@@ -3000,20 +3397,25 @@ impl SessionStore for SqliteStore {
         path: &str,
         name: Option<&str>,
         workflow_id: String,
+        enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
         let canonical = canonical_project_path(path)?;
         let name = clean_project_name(name, &canonical)?;
         let id = stable_project_id(&canonical);
         let now = now_ms();
-        let conn = self.conn.lock().unwrap();
-        ensure_workflow_exists(&conn, &workflow_id)?;
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        ensure_workflow_exists(&tx, &workflow_id)?;
+        tx.execute(
             "INSERT INTO projects (id, path, name, workflow_id, created_at, updated_at, archived)
              VALUES (?, ?, ?, ?, ?, ?, 0)",
             params![id, canonical, name, workflow_id.as_str(), now, now],
         )
         .with_context(|| "add project")?;
-        load_project_by_id(&conn, &id)
+        instantiate_project_builtin_stages(&tx, &id, &workflow_id, enabled_stage_ids, now)?;
+        let project = load_project_by_id(&tx, &id)?;
+        tx.commit()?;
+        Ok(project)
     }
 
     fn create_project(
@@ -3021,6 +3423,7 @@ impl SessionStore for SqliteStore {
         parent_path: &str,
         name: &str,
         workflow_id: String,
+        enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
         let parent = canonical_project_path(parent_path)?;
         let clean_name = clean_child_project_name(name)?;
@@ -3034,7 +3437,7 @@ impl SessionStore for SqliteStore {
         std::fs::create_dir(&project_path)
             .with_context(|| format!("create project directory {}", project_path.display()))?;
         let path = canonical_project_path(&project_path.to_string_lossy())?;
-        self.add_project(&path, Some(&clean_name), workflow_id)
+        self.add_project(&path, Some(&clean_name), workflow_id, enabled_stage_ids)
     }
 
     fn update_project(
@@ -3043,21 +3446,33 @@ impl SessionStore for SqliteStore {
         name: Option<&str>,
         workflow_id: Option<String>,
     ) -> Result<ProjectInfo> {
-        let conn = self.conn.lock().unwrap();
-        let current = load_project_by_id(&conn, project_id)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let current = load_project_by_id(&tx, project_id)?;
         let next_name = match name {
             Some(value) => clean_project_name(Some(value), &current.path)?,
             None => current.name,
         };
-        let next_workflow_id = workflow_id.unwrap_or(current.workflow_id);
-        ensure_workflow_exists(&conn, &next_workflow_id)?;
-        conn.execute(
+        let current_workflow_id = current.workflow_id.clone();
+        let next_workflow_id = workflow_id.unwrap_or_else(|| current_workflow_id.clone());
+        ensure_workflow_exists(&tx, &next_workflow_id)?;
+        let workflow_changed = next_workflow_id != current_workflow_id;
+        tx.execute(
             "UPDATE projects
              SET name = ?, workflow_id = ?, updated_at = ?
              WHERE id = ? AND archived = 0",
             params![next_name, next_workflow_id.as_str(), now_ms(), project_id],
         )?;
-        load_project_by_id(&conn, project_id)
+        if workflow_changed {
+            tx.execute(
+                "DELETE FROM stages WHERE project_id = ? AND type = 'builtin'",
+                params![project_id],
+            )?;
+            instantiate_project_builtin_stages(&tx, project_id, &next_workflow_id, None, now_ms())?;
+        }
+        let project = load_project_by_id(&tx, project_id)?;
+        tx.commit()?;
+        Ok(project)
     }
 
     fn archive_project(&self, project_id: &str) -> Result<()> {
@@ -3160,7 +3575,9 @@ impl SessionStore for SqliteStore {
         let now = now_ms();
         let model = model.map(str::trim).filter(|value| !value.is_empty());
         let effort = effort.map(str::trim).filter(|value| !value.is_empty());
-        let permission_mode = permission_mode.map(str::trim).filter(|value| !value.is_empty());
+        let permission_mode = permission_mode
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         conn.execute(
             "INSERT INTO runtime_agent_selections (
                 key, agent, model, effort, permission_mode, updated_at
@@ -3194,7 +3611,7 @@ impl SessionStore for SqliteStore {
         let assistants = if let Some(project_id) = project_id {
             let project = load_project_by_id(&conn, project_id)?;
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
                  FROM assistants
                  WHERE (project_id IS NULL AND (workflow_id IS NULL OR workflow_id = ?)) OR project_id = ?
                  ORDER BY type ASC, project_id IS NOT NULL ASC, updated_at DESC, name COLLATE NOCASE ASC",
@@ -3206,7 +3623,7 @@ impl SessionStore for SqliteStore {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
                  FROM assistants
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
@@ -3286,8 +3703,8 @@ impl SessionStore for SqliteStore {
         let agent_json = serde_json::to_string(&agent)?;
         conn.execute(
             "INSERT INTO assistants (
-                id, name, agent_json, system_prompt, type, workflow_id, project_id, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             params![
                 id,
                 name,
@@ -3309,6 +3726,7 @@ impl SessionStore for SqliteStore {
         name: Option<&str>,
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
+        enabled: Option<bool>,
     ) -> Result<AssistantInfo> {
         let conn = self.conn.lock().unwrap();
         let current = load_assistant_by_id(&conn, assistant_id)?;
@@ -3356,15 +3774,17 @@ impl SessionStore for SqliteStore {
             Some(None) => None,
             None => current.system_prompt,
         };
+        let next_enabled = enabled.unwrap_or(current.enabled);
         let next_agent_json = serde_json::to_string(&next_agent)?;
         conn.execute(
             "UPDATE assistants
-             SET name = ?, agent_json = ?, system_prompt = ?, updated_at = ?
+             SET name = ?, agent_json = ?, system_prompt = ?, enabled = ?, updated_at = ?
              WHERE id = ?",
             params![
                 next_name,
                 next_agent_json,
                 next_system_prompt,
+                next_enabled as i64,
                 now_ms(),
                 assistant_id,
             ],
@@ -3393,7 +3813,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         load_project_by_id(&conn, project_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, goal, description, stage_id, created_at, updated_at
+            "SELECT id, project_id, goal, description, stage_id, enabled, created_at, updated_at
              FROM threads
              WHERE project_id = ?
              ORDER BY updated_at DESC, created_at DESC",
@@ -3403,6 +3823,7 @@ impl SessionStore for SqliteStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for thread in threads.iter_mut() {
             thread.stages = load_thread_stages(&conn, &thread.id)?;
+            thread.sessions = load_thread_sessions(&conn, &thread.id)?;
         }
         Ok(threads)
     }
@@ -3423,8 +3844,8 @@ impl SessionStore for SqliteStore {
         let now = now_ms();
         let id = stable_thread_id(project_id, goal, now);
         conn.execute(
-            "INSERT INTO threads (id, project_id, goal, description, stage_id, created_at, updated_at)
-             VALUES (?, ?, ?, ?, NULL, ?, ?)",
+            "INSERT INTO threads (id, project_id, goal, description, stage_id, enabled, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, 1, ?, ?)",
             params![id, project_id, goal, description, now, now],
         )?;
         load_thread_by_id(&conn, &id)
@@ -3435,6 +3856,7 @@ impl SessionStore for SqliteStore {
         thread_id: &str,
         goal: Option<&str>,
         description: Option<Option<&str>>,
+        enabled: Option<bool>,
     ) -> Result<ThreadInfo> {
         let conn = self.conn.lock().unwrap();
         let current = load_thread_by_id(&conn, thread_id)?;
@@ -3457,11 +3879,18 @@ impl SessionStore for SqliteStore {
             Some(None) => None,
             None => current.description,
         };
+        let next_enabled = enabled.unwrap_or(current.enabled);
         conn.execute(
             "UPDATE threads
-             SET goal = ?, description = ?, updated_at = ?
+             SET goal = ?, description = ?, enabled = ?, updated_at = ?
              WHERE id = ?",
-            params![next_goal, next_description, now_ms(), thread_id],
+            params![
+                next_goal,
+                next_description,
+                next_enabled as i64,
+                now_ms(),
+                thread_id
+            ],
         )?;
         load_thread_by_id(&conn, thread_id)
     }
@@ -3477,17 +3906,14 @@ impl SessionStore for SqliteStore {
 
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>> {
         let conn = self.conn.lock().unwrap();
-        let project = load_project_by_id(&conn, project_id)?;
+        load_project_by_id(&conn, project_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
+            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
              FROM stages
-             WHERE (project_id IS NULL AND workflow_id = ?) OR project_id = ?
-             ORDER BY \"order\" ASC, type ASC, project_id IS NOT NULL ASC, created_at ASC",
+             WHERE project_id = ? AND enabled = 1
+             ORDER BY \"order\" ASC, type ASC, created_at ASC",
         )?;
-        let rows = stmt.query_map(
-            params![project.workflow_id.as_str(), project_id],
-            project_stage_from_row,
-        )?;
+        let rows = stmt.query_map(params![project_id], project_stage_from_row)?;
         let mut stages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for stage in stages.iter_mut() {
             stage.assistants = load_project_stage_assistants(&conn, &stage.id)?;
@@ -3499,7 +3925,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         ensure_workflow_exists(&conn, workflow_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at
+            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
              FROM stages
              WHERE project_id IS NULL AND workflow_id = ?
              ORDER BY \"order\" ASC, type ASC, created_at ASC",
@@ -3565,8 +3991,8 @@ impl SessionStore for SqliteStore {
             now,
         );
         conn.execute(
-            "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", created_at, updated_at)
-             VALUES (?, ?, 'custom', ?, NULL, ?, ?, ?, ?, ?)",
+            "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at)
+             VALUES (?, ?, 'custom', ?, NULL, ?, ?, ?, 1, ?, ?)",
             params![
                 id,
                 template_project_id,
@@ -3587,11 +4013,13 @@ impl SessionStore for SqliteStore {
         name: Option<&str>,
         description: Option<Option<&str>>,
         order: Option<i64>,
+        enabled: Option<bool>,
     ) -> Result<ProjectStageInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let current = load_project_stage_by_id(&tx, stage_id)?;
-        if current.stage_type != ProjectStageType::Custom && (name.is_some() || description.is_some())
+        if current.stage_type != ProjectStageType::Custom
+            && (name.is_some() || description.is_some())
         {
             anyhow::bail!("builtin project stage details cannot be updated");
         }
@@ -3628,16 +4056,17 @@ impl SessionStore for SqliteStore {
             )?,
             _ => current.order,
         };
+        let next_enabled = enabled.unwrap_or(current.enabled);
         let now = now_ms();
         if current.stage_type == ProjectStageType::Custom {
             tx.execute(
-                "UPDATE stages SET name = ?, description = ?, \"order\" = ?, updated_at = ? WHERE id = ?",
-                params![next_name, next_description, next_order, now, stage_id],
+                "UPDATE stages SET name = ?, description = ?, \"order\" = ?, enabled = ?, updated_at = ? WHERE id = ?",
+                params![next_name, next_description, next_order, next_enabled as i64, now, stage_id],
             )?;
         } else {
             tx.execute(
-                "UPDATE stages SET \"order\" = ?, updated_at = ? WHERE id = ?",
-                params![next_order, now, stage_id],
+                "UPDATE stages SET \"order\" = ?, enabled = ?, updated_at = ? WHERE id = ?",
+                params![next_order, next_enabled as i64, now, stage_id],
             )?;
         }
         let stage = load_project_stage_by_id(&tx, stage_id)?;
@@ -3687,13 +4116,17 @@ impl SessionStore for SqliteStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let thread = load_thread_by_id(&tx, thread_id)?;
+        if !thread.enabled {
+            anyhow::bail!("thread is disabled");
+        }
         let project = load_project_by_id(&tx, &thread.project_id)?;
         let project_stage = load_project_stage_by_id(&tx, stage_id)?;
-        let stage_available = project_stage.project_id.as_deref()
-            == Some(thread.project_id.as_str())
-            || (project_stage.project_id.is_none()
-                && project_stage.workflow_id.as_deref() == Some(project.workflow_id.as_str()));
-        if !stage_available {
+        if !project_stage.enabled {
+            anyhow::bail!("project stage is disabled");
+        }
+        if project_stage.project_id.as_deref() != Some(thread.project_id.as_str())
+            || project_stage.workflow_id.as_deref() != Some(project.workflow_id.as_str())
+        {
             anyhow::bail!("project stage does not belong to this thread's project");
         }
         let default_assistant_ids = if assistant_ids.is_empty() {
@@ -3754,6 +4187,7 @@ impl SessionStore for SqliteStore {
         thread_stage_id: &str,
         assistant_ids: Option<&[String]>,
         order: Option<i64>,
+        enabled: Option<bool>,
     ) -> Result<StageInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -3818,6 +4252,12 @@ impl SessionStore for SqliteStore {
         )?;
         if let Some(next_assistant_bindings) = next_assistant_bindings {
             replace_thread_stage_assistants(&tx, thread_stage_id, &next_assistant_bindings, now)?;
+        }
+        if let Some(enabled) = enabled {
+            tx.execute(
+                "UPDATE stages SET enabled = ?, updated_at = ? WHERE id = ?",
+                params![enabled as i64, now, current.stage_id],
+            )?;
         }
         compact_stage_order(&tx, &current.thread_id)?;
         tx.execute(
@@ -3898,16 +4338,79 @@ impl SessionStore for SqliteStore {
 
     fn set_thread_stage(&self, thread_id: &str, thread_stage_id: &str) -> Result<ThreadInfo> {
         let conn = self.conn.lock().unwrap();
-        load_thread_by_id(&conn, thread_id)?;
+        let thread = load_thread_by_id(&conn, thread_id)?;
+        if !thread.enabled {
+            anyhow::bail!("thread is disabled");
+        }
         let stage = load_thread_stage_by_id(&conn, thread_stage_id)?;
         if stage.thread_id != thread_id {
             anyhow::bail!("stage does not belong to this thread");
+        }
+        if !stage.enabled {
+            anyhow::bail!("thread stage is disabled");
         }
         conn.execute(
             "UPDATE threads SET stage_id = ?, updated_at = ? WHERE id = ?",
             params![thread_stage_id, now_ms(), thread_id],
         )?;
         load_thread_by_id(&conn, thread_id)
+    }
+
+    fn link_thread_session(
+        &self,
+        thread_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<ThreadInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let thread = load_thread_by_id(&tx, thread_id)?;
+        if !thread.enabled {
+            anyhow::bail!("thread is disabled");
+        }
+        let project = load_project_by_id(&tx, &thread.project_id)?;
+        let session_project_path = session_project_path(&tx, agent, session_id)?
+            .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
+        if session_project_path != project.path {
+            anyhow::bail!("session does not belong to this thread's project");
+        }
+        ensure_session_not_linked_to_thread_workflow(&tx, agent, session_id)?;
+        let now = now_ms();
+        tx.execute(
+            "INSERT OR IGNORE INTO thread_sessions (thread_id, agent, session_id, created_at)
+             VALUES (?, ?, ?, ?)",
+            params![thread_id, agent.as_str(), session_id, now],
+        )?;
+        tx.execute(
+            "UPDATE threads SET updated_at = ? WHERE id = ?",
+            params![now, thread_id],
+        )?;
+        let thread = load_thread_by_id(&tx, thread_id)?;
+        tx.commit()?;
+        Ok(thread)
+    }
+
+    fn unlink_thread_session(
+        &self,
+        thread_id: &str,
+        agent: Agent,
+        session_id: &str,
+    ) -> Result<ThreadInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        load_thread_by_id(&tx, thread_id)?;
+        tx.execute(
+            "DELETE FROM thread_sessions
+             WHERE thread_id = ? AND agent = ? AND session_id = ?",
+            params![thread_id, agent.as_str(), session_id],
+        )?;
+        tx.execute(
+            "UPDATE threads SET updated_at = ? WHERE id = ?",
+            params![now_ms(), thread_id],
+        )?;
+        let thread = load_thread_by_id(&tx, thread_id)?;
+        tx.commit()?;
+        Ok(thread)
     }
 
     fn link_stage_session(
@@ -3919,12 +4422,20 @@ impl SessionStore for SqliteStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        if !stage.enabled {
+            anyhow::bail!("thread stage is disabled");
+        }
+        let thread = load_thread_by_id(&tx, &stage.thread_id)?;
+        if !thread.enabled {
+            anyhow::bail!("thread is disabled");
+        }
         let project = load_project_by_id(&tx, &stage.project_id)?;
         let session_project_path = session_project_path(&tx, agent, session_id)?
             .ok_or_else(|| anyhow::anyhow!("session not found: {session_id}"))?;
         if session_project_path != project.path {
             anyhow::bail!("session does not belong to this stage's project");
         }
+        ensure_session_not_linked_to_thread_workflow(&tx, agent, session_id)?;
         let now = now_ms();
         tx.execute(
             "INSERT OR IGNORE INTO stage_sessions (thread_stage_id, agent, session_id, created_at)
@@ -5541,7 +6052,7 @@ mod migration_tests {
         assert_eq!(store.list_all_sessions().unwrap().len(), 1);
 
         let project = store
-            .add_project(&project_path, Some("Visible"), "research".to_string())
+            .add_project(&project_path, Some("Visible"), "research".to_string(), None)
             .unwrap();
         assert_eq!(project.workflow_id, "research");
         assert_eq!(store.list_sessions().unwrap().len(), 1);
@@ -5563,6 +6074,7 @@ mod migration_tests {
                 &parent.to_string_lossy(),
                 "video-plan",
                 "video_production".to_string(),
+                None,
             )
             .unwrap();
         assert_eq!(created.name, "video-plan");
@@ -5617,13 +6129,19 @@ mod migration_tests {
         std::fs::create_dir(&parent).unwrap();
 
         let code = store
-            .create_project(&parent.to_string_lossy(), "code-flow", "code".to_string())
+            .create_project(
+                &parent.to_string_lossy(),
+                "code-flow",
+                "code".to_string(),
+                None,
+            )
             .unwrap();
         let writing = store
             .create_project(
                 &parent.to_string_lossy(),
                 "writing-flow",
                 "writing".to_string(),
+                None,
             )
             .unwrap();
         let video = store
@@ -5631,6 +6149,7 @@ mod migration_tests {
                 &parent.to_string_lossy(),
                 "video-flow",
                 "video_production".to_string(),
+                None,
             )
             .unwrap();
         let general = store
@@ -5638,6 +6157,7 @@ mod migration_tests {
                 &parent.to_string_lossy(),
                 "general-flow",
                 "general".to_string(),
+                None,
             )
             .unwrap();
 
@@ -5710,14 +6230,19 @@ mod migration_tests {
     }
 
     #[test]
-    fn builtin_workflow_stage_order_can_be_reordered_and_survives_seed() {
+    fn project_builtin_stage_order_can_be_reordered_and_survives_seed() {
         let path = unique_db("sessio-builtin-stage-order");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-builtin-stage-order-parent");
         std::fs::create_dir(&parent).unwrap();
         let project = store
-            .create_project(&parent.to_string_lossy(), "code-flow", "code".to_string())
+            .create_project(
+                &parent.to_string_lossy(),
+                "code-flow",
+                "code".to_string(),
+                None,
+            )
             .unwrap();
 
         let stages = store.list_project_stages(&project.id).unwrap();
@@ -5733,7 +6258,7 @@ mod migration_tests {
             .clone();
 
         let moved = store
-            .update_project_stage(&research.id, None, None, Some(plan.order))
+            .update_project_stage(&research.id, None, None, Some(plan.order), None)
             .unwrap();
         assert_eq!(moved.order, 1);
         assert_eq!(
@@ -5766,6 +6291,197 @@ mod migration_tests {
     }
 
     #[test]
+    fn project_instantiates_selected_builtin_stage_templates() {
+        let path = unique_db("sessio-project-stage-selection");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-stage-selection-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let templates = store.list_workflow_stages("code").unwrap();
+        let research_template = templates
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        assert_eq!(research_template.assistants.len(), 1);
+        assert_eq!(
+            research_template.assistants[0].assistant_id,
+            "assistant-builtin-research"
+        );
+        let selected_template_ids = templates
+            .iter()
+            .filter(|stage| matches!(stage.kind, Some(StageType::Research | StageType::Done)))
+            .map(|stage| stage.id.clone())
+            .collect::<Vec<_>>();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "selected-stages",
+                "code".to_string(),
+                Some(&selected_template_ids),
+            )
+            .unwrap();
+
+        let stages = store.list_project_stages(&project.id).unwrap();
+        assert_eq!(
+            stage_kinds(stages.clone()),
+            vec![StageType::Research, StageType::Done]
+        );
+        assert!(stages
+            .iter()
+            .all(|stage| stage.project_id.as_deref() == Some(project.id.as_str())));
+        assert!(stages
+            .iter()
+            .all(|stage| stage.stage_type == ProjectStageType::Builtin));
+        assert!(stages
+            .iter()
+            .all(|stage| !selected_template_ids.contains(&stage.id)));
+        let project_research = stages
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        assert_eq!(project_research.assistants.len(), 1);
+        assert_eq!(
+            project_research.assistants[0].assistant_id,
+            "assistant-builtin-research"
+        );
+
+        let thread = store
+            .create_thread(&project.id, "Use stages", None)
+            .unwrap();
+        let assistant = store
+            .list_assistants(Some(&project.id))
+            .unwrap()
+            .into_iter()
+            .find(|assistant| assistant.id == "assistant-builtin-research")
+            .unwrap();
+        assert!(store
+            .add_thread_stage(&thread.id, &research_template.id, &[assistant.id.clone()])
+            .is_err());
+        assert!(store
+            .add_thread_stage(&thread.id, &project_research.id, &[assistant.id])
+            .is_ok());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn backfill_preserves_existing_project_stage_assistant_bindings() {
+        let path = unique_db("sessio-project-stage-assistant-backfill");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(
+            &std::env::temp_dir(),
+            "sessio-project-stage-assistant-backfill-parent",
+        );
+        std::fs::create_dir(&parent).unwrap();
+
+        let templates = store.list_workflow_stages("code").unwrap();
+        let research_template = templates
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap()
+            .clone();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "backfill",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let reviewer = store
+            .list_assistants(Some(&project.id))
+            .unwrap()
+            .into_iter()
+            .find(|assistant| assistant.id == "assistant-builtin-review")
+            .unwrap();
+        let project_research = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        store
+            .update_project_stage_assistants(&project_research.id, &[reviewer.id.clone()])
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Old thread stage", None)
+            .unwrap();
+        let now = now_ms();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO thread_stages (id, thread_id, stage_id, \"order\", created_at, updated_at)
+                 VALUES (?, ?, ?, 0, ?, ?)",
+                params![
+                    "old-template-thread-stage",
+                    thread.id,
+                    research_template.id,
+                    now,
+                    now
+                ],
+            )
+            .unwrap();
+        }
+
+        store.init().unwrap();
+
+        let project_research = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        assert_eq!(
+            project_research.id,
+            stable_project_builtin_stage_id(&project.id, &research_template.id)
+        );
+        assert_eq!(project_research.assistants.len(), 1);
+        assert_eq!(project_research.assistants[0].assistant_id, reviewer.id);
+        let thread_stages = {
+            let conn = store.conn.lock().unwrap();
+            load_thread_stages(&conn, &thread.id).unwrap()
+        };
+        assert_eq!(thread_stages.len(), 1);
+        assert_eq!(thread_stages[0].stage_id, project_research.id);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn seed_does_not_recreate_deleted_workflow_stage_assistant_bindings() {
+        let path = unique_db("sessio-workflow-stage-assistant-seed");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let research = store
+            .list_workflow_stages("code")
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        assert_eq!(research.assistants.len(), 1);
+        store
+            .update_project_stage_assistants(&research.id, &[])
+            .unwrap();
+
+        store.init().unwrap();
+
+        let research = store
+            .list_workflow_stages("code")
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        assert!(research.assistants.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn kanban_items_link_and_aggregate_sessions() {
         let path = unique_db("sessio-kanban-session-links");
         let store = SqliteStore::open(&path).unwrap();
@@ -5774,7 +6490,12 @@ mod migration_tests {
         std::fs::create_dir(&parent).unwrap();
 
         let project = store
-            .create_project(&parent.to_string_lossy(), "linked", "code".to_string())
+            .create_project(
+                &parent.to_string_lossy(),
+                "linked",
+                "code".to_string(),
+                None,
+            )
             .unwrap();
         let session = SessionInfo {
             id: "session-a".to_string(),
@@ -5824,7 +6545,12 @@ mod migration_tests {
         let other_parent = temp_child_path(&std::env::temp_dir(), "sessio-kanban-other-parent");
         std::fs::create_dir(&other_parent).unwrap();
         let other_project = store
-            .create_project(&other_parent.to_string_lossy(), "other", "code".to_string())
+            .create_project(
+                &other_parent.to_string_lossy(),
+                "other",
+                "code".to_string(),
+                None,
+            )
             .unwrap();
         let other_session = SessionInfo {
             id: "session-b".to_string(),
@@ -5889,7 +6615,12 @@ mod migration_tests {
         std::fs::create_dir(&parent).unwrap();
 
         let project = store
-            .create_project(&parent.to_string_lossy(), "threaded", "code".to_string())
+            .create_project(
+                &parent.to_string_lossy(),
+                "threaded",
+                "code".to_string(),
+                None,
+            )
             .unwrap();
         let assistant = store
             .create_assistant(
@@ -5981,6 +6712,11 @@ mod migration_tests {
             .iter()
             .find(|item| item.id == "assistant-builtin-research")
             .unwrap();
+        assert_eq!(research_option.assistants.len(), 1);
+        assert_eq!(
+            research_option.assistants[0].assistant_id,
+            builtin_researcher.id
+        );
         let default_stage = store
             .update_project_stage_assistants(&research_option.id, &[builtin_researcher.id.clone()])
             .unwrap();
@@ -6100,7 +6836,13 @@ mod migration_tests {
             .unwrap();
         assert_eq!(unchanged_research.assistants[0].agent.id, "codex");
         let reviewed = store
-            .update_project_stage(&build_option.id, Some("Review Pass"), Some(None), None)
+            .update_project_stage(
+                &build_option.id,
+                Some("Review Pass"),
+                Some(None),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(reviewed.name.as_deref(), Some("Review Pass"));
         assert_eq!(reviewed.description, None);
@@ -6178,7 +6920,9 @@ mod migration_tests {
                 .id,
             "codex"
         );
-        let build = store.update_thread_stage(&build.id, None, Some(0)).unwrap();
+        let build = store
+            .update_thread_stage(&build.id, None, Some(0), None)
+            .unwrap();
         assert_eq!(build.name.as_deref(), Some("Review Pass"));
         assert_eq!(build.order, 0);
         assert_eq!(build.assistants[0].agent.id, "claude");
@@ -6198,9 +6942,31 @@ mod migration_tests {
         assert_eq!(listed_build_lane.stages[1].assistant_ids, assistant_ids);
         let reordered_ids = vec![reviewer.id.clone(), assistant.id.clone()];
         let research = store
-            .update_thread_stage(&research.id, Some(&reordered_ids), None)
+            .update_thread_stage(&research.id, Some(&reordered_ids), None, None)
             .unwrap();
         assert_eq!(research.assistant_ids, reordered_ids);
+
+        let disabled_research = store
+            .update_thread_stage(&research.id, None, None, Some(false))
+            .unwrap();
+        assert!(!disabled_research.enabled);
+        assert!(store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .all(|stage| stage.id != research.stage_id));
+        assert!(store
+            .list_workflow_stages(&project.workflow_id)
+            .unwrap()
+            .into_iter()
+            .any(|stage| stage.kind == Some(StageType::Research) && stage.project_id.is_none()));
+        assert!(store
+            .add_thread_stage(&thread.id, &research.stage_id, &assistant_ids)
+            .is_err());
+        let research = store
+            .update_thread_stage(&research.id, None, None, Some(true))
+            .unwrap();
+        assert!(research.enabled);
 
         let switched = store.set_thread_stage(&thread.id, &build.id).unwrap();
         assert_eq!(switched.stage_id.as_deref(), Some(build.id.as_str()));
@@ -6236,6 +7002,9 @@ mod migration_tests {
             .unwrap();
         assert_eq!(linked.sessions.len(), 1);
         assert_eq!(linked.sessions[0].id, session.id);
+        assert!(store
+            .link_thread_session(&thread.id, Agent::Codex, &session.id)
+            .is_err());
         assert_eq!(
             store
                 .list_threads(&project.id)
@@ -6253,6 +7022,7 @@ mod migration_tests {
             .iter()
             .find(|item| item.id == thread.id)
             .unwrap();
+        assert!(current_thread.sessions.is_empty());
         let build_stage = current_thread
             .stages
             .iter()
@@ -6270,8 +7040,38 @@ mod migration_tests {
             .unwrap();
         assert!(unlinked.sessions.is_empty());
 
+        let thread_linked = store
+            .link_thread_session(&thread.id, Agent::Codex, &session.id)
+            .unwrap();
+        assert_eq!(thread_linked.sessions.len(), 1);
+        assert_eq!(thread_linked.sessions[0].id, session.id);
+        assert!(thread_linked
+            .stages
+            .iter()
+            .all(|stage| stage.sessions.is_empty()));
+        assert!(store
+            .link_stage_session(&build.id, Agent::Codex, &session.id)
+            .is_err());
+        let listed_thread = store
+            .list_threads(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == thread.id)
+            .unwrap();
+        assert_eq!(listed_thread.sessions.len(), 1);
+        assert_eq!(listed_thread.sessions[0].id, session.id);
+        let thread_unlinked = store
+            .unlink_thread_session(&thread.id, Agent::Codex, &session.id)
+            .unwrap();
+        assert!(thread_unlinked.sessions.is_empty());
+
         let edited_thread = store
-            .update_thread(&thread.id, Some("Ship edited workflow"), Some(Some("")))
+            .update_thread(
+                &thread.id,
+                Some("Ship edited workflow"),
+                Some(Some("")),
+                None,
+            )
             .unwrap();
         assert_eq!(edited_thread.goal, "Ship edited workflow");
         assert_eq!(edited_thread.description, None);
@@ -6287,6 +7087,7 @@ mod migration_tests {
                     effort: "medium".to_string(),
                 }),
                 Some(None),
+                None,
             )
             .unwrap();
         assert_eq!(edited_assistant.name, "Builder Prime");
@@ -6299,7 +7100,12 @@ mod migration_tests {
         let other_parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-other-parent");
         std::fs::create_dir(&other_parent).unwrap();
         let other_project = store
-            .create_project(&other_parent.to_string_lossy(), "other", "code".to_string())
+            .create_project(
+                &other_parent.to_string_lossy(),
+                "other",
+                "code".to_string(),
+                None,
+            )
             .unwrap();
         let other_session = SessionInfo {
             id: "session-b".to_string(),
