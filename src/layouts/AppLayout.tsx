@@ -85,7 +85,7 @@ export default function AppLayout({
     >
       <div
         id="app-sidebar"
-        className="app-sidebar-panel min-w-0 overflow-hidden"
+        className="app-sidebar-panel min-h-0 min-w-0 overflow-hidden"
         aria-hidden={!sidebarOpen}
       >
         {sidebar}
@@ -120,7 +120,7 @@ export default function AppLayout({
           }
         }}
       />
-      <main id="app-main" className="relative flex h-full min-w-0 flex-col">
+      <main id="app-main" className="relative flex h-full min-h-0 min-w-0 overflow-hidden flex-col">
         {header}
         {children}
         {overlays}

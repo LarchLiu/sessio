@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import HashIcon from "@iconify-react/mynaui/hash";
 import { Bot, Check, Clapperboard, Copy, FilePenLine, GitBranch, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Save, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
 import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, StageType, ThreadInfo, WorkflowInfo } from "../api";
 import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateRuntimeAgentPreferences, updateThread } from "../api";
@@ -413,7 +414,7 @@ export function ProjectWorkbenchPage({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface-panel">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
       <div className="border-b border-ink/10 px-6 py-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
@@ -457,11 +458,11 @@ export function ProjectWorkbenchPage({
           </div>
         </div>
       </div>
-      <div className="min-h-0 flex-1">
-        <ScrollArea className="h-full min-h-0 p-5">
-          <div className="mb-4 inline-flex rounded-lg bg-ink/[0.06] p-1">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="shrink-0 px-5 pt-5">
+          <div className="inline-flex rounded-lg bg-ink/[0.06] p-1">
             {([
-              ["threads", t("thread.title"), GitBranch],
+              ["threads", t("thread.title"), HashIcon],
               ["stages", t("stage.project_stages"), ListChecks],
               ["assistants", t("assistant.title"), Bot],
               ["kanban", t("project.workbench"), Kanban],
@@ -480,6 +481,8 @@ export function ProjectWorkbenchPage({
               </button>
             ))}
           </div>
+        </div>
+        <ScrollArea className="min-h-0 flex-1" viewportClassName="px-5 pb-5 pt-4">
           {activeView === "threads" && (
             <ThreadWorkflowPanel
               project={project}

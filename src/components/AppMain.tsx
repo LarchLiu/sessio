@@ -119,7 +119,11 @@ export default function AppMain({
   }
 
   if (activeProject) {
-    return <ProjectWorkbenchPage {...projectWorkbenchProps(activeProject)} />;
+    return (
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <ProjectWorkbenchPage {...projectWorkbenchProps(activeProject)} />
+      </div>
+    );
   }
 
   if (!selected) {

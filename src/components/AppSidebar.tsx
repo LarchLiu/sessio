@@ -1,6 +1,8 @@
 import { type MouseEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { createPortal } from "react-dom";
+import HashIcon from "@iconify-react/mynaui/hash";
 import {
   ChevronDown,
   CircleAlert,
@@ -11,6 +13,7 @@ import {
   Key,
   LoaderCircle,
   MailPlus,
+  MessageSquareText,
   PanelLeftClose,
   Settings,
   SquareKanban,
@@ -19,11 +22,13 @@ import {
 } from "lucide-react";
 import {
   ProjectInfo,
-  WorkflowInfo,
   SessionInfo,
+  WorkflowInfo,
   addExistingProject,
   createDefaultProject,
+  listThreads,
   listWorkflows,
+  type ThreadInfo,
 } from "../api";
 import { useI18n } from "../i18n";
 import type { ProjectGroup } from "../navigation";
@@ -101,6 +106,46 @@ export default function AppSidebar({
   onError,
 }: AppSidebarProps) {
   const { t } = useI18n();
+  const [projectListModes, setProjectListModes] = useState<Record<string, "sessions" | "threads">>({});
+  const [projectThreads, setProjectThreads] = useState<Record<string, ThreadInfo[]>>({});
+  const [loadingProjectThreads, setLoadingProjectThreads] = useState<Set<string>>(new Set());
+
+  const refreshProjectThreads = (project: ProjectGroup) => {
+    setLoadingProjectThreads((prev) => new Set(prev).add(project.key));
+    listThreads(project.project.id)
+      .then((threads) => {
+        setProjectThreads((prev) => ({ ...prev, [project.key]: threads }));
+      })
+      .catch((err) => onError(String(err)))
+      .finally(() => {
+        setLoadingProjectThreads((prev) => {
+          const next = new Set(prev);
+          next.delete(project.key);
+          return next;
+        });
+      });
+  };
+
+  useEffect(() => {
+    const unlisten = listen("threads_updated", () => {
+      for (const project of projectGroups) {
+        if (projectListModes[project.key] === "threads") refreshProjectThreads(project);
+      }
+    });
+    return () => {
+      unlisten.then((f) => f()).catch(() => {});
+    };
+  }, [projectGroups, projectListModes]);
+
+  const toggleProjectListMode = (project: ProjectGroup) => {
+    setProjectListModes((prev) => {
+      const nextMode = prev[project.key] === "threads" ? "sessions" : "threads";
+      if (nextMode === "threads" && !projectThreads[project.key]) {
+        refreshProjectThreads(project);
+      }
+      return { ...prev, [project.key]: nextMode };
+    });
+  };
 
   return (
     <aside
@@ -171,7 +216,11 @@ export default function AppSidebar({
                 liveState={liveState}
                 runtimeSessionAliases={runtimeSessionAliases}
                 unreadSessionIds={unreadSessionIds}
+                listMode={projectListModes[project.key] ?? "sessions"}
+                threads={projectThreads[project.key] ?? []}
+                threadsLoading={loadingProjectThreads.has(project.key)}
                 onSelectProject={() => onToggleProjectExpanded(project.key)}
+                onToggleListMode={() => toggleProjectListMode(project)}
                 onOpenKanban={() => onOpenKanban(project)}
                 onNewChat={() => onNewProjectChat(project)}
                 onSelectSession={(session) => onSelectSession(project, session)}
@@ -546,7 +595,11 @@ function ProjectSidebarGroup({
   liveState,
   runtimeSessionAliases,
   unreadSessionIds,
+  listMode,
+  threads,
+  threadsLoading,
   onSelectProject,
+  onToggleListMode,
   onOpenKanban,
   onNewChat,
   onSelectSession,
@@ -562,7 +615,11 @@ function ProjectSidebarGroup({
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
+  listMode: "sessions" | "threads";
+  threads: ThreadInfo[];
+  threadsLoading: boolean;
   onSelectProject: () => void;
+  onToggleListMode: () => void;
   onOpenKanban: () => void;
   onNewChat: () => void;
   onSelectSession: (session: SessionInfo) => void;
@@ -580,7 +637,9 @@ function ProjectSidebarGroup({
     ? project.sessions
     : project.sessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
   const canToggleSessionLimit =
-    project.sessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+    listMode === "sessions" && project.sessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+  const displayCount = listMode === "threads" ? threads.length : project.count;
+  const ProjectListModeIcon = listMode === "threads" ? MessageSquareText : HashIcon;
   const toggleSessionLimit = () => {
     const collapsing = sessionsExpanded;
     onToggleSessionLimit();
@@ -608,9 +667,29 @@ function ProjectSidebarGroup({
         />
         <span className="min-w-0 flex-1 truncate text-body">{project.label}</span>
         <span className="text-meta text-ink/40 tabular-nums group-hover:hidden">
-          {project.count}
+          {displayCount}
         </span>
         <span className="ml-auto hidden shrink-0 items-center gap-0.5 group-hover:flex">
+          <Tooltip content={listMode === "threads" ? "Chats" : t("thread.title")} placement="top">
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label={t("thread.title")}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleListMode();
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onToggleListMode();
+              }}
+              className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
+            >
+              <ProjectListModeIcon className="h-3.5 w-3.5" />
+            </span>
+          </Tooltip>
           <Tooltip content={t("project.workbench")} placement="top">
             <span
               role="button"
@@ -666,26 +745,46 @@ function ProjectSidebarGroup({
               (expanded ? "translate-y-0" : "-translate-y-1")
             }
           >
-            {visibleSessions.map((session) => {
-              const key = sessionKey(session);
-              const unreadKeys = sessionUnreadKeys(session, runtimeSessionAliases);
-              const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)] ?? session.id;
-              const liveActivity = liveSessionActivity(liveState.sessions[runtimeSessionId]);
-              return (
-                <SidebarSessionItem
-                  key={key}
-                  item={session}
-                  active={selectedKey === key || selectedIdentityKey === sessionIdentityKey(session)}
-                  liveActivity={liveActivity}
-                  unread={intersectsSet(unreadKeys, unreadSessionIds)}
-                  onSelect={() => onSelectSession(session)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    onSessionContextMenu(session, { x: event.clientX, y: event.clientY });
-                  }}
-                />
-              );
-            })}
+            {listMode === "threads" ? (
+              threadsLoading && threads.length === 0 ? (
+                <div className="ml-7 px-1 py-1.5 text-body-sm text-ink/35">
+                  {t("new_chat.sending")}
+                </div>
+              ) : threads.length === 0 ? (
+                <div className="ml-7 px-1 py-1.5 text-body-sm text-ink/35">
+                  {t("thread.empty")}
+                </div>
+              ) : (
+                threads.map((thread) => (
+                  <SidebarThreadItem
+                    key={thread.id}
+                    thread={thread}
+                    onSelect={onOpenKanban}
+                  />
+                ))
+              )
+            ) : (
+              visibleSessions.map((session) => {
+                const key = sessionKey(session);
+                const unreadKeys = sessionUnreadKeys(session, runtimeSessionAliases);
+                const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)] ?? session.id;
+                const liveActivity = liveSessionActivity(liveState.sessions[runtimeSessionId]);
+                return (
+                  <SidebarSessionItem
+                    key={key}
+                    item={session}
+                    active={selectedKey === key || selectedIdentityKey === sessionIdentityKey(session)}
+                    liveActivity={liveActivity}
+                    unread={intersectsSet(unreadKeys, unreadSessionIds)}
+                    onSelect={() => onSelectSession(session)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      onSessionContextMenu(session, { x: event.clientX, y: event.clientY });
+                    }}
+                  />
+                );
+              })
+            )}
           </div>
           {canToggleSessionLimit && (
             <button
@@ -751,6 +850,41 @@ function SidebarSessionItem({
         {relativeTime}
       </span>
     </button>
+  );
+}
+
+function SidebarThreadItem({
+  thread,
+  onSelect,
+}: {
+  thread: ThreadInfo;
+  onSelect: () => void;
+}) {
+  const { t } = useI18n();
+  const relativeTime = formatShortRelativeTime(thread.updatedAt ?? thread.createdAt, t);
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      title={thread.goal}
+      className="group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left text-ink/65 transition hover:bg-ink/5 hover:text-ink"
+    >
+      <SidebarThreadStatusIcon />
+      <span className="min-w-0 flex-1 truncate text-body-sm leading-snug">
+        {thread.goal || <span className="text-ink/30">{t("thread.goal_placeholder")}</span>}
+      </span>
+      <span className="shrink-0 text-meta tabular-nums text-ink/35">
+        {relativeTime}
+      </span>
+    </button>
+  );
+}
+
+function SidebarThreadStatusIcon() {
+  return (
+    <span className="absolute left-2 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded border border-ink/80 bg-ink text-[rgb(var(--color-bg-sidebar))] shadow-sm">
+      <HashIcon className="h-3 w-3" />
+    </span>
   );
 }
 
