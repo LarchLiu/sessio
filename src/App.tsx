@@ -289,6 +289,9 @@ export default function App() {
     selected?.projectPath
       ? projects.find((project) => project.path === selected.projectPath) ?? null
       : null;
+  const newChatProject = newChatProjectKey
+    ? projects.find((project) => project.id === newChatProjectKey || project.path === newChatProjectKey) ?? null
+    : null;
 
   const selectedKey = selected ? sessionKey(selected) : null;
   const selectedIdentityKey = selected ? sessionIdentityKey(selected) : null;
@@ -406,6 +409,11 @@ export default function App() {
     : activeProject
       ? { kind: "project" as const, title: activeProject.name, icon: Folder, pill: activeProject.workflowId }
       : null;
+  const headerProjectContext =
+    selectedSessionProject ??
+    activeThreadProject ??
+    activeProject ??
+    newChatProject;
 
   useEffect(() => {
     if (memorySearchOpen && projectSearchInitialKey) {
@@ -522,6 +530,7 @@ export default function App() {
       detailTitle={detailTitle}
       contextTitle={headerContextTitle}
       entityTitle={headerEntityTitle}
+      projectContext={headerProjectContext}
       activeMessageMeta={activeMessageMeta}
       metaPopoverOpen={metaPopoverOpen}
       memoryBackendStatus={memoryBackendStatus}

@@ -1,6 +1,6 @@
 import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, Search, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
-import type { MemoryBackendStatus, SessionInfo } from "../api";
+import type { MemoryBackendStatus, ProjectInfo, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
 import { AgentGlyph } from "./AgentIcon";
 import Tooltip from "./Tooltip";
@@ -13,6 +13,7 @@ interface AppHeaderProps {
   detailTitle: string;
   contextTitle: { label: string; icon: LucideIcon } | null;
   entityTitle: { kind: "thread" | "project"; title: string; icon: LucideIcon; pill?: string } | null;
+  projectContext: Pick<ProjectInfo, "name" | "workflowId"> | null;
   activeMessageMeta: {
     count: number;
     partial: boolean;
@@ -39,6 +40,7 @@ export default function AppHeader({
   detailTitle,
   contextTitle,
   entityTitle,
+  projectContext,
   activeMessageMeta,
   metaPopoverOpen,
   memoryBackendStatus,
@@ -93,11 +95,11 @@ export default function AppHeader({
           <>
             <span
               data-tauri-drag-region
-              className="flex h-5 w-5 shrink-0"
+              className="flex h-4 w-4 shrink-0"
             >
               <AgentGlyph
                 agent={selected.agent}
-                className="h-5 w-5 pointer-events-none"
+                className="h-4 w-4 pointer-events-none"
               />
             </span>
             <div
@@ -106,7 +108,7 @@ export default function AppHeader({
             >
               <div
                 data-tauri-drag-region
-                className="truncate text-body font-medium leading-tight text-ink/85"
+                className="truncate text-body-sm font-medium leading-tight text-ink/85"
               >
                 {detailTitle}
               </div>
@@ -121,16 +123,16 @@ export default function AppHeader({
             </div>
           </>
         )}
-        {!selected && entityTitle && !sidebarOpen && (
+        {!selected && entityTitle && entityTitle.kind !== "project" && !sidebarOpen && (
           <HeaderEntityTitle title={entityTitle} />
         )}
       </div>
       <div data-tauri-drag-region="false" className="flex h-full items-center justify-self-center">
         {contextTitle ? (
-          <HeaderContextTitle title={contextTitle} />
+          <HeaderContextTitle title={contextTitle} project={projectContext} />
         ) : null}
       </div>
-      <div className="justify-self-end" data-tauri-drag-region="false">
+      <div className="flex h-full items-center justify-self-end" data-tauri-drag-region="false">
         {memoryBackendMissing && memoryBackendStatus ? (
           <MemoryBackendMissingButton
             status={memoryBackendStatus}
@@ -184,17 +186,32 @@ function HeaderEntityTitle({
 
 function HeaderContextTitle({
   title,
+  project,
 }: {
   title: { label: string; icon: LucideIcon };
+  project: Pick<ProjectInfo, "name" | "workflowId"> | null;
 }) {
   const Icon = title.icon;
   return (
     <div
       data-tauri-drag-region
-      className="inline-flex h-6 items-center gap-2 text-body-sm font-medium uppercase leading-none tracking-[0.12em] text-ink/50"
+      className="inline-flex h-6 max-w-[min(52vw,760px)] items-center gap-2 text-body-sm font-medium leading-none text-ink/50"
     >
-      <Icon className="h-4 w-4 shrink-0" />
-      {title.label}
+      <span className="inline-flex min-w-0 items-center gap-2 uppercase tracking-[0.12em]">
+        <Icon className="h-4 w-4 shrink-0" />
+        <span className="truncate">{title.label}</span>
+      </span>
+      {project && (
+        <>
+          <span className="shrink-0 text-ink/28">·</span>
+          <span className="min-w-0 truncate text-body-sm uppercase leading-none tracking-normal text-ink/72">
+            {project.name}
+          </span>
+          <span className="shrink-0 rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-1.5 py-0.5 text-meta leading-none tracking-normal first-letter:uppercase text-card-fg/55">
+            {project.workflowId}
+          </span>
+        </>
+      )}
     </div>
   );
 }
