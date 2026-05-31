@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction, ReactNode } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo } from "../api";
 import type { ActiveMessageMeta } from "../pages/ChatPage";
 import ChatPage from "../pages/ChatPage";
@@ -11,10 +11,8 @@ import type {
   LiveRuntimeAction,
   LiveRuntimeState,
 } from "../runtimeChat";
-import ToastStack from "./ToastStack";
 
 export default function AppMain({
-  error,
   activeProject,
   selectedThreadId,
   selected,
@@ -44,7 +42,6 @@ export default function AppMain({
   onActiveMessageMeta,
   onError,
 }: {
-  error: string | null;
   activeProject: ProjectInfo | null;
   selectedThreadId: string | null;
   selected: SessionInfo | null;
@@ -106,34 +103,25 @@ export default function AppMain({
     onError,
   });
 
-  const withErrorToast = (content: ReactNode) => (
-    <div className="relative flex min-h-0 flex-1 overflow-hidden">
-      {content}
-      <ToastStack message={error} onMessageConsumed={() => onError(null)} />
-    </div>
-  );
-
   if (activeProject) {
     return (
-      withErrorToast(
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {selectedThreadId ? (
-            <ThreadPage
-              project={activeProject}
-              threadId={selectedThreadId}
-              onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
-              onError={onError}
-            />
-          ) : (
-            <ProjectWorkbenchPage {...projectWorkbenchProps(activeProject)} />
-          )}
-        </div>,
-      )
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {selectedThreadId ? (
+          <ThreadPage
+            project={activeProject}
+            threadId={selectedThreadId}
+            onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
+            onError={onError}
+          />
+        ) : (
+          <ProjectWorkbenchPage {...projectWorkbenchProps(activeProject)} />
+        )}
+      </div>
     );
   }
 
   if (!selected) {
-    return withErrorToast(
+    return (
       <NewChatPage
         projects={projectGroups}
         initialProjectKey={newChatProjectKey}
@@ -144,11 +132,11 @@ export default function AppMain({
         dispatchLiveEvent={dispatchLiveEvent}
         onError={onError}
         onPendingSession={addPendingSession}
-      />,
+      />
     );
   }
 
-  return withErrorToast(
+  return (
     <div className="relative flex-1 min-h-0">
       <div
         className={
@@ -187,6 +175,6 @@ export default function AppMain({
           </div>
         )}
       </div>
-    </div>,
+    </div>
   );
 }

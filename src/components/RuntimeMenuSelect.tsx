@@ -68,7 +68,7 @@ export function runtimePermissionModeOptions(
   return rows;
 }
 
-function runtimePermissionModeIcon(agent: Agent | null | undefined, value: string) {
+export function runtimePermissionModeIcon(agent: Agent | null | undefined, value: string) {
   const className = "h-4 w-4 text-ink/55";
   if (agent === "codex") {
     switch (value) {

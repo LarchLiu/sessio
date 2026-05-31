@@ -2,7 +2,7 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import { ArrowLeft, Bot, Check, ChevronDown, Circle, GripVertical, Languages, ListChecks, Monitor, Moon, Pencil, Plus, RefreshCw, Settings, Sun, Trash2, Workflow } from "lucide-react";
-import type { AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, StageAssistantInfo, WorkflowInfo } from "../api";
+import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, StageAssistantInfo, WorkflowInfo } from "../api";
 import {
   createAssistant,
   createProjectStage,
@@ -18,8 +18,10 @@ import {
   updateProjectStageAssistants,
 } from "../api";
 import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
-import InlineMenuSelect from "../components/InlineMenuSelect";
+import { AgentGlyph } from "../components/AgentIcon";
+import { runtimePermissionModeIcon } from "../components/RuntimeMenuSelect";
 import ScrollArea from "../components/ScrollArea";
+import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
@@ -184,10 +186,8 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
   const { t } = useI18n();
   const [assistants, setAssistants] = useState<AssistantInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState("");
-  const [workflowId, setWorkflowId] = useState("code");
   const [systemPrompt, setSystemPrompt] = useState("");
   const runtimeAgents = useMemo(() => dbAgentsAsRuntimeAgents(agents), [agents]);
   const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(() => ({
@@ -201,15 +201,12 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
   const reload = async () => {
     setLoading(true);
     try {
-      const [assistantRows, agentRows, workflowRows] = await Promise.all([
+      const [assistantRows, agentRows] = await Promise.all([
         listAssistants(null),
         listAgents(),
-        listWorkflows(),
       ]);
       setAssistants(assistantRows);
       setAgents(agentRows);
-      setWorkflows(workflowRows);
-      setWorkflowId((current) => workflowRows.some((workflow) => workflow.id === current) ? current : workflowRows[0]?.id ?? "code");
     } catch (err) {
       onError(String(err));
     } finally {
@@ -235,7 +232,6 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
         agent: agentDraft,
         systemPrompt,
         type: "custom" satisfies AssistantType,
-        workflowId,
       });
       setAssistants((prev) => [assistant, ...prev]);
       setName("");
@@ -245,25 +241,31 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
     }
   };
 
-  const builtin = assistants.filter((assistant) => assistant.type === "builtin");
-  const custom = assistants.filter((assistant) => assistant.type === "custom");
+  const sharedAssistants = assistants.filter((assistant) => assistant.projectId === null && assistant.workflowId === null);
+  const builtin = sharedAssistants.filter((assistant) => assistant.type === "builtin");
+  const custom = sharedAssistants.filter((assistant) => assistant.type === "custom");
 
   return (
     <section>
       <SettingsGroup title={t("assistant.builtin")}>
         <div className="grid gap-2">
           {builtin.map((assistant) => (
-            <AssistantCard key={assistant.id} assistant={assistant} agents={agents} readonly onUpdated={() => {}} onDeleted={() => {}} onError={onError} />
+            <AssistantCard
+              key={assistant.id}
+              assistant={assistant}
+              agents={agents}
+              deletable={false}
+              onUpdated={(next) => setAssistants((prev) => prev.map((item) => item.id === next.id ? next : item))}
+              onDeleted={() => {}}
+              onError={onError}
+            />
           ))}
           {!loading && builtin.length === 0 && <EmptyState label={t("assistant.empty")} />}
         </div>
       </SettingsGroup>
       <SettingsGroup title={t("assistant.add")}>
         <div className="grid gap-2">
-          <div className="grid grid-cols-[minmax(0,1fr)_180px] gap-2">
-            <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("assistant.name")} className={inputClassName} />
-            <InlineMenuSelect value={workflowId} options={workflows.map((workflow) => ({ value: workflow.id, label: workflow.name }))} onChange={setWorkflowId} ariaLabel={t("project.workflowId")} className="h-9 max-w-none rounded-md border border-input-border/[0.16] bg-input px-2" minMenuWidth={220} />
-          </div>
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("assistant.name")} className={inputClassName} />
           <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
           <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} placeholder={t("assistant.system_prompt")} rows={4} className={textareaClassName} />
           <button type="button" onClick={() => void create()} disabled={!name.trim() || !agentDraft.id} className="inline-flex h-8 w-fit items-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
@@ -279,7 +281,7 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
               key={assistant.id}
               assistant={assistant}
               agents={agents}
-              readonly={false}
+              deletable
               onUpdated={(next) => setAssistants((prev) => prev.map((item) => item.id === next.id ? next : item))}
               onDeleted={(id) => setAssistants((prev) => prev.filter((item) => item.id !== id))}
               onError={onError}
@@ -305,7 +307,10 @@ function WorkflowsSettings({ onError }: { onError: (error: string | null) => voi
   const [loading, setLoading] = useState(true);
 
   const selectedWorkflow = workflows.find((workflow) => workflow.id === selectedWorkflowId) ?? workflows[0] ?? null;
-  const availableAssistants = assistants.filter((assistant) => assistant.projectId === null && (assistant.workflowId === null || assistant.workflowId === selectedWorkflowId));
+  const availableAssistants = assistants.filter((assistant) => assistant.enabled && assistant.projectId === null && (
+    assistant.workflowId === selectedWorkflowId ||
+    (assistant.workflowId === null && assistant.type === "custom")
+  ));
 
   const reloadAll = async () => {
     setLoading(true);
@@ -645,40 +650,18 @@ function StageTemplateRow({
         </button>
         <div className="flex shrink-0 items-center gap-1">
           <>
-            <Tooltip content={stage.enabled ? t("stage.enabled") : t("stage.disabled")} placement="top">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={stage.enabled}
-                onClick={() => void toggleEnabled()}
-                className={
-                  "relative h-5 w-9 rounded-full border transition " +
-                  (stage.enabled
-                    ? "border-card-border/[0.18] bg-card-chip/[0.22]"
-                    : "border-card-border/[0.12] bg-card-panel")
-                }
-              >
-                <span
-                  className={
-                    "absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full transition " +
-                    (stage.enabled
-                      ? "left-[18px] bg-card-fg/75"
-                      : "left-1 bg-card-subtle/45")
-                  }
-                />
-              </button>
-            </Tooltip>
-            <Tooltip content={t("stage.allow_empty_assistants")} placement="top">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={stage.allowEmptyAssistants}
-                onClick={() => void toggleAllowEmptyAssistants()}
-                className={`rounded p-1 ${stage.allowEmptyAssistants ? "bg-card-chip/[0.12] text-card-fg/75" : "text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"}`}
-              >
-                {stage.allowEmptyAssistants ? <Check className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
-              </button>
-            </Tooltip>
+            <WorkflowStageSwitch
+              checked={stage.enabled}
+              tooltip={stage.enabled ? t("stage.enabled") : t("stage.disabled")}
+              onToggle={() => void toggleEnabled()}
+              variant="track"
+            />
+            <WorkflowStageSwitch
+              checked={stage.allowEmptyAssistants}
+              tooltip={t("stage.allow_empty_assistants")}
+              onToggle={() => void toggleAllowEmptyAssistants()}
+              variant="icon"
+            />
             <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4 rotate-180" /></button>
             <button type="button" onClick={() => void onMove(stage, 1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4" /></button>
             {custom && (
@@ -702,8 +685,8 @@ function StageTemplateRow({
               {assistantOptions.map((option) => {
                 const active = selectedAssistantIds.includes(option.value);
                 return (
-                  <button key={option.value} type="button" onClick={() => void toggleAssistant(option.value)} className={"inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " + (active ? "border-card-border/[0.18] bg-card-chip/[0.06] text-card-fg/88" : "border-card-border/[0.12] bg-card-panel text-card-muted/60 hover:text-card-fg")}>
-                    {active && <Check className="h-3 w-3" />}
+                  <button key={option.value} type="button" onClick={() => void toggleAssistant(option.value)} className={"inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " + (active ? "border-card-border/[0.22] bg-surface text-card-fg/92" : "border-card-border/[0.10] bg-card-chip/[0.06] text-card-muted/60 hover:border-card-border/[0.16] hover:bg-card-chip/[0.08] hover:text-card-fg")}>
+                    {active && <Check className="h-3 w-3 shrink-0" />}
                     {option.label}
                   </button>
                 );
@@ -717,17 +700,47 @@ function StageTemplateRow({
   );
 }
 
+function WorkflowStageSwitch({
+  checked,
+  tooltip,
+  onToggle,
+  variant,
+}: {
+  checked: boolean;
+  tooltip: string;
+  onToggle: () => void;
+  variant: "track" | "icon";
+}) {
+  if (variant === "track") {
+    return <SwitchControl checked={checked} tooltip={tooltip} onToggle={onToggle} />;
+  }
+
+  return (
+    <Tooltip content={tooltip} placement="top">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={onToggle}
+        className={`rounded p-1 ${checked ? "bg-card-chip/[0.12] text-card-fg/75" : "text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"}`}
+      >
+        {checked ? <Check className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
+      </button>
+    </Tooltip>
+  );
+}
+
 function AssistantCard({
   assistant,
   agents,
-  readonly,
+  deletable,
   onUpdated,
   onDeleted,
   onError,
 }: {
   assistant: AssistantInfo;
   agents: AgentInfo[];
-  readonly: boolean;
+  deletable: boolean;
   onUpdated: (assistant: AssistantInfo) => void;
   onDeleted: (assistantId: string) => void;
   onError: (error: string | null) => void;
@@ -737,17 +750,18 @@ function AssistantCard({
   const [name, setName] = useState(assistant.name);
   const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(assistant.agent);
   const [systemPrompt, setSystemPrompt] = useState(assistant.systemPrompt ?? "");
+  const [enabled, setEnabled] = useState(assistant.enabled);
 
   useEffect(() => {
     setName(assistant.name);
     setAgentDraft(assistant.agent);
     setSystemPrompt(assistant.systemPrompt ?? "");
+    setEnabled(assistant.enabled);
   }, [assistant]);
 
   const save = async () => {
-    if (readonly) return;
     try {
-      onUpdated(await updateAssistant(assistant.id, { name, agent: agentDraft, systemPrompt }));
+      onUpdated(await updateAssistant(assistant.id, { name, agent: agentDraft, systemPrompt, enabled }));
       setEditing(false);
     } catch (err) {
       onError(String(err));
@@ -755,7 +769,7 @@ function AssistantCard({
   };
 
   const remove = async () => {
-    if (readonly) return;
+    if (!deletable) return;
     try {
       await deleteAssistant(assistant.id);
       onDeleted(assistant.id);
@@ -764,12 +778,24 @@ function AssistantCard({
     }
   };
 
+  const toggleEnabled = async () => {
+    try {
+      onUpdated(await updateAssistant(assistant.id, { enabled: !assistant.enabled }));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
   return (
-    <div className="rounded-lg border border-card-border/[0.12] bg-card p-3">
+    <div className={`rounded-lg border border-card-border/[0.12] bg-card p-3 ${assistant.enabled ? "" : "opacity-45"}`}>
       {editing ? (
         <div className="grid gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} className={inputClassName} />
           <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
+          <div className="flex h-8 w-fit items-center gap-2 rounded-md border border-card-border/[0.12] bg-card-chip/[0.05] px-2 text-caption text-card-fg/75">
+            <SwitchControl checked={enabled} onToggle={() => setEnabled(!enabled)} />
+            {enabled ? t("stage.enabled") : t("stage.disabled")}
+          </div>
           <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows={4} className={textareaClassName} />
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setEditing(false)} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
@@ -783,19 +809,48 @@ function AssistantCard({
             <div className="flex min-w-0 items-center gap-2">
               <span className="truncate text-body-sm font-medium text-card-fg/75">{assistant.name}</span>
               <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{assistant.type}</span>
+              <AssistantAgentPill agent={assistant.agent} agents={agents} />
             </div>
-            <div className="mt-1 truncate text-caption text-card-muted/60">{assistant.agent.name} · {assistant.agent.model} · {assistant.agent.mode} · {assistant.agent.effort}</div>
             {assistant.systemPrompt && <div className="mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-card-muted/60">{assistant.systemPrompt}</div>}
           </div>
-          {!readonly && (
-            <div className="flex shrink-0 items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
+            <Tooltip content={t("assistant.edit")} placement="top">
               <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><Pencil className="h-4 w-4" /></button>
+            </Tooltip>
+            <SwitchControl
+              checked={assistant.enabled}
+              tooltip={assistant.enabled ? t("assistant.disable") : t("assistant.enable")}
+              onToggle={() => void toggleEnabled()}
+            />
+            {deletable && (
               <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+function AssistantAgentPill({ agent, agents }: { agent: AssistantAgentInfo; agents: AgentInfo[] }) {
+  const agentId = (agent.id === "claude" || agent.id === "gemini" ? agent.id : "codex") as Agent;
+  const dbAgent = agents.find((item) => item.id === agent.id);
+  const modelName = dbAgent?.models.find((option) => option.value === agent.model)?.label || agent.model;
+  const effortName = dbAgent?.efforts.find((option) => option.value === agent.effort)?.label || agent.effort;
+  const modeName = dbAgent?.permissionModes.find((option) => option.value === agent.mode)?.label || agent.mode;
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-caption text-ink/60">
+      <span className="inline-flex h-7 min-w-0 max-w-[260px] items-center gap-1.5 rounded-md px-1.5 py-1">
+        <AgentGlyph agent={agentId} className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{modelName}</span>
+        {effortName && <span className="shrink-0 text-ink/38">{effortName}</span>}
+      </span>
+      <span className="text-ink/35">·</span>
+      <span className="inline-flex h-7 min-w-0 max-w-[190px] items-center gap-1.5 rounded-md px-1.5 py-1">
+        {runtimePermissionModeIcon(agentId, agent.mode)}
+        <span className="truncate">{modeName}</span>
+      </span>
+    </span>
   );
 }
 
@@ -807,7 +862,8 @@ function AssistantSummary({ assistants }: { assistants: StageAssistantInfo[] }) 
   return (
     <div className="mt-2 flex flex-wrap gap-1.5">
       {assistants.map((assistant) => (
-        <span key={assistant.assistantId} className="rounded bg-card-panel px-1.5 py-0.5 text-meta text-card-chip-fg/60">
+        <span key={assistant.assistantId} className="inline-flex h-7 items-center rounded-md border border-card-border/[0.22] bg-surface px-2 text-caption text-card-fg/92">
+          <Bot className="mr-1.5 h-3 w-3 shrink-0" />
           {assistant.name}
         </span>
       ))}

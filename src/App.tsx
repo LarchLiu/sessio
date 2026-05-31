@@ -27,6 +27,7 @@ import AppMain from "./components/AppMain";
 import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
 import AppSidebar from "./components/AppSidebar";
 import MemoryBackendMissingButton from "./components/MemoryBackendMissingButton";
+import ToastStack from "./components/ToastStack";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppData } from "./hooks/useAppData";
 import { usePendingNewChats } from "./hooks/usePendingNewChats";
@@ -561,7 +562,7 @@ export default function App() {
 
   if (settingsOpen) {
     return (
-      <div className="h-screen text-body">
+      <div className="relative h-screen text-body">
         <SettingsPage
           lang={lang}
           onLangChange={setLang}
@@ -573,48 +574,51 @@ export default function App() {
           onError={setError}
           onRebuildFinished={refreshMemoryBackend}
         />
+        <ToastStack message={error} onMessageConsumed={() => setError(null)} />
       </div>
     );
   }
 
   return (
-    <AppLayout
-      sidebar={sidebar}
-      header={header}
-      sidebarOpen={sidebarOpen}
-      overlays={overlays}
-    >
-      <AppMain
-        error={error}
-        activeProject={activeProject ?? activeThreadProject}
-        selectedThreadId={selectedThreadId}
-        selected={selected}
-        selectedSessionProject={selectedSessionProject}
-        detailRoute={detailRoute}
-        viewMode={viewMode}
-        liveState={liveRuntimeState}
-        runtimeAgents={runtimeAgents}
-        lastRuntimeAgentSelection={lastRuntimeAgentSelection}
-        rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
-        debugAcpConfig={debugAcpConfig}
-        runtimeSessionAliases={runtimeSessionAliases}
-        selectedAncestorSessions={selectedAncestorSessions}
-        newChatProjectKey={newChatProjectKey}
-        projectGroups={projectGroups}
-        availableSessions={availableSessions}
-        dispatchLiveEvent={dispatchLiveRuntimeEvent}
-        setProjects={setProjects}
-        setFilter={setFilter}
-        setSelectedProject={setSelectedProject}
-        setSelectedThread={setSelectedThread}
-        setSelected={setSelected}
-        setDetailMode={setDetailMode}
-        setPendingNewChats={setPendingNewChats}
-        refreshSessions={refreshSessions}
-        onMessageCount={handleMessageCount}
-        onActiveMessageMeta={handleActiveMessageMeta}
-        onError={setError}
-      />
-    </AppLayout>
+    <div className="relative h-screen">
+      <AppLayout
+        sidebar={sidebar}
+        header={header}
+        sidebarOpen={sidebarOpen}
+        overlays={overlays}
+      >
+        <AppMain
+          activeProject={activeProject ?? activeThreadProject}
+          selectedThreadId={selectedThreadId}
+          selected={selected}
+          selectedSessionProject={selectedSessionProject}
+          detailRoute={detailRoute}
+          viewMode={viewMode}
+          liveState={liveRuntimeState}
+          runtimeAgents={runtimeAgents}
+          lastRuntimeAgentSelection={lastRuntimeAgentSelection}
+          rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
+          debugAcpConfig={debugAcpConfig}
+          runtimeSessionAliases={runtimeSessionAliases}
+          selectedAncestorSessions={selectedAncestorSessions}
+          newChatProjectKey={newChatProjectKey}
+          projectGroups={projectGroups}
+          availableSessions={availableSessions}
+          dispatchLiveEvent={dispatchLiveRuntimeEvent}
+          setProjects={setProjects}
+          setFilter={setFilter}
+          setSelectedProject={setSelectedProject}
+          setSelectedThread={setSelectedThread}
+          setSelected={setSelected}
+          setDetailMode={setDetailMode}
+          setPendingNewChats={setPendingNewChats}
+          refreshSessions={refreshSessions}
+          onMessageCount={handleMessageCount}
+          onActiveMessageMeta={handleActiveMessageMeta}
+          onError={setError}
+        />
+      </AppLayout>
+      <ToastStack message={error} onMessageConsumed={() => setError(null)} />
+    </div>
   );
 }

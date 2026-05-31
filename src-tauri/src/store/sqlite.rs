@@ -388,8 +388,6 @@ CREATE TABLE IF NOT EXISTS assistants (
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
-    CHECK(type = 'builtin'
-       OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
     FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
@@ -703,7 +701,7 @@ fn apply_v5_patch(conn: &Connection) {
         );
     }
     let _ = rebuild_stages_table_for_project_builtin_stages(conn);
-    let _ = rebuild_assistants_table_for_project_builtin_assistants(conn);
+    let _ = rebuild_assistants_table_for_scope_constraints(conn);
 }
 
 fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -717,7 +715,7 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn rebuild_assistants_table_for_project_builtin_assistants(conn: &Connection) -> Result<()> {
+fn rebuild_assistants_table_for_scope_constraints(conn: &Connection) -> Result<()> {
     let create_sql: Option<String> = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assistants'",
@@ -728,7 +726,9 @@ fn rebuild_assistants_table_for_project_builtin_assistants(conn: &Connection) ->
     let Some(create_sql) = create_sql else {
         return Ok(());
     };
-    if !create_sql.contains("type = 'builtin' AND project_id IS NULL") {
+    if !create_sql.contains("type = 'builtin' AND project_id IS NULL")
+        && !create_sql.contains("workflow_id IS NOT NULL OR project_id IS NOT NULL")
+    {
         return Ok(());
     }
     conn.execute_batch(
@@ -746,8 +746,6 @@ fn rebuild_assistants_table_for_project_builtin_assistants(conn: &Connection) ->
             created_at      INTEGER NOT NULL,
             updated_at      INTEGER NOT NULL,
             CHECK(type IN ('builtin', 'custom')),
-            CHECK(type = 'builtin'
-               OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
             FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
@@ -918,6 +916,7 @@ fn seed_workflow_assistants_from_stage_bindings(conn: &Connection, now: i64) -> 
              INNER JOIN assistants a ON a.id = sa.assistant_id
              WHERE s.project_id IS NULL
                AND s.workflow_id IS NOT NULL
+               AND a.type = 'builtin'
                AND a.project_id IS NULL
                AND (a.workflow_id IS NULL OR a.workflow_id != s.workflow_id)",
         )?;
@@ -1620,6 +1619,10 @@ fn stable_project_builtin_assistant_id(project_id: &str, template_assistant_id: 
     )
 }
 
+fn stable_project_assistant_id(project_id: &str, template_assistant_id: &str) -> String {
+    stable_project_builtin_assistant_id(project_id, template_assistant_id)
+}
+
 fn stable_workflow_builtin_assistant_id(workflow_id: &str, source_assistant_id: &str) -> String {
     format!("assistant-workflow-{workflow_id}-{source_assistant_id}")
 }
@@ -1987,14 +1990,14 @@ fn instantiate_project_assistants(
          FROM assistants
          WHERE project_id IS NULL
            AND enabled = 1
-           AND workflow_id = ?
-         ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
+           AND (workflow_id = ? OR (workflow_id IS NULL AND type = 'custom'))
+         ORDER BY CASE WHEN workflow_id = ? THEN 0 ELSE 1 END, type ASC, updated_at DESC, name COLLATE NOCASE ASC",
     )?;
     let templates = stmt
-        .query_map(params![workflow_id], assistant_from_row)?
+        .query_map(params![workflow_id, workflow_id], assistant_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for template in templates {
-        let id = stable_project_builtin_assistant_id(project_id, &template.id);
+        let id = stable_project_assistant_id(project_id, &template.id);
         conn.execute(
             "INSERT OR IGNORE INTO assistants (
                 id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
@@ -2131,7 +2134,7 @@ fn copy_project_stage_assistants(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (assistant_id, order) in bindings {
-        let project_assistant_id = stable_project_builtin_assistant_id(project_id, &assistant_id);
+        let project_assistant_id = stable_project_assistant_id(project_id, &assistant_id);
         let Some(target_assistant_id) = conn
             .query_row(
                 "SELECT id FROM assistants WHERE id = ? AND project_id = ? AND enabled = 1",
@@ -2325,6 +2328,21 @@ fn validate_assistant_for_stage(
     if stage.project_id.is_some() && assistant.project_id == stage.project_id {
         return Ok(assistant);
     }
+    if stage.project_id.is_none()
+        && stage.workflow_id.is_some()
+        && assistant.project_id.is_none()
+        && assistant.workflow_id == stage.workflow_id
+    {
+        return Ok(assistant);
+    }
+    if stage.project_id.is_none()
+        && stage.workflow_id.is_some()
+        && assistant.project_id.is_none()
+        && assistant.workflow_id.is_none()
+        && assistant.assistant_type == AssistantType::Custom
+    {
+        return Ok(assistant);
+    }
     anyhow::bail!("assistant is not available for this stage")
 }
 
@@ -2376,6 +2394,26 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let workflow_stage_usages = {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(w.name, 'Unknown'),
+                COALESCE(s.name, s.kind, s.id)
+             FROM stage_assistants sa
+             INNER JOIN stages s ON s.id = sa.stage_id
+             LEFT JOIN workflows w ON w.id = s.workflow_id
+             WHERE sa.assistant_id = ?
+               AND s.project_id IS NULL
+               AND s.workflow_id IS NOT NULL
+             ORDER BY w.name COLLATE NOCASE ASC, s.\"order\" ASC",
+        )?;
+        let rows = stmt.query_map(params![assistant_id], |row| {
+            let workflow_name: String = row.get(0)?;
+            let stage_name: String = row.get(1)?;
+            Ok(format!("workflow \"{workflow_name}\" stage \"{stage_name}\""))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
     let thread_stage_usages = {
         let mut stmt = conn.prepare(
             "SELECT
@@ -2401,13 +2439,23 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    if !project_stage_usages.is_empty() || !thread_stage_usages.is_empty() {
+    if !project_stage_usages.is_empty()
+        || !workflow_stage_usages.is_empty()
+        || !thread_stage_usages.is_empty()
+    {
         let mut parts = Vec::new();
         if !project_stage_usages.is_empty() {
             parts.push(format!(
                 "{} project stage assistant binding(s): {}",
                 project_stage_usages.len(),
                 usage_list(&project_stage_usages)
+            ));
+        }
+        if !workflow_stage_usages.is_empty() {
+            parts.push(format!(
+                "{} workflow stage assistant binding(s): {}",
+                workflow_stage_usages.len(),
+                usage_list(&workflow_stage_usages)
             ));
         }
         if !thread_stage_usages.is_empty() {
@@ -4026,11 +4074,7 @@ impl SessionStore for SqliteStore {
                     anyhow::bail!("builtin assistant cannot be linked to a project");
                 }
             }
-            AssistantType::Custom => {
-                if project_id.is_none() && resolved_workflow_id.is_none() {
-                    anyhow::bail!("custom assistant requires a project or workflow");
-                }
-            }
+            AssistantType::Custom => {}
         }
         if let Some(workflow_id) = resolved_workflow_id.as_deref() {
             ensure_workflow_exists(&conn, workflow_id)?;
@@ -6136,6 +6180,80 @@ mod migration_tests {
     }
 
     #[test]
+    fn migration_removes_custom_assistant_scope_check() {
+        let path = unique_db("sessio-mig-assistant-scope-check");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
+                INSERT INTO schema_migrations(version) VALUES (1),(2),(3),(4),(5);
+                CREATE TABLE workflows (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    type TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    CHECK(type IN ('builtin', 'custom'))
+                );
+                CREATE TABLE projects (
+                    id TEXT PRIMARY KEY,
+                    path TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL DEFAULT 'code',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(workflow_id) REFERENCES workflows(id)
+                );
+                CREATE TABLE assistants (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    agent_json TEXT NOT NULL,
+                    system_prompt TEXT,
+                    type TEXT NOT NULL,
+                    workflow_id TEXT,
+                    project_id TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    CHECK(type IN ('builtin', 'custom')),
+                    CHECK(type = 'builtin'
+                       OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
+                    FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                "#,
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let assistant = store
+            .create_assistant(
+                "Shared reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(assistant.workflow_id, None);
+        assert_eq!(assistant.project_id, None);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn session_history_roundtrip_stores_acp_turn_json() {
         let path = unique_db("sessio-history-roundtrip");
         let store = SqliteStore::open(&path).unwrap();
@@ -6884,6 +7002,186 @@ mod migration_tests {
         assert!(research.assistants.is_empty());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn workflow_stage_templates_accept_only_same_workflow_assistants() {
+        let path = unique_db("sessio-workflow-stage-assistant-scope");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let research = store
+            .list_workflow_stages("code")
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        let code_assistant = store
+            .create_assistant(
+                "Code reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                Some("code".to_string()),
+                None,
+            )
+            .unwrap();
+        let writing_assistant = store
+            .create_assistant(
+                "Writing reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                Some("writing".to_string()),
+                None,
+            )
+            .unwrap();
+        let shared_assistant = store
+            .create_assistant(
+                "Shared reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let updated = store
+            .update_project_stage_assistants(
+                &research.id,
+                &[code_assistant.id.clone(), shared_assistant.id.clone()],
+            )
+            .unwrap();
+        assert_eq!(updated.assistants.len(), 2);
+        assert_eq!(updated.assistants[0].assistant_id, code_assistant.id);
+        assert_eq!(updated.assistants[1].assistant_id, shared_assistant.id);
+
+        let wrong_workflow_error = store
+            .update_project_stage_assistants(&research.id, &[writing_assistant.id])
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_workflow_error.contains("assistant is not available for this stage"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn custom_assistants_can_be_global_shared() {
+        let path = unique_db("sessio-global-custom-assistant");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let assistant = store
+            .create_assistant(
+                "Shared reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(assistant.workflow_id, None);
+        assert_eq!(assistant.project_id, None);
+        assert_eq!(assistant.assistant_type, AssistantType::Custom);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn project_creation_instantiates_global_custom_stage_assistants() {
+        let path = unique_db("sessio-project-global-stage-assistant");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-project-global-assistant-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let shared_assistant = store
+            .create_assistant(
+                "Shared reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                Some("Review from global context"),
+                AssistantType::Custom,
+                None,
+                None,
+            )
+            .unwrap();
+        let research_template = store
+            .list_workflow_stages("code")
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        store
+            .update_project_stage_assistants(&research_template.id, &[shared_assistant.id.clone()])
+            .unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "global-stage-assistant",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let project_assistant_id = stable_project_assistant_id(&project.id, &shared_assistant.id);
+        let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
+        let project_shared_assistant = project_assistants
+            .iter()
+            .find(|assistant| assistant.id == project_assistant_id)
+            .unwrap();
+        assert_eq!(project_shared_assistant.name, shared_assistant.name);
+        assert_eq!(project_shared_assistant.assistant_type, AssistantType::Custom);
+        assert_eq!(
+            project_shared_assistant.project_id.as_deref(),
+            Some(project.id.as_str())
+        );
+
+        let project_research = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        assert_eq!(project_research.assistants.len(), 1);
+        assert_eq!(
+            project_research.assistants[0].assistant_id,
+            project_assistant_id
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]
