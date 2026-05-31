@@ -37,6 +37,7 @@ pub fn runtime_metadata_from_agent_info(
         agent: runtime_agent,
         enabled: agent.enabled,
         configured: agent.enabled,
+        order: agent.order,
         transport: agent.transport,
         model: agent.model,
         models: agent.models,
@@ -56,7 +57,7 @@ pub fn runtime_agents_from_db(
     store: Arc<dyn SessionStore>,
     cache: &[RuntimeAgentMetadata],
 ) -> Result<Vec<RuntimeAgentMetadata>> {
-    let mut agents: Vec<RuntimeAgentMetadata> = store
+    let agents: Vec<RuntimeAgentMetadata> = store
         .list_agents()?
         .into_iter()
         .filter(|agent| agent.agent_type == AgentType::Builtin)
@@ -68,7 +69,6 @@ pub fn runtime_agents_from_db(
             runtime_metadata_from_agent_info(agent, cached)
         })
         .collect();
-    agents.sort_by_key(|metadata| metadata.agent.as_str().to_string());
     Ok(agents)
 }
 
@@ -131,6 +131,7 @@ pub fn startup_probe_runtime_agents(
             agent: runtime_agent,
             enabled: agent.enabled,
             configured: agent.enabled,
+            order: agent.order,
             transport: agent.transport,
             model: agent.model,
             models: agent.models,

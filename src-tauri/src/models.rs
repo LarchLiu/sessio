@@ -149,6 +149,7 @@ impl AgentType {
 pub struct AgentInfo {
     pub id: String,
     pub name: String,
+    pub display_name: String,
     pub icon: Option<String>,
     pub model: Option<String>,
     pub models: Vec<RuntimeAgentOptionMetadata>,
@@ -161,6 +162,7 @@ pub struct AgentInfo {
     pub enabled: bool,
     pub transport: RuntimeTransportKind,
     pub commands: AgentCommandsInfo,
+    pub order: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -885,6 +887,7 @@ pub struct RuntimeAgentMetadata {
     pub agent: Agent,
     pub enabled: bool,
     pub configured: bool,
+    pub order: i64,
     pub transport: RuntimeTransportKind,
     pub model: Option<String>,
     pub models: Vec<RuntimeAgentOptionMetadata>,
@@ -904,6 +907,9 @@ pub struct RuntimeAgentMetadata {
 pub struct RuntimeAgentOptionMetadata {
     pub value: String,
     pub label: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub order: i64,
 }
 
 pub fn normalize_preview(s: &str) -> String {

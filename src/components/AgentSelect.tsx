@@ -27,12 +27,12 @@ export function agentModelSelectOptions(
     const models =
       runtimeAgent.models.length > 0
         ? runtimeAgent.models
-        : [{ value: runtimeAgent.model ?? "", label: runtimeAgent.model ?? "Default" }];
+        : [{ value: runtimeAgent.model ?? "", label: runtimeAgent.model ?? "Default", displayName: runtimeAgent.model ?? "Default", enabled: true, order: 0 }];
     return models
-      .filter((model) => model.value.trim().length > 0)
+      .filter((model) => model.value.trim().length > 0 && model.enabled)
       .map((model) => ({
         value: agentModelSelectValue(runtimeAgent.agent, model.value),
-        label: model.label || model.value,
+        label: model.displayName || model.label || model.value,
         suffix: effortLabel(runtimeAgent, selectedEfforts[runtimeAgent.agent]),
         icon: <AgentGlyph agent={runtimeAgent.agent} className="h-3.5 w-3.5" />,
         menuIcon: null,
@@ -72,7 +72,7 @@ export function initialRuntimeEffort(agent: RuntimeAgentMetadata | null): string
 export function runtimeEffortOptions(agent: RuntimeAgentMetadata | null): RuntimeAgentOptionMetadata[] {
   if (!agent) return [];
   if (agent.efforts.length > 0) return agent.efforts;
-  return agent.effort ? [{ value: agent.effort, label: agent.effort }] : [];
+  return agent.effort ? [{ value: agent.effort, label: agent.effort, displayName: agent.effort, enabled: true, order: 0 }] : [];
 }
 
 function effortLabel(agent: RuntimeAgentMetadata, selectedEffort: string | undefined): string | undefined {
@@ -80,7 +80,8 @@ function effortLabel(agent: RuntimeAgentMetadata, selectedEffort: string | undef
   if (!effort) return undefined;
   const options = runtimeEffortOptions(agent);
   if (options.length <= 1) return undefined;
-  return options.find((option) => option.value === effort)?.label || effort;
+  const option = options.find((option) => option.value === effort);
+  return option?.displayName || option?.label || effort;
 }
 
 function agentLabel(agent: Agent): string {

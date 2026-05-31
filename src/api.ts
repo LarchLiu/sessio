@@ -28,6 +28,7 @@ export type AgentType = "builtin" | "custom";
 export interface AgentInfo {
   id: string;
   name: string;
+  displayName: string;
   icon: string | null;
   model: string | null;
   models: RuntimeAgentOptionMetadata[];
@@ -39,6 +40,7 @@ export interface AgentInfo {
   enabled: boolean;
   transport: RuntimeTransportKind;
   commands: AgentCommandsInfo;
+  order: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -390,6 +392,7 @@ export interface RuntimeAgentMetadata {
   agent: Agent;
   enabled: boolean;
   configured: boolean;
+  order: number;
   transport: RuntimeTransportKind;
   model: string | null;
   models: RuntimeAgentOptionMetadata[];
@@ -411,10 +414,16 @@ export interface DebugConfig {
 export interface RuntimeAgentOptionMetadata {
   value: string;
   label: string;
+  displayName: string;
+  enabled: boolean;
+  order: number;
 }
 
 export interface UpdateRuntimeAgentPreferencesRequest {
   agent: Agent;
+  displayName?: string | null;
+  enabled?: boolean | null;
+  order?: number | null;
   model?: string | null;
   effort?: string | null;
   permissionMode?: string | null;

@@ -47,7 +47,7 @@ export function RuntimeMenuSelect({
 }
 
 export function runtimePermissionModeOptions(
-  options: { value: string; label: string }[],
+  options: RuntimeAgentOptionMetadata[],
   selected: string,
   agent?: Agent | null,
 ): InlineMenuSelectOption[] {
@@ -55,7 +55,7 @@ export function runtimePermissionModeOptions(
     .filter((option) => option.value.trim().length > 0)
     .map((option) => ({
       value: option.value,
-      label: option.label || option.value,
+      label: option.displayName || option.label || option.value,
       icon: runtimePermissionModeIcon(agent, option.value),
     }));
   if (selected && !rows.some((option) => option.value === selected)) {
@@ -133,8 +133,8 @@ export function RuntimeEffortControl({
           disabled={disabled}
           role="radio"
           aria-checked={option.value === value}
-          aria-label={option.label || option.value}
-          title={option.label || option.value}
+          aria-label={option.displayName || option.label || option.value}
+          title={option.displayName || option.label || option.value}
           onClick={() => onChange(option.value)}
           className="relative z-10 flex h-4 flex-1 items-center justify-center rounded-full disabled:cursor-not-allowed"
         >

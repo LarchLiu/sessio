@@ -52,12 +52,18 @@ fn default_workflow_id() -> String {
 struct RuntimeAgentOptionInput {
     value: String,
     label: String,
+    display_name: Option<String>,
+    enabled: Option<bool>,
+    order: Option<i64>,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateRuntimeAgentPreferencesRequest {
     agent: Agent,
+    display_name: Option<String>,
+    enabled: Option<bool>,
+    order: Option<i64>,
     model: Option<String>,
     effort: Option<String>,
     permission_mode: Option<String>,
@@ -302,7 +308,11 @@ fn runtime_option_inputs_to_metadata(
     options.map(|options| {
         options
             .into_iter()
-            .map(|option| models::RuntimeAgentOptionMetadata {
+            .enumerate()
+            .map(|(index, option)| models::RuntimeAgentOptionMetadata {
+                display_name: option.display_name.unwrap_or_else(|| option.label.clone()),
+                enabled: option.enabled.unwrap_or(true),
+                order: option.order.unwrap_or(index as i64),
                 value: option.value,
                 label: option.label,
             })
@@ -1945,6 +1955,9 @@ fn update_runtime_agent_preferences(
     store
         .update_builtin_agent_preferences(
             req.agent,
+            req.display_name.as_deref(),
+            req.enabled,
+            req.order,
             req.model.as_deref(),
             req.effort.as_deref(),
             req.permission_mode.as_deref(),

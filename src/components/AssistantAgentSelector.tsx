@@ -12,11 +12,11 @@ import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions }
 import { useI18n } from "../i18n";
 
 function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
-  return agent?.model ?? agent?.models[0]?.value ?? "";
+  return agent?.model ?? agent?.models.find((model) => model.enabled)?.value ?? "";
 }
 
 function optionValue(options: RuntimeAgentOptionMetadata[], fallback: string) {
-  return options[0]?.value ?? fallback;
+  return options.find((option) => option.enabled)?.value ?? options[0]?.value ?? fallback;
 }
 
 export function dbAgentsAsRuntimeAgents(agents: AgentInfo[]): RuntimeAgentMetadata[] {
@@ -26,6 +26,7 @@ export function dbAgentsAsRuntimeAgents(agents: AgentInfo[]): RuntimeAgentMetada
       agent: agent.id as Agent,
       enabled: agent.enabled,
       configured: agent.commands.session.length > 0,
+      order: agent.order,
       transport: agent.transport,
       model: agent.model,
       models: agent.models,

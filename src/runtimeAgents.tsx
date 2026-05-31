@@ -114,8 +114,8 @@ export function selectionModel(
   selection: RuntimeAgentSelection | null,
 ): string {
   const selected = selection?.agent === agent.agent ? selection.model : null;
-  if (selected && agent.models.some((option) => option.value === selected)) return selected;
-  return agent.model ?? agent.models[0]?.value ?? "";
+  if (selected && agent.models.some((option) => option.value === selected && option.enabled)) return selected;
+  return agent.model ?? agent.models.find((option) => option.enabled)?.value ?? "";
 }
 
 export function selectionEffort(

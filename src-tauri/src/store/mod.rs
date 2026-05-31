@@ -125,6 +125,9 @@ pub trait SessionStore: Send + Sync {
     fn update_builtin_agent_preferences(
         &self,
         agent: Agent,
+        display_name: Option<&str>,
+        enabled: Option<bool>,
+        order: Option<i64>,
         model: Option<&str>,
         effort: Option<&str>,
         permission_mode: Option<&str>,

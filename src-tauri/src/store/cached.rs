@@ -196,6 +196,9 @@ impl SessionStore for CachedStore {
     fn update_builtin_agent_preferences(
         &self,
         agent: Agent,
+        display_name: Option<&str>,
+        enabled: Option<bool>,
+        order: Option<i64>,
         model: Option<&str>,
         effort: Option<&str>,
         permission_mode: Option<&str>,
@@ -205,6 +208,9 @@ impl SessionStore for CachedStore {
     ) -> Result<AgentInfo> {
         self.inner.update_builtin_agent_preferences(
             agent,
+            display_name,
+            enabled,
+            order,
             model,
             effort,
             permission_mode,

@@ -1,8 +1,8 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { ArrowLeft, Bot, Check, ChevronDown, Circle, GripVertical, Languages, ListChecks, Monitor, Moon, Pencil, Plus, RefreshCw, Settings, Sun, Trash2, Workflow } from "lucide-react";
-import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, StageAssistantInfo, WorkflowInfo } from "../api";
+import { ArrowLeft, Bot, Check, ChevronDown, Circle, GripVertical, Languages, ListChecks, Monitor, Moon, Pencil, Plus, RefreshCw, Search, Settings, Sun, Trash2, Workflow } from "lucide-react";
+import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, RuntimeAgentOptionMetadata, StageAssistantInfo, WorkflowInfo } from "../api";
 import {
   createAssistant,
   createProjectStage,
@@ -16,17 +16,19 @@ import {
   updateAssistant,
   updateProjectStage,
   updateProjectStageAssistants,
+  updateRuntimeAgentPreferences,
 } from "../api";
 import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
 import { AgentGlyph } from "../components/AgentIcon";
-import { runtimePermissionModeIcon } from "../components/RuntimeMenuSelect";
+import InlineMenuSelect from "../components/InlineMenuSelect";
+import { runtimePermissionModeIcon, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import ScrollArea from "../components/ScrollArea";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
 
-type SettingsSection = "general" | "assistants" | "workflows";
+type SettingsSection = "general" | "agents" | "assistants" | "workflows";
 
 export default function SettingsPage({
   lang,
@@ -54,6 +56,7 @@ export default function SettingsPage({
 
   const navItems = [
     { id: "general" as const, label: t("settings.general"), icon: Settings },
+    { id: "agents" as const, label: t("agent.title"), icon: Bot },
     { id: "assistants" as const, label: t("assistant.title"), icon: Bot },
     { id: "workflows" as const, label: t("settings.workflows"), icon: Workflow },
   ];
@@ -112,6 +115,7 @@ export default function SettingsPage({
                 onRebuildFinished={onRebuildFinished}
               />
             )}
+            {section === "agents" && <AgentsSettings onError={onError} />}
             {section === "assistants" && <AssistantsSettings onError={onError} />}
             {section === "workflows" && <WorkflowsSettings onError={onError} />}
           </div>
@@ -180,6 +184,577 @@ function GeneralSettings({
       </SettingsGroup>
     </section>
   );
+}
+
+function AgentsSettings({ onError }: { onError: (error: string | null) => void }) {
+  const { t } = useI18n();
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("codex");
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const builtinAgents = useMemo(
+    () => agents.filter((agent) => agent.type === "builtin" && isRuntimeAgent(agent.id)),
+    [agents],
+  );
+  const filteredAgents = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return builtinAgents;
+    return builtinAgents.filter((agent) =>
+      `${agent.displayName} ${agent.name} ${agent.id} ${agent.model ?? ""}`.toLowerCase().includes(query),
+    );
+  }, [builtinAgents, search]);
+  const selectedAgent =
+    builtinAgents.find((agent) => agent.id === selectedAgentId) ?? builtinAgents[0] ?? null;
+
+  const reload = async () => {
+    setLoading(true);
+    try {
+      const rows = await listAgents();
+      setAgents(rows);
+      setSelectedAgentId((current) => {
+        const currentExists = rows.some((agent) => agent.id === current && isRuntimeAgent(agent.id));
+        return currentExists ? current : rows.find((agent) => isRuntimeAgent(agent.id))?.id ?? current;
+      });
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void reload();
+  }, []);
+
+  const updateAgent = (next: AgentInfo) => {
+    setAgents((prev) => prev.map((agent) => agent.id === next.id ? next : agent));
+  };
+
+  const moveAgent = async (from: number, to: number) => {
+    const nextAgents = moveAgentOption(builtinAgents, from, to).map((agent, index) => ({ ...agent, order: index }));
+    setAgents((prev) => prev.map((agent) => nextAgents.find((item) => item.id === agent.id) ?? agent));
+    try {
+      await Promise.all(nextAgents.map((agent) => updateRuntimeAgentPreferences({
+        agent: runtimeAgentId(agent.id),
+        order: agent.order,
+      })));
+      const rows = await listAgents();
+      setAgents(rows);
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const handleAgentDragEnd = (event: DragEndEvent) => {
+    if (event.canceled || search.trim()) return;
+    const { source } = event.operation;
+    if (!isSortable(source)) return;
+    if (source.initialIndex === source.index) return;
+    void moveAgent(source.initialIndex, source.index);
+  };
+
+  return (
+    <section>
+      <div className="grid grid-cols-[240px_minmax(0,1fr)] gap-5">
+        <div className="min-w-0">
+          <div className="mb-8">
+            <h2 className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{t("agent.title")}</h2>
+            <label className="mb-3 flex h-9 items-center gap-2 rounded-md border border-input-border/[0.12] bg-input px-2 text-input-fg">
+              <Search className="h-3.5 w-3.5 shrink-0 text-input-placeholder/45" />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder={t("agent.search")}
+                className="min-w-0 flex-1 bg-transparent text-body-sm outline-none placeholder:text-input-placeholder/35"
+              />
+            </label>
+            <div className="overflow-hidden rounded-lg border border-card-border/[0.12] bg-card">
+              <DragDropProvider onDragEnd={handleAgentDragEnd}>
+                <div className="divide-y divide-card-border/10">
+                  {filteredAgents.map((agent, index) => (
+                    <AgentListRow
+                      key={agent.id}
+                      agent={agent}
+                      index={index}
+                      active={agent.id === selectedAgent?.id}
+                      draggable={!search.trim()}
+                      onSelect={setSelectedAgentId}
+                    />
+                  ))}
+                  {!loading && filteredAgents.length === 0 && <div className="p-3"><EmptyState label={t("agent.empty")} /></div>}
+                </div>
+              </DragDropProvider>
+            </div>
+          </div>
+        </div>
+        <div className="min-w-0">
+          {selectedAgent ? (
+            <AgentEditor
+              key={selectedAgent.id}
+              agent={selectedAgent}
+              onUpdated={updateAgent}
+              onError={onError}
+            />
+          ) : (
+            !loading && <EmptyState label={t("agent.empty")} />
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AgentListRow({
+  agent,
+  index,
+  active,
+  draggable,
+  onSelect,
+}: {
+  agent: AgentInfo;
+  index: number;
+  active: boolean;
+  draggable: boolean;
+  onSelect: (agentId: string) => void;
+}) {
+  const { t } = useI18n();
+  const { handleRef, isDragSource, isDropTarget, ref } = useSortable({
+    id: agent.id,
+    index,
+    group: "settings-agents",
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+      idle: true,
+    },
+  });
+  return (
+    <div
+      ref={ref}
+      className={
+        "workflow-list-item flex h-12 w-full min-w-0 items-center gap-2 px-2 text-left text-body-sm transition " +
+        (active ? "workflow-list-item-active " : "") +
+        (isDragSource ? "z-20 cursor-grabbing bg-card shadow-[0_12px_28px_rgba(0,0,0,0.22)] " : "") +
+        (isDropTarget ? "bg-card-active shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.32)] " : "")
+      }
+    >
+      <button
+        ref={handleRef}
+        type="button"
+        disabled={!draggable}
+        className="cursor-grab touch-none rounded p-0.5 text-card-subtle/35 hover:bg-card-action-hover/5 hover:text-card-fg/60 active:cursor-grabbing disabled:cursor-default disabled:opacity-25"
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+      <button type="button" onClick={() => onSelect(agent.id)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        <AgentGlyph agent={runtimeAgentId(agent.id)} className="h-4 w-4 shrink-0" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-medium text-card-fg/78">{agent.displayName}</span>
+          <span className="mt-0.5 block truncate text-meta text-card-muted/45">{agent.model || t("agent.no_model")}</span>
+        </span>
+        <span className={"h-1.5 w-1.5 rounded-full " + (agent.enabled ? "bg-ink/70" : "bg-ink/20")} />
+      </button>
+    </div>
+  );
+}
+
+function AgentEditor({
+  agent,
+  onUpdated,
+  onError,
+}: {
+  agent: AgentInfo;
+  onUpdated: (agent: AgentInfo) => void;
+  onError: (error: string | null) => void;
+}) {
+  const { t } = useI18n();
+  const [model, setModel] = useState(agent.model ?? agent.models.find((item) => item.enabled)?.value ?? "");
+  const [effort, setEffort] = useState(agent.effort ?? agent.efforts[0]?.value ?? "");
+  const [permissionMode, setPermissionMode] = useState(agent.permissionMode ?? agent.permissionModes[0]?.value ?? "");
+  const [models, setModels] = useState<RuntimeAgentOptionMetadata[]>(agent.models);
+  const [newModelValue, setNewModelValue] = useState("");
+  const [newModelDisplayName, setNewModelDisplayName] = useState("");
+  const runtimeAgent = runtimeAgentId(agent.id);
+
+  useEffect(() => {
+    setModel(agent.model ?? agent.models.find((item) => item.enabled)?.value ?? "");
+    setEffort(agent.effort ?? agent.efforts[0]?.value ?? "");
+    setPermissionMode(agent.permissionMode ?? agent.permissionModes[0]?.value ?? "");
+    setModels(agent.models);
+    setNewModelValue("");
+    setNewModelDisplayName("");
+  }, [agent]);
+
+  const persist = async (patch: {
+    displayName?: string | null;
+    enabled?: boolean;
+    order?: number;
+    model?: string | null;
+    effort?: string | null;
+    permissionMode?: string | null;
+    models?: RuntimeAgentOptionMetadata[];
+  }) => {
+    try {
+      await updateRuntimeAgentPreferences({
+        agent: runtimeAgent,
+        ...patch,
+      });
+      const rows = await listAgents();
+      const next = rows.find((item) => item.id === agent.id);
+      if (next) onUpdated(next);
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const selectModel = async (nextModel: string) => {
+    setModel(nextModel);
+    await persist({ model: nextModel });
+  };
+
+  const selectEffort = async (nextEffort: string) => {
+    setEffort(nextEffort);
+    await persist({ effort: nextEffort });
+  };
+
+  const selectPermissionMode = async (nextMode: string) => {
+    setPermissionMode(nextMode);
+    await persist({ permissionMode: nextMode });
+  };
+
+  const addModel = async () => {
+    const value = newModelValue.trim();
+    if (!value || models.some((item) => item.value === value)) return;
+    const displayName = newModelDisplayName.trim() || value;
+    const nextModels = normalizeModelOrders([...models, { value, label: displayName, displayName, enabled: true, order: models.length }]);
+    setModels(nextModels);
+    setNewModelValue("");
+    setNewModelDisplayName("");
+    const nextModel = model || value;
+    setModel(nextModel);
+    await persist({ models: nextModels, model: nextModel });
+  };
+
+  const deleteModel = async (value: string) => {
+    const nextModels = models.filter((item) => item.value !== value);
+    const orderedModels = normalizeModelOrders(nextModels);
+    const nextModel = model === value ? nextModels[0]?.value ?? null : model;
+    setModels(orderedModels);
+    setModel(nextModel ?? "");
+    await persist({ models: orderedModels, model: nextModel });
+  };
+
+  const saveModel = async (previousValue: string, nextValue: string, nextDisplayName: string) => {
+    const value = nextValue.trim();
+    if (!value || models.some((item) => item.value === value && item.value !== previousValue)) return;
+    const displayName = nextDisplayName.trim() || value;
+    const nextModels = normalizeModelOrders(models.map((item) => item.value === previousValue ? { ...item, value, label: displayName, displayName } : item));
+    const nextModel = model === previousValue ? value : model;
+    setModels(nextModels);
+    setModel(nextModel ?? "");
+    await persist({ models: nextModels, model: nextModel });
+  };
+
+  const moveModel = async (from: number, to: number) => {
+    const nextModels = normalizeModelOrders(moveOption(models, from, to));
+    setModels(nextModels);
+    await persist({ models: nextModels });
+  };
+
+  const setDefaultModel = async (value: string) => {
+    if (model === value) return;
+    setModel(value);
+    await persist({ model: value });
+  };
+
+  const handleModelDragEnd = (event: DragEndEvent) => {
+    if (event.canceled) return;
+    const { source } = event.operation;
+    if (!isSortable(source)) return;
+    if (source.initialIndex === source.index) return;
+    void moveModel(source.initialIndex, source.index);
+  };
+
+  const modelOptions = optionRows(models, model);
+  const effortOptions = optionRows(agent.efforts, effort);
+  const permissionOptions = runtimePermissionModeOptions(optionRows(agent.permissionModes, permissionMode), permissionMode, runtimeAgent);
+  const sessionCommand = agent.commands.session[0] ?? "";
+  const versionCommand = agent.commands.version[0] ?? "";
+
+  return (
+    <>
+      <SettingsGroup title={agent.displayName}>
+        <div className="flex items-start gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-card-chip/[0.08]">
+            <AgentGlyph agent={runtimeAgent} className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <h2 className="truncate text-title font-semibold text-card-fg/88">{agent.displayName}</h2>
+              <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{agent.type}</span>
+              <span className={"rounded px-1.5 py-0.5 text-meta " + (agent.enabled ? "bg-ink/[0.09] text-ink/70" : "bg-card-chip/8 text-card-muted/50")}>
+                {agent.enabled ? t("agent.active") : t("agent.disabled")}
+              </span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-card-muted/55">
+              <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{agent.transport}</span>
+              {sessionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{sessionCommand}</span>}
+              {versionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{versionCommand}</span>}
+            </div>
+          </div>
+          <SwitchControl
+            checked={agent.enabled}
+            tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
+            onToggle={() => void persist({ enabled: !agent.enabled })}
+          />
+        </div>
+      </SettingsGroup>
+      <SettingsGroup title={t("agent.preferences")}>
+        <div className="grid gap-2">
+          <AgentPreferenceRow label={t("assistant.model")}>
+            <AgentInlineSelect
+              value={model}
+              options={modelOptions}
+              placeholder={t("agent.no_model")}
+              onChange={(value) => void selectModel(value)}
+            />
+          </AgentPreferenceRow>
+          <AgentPreferenceRow label={t("assistant.effort")}>
+            <AgentInlineSelect
+              value={effort}
+              options={effortOptions}
+              placeholder={t("assistant.effort")}
+              onChange={(value) => void selectEffort(value)}
+            />
+          </AgentPreferenceRow>
+          <AgentPreferenceRow label={t("assistant.permission_mode")}>
+            <AgentInlineSelect
+              value={permissionMode}
+              options={permissionOptions}
+              placeholder={t("assistant.permission_mode")}
+              onChange={(value) => void selectPermissionMode(value)}
+            />
+          </AgentPreferenceRow>
+        </div>
+      </SettingsGroup>
+      <SettingsGroup title={t("agent.models")}>
+        <div className="grid gap-3">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_auto] gap-2">
+            <input value={newModelValue} onChange={(event) => setNewModelValue(event.target.value)} placeholder={t("agent.model_id")} className={inputClassName} />
+            <input value={newModelDisplayName} onChange={(event) => setNewModelDisplayName(event.target.value)} placeholder={t("agent.model_name")} className={inputClassName} />
+            <button type="button" onClick={() => void addModel()} disabled={!newModelValue.trim()} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
+              <Plus className="h-4 w-4" />
+              {t("agent.add_model")}
+            </button>
+          </div>
+          <DragDropProvider onDragEnd={handleModelDragEnd}>
+            <div className="overflow-hidden rounded-md border border-card-border/[0.10]">
+              {models.map((item, index) => (
+                <AgentModelRow
+                  key={item.value}
+                  item={item}
+                  index={index}
+                  defaultModel={item.value === model}
+                  onSetDefault={setDefaultModel}
+                  onSave={saveModel}
+                  onDelete={deleteModel}
+                />
+              ))}
+              {models.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_models")} /></div>}
+            </div>
+          </DragDropProvider>
+        </div>
+      </SettingsGroup>
+    </>
+  );
+}
+
+function AgentModelRow({
+  item,
+  index,
+  defaultModel,
+  onSetDefault,
+  onSave,
+  onDelete,
+}: {
+  item: RuntimeAgentOptionMetadata;
+  index: number;
+  defaultModel: boolean;
+  onSetDefault: (value: string) => Promise<void>;
+  onSave: (previousValue: string, nextValue: string, nextLabel: string) => Promise<void>;
+  onDelete: (value: string) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const { handleRef, isDragSource, isDropTarget, ref } = useSortable({
+    id: item.value,
+    index,
+    group: "agent-models",
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+      idle: true,
+    },
+  });
+  const [editing, setEditing] = useState(false);
+  const [valueDraft, setValueDraft] = useState(item.value);
+  const [displayNameDraft, setDisplayNameDraft] = useState(item.displayName);
+
+  useEffect(() => {
+    setValueDraft(item.value);
+    setDisplayNameDraft(item.displayName);
+    setEditing(false);
+  }, [item]);
+
+  const save = async () => {
+    await onSave(item.value, valueDraft, displayNameDraft);
+    setEditing(false);
+  };
+
+  return (
+    <div
+      ref={ref}
+      className={
+        "grid min-h-12 grid-cols-[auto_minmax(0,1fr)_minmax(0,0.72fr)_auto_auto_auto] items-center gap-2 border-b border-card-border/[0.08] px-3 py-2 transition last:border-b-0 " +
+        (isDragSource
+          ? "z-20 cursor-grabbing bg-card shadow-[0_12px_28px_rgba(0,0,0,0.22)]"
+          : isDropTarget
+            ? "bg-card-active shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.32)]"
+            : "")
+      }
+    >
+      <button ref={handleRef} type="button" className="cursor-grab touch-none rounded p-0.5 text-card-subtle/35 hover:bg-card-action-hover/5 hover:text-card-fg/60 active:cursor-grabbing">
+        <GripVertical className="h-4 w-4" />
+      </button>
+      <div className="min-w-0">
+        {editing ? (
+          <input
+            value={valueDraft}
+            onChange={(event) => setValueDraft(event.target.value)}
+            className="h-8 w-full min-w-0 rounded-md border border-input-border/[0.12] bg-input px-2 text-caption text-input-fg outline-none focus:border-input-focus/30"
+          />
+        ) : (
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-body-sm font-medium text-card-fg/80">{item.value}</span>
+            {defaultModel && <span className="rounded bg-card-chip/10 px-1.5 py-0.5 text-meta text-card-chip-fg/60">{t("agent.default_model")}</span>}
+          </div>
+        )}
+      </div>
+      <div className="min-w-0">
+        {editing ? (
+          <input
+            value={displayNameDraft}
+            onChange={(event) => setDisplayNameDraft(event.target.value)}
+            className="h-8 w-full min-w-0 rounded-md border border-input-border/[0.12] bg-input px-2 text-caption text-input-fg outline-none focus:border-input-focus/30"
+          />
+        ) : (
+          <span className="block truncate text-caption text-card-muted/62">{item.displayName || item.value}</span>
+        )}
+      </div>
+      <Tooltip content={t("agent.make_default")} placement="top">
+        <button
+          type="button"
+          role="radio"
+          aria-checked={defaultModel}
+          onClick={() => void onSetDefault(item.value)}
+          className={`rounded p-1 ${defaultModel ? "bg-card-chip/[0.12] text-card-fg/75" : "text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"}`}
+        >
+          {defaultModel ? <Check className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
+        </button>
+      </Tooltip>
+      <Tooltip content={editing ? t("project.save") : t("agent.edit_model")} placement="top">
+        <button type="button" onClick={() => editing ? void save() : setEditing(true)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75">
+          {editing ? <Check className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
+        </button>
+      </Tooltip>
+      <Tooltip content={t("agent.delete_model")} placement="top">
+        <button type="button" onClick={() => void onDelete(item.value)} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error">
+          <Trash2 className="h-4 w-4" />
+        </button>
+      </Tooltip>
+    </div>
+  );
+}
+
+function AgentPreferenceRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid min-h-10 grid-cols-[120px_minmax(0,1fr)] items-center gap-3 rounded-md bg-card-chip/[0.04] px-3">
+      <span className="text-caption font-medium text-card-muted/60">{label}</span>
+      <div className="min-w-0 justify-self-start">{children}</div>
+    </div>
+  );
+}
+
+function AgentInlineSelect({
+  value,
+  options,
+  placeholder,
+  onChange,
+}: {
+  value: string;
+  options: Array<{ value: string; label: string; icon?: ReactNode }>;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="flex min-w-0 max-w-[320px] items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink">
+      <InlineMenuSelect
+        value={value}
+        options={options}
+        onChange={onChange}
+        menuAlign="trigger"
+        placeholder={placeholder}
+        ariaLabel={placeholder}
+        className="h-7 max-w-[320px] border-r-0 px-1.5 py-1 text-ink/60 hover:text-ink"
+        menuClassName="bg-surface-panel"
+        minMenuWidth={220}
+        emptyContent={placeholder}
+      />
+    </div>
+  );
+}
+
+function optionRows(options: RuntimeAgentOptionMetadata[], selected: string): RuntimeAgentOptionMetadata[] {
+  const rows = options
+    .filter((option) => option.value.trim().length > 0 && option.enabled)
+    .map((option) => ({ ...option, label: option.displayName || option.label || option.value }));
+  if (selected && !rows.some((option) => option.value === selected)) {
+    return [{ value: selected, label: selected, displayName: selected, enabled: true, order: -1 }, ...rows];
+  }
+  return rows;
+}
+
+function moveOption(options: RuntimeAgentOptionMetadata[], from: number, to: number): RuntimeAgentOptionMetadata[] {
+  if (from < 0 || to < 0 || from >= options.length || to >= options.length || from === to) return options;
+  const next = [...options];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
+
+function normalizeModelOrders(options: RuntimeAgentOptionMetadata[]): RuntimeAgentOptionMetadata[] {
+  return options.map((option, index) => ({
+    ...option,
+    label: option.displayName || option.label || option.value,
+    displayName: option.displayName || option.label || option.value,
+    enabled: option.enabled ?? true,
+    order: index,
+  }));
+}
+
+function moveAgentOption(options: AgentInfo[], from: number, to: number): AgentInfo[] {
+  if (from < 0 || to < 0 || from >= options.length || to >= options.length || from === to) return options;
+  const next = [...options];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
+
+function isRuntimeAgent(id: string): id is Agent {
+  return id === "codex" || id === "claude" || id === "gemini";
+}
+
+function runtimeAgentId(id: string): Agent {
+  return isRuntimeAgent(id) ? id : "codex";
 }
 
 function AssistantsSettings({ onError }: { onError: (error: string | null) => void }) {
@@ -804,9 +1379,9 @@ function AssistantCard({
         </div>
       ) : (
         <div className="flex items-start gap-3">
-          <Bot className="mt-0.5 h-4 w-4 shrink-0 text-card-icon/55" />
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
+              <Bot className="h-4 w-4 shrink-0 text-card-icon/55" />
               <span className="truncate text-body-sm font-medium text-card-fg/75">{assistant.name}</span>
               <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{assistant.type}</span>
               <AssistantAgentPill agent={assistant.agent} agents={agents} />
@@ -835,9 +1410,12 @@ function AssistantCard({
 function AssistantAgentPill({ agent, agents }: { agent: AssistantAgentInfo; agents: AgentInfo[] }) {
   const agentId = (agent.id === "claude" || agent.id === "gemini" ? agent.id : "codex") as Agent;
   const dbAgent = agents.find((item) => item.id === agent.id);
-  const modelName = dbAgent?.models.find((option) => option.value === agent.model)?.label || agent.model;
-  const effortName = dbAgent?.efforts.find((option) => option.value === agent.effort)?.label || agent.effort;
-  const modeName = dbAgent?.permissionModes.find((option) => option.value === agent.mode)?.label || agent.mode;
+  const selectedModel = dbAgent?.models.find((option) => option.value === agent.model);
+  const selectedEffort = dbAgent?.efforts.find((option) => option.value === agent.effort);
+  const selectedMode = dbAgent?.permissionModes.find((option) => option.value === agent.mode);
+  const modelName = selectedModel?.displayName || selectedModel?.label || agent.model;
+  const effortName = selectedEffort?.displayName || selectedEffort?.label || agent.effort;
+  const modeName = selectedMode?.displayName || selectedMode?.label || agent.mode;
   return (
     <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-caption text-ink/60">
       <span className="inline-flex h-7 min-w-0 max-w-[260px] items-center gap-1.5 rounded-md px-1.5 py-1">

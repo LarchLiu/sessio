@@ -163,7 +163,7 @@ export interface PendingAgentSession {
 }
 
 function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
-  return agent?.model ?? agent?.models[0]?.value ?? "";
+  return agent?.model ?? agent?.models.find((option) => option.enabled)?.value ?? "";
 }
 
 function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {

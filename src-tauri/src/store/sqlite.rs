@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -98,17 +98,6 @@ CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
 "#;
 
 const RUNTIME_SELECTION_KEY: &str = "last";
-
-const RUNTIME_SELECTION_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS runtime_agent_selections (
-    key             TEXT PRIMARY KEY,
-    agent           TEXT NOT NULL,
-    model           TEXT,
-    effort          TEXT,
-    permission_mode TEXT,
-    updated_at      INTEGER NOT NULL
-);
-"#;
 
 // v2: subagents.available column (subagents can now be soft-deleted
 // independently of their parent session row).
@@ -234,6 +223,8 @@ ALTER TABLE sessions ADD COLUMN title TEXT;
 "#;
 
 const SCHEMA_V5: &str = r#"
+ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
+
 CREATE TABLE IF NOT EXISTS runtime_agent_capabilities (
     agent                TEXT PRIMARY KEY,
     transport_kind       TEXT NOT NULL,
@@ -244,6 +235,28 @@ CREATE TABLE IF NOT EXISTS runtime_agent_capabilities (
     updated_at           INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS runtime_agent_selections (
+    key             TEXT PRIMARY KEY,
+    agent           TEXT NOT NULL,
+    model           TEXT,
+    effort          TEXT,
+    permission_mode TEXT,
+    updated_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflows (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    description TEXT,
+    type       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK(type IN ('builtin', 'custom'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflows_type_name
+    ON workflows(type, name COLLATE NOCASE);
+
 CREATE TABLE IF NOT EXISTS projects (
     id         TEXT PRIMARY KEY,
     path       TEXT NOT NULL UNIQUE,
@@ -251,7 +264,8 @@ CREATE TABLE IF NOT EXISTS projects (
     workflow_id TEXT NOT NULL DEFAULT 'code',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    archived   INTEGER NOT NULL DEFAULT 0
+    archived   INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(workflow_id) REFERENCES workflows(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_archived_updated ON projects(archived, updated_at DESC);
@@ -348,33 +362,6 @@ CREATE TABLE IF NOT EXISTS session_history_snapshot_turns (
         REFERENCES session_history_snapshots(child_agent, child_session_id, ancestor_index)
         ON DELETE CASCADE
 );
-
-CREATE TABLE IF NOT EXISTS workflows (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL,
-    description TEXT,
-    type       TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    CHECK(type IN ('builtin', 'custom'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_workflows_type_name
-    ON workflows(type, name COLLATE NOCASE);
-
-CREATE TABLE IF NOT EXISTS projects (
-    id         TEXT PRIMARY KEY,
-    path       TEXT NOT NULL UNIQUE,
-    name       TEXT NOT NULL,
-    workflow_id TEXT NOT NULL DEFAULT 'code',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    archived   INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY(workflow_id) REFERENCES workflows(id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_projects_archived_updated ON projects(archived, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_projects_path ON projects(path);
 
 CREATE TABLE IF NOT EXISTS assistants (
     id              TEXT PRIMARY KEY,
@@ -529,9 +516,10 @@ CREATE INDEX IF NOT EXISTS idx_stage_sessions_session
 CREATE TABLE IF NOT EXISTS agents (
     id               TEXT PRIMARY KEY,
     name             TEXT NOT NULL,
+    display_name     TEXT NOT NULL,
     icon             TEXT,
     model            TEXT,
-    models_json      TEXT NOT NULL DEFAULT '[]',
+    models_json      TEXT NOT NULL DEFAULT '{}',
     effort           TEXT,
     efforts_json     TEXT NOT NULL DEFAULT '[]',
     permission_mode  TEXT,
@@ -540,49 +528,14 @@ CREATE TABLE IF NOT EXISTS agents (
     enabled          INTEGER NOT NULL DEFAULT 1,
     transport        TEXT NOT NULL DEFAULT 'acp',
     commands_json    TEXT NOT NULL DEFAULT '{"session":[],"version":[]}',
+    "order"          INTEGER NOT NULL DEFAULT 0,
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_agents_type_enabled
-    ON agents(type, enabled, name COLLATE NOCASE);
-"#;
-
-const SCHEMA_V5_PATCH: &str = r#"
-ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
-ALTER TABLE workflows ADD COLUMN description TEXT;
-ALTER TABLE projects ADD COLUMN workflow_id TEXT NOT NULL DEFAULT 'code';
-ALTER TABLE assistants ADD COLUMN workflow_id TEXT;
-ALTER TABLE stages ADD COLUMN workflow_id TEXT;
-ALTER TABLE assistants ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE threads ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE stages ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE stages ADD COLUMN allow_empty_assistants INTEGER NOT NULL DEFAULT 0;
-CREATE TABLE IF NOT EXISTS stage_assistants (
-    stage_id     TEXT NOT NULL,
-    assistant_id TEXT NOT NULL,
-    "order"      INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL,
-    PRIMARY KEY(stage_id, assistant_id),
-    FOREIGN KEY(stage_id) REFERENCES stages(id) ON DELETE CASCADE,
-    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
-);
-CREATE INDEX IF NOT EXISTS idx_stage_assistants_assistant
-    ON stage_assistants(assistant_id);
-CREATE TABLE IF NOT EXISTS thread_sessions (
-    thread_id  TEXT NOT NULL,
-    agent      TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY(thread_id, agent, session_id),
-    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_thread_sessions_thread
-    ON thread_sessions(thread_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_thread_sessions_session
-    ON thread_sessions(agent, session_id);
+    ON agents(type, enabled, "order", display_name COLLATE NOCASE);
 "#;
 
 fn now_ms() -> i64 {
@@ -614,7 +567,6 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         .ok()
         .flatten();
     let current = current.unwrap_or(0);
-    let had_stage_assistants_table = table_exists(conn, "stage_assistants")?;
     if current < 1 {
         conn.execute_batch(SCHEMA_V1)?;
         conn.execute(
@@ -623,11 +575,8 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
     if current < 2 {
-        // V1 dbs already have the index; v2 only adds the column. Both are
-        // idempotent on a fresh v1 schema since execute_batch tolerates the
-        // CREATE INDEX IF NOT EXISTS, and the ALTER is guarded by version.
-        // Catch & ignore errors from ALTER when the column already exists
-        // (e.g. an old dev db that pre-baked it).
+        // The current v1 bootstrap schema already includes this column, so
+        // fresh installs can ignore the duplicate ALTER.
         let _ = conn.execute_batch(SCHEMA_V2);
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)",
@@ -655,180 +604,12 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    conn.execute_batch(SCHEMA_V5)?;
-    conn.execute_batch(RUNTIME_SELECTION_SCHEMA)?;
-    apply_v5_patch(conn);
-    conn.execute("DELETE FROM schema_migrations WHERE version > 5", [])?;
     seed_builtin_workflows(conn)?;
     seed_builtin_workflow_stages(conn)?;
     seed_builtin_agents(conn)?;
-    if !had_stage_assistants_table {
+    if current < 5 {
         seed_builtin_workflow_stage_assistants(conn, now_ms())?;
     }
-    seed_workflow_assistants_from_stage_bindings(conn, now_ms())?;
-    backfill_project_builtin_stages(conn)?;
-    Ok(())
-}
-
-fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
-    let exists = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            params![name],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    Ok(exists)
-}
-
-fn apply_v5_patch(conn: &Connection) {
-    let added_allow_empty_assistants =
-        !column_exists(conn, "stages", "allow_empty_assistants").unwrap_or(false);
-    for statement in SCHEMA_V5_PATCH
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
-    {
-        let _ = conn.execute(statement, []);
-    }
-    if added_allow_empty_assistants {
-        let _ = conn.execute(
-            "UPDATE stages
-             SET allow_empty_assistants = 1
-             WHERE type = 'builtin' AND kind IN ('human', 'done')",
-            [],
-        );
-    }
-    let _ = rebuild_stages_table_for_project_builtin_stages(conn);
-    let _ = rebuild_assistants_table_for_scope_constraints(conn);
-}
-
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for name in rows {
-        if name? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn rebuild_assistants_table_for_scope_constraints(conn: &Connection) -> Result<()> {
-    let create_sql: Option<String> = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assistants'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(create_sql) = create_sql else {
-        return Ok(());
-    };
-    if !create_sql.contains("type = 'builtin' AND project_id IS NULL")
-        && !create_sql.contains("workflow_id IS NOT NULL OR project_id IS NOT NULL")
-    {
-        return Ok(());
-    }
-    conn.execute_batch(
-        r#"
-        PRAGMA foreign_keys = OFF;
-        CREATE TABLE IF NOT EXISTS assistants_new (
-            id              TEXT PRIMARY KEY,
-            name            TEXT NOT NULL,
-            agent_json      TEXT NOT NULL,
-            system_prompt   TEXT,
-            type            TEXT NOT NULL,
-            workflow_id     TEXT,
-            project_id      TEXT,
-            enabled         INTEGER NOT NULL DEFAULT 1,
-            created_at      INTEGER NOT NULL,
-            updated_at      INTEGER NOT NULL,
-            CHECK(type IN ('builtin', 'custom')),
-            FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
-            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
-        );
-        INSERT OR IGNORE INTO assistants_new (
-            id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
-        )
-        SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, COALESCE(enabled, 1), created_at, updated_at
-        FROM assistants;
-        DROP TABLE assistants;
-        ALTER TABLE assistants_new RENAME TO assistants;
-        CREATE INDEX IF NOT EXISTS idx_assistants_project
-            ON assistants(workflow_id, project_id, updated_at DESC);
-        PRAGMA foreign_keys = ON;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn rebuild_stages_table_for_project_builtin_stages(conn: &Connection) -> Result<()> {
-    let create_sql: Option<String> = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stages'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(create_sql) = create_sql else {
-        return Ok(());
-    };
-    if !create_sql.contains("type = 'builtin' AND workflow_id IS NOT NULL AND project_id IS NULL") {
-        return Ok(());
-    }
-    conn.execute_batch(
-        r#"
-        PRAGMA foreign_keys = OFF;
-        CREATE TABLE IF NOT EXISTS stages_new (
-            id           TEXT PRIMARY KEY,
-            project_id   TEXT,
-            type         TEXT NOT NULL,
-            workflow_id  TEXT,
-            kind         TEXT,
-            name         TEXT,
-            description  TEXT,
-            "order"      INTEGER NOT NULL,
-            enabled      INTEGER NOT NULL DEFAULT 1,
-            allow_empty_assistants INTEGER NOT NULL DEFAULT 0,
-            created_at   INTEGER NOT NULL,
-            updated_at   INTEGER NOT NULL,
-            CHECK(type IN ('builtin', 'custom')),
-            CHECK(kind IS NULL OR kind IN (
-                'research',
-                'plan',
-                'develop',
-                'build',
-                'writing',
-                'editing',
-                'review',
-                'proofreading',
-                'screenplay',
-                'storyboard',
-                'design',
-                'production',
-                'human',
-                'done'
-            )),
-            CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND kind IS NOT NULL AND name IS NULL)
-               OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL) AND kind IS NULL AND name IS NOT NULL)),
-            UNIQUE(workflow_id, project_id, "order"),
-            FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
-            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
-        );
-        INSERT OR IGNORE INTO stages_new (
-            id, project_id, type, workflow_id, kind, name, description, "order", enabled, allow_empty_assistants, created_at, updated_at
-        )
-        SELECT id, project_id, type, workflow_id, kind, name, description, "order", COALESCE(enabled, 1), COALESCE(allow_empty_assistants, 0), created_at, updated_at
-        FROM stages;
-        DROP TABLE stages;
-        ALTER TABLE stages_new RENAME TO stages;
-        CREATE INDEX IF NOT EXISTS idx_stages_project
-            ON stages(workflow_id, project_id, type, "order", kind, name);
-        PRAGMA foreign_keys = ON;
-        "#,
-    )?;
     Ok(())
 }
 
@@ -851,7 +632,6 @@ fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
 
 fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
     let now = now_ms();
-    delete_legacy_builtin_workflow_stages(conn)?;
     for (workflow_id, _, _) in BUILTIN_WORKFLOW_SEEDS {
         for (index, (kind, description)) in builtin_workflow_stage_seeds(workflow_id)
             .iter()
@@ -896,7 +676,9 @@ fn seed_builtin_workflow_stage_assistants(conn: &Connection, now: i64) -> Result
             if stage_has_assistants(conn, &stage_id)? {
                 continue;
             }
-            let assistant_id = builtin_assistant_seed_for_kind(kind).id;
+            let assistant_seed = builtin_assistant_seed_for_kind(kind);
+            let assistant_id = stable_workflow_builtin_assistant_id(workflow_id, assistant_seed.id);
+            seed_workflow_builtin_assistant(conn, workflow_id, assistant_seed.id, now)?;
             conn.execute(
                 "INSERT OR IGNORE INTO stage_assistants (stage_id, assistant_id, \"order\", created_at, updated_at)
                  VALUES (?, ?, 0, ?, ?)",
@@ -904,52 +686,6 @@ fn seed_builtin_workflow_stage_assistants(conn: &Connection, now: i64) -> Result
             )?;
         }
     }
-    Ok(())
-}
-
-fn seed_workflow_assistants_from_stage_bindings(conn: &Connection, now: i64) -> Result<()> {
-    let bindings = {
-        let mut stmt = conn.prepare(
-            "SELECT s.workflow_id, sa.stage_id, sa.assistant_id
-             FROM stage_assistants sa
-             INNER JOIN stages s ON s.id = sa.stage_id
-             INNER JOIN assistants a ON a.id = sa.assistant_id
-             WHERE s.project_id IS NULL
-               AND s.workflow_id IS NOT NULL
-               AND a.type = 'builtin'
-               AND a.project_id IS NULL
-               AND (a.workflow_id IS NULL OR a.workflow_id != s.workflow_id)",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-
-    for (workflow_id, stage_id, assistant_id) in bindings {
-        let workflow_assistant_id =
-            stable_workflow_builtin_assistant_id(&workflow_id, &assistant_id);
-        conn.execute(
-            "INSERT OR IGNORE INTO assistants (
-                id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
-             )
-             SELECT ?, name, agent_json, system_prompt, type, ?, NULL, enabled, ?, ?
-             FROM assistants
-             WHERE id = ?",
-            params![workflow_assistant_id, workflow_id, now, now, assistant_id],
-        )?;
-        conn.execute(
-            "UPDATE stage_assistants
-             SET assistant_id = ?, updated_at = ?
-             WHERE stage_id = ? AND assistant_id = ?",
-            params![workflow_assistant_id, now, stage_id, assistant_id],
-        )?;
-    }
-
     Ok(())
 }
 
@@ -964,16 +700,6 @@ const BUILTIN_WORKFLOW_SEEDS: [(&str, &str, &str); 5] = [
         "workflow.description.video_production",
     ),
 ];
-
-fn delete_legacy_builtin_workflow_stages(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "DELETE FROM stages
-         WHERE type = 'builtin'
-           AND workflow_id IS NULL",
-        [],
-    )?;
-    Ok(())
-}
 
 fn builtin_workflow_stage_seeds(workflow_id: &str) -> Vec<(StageType, &'static str)> {
     match workflow_id {
@@ -1104,7 +830,71 @@ fn runtime_option(value: &str, label: &str) -> RuntimeAgentOptionMetadata {
     RuntimeAgentOptionMetadata {
         value: value.to_string(),
         label: label.to_string(),
+        display_name: label.to_string(),
+        enabled: true,
+        order: 0,
     }
+}
+
+fn runtime_options(
+    mut options: Vec<RuntimeAgentOptionMetadata>,
+) -> Vec<RuntimeAgentOptionMetadata> {
+    for (index, option) in options.iter_mut().enumerate() {
+        option.order = index as i64;
+    }
+    options
+}
+
+fn runtime_options_json(options: &[RuntimeAgentOptionMetadata]) -> Result<String> {
+    let map = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            (
+                option.value.clone(),
+                RuntimeAgentModelConfig {
+                    display_name: option.display_name.clone(),
+                    enabled: option.enabled,
+                    order: if option.order == 0 {
+                        index as i64
+                    } else {
+                        option.order
+                    },
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    serde_json::to_string(&map).map_err(Into::into)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimeAgentModelConfig {
+    display_name: String,
+    enabled: bool,
+    order: i64,
+}
+
+fn runtime_options_from_json(json: &str) -> Vec<RuntimeAgentOptionMetadata> {
+    let Ok(map) = serde_json::from_str::<BTreeMap<String, RuntimeAgentModelConfig>>(json) else {
+        return Vec::new();
+    };
+    let mut options = map
+        .into_iter()
+        .map(|(value, config)| RuntimeAgentOptionMetadata {
+            label: config.display_name.clone(),
+            display_name: config.display_name,
+            value,
+            enabled: config.enabled,
+            order: config.order,
+        })
+        .collect::<Vec<_>>();
+    options.sort_by(|a, b| {
+        a.order
+            .cmp(&b.order)
+            .then_with(|| a.display_name.cmp(&b.display_name))
+            .then_with(|| a.value.cmp(&b.value))
+    });
+    options
 }
 
 fn seed_builtin_agent(
@@ -1124,15 +914,16 @@ fn seed_builtin_agent(
     let id = agent.as_str();
     conn.execute(
         "INSERT INTO agents (
-            id, name, icon, model, models_json, effort, efforts_json,
+            id, name, display_name, icon, model, models_json, effort, efforts_json,
             permission_mode, permission_modes_json, type, enabled, transport,
-            commands_json, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            commands_json, \"order\", created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
+            display_name = COALESCE(agents.display_name, excluded.display_name),
             icon = COALESCE(agents.icon, excluded.icon),
             model = COALESCE(agents.model, excluded.model),
-            models_json = excluded.models_json,
+            models_json = COALESCE(NULLIF(agents.models_json, '{}'), excluded.models_json),
             effort = COALESCE(agents.effort, excluded.effort),
             efforts_json = excluded.efforts_json,
             permission_mode = COALESCE(agents.permission_mode, excluded.permission_mode),
@@ -1141,13 +932,15 @@ fn seed_builtin_agent(
             enabled = agents.enabled,
             transport = COALESCE(agents.transport, excluded.transport),
             commands_json = excluded.commands_json,
+            \"order\" = agents.\"order\",
             updated_at = excluded.updated_at",
         params![
             id,
             runtime_agent_name(agent),
+            runtime_agent_display_name(agent),
             id,
             model,
-            serde_json::to_string(&models)?,
+            runtime_options_json(&models)?,
             effort,
             serde_json::to_string(&efforts)?,
             permission_mode,
@@ -1156,6 +949,7 @@ fn seed_builtin_agent(
             enabled as i64,
             transport_kind_to_db(transport),
             serde_json::to_string(&commands)?,
+            runtime_agent_order(agent),
             now,
             now,
         ],
@@ -1169,11 +963,11 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         conn,
         Agent::Codex,
         Some("gpt-5.5"),
-        vec![
+        runtime_options(vec![
             runtime_option("gpt-5.5", "5.5"),
             runtime_option("gpt-5.4", "5.4"),
             runtime_option("gpt-5.3-codex", "5.3 Codex"),
-        ],
+        ]),
         Some("high"),
         vec![
             runtime_option("low", "Low"),
@@ -1199,10 +993,10 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         conn,
         Agent::Claude,
         Some("claude-opus-4-7"),
-        vec![
+        runtime_options(vec![
             runtime_option("claude-opus-4-7", "Opus 4.7"),
             runtime_option("claude-opus-4-6", "Opus 4.6"),
-        ],
+        ]),
         Some("high"),
         vec![
             runtime_option("low", "Low"),
@@ -1274,6 +1068,22 @@ fn runtime_agent_name(agent: Agent) -> &'static str {
         Agent::Codex => "Codex",
         Agent::Claude => "Claude",
         Agent::Gemini => "Gemini",
+    }
+}
+
+fn runtime_agent_display_name(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "Codex CLI",
+        Agent::Claude => "Claude Code",
+        Agent::Gemini => "Gemini CLI",
+    }
+}
+
+fn runtime_agent_order(agent: Agent) -> i64 {
+    match agent {
+        Agent::Codex => 0,
+        Agent::Claude => 1,
+        Agent::Gemini => 2,
     }
 }
 
@@ -1728,14 +1538,13 @@ fn kanban_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KanbanItem>
 }
 
 fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
-    let models_json: String = row.get(4)?;
-    let efforts_json: String = row.get(6)?;
-    let permission_modes_json: String = row.get(8)?;
-    let agent_type_raw: String = row.get(9)?;
-    let transport_raw: String = row.get(11)?;
-    let commands_json: String = row.get(12)?;
-    let models =
-        serde_json::from_str::<Vec<RuntimeAgentOptionMetadata>>(&models_json).unwrap_or_default();
+    let models_json: String = row.get(5)?;
+    let efforts_json: String = row.get(7)?;
+    let permission_modes_json: String = row.get(9)?;
+    let agent_type_raw: String = row.get(10)?;
+    let transport_raw: String = row.get(12)?;
+    let commands_json: String = row.get(13)?;
+    let models = runtime_options_from_json(&models_json);
     let efforts =
         serde_json::from_str::<Vec<RuntimeAgentOptionMetadata>>(&efforts_json).unwrap_or_default();
     let permission_modes =
@@ -1750,19 +1559,21 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
     Ok(AgentInfo {
         id: row.get(0)?,
         name: row.get(1)?,
-        icon: row.get(2)?,
-        model: row.get(3)?,
+        display_name: row.get(2)?,
+        icon: row.get(3)?,
+        model: row.get(4)?,
         models,
-        effort: row.get(5)?,
+        effort: row.get(6)?,
         efforts,
-        permission_mode: row.get(7)?,
+        permission_mode: row.get(8)?,
         permission_modes,
         agent_type: AgentType::from_db_str(&agent_type_raw).unwrap_or(AgentType::Custom),
-        enabled: row.get::<_, i64>(10)? != 0,
+        enabled: row.get::<_, i64>(11)? != 0,
         transport: transport_kind_from_db(&transport_raw),
         commands,
-        created_at: row.get(13)?,
-        updated_at: row.get(14)?,
+        order: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -1899,9 +1710,9 @@ fn load_workflow_by_id(conn: &Connection, workflow_id: &str) -> Result<WorkflowI
 
 fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
     conn.query_row(
-        "SELECT id, name, icon, model, models_json, effort, efforts_json,
+        "SELECT id, name, display_name, icon, model, models_json, effort, efforts_json,
                 permission_mode, permission_modes_json, type, enabled, transport,
-                commands_json, created_at, updated_at
+                commands_json, \"order\", created_at, updated_at
          FROM agents
          WHERE id = ?",
         params![agent_id],
@@ -1913,11 +1724,11 @@ fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
 
 fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, icon, model, models_json, effort, efforts_json,
+        "SELECT id, name, display_name, icon, model, models_json, effort, efforts_json,
                 permission_mode, permission_modes_json, type, enabled, transport,
-                commands_json, created_at, updated_at
+                commands_json, \"order\", created_at, updated_at
          FROM agents
-         ORDER BY type ASC, name COLLATE NOCASE ASC",
+         ORDER BY type ASC, \"order\" ASC, display_name COLLATE NOCASE ASC",
     )?;
     let rows = stmt.query_map([], agent_info_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2154,108 +1965,6 @@ fn copy_project_stage_assistants(
     Ok(())
 }
 
-fn backfill_project_builtin_stages(conn: &Connection) -> Result<()> {
-    let projects = {
-        let mut stmt = conn.prepare("SELECT id, workflow_id, created_at FROM projects")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (project_id, workflow_id, created_at) in projects {
-        instantiate_project_assistants(conn, &project_id, &workflow_id, created_at.max(now_ms()))?;
-        let existing_count: i64 = conn.query_row(
-            "SELECT count(*) FROM stages WHERE project_id = ? AND type = 'builtin'",
-            params![project_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if existing_count == 0 {
-            instantiate_project_builtin_stages(
-                conn,
-                &project_id,
-                &workflow_id,
-                None,
-                created_at.max(now_ms()),
-            )?;
-        }
-        link_project_stage_assistants(conn, &project_id, &workflow_id, created_at.max(now_ms()))?;
-    }
-    let redirects = {
-        let mut stmt = conn.prepare(
-            "SELECT ts.id, t.project_id, s.id, s.workflow_id, s.kind, s.description, s.\"order\", s.enabled, s.allow_empty_assistants, s.created_at
-             FROM thread_stages ts
-             INNER JOIN threads t ON t.id = ts.thread_id
-             INNER JOIN stages s ON s.id = ts.stage_id
-             WHERE s.project_id IS NULL AND s.type = 'builtin'",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, i64>(9)?,
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    for (
-        thread_stage_id,
-        project_id,
-        template_stage_id,
-        workflow_id,
-        kind,
-        description,
-        order,
-        enabled,
-        allow_empty_assistants,
-        created_at,
-    ) in redirects
-    {
-        let project_stage_id = stable_project_builtin_stage_id(&project_id, &template_stage_id);
-        let inserted = conn.execute(
-            "INSERT OR IGNORE INTO stages (
-                id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at
-             ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
-            params![
-                project_stage_id,
-                project_id,
-                workflow_id,
-                kind,
-                description,
-                order,
-                enabled,
-                allow_empty_assistants,
-                created_at,
-                now_ms()
-            ],
-        )?;
-        if inserted > 0 {
-            copy_project_stage_assistants(
-                conn,
-                &project_id,
-                &template_stage_id,
-                &project_stage_id,
-                now_ms(),
-            )?;
-        }
-        conn.execute(
-            "UPDATE thread_stages SET stage_id = ? WHERE id = ?",
-            params![project_stage_id, thread_stage_id],
-        )?;
-    }
-    Ok(())
-}
-
 fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<StageInfo> {
     let mut stage = conn
         .query_row(
@@ -2410,7 +2119,9 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
         let rows = stmt.query_map(params![assistant_id], |row| {
             let workflow_name: String = row.get(0)?;
             let stage_name: String = row.get(1)?;
-            Ok(format!("workflow \"{workflow_name}\" stage \"{stage_name}\""))
+            Ok(format!(
+                "workflow \"{workflow_name}\" stage \"{stage_name}\""
+            ))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -2686,7 +2397,6 @@ fn assistant_agent_from_db_agent(agent: &AgentInfo) -> Option<AssistantAgentInfo
 }
 
 fn seed_builtin_assistants(conn: &Connection, now: i64) -> Result<()> {
-    delete_legacy_agent_builtin_assistants(conn)?;
     let codex_agent = load_agent_by_id(conn, Agent::Codex.as_str())?;
     let Some(assistant_agent) = assistant_agent_from_db_agent(&codex_agent) else {
         return Ok(());
@@ -2697,21 +2407,28 @@ fn seed_builtin_assistants(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn delete_legacy_agent_builtin_assistants(conn: &Connection) -> Result<()> {
+fn seed_workflow_builtin_assistant(
+    conn: &Connection,
+    workflow_id: &str,
+    source_assistant_id: &str,
+    now: i64,
+) -> Result<()> {
+    let workflow_assistant_id =
+        stable_workflow_builtin_assistant_id(workflow_id, source_assistant_id);
     conn.execute(
-        "DELETE FROM assistants
-         WHERE type = 'builtin'
-           AND id IN (
-             'assistant-builtin-codex',
-             'assistant-builtin-claude',
-             'assistant-builtin-gemini',
-             'assistant-builtin-researcher',
-             'assistant-builtin-planner',
-             'assistant-builtin-builder',
-             'assistant-builtin-reviewer'
-           )
-           OR (type = 'builtin' AND id LIKE 'assistant-builtin-%-%')",
-        [],
+        "INSERT OR IGNORE INTO assistants (
+            id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
+         )
+         SELECT ?, name, agent_json, system_prompt, type, ?, NULL, enabled, ?, ?
+         FROM assistants
+         WHERE id = ?",
+        params![
+            workflow_assistant_id,
+            workflow_id,
+            now,
+            now,
+            source_assistant_id
+        ],
     )?;
     Ok(())
 }
@@ -3890,6 +3607,9 @@ impl SessionStore for SqliteStore {
     fn update_builtin_agent_preferences(
         &self,
         agent: Agent,
+        display_name: Option<&str>,
+        enabled: Option<bool>,
+        order: Option<i64>,
         model: Option<&str>,
         effort: Option<&str>,
         permission_mode: Option<&str>,
@@ -3903,14 +3623,17 @@ impl SessionStore for SqliteStore {
         if current.agent_type != AgentType::Builtin {
             anyhow::bail!("agent is not builtin: {id}");
         }
+        let next_display_name = display_name
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let next_model = model.map(str::trim).filter(|value| !value.is_empty());
         let next_effort = effort.map(str::trim).filter(|value| !value.is_empty());
         let next_permission_mode = permission_mode
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let next_models = match models {
-            Some(values) => serde_json::to_string(values)?,
-            None => serde_json::to_string(&current.models)?,
+            Some(values) => runtime_options_json(values)?,
+            None => runtime_options_json(&current.models)?,
         };
         let next_efforts = match efforts {
             Some(values) => serde_json::to_string(values)?,
@@ -3923,21 +3646,27 @@ impl SessionStore for SqliteStore {
         let now = now_ms();
         conn.execute(
             "UPDATE agents
-             SET model = COALESCE(?, model),
+             SET display_name = COALESCE(?, display_name),
+                 model = COALESCE(?, model),
                  models_json = ?,
                  effort = COALESCE(?, effort),
                  efforts_json = ?,
                  permission_mode = COALESCE(?, permission_mode),
                  permission_modes_json = ?,
+                 enabled = COALESCE(?, enabled),
+                 \"order\" = COALESCE(?, \"order\"),
                  updated_at = ?
              WHERE id = ? AND type = 'builtin'",
             params![
+                next_display_name,
                 next_model,
                 next_models,
                 next_effort,
                 next_efforts,
                 next_permission_mode,
                 next_permission_modes,
+                enabled.map(|value| if value { 1_i64 } else { 0_i64 }),
+                order,
                 now,
                 id,
             ],
@@ -6180,80 +5909,6 @@ mod migration_tests {
     }
 
     #[test]
-    fn migration_removes_custom_assistant_scope_check() {
-        let path = unique_db("sessio-mig-assistant-scope-check");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                r#"
-                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-                INSERT INTO schema_migrations(version) VALUES (1),(2),(3),(4),(5);
-                CREATE TABLE workflows (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    type TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    CHECK(type IN ('builtin', 'custom'))
-                );
-                CREATE TABLE projects (
-                    id TEXT PRIMARY KEY,
-                    path TEXT NOT NULL UNIQUE,
-                    name TEXT NOT NULL,
-                    workflow_id TEXT NOT NULL DEFAULT 'code',
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(workflow_id) REFERENCES workflows(id)
-                );
-                CREATE TABLE assistants (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    agent_json TEXT NOT NULL,
-                    system_prompt TEXT,
-                    type TEXT NOT NULL,
-                    workflow_id TEXT,
-                    project_id TEXT,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL,
-                    CHECK(type IN ('builtin', 'custom')),
-                    CHECK(type = 'builtin'
-                       OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
-                    FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
-                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
-                );
-                "#,
-            )
-            .unwrap();
-        }
-
-        let store = SqliteStore::open(&path).unwrap();
-        store.init().unwrap();
-        let assistant = store
-            .create_assistant(
-                "Shared reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
-                },
-                None,
-                AssistantType::Custom,
-                None,
-                None,
-            )
-            .unwrap();
-        assert_eq!(assistant.workflow_id, None);
-        assert_eq!(assistant.project_id, None);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
     fn session_history_roundtrip_stores_acp_turn_json() {
         let path = unique_db("sessio-history-roundtrip");
         let store = SqliteStore::open(&path).unwrap();
@@ -6880,101 +6535,6 @@ mod migration_tests {
     }
 
     #[test]
-    fn backfill_preserves_existing_project_stage_assistant_bindings() {
-        let path = unique_db("sessio-project-stage-assistant-backfill");
-        let store = SqliteStore::open(&path).unwrap();
-        store.init().unwrap();
-        let parent = temp_child_path(
-            &std::env::temp_dir(),
-            "sessio-project-stage-assistant-backfill-parent",
-        );
-        std::fs::create_dir(&parent).unwrap();
-
-        let templates = store.list_workflow_stages("code").unwrap();
-        let research_template = templates
-            .iter()
-            .find(|stage| stage.kind == Some(StageType::Research))
-            .unwrap()
-            .clone();
-        let project = store
-            .create_project(
-                &parent.to_string_lossy(),
-                "backfill",
-                "code".to_string(),
-                None,
-            )
-            .unwrap();
-        let reviewer = store
-            .create_assistant(
-                "Reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
-                },
-                None,
-                AssistantType::Custom,
-                None,
-                Some(&project.id),
-            )
-            .unwrap();
-        let project_research = store
-            .list_project_stages(&project.id)
-            .unwrap()
-            .into_iter()
-            .find(|stage| stage.kind == Some(StageType::Research))
-            .unwrap();
-        store
-            .update_project_stage_assistants(&project_research.id, &[reviewer.id.clone()])
-            .unwrap();
-        let thread = store
-            .create_thread(&project.id, "Old thread stage", None)
-            .unwrap();
-        let now = now_ms();
-        {
-            let conn = store.conn.lock().unwrap();
-            conn.execute(
-                "INSERT INTO thread_stages (id, thread_id, stage_id, \"order\", created_at, updated_at)
-                 VALUES (?, ?, ?, 0, ?, ?)",
-                params![
-                    "old-template-thread-stage",
-                    thread.id,
-                    research_template.id,
-                    now,
-                    now
-                ],
-            )
-            .unwrap();
-        }
-
-        store.init().unwrap();
-
-        let project_research = store
-            .list_project_stages(&project.id)
-            .unwrap()
-            .into_iter()
-            .find(|stage| stage.kind == Some(StageType::Research))
-            .unwrap();
-        assert_eq!(
-            project_research.id,
-            stable_project_builtin_stage_id(&project.id, &research_template.id)
-        );
-        assert_eq!(project_research.assistants.len(), 1);
-        assert_eq!(project_research.assistants[0].assistant_id, reviewer.id);
-        let thread_stages = {
-            let conn = store.conn.lock().unwrap();
-            load_thread_stages(&conn, &thread.id).unwrap()
-        };
-        assert_eq!(thread_stages.len(), 1);
-        assert_eq!(thread_stages[0].stage_id, project_research.id);
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&parent);
-    }
-
-    #[test]
     fn seed_does_not_recreate_deleted_workflow_stage_assistant_bindings() {
         let path = unique_db("sessio-workflow-stage-assistant-seed");
         let store = SqliteStore::open(&path).unwrap();
@@ -7118,7 +6678,10 @@ mod migration_tests {
         let path = unique_db("sessio-project-global-stage-assistant");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
-        let parent = temp_child_path(&std::env::temp_dir(), "sessio-project-global-assistant-parent");
+        let parent = temp_child_path(
+            &std::env::temp_dir(),
+            "sessio-project-global-assistant-parent",
+        );
         std::fs::create_dir(&parent).unwrap();
 
         let shared_assistant = store
@@ -7162,7 +6725,10 @@ mod migration_tests {
             .find(|assistant| assistant.id == project_assistant_id)
             .unwrap();
         assert_eq!(project_shared_assistant.name, shared_assistant.name);
-        assert_eq!(project_shared_assistant.assistant_type, AssistantType::Custom);
+        assert_eq!(
+            project_shared_assistant.assistant_type,
+            AssistantType::Custom
+        );
         assert_eq!(
             project_shared_assistant.project_id.as_deref(),
             Some(project.id.as_str())
