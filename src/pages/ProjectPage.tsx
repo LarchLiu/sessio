@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   type RefObject,
   type ReactNode,
@@ -7,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
@@ -47,6 +49,10 @@ const KANBAN_STATUS_ICONS: Record<KanbanStatus, LucideIcon> = {
   human_review: CircleUserRound,
   done: CircleCheck,
 };
+
+const ASSISTANT_MENU_GAP = 6;
+const ASSISTANT_MENU_MARGIN = 8;
+const ASSISTANT_MENU_MAX_HEIGHT = 260;
 
 const STAGE_TYPE_ICONS: Record<StageType, LucideIcon> = {
   research: CircleGauge,
@@ -299,7 +305,6 @@ export function ProjectWorkbenchPage({
   const [editingName, setEditingName] = useState(project.name);
   const [editingWorkflowId, setEditingWorkflowId] = useState(project.workflowId);
   const [projectSaving, setProjectSaving] = useState(false);
-  const compactTabContent = activeView === "threads" || activeView === "stages";
 
   useEffect(() => {
     setEditingName(project.name);
@@ -490,7 +495,7 @@ export function ProjectWorkbenchPage({
           </div>
         </div>
         <ScrollArea
-          className={compactTabContent ? "max-h-full w-full" : "min-h-0 flex-1"}
+          className="min-h-0 flex-1"
           viewportClassName="px-5 pb-5 pt-4"
         >
           {activeView === "threads" && (
@@ -1397,8 +1402,62 @@ function AssistantMultiPicker({
   className?: string;
 }) {
   const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const selected = new Set(assistantIds);
   const label = assistantNames(assistantIds, labelAssistants ?? assistants, t);
+
+  const updatePosition = useCallback(() => {
+    if (!open) return;
+    const button = buttonRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    const width = Math.max(224, rect.width);
+    const maxLeft = Math.max(ASSISTANT_MENU_MARGIN, window.innerWidth - width - ASSISTANT_MENU_MARGIN);
+    const estimatedHeight = Math.min(
+      ASSISTANT_MENU_MAX_HEIGHT,
+      Math.max(40, assistants.length * 32 + 12),
+    );
+    const roomBelow = window.innerHeight - rect.bottom - ASSISTANT_MENU_MARGIN;
+    const top =
+      roomBelow >= estimatedHeight
+        ? rect.bottom + ASSISTANT_MENU_GAP
+        : rect.top - estimatedHeight - ASSISTANT_MENU_GAP;
+    const maxTop = Math.max(ASSISTANT_MENU_MARGIN, window.innerHeight - estimatedHeight - ASSISTANT_MENU_MARGIN);
+    setPos({
+      top: Math.round(Math.max(ASSISTANT_MENU_MARGIN, Math.min(top, maxTop))),
+      left: Math.round(Math.max(ASSISTANT_MENU_MARGIN, Math.min(rect.left, maxLeft))),
+      width,
+    });
+  }, [assistants.length, open]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [updatePosition]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, updatePosition]);
 
   const toggle = (assistantId: string) => {
     if (selected.has(assistantId)) {
@@ -1409,38 +1468,54 @@ function AssistantMultiPicker({
   };
 
   return (
-    <div className={"group relative inline-flex h-7 min-w-[150px] items-center gap-1 border-r border-ink/10 text-caption text-ink/65 " + className}>
-      <Bot className="h-3.5 w-3.5 shrink-0 text-ink/40" />
-      <span className="truncate">{label}</span>
-      <div className="invisible absolute left-0 top-full z-30 mt-1 w-56 rounded-lg border border-ink/10 bg-surface-panel p-1.5 opacity-0 shadow-lg transition group-focus-within:visible group-focus-within:opacity-100 group-hover:visible group-hover:opacity-100">
-        {assistants.length === 0 ? (
-          <div className="px-2 py-1.5 text-caption text-ink/40">{t("assistant.empty")}</div>
-        ) : (
-          assistants.map((assistant) => (
-            <button
-              key={assistant.id}
-              type="button"
-              onClick={() => toggle(assistant.id)}
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-caption text-ink/65 hover:bg-ink/5"
-            >
-              <span className="flex h-3.5 w-3.5 items-center justify-center rounded border border-ink/15 bg-ink/5">
-                {selected.has(assistant.id) && <Check className="h-3 w-3" />}
-              </span>
-              <Bot className="h-3.5 w-3.5 text-ink/35" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate">{assistant.name}</span>
-                {assistant.systemPrompt && (
-                  <span className="mt-0.5 block line-clamp-2 text-ink/40">
-                    {assistant.systemPrompt}
-                  </span>
-                )}
-              </span>
-              <span className="text-meta text-ink/35">{assistant.type === "builtin" ? t("assistant.builtin") : t("assistant.custom")}</span>
-            </button>
-          ))
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className={"inline-flex h-7 min-w-[150px] items-center gap-1 border-r border-ink/10 text-caption text-ink/65 outline-none hover:text-ink " + className}
+      >
+        <Bot className="h-3.5 w-3.5 shrink-0 text-ink/40" />
+        <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            onWheel={(event) => event.stopPropagation()}
+            className="fixed overflow-hidden rounded-lg border border-ink/10 bg-surface-panel p-1.5 shadow-lg"
+            style={{
+              top: pos.top,
+              left: pos.left,
+              width: pos.width,
+              maxHeight: ASSISTANT_MENU_MAX_HEIGHT,
+              zIndex: 90,
+            }}
+          >
+            <ScrollArea className="max-h-[248px] overscroll-contain">
+              {assistants.length === 0 ? (
+                <div className="px-2 py-1.5 text-caption text-ink/40">{t("assistant.empty")}</div>
+              ) : (
+                assistants.map((assistant) => (
+                  <button
+                    key={assistant.id}
+                    type="button"
+                    onClick={() => toggle(assistant.id)}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-caption text-ink/65 hover:bg-ink/5"
+                  >
+                    <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/15 bg-ink/5">
+                      {selected.has(assistant.id) && <Check className="h-3 w-3" />}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{assistant.name}</span>
+                  </button>
+                ))
+              )}
+            </ScrollArea>
+          </div>,
+          document.body,
         )}
-      </div>
-    </div>
+    </>
   );
 }
 
