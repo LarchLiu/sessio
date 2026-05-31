@@ -328,6 +328,7 @@ pub struct ProjectStageInfo {
     pub description: Option<String>,
     pub order: i64,
     pub enabled: bool,
+    pub allow_empty_assistants: bool,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
@@ -352,6 +353,7 @@ pub struct StageInfo {
     pub description: Option<String>,
     pub order: i64,
     pub enabled: bool,
+    pub allow_empty_assistants: bool,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]

@@ -61,7 +61,9 @@ type AppSidebarProps = {
   expandedProjectSessions: Set<string>;
   selectedKey: string | null;
   selectedIdentityKey: string | null;
-  hasSelectedSession: boolean;
+  selectedProjectId: string | null;
+  selectedThreadId: string | null;
+  hasActiveSelection: boolean;
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
@@ -75,6 +77,7 @@ type AppSidebarProps = {
   onOpenKanban: (project: ProjectGroup) => void;
   onNewProjectChat: (project: ProjectGroup) => void;
   onSelectSession: (project: ProjectGroup, session: SessionInfo) => void;
+  onSelectThread: (project: ProjectGroup, thread: ThreadInfo) => void;
   onToggleProjectSessions: (projectKey: string) => void;
   onProjectContextMenu: (project: ProjectGroup, e: MouseEvent) => void;
   onSessionContextMenu: (
@@ -93,7 +96,9 @@ export default function AppSidebar({
   expandedProjectSessions,
   selectedKey,
   selectedIdentityKey,
-  hasSelectedSession,
+  selectedProjectId,
+  selectedThreadId,
+  hasActiveSelection,
   liveState,
   runtimeSessionAliases,
   unreadSessionIds,
@@ -107,6 +112,7 @@ export default function AppSidebar({
   onOpenKanban,
   onNewProjectChat,
   onSelectSession,
+  onSelectThread,
   onToggleProjectSessions,
   onProjectContextMenu,
   onSessionContextMenu,
@@ -194,7 +200,7 @@ export default function AppSidebar({
           onClick={onNewChat}
           className={
             "mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-body-sm font-medium transition " +
-            (!hasSelectedSession
+            (!hasActiveSelection
               ? "bg-ink/10 text-ink"
               : "text-ink/72 hover:bg-ink/5 hover:text-ink")
           }
@@ -231,6 +237,8 @@ export default function AppSidebar({
                 sessionsExpanded={expandedProjectSessions.has(project.key)}
                 selectedKey={selectedKey}
                 selectedIdentityKey={selectedIdentityKey}
+                selectedProjectId={selectedProjectId}
+                selectedThreadId={selectedThreadId}
                 liveState={liveState}
                 runtimeSessionAliases={runtimeSessionAliases}
                 unreadSessionIds={unreadSessionIds}
@@ -242,6 +250,7 @@ export default function AppSidebar({
                 onOpenKanban={() => onOpenKanban(project)}
                 onNewChat={() => onNewProjectChat(project)}
                 onSelectSession={(session) => onSelectSession(project, session)}
+                onSelectThread={(thread) => onSelectThread(project, thread)}
                 onToggleSessionLimit={() => onToggleProjectSessions(project.key)}
                 onProjectContextMenu={(event) => onProjectContextMenu(project, event)}
                 onSessionContextMenu={onSessionContextMenu}
@@ -668,6 +677,8 @@ function ProjectSidebarGroup({
   sessionsExpanded,
   selectedKey,
   selectedIdentityKey,
+  selectedProjectId,
+  selectedThreadId,
   liveState,
   runtimeSessionAliases,
   unreadSessionIds,
@@ -679,6 +690,7 @@ function ProjectSidebarGroup({
   onOpenKanban,
   onNewChat,
   onSelectSession,
+  onSelectThread,
   onToggleSessionLimit,
   onProjectContextMenu,
   onSessionContextMenu,
@@ -688,6 +700,8 @@ function ProjectSidebarGroup({
   sessionsExpanded: boolean;
   selectedKey: string | null;
   selectedIdentityKey: string | null;
+  selectedProjectId: string | null;
+  selectedThreadId: string | null;
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
@@ -699,6 +713,7 @@ function ProjectSidebarGroup({
   onOpenKanban: () => void;
   onNewChat: () => void;
   onSelectSession: (session: SessionInfo) => void;
+  onSelectThread: (thread: ThreadInfo) => void;
   onToggleSessionLimit: () => void;
   onProjectContextMenu: (e: MouseEvent) => void;
   onSessionContextMenu: (
@@ -732,6 +747,7 @@ function ProjectSidebarGroup({
     listMode === "sessions" && sessionEntries.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
   const displayCount = listMode === "threads" ? threads.length : project.count;
   const ProjectListModeIcon = listMode === "threads" ? MessageSquareText : HashIcon;
+  const projectActive = selectedProjectId === project.project.id;
   const toggleSessionLimit = () => {
     const collapsing = sessionsExpanded;
     onToggleSessionLimit();
@@ -748,7 +764,10 @@ function ProjectSidebarGroup({
         type="button"
         onClick={onSelectProject}
         title={project.path ?? project.label}
-        className="group flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-ink/70 transition hover:bg-ink/5 hover:text-ink"
+        className={
+          "group flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition " +
+          (projectActive ? "bg-ink/10 text-ink" : "text-ink/70 hover:bg-ink/5 hover:text-ink")
+        }
         onContextMenu={onProjectContextMenu}
       >
         <FolderIcon
@@ -851,7 +870,8 @@ function ProjectSidebarGroup({
                   <SidebarThreadItem
                     key={thread.id}
                     thread={thread}
-                    onSelect={onOpenKanban}
+                    active={selectedThreadId === thread.id}
+                    onSelect={() => onSelectThread(thread)}
                   />
                 ))
               )
@@ -959,9 +979,11 @@ function SidebarSessionItem({
 
 function SidebarThreadItem({
   thread,
+  active,
   onSelect,
 }: {
   thread: ThreadInfo;
+  active: boolean;
   onSelect: () => void;
 }) {
   const { t } = useI18n();
@@ -971,7 +993,10 @@ function SidebarThreadItem({
       type="button"
       onClick={onSelect}
       title={thread.goal}
-      className="group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left text-ink/65 transition hover:bg-ink/5 hover:text-ink"
+      className={
+        "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
+        (active ? "bg-ink/10 text-ink" : "text-ink/65 hover:bg-ink/5 hover:text-ink")
+      }
     >
       <SidebarThreadStatusIcon />
       <span className="min-w-0 flex-1 truncate text-body-sm leading-snug">
@@ -986,8 +1011,8 @@ function SidebarThreadItem({
 
 function SidebarThreadStatusIcon() {
   return (
-    <span className="absolute left-2 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded border border-ink/80 bg-ink text-[rgb(var(--color-bg-sidebar))] shadow-sm">
-      <HashIcon className="h-3 w-3" />
+    <span className="flex h-4 w-4 shrink-0 items-center justify-center text-current">
+      <HashIcon className="h-3.5 w-3.5" />
     </span>
   );
 }

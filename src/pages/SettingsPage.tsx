@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { ArrowLeft, Bot, Check, ChevronDown, GripVertical, Languages, ListChecks, Monitor, Moon, Pencil, Plus, RefreshCw, Settings, Sun, Trash2, Workflow } from "lucide-react";
+import { ArrowLeft, Bot, Check, ChevronDown, Circle, GripVertical, Languages, ListChecks, Monitor, Moon, Pencil, Plus, RefreshCw, Settings, Sun, Trash2, Workflow } from "lucide-react";
 import type { AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, StageAssistantInfo, WorkflowInfo } from "../api";
 import {
   createAssistant,
@@ -600,6 +600,14 @@ function StageTemplateRow({
     }
   };
 
+  const toggleAllowEmptyAssistants = async () => {
+    try {
+      onUpdated(await updateProjectStage(stage.id, { allowEmptyAssistants: !stage.allowEmptyAssistants }));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
   const remove = async () => {
     if (!custom) return;
     try {
@@ -658,6 +666,17 @@ function StageTemplateRow({
                       : "left-1 bg-card-subtle/45")
                   }
                 />
+              </button>
+            </Tooltip>
+            <Tooltip content={t("stage.allow_empty_assistants")} placement="top">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={stage.allowEmptyAssistants}
+                onClick={() => void toggleAllowEmptyAssistants()}
+                className={`rounded p-1 ${stage.allowEmptyAssistants ? "bg-card-chip/[0.12] text-card-fg/75" : "text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"}`}
+              >
+                {stage.allowEmptyAssistants ? <Check className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
               </button>
             </Tooltip>
             <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4 rotate-180" /></button>

@@ -388,7 +388,7 @@ CREATE TABLE IF NOT EXISTS assistants (
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
-    CHECK((type = 'builtin' AND project_id IS NULL)
+    CHECK(type = 'builtin'
        OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
     FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -425,6 +425,7 @@ CREATE TABLE IF NOT EXISTS stages (
     description  TEXT,
     "order"      INTEGER NOT NULL,
     enabled      INTEGER NOT NULL DEFAULT 1,
+    allow_empty_assistants INTEGER NOT NULL DEFAULT 0,
     created_at   INTEGER NOT NULL,
     updated_at   INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
@@ -559,6 +560,7 @@ ALTER TABLE stages ADD COLUMN workflow_id TEXT;
 ALTER TABLE assistants ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE threads ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE stages ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE stages ADD COLUMN allow_empty_assistants INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS stage_assistants (
     stage_id     TEXT NOT NULL,
     assistant_id TEXT NOT NULL,
@@ -665,6 +667,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     if !had_stage_assistants_table {
         seed_builtin_workflow_stage_assistants(conn, now_ms())?;
     }
+    seed_workflow_assistants_from_stage_bindings(conn, now_ms())?;
     backfill_project_builtin_stages(conn)?;
     Ok(())
 }
@@ -682,6 +685,8 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
 }
 
 fn apply_v5_patch(conn: &Connection) {
+    let added_allow_empty_assistants =
+        !column_exists(conn, "stages", "allow_empty_assistants").unwrap_or(false);
     for statement in SCHEMA_V5_PATCH
         .split(';')
         .map(str::trim)
@@ -689,7 +694,76 @@ fn apply_v5_patch(conn: &Connection) {
     {
         let _ = conn.execute(statement, []);
     }
+    if added_allow_empty_assistants {
+        let _ = conn.execute(
+            "UPDATE stages
+             SET allow_empty_assistants = 1
+             WHERE type = 'builtin' AND kind IN ('human', 'done')",
+            [],
+        );
+    }
     let _ = rebuild_stages_table_for_project_builtin_stages(conn);
+    let _ = rebuild_assistants_table_for_project_builtin_assistants(conn);
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn rebuild_assistants_table_for_project_builtin_assistants(conn: &Connection) -> Result<()> {
+    let create_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assistants'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(create_sql) = create_sql else {
+        return Ok(());
+    };
+    if !create_sql.contains("type = 'builtin' AND project_id IS NULL") {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE IF NOT EXISTS assistants_new (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            agent_json      TEXT NOT NULL,
+            system_prompt   TEXT,
+            type            TEXT NOT NULL,
+            workflow_id     TEXT,
+            project_id      TEXT,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL,
+            CHECK(type IN ('builtin', 'custom')),
+            CHECK(type = 'builtin'
+               OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL))),
+            FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO assistants_new (
+            id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
+        )
+        SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, COALESCE(enabled, 1), created_at, updated_at
+        FROM assistants;
+        DROP TABLE assistants;
+        ALTER TABLE assistants_new RENAME TO assistants;
+        CREATE INDEX IF NOT EXISTS idx_assistants_project
+            ON assistants(workflow_id, project_id, updated_at DESC);
+        PRAGMA foreign_keys = ON;
+        "#,
+    )?;
+    Ok(())
 }
 
 fn rebuild_stages_table_for_project_builtin_stages(conn: &Connection) -> Result<()> {
@@ -719,6 +793,7 @@ fn rebuild_stages_table_for_project_builtin_stages(conn: &Connection) -> Result<
             description  TEXT,
             "order"      INTEGER NOT NULL,
             enabled      INTEGER NOT NULL DEFAULT 1,
+            allow_empty_assistants INTEGER NOT NULL DEFAULT 0,
             created_at   INTEGER NOT NULL,
             updated_at   INTEGER NOT NULL,
             CHECK(type IN ('builtin', 'custom')),
@@ -745,9 +820,9 @@ fn rebuild_stages_table_for_project_builtin_stages(conn: &Connection) -> Result<
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
         INSERT OR IGNORE INTO stages_new (
-            id, project_id, type, workflow_id, kind, name, description, "order", enabled, created_at, updated_at
+            id, project_id, type, workflow_id, kind, name, description, "order", enabled, allow_empty_assistants, created_at, updated_at
         )
-        SELECT id, project_id, type, workflow_id, kind, name, description, "order", COALESCE(enabled, 1), created_at, updated_at
+        SELECT id, project_id, type, workflow_id, kind, name, description, "order", COALESCE(enabled, 1), COALESCE(allow_empty_assistants, 0), created_at, updated_at
         FROM stages;
         DROP TABLE stages;
         ALTER TABLE stages_new RENAME TO stages;
@@ -786,9 +861,10 @@ fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
             .enumerate()
         {
             let id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
+            let allow_empty_assistants = matches!(kind, StageType::Human | StageType::Done);
             conn.execute(
-                "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at)
-                 VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, ?, 1, ?, ?)
+                "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at)
+                 VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, ?, 1, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                     type = excluded.type,
                     workflow_id = excluded.workflow_id,
@@ -802,6 +878,7 @@ fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
                     kind.as_str(),
                     description,
                     (index as i64 + 1) * 1000,
+                    allow_empty_assistants as i64,
                     now,
                     now
                 ],
@@ -829,6 +906,51 @@ fn seed_builtin_workflow_stage_assistants(conn: &Connection, now: i64) -> Result
             )?;
         }
     }
+    Ok(())
+}
+
+fn seed_workflow_assistants_from_stage_bindings(conn: &Connection, now: i64) -> Result<()> {
+    let bindings = {
+        let mut stmt = conn.prepare(
+            "SELECT s.workflow_id, sa.stage_id, sa.assistant_id
+             FROM stage_assistants sa
+             INNER JOIN stages s ON s.id = sa.stage_id
+             INNER JOIN assistants a ON a.id = sa.assistant_id
+             WHERE s.project_id IS NULL
+               AND s.workflow_id IS NOT NULL
+               AND a.project_id IS NULL
+               AND (a.workflow_id IS NULL OR a.workflow_id != s.workflow_id)",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for (workflow_id, stage_id, assistant_id) in bindings {
+        let workflow_assistant_id =
+            stable_workflow_builtin_assistant_id(&workflow_id, &assistant_id);
+        conn.execute(
+            "INSERT OR IGNORE INTO assistants (
+                id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
+             )
+             SELECT ?, name, agent_json, system_prompt, type, ?, NULL, enabled, ?, ?
+             FROM assistants
+             WHERE id = ?",
+            params![workflow_assistant_id, workflow_id, now, now, assistant_id],
+        )?;
+        conn.execute(
+            "UPDATE stage_assistants
+             SET assistant_id = ?, updated_at = ?
+             WHERE stage_id = ? AND assistant_id = ?",
+            params![workflow_assistant_id, now, stage_id, assistant_id],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1487,6 +1609,21 @@ fn stable_assistant_id(
     )
 }
 
+fn stable_project_builtin_assistant_id(project_id: &str, template_assistant_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(project_id.as_bytes());
+    hasher.update(template_assistant_id.as_bytes());
+    format!(
+        "assistant-{}",
+        hex::encode(hasher.finalize())[..16].to_string()
+    )
+}
+
+fn stable_workflow_builtin_assistant_id(workflow_id: &str, source_assistant_id: &str) -> String {
+    format!("assistant-workflow-{workflow_id}-{source_assistant_id}")
+}
+
 fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -1668,8 +1805,9 @@ fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectSt
         description: row.get(6)?,
         order: row.get(7)?,
         enabled: row.get::<_, i64>(8)? != 0,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        allow_empty_assistants: row.get::<_, i64>(9)? != 0,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
         assistants: Vec::new(),
     })
 }
@@ -1693,8 +1831,9 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
         description: row.get(8)?,
         order: row.get(9)?,
         enabled: row.get::<_, i64>(10)? != 0,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        allow_empty_assistants: row.get::<_, i64>(11)? != 0,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
         sessions: Vec::new(),
     })
 }
@@ -1825,7 +1964,7 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
 
 fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
     let mut stage = conn.query_row(
-        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
+        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at
          FROM stages
          WHERE id = ?",
         params![stage_id],
@@ -1835,6 +1974,38 @@ fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<Project
     .ok_or_else(|| anyhow::anyhow!("project stage not found: {stage_id}"))?;
     stage.assistants = load_project_stage_assistants(conn, &stage.id)?;
     Ok(stage)
+}
+
+fn instantiate_project_assistants(
+    conn: &Connection,
+    project_id: &str,
+    workflow_id: &str,
+    now: i64,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
+         FROM assistants
+         WHERE project_id IS NULL
+           AND enabled = 1
+           AND workflow_id = ?
+         ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
+    )?;
+    let templates = stmt
+        .query_map(params![workflow_id], assistant_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for template in templates {
+        let id = stable_project_builtin_assistant_id(project_id, &template.id);
+        conn.execute(
+            "INSERT OR IGNORE INTO assistants (
+                id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
+             )
+             SELECT ?, name, agent_json, system_prompt, type, workflow_id, ?, 1, ?, ?
+             FROM assistants
+             WHERE id = ?",
+            params![id, project_id, now, now, template.id],
+        )?;
+    }
+    Ok(())
 }
 
 fn instantiate_project_builtin_stages(
@@ -1851,7 +2022,7 @@ fn instantiate_project_builtin_stages(
             .collect::<HashSet<_>>()
     });
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
+        "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at
          FROM stages
          WHERE project_id IS NULL AND workflow_id = ? AND type = 'builtin'
          ORDER BY \"order\" ASC, created_at ASC",
@@ -1871,10 +2042,10 @@ fn instantiate_project_builtin_stages(
             continue;
         };
         let id = stable_project_builtin_stage_id(project_id, &template.id);
-        let inserted = conn.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO stages (
-                id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
-             ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, 1, ?, ?)",
+                id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at
+             ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, 1, ?, ?, ?)",
             params![
                 id,
                 project_id,
@@ -1882,12 +2053,48 @@ fn instantiate_project_builtin_stages(
                 kind.as_str(),
                 template.description,
                 template.order,
+                template.allow_empty_assistants as i64,
                 now,
                 now
             ],
         )?;
-        if inserted > 0 {
-            copy_project_stage_assistants(conn, &template.id, &id, now)?;
+    }
+    Ok(())
+}
+
+fn link_project_stage_assistants(
+    conn: &Connection,
+    project_id: &str,
+    workflow_id: &str,
+    now: i64,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT id
+         FROM stages
+         WHERE project_id IS NULL AND workflow_id = ? AND type = 'builtin'
+         ORDER BY \"order\" ASC, created_at ASC",
+    )?;
+    let template_stage_ids = stmt
+        .query_map(params![workflow_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for template_stage_id in template_stage_ids {
+        let project_stage_id = stable_project_builtin_stage_id(project_id, &template_stage_id);
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM stages WHERE id = ? AND project_id = ?",
+                params![project_stage_id, project_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            copy_project_stage_assistants(
+                conn,
+                project_id,
+                &template_stage_id,
+                &project_stage_id,
+                now,
+            )?;
         }
     }
     Ok(())
@@ -1904,6 +2111,7 @@ fn stage_has_assistants(conn: &Connection, stage_id: &str) -> Result<bool> {
 
 fn copy_project_stage_assistants(
     conn: &Connection,
+    project_id: &str,
     from_stage_id: &str,
     to_stage_id: &str,
     now: i64,
@@ -1911,13 +2119,35 @@ fn copy_project_stage_assistants(
     if stage_has_assistants(conn, to_stage_id)? {
         return Ok(());
     }
-    conn.execute(
-        "INSERT OR IGNORE INTO stage_assistants (stage_id, assistant_id, \"order\", created_at, updated_at)
-         SELECT ?, assistant_id, \"order\", ?, ?
+    let mut stmt = conn.prepare(
+        "SELECT assistant_id, \"order\"
          FROM stage_assistants
-         WHERE stage_id = ?",
-        params![to_stage_id, now, now, from_stage_id],
+         WHERE stage_id = ?
+         ORDER BY \"order\" ASC, created_at ASC",
     )?;
+    let bindings = stmt
+        .query_map(params![from_stage_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (assistant_id, order) in bindings {
+        let project_assistant_id = stable_project_builtin_assistant_id(project_id, &assistant_id);
+        let Some(target_assistant_id) = conn
+            .query_row(
+                "SELECT id FROM assistants WHERE id = ? AND project_id = ? AND enabled = 1",
+                params![project_assistant_id, project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            continue;
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO stage_assistants (stage_id, assistant_id, \"order\", created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![to_stage_id, target_assistant_id, order, now, now],
+        )?;
+    }
     Ok(())
 }
 
@@ -1934,6 +2164,7 @@ fn backfill_project_builtin_stages(conn: &Connection) -> Result<()> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (project_id, workflow_id, created_at) in projects {
+        instantiate_project_assistants(conn, &project_id, &workflow_id, created_at.max(now_ms()))?;
         let existing_count: i64 = conn.query_row(
             "SELECT count(*) FROM stages WHERE project_id = ? AND type = 'builtin'",
             params![project_id.as_str()],
@@ -1948,10 +2179,11 @@ fn backfill_project_builtin_stages(conn: &Connection) -> Result<()> {
                 created_at.max(now_ms()),
             )?;
         }
+        link_project_stage_assistants(conn, &project_id, &workflow_id, created_at.max(now_ms()))?;
     }
     let redirects = {
         let mut stmt = conn.prepare(
-            "SELECT ts.id, t.project_id, s.id, s.workflow_id, s.kind, s.description, s.\"order\", s.enabled, s.created_at
+            "SELECT ts.id, t.project_id, s.id, s.workflow_id, s.kind, s.description, s.\"order\", s.enabled, s.allow_empty_assistants, s.created_at
              FROM thread_stages ts
              INNER JOIN threads t ON t.id = ts.thread_id
              INNER JOIN stages s ON s.id = ts.stage_id
@@ -1968,6 +2200,7 @@ fn backfill_project_builtin_stages(conn: &Connection) -> Result<()> {
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
             ))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -1981,14 +2214,15 @@ fn backfill_project_builtin_stages(conn: &Connection) -> Result<()> {
         description,
         order,
         enabled,
+        allow_empty_assistants,
         created_at,
     ) in redirects
     {
         let project_stage_id = stable_project_builtin_stage_id(&project_id, &template_stage_id);
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO stages (
-                id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
-             ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, ?, ?, ?)",
+                id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at
+             ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
             params![
                 project_stage_id,
                 project_id,
@@ -1997,12 +2231,19 @@ fn backfill_project_builtin_stages(conn: &Connection) -> Result<()> {
                 description,
                 order,
                 enabled,
+                allow_empty_assistants,
                 created_at,
                 now_ms()
             ],
         )?;
         if inserted > 0 {
-            copy_project_stage_assistants(conn, &template_stage_id, &project_stage_id, now_ms())?;
+            copy_project_stage_assistants(
+                conn,
+                &project_id,
+                &template_stage_id,
+                &project_stage_id,
+                now_ms(),
+            )?;
         }
         conn.execute(
             "UPDATE thread_stages SET stage_id = ? WHERE id = ?",
@@ -2016,7 +2257,7 @@ fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<S
     let mut stage = conn
         .query_row(
             "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description,
-                    ts.\"order\", s.enabled, ts.created_at, ts.updated_at
+                    ts.\"order\", s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at
              FROM thread_stages ts
              INNER JOIN threads t ON t.id = ts.thread_id
              INNER JOIN stages s ON s.id = ts.stage_id
@@ -2041,18 +2282,11 @@ fn validate_assistant_for_project(
     project_id: &str,
     assistant_id: &str,
 ) -> Result<AssistantInfo> {
-    let project = load_project_by_id(conn, project_id)?;
     let assistant = load_assistant_by_id(conn, assistant_id)?;
     if !assistant.enabled {
         anyhow::bail!("assistant is disabled");
     }
     if assistant.project_id.as_deref() == Some(project_id) {
-        return Ok(assistant);
-    }
-    if assistant.project_id.is_none()
-        && (assistant.workflow_id.is_none()
-            || assistant.workflow_id.as_deref() == Some(project.workflow_id.as_str()))
-    {
         return Ok(assistant);
     }
     anyhow::bail!("assistant is not available for this project")
@@ -2076,9 +2310,6 @@ fn validate_assistants_for_project(
             assistant_id,
         )?);
     }
-    if assistants.is_empty() {
-        anyhow::bail!("thread stage requires at least one assistant");
-    }
     Ok(assistants)
 }
 
@@ -2092,11 +2323,6 @@ fn validate_assistant_for_stage(
         anyhow::bail!("assistant is disabled");
     }
     if stage.project_id.is_some() && assistant.project_id == stage.project_id {
-        return Ok(assistant);
-    }
-    if assistant.project_id.is_none()
-        && (assistant.workflow_id.is_none() || assistant.workflow_id == stage.workflow_id)
-    {
         return Ok(assistant);
     }
     anyhow::bail!("assistant is not available for this stage")
@@ -2117,6 +2343,123 @@ fn validate_assistants_for_stage(
         assistants.push(validate_assistant_for_stage(conn, stage, assistant_id)?);
     }
     Ok(assistants)
+}
+
+fn usage_list(items: &[String]) -> String {
+    const LIMIT: usize = 8;
+    let mut visible = items.iter().take(LIMIT).cloned().collect::<Vec<_>>();
+    if items.len() > LIMIT {
+        visible.push(format!("and {} more", items.len() - LIMIT));
+    }
+    visible.join("; ")
+}
+
+fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Result<()> {
+    let assistant = load_assistant_by_id(conn, assistant_id)?;
+    let project_id = assistant.project_id.as_deref();
+    let project_stage_usages = {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(p.name, 'Unknown'),
+                COALESCE(s.name, s.kind, s.id)
+             FROM stage_assistants sa
+             INNER JOIN stages s ON s.id = sa.stage_id
+             LEFT JOIN projects p ON p.id = s.project_id
+             WHERE sa.assistant_id = ?
+               AND s.project_id = ?
+             ORDER BY p.name COLLATE NOCASE ASC, s.\"order\" ASC",
+        )?;
+        let rows = stmt.query_map(params![assistant_id, project_id], |row| {
+            let project_name: String = row.get(0)?;
+            let stage_name: String = row.get(1)?;
+            Ok(format!("project \"{project_name}\" stage \"{stage_name}\""))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let thread_stage_usages = {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(p.name, 'Unknown'),
+                t.goal,
+                COALESCE(s.name, s.kind, s.id)
+             FROM thread_stage_assistants tsa
+             INNER JOIN thread_stages ts ON ts.id = tsa.thread_stage_id
+             INNER JOIN threads t ON t.id = ts.thread_id
+             INNER JOIN stages s ON s.id = ts.stage_id
+             LEFT JOIN projects p ON p.id = t.project_id
+             WHERE tsa.assistant_id = ?
+               AND ((? IS NULL AND t.project_id IS NULL) OR t.project_id = ?)
+             ORDER BY p.name COLLATE NOCASE ASC, t.updated_at DESC, ts.\"order\" ASC",
+        )?;
+        let rows = stmt.query_map(params![assistant_id, project_id, project_id], |row| {
+            let project_name: String = row.get(0)?;
+            let thread_goal: String = row.get(1)?;
+            let stage_name: String = row.get(2)?;
+            Ok(format!(
+                "project \"{project_name}\" thread \"{thread_goal}\" stage \"{stage_name}\""
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !project_stage_usages.is_empty() || !thread_stage_usages.is_empty() {
+        let mut parts = Vec::new();
+        if !project_stage_usages.is_empty() {
+            parts.push(format!(
+                "{} project stage assistant binding(s): {}",
+                project_stage_usages.len(),
+                usage_list(&project_stage_usages)
+            ));
+        }
+        if !thread_stage_usages.is_empty() {
+            parts.push(format!(
+                "{} thread stage assistant binding(s): {}",
+                thread_stage_usages.len(),
+                usage_list(&thread_stage_usages)
+            ));
+        }
+        anyhow::bail!(
+            "assistant is in use; remove these bindings before disabling: {}",
+            parts.join(" | ")
+        );
+    }
+    Ok(())
+}
+
+fn ensure_project_stage_can_be_disabled(conn: &Connection, stage_id: &str) -> Result<()> {
+    let stage = load_project_stage_by_id(conn, stage_id)?;
+    let project_id = stage.project_id.as_deref();
+    let thread_stage_usages = {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(p.name, 'Unknown'),
+                t.goal,
+                COALESCE(s.name, s.kind, s.id)
+             FROM thread_stages ts
+             INNER JOIN threads t ON t.id = ts.thread_id
+             INNER JOIN stages s ON s.id = ts.stage_id
+             LEFT JOIN projects p ON p.id = t.project_id
+             WHERE ts.stage_id = ?
+               AND ((? IS NULL AND t.project_id IS NULL) OR t.project_id = ?)
+             ORDER BY p.name COLLATE NOCASE ASC, t.updated_at DESC, ts.\"order\" ASC",
+        )?;
+        let rows = stmt.query_map(params![stage_id, project_id, project_id], |row| {
+            let project_name: String = row.get(0)?;
+            let thread_goal: String = row.get(1)?;
+            let stage_name: String = row.get(2)?;
+            Ok(format!(
+                "project \"{project_name}\" thread \"{thread_goal}\" stage \"{stage_name}\""
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !thread_stage_usages.is_empty() {
+        anyhow::bail!(
+            "stage is in use by {} thread stage(s); remove these stages from threads before disabling: {}",
+            thread_stage_usages.len(),
+            usage_list(&thread_stage_usages)
+        );
+    }
+    Ok(())
 }
 
 fn load_stage_assistants(
@@ -2710,7 +3053,7 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
 fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
     let mut stmt = conn.prepare(
         "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description,
-                ts.\"order\", s.enabled, ts.created_at, ts.updated_at
+                ts.\"order\", s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at
          FROM thread_stages ts
          INNER JOIN threads t ON t.id = ts.thread_id
          INNER JOIN stages s ON s.id = ts.stage_id
@@ -3413,6 +3756,8 @@ impl SessionStore for SqliteStore {
         )
         .with_context(|| "add project")?;
         instantiate_project_builtin_stages(&tx, &id, &workflow_id, enabled_stage_ids, now)?;
+        instantiate_project_assistants(&tx, &id, &workflow_id, now)?;
+        link_project_stage_assistants(&tx, &id, &workflow_id, now)?;
         let project = load_project_by_id(&tx, &id)?;
         tx.commit()?;
         Ok(project)
@@ -3469,6 +3814,8 @@ impl SessionStore for SqliteStore {
                 params![project_id],
             )?;
             instantiate_project_builtin_stages(&tx, project_id, &next_workflow_id, None, now_ms())?;
+            instantiate_project_assistants(&tx, project_id, &next_workflow_id, now_ms())?;
+            link_project_stage_assistants(&tx, project_id, &next_workflow_id, now_ms())?;
         }
         let project = load_project_by_id(&tx, project_id)?;
         tx.commit()?;
@@ -3609,17 +3956,14 @@ impl SessionStore for SqliteStore {
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>> {
         let conn = self.conn.lock().unwrap();
         let assistants = if let Some(project_id) = project_id {
-            let project = load_project_by_id(&conn, project_id)?;
+            load_project_by_id(&conn, project_id)?;
             let mut stmt = conn.prepare(
                 "SELECT id, name, agent_json, system_prompt, type, workflow_id, project_id, enabled, created_at, updated_at
                  FROM assistants
-                 WHERE (project_id IS NULL AND (workflow_id IS NULL OR workflow_id = ?)) OR project_id = ?
-                 ORDER BY type ASC, project_id IS NOT NULL ASC, updated_at DESC, name COLLATE NOCASE ASC",
+                 WHERE project_id = ?
+                 ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
-            let rows = stmt.query_map(
-                params![project.workflow_id.as_str(), project_id],
-                assistant_from_row,
-            )?;
+            let rows = stmt.query_map(params![project_id], assistant_from_row)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut stmt = conn.prepare(
@@ -3775,6 +4119,9 @@ impl SessionStore for SqliteStore {
             None => current.system_prompt,
         };
         let next_enabled = enabled.unwrap_or(current.enabled);
+        if current.enabled && !next_enabled {
+            ensure_assistant_can_be_disabled(&conn, assistant_id)?;
+        }
         let next_agent_json = serde_json::to_string(&next_agent)?;
         conn.execute(
             "UPDATE assistants
@@ -3908,9 +4255,9 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         load_project_by_id(&conn, project_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
+            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at
              FROM stages
-             WHERE project_id = ? AND enabled = 1
+             WHERE project_id = ?
              ORDER BY \"order\" ASC, type ASC, created_at ASC",
         )?;
         let rows = stmt.query_map(params![project_id], project_stage_from_row)?;
@@ -3925,7 +4272,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         ensure_workflow_exists(&conn, workflow_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at
+            "SELECT id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at
              FROM stages
              WHERE project_id IS NULL AND workflow_id = ?
              ORDER BY \"order\" ASC, type ASC, created_at ASC",
@@ -3991,8 +4338,8 @@ impl SessionStore for SqliteStore {
             now,
         );
         conn.execute(
-            "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, created_at, updated_at)
-             VALUES (?, ?, 'custom', ?, NULL, ?, ?, ?, 1, ?, ?)",
+            "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, \"order\", enabled, allow_empty_assistants, created_at, updated_at)
+             VALUES (?, ?, 'custom', ?, NULL, ?, ?, ?, 1, 0, ?, ?)",
             params![
                 id,
                 template_project_id,
@@ -4014,6 +4361,7 @@ impl SessionStore for SqliteStore {
         description: Option<Option<&str>>,
         order: Option<i64>,
         enabled: Option<bool>,
+        allow_empty_assistants: Option<bool>,
     ) -> Result<ProjectStageInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -4057,16 +4405,35 @@ impl SessionStore for SqliteStore {
             _ => current.order,
         };
         let next_enabled = enabled.unwrap_or(current.enabled);
+        if current.enabled && !next_enabled {
+            ensure_project_stage_can_be_disabled(&tx, stage_id)?;
+        }
+        let next_allow_empty_assistants =
+            allow_empty_assistants.unwrap_or(current.allow_empty_assistants);
         let now = now_ms();
         if current.stage_type == ProjectStageType::Custom {
             tx.execute(
-                "UPDATE stages SET name = ?, description = ?, \"order\" = ?, enabled = ?, updated_at = ? WHERE id = ?",
-                params![next_name, next_description, next_order, next_enabled as i64, now, stage_id],
+                "UPDATE stages SET name = ?, description = ?, \"order\" = ?, enabled = ?, allow_empty_assistants = ?, updated_at = ? WHERE id = ?",
+                params![
+                    next_name,
+                    next_description,
+                    next_order,
+                    next_enabled as i64,
+                    next_allow_empty_assistants as i64,
+                    now,
+                    stage_id
+                ],
             )?;
         } else {
             tx.execute(
-                "UPDATE stages SET \"order\" = ?, enabled = ?, updated_at = ? WHERE id = ?",
-                params![next_order, next_enabled as i64, now, stage_id],
+                "UPDATE stages SET \"order\" = ?, enabled = ?, allow_empty_assistants = ?, updated_at = ? WHERE id = ?",
+                params![
+                    next_order,
+                    next_enabled as i64,
+                    next_allow_empty_assistants as i64,
+                    now,
+                    stage_id
+                ],
             )?;
         }
         let stage = load_project_stage_by_id(&tx, stage_id)?;
@@ -4148,8 +4515,8 @@ impl SessionStore for SqliteStore {
             .iter()
             .map(|assistant| assistant.assistant_id.clone())
             .collect::<Vec<_>>();
-        if assistant_ids.is_empty() {
-            anyhow::bail!("thread stage requires at least one assistant");
+        if assistant_ids.is_empty() && !project_stage.allow_empty_assistants {
+            anyhow::bail!("stage does not allow empty assistants");
         }
         let next_order: i64 = tx
             .query_row(
@@ -4193,15 +4560,19 @@ impl SessionStore for SqliteStore {
         let tx = conn.transaction()?;
         let current = load_thread_stage_by_id(&tx, thread_stage_id)?;
         let next_assistant_bindings = match assistant_ids {
-            Some(ids) => Some(
-                validate_assistants_for_project(&tx, &current.project_id, ids)?
+            Some(ids) => {
+                let bindings = validate_assistants_for_project(&tx, &current.project_id, ids)?
                     .into_iter()
                     .enumerate()
                     .map(|(index, assistant)| {
                         stage_assistant_from_assistant(assistant, index as i64)
                     })
-                    .collect::<Vec<_>>(),
-            ),
+                    .collect::<Vec<_>>();
+                if bindings.is_empty() && !current.allow_empty_assistants {
+                    anyhow::bail!("stage does not allow empty assistants");
+                }
+                Some(bindings)
+            }
             None => None,
         };
         let max_order: i64 = tx
@@ -4213,33 +4584,31 @@ impl SessionStore for SqliteStore {
             .unwrap_or(0);
         let next_order = order.unwrap_or(current.order).clamp(0, max_order);
         if next_order != current.order {
-            tx.execute(
-                "UPDATE thread_stages SET \"order\" = -1 WHERE id = ?",
-                params![thread_stage_id],
-            )?;
-            if next_order < current.order {
-                tx.execute(
-                    "UPDATE thread_stages
-                     SET \"order\" = \"order\" + 1
-                     WHERE thread_id = ? AND \"order\" >= ? AND \"order\" < ? AND id != ?",
-                    params![
-                        current.thread_id,
-                        next_order,
-                        current.order,
-                        thread_stage_id
-                    ],
+            let mut ids = {
+                let mut stmt = tx.prepare(
+                    "SELECT id
+                     FROM thread_stages
+                     WHERE thread_id = ?
+                     ORDER BY \"order\" ASC, created_at ASC",
                 )?;
-            } else {
+                let rows = stmt.query_map(params![current.thread_id], |row| row.get(0))?;
+                rows.collect::<rusqlite::Result<Vec<String>>>()?
+            };
+            let Some(current_index) = ids.iter().position(|id| id == thread_stage_id) else {
+                anyhow::bail!("thread stage not found in reorder scope: {thread_stage_id}");
+            };
+            let id = ids.remove(current_index);
+            ids.insert(next_order as usize, id);
+            for (index, id) in ids.iter().enumerate() {
                 tx.execute(
-                    "UPDATE thread_stages
-                     SET \"order\" = \"order\" - 1
-                     WHERE thread_id = ? AND \"order\" <= ? AND \"order\" > ? AND id != ?",
-                    params![
-                        current.thread_id,
-                        next_order,
-                        current.order,
-                        thread_stage_id
-                    ],
+                    "UPDATE thread_stages SET \"order\" = ? WHERE id = ?",
+                    params![-((index as i64) + 1), id],
+                )?;
+            }
+            for (index, id) in ids.iter().enumerate() {
+                tx.execute(
+                    "UPDATE thread_stages SET \"order\" = ? WHERE id = ?",
+                    params![index as i64, id],
                 )?;
             }
         }
@@ -4254,6 +4623,9 @@ impl SessionStore for SqliteStore {
             replace_thread_stage_assistants(&tx, thread_stage_id, &next_assistant_bindings, now)?;
         }
         if let Some(enabled) = enabled {
+            if current.enabled && !enabled {
+                ensure_project_stage_can_be_disabled(&tx, &current.stage_id)?;
+            }
             tx.execute(
                 "UPDATE stages SET enabled = ?, updated_at = ? WHERE id = ?",
                 params![enabled as i64, now, current.stage_id],
@@ -6173,6 +6545,14 @@ mod migration_tests {
                 StageType::Done,
             ]
         );
+        let code_assistants = store.list_assistants(Some(&code.id)).unwrap();
+        assert_eq!(code_assistants.len(), 4);
+        assert!(code_assistants
+            .iter()
+            .all(|item| item.project_id.as_deref() == Some(code.id.as_str())));
+        assert!(code_assistants
+            .iter()
+            .all(|item| item.workflow_id.as_deref() == Some(code.workflow_id.as_str())));
 
         let writing_kinds = stage_kinds(store.list_project_stages(&writing.id).unwrap());
         assert_eq!(
@@ -6258,7 +6638,7 @@ mod migration_tests {
             .clone();
 
         let moved = store
-            .update_project_stage(&research.id, None, None, Some(plan.order), None)
+            .update_project_stage(&research.id, None, None, Some(plan.order), None, None)
             .unwrap();
         assert_eq!(moved.order, 1);
         assert_eq!(
@@ -6306,7 +6686,7 @@ mod migration_tests {
         assert_eq!(research_template.assistants.len(), 1);
         assert_eq!(
             research_template.assistants[0].assistant_id,
-            "assistant-builtin-research"
+            stable_workflow_builtin_assistant_id("code", "assistant-builtin-research")
         );
         let selected_template_ids = templates
             .iter()
@@ -6341,19 +6721,34 @@ mod migration_tests {
             .find(|stage| stage.kind == Some(StageType::Research))
             .unwrap();
         assert_eq!(project_research.assistants.len(), 1);
+        let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
+        assert_eq!(project_assistants.len(), 4);
         assert_eq!(
             project_research.assistants[0].assistant_id,
-            "assistant-builtin-research"
+            stable_project_builtin_assistant_id(
+                &project.id,
+                &stable_workflow_builtin_assistant_id("code", "assistant-builtin-research")
+            )
         );
 
         let thread = store
             .create_thread(&project.id, "Use stages", None)
             .unwrap();
         let assistant = store
-            .list_assistants(Some(&project.id))
-            .unwrap()
-            .into_iter()
-            .find(|assistant| assistant.id == "assistant-builtin-research")
+            .create_assistant(
+                "Researcher",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                None,
+                Some(&project.id),
+            )
             .unwrap();
         assert!(store
             .add_thread_stage(&thread.id, &research_template.id, &[assistant.id.clone()])
@@ -6392,10 +6787,20 @@ mod migration_tests {
             )
             .unwrap();
         let reviewer = store
-            .list_assistants(Some(&project.id))
-            .unwrap()
-            .into_iter()
-            .find(|assistant| assistant.id == "assistant-builtin-review")
+            .create_assistant(
+                "Reviewer",
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                None,
+                AssistantType::Custom,
+                None,
+                Some(&project.id),
+            )
             .unwrap();
         let project_research = store
             .list_project_stages(&project.id)
@@ -6645,25 +7050,17 @@ mod migration_tests {
         assert_eq!(assistant.agent.mode, "read-only");
         assert_eq!(assistant.agent.effort, "medium");
         let project_assistants = store.list_assistants(Some(&project.id)).unwrap();
-        assert_eq!(project_assistants.len(), 13);
+        assert_eq!(project_assistants.len(), 5);
+        assert!(project_assistants
+            .iter()
+            .all(|item| item.project_id.as_deref() == Some(project.id.as_str())));
         assert_eq!(
             project_assistants
                 .iter()
                 .filter(|item| item.assistant_type == AssistantType::Builtin)
                 .count(),
-            12
+            4
         );
-        let builtin_builder = project_assistants
-            .iter()
-            .find(|item| item.id == "assistant-builtin-develop")
-            .unwrap();
-        assert_eq!(builtin_builder.name, "Developer");
-        assert_eq!(builtin_builder.agent.id, "codex");
-        assert!(builtin_builder
-            .system_prompt
-            .as_deref()
-            .unwrap()
-            .contains("Implement the planned code changes"));
         assert!(project_assistants
             .iter()
             .any(|item| item.id == assistant.id));
@@ -6708,34 +7105,43 @@ mod migration_tests {
         assert!(builtin_stages
             .iter()
             .all(|stage| stage.kind != Some(StageType::Build)));
-        let builtin_researcher = project_assistants
-            .iter()
-            .find(|item| item.id == "assistant-builtin-research")
-            .unwrap();
         assert_eq!(research_option.assistants.len(), 1);
+        let builtin_research_assistant_id = research_option.assistants[0].assistant_id.clone();
         assert_eq!(
-            research_option.assistants[0].assistant_id,
-            builtin_researcher.id
+            builtin_research_assistant_id,
+            stable_project_builtin_assistant_id(
+                &project.id,
+                &stable_workflow_builtin_assistant_id("code", "assistant-builtin-research")
+            )
         );
         let default_stage = store
-            .update_project_stage_assistants(&research_option.id, &[builtin_researcher.id.clone()])
+            .update_project_stage_assistants(&research_option.id, &[assistant.id.clone()])
             .unwrap();
         assert_eq!(default_stage.assistants.len(), 1);
-        assert_eq!(
-            default_stage.assistants[0].assistant_id,
-            builtin_researcher.id
-        );
+        assert_eq!(default_stage.assistants[0].assistant_id, assistant.id);
+        let assistant_stage_binding_error = store
+            .update_assistant(&assistant.id, None, None, None, Some(false))
+            .unwrap_err()
+            .to_string();
+        assert!(assistant_stage_binding_error.contains("project stage assistant binding(s)"));
+        assert!(assistant_stage_binding_error.contains("stage \"research\""));
+        assert!(!assistant_stage_binding_error.contains("workflow \""));
         let default_thread = store
             .create_thread(&project.id, "Default stage assistants", None)
             .unwrap();
         let default_research = store
             .add_thread_stage(&default_thread.id, &research_option.id, &[])
             .unwrap();
-        assert_eq!(
-            default_research.assistant_ids,
-            vec![builtin_researcher.id.clone()]
-        );
+        assert_eq!(default_research.assistant_ids, vec![assistant.id.clone()]);
         assert_eq!(default_research.assistants[0].agent.id, "codex");
+        let assistant_disable_error = store
+            .update_assistant(&assistant.id, None, None, None, Some(false))
+            .unwrap_err()
+            .to_string();
+        assert!(assistant_disable_error.contains("project stage assistant binding(s)"));
+        assert!(assistant_disable_error.contains("thread stage assistant binding(s)"));
+        assert!(!assistant_disable_error.contains("workflow \""));
+        assert!(assistant_disable_error.contains("thread \"Default stage assistants\""));
         let custom_workflow = store
             .create_workflow("Custom Flow", Some("Custom workflow description"))
             .unwrap();
@@ -6789,18 +7195,44 @@ mod migration_tests {
             Some("Implementation notes")
         );
         assert_eq!(store.list_project_stages(&project.id).unwrap().len(), 7);
+        let human_option = builtin_stages
+            .iter()
+            .find(|stage| stage.kind == Some(StageType::Human))
+            .unwrap()
+            .clone();
+        assert!(human_option.allow_empty_assistants);
+        let human = store
+            .add_thread_stage(&thread.id, &human_option.id, &[])
+            .unwrap();
+        assert!(human.assistant_ids.is_empty());
+        assert!(human.allow_empty_assistants);
+        assert!(!build_option.allow_empty_assistants);
+        assert!(store
+            .add_thread_stage(&thread.id, &build_option.id, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("stage does not allow empty assistants"));
+        let manual_build = store
+            .update_project_stage(&build_option.id, None, None, None, None, Some(true))
+            .unwrap();
+        assert!(manual_build.allow_empty_assistants);
+        let empty_build = store
+            .add_thread_stage(&thread.id, &build_option.id, &[])
+            .unwrap();
+        assert!(empty_build.assistant_ids.is_empty());
+        store.delete_thread_stage(&empty_build.id).unwrap();
         let assistant_ids = vec![assistant.id.clone(), reviewer.id.clone()];
         let research = store
             .add_thread_stage(&thread.id, &research_option.id, &assistant_ids)
             .unwrap();
-        assert_eq!(research.order, 0);
+        assert_eq!(research.order, 1);
         assert_eq!(research.stage_id, research_option.id);
         assert_eq!(research.assistant_ids, assistant_ids);
         let builder_only_ids = vec![assistant.id.clone()];
         let build = store
             .add_thread_stage(&thread.id, &build_option.id, &builder_only_ids)
             .unwrap();
-        assert_eq!(build.order, 1);
+        assert_eq!(build.order, 2);
         assert_eq!(build.assistant_ids, builder_only_ids);
         assert_eq!(build.assistants[0].agent.id, "codex");
         let build = store
@@ -6840,6 +7272,7 @@ mod migration_tests {
                 &build_option.id,
                 Some("Review Pass"),
                 Some(None),
+                None,
                 None,
                 None,
             )
@@ -6895,7 +7328,7 @@ mod migration_tests {
             .iter()
             .find(|item| item.id == review_thread.id)
             .unwrap();
-        assert_eq!(build_lane.stages.len(), 2);
+        assert_eq!(build_lane.stages.len(), 3);
         assert_eq!(review_lane.stages.len(), 1);
         assert_eq!(
             build_lane
@@ -6935,26 +7368,36 @@ mod migration_tests {
             .unwrap();
         assert_eq!(
             listed_build_lane.stage_id.as_deref(),
-            Some(research.id.as_str())
+            Some(human.id.as_str())
         );
-        assert_eq!(listed_build_lane.stages.len(), 2);
+        assert_eq!(listed_build_lane.stages.len(), 3);
         assert_eq!(listed_build_lane.stages[0].id, build.id);
-        assert_eq!(listed_build_lane.stages[1].assistant_ids, assistant_ids);
+        assert_eq!(listed_build_lane.stages[1].id, human.id);
+        assert!(listed_build_lane.stages[1].assistant_ids.is_empty());
+        assert_eq!(listed_build_lane.stages[2].assistant_ids, assistant_ids);
         let reordered_ids = vec![reviewer.id.clone(), assistant.id.clone()];
         let research = store
             .update_thread_stage(&research.id, Some(&reordered_ids), None, None)
             .unwrap();
         assert_eq!(research.assistant_ids, reordered_ids);
 
-        let disabled_research = store
+        let stage_disable_error = store
             .update_thread_stage(&research.id, None, None, Some(false))
+            .unwrap_err()
+            .to_string();
+        assert!(stage_disable_error.contains("thread \"Ship thread workflow\""));
+        assert!(stage_disable_error.contains("thread \"Default stage assistants\""));
+        store.delete_thread_stage(&default_research.id).unwrap();
+        store.delete_thread_stage(&research.id).unwrap();
+        let disabled_research = store
+            .update_project_stage(&research.stage_id, None, None, None, Some(false), None)
             .unwrap();
         assert!(!disabled_research.enabled);
         assert!(store
             .list_project_stages(&project.id)
             .unwrap()
             .into_iter()
-            .all(|stage| stage.id != research.stage_id));
+            .any(|stage| stage.id == research.stage_id && !stage.enabled));
         assert!(store
             .list_workflow_stages(&project.workflow_id)
             .unwrap()
@@ -6963,13 +7406,16 @@ mod migration_tests {
         assert!(store
             .add_thread_stage(&thread.id, &research.stage_id, &assistant_ids)
             .is_err());
-        let research = store
-            .update_thread_stage(&research.id, None, None, Some(true))
+        let enabled_research = store
+            .update_project_stage(&research.stage_id, None, None, None, Some(true), None)
             .unwrap();
-        assert!(research.enabled);
+        assert!(enabled_research.enabled);
 
         let switched = store.set_thread_stage(&thread.id, &build.id).unwrap();
         assert_eq!(switched.stage_id.as_deref(), Some(build.id.as_str()));
+        let research = store
+            .add_thread_stage(&thread.id, &research.stage_id, &reordered_ids)
+            .unwrap();
         let switched = store.set_thread_stage(&thread.id, &research.id).unwrap();
         assert_eq!(switched.stage_id.as_deref(), Some(research.id.as_str()));
 
@@ -7157,6 +7603,7 @@ mod migration_tests {
             .unwrap();
         assert!(store.set_thread_stage(&thread.id, &other_stage.id).is_err());
         store.delete_thread_stage(&research.id).unwrap();
+        store.delete_thread_stage(&human.id).unwrap();
         let after_delete_stage = store.list_threads(&project.id).unwrap();
         let after_delete_build_lane = after_delete_stage
             .iter()
@@ -7169,13 +7616,18 @@ mod migration_tests {
         store.delete_thread(&thread.id).unwrap();
         store.delete_thread(&default_thread.id).unwrap();
         assert!(store.list_threads(&project.id).unwrap().is_empty());
+        assert!(store.delete_assistant(&assistant.id).is_err());
+        let cleared_default_stage = store
+            .update_project_stage_assistants(&research_option.id, &[])
+            .unwrap();
+        assert!(cleared_default_stage.assistants.is_empty());
         store.delete_assistant(&assistant.id).unwrap();
         store.delete_assistant(&reviewer.id).unwrap();
         let remaining_assistants = store.list_assistants(Some(&project.id)).unwrap();
-        assert_eq!(remaining_assistants.len(), 12);
+        assert_eq!(remaining_assistants.len(), 4);
         assert!(remaining_assistants
             .iter()
-            .all(|item| item.assistant_type == AssistantType::Builtin));
+            .any(|item| item.id == builtin_research_assistant_id));
 
         assert!(store
             .create_assistant(

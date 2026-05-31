@@ -7,10 +7,12 @@ import {
   useRef,
   useState,
 } from "react";
+import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
+import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
-import { Bot, Check, Clapperboard, Copy, FilePenLine, GitBranch, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Save, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
+import { Bot, Check, Circle, Clapperboard, Copy, FilePenLine, GitBranch, GripVertical, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Save, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
 import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, StageType, ThreadInfo, WorkflowInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, linkThreadSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, unlinkThreadSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateRuntimeAgentPreferences, updateThread } from "../api";
+import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, linkThreadSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, unlinkThreadSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateProjectStageAssistants, updateRuntimeAgentPreferences, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import {
   agentModelSelectOptions,
@@ -97,6 +99,10 @@ function projectStageLabel(stage: ProjectStageInfo, t: (key: string) => string):
 function projectStageIcon(stage: ProjectStageInfo) {
   const Icon = stage.kind ? STAGE_TYPE_ICONS[stage.kind] : ListChecks;
   return <Icon className="h-3.5 w-3.5" />;
+}
+
+function stageAllowsThreadAddition(stage: ProjectStageInfo): boolean {
+  return stage.assistants.length > 0 || stage.allowEmptyAssistants;
 }
 
 function workflowOptions(workflows: WorkflowInfo[]): InlineMenuSelectOption[] {
@@ -293,6 +299,7 @@ export function ProjectWorkbenchPage({
   const [editingName, setEditingName] = useState(project.name);
   const [editingWorkflowId, setEditingWorkflowId] = useState(project.workflowId);
   const [projectSaving, setProjectSaving] = useState(false);
+  const compactTabContent = activeView === "threads" || activeView === "stages";
 
   useEffect(() => {
     setEditingName(project.name);
@@ -482,7 +489,10 @@ export function ProjectWorkbenchPage({
             ))}
           </div>
         </div>
-        <ScrollArea className="min-h-0 flex-1" viewportClassName="px-5 pb-5 pt-4">
+        <ScrollArea
+          className={compactTabContent ? "max-h-full w-full" : "min-h-0 flex-1"}
+          viewportClassName="px-5 pb-5 pt-4"
+        >
           {activeView === "threads" && (
             <ThreadWorkflowPanel
               project={project}
@@ -523,6 +533,7 @@ export function ProjectWorkbenchPage({
             <ProjectStagePicker
               project={project}
               stages={projectStages}
+              assistants={assistants}
               onCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
               onUpdated={patchProjectStage}
               onDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
@@ -656,6 +667,16 @@ function ThreadWorkflowPanel({
   const [goal, setGoal] = useState("");
   const [description, setDescription] = useState("");
   const [creating, setCreating] = useState(false);
+  const enabledProjectStages = useMemo(
+    () => projectStages.filter((stage) => stage.enabled),
+    [projectStages],
+  );
+  const selectableProjectStages = useMemo(
+    () => enabledProjectStages.filter(stageAllowsThreadAddition),
+    [enabledProjectStages],
+  );
+  const [selectedStageIds, setSelectedStageIds] = useState<string[]>([]);
+  const [createStageOrder, setCreateStageOrder] = useState<string[]>([]);
   const linkedSessionKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const thread of threads) {
@@ -667,6 +688,54 @@ function ThreadWorkflowPanel({
     return keys;
   }, [threads]);
 
+  useEffect(() => {
+    setCreateStageOrder((current) => {
+      const enabledIds = enabledProjectStages.map((stage) => stage.id);
+      return [
+        ...current.filter((id) => enabledIds.includes(id)),
+        ...enabledIds.filter((id) => !current.includes(id)),
+      ];
+    });
+    setSelectedStageIds((current) => {
+      const selectableIds = selectableProjectStages.map((stage) => stage.id);
+      const existing = current.filter((id) => selectableIds.includes(id));
+      if (existing.length > 0 || current.length > 0) return existing;
+      return selectableIds;
+    });
+  }, [enabledProjectStages, selectableProjectStages]);
+
+  const toggleCreateStage = (stageId: string) => {
+    if (!selectableProjectStages.some((stage) => stage.id === stageId)) return;
+    setSelectedStageIds((current) =>
+      current.includes(stageId)
+        ? current.filter((id) => id !== stageId)
+        : [...current, stageId],
+    );
+  };
+
+  const orderedCreateStages = useMemo(() => {
+    const byId = new Map(enabledProjectStages.map((stage) => [stage.id, stage]));
+    return createStageOrder
+      .map((id) => byId.get(id))
+      .filter((stage): stage is ProjectStageInfo => Boolean(stage));
+  }, [createStageOrder, enabledProjectStages]);
+
+  const handleCreateStageDragEnd = (event: DragEndEvent) => {
+    if (event.canceled) return;
+    const { source } = event.operation;
+    if (!isSortable(source)) return;
+    const from = source.initialIndex;
+    const to = source.index;
+    if (from === to) return;
+    setCreateStageOrder((current) => {
+      const next = [...current];
+      const [id] = next.splice(from, 1);
+      if (!id) return current;
+      next.splice(to, 0, id);
+      return next;
+    });
+  };
+
   const create = async () => {
     const nextGoal = goal.trim();
     if (!nextGoal) return;
@@ -674,7 +743,17 @@ function ThreadWorkflowPanel({
     onError(null);
     try {
       const thread = await createThread(project.id, nextGoal, description);
-      onThreadCreated(thread);
+      let nextThread = thread;
+      for (const stageId of createStageOrder.filter((id) => selectedStageIds.includes(id))) {
+        const stage = await addThreadStage(thread.id, stageId, []);
+        nextThread = {
+          ...nextThread,
+          stageId: nextThread.stageId ?? stage.id,
+          stages: [...nextThread.stages, stage].sort((a, b) => a.order - b.order),
+          updatedAt: Math.max(nextThread.updatedAt, stage.updatedAt),
+        };
+      }
+      onThreadCreated(nextThread);
       setGoal("");
       setDescription("");
     } catch (err) {
@@ -686,7 +765,8 @@ function ThreadWorkflowPanel({
 
   return (
     <div className="min-w-0">
-        <div className="mb-3 grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-lg border border-ink/10 bg-ink/[0.035] p-3">
+        <div className="mb-3 grid gap-3 rounded-lg border border-ink/10 bg-ink/[0.035] p-3">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
           <div className="grid min-w-0 gap-2">
             <input
               value={goal}
@@ -713,6 +793,24 @@ function ThreadWorkflowPanel({
             {creating ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
             {t("thread.add")}
           </button>
+          </div>
+          {orderedCreateStages.length > 0 && (
+            <DragDropProvider onDragEnd={handleCreateStageDragEnd}>
+              <div className="flex flex-wrap gap-1.5 border-t border-ink/10 pt-2">
+                {orderedCreateStages.map((stage, index) => (
+                  <CreateThreadStageChip
+                    key={stage.id}
+                    stage={stage}
+                    index={index}
+                    selected={selectedStageIds.includes(stage.id)}
+                    selectable={stageAllowsThreadAddition(stage)}
+                    onToggle={toggleCreateStage}
+                    label={projectStageLabel(stage, t)}
+                  />
+                ))}
+              </div>
+            </DragDropProvider>
+          )}
         </div>
         {loading ? (
           <div className="py-12 text-center text-body-sm text-ink/45">{t("memory_search.searching")}</div>
@@ -741,6 +839,71 @@ function ThreadWorkflowPanel({
             ))}
           </div>
         )}
+    </div>
+  );
+}
+
+function CreateThreadStageChip({
+  stage,
+  index,
+  selected,
+  selectable,
+  label,
+  onToggle,
+}: {
+  stage: ProjectStageInfo;
+  index: number;
+  selected: boolean;
+  selectable: boolean;
+  label: string;
+  onToggle: (stageId: string) => void;
+}) {
+  const { handleRef, isDragSource, isDropTarget, ref } = useSortable({
+    id: stage.id,
+    index,
+    group: "create-thread-stages",
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+      idle: true,
+    },
+  });
+
+  return (
+    <div
+      ref={ref}
+      className={
+        "inline-flex h-7 items-center gap-1.5 rounded-md border px-1.5 text-caption transition duration-150 " +
+        (isDragSource
+          ? "z-20 cursor-grabbing border-ink/30 bg-surface-panel shadow-lg"
+          : isDropTarget
+            ? "border-ink/35 bg-ink/12 shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.28)]"
+            : !selectable
+              ? "cursor-not-allowed border-ink/10 bg-surface-panel text-ink/25 opacity-55"
+              : selected
+                ? "border-ink/25 bg-ink/10 text-ink/75"
+                : "border-ink/10 bg-surface-panel text-ink/45 hover:bg-ink/5 hover:text-ink/65")
+      }
+    >
+      <button
+        ref={handleRef}
+        type="button"
+        className="cursor-grab touch-none rounded p-0.5 text-current/50 hover:bg-ink/5 active:cursor-grabbing"
+      >
+        <GripVertical className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={() => onToggle(stage.id)}
+        disabled={!selectable}
+        className="inline-flex min-w-0 items-center gap-1.5 disabled:cursor-not-allowed"
+      >
+        <span className="flex h-3.5 w-3.5 items-center justify-center rounded border border-current/25">
+          {selected && <Check className="h-3 w-3" />}
+        </span>
+        {projectStageIcon(stage)}
+        <span className="max-w-[140px] truncate">{label}</span>
+      </button>
     </div>
   );
 }
@@ -813,7 +976,12 @@ function ThreadCard({
   }, [enabledAssistants]);
 
   useEffect(() => {
-    const availableStages = projectStages.filter((stage) => !thread.stages.some((threadStage) => threadStage.stageId === stage.id));
+    const availableStages = projectStages.filter(
+      (stage) =>
+        stage.enabled &&
+        stageAllowsThreadAddition(stage) &&
+        !thread.stages.some((threadStage) => threadStage.stageId === stage.id),
+    );
     if (availableStages.some((stage) => stage.id === newStageId)) return;
     setNewStageId(availableStages[0]?.id ?? "");
   }, [newStageId, projectStages, thread.stages]);
@@ -837,7 +1005,8 @@ function ThreadCard({
   };
 
   const add = async () => {
-    if (!newStageId || newAssistantIds.length === 0) return;
+    const stage = projectStages.find((item) => item.id === newStageId);
+    if (!stage || (!stage.allowEmptyAssistants && newAssistantIds.length === 0)) return;
     try {
       onStageAdded(await addThreadStage(thread.id, newStageId, newAssistantIds));
     } catch (err) {
@@ -874,7 +1043,12 @@ function ThreadCard({
     };
   });
   const availableProjectStageOptions = projectStages
-    .filter((stage) => !thread.stages.some((threadStage) => threadStage.stageId === stage.id))
+    .filter(
+      (stage) =>
+        stage.enabled &&
+        stageAllowsThreadAddition(stage) &&
+        !thread.stages.some((threadStage) => threadStage.stageId === stage.id),
+    )
     .map((stage) => {
       return {
         value: stage.id,
@@ -884,6 +1058,7 @@ function ThreadCard({
         icon: projectStageIcon(stage),
       };
     });
+  const selectedNewStage = projectStages.find((stage) => stage.id === newStageId);
 
   return (
     <section className="rounded-lg border border-ink/10 bg-surface-panel p-3 shadow-sm">
@@ -997,7 +1172,7 @@ function ThreadCard({
         />
         <button
           type="button"
-          disabled={!newStageId || newAssistantIds.length === 0}
+          disabled={!newStageId || (!selectedNewStage?.allowEmptyAssistants && newAssistantIds.length === 0)}
           onClick={() => void add()}
           className="inline-flex h-7 items-center gap-1 rounded-md bg-ink/80 px-2 text-caption font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
         >
@@ -1031,6 +1206,7 @@ function ThreadCard({
 function ProjectStagePicker({
   project,
   stages,
+  assistants,
   onCreated,
   onUpdated,
   onDeleted,
@@ -1038,6 +1214,7 @@ function ProjectStagePicker({
 }: {
   project: ProjectInfo;
   stages: ProjectStageInfo[];
+  assistants: AssistantInfo[];
   onCreated: (stage: ProjectStageInfo) => void;
   onUpdated: (stage: ProjectStageInfo) => void;
   onDeleted: (stageId: string) => void;
@@ -1046,6 +1223,14 @@ function ProjectStagePicker({
   const { t } = useI18n();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const projectAssistants = useMemo(
+    () => assistants.filter((assistant) => assistant.projectId === project.id),
+    [assistants, project.id],
+  );
+  const enabledAssistants = useMemo(
+    () => projectAssistants.filter((assistant) => assistant.enabled),
+    [projectAssistants],
+  );
 
   const create = async () => {
     const nextName = name.trim();
@@ -1069,8 +1254,12 @@ function ProjectStagePicker({
       <div className="flex flex-wrap gap-2">
         {stages.map((stage) => {
           const custom = stage.type === "custom";
+          const stageAssistantIds = stage.assistants.map((assistant) => assistant.assistantId);
           return (
-            <div key={stage.id} className="grid max-w-[260px] gap-1 rounded-md bg-surface-panel px-1.5 py-1 text-caption text-ink/65">
+            <div
+              key={stage.id}
+              className={`grid max-w-[260px] gap-1 rounded-md bg-surface-panel px-1.5 py-1 text-caption text-ink/65 ${stage.enabled ? "" : "opacity-45"}`}
+            >
               <div className="flex min-h-6 items-center gap-1">
                 {projectStageIcon(stage)}
                 {custom ? (
@@ -1109,22 +1298,57 @@ function ProjectStagePicker({
                 <span className="rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">
                   {stage.type === "builtin" ? t("stage.builtin") : t("stage.custom")}
                 </span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      if (custom) await deleteProjectStage(stage.id);
-                      else await updateProjectStage(stage.id, { enabled: false });
-                      onDeleted(stage.id);
-                    } catch (err) {
-                      onError(String(err));
-                    }
-                  }}
-                  className="rounded p-0.5 text-ink/25 hover:bg-status-error/10 hover:text-status-error"
-                >
-                  {custom ? <Trash2 className="h-3 w-3" /> : <CircleSlash className="h-3 w-3" />}
-                </button>
+                <Tooltip content={custom ? t("delete.title") : stage.enabled ? t("stage.disable") : t("stage.enable")} placement="top">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        if (custom) {
+                          await deleteProjectStage(stage.id);
+                          onDeleted(stage.id);
+                        } else {
+                          onUpdated(await updateProjectStage(stage.id, { enabled: !stage.enabled }));
+                        }
+                      } catch (err) {
+                        onError(String(err));
+                      }
+                    }}
+                    className={`rounded p-0.5 ${custom ? "text-ink/25 hover:bg-status-error/10 hover:text-status-error" : "text-ink/30 hover:bg-ink/8 hover:text-ink/70"}`}
+                  >
+                    {custom ? <Trash2 className="h-3 w-3" /> : <CircleSlash className="h-3 w-3" />}
+                  </button>
+                </Tooltip>
+                <Tooltip content={t("stage.allow_empty_assistants")} placement="top">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={stage.allowEmptyAssistants}
+                    onClick={async () => {
+                      try {
+                        onUpdated(await updateProjectStage(stage.id, { allowEmptyAssistants: !stage.allowEmptyAssistants }));
+                      } catch (err) {
+                        onError(String(err));
+                      }
+                    }}
+                    className={`rounded p-0.5 ${stage.allowEmptyAssistants ? "bg-ink/10 text-ink/65" : "text-ink/25 hover:bg-ink/8 hover:text-ink/55"}`}
+                  >
+                    {stage.allowEmptyAssistants ? <Check className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
+                  </button>
+                </Tooltip>
               </div>
+              <AssistantMultiPicker
+                assistantIds={stageAssistantIds}
+                assistants={enabledAssistants}
+                labelAssistants={projectAssistants}
+                onChange={async (assistantIds) => {
+                  try {
+                    onUpdated(await updateProjectStageAssistants(stage.id, assistantIds));
+                  } catch (err) {
+                    onError(String(err));
+                  }
+                }}
+                className="border-r-0 pl-5"
+              />
               {stage.description && !custom && (
                 <div className="line-clamp-2 pl-5 text-meta leading-snug text-ink/40">
                   {stage.description}
@@ -1162,17 +1386,19 @@ function ProjectStagePicker({
 function AssistantMultiPicker({
   assistantIds,
   assistants,
+  labelAssistants,
   onChange,
   className = "",
 }: {
   assistantIds: string[];
   assistants: AssistantInfo[];
+  labelAssistants?: AssistantInfo[];
   onChange: (assistantIds: string[]) => void;
   className?: string;
 }) {
   const { t } = useI18n();
   const selected = new Set(assistantIds);
-  const label = assistantNames(assistantIds, assistants, t);
+  const label = assistantNames(assistantIds, labelAssistants ?? assistants, t);
 
   const toggle = (assistantId: string) => {
     if (selected.has(assistantId)) {
@@ -1384,8 +1610,6 @@ function AssistantManagementPanel({
   const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(() => defaultAssistantAgent(firstRuntime));
   const [systemPrompt, setSystemPrompt] = useState("");
   const projectAssistants = assistants.filter((assistant) => assistant.projectId === project.id);
-  const builtinAssistants = projectAssistants.filter((assistant) => assistant.type === "builtin");
-  const customAssistants = projectAssistants.filter((assistant) => assistant.type === "custom");
 
   useEffect(() => {
     if (runtimeAgentOptions.some((agent) => agent.agent === agentDraft.id)) return;
@@ -1419,19 +1643,6 @@ function AssistantManagementPanel({
         <Bot className="h-4 w-4 text-ink/45" />
         {t("assistant.title")}
       </div>
-      {builtinAssistants.length > 0 && (
-        <div className="mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-3">
-          <div className="mb-2 flex items-center gap-2 text-body-sm font-medium text-ink/65">
-            <Bot className="h-4 w-4 text-ink/40" />
-            {t("assistant.builtin")}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {builtinAssistants.map((assistant) => (
-              <AssistantBuiltinChip key={assistant.id} assistant={assistant} />
-            ))}
-          </div>
-        </div>
-      )}
       <div className="grid gap-2 rounded-lg border border-ink/10 bg-ink/[0.035] p-3">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("assistant.name")} className="rounded-md border border-ink/10 bg-surface-panel px-2 py-1.5 text-body-sm text-ink outline-none placeholder:text-ink/35" />
         <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
@@ -1445,11 +1656,11 @@ function AssistantManagementPanel({
       </div>
       {loading ? (
         <div className="py-8 text-center text-body-sm text-ink/40">{t("memory_search.searching")}</div>
-      ) : customAssistants.length === 0 ? (
+      ) : projectAssistants.length === 0 ? (
         <div className="py-8 text-center text-body-sm text-ink/35">{t("assistant.empty")}</div>
       ) : (
         <div className="mt-3 grid gap-2">
-          {customAssistants.map((assistant) => (
+          {projectAssistants.map((assistant) => (
             <AssistantRow
               key={assistant.id}
               assistant={assistant}
@@ -1463,27 +1674,6 @@ function AssistantManagementPanel({
         </div>
       )}
     </aside>
-  );
-}
-
-function AssistantBuiltinChip({ assistant }: { assistant: AssistantInfo }) {
-  const { t } = useI18n();
-  return (
-    <div className="grid max-w-[260px] gap-1 rounded-md bg-surface-panel px-2 py-1.5 text-caption text-ink/65">
-      <div className="flex min-w-0 items-center gap-1.5">
-        <Bot className="h-3.5 w-3.5 shrink-0 text-ink/35" />
-        <span className="min-w-0 flex-1 truncate font-medium text-ink/70">{assistant.name}</span>
-        <span className="shrink-0 rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">{t("assistant.builtin")}</span>
-      </div>
-      <div className="truncate pl-5 text-meta text-ink/40">
-        {assistant.agent.name} · {assistant.agent.model} · {assistant.agent.mode} · {assistant.agent.effort}
-      </div>
-      {assistant.systemPrompt && (
-        <div className="line-clamp-3 pl-5 text-meta leading-snug text-ink/45">
-          {assistant.systemPrompt}
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -1516,7 +1706,6 @@ function AssistantRow({
   }, [assistant]);
 
   const save = async () => {
-    if (builtin) return;
     try {
       onUpdated(await updateAssistant(assistant.id, { name, agent: agentDraft, systemPrompt }));
       setEditing(false);
@@ -1535,8 +1724,16 @@ function AssistantRow({
     }
   };
 
+  const toggleEnabled = async () => {
+    try {
+      onUpdated(await updateAssistant(assistant.id, { enabled: !assistant.enabled }));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
   return (
-    <div className="rounded-md border border-ink/10 bg-surface-panel p-2">
+    <div className={`rounded-md border border-ink/10 bg-surface-panel p-2 ${assistant.enabled ? "" : "opacity-45"}`}>
       {editing ? (
         <div className="grid gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} className="rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
@@ -1565,12 +1762,17 @@ function AssistantRow({
               </div>
             )}
           </div>
-          {!builtin && (
-            <div className="flex shrink-0 items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
+            <Tooltip content={t("assistant.edit")} placement="top">
               <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
+            </Tooltip>
+            <Tooltip content={assistant.enabled ? t("assistant.disable") : t("assistant.enable")} placement="top">
+              <button type="button" onClick={() => void toggleEnabled()} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><CircleSlash className="h-3.5 w-3.5" /></button>
+            </Tooltip>
+            {!builtin && (
               <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-3.5 w-3.5" /></button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
     </div>

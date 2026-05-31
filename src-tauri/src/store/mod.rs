@@ -190,6 +190,7 @@ pub trait SessionStore: Send + Sync {
         description: Option<Option<&str>>,
         order: Option<i64>,
         enabled: Option<bool>,
+        allow_empty_assistants: Option<bool>,
     ) -> Result<ProjectStageInfo>;
     fn update_project_stage_assistants(
         &self,

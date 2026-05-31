@@ -57,6 +57,8 @@ import {
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 
+type ThreadSelection = { projectId: string; threadId: string } | null;
+
 function readViewMode(): ViewMode {
   if (typeof localStorage === "undefined") return "native";
   const v = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
@@ -80,6 +82,7 @@ export default function App() {
   } = useAppData({ setError });
   const [filter, setFilter] = useState<Filter>({ kind: "all" });
   const [selectedProject, setSelectedProject] = useState<ProjectSelection>(null);
+  const [selectedThread, setSelectedThread] = useState<ThreadSelection>(null);
   const [selected, setSelected] = useState<SessionInfo | null>(null);
   const [newChatProjectKey, setNewChatProjectKey] = useState<string | null>(null);
   const [expandProject, setExpandProject] = useState(true);
@@ -179,6 +182,7 @@ export default function App() {
     setRuntimeSessionAliases,
     setSessions,
     setSelectedProject,
+    setSelectedThread,
     setSelected,
     setDetailMode,
     setPendingSelectSession,
@@ -249,6 +253,7 @@ export default function App() {
     setDetailMode,
     setFilter,
     setSelectedProject,
+    setSelectedThread,
     setExpandedProjects,
     setPendingSelectSession,
   });
@@ -264,9 +269,20 @@ export default function App() {
     setSelectedProject(null);
   }, [projects, selectedProject]);
 
+  useEffect(() => {
+    if (!selectedThread) return;
+    if (projects.some((project) => project.id === selectedThread.projectId)) return;
+    setSelectedThread(null);
+  }, [projects, selectedThread]);
+
   const activeProject = selectedProject
     ? projects.find((project) => project.id === selectedProject.projectId) ?? null
     : null;
+  const activeThreadProject = selectedThread
+    ? projects.find((project) => project.id === selectedThread.projectId) ?? null
+    : null;
+  const selectedProjectId = selectedProject?.projectId ?? null;
+  const selectedThreadId = selectedThread?.threadId ?? null;
   const selectedSessionProject =
     selected?.projectPath
       ? projects.find((project) => project.path === selected.projectPath) ?? null
@@ -300,6 +316,7 @@ export default function App() {
     await removeSessionsByScope(scope);
     if (selected && targets.some((s) => sessionKey(s) === sessionKey(selected))) {
       setSelected(null);
+      setSelectedThread(null);
     }
   };
 
@@ -324,6 +341,7 @@ export default function App() {
         await removeSessionFiles(target.session);
         if (selected && sessionKey(selected) === sessionKey(target.session)) {
           setSelected(null);
+          setSelectedThread(null);
         }
       } else {
         await removeSessionsInScope(target.scope);
@@ -386,6 +404,7 @@ export default function App() {
 
   const handleDetailModeChange = (mode: DetailMode) => {
     setDetailMode(mode);
+    setSelectedThread(null);
     if (mode === "chat") {
       setSelectedProject(null);
       return;
@@ -409,7 +428,9 @@ export default function App() {
       expandedProjectSessions={expandedProjectSessions}
       selectedKey={selectedKey}
       selectedIdentityKey={selectedIdentityKey}
-      hasSelectedSession={Boolean(selected)}
+      selectedProjectId={selectedProjectId}
+      selectedThreadId={selectedThreadId}
+      hasActiveSelection={Boolean(selected || selectedProject || selectedThread)}
       liveState={liveRuntimeState}
       runtimeSessionAliases={runtimeSessionAliases}
       unreadSessionIds={unreadSessionIds}
@@ -418,6 +439,7 @@ export default function App() {
       onCloseSidebar={() => setSidebarOpen(false)}
       onNewChat={() => {
         setSelectedProject(null);
+        setSelectedThread(null);
         setNewChatProjectKey(null);
         setSelected(null);
         setDetailMode("chat");
@@ -426,6 +448,8 @@ export default function App() {
       onProjectAdded={(project) => {
         setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
         setSelectedProject({ kind: "project", projectId: project.id });
+        setSelectedThread(null);
+        setSelected(null);
         setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
         setExpandedProjects((prev) => new Set(prev).add(project.id));
         void refreshSessions();
@@ -439,13 +463,20 @@ export default function App() {
         });
       }}
       onOpenKanban={(projectGroup) => {
-        setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
+        const selectedSameProjectSession = selected?.projectPath === projectGroup.project.path;
+        const selectedSameProjectThread = selectedThread?.projectId === projectGroup.project.id;
+        if (!selectedSameProjectSession && !selectedSameProjectThread) {
+          setSelected(null);
+          setSelectedThread(null);
+          setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
+        }
         setNewChatProjectKey(null);
         setDetailMode("project");
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
       }}
       onNewProjectChat={(projectGroup) => {
         setSelectedProject(null);
+        setSelectedThread(null);
         setNewChatProjectKey(projectGroup.key);
         setSelected(null);
         setDetailMode("chat");
@@ -453,10 +484,19 @@ export default function App() {
       }}
       onSelectSession={(projectGroup, session) => {
         setSelectedProject(null);
+        setSelectedThread(null);
         setNewChatProjectKey(null);
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
         setSelected(session);
         setDetailMode("chat");
+      }}
+      onSelectThread={(projectGroup, thread) => {
+        setSelected(null);
+        setSelectedProject(null);
+        setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id });
+        setNewChatProjectKey(null);
+        setDetailMode("project");
+        setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
       }}
       onToggleProjectSessions={(projectKeyValue) => {
         setExpandedProjectSessions((prev) => {
@@ -555,7 +595,7 @@ export default function App() {
     >
       <AppMain
         error={error}
-        activeProject={activeProject}
+        activeProject={activeProject ?? activeThreadProject}
         selected={selected}
         selectedSessionProject={selectedSessionProject}
         detailRoute={detailRoute}
@@ -574,6 +614,7 @@ export default function App() {
         setProjects={setProjects}
         setFilter={setFilter}
         setSelectedProject={setSelectedProject}
+        setSelectedThread={setSelectedThread}
         setSelected={setSelected}
         setDetailMode={setDetailMode}
         setPendingNewChats={setPendingNewChats}

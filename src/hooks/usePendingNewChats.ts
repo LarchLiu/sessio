@@ -19,6 +19,7 @@ export function usePendingNewChats({
   setRuntimeSessionAliases,
   setSessions,
   setSelectedProject,
+  setSelectedThread,
   setSelected,
   setDetailMode,
   setPendingSelectSession,
@@ -30,6 +31,7 @@ export function usePendingNewChats({
   setRuntimeSessionAliases: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   setSessions: React.Dispatch<React.SetStateAction<SessionInfo[]>>;
   setSelectedProject: React.Dispatch<React.SetStateAction<{ kind: "project"; projectId: string } | null>>;
+  setSelectedThread: React.Dispatch<React.SetStateAction<{ projectId: string; threadId: string } | null>>;
   setSelected: React.Dispatch<React.SetStateAction<SessionInfo | null>>;
   setDetailMode: React.Dispatch<React.SetStateAction<DetailMode>>;
   setPendingSelectSession: React.Dispatch<React.SetStateAction<{
@@ -88,6 +90,7 @@ export function usePendingNewChats({
       }));
       setSessions((prev) => mergePendingSession(prev, pendingSession));
       setSelected(pendingSession);
+      setSelectedThread(null);
       setDetailMode("chat");
       setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
       setPendingNewChats((prev) => {
@@ -143,6 +146,7 @@ export function usePendingNewChats({
     setRuntimeSessionAliases,
     setSelected,
     setSelectedProject,
+    setSelectedThread,
     setSessions,
   ]);
 }

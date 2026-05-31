@@ -567,12 +567,20 @@ fn update_project_stage(
     description: Option<Option<String>>,
     order: Option<i64>,
     enabled: Option<bool>,
+    allow_empty_assistants: Option<bool>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectStageInfo, String> {
     let description_ref = description.as_ref().map(|value| value.as_deref());
     let stage = store
-        .update_project_stage(&stage_id, name.as_deref(), description_ref, order, enabled)
+        .update_project_stage(
+            &stage_id,
+            name.as_deref(),
+            description_ref,
+            order,
+            enabled,
+            allow_empty_assistants,
+        )
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)

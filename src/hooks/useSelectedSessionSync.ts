@@ -19,6 +19,7 @@ export function useSelectedSessionSync({
   setDetailMode,
   setFilter,
   setSelectedProject,
+  setSelectedThread,
   setExpandedProjects,
   setPendingSelectSession,
 }: {
@@ -30,6 +31,7 @@ export function useSelectedSessionSync({
   setDetailMode: Dispatch<SetStateAction<DetailMode>>;
   setFilter: Dispatch<SetStateAction<Filter>>;
   setSelectedProject: Dispatch<SetStateAction<ProjectSelection>>;
+  setSelectedThread: Dispatch<SetStateAction<{ projectId: string; threadId: string } | null>>;
   setExpandedProjects: Dispatch<SetStateAction<Set<string>>>;
   setPendingSelectSession: Dispatch<SetStateAction<{
     agent: Agent;
@@ -59,6 +61,7 @@ export function useSelectedSessionSync({
     );
     if (!next) return;
     setSelected(next);
+    setSelectedThread(null);
     setDetailMode("chat");
     const project = projects.find((item) => item.path === next.projectPath);
     if (project) {
@@ -81,5 +84,6 @@ export function useSelectedSessionSync({
     setPendingSelectSession,
     setSelected,
     setSelectedProject,
+    setSelectedThread,
   ]);
 }

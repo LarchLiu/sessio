@@ -322,9 +322,16 @@ impl SessionStore for CachedStore {
         description: Option<Option<&str>>,
         order: Option<i64>,
         enabled: Option<bool>,
+        allow_empty_assistants: Option<bool>,
     ) -> Result<ProjectStageInfo> {
-        self.inner
-            .update_project_stage(stage_id, name, description, order, enabled)
+        self.inner.update_project_stage(
+            stage_id,
+            name,
+            description,
+            order,
+            enabled,
+            allow_empty_assistants,
+        )
     }
 
     fn update_project_stage_assistants(

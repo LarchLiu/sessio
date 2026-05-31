@@ -110,6 +110,7 @@ export interface StageInfo {
   description: string | null;
   order: number;
   enabled: boolean;
+  allowEmptyAssistants: boolean;
   createdAt: number;
   updatedAt: number;
   sessions: SessionInfo[];
@@ -125,6 +126,7 @@ export interface ProjectStageInfo {
   description: string | null;
   order: number;
   enabled: boolean;
+  allowEmptyAssistants: boolean;
   createdAt: number;
   updatedAt: number;
   assistants: StageAssistantInfo[];
@@ -812,6 +814,7 @@ export async function updateProjectStage(
     description?: string | null;
     order?: number | null;
     enabled?: boolean | null;
+    allowEmptyAssistants?: boolean | null;
   },
 ): Promise<ProjectStageInfo> {
   const payload: {
@@ -820,11 +823,13 @@ export async function updateProjectStage(
     description?: string | null;
     order?: number | null;
     enabled?: boolean | null;
+    allowEmptyAssistants?: boolean | null;
   } = { stageId };
   if ("name" in patch) payload.name = patch.name ?? null;
   if ("description" in patch) payload.description = patch.description ?? null;
   if ("order" in patch) payload.order = patch.order ?? null;
   if ("enabled" in patch) payload.enabled = patch.enabled ?? null;
+  if ("allowEmptyAssistants" in patch) payload.allowEmptyAssistants = patch.allowEmptyAssistants ?? null;
   return invoke<ProjectStageInfo>("update_project_stage", payload);
 }
 
