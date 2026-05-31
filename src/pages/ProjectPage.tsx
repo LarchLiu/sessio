@@ -12,9 +12,9 @@ import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
-import { Bot, Check, Circle, Clapperboard, Copy, FilePenLine, GitBranch, GripVertical, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Save, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
-import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, StageType, ThreadInfo, WorkflowInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, linkThreadSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, listWorkflows, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, unlinkThreadSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProject, updateProjectStage, updateProjectStageAssistants, updateRuntimeAgentPreferences, updateThread } from "../api";
+import { Bot, Check, Circle, Clapperboard, Copy, FilePenLine, GitBranch, GripVertical, Kanban, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Scissors, Send, SpellCheck, Trash2, Unlink, CircleDashed, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
+import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, StageType, ThreadInfo } from "../api";
+import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createKanbanItem, createProjectStage, createThread, deleteAssistant, deleteKanbanItem, deleteProjectStage, deleteThread, deleteThreadStage, linkKanbanItemSession, linkStageSession, linkThreadSession, listAgents, listAssistants, listKanbanItems, listProjectStages, listThreads, sendAgentInput, setThreadStage, startAgentSession, unlinkKanbanItemSession, unlinkStageSession, unlinkThreadSession, updateAssistant, updateKanbanItem, updateKanbanItemStatus, updateProjectStage, updateProjectStageAssistants, updateRuntimeAgentPreferences, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import {
   agentModelSelectOptions,
@@ -23,7 +23,7 @@ import {
   parseAgentModelSelectValue,
   runtimeEffortOptions,
 } from "../components/AgentSelect";
-import InlineMenuSelect, { type InlineMenuSelectOption } from "../components/InlineMenuSelect";
+import InlineMenuSelect from "../components/InlineMenuSelect";
 import { RuntimeEffortControl, RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
 import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
 import { localeTag, useI18n } from "../i18n";
@@ -109,13 +109,6 @@ function projectStageIcon(stage: ProjectStageInfo) {
 
 function stageAllowsThreadAddition(stage: ProjectStageInfo): boolean {
   return stage.assistants.length > 0 || stage.allowEmptyAssistants;
-}
-
-function workflowOptions(workflows: WorkflowInfo[]): InlineMenuSelectOption[] {
-  return workflows.map((workflow) => ({
-    value: workflow.id,
-    label: workflow.name,
-  }));
 }
 
 interface MetaRow {
@@ -271,7 +264,6 @@ export function ProjectWorkbenchPage({
   debugAcpConfig,
   liveState,
   dispatchLiveEvent,
-  onProjectUpdated,
   onProjectArchived,
   onSelectSession,
   onPendingSession,
@@ -284,7 +276,6 @@ export function ProjectWorkbenchPage({
   debugAcpConfig: boolean;
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
-  onProjectUpdated: (project: ProjectInfo) => void;
   onProjectArchived: (projectId: string) => void;
   onSelectSession: (session: SessionInfo) => void;
   onPendingSession: (session: PendingNewChatSession) => void;
@@ -297,19 +288,10 @@ export function ProjectWorkbenchPage({
   const [projectStages, setProjectStages] = useState<ProjectStageInfo[]>([]);
   const [assistants, setAssistants] = useState<AssistantInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [workflowLoading, setWorkflowLoading] = useState(true);
   const [activeView, setActiveView] = useState<"threads" | "stages" | "assistants" | "kanban">("threads");
   const [newTitle, setNewTitle] = useState("");
-  const [editingName, setEditingName] = useState(project.name);
-  const [editingWorkflowId, setEditingWorkflowId] = useState(project.workflowId);
-  const [projectSaving, setProjectSaving] = useState(false);
-
-  useEffect(() => {
-    setEditingName(project.name);
-    setEditingWorkflowId(project.workflowId);
-  }, [project.id, project.name, project.workflowId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -332,14 +314,13 @@ export function ProjectWorkbenchPage({
   useEffect(() => {
     let cancelled = false;
     setWorkflowLoading(true);
-    Promise.all([listThreads(project.id), listProjectStages(project.id), listAssistants(project.id), listAgents(), listWorkflows()])
-      .then(([threadRows, projectStageRows, assistantRows, agentRows, workflowRows]) => {
+    Promise.all([listThreads(project.id), listProjectStages(project.id), listAssistants(project.id), listAgents()])
+      .then(([threadRows, projectStageRows, assistantRows, agentRows]) => {
         if (cancelled) return;
         setThreads(threadRows);
         setProjectStages(projectStageRows);
         setAssistants(assistantRows);
         setAgents(agentRows);
-        setWorkflows(workflowRows);
       })
       .catch((err) => {
         if (!cancelled) onError(String(err));
@@ -362,22 +343,6 @@ export function ProjectWorkbenchPage({
       setNewTitle("");
     } catch (err) {
       onError(String(err));
-    }
-  };
-
-  const saveProject = async () => {
-    setProjectSaving(true);
-    onError(null);
-    try {
-      const updated = await updateProject(project.id, {
-        name: editingName,
-        workflowId: editingWorkflowId,
-      });
-      onProjectUpdated(updated);
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setProjectSaving(false);
     }
   };
 
@@ -427,51 +392,8 @@ export function ProjectWorkbenchPage({
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
-      <div className="border-b border-ink/10 px-6 py-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="min-w-0 flex-1">
-            <div className="mb-2 flex items-center gap-2 text-caption uppercase tracking-[0.16em] text-ink/40">
-              <Kanban className="h-4 w-4" />
-              {t("project.workbench")}
-            </div>
-            <input
-              value={editingName}
-              onChange={(event) => setEditingName(event.target.value)}
-              className="w-full max-w-[520px] bg-transparent text-[28px] font-medium leading-tight text-ink outline-none"
-            />
-            <div className="mt-1 truncate text-body-sm text-ink/45">{project.path}</div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <RuntimeMenuSelect
-              ariaLabel={t("project.workflowId")}
-              value={editingWorkflowId}
-              options={workflowOptions(workflows)}
-              onChange={setEditingWorkflowId}
-            />
-            <Tooltip content={t("project.save")} placement="bottom">
-              <button
-                type="button"
-                disabled={projectSaving}
-                onClick={() => void saveProject()}
-                className="rounded-md p-2 text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:opacity-45"
-              >
-                <Save className="h-4 w-4" />
-              </button>
-            </Tooltip>
-            <Tooltip content={t("project.archive")} placement="bottom">
-              <button
-                type="button"
-                onClick={() => void archive()}
-                className="rounded-md p-2 text-ink/45 transition hover:bg-status-error/10 hover:text-status-error"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-      </div>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div className="shrink-0 px-5 pt-5">
+        <div className="flex shrink-0 items-center justify-between gap-4 px-5 pt-5">
           <div className="inline-flex rounded-lg bg-ink/[0.06] p-1">
             {([
               ["threads", t("thread.title"), HashIcon],
@@ -493,6 +415,15 @@ export function ProjectWorkbenchPage({
               </button>
             ))}
           </div>
+          <Tooltip content={t("project.archive")} placement="bottom">
+            <button
+              type="button"
+              onClick={() => void archive()}
+              className="rounded-md p-2 text-ink/45 transition hover:bg-status-error/10 hover:text-status-error"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </Tooltip>
         </div>
         <ScrollArea
           className="min-h-0 flex-1"

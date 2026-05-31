@@ -31,7 +31,7 @@ export function useSelectedSessionSync({
   setDetailMode: Dispatch<SetStateAction<DetailMode>>;
   setFilter: Dispatch<SetStateAction<Filter>>;
   setSelectedProject: Dispatch<SetStateAction<ProjectSelection>>;
-  setSelectedThread: Dispatch<SetStateAction<{ projectId: string; threadId: string } | null>>;
+  setSelectedThread: Dispatch<SetStateAction<{ projectId: string; threadId: string; goal: string } | null>>;
   setExpandedProjects: Dispatch<SetStateAction<Set<string>>>;
   setPendingSelectSession: Dispatch<SetStateAction<{
     agent: Agent;

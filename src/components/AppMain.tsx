@@ -4,7 +4,8 @@ import type { ActiveMessageMeta } from "../pages/ChatPage";
 import ChatPage from "../pages/ChatPage";
 import NewChatPage from "../pages/NewChatPage";
 import { ProjectWorkbenchPage } from "../pages/ProjectPage";
-import { projectFilterKey, type Filter } from "../appUtils";
+import ThreadPage from "../pages/ThreadPage";
+import { type Filter } from "../appUtils";
 import type { PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
 import type {
   LiveRuntimeAction,
@@ -15,6 +16,7 @@ import ToastStack from "./ToastStack";
 export default function AppMain({
   error,
   activeProject,
+  selectedThreadId,
   selected,
   selectedSessionProject,
   detailRoute,
@@ -44,6 +46,7 @@ export default function AppMain({
 }: {
   error: string | null;
   activeProject: ProjectInfo | null;
+  selectedThreadId: string | null;
   selected: SessionInfo | null;
   selectedSessionProject: ProjectInfo | null;
   detailRoute: "chat" | "project";
@@ -62,7 +65,7 @@ export default function AppMain({
   setProjects: Dispatch<SetStateAction<ProjectInfo[]>>;
   setFilter: Dispatch<SetStateAction<Filter>>;
   setSelectedProject: Dispatch<SetStateAction<{ kind: "project"; projectId: string } | null>>;
-  setSelectedThread: Dispatch<SetStateAction<{ projectId: string; threadId: string } | null>>;
+  setSelectedThread: Dispatch<SetStateAction<{ projectId: string; threadId: string; goal: string } | null>>;
   setSelected: Dispatch<SetStateAction<SessionInfo | null>>;
   setDetailMode: Dispatch<SetStateAction<"chat" | "project">>;
   setPendingNewChats: Dispatch<SetStateAction<Record<string, PendingNewChatSession>>>;
@@ -90,10 +93,6 @@ export default function AppMain({
     debugAcpConfig,
     liveState,
     dispatchLiveEvent,
-    onProjectUpdated: (updatedProject: ProjectInfo) => {
-      setProjects((prev) => prev.map((item) => (item.id === updatedProject.id ? updatedProject : item)));
-      setFilter({ kind: "project", key: projectFilterKey(updatedProject), label: updatedProject.name });
-    },
     onProjectArchived: (projectId: string) => {
       setProjects((prev) => prev.filter((item) => item.id !== projectId));
       setSelectedProject(null);
@@ -127,7 +126,16 @@ export default function AppMain({
     return (
       withErrorToast(
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <ProjectWorkbenchPage {...projectWorkbenchProps(activeProject)} />
+          {selectedThreadId ? (
+            <ThreadPage
+              project={activeProject}
+              threadId={selectedThreadId}
+              onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
+              onError={onError}
+            />
+          ) : (
+            <ProjectWorkbenchPage {...projectWorkbenchProps(activeProject)} />
+          )}
         </div>,
       )
     );

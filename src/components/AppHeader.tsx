@@ -1,4 +1,4 @@
-import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, Search } from "lucide-react";
+import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, Search, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
 import type { MemoryBackendStatus, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
@@ -14,6 +14,8 @@ interface AppHeaderProps {
   detailTitle: string;
   detailMode: DetailMode;
   showDetailTabs: boolean;
+  contextTitle: { label: string; icon: LucideIcon } | null;
+  entityTitle: { kind: "thread" | "project"; title: string; icon: LucideIcon; pill?: string } | null;
   activeMessageMeta: {
     count: number;
     partial: boolean;
@@ -41,6 +43,8 @@ export default function AppHeader({
   detailTitle,
   detailMode,
   showDetailTabs,
+  contextTitle,
+  entityTitle,
   activeMessageMeta,
   metaPopoverOpen,
   memoryBackendStatus,
@@ -124,11 +128,16 @@ export default function AppHeader({
             </div>
           </>
         )}
+        {!selected && entityTitle && !sidebarOpen && (
+          <HeaderEntityTitle title={entityTitle} />
+        )}
       </div>
       <div data-tauri-drag-region="false" className="justify-self-center">
-        {showDetailTabs && (
+        {showDetailTabs ? (
           <HeaderModeTabs mode={detailMode} onChange={onDetailModeChange} />
-        )}
+        ) : contextTitle ? (
+          <HeaderContextTitle title={contextTitle} />
+        ) : null}
       </div>
       <div className="justify-self-end" data-tauri-drag-region="false">
         {memoryBackendMissing && memoryBackendStatus ? (
@@ -154,6 +163,47 @@ export default function AppHeader({
       <div className="absolute top-0 right-0 z-20">
         <WindowControls />
       </div>
+    </div>
+  );
+}
+
+function HeaderEntityTitle({
+  title,
+}: {
+  title: { kind: "thread" | "project"; title: string; icon: LucideIcon; pill?: string };
+}) {
+  const Icon = title.icon;
+  return (
+    <div
+      data-tauri-drag-region
+      className="flex min-w-0 max-w-[min(42vw,620px)] items-center gap-2"
+    >
+      <Icon className="h-4 w-4 shrink-0 text-ink/45" />
+      <span className="min-w-0 truncate text-body font-medium leading-none text-ink/85">
+        {title.title}
+      </span>
+      {title.pill && (
+        <span className="shrink-0 rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-2 py-0.5 text-meta uppercase leading-none text-card-fg/55">
+          {title.pill}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function HeaderContextTitle({
+  title,
+}: {
+  title: { label: string; icon: LucideIcon };
+}) {
+  const Icon = title.icon;
+  return (
+    <div
+      data-tauri-drag-region
+      className="inline-flex items-center gap-2 text-body-sm font-medium uppercase leading-none tracking-[0.12em] text-ink/50"
+    >
+      <Icon className="h-4 w-4 shrink-0" />
+      {title.label}
     </div>
   );
 }

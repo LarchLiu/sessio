@@ -60,6 +60,7 @@ export default {
           fg: "rgb(var(--color-tooltip-fg) / <alpha-value>)",
         },
         "accent-purple": "rgb(var(--color-accent-purple) / <alpha-value>)",
+        emerald: "rgb(var(--color-emerald) / <alpha-value>)",
         status: {
           warn: "rgb(var(--color-status-warn) / <alpha-value>)",
           error: "rgb(var(--color-status-error) / <alpha-value>)",

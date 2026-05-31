@@ -43,6 +43,7 @@ import {
   emptyLiveRuntimeState,
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
+import { Folder, Goal, Hash, Kanban } from "lucide-react";
 import type { DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
   isSubagentOnly,
@@ -57,7 +58,7 @@ import {
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 
-type ThreadSelection = { projectId: string; threadId: string } | null;
+type ThreadSelection = { projectId: string; threadId: string; goal: string } | null;
 
 function readViewMode(): ViewMode {
   if (typeof localStorage === "undefined") return "native";
@@ -392,6 +393,16 @@ export default function App() {
     memoryBackendStatus !== null && memoryBackendStatus.available === false;
   const projectSearchInitialKey = filter.kind === "project" ? filter.key : projects[0]?.path;
   const detailRoute: DetailMode = detailMode;
+  const headerContextTitle = selectedThreadId
+    ? { label: t("thread.detail"), icon: Hash }
+    : activeProject
+      ? { label: t("project.workbench"), icon: Kanban }
+      : null;
+  const headerEntityTitle = selectedThread
+    ? { kind: "thread" as const, title: selectedThread.goal, icon: Goal }
+    : activeProject
+      ? { kind: "project" as const, title: activeProject.name, icon: Folder }
+      : null;
 
   useEffect(() => {
     if (memorySearchOpen && projectSearchInitialKey) {
@@ -463,13 +474,9 @@ export default function App() {
         });
       }}
       onOpenKanban={(projectGroup) => {
-        const selectedSameProjectSession = selected?.projectPath === projectGroup.project.path;
-        const selectedSameProjectThread = selectedThread?.projectId === projectGroup.project.id;
-        if (!selectedSameProjectSession && !selectedSameProjectThread) {
-          setSelected(null);
-          setSelectedThread(null);
-          setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
-        }
+        setSelected(null);
+        setSelectedThread(null);
+        setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
         setNewChatProjectKey(null);
         setDetailMode("project");
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
@@ -493,7 +500,7 @@ export default function App() {
       onSelectThread={(projectGroup, thread) => {
         setSelected(null);
         setSelectedProject(null);
-        setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id });
+        setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id, goal: thread.goal });
         setNewChatProjectKey(null);
         setDetailMode("project");
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
@@ -529,6 +536,8 @@ export default function App() {
       detailTitle={detailTitle}
       detailMode={detailMode}
       showDetailTabs={Boolean(selected)}
+      contextTitle={headerContextTitle}
+      entityTitle={headerEntityTitle}
       activeMessageMeta={activeMessageMeta}
       metaPopoverOpen={metaPopoverOpen}
       memoryBackendStatus={memoryBackendStatus}
@@ -596,6 +605,7 @@ export default function App() {
       <AppMain
         error={error}
         activeProject={activeProject ?? activeThreadProject}
+        selectedThreadId={selectedThreadId}
         selected={selected}
         selectedSessionProject={selectedSessionProject}
         detailRoute={detailRoute}
