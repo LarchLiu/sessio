@@ -2,7 +2,6 @@ import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, Search, type Luc
 import type { ComponentType } from "react";
 import type { MemoryBackendStatus, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
-import type { DetailMode } from "../navigation";
 import { AgentGlyph } from "./AgentIcon";
 import Tooltip from "./Tooltip";
 import WindowControls from "./WindowControls";
@@ -12,8 +11,6 @@ interface AppHeaderProps {
   sidebarOpen: boolean;
   selected: SessionInfo | null;
   detailTitle: string;
-  detailMode: DetailMode;
-  showDetailTabs: boolean;
   contextTitle: { label: string; icon: LucideIcon } | null;
   entityTitle: { kind: "thread" | "project"; title: string; icon: LucideIcon; pill?: string } | null;
   activeMessageMeta: {
@@ -25,7 +22,6 @@ interface AppHeaderProps {
   memoryBackendMissing: boolean;
   projectCount: number;
   onOpenSidebar: () => void;
-  onDetailModeChange: (mode: DetailMode) => void;
   onToggleMetaPopover: () => void;
   onOpenSearch: () => void;
   onRefreshMemoryBackend: () => Promise<void> | void;
@@ -41,8 +37,6 @@ export default function AppHeader({
   sidebarOpen,
   selected,
   detailTitle,
-  detailMode,
-  showDetailTabs,
   contextTitle,
   entityTitle,
   activeMessageMeta,
@@ -51,7 +45,6 @@ export default function AppHeader({
   memoryBackendMissing,
   projectCount,
   onOpenSidebar,
-  onDetailModeChange,
   onToggleMetaPopover,
   onOpenSearch,
   onRefreshMemoryBackend,
@@ -132,10 +125,8 @@ export default function AppHeader({
           <HeaderEntityTitle title={entityTitle} />
         )}
       </div>
-      <div data-tauri-drag-region="false" className="justify-self-center">
-        {showDetailTabs ? (
-          <HeaderModeTabs mode={detailMode} onChange={onDetailModeChange} />
-        ) : contextTitle ? (
+      <div data-tauri-drag-region="false" className="flex h-full items-center justify-self-center">
+        {contextTitle ? (
           <HeaderContextTitle title={contextTitle} />
         ) : null}
       </div>
@@ -200,7 +191,7 @@ function HeaderContextTitle({
   return (
     <div
       data-tauri-drag-region
-      className="inline-flex items-center gap-2 text-body-sm font-medium uppercase leading-none tracking-[0.12em] text-ink/50"
+      className="inline-flex h-6 items-center gap-2 text-body-sm font-medium uppercase leading-none tracking-[0.12em] text-ink/50"
     >
       <Icon className="h-4 w-4 shrink-0" />
       {title.label}
@@ -247,53 +238,6 @@ function HeaderMessageMetaButton({
           }
         />
       </button>
-    </div>
-  );
-}
-
-function HeaderModeTabs({
-  mode,
-  onChange,
-}: {
-  mode: DetailMode;
-  onChange: (mode: DetailMode) => void;
-}) {
-  const items: { value: DetailMode; label: string }[] = [
-    { value: "chat", label: "Chat" },
-    { value: "project", label: "Project" },
-  ];
-  const activeIndex = Math.max(
-    0,
-    items.findIndex((item) => item.value === mode),
-  );
-  const BTN_W = 72;
-  return (
-    <div className="relative flex items-center rounded-md bg-ink/[0.14] p-0.5">
-      <div
-        aria-hidden
-        className="absolute top-0.5 left-0.5 h-[26px] rounded bg-surface shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition-transform duration-300 ease-out"
-        style={{
-          width: `${BTN_W}px`,
-          transform: `translateX(${activeIndex * BTN_W}px)`,
-        }}
-      />
-      {items.map(({ value, label }, index) => {
-        const active = index === activeIndex;
-        return (
-          <button
-            key={label}
-            type="button"
-            onClick={() => onChange(value)}
-            style={{ width: `${BTN_W}px` }}
-            className={
-              "relative z-10 h-[26px] flex items-center justify-center rounded text-body-sm leading-none transition-colors duration-150 " +
-              (active ? "text-ink" : "text-ink/55 hover:text-ink/85")
-            }
-          >
-            {label}
-          </button>
-        );
-      })}
     </div>
   );
 }

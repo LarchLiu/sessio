@@ -14,7 +14,7 @@ import {
   Key,
   LoaderCircle,
   MailPlus,
-  MessageSquareText,
+  MessagesSquare,
   PanelLeftClose,
   Settings,
   SquareKanban,
@@ -746,7 +746,7 @@ function ProjectSidebarGroup({
   const canToggleSessionLimit =
     listMode === "sessions" && sessionEntries.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
   const displayCount = listMode === "threads" ? threads.length : project.count;
-  const ProjectListModeIcon = listMode === "threads" ? MessageSquareText : HashIcon;
+  const ProjectListModeIcon = listMode === "threads" ? MessagesSquare : HashIcon;
   const projectActive = selectedProjectId === project.project.id;
   const toggleSessionLimit = () => {
     const collapsing = sessionsExpanded;

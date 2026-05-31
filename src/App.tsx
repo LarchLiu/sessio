@@ -43,7 +43,7 @@ import {
   emptyLiveRuntimeState,
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
-import { Folder, Goal, Hash, Kanban } from "lucide-react";
+import { Folder, Goal, Hash, Kanban, MessageSquare, MessageSquareText } from "lucide-react";
 import type { DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
   isSubagentOnly,
@@ -393,15 +393,17 @@ export default function App() {
     memoryBackendStatus !== null && memoryBackendStatus.available === false;
   const projectSearchInitialKey = filter.kind === "project" ? filter.key : projects[0]?.path;
   const detailRoute: DetailMode = detailMode;
-  const headerContextTitle = selectedThreadId
-    ? { label: t("thread.detail"), icon: Hash }
-    : activeProject
-      ? { label: t("project.workbench"), icon: Kanban }
-      : null;
+  const headerContextTitle = selected
+    ? { label: t("header.chat"), icon: MessageSquareText }
+    : selectedThreadId
+      ? { label: t("thread.detail"), icon: Hash }
+      : activeProject
+        ? { label: t("project.workbench"), icon: Kanban }
+        : { label: t("sidebar.new_chat"), icon: MessageSquare };
   const headerEntityTitle = selectedThread
     ? { kind: "thread" as const, title: selectedThread.goal, icon: Goal }
     : activeProject
-      ? { kind: "project" as const, title: activeProject.name, icon: Folder }
+      ? { kind: "project" as const, title: activeProject.name, icon: Folder, pill: activeProject.workflowId }
       : null;
 
   useEffect(() => {
@@ -412,23 +414,6 @@ export default function App() {
       setMemorySearchMounted(false);
     }
   }, [memorySearchOpen, projectSearchInitialKey]);
-
-  const handleDetailModeChange = (mode: DetailMode) => {
-    setDetailMode(mode);
-    setSelectedThread(null);
-    if (mode === "chat") {
-      setSelectedProject(null);
-      return;
-    }
-    if (selectedSessionProject) {
-      setSelectedProject({ kind: "project", projectId: selectedSessionProject.id });
-      setFilter({
-        kind: "project",
-        key: projectFilterKey(selectedSessionProject),
-        label: selectedSessionProject.name,
-      });
-    }
-  };
 
   const sidebar = (
     <AppSidebar
@@ -534,8 +519,6 @@ export default function App() {
       sidebarOpen={sidebarOpen}
       selected={selected}
       detailTitle={detailTitle}
-      detailMode={detailMode}
-      showDetailTabs={Boolean(selected)}
       contextTitle={headerContextTitle}
       entityTitle={headerEntityTitle}
       activeMessageMeta={activeMessageMeta}
@@ -544,7 +527,6 @@ export default function App() {
       memoryBackendMissing={memoryBackendMissing}
       projectCount={projectGroups.length}
       onOpenSidebar={() => setSidebarOpen(true)}
-      onDetailModeChange={handleDetailModeChange}
       onToggleMetaPopover={() => setMetaPopoverOpen((open) => !open)}
       onOpenSearch={() => setMemorySearchOpen(true)}
       onRefreshMemoryBackend={refreshMemoryBackend}

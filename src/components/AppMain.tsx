@@ -90,9 +90,6 @@ export default function AppMain({
     project,
     sessions: availableSessions.filter((session) => session.projectPath === project.path),
     runtimeAgents,
-    debugAcpConfig,
-    liveState,
-    dispatchLiveEvent,
     onProjectArchived: (projectId: string) => {
       setProjects((prev) => prev.filter((item) => item.id !== projectId));
       setSelectedProject(null);
@@ -104,12 +101,6 @@ export default function AppMain({
       setSelectedProject(null);
       setSelectedThread(null);
       setSelected(session);
-      setDetailMode("chat");
-    },
-    onPendingSession: addPendingSession,
-    onChatStarted: () => {
-      setSelectedProject(null);
-      setSelectedThread(null);
       setDetailMode("chat");
     },
     onError,
