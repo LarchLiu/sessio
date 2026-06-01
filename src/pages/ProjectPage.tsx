@@ -3,7 +3,6 @@ import {
   useLayoutEffect,
   useMemo,
   type RefObject,
-  useCallback,
   useRef,
   useState,
 } from "react";
@@ -12,15 +11,15 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
 import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
-import { Check, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Unlink, Workflow, X } from "lucide-react";
+import HashtagChatLinearIcon from "@iconify-react/solar/hashtag-chat-linear";
+import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
 import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, linkStageSession, linkThreadSession, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, unlinkStageSession, unlinkThreadSession, updateThread } from "../api";
+import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
-import InlineMenuSelect from "../components/InlineMenuSelect";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
-import AssistantBotIcon from "../components/AssistantBotIcon";
 import AssistantCard from "../components/AssistantCard";
+import MultiPicker from "../components/MultiPicker";
 import StageList from "../components/StageList";
 import StageSelectChip from "../components/StageSelectChip";
 import { localeTag, useI18n } from "../i18n";
@@ -28,11 +27,8 @@ import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
 import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
 
-const ASSISTANT_MENU_GAP = 6;
-const ASSISTANT_MENU_MARGIN = 8;
-const ASSISTANT_MENU_MAX_HEIGHT = 260;
-
 type ProjectView = "threads" | "stages" | "assistants";
+type ThreadPanelView = "threads" | "thread-chats";
 
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
@@ -187,15 +183,28 @@ function formatBytes(bytes: number): string {
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Record<string, string | number>) => string): string {
+  if (!ts) return "";
+  const diffMs = Math.max(0, Date.now() - ts);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  const week = 7 * day;
+  const month = 30 * day;
+  if (diffMs < hour) return t("time.minute", { count: Math.max(1, Math.floor(diffMs / minute)) });
+  if (diffMs < day) return t("time.hour", { count: Math.floor(diffMs / hour) });
+  if (diffMs < week) return t("time.day", { count: Math.floor(diffMs / day) });
+  if (diffMs < month) return t("time.week", { count: Math.floor(diffMs / week) });
+  return t("time.month", { count: Math.floor(diffMs / month) });
+}
+
 
 export function ProjectWorkbenchPage({
   project,
-  sessions,
   onSelectSession,
   onError,
 }: {
   project: ProjectInfo;
-  sessions: SessionInfo[];
   onSelectSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
 }) {
@@ -243,17 +252,22 @@ export function ProjectWorkbenchPage({
 
   const patchStage = (stage: StageInfo) => {
     setThreads((prev) =>
-      prev.map((thread) =>
-        thread.id === stage.threadId
-          ? {
-              ...thread,
-              updatedAt: Math.max(thread.updatedAt, stage.updatedAt),
-              stages: thread.stages
-                .map((currentStage) => (currentStage.id === stage.id ? stage : currentStage))
-                .sort((a, b) => a.order - b.order),
-            }
-          : thread,
-      ),
+      prev.map((thread) => {
+        if (thread.id !== stage.threadId) return thread;
+        const currentStage = thread.stages.find((item) => item.id === stage.id);
+        if (!currentStage) return thread;
+        const stages =
+          currentStage.order === stage.order
+            ? thread.stages
+                .map((item) => (item.id === stage.id ? stage : item))
+                .sort((a, b) => a.order - b.order)
+            : reorderThreadStages(thread.stages, stage);
+        return {
+          ...thread,
+          updatedAt: Math.max(thread.updatedAt, stage.updatedAt),
+          stages,
+        };
+      }),
     );
   };
 
@@ -289,8 +303,6 @@ export function ProjectWorkbenchPage({
               project={project}
               threads={threads}
               projectStages={projectStages}
-              assistants={assistants}
-              sessions={sessions}
               loading={workflowLoading}
               onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
               onThreadUpdated={patchThread}
@@ -352,18 +364,6 @@ export function ProjectWorkbenchPage({
   );
 }
 
-function selectedAssistants(ids: string[], assistants: AssistantInfo[]): AssistantInfo[] {
-  return ids
-    .map((id) => assistants.find((assistant) => assistant.id === id))
-    .filter((assistant): assistant is AssistantInfo => Boolean(assistant));
-}
-
-function normalizeAssistantIds(ids: string[], assistants: AssistantInfo[]): string[] {
-  const available = new Set(assistants.map((assistant) => assistant.id));
-  const seen = new Set<string>();
-  return ids.filter((id) => available.has(id) && !seen.has(id) && seen.add(id));
-}
-
 function removeStageFromThread(thread: ThreadInfo, stageId: string): ThreadInfo {
   const stages = thread.stages
     .filter((stage) => stage.id !== stageId)
@@ -376,12 +376,18 @@ function removeStageFromThread(thread: ThreadInfo, stageId: string): ThreadInfo 
   };
 }
 
+function reorderThreadStages(stages: StageInfo[], movedStage: StageInfo): StageInfo[] {
+  const ordered = [...stages].sort((a, b) => a.order - b.order);
+  const withoutMoved = ordered.filter((stage) => stage.id !== movedStage.id);
+  const targetIndex = Math.max(0, Math.min(movedStage.order, withoutMoved.length));
+  withoutMoved.splice(targetIndex, 0, movedStage);
+  return withoutMoved.map((stage, index) => ({ ...stage, order: index }));
+}
+
 function ThreadWorkflowPanel({
   project,
   threads,
   projectStages,
-  assistants,
-  sessions,
   loading,
   onThreadCreated,
   onThreadUpdated,
@@ -395,8 +401,6 @@ function ThreadWorkflowPanel({
   project: ProjectInfo;
   threads: ThreadInfo[];
   projectStages: ProjectStageInfo[];
-  assistants: AssistantInfo[];
-  sessions: SessionInfo[];
   loading: boolean;
   onThreadCreated: (thread: ThreadInfo) => void;
   onThreadUpdated: (thread: ThreadInfo) => void;
@@ -412,6 +416,8 @@ function ThreadWorkflowPanel({
   const [description, setDescription] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [panelView, setPanelView] = useState<ThreadPanelView>("threads");
+  const [selectedThreadChatThreadId, setSelectedThreadChatThreadId] = useState<string | null>(null);
   const enabledProjectStages = useMemo(
     () => projectStages.filter((stage) => stage.enabled),
     [projectStages],
@@ -426,12 +432,26 @@ function ThreadWorkflowPanel({
     const keys = new Set<string>();
     for (const thread of threads) {
       for (const session of thread.sessions) keys.add(sessionIdentityKey(session));
-      for (const stage of thread.stages) {
-        for (const session of stage.sessions) keys.add(sessionIdentityKey(session));
-      }
     }
     return keys;
   }, [threads]);
+  const threadPanelTabs = useMemo<SegmentedTabItem<ThreadPanelView>[]>(
+    () => [
+      { value: "threads", label: t("thread.title"), icon: HashIcon, badge: threads.length },
+      { value: "thread-chats", label: t("thread.chats"), icon: HashtagChatLinearIcon, badge: linkedSessionKeys.size },
+    ],
+    [linkedSessionKeys.size, t, threads.length],
+  );
+  const threadChatSessions = useMemo(() => {
+    const byKey = new Map<string, SessionInfo>();
+    const sourceThreads = selectedThreadChatThreadId
+      ? threads.filter((thread) => thread.id === selectedThreadChatThreadId)
+      : threads;
+    for (const thread of sourceThreads) {
+      for (const session of thread.sessions) byKey.set(sessionIdentityKey(session), session);
+    }
+    return Array.from(byKey.values()).sort((a, b) => (b.updatedAt ?? b.startedAt ?? 0) - (a.updatedAt ?? a.startedAt ?? 0));
+  }, [selectedThreadChatThreadId, threads]);
 
   useEffect(() => {
     setCreateStageOrder((current) => {
@@ -448,6 +468,12 @@ function ThreadWorkflowPanel({
       return selectableIds;
     });
   }, [enabledProjectStages, selectableProjectStages]);
+
+  useEffect(() => {
+    if (selectedThreadChatThreadId && !threads.some((thread) => thread.id === selectedThreadChatThreadId)) {
+      setSelectedThreadChatThreadId(null);
+    }
+  }, [selectedThreadChatThreadId, threads]);
 
   const toggleCreateStage = (stageId: string) => {
     if (!selectableProjectStages.some((stage) => stage.id === stageId)) return;
@@ -510,17 +536,31 @@ function ThreadWorkflowPanel({
   };
 
   return (
-    <div className="min-w-0">
-        <div className="mb-3 flex justify-end">
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            className="inline-flex h-9 items-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] hover:opacity-90"
-          >
-            <Plus className="h-4 w-4" />
-            {t("thread.add")}
-          </button>
-        </div>
+    <div className="min-w-0 rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5">
+        <SegmentedTabs
+          items={threadPanelTabs}
+          value={panelView}
+          onChange={(value) => {
+            setPanelView(value);
+            if (value === "threads") setSelectedThreadChatThreadId(null);
+          }}
+          variant="underline"
+          itemWidth={148}
+          itemHeight={34}
+          className="mb-4"
+          endAdornment={
+            panelView === "threads" ? (
+              <button
+                type="button"
+                onClick={() => setCreateOpen(true)}
+                className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:text-card-fg/90"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {t("thread.add")}
+              </button>
+            ) : null
+          }
+        />
         {createOpen &&
           createPortal(
             <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4">
@@ -595,6 +635,11 @@ function ThreadWorkflowPanel({
           )}
         {loading ? (
           <div className="py-12 text-center text-body-sm text-ink/45">{t("memory_search.searching")}</div>
+        ) : panelView === "thread-chats" ? (
+          <ThreadChatList
+            sessions={threadChatSessions}
+            onSelectSession={onSelectSession}
+          />
         ) : threads.length === 0 ? (
           <div className="rounded-lg border border-dashed border-ink/15 py-12 text-center text-body-sm text-ink/40">
             {t("thread.empty")}
@@ -606,20 +651,62 @@ function ThreadWorkflowPanel({
                 key={thread.id}
                 thread={thread}
                 projectStages={projectStages}
-                assistants={assistants}
-                sessions={sessions}
-                linkedSessionKeys={linkedSessionKeys}
                 onThreadUpdated={onThreadUpdated}
                 onThreadDeleted={onThreadDeleted}
                 onStageAdded={onStageAdded}
                 onStageUpdated={onStageUpdated}
                 onStageDeleted={onStageDeleted}
-                onSelectSession={onSelectSession}
+                onShowSessions={(threadId) => {
+                  setSelectedThreadChatThreadId(threadId);
+                  setPanelView("thread-chats");
+                }}
                 onError={onError}
               />
             ))}
           </div>
         )}
+    </div>
+  );
+}
+
+function ThreadChatList({
+  sessions,
+  onSelectSession,
+}: {
+  sessions: SessionInfo[];
+  onSelectSession: (session: SessionInfo) => void;
+}) {
+  const { t } = useI18n();
+  if (sessions.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-ink/15 py-12 text-center text-body-sm text-ink/40">
+        {t("thread.no_chats")}
+      </div>
+    );
+  }
+  return (
+    <div className="grid gap-2">
+      {sessions.map((session) => (
+        <button
+          key={sessionIdentityKey(session)}
+          type="button"
+          onClick={() => onSelectSession(session)}
+          className="flex min-w-0 items-center gap-3 rounded-lg border border-ink/10 bg-surface-panel px-3 py-2 text-left transition hover:bg-ink/[0.035]"
+        >
+          <AgentGlyph agent={session.agent} className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-body-sm font-medium text-ink/75">
+              {session.title ?? session.firstUserMessage ?? t("list.no_user_message")}
+            </span>
+            <span className="mt-0.5 block text-caption text-ink/40">
+              {AGENT_LABEL[session.agent]} · {t("list.msgs", { count: session.messageCount })}
+            </span>
+          </span>
+          <span className="shrink-0 text-meta tabular-nums text-ink/35">
+            {formatShortRelativeTime(session.updatedAt ?? session.startedAt, t)}
+          </span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -675,83 +762,136 @@ function CreateThreadStageChip({
   );
 }
 
+function ThreadStageChip({
+  stage,
+  index,
+  active,
+  locked,
+  onSelect,
+  onRemove,
+}: {
+  stage: StageInfo;
+  index: number;
+  active: boolean;
+  locked: boolean;
+  onSelect: (stageId: string) => void | Promise<void>;
+  onRemove: () => void;
+}) {
+  const { t } = useI18n();
+  const { handleRef, isDragSource, isDropTarget, ref } = useSortable({
+    id: stage.id,
+    index,
+    group: `thread-stages-${stage.threadId}`,
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(0.2, 0, 0, 1)",
+      idle: true,
+    },
+  });
+  const label = projectStageLabel(stage, t);
+  const showActions = !locked && !active;
+
+  return (
+    <div
+      ref={ref}
+      className={
+        "inline-flex h-7 items-center gap-1.5 rounded-md border px-1.5 text-caption transition duration-150 " +
+        (isDragSource
+          ? "z-20 cursor-grabbing border-ink/30 bg-surface-panel shadow-lg "
+          : isDropTarget
+            ? "border-ink/35 bg-ink/12 shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.28)] "
+            : active
+              ? "border-brand/45 bg-brand/15 text-ink shadow-[inset_0_0_0_1px_rgb(var(--color-brand)/0.12)] "
+              : "border-ink/10 bg-surface-panel text-ink/50 hover:bg-ink/5 hover:text-ink/70 ") +
+        (locked ? "opacity-90 " : "")
+      }
+    >
+      {showActions && (
+        <button
+          ref={handleRef}
+          type="button"
+          className="cursor-grab touch-none rounded p-0.5 text-current/50 hover:bg-ink/5 active:cursor-grabbing"
+        >
+          <GripVertical className="h-3.5 w-3.5" />
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => void onSelect(stage.id)}
+        className="inline-flex min-w-0 items-center gap-1.5 text-left"
+      >
+        {projectStageIcon(stage)}
+        <span className="max-w-[140px] truncate">{label}</span>
+      </button>
+      {showActions && (
+        <button
+          type="button"
+          aria-label={t("delete.title")}
+          onClick={onRemove}
+          className="rounded p-0.5 text-current/35 hover:bg-status-error/10 hover:text-status-error"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ThreadCard({
   thread,
   projectStages,
-  assistants,
-  sessions,
-  linkedSessionKeys,
   onThreadUpdated,
   onThreadDeleted,
   onStageAdded,
   onStageUpdated,
   onStageDeleted,
-  onSelectSession,
+  onShowSessions,
   onError,
 }: {
   thread: ThreadInfo;
   projectStages: ProjectStageInfo[];
-  assistants: AssistantInfo[];
-  sessions: SessionInfo[];
-  linkedSessionKeys: Set<string>;
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
   onStageAdded: (stage: StageInfo) => void;
   onStageUpdated: (stage: StageInfo) => void;
   onStageDeleted: (threadId: string, stageId: string) => void;
-  onSelectSession: (session: SessionInfo) => void;
+  onShowSessions: (threadId: string) => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
   const [editing, setEditing] = useState(false);
+  const [expandedText, setExpandedText] = useState(false);
+  const [textOverflowing, setTextOverflowing] = useState(false);
   const [goal, setGoal] = useState(thread.goal);
   const [description, setDescription] = useState(thread.description ?? "");
-  const [newStageId, setNewStageId] = useState(projectStages[0]?.id ?? "");
-  const enabledAssistants = useMemo(
-    () => assistants.filter((assistant) => assistant.projectId === thread.projectId && assistant.enabled),
-    [assistants, thread.projectId],
-  );
-  const [newAssistantIds, setNewAssistantIds] = useState<string[]>(() => (enabledAssistants[0]?.id ? [enabledAssistants[0].id] : []));
-  const sessionByKey = useMemo(() => {
-    const map = new Map<string, SessionInfo>();
-    for (const session of sessions) map.set(sessionIdentityKey(session), session);
-    return map;
-  }, [sessions]);
-  const availableSessionOptions = useMemo(
-    () =>
-      sessions
-        .filter((session) => !linkedSessionKeys.has(sessionIdentityKey(session)))
-        .map((session) => ({
-          value: sessionIdentityKey(session),
-          label: session.title ?? session.firstUserMessage ?? t("list.no_user_message"),
-          icon: <AgentGlyph agent={session.agent} className="h-3.5 w-3.5" />,
-        })),
-    [linkedSessionKeys, sessions, t],
-  );
+  const [selectedStageIds, setSelectedStageIds] = useState<string[]>([]);
+  const goalRef = useRef<HTMLDivElement>(null);
+  const descriptionRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setGoal(thread.goal);
     setDescription(thread.description ?? "");
+    setExpandedText(false);
+    setTextOverflowing(false);
   }, [thread.description, thread.goal]);
 
-  useEffect(() => {
-    setNewAssistantIds((current) => {
-      const normalized = normalizeAssistantIds(current, enabledAssistants);
-      if (normalized.length > 0 || !enabledAssistants[0]?.id) return normalized;
-      return [enabledAssistants[0].id];
-    });
-  }, [enabledAssistants]);
-
-  useEffect(() => {
-    const availableStages = projectStages.filter(
-      (stage) =>
-        stage.enabled &&
-        stageAllowsThreadAddition(stage) &&
-        !thread.stages.some((threadStage) => threadStage.stageId === stage.id),
-    );
-    if (availableStages.some((stage) => stage.id === newStageId)) return;
-    setNewStageId(availableStages[0]?.id ?? "");
-  }, [newStageId, projectStages, thread.stages]);
+  useLayoutEffect(() => {
+    const measure = () => {
+      if (expandedText && textOverflowing) return;
+      const goalNode = goalRef.current;
+      const descriptionNode = descriptionRef.current;
+      const goalOverflow = goalNode ? goalNode.scrollWidth > goalNode.clientWidth + 1 : false;
+      const descriptionOverflow = descriptionNode
+        ? descriptionNode.scrollWidth > descriptionNode.clientWidth + 1 || Boolean(thread.description?.includes("\n"))
+        : false;
+      setTextOverflowing(goalOverflow || descriptionOverflow);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (goalRef.current) observer.observe(goalRef.current);
+    if (descriptionRef.current) observer.observe(descriptionRef.current);
+    return () => observer.disconnect();
+  }, [expandedText, textOverflowing, thread.description, thread.goal]);
 
   const save = async () => {
     try {
@@ -772,197 +912,191 @@ function ThreadCard({
   };
 
   const add = async () => {
-    const stage = projectStages.find((item) => item.id === newStageId);
-    if (!stage || (!stage.allowEmptyAssistants && newAssistantIds.length === 0)) return;
+    if (selectedStageIds.length === 0) return;
     try {
-      onStageAdded(await addThreadStage(thread.id, newStageId, newAssistantIds));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const linkSession = async (value: string) => {
-    const session = sessionByKey.get(value);
-    if (!session) return;
-    try {
-      onThreadUpdated(await linkThreadSession(thread.id, session.agent, session.id));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const unlinkSession = async (session: SessionInfo) => {
-    try {
-      onThreadUpdated(await unlinkThreadSession(thread.id, session.agent, session.id));
+      for (const stageId of selectedStageIds) {
+        onStageAdded(await addThreadStage(thread.id, stageId, []));
+      }
+      setSelectedStageIds([]);
     } catch (err) {
       onError(String(err));
     }
   };
 
   const currentStageId = thread.stageId ?? "";
-  const stageOptions = thread.stages.map((stage) => {
-    return {
-      value: stage.id,
-      label: projectStageLabel(stage, t),
-      description: stage.description ?? undefined,
-      icon: projectStageIcon(stage),
-    };
-  });
-  const availableProjectStageOptions = projectStages
-    .filter(
-      (stage) =>
-        stage.enabled &&
-        stageAllowsThreadAddition(stage) &&
-        !thread.stages.some((threadStage) => threadStage.stageId === stage.id),
-    )
-    .map((stage) => {
-      return {
+  const orderedThreadStages = useMemo(
+    () => [...thread.stages].sort((a, b) => a.order - b.order),
+    [thread.stages],
+  );
+  const activeStageIndex = orderedThreadStages.findIndex((stage) => stage.id === currentStageId);
+  const isStageLocked = (index: number) => activeStageIndex >= 0 && index <= activeStageIndex;
+  const handleThreadStageDragEnd = (event: DragEndEvent) => {
+    if (event.canceled) return;
+    const { source } = event.operation;
+    if (!isSortable(source)) return;
+    const from = source.initialIndex;
+    const to = source.index;
+    if (from === to || isStageLocked(from) || isStageLocked(to)) return;
+    const stage = orderedThreadStages[from];
+    const target = orderedThreadStages[to];
+    if (!stage || !target) return;
+    void (async () => {
+      try {
+        onStageUpdated(await updateThreadStage(stage.id, { order: target.order }));
+      } catch (err) {
+        onError(String(err));
+      }
+    })();
+  };
+  const removeThreadStage = async (stage: StageInfo, locked: boolean) => {
+    if (locked) return;
+    try {
+      await deleteThreadStage(stage.id);
+      onStageDeleted(stage.threadId, stage.id);
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+  const availableProjectStages = useMemo(
+    () =>
+      projectStages.filter(
+        (stage) =>
+          stage.enabled &&
+          stageAllowsThreadAddition(stage) &&
+          !thread.stages.some((threadStage) => threadStage.stageId === stage.id),
+      ),
+    [projectStages, thread.stages],
+  );
+  const availableProjectStageOptions = useMemo(
+    () =>
+      availableProjectStages.map((stage) => ({
         value: stage.id,
         label: projectStageLabel(stage, t),
-        description: stage.description ?? undefined,
-        suffix: stage.type === "builtin" ? t("stage.builtin") : t("stage.custom"),
         icon: projectStageIcon(stage),
-      };
-    });
-  const selectedNewStage = projectStages.find((stage) => stage.id === newStageId);
+      })),
+    [availableProjectStages, t],
+  );
+  const linkedSessionCount = thread.sessions.length;
+
+  useEffect(() => {
+    const availableIds = new Set(availableProjectStages.map((stage) => stage.id));
+    setSelectedStageIds((current) => current.filter((id) => availableIds.has(id)));
+  }, [availableProjectStages]);
 
   return (
     <section className="rounded-lg border border-ink/10 bg-surface-panel p-3 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        {editing ? (
-          <div className="grid min-w-0 flex-1 gap-2">
+      {editing ? (
+        <div className="grid gap-2">
+          <div className="flex items-start gap-3">
             <input
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
-              className="rounded-md border border-ink/10 bg-ink/5 px-2 py-1.5 text-body-sm text-ink outline-none"
+              className="min-w-0 flex-1 rounded-md border border-ink/10 bg-ink/5 px-2 py-1.5 text-body-sm text-ink outline-none"
             />
-            <textarea
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              rows={2}
-              className="resize-none rounded-md border border-ink/10 bg-ink/5 px-2 py-1.5 text-body-sm text-ink outline-none"
-            />
-          </div>
-        ) : (
-          <div className="min-w-0 flex-1">
-            <div className="text-body font-medium text-ink/85">{thread.goal}</div>
-            {thread.description && <div className="mt-1 whitespace-pre-wrap text-body-sm text-ink/50">{thread.description}</div>}
-          </div>
-        )}
-        <div className="flex shrink-0 items-center gap-1">
-          {editing ? (
-            <>
+            <div className="flex shrink-0 items-center gap-1">
               <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
               <button type="button" onClick={() => void save()} className="rounded bg-ink px-2 py-1 text-caption text-[rgb(var(--color-bg-panel))]">{t("project.save")}</button>
-            </>
-          ) : (
-            <>
-              <button type="button" onClick={() => setEditing(true)} className="rounded p-1.5 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
-              <button type="button" onClick={() => void remove()} className="rounded p-1.5 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-3.5 w-3.5" /></button>
-            </>
-          )}
-        </div>
-      </div>
-      <div className="mt-3 border-t border-ink/10 pt-3">
-        <div className="flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
-          <Link2 className="h-3.5 w-3.5 text-ink/30" />
-          <span>{t("kanban.sessions_count", { count: thread.sessions.length })}</span>
-          <InlineMenuSelect
-            value=""
-            options={availableSessionOptions}
-            onChange={(value) => void linkSession(value)}
-            ariaLabel={t("kanban.link_session")}
-            placeholder={t("kanban.link_session")}
-            minMenuWidth={220}
-            className="ml-auto h-6 max-w-[110px] border-r-0 px-1 py-0 text-caption text-ink/45 hover:text-ink"
-            emptyContent={t("kanban.no_unlinked_sessions")}
+            </div>
+          </div>
+          <textarea
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            rows={2}
+            className="min-w-0 resize-none rounded-md border border-ink/10 bg-ink/5 px-2 py-1.5 text-body-sm text-ink outline-none"
           />
         </div>
-        {thread.sessions.length > 0 && (
-          <div className="mt-2 flex flex-col gap-1">
-            {thread.sessions.map((session) => (
-              <div key={sessionIdentityKey(session)} className="group flex min-w-0 items-center gap-1.5 rounded bg-ink/[0.035] px-1.5 py-1">
-                <button
-                  type="button"
-                  onClick={() => onSelectSession(session)}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-caption text-ink/60 hover:text-ink"
-                >
-                  <AgentGlyph agent={session.agent} className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">{session.title ?? session.firstUserMessage ?? t("list.no_user_message")}</span>
-                </button>
-                <button
-                  type="button"
-                  aria-label={t("kanban.unlink_session")}
-                  onClick={() => void unlinkSession(session)}
-                  className="rounded p-0.5 text-ink/25 opacity-0 transition hover:bg-ink/8 hover:text-ink/65 group-hover:opacity-100"
-                >
-                  <Unlink className="h-3 w-3" />
-                </button>
-              </div>
-            ))}
+      ) : (
+        <div className="min-w-0">
+          <div className="flex items-start gap-3">
+            <div
+              ref={goalRef}
+              className={
+                "min-w-0 flex-1 text-body font-medium text-ink/85 " +
+                (expandedText ? "break-words" : "truncate")
+              }
+            >
+              <span>{thread.goal}</span>
+              <button
+                type="button"
+                onClick={() => onShowSessions(thread.id)}
+                className="ml-2 inline-flex items-center gap-1 rounded px-1 align-middle text-caption font-normal text-ink/40 transition hover:bg-ink/5 hover:text-ink/65"
+              >
+                <Link2 className="h-3.5 w-3.5 shrink-0" />
+                {t("thread.chats_count", { count: linkedSessionCount })}
+              </button>
+            </div>
+            <div className="flex shrink-0 items-center gap-1">
+              <button type="button" onClick={() => setEditing(true)} className="rounded p-1.5 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
+              <button type="button" onClick={() => void remove()} className="rounded p-1.5 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-3.5 w-3.5" /></button>
+            </div>
           </div>
-        )}
-      </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3">
-        <InlineMenuSelect
-          value={currentStageId}
-          options={stageOptions}
-          onChange={async (stageId) => {
-            try {
-              onThreadUpdated(await setThreadStage(thread.id, stageId));
-            } catch (err) {
-              onError(String(err));
-            }
-          }}
-          ariaLabel={t("thread.current_stage")}
-          placeholder={t("thread.current_stage")}
-          emptyContent={t("stage.empty")}
-          minMenuWidth={220}
-          className="max-w-[180px] border-r-0 rounded-md bg-ink/[0.05] px-2"
-        />
-        <InlineMenuSelect
-          value={newStageId}
-          options={availableProjectStageOptions}
-          onChange={setNewStageId}
-          ariaLabel={t("stage.type")}
-          placeholder={t("stage.type")}
-          emptyContent={t("stage.empty")}
-          minMenuWidth={160}
-          className="max-w-[140px] border-r-0 rounded-md bg-ink/[0.05] px-2"
-        />
-        <AssistantMultiPicker
-          assistantIds={newAssistantIds}
-          assistants={enabledAssistants}
-          onChange={setNewAssistantIds}
-          className="max-w-[200px] rounded-md bg-ink/[0.05] px-2"
-        />
-        <button
-          type="button"
-          disabled={!newStageId || (!selectedNewStage?.allowEmptyAssistants && newAssistantIds.length === 0)}
-          onClick={() => void add()}
-          className="inline-flex h-7 items-center gap-1 rounded-md bg-ink/80 px-2 text-caption font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {t("stage.add")}
-        </button>
-      </div>
-      {thread.stages.length > 0 && (
-        <div className="mt-3 grid gap-2">
-          {thread.stages.map((stage) => (
-            <StageRow
-              key={stage.id}
-              thread={thread}
-              stage={stage}
-              sessions={sessions}
-              linkedSessionKeys={linkedSessionKeys}
-              active={stage.id === thread.stageId}
-              onThreadUpdated={onThreadUpdated}
-              onStageUpdated={onStageUpdated}
-              onStageDeleted={onStageDeleted}
-              onSelectSession={onSelectSession}
-              onError={onError}
-            />
-          ))}
+          {thread.description && (
+            <div
+              ref={descriptionRef}
+              className={
+                "mt-1 text-body-sm text-ink/50 " +
+                (expandedText ? "whitespace-pre-wrap break-words" : "truncate")
+              }
+            >
+              {thread.description}
+            </div>
+          )}
+          {textOverflowing && (
+            <button
+              type="button"
+              onClick={() => setExpandedText((value) => !value)}
+              aria-expanded={expandedText}
+              className="mt-1 inline-flex h-5 items-center gap-1 rounded px-1.5 text-caption text-ink/40 transition hover:bg-ink/5 hover:text-ink/65"
+            >
+              <span>{t(expandedText ? "detail.collapse" : "detail.expand")}</span>
+              <ChevronDown className={"h-3 w-3 transition-transform " + (expandedText ? "rotate-180" : "")} />
+            </button>
+          )}
+          {(orderedThreadStages.length > 0 || availableProjectStages.length > 0) && (
+            <DragDropProvider onDragEnd={handleThreadStageDragEnd}>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {orderedThreadStages.map((stage, index) => {
+                  const locked = isStageLocked(index);
+                  return (
+                    <ThreadStageChip
+                      key={stage.id}
+                      stage={stage}
+                      index={index}
+                      active={stage.id === currentStageId}
+                      locked={locked}
+                      onSelect={async (stageId) => {
+                        if (stageId === currentStageId) return;
+                        try {
+                          onThreadUpdated(await setThreadStage(thread.id, stageId));
+                        } catch (err) {
+                          onError(String(err));
+                        }
+                      }}
+                      onRemove={() => void removeThreadStage(stage, locked)}
+                    />
+                  );
+                })}
+                {availableProjectStages.length > 0 && (
+                  <div className="inline-flex h-7 min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
+                    <MultiPicker
+                      selectedValues={selectedStageIds}
+                      options={availableProjectStageOptions}
+                      onChange={setSelectedStageIds}
+                      placeholder={t("stage.add")}
+                    />
+                    <button
+                      type="button"
+                      disabled={selectedStageIds.length === 0}
+                      onClick={() => void add()}
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center border-l border-ink/10 text-ink/45 transition hover:bg-ink/5 hover:text-ink/75 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink/45"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </DragDropProvider>
+          )}
         </div>
       )}
     </section>
@@ -1027,283 +1161,6 @@ function ProjectStagePicker({
           onClose={() => setShowCreate(false)}
           onError={onError}
         />
-      )}
-    </div>
-  );
-}
-
-function AssistantMultiPicker({
-  assistantIds,
-  assistants,
-  labelAssistants,
-  onChange,
-  className = "",
-}: {
-  assistantIds: string[];
-  assistants: AssistantInfo[];
-  labelAssistants?: AssistantInfo[];
-  onChange: (assistantIds: string[]) => void;
-  className?: string;
-}) {
-  const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const selected = new Set(assistantIds);
-  const labelSource = labelAssistants ?? assistants;
-  const selectedItems = selectedAssistants(assistantIds, labelSource);
-
-  const updatePosition = useCallback(() => {
-    if (!open) return;
-    const button = buttonRef.current;
-    if (!button) return;
-    const rect = button.getBoundingClientRect();
-    const width = Math.max(224, rect.width);
-    const maxLeft = Math.max(ASSISTANT_MENU_MARGIN, window.innerWidth - width - ASSISTANT_MENU_MARGIN);
-    const estimatedHeight = Math.min(
-      ASSISTANT_MENU_MAX_HEIGHT,
-      Math.max(40, assistants.length * 32 + 12),
-    );
-    const roomBelow = window.innerHeight - rect.bottom - ASSISTANT_MENU_MARGIN;
-    const top =
-      roomBelow >= estimatedHeight
-        ? rect.bottom + ASSISTANT_MENU_GAP
-        : rect.top - estimatedHeight - ASSISTANT_MENU_GAP;
-    const maxTop = Math.max(ASSISTANT_MENU_MARGIN, window.innerHeight - estimatedHeight - ASSISTANT_MENU_MARGIN);
-    setPos({
-      top: Math.round(Math.max(ASSISTANT_MENU_MARGIN, Math.min(top, maxTop))),
-      left: Math.round(Math.max(ASSISTANT_MENU_MARGIN, Math.min(rect.left, maxLeft))),
-      width,
-    });
-  }, [assistants.length, open]);
-
-  useLayoutEffect(() => {
-    updatePosition();
-  }, [updatePosition]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onMouseDown = (event: MouseEvent) => {
-      const target = event.target as Node | null;
-      if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open, updatePosition]);
-
-  const toggle = (assistantId: string) => {
-    if (selected.has(assistantId)) {
-      onChange(assistantIds.filter((id) => id !== assistantId));
-      return;
-    }
-    onChange([...assistantIds, assistantId]);
-  };
-
-  return (
-    <>
-      <button
-        ref={buttonRef}
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className={"inline-flex h-7 min-w-[150px] items-center gap-1 overflow-hidden border-r border-ink/10 text-caption text-ink/65 outline-none hover:text-ink " + className}
-      >
-        {selectedItems.length > 0 ? (
-          <span className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
-            {selectedItems.map((assistant) => (
-              <span key={assistant.id} className="inline-flex min-w-0 shrink items-center gap-1">
-                <AssistantBotIcon color={assistant.color} className="h-3.5 w-3.5 shrink-0 text-ink/40" />
-                <span className="truncate">{assistant.name}</span>
-              </span>
-            ))}
-          </span>
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-left">{t("assistant.empty")}</span>
-        )}
-      </button>
-      {open &&
-        pos &&
-        createPortal(
-          <div
-            ref={menuRef}
-            onWheel={(event) => event.stopPropagation()}
-            className="fixed overflow-hidden rounded-lg border border-ink/10 bg-surface-panel p-1.5 shadow-lg"
-            style={{
-              top: pos.top,
-              left: pos.left,
-              width: pos.width,
-              maxHeight: ASSISTANT_MENU_MAX_HEIGHT,
-              zIndex: 90,
-            }}
-          >
-            <ScrollArea className="max-h-[248px] overscroll-contain">
-              {assistants.length === 0 ? (
-                <div className="px-2 py-1.5 text-caption text-ink/40">{t("assistant.empty")}</div>
-              ) : (
-                assistants.map((assistant) => (
-                  <button
-                    key={assistant.id}
-                    type="button"
-                    onClick={() => toggle(assistant.id)}
-                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-caption text-ink/65 hover:bg-ink/5"
-                  >
-                    <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/15 bg-ink/5">
-                      {selected.has(assistant.id) && <Check className="h-3 w-3" />}
-                    </span>
-                    <AssistantBotIcon color={assistant.color} className="h-3.5 w-3.5 shrink-0 text-ink/40" />
-                    <span className="min-w-0 flex-1 truncate">{assistant.name}</span>
-                  </button>
-                ))
-              )}
-            </ScrollArea>
-          </div>,
-          document.body,
-        )}
-    </>
-  );
-}
-
-function StageRow({
-  thread,
-  stage,
-  sessions,
-  linkedSessionKeys,
-  active,
-  onThreadUpdated,
-  onStageUpdated,
-  onStageDeleted,
-  onSelectSession,
-  onError,
-}: {
-  thread: ThreadInfo;
-  stage: StageInfo;
-  sessions: SessionInfo[];
-  linkedSessionKeys: Set<string>;
-  active: boolean;
-  onThreadUpdated: (thread: ThreadInfo) => void;
-  onStageUpdated: (stage: StageInfo) => void;
-  onStageDeleted: (threadId: string, stageId: string) => void;
-  onSelectSession: (session: SessionInfo) => void;
-  onError: (error: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const sessionByKey = useMemo(() => {
-    const map = new Map<string, SessionInfo>();
-    for (const session of sessions) map.set(sessionIdentityKey(session), session);
-    return map;
-  }, [sessions]);
-  const availableSessionOptions = useMemo(
-    () =>
-      sessions
-        .filter((session) => !linkedSessionKeys.has(sessionIdentityKey(session)))
-        .map((session) => ({
-          value: sessionIdentityKey(session),
-          label: session.title ?? session.firstUserMessage ?? t("list.no_user_message"),
-          icon: <AgentGlyph agent={session.agent} className="h-3.5 w-3.5" />,
-        })),
-    [linkedSessionKeys, sessions, t],
-  );
-  const linkSession = async (value: string) => {
-    const session = sessionByKey.get(value);
-    if (!session) return;
-    try {
-      onStageUpdated(await linkStageSession(stage.id, session.agent, session.id));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const unlinkSession = async (session: SessionInfo) => {
-    try {
-      onStageUpdated(await unlinkStageSession(stage.id, session.agent, session.id));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  return (
-    <div className={"rounded-md border p-2 " + (active ? "border-ink/25 bg-ink/[0.055]" : "border-ink/10 bg-ink/[0.025]")}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={async () => {
-            try {
-              onThreadUpdated(await setThreadStage(thread.id, stage.id));
-            } catch (err) {
-              onError(String(err));
-            }
-          }}
-          className="inline-flex min-w-0 items-center gap-2 text-left text-body-sm font-medium text-ink/75 hover:text-ink"
-        >
-          {projectStageIcon(stage, "h-4 w-4 shrink-0 text-ink/45")}
-          <span>{stage.order + 1}.</span>
-          <span>{projectStageLabel(stage, t)}</span>
-          {active && <span className="rounded bg-ink/10 px-1.5 py-0.5 text-meta text-ink/50">{t("thread.active")}</span>}
-        </button>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await deleteThreadStage(stage.id);
-                onStageDeleted(stage.threadId, stage.id);
-              } catch (err) {
-                onError(String(err));
-              }
-            }}
-            className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
-        <InlineMenuSelect
-          value=""
-          options={availableSessionOptions}
-          onChange={(value) => void linkSession(value)}
-          ariaLabel={t("kanban.link_session")}
-          placeholder={t("kanban.link_session")}
-          minMenuWidth={220}
-          className="ml-auto h-6 max-w-[110px] border-r-0 px-1 py-0 text-caption text-ink/45 hover:text-ink"
-          emptyContent={t("kanban.no_unlinked_sessions")}
-        />
-      </div>
-      {stage.sessions.length > 0 && (
-        <div className="mt-2 flex flex-col gap-1">
-          {stage.sessions.map((session) => (
-            <div key={sessionIdentityKey(session)} className="group flex min-w-0 items-center gap-1.5 rounded bg-surface-panel px-1.5 py-1">
-              <button
-                type="button"
-                onClick={() => onSelectSession(session)}
-                className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-caption text-ink/60 hover:text-ink"
-              >
-                <AgentGlyph agent={session.agent} className="h-3.5 w-3.5 shrink-0" />
-                <span className="truncate">{session.title ?? session.firstUserMessage ?? t("list.no_user_message")}</span>
-              </button>
-              <button
-                type="button"
-                aria-label={t("kanban.unlink_session")}
-                onClick={() => void unlinkSession(session)}
-                className="rounded p-0.5 text-ink/25 opacity-0 transition hover:bg-ink/8 hover:text-ink/65 group-hover:opacity-100"
-              >
-                <Unlink className="h-3 w-3" />
-              </button>
-            </div>
-          ))}
-        </div>
       )}
     </div>
   );
