@@ -12,12 +12,13 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
 import { Bot, Check, Circle, Copy, GripVertical, Link2, ListChecks, LoaderCircle, Pencil, Plus, Trash2, Unlink, CircleSlash } from "lucide-react";
-import type { AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, ThreadInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createProjectStage, createThread, deleteAssistant, deleteProjectStage, deleteThread, deleteThreadStage, linkStageSession, linkThreadSession, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, unlinkStageSession, unlinkThreadSession, updateAssistant, updateProjectStage, updateProjectStageAssistants, updateThread } from "../api";
+import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
+import { AGENT_LABEL, addThreadStage, archiveProject, createProjectStage, createThread, deleteProjectStage, deleteThread, deleteThreadStage, linkStageSession, linkThreadSession, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, unlinkStageSession, unlinkThreadSession, updateProjectStage, updateProjectStageAssistants, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import InlineMenuSelect from "../components/InlineMenuSelect";
-import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
+import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import AssistantBotIcon from "../components/AssistantBotIcon";
+import AssistantCard from "../components/AssistantCard";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
@@ -187,14 +188,12 @@ function formatBytes(bytes: number): string {
 export function ProjectWorkbenchPage({
   project,
   sessions,
-  runtimeAgents,
   onProjectArchived,
   onSelectSession,
   onError,
 }: {
   project: ProjectInfo;
   sessions: SessionInfo[];
-  runtimeAgents: RuntimeAgentMetadata[];
   onProjectArchived: (projectId: string) => void;
   onSelectSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
@@ -355,7 +354,6 @@ export function ProjectWorkbenchPage({
               project={project}
               assistants={assistants}
               agents={agents}
-              runtimeAgents={runtimeAgents}
               loading={workflowLoading}
               onAssistantCreated={(assistant) => setAssistants((prev) => [...prev, assistant])}
               onAssistantUpdated={patchAssistant}
@@ -1424,7 +1422,6 @@ function AssistantManagementPanel({
   project,
   assistants,
   agents,
-  runtimeAgents,
   loading,
   compact = false,
   onAssistantCreated,
@@ -1435,7 +1432,6 @@ function AssistantManagementPanel({
   project: ProjectInfo;
   assistants: AssistantInfo[];
   agents: AgentInfo[];
-  runtimeAgents: RuntimeAgentMetadata[];
   loading: boolean;
   compact?: boolean;
   onAssistantCreated: (assistant: AssistantInfo) => void;
@@ -1444,186 +1440,61 @@ function AssistantManagementPanel({
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
-  const runtimeAgentOptions = useMemo(() => dbAgentsAsRuntimeAgents(agents), [agents]);
-  const firstRuntime = runtimeAgentOptions[0] ?? runtimeAgents[0] ?? null;
-  const [name, setName] = useState("");
-  const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(() => defaultAssistantAgent(firstRuntime));
-  const [systemPrompt, setSystemPrompt] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [tab, setTab] = useState<"builtin" | "custom">("builtin");
   const projectAssistants = assistants.filter((assistant) => assistant.projectId === project.id);
-
-  useEffect(() => {
-    if (runtimeAgentOptions.some((agent) => agent.agent === agentDraft.id)) return;
-    if (firstRuntime) {
-      setAgentDraft(defaultAssistantAgent(firstRuntime));
-    }
-  }, [agentDraft.id, firstRuntime, runtimeAgentOptions]);
-
-  const create = async () => {
-    const nextName = name.trim();
-    if (!nextName) return;
-    try {
-      const assistant = await createAssistant({
-        name: nextName,
-        agent: agentDraft,
-        systemPrompt,
-        type: "custom" satisfies AssistantType,
-        projectId: project.id,
-      });
-      onAssistantCreated(assistant);
-      setName("");
-      setSystemPrompt("");
-    } catch (err) {
-      onError(String(err));
-    }
-  };
+  const builtin = projectAssistants.filter((assistant) => assistant.type === "builtin");
+  const custom = projectAssistants.filter((assistant) => assistant.type === "custom");
+  const visible = tab === "builtin" ? builtin : custom;
 
   return (
     <aside className={compact ? "min-w-0 rounded-lg border border-ink/10 bg-surface-panel p-3" : "min-w-0"}>
-      <div className="mb-3 flex items-center gap-2 text-body-sm font-medium text-ink/70">
-        <Bot className="h-4 w-4 text-ink/45" />
-        {t("assistant.title")}
-      </div>
-      <div className="grid gap-2 rounded-lg border border-ink/10 bg-ink/[0.035] p-3">
-        <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("assistant.name")} className="rounded-md border border-ink/10 bg-surface-panel px-2 py-1.5 text-body-sm text-ink outline-none placeholder:text-ink/35" />
-        <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
-        {!compact && (
-          <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} placeholder={t("assistant.system_prompt")} rows={3} className="resize-none rounded-md border border-ink/10 bg-surface-panel px-2 py-1.5 text-body-sm text-ink outline-none placeholder:text-ink/35" />
-        )}
-        <button type="button" onClick={() => void create()} disabled={!name.trim()} className="inline-flex h-8 items-center justify-center gap-1 rounded-md bg-ink px-2 text-caption font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
-          <Plus className="h-3.5 w-3.5" />
-          {t("assistant.add")}
-        </button>
-      </div>
       {loading ? (
         <div className="py-8 text-center text-body-sm text-ink/40">{t("memory_search.searching")}</div>
-      ) : projectAssistants.length === 0 ? (
-        <div className="py-8 text-center text-body-sm text-ink/35">{t("assistant.empty")}</div>
       ) : (
-        <div className="mt-3 grid gap-2">
-          {projectAssistants.map((assistant) => (
-            <AssistantRow
-              key={assistant.id}
-              assistant={assistant}
-              agents={agents}
-              compact={compact}
-              onUpdated={onAssistantUpdated}
-              onDeleted={onAssistantDeleted}
-              onError={onError}
-            />
-          ))}
+        <div className="rounded-lg border border-card-border/[0.12] bg-card p-5">
+          <SegmentedTabs
+            items={[
+              { value: "builtin", label: t("assistant.builtin"), badge: builtin.length },
+              { value: "custom", label: t("assistant.custom"), badge: custom.length },
+            ]}
+            value={tab}
+            onChange={setTab}
+            variant="underline"
+            itemWidth={132}
+            itemHeight={34}
+            className="mb-4"
+            endAdornment={
+              <button type="button" onClick={() => setShowCreate(true)} className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90">
+                <Plus className="h-3.5 w-3.5" />
+                {t("assistant.add")}
+              </button>
+            }
+          />
+          <div className="grid gap-2">
+            {visible.map((assistant) => (
+              <AssistantCard
+                key={assistant.id}
+                assistant={assistant}
+                agents={agents}
+                onUpdated={onAssistantUpdated}
+                onDeleted={onAssistantDeleted}
+                onError={onError}
+              />
+            ))}
+            {visible.length === 0 && <div className="rounded-md border border-dashed border-ink/10 py-8 text-center text-body-sm text-ink/35">{t("assistant.empty")}</div>}
+          </div>
         </div>
+      )}
+      {showCreate && (
+        <CreateAssistantDialog
+          agents={agents}
+          projectId={project.id}
+          onCreated={onAssistantCreated}
+          onClose={() => setShowCreate(false)}
+          onError={onError}
+        />
       )}
     </aside>
-  );
-}
-
-function AssistantRow({
-  assistant,
-  agents,
-  compact,
-  onUpdated,
-  onDeleted,
-  onError,
-}: {
-  assistant: AssistantInfo;
-  agents: AgentInfo[];
-  compact: boolean;
-  onUpdated: (assistant: AssistantInfo) => void;
-  onDeleted: (assistantId: string) => void;
-  onError: (error: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const builtin = assistant.type === "builtin";
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(assistant.name);
-  const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(assistant.agent);
-  const [systemPrompt, setSystemPrompt] = useState(assistant.systemPrompt ?? "");
-
-  useEffect(() => {
-    setName(assistant.name);
-    setAgentDraft(assistant.agent);
-    setSystemPrompt(assistant.systemPrompt ?? "");
-  }, [assistant]);
-
-  const save = async () => {
-    try {
-      onUpdated(await updateAssistant(assistant.id, { name, agent: agentDraft, systemPrompt }));
-      setEditing(false);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const remove = async () => {
-    if (builtin) return;
-    try {
-      await deleteAssistant(assistant.id);
-      onDeleted(assistant.id);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const toggleEnabled = async () => {
-    try {
-      onUpdated(await updateAssistant(assistant.id, { enabled: !assistant.enabled }));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const updateAgent = async (agent: AssistantAgentInfo) => {
-    try {
-      onUpdated(await updateAssistant(assistant.id, { agent }));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  return (
-    <div className={`rounded-md border border-ink/10 bg-surface-panel p-2 ${assistant.enabled ? "" : "opacity-45"}`}>
-      {editing ? (
-        <div className="grid gap-2">
-          <input value={name} onChange={(event) => setName(event.target.value)} className="rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />
-          <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} compact={compact} />
-          {!compact && <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows={3} className="resize-none rounded border border-ink/10 bg-ink/5 px-2 py-1 text-body-sm text-ink outline-none" />}
-          <div className="flex justify-end gap-1">
-            <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
-            <button type="button" onClick={() => void save()} className="rounded bg-ink px-2 py-1 text-caption text-[rgb(var(--color-bg-panel))]">{t("project.save")}</button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <AssistantBotIcon color={assistant.color} className="h-4 w-4 shrink-0 text-ink/40" />
-              <div className="truncate text-body-sm font-medium text-ink/75">{assistant.name}</div>
-              <span className="shrink-0 rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">
-                {builtin ? t("assistant.builtin") : t("assistant.custom")}
-              </span>
-              <div className="min-w-[260px] flex-1">
-                <AssistantAgentSelector agent={assistant.agent} agents={agents} onChange={(agent) => void updateAgent(agent)} compact={compact} />
-              </div>
-            </div>
-            {assistant.systemPrompt && (
-              <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">
-                {assistant.systemPrompt}
-              </div>
-            )}
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <Tooltip content={t("assistant.edit")} placement="top">
-              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
-            </Tooltip>
-            <Tooltip content={assistant.enabled ? t("assistant.disable") : t("assistant.enable")} placement="top">
-              <button type="button" onClick={() => void toggleEnabled()} className="rounded p-1 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><CircleSlash className="h-3.5 w-3.5" /></button>
-            </Tooltip>
-            {!builtin && (
-              <button type="button" onClick={() => void remove()} className="rounded p-1 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-3.5 w-3.5" /></button>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
   );
 }

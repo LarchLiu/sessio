@@ -1,10 +1,11 @@
 import type { LucideIcon } from "lucide-react";
-import type { ComponentType } from "react";
+import type { ComponentType, ReactNode } from "react";
 
 export interface SegmentedTabItem<T extends string> {
   value: T;
   label: string;
   icon?: LucideIcon | ComponentType<{ className?: string }>;
+  badge?: string | number;
 }
 
 interface SegmentedTabsProps<T extends string> {
@@ -15,6 +16,8 @@ interface SegmentedTabsProps<T extends string> {
   itemHeight?: number;
   padding?: number;
   className?: string;
+  variant?: "segmented" | "underline";
+  endAdornment?: ReactNode;
 }
 
 export default function SegmentedTabs<T extends string>({
@@ -25,6 +28,8 @@ export default function SegmentedTabs<T extends string>({
   itemHeight = 26,
   padding = 2,
   className = "",
+  variant = "segmented",
+  endAdornment,
 }: SegmentedTabsProps<T>) {
   if (items.length === 0) return null;
 
@@ -32,6 +37,41 @@ export default function SegmentedTabs<T extends string>({
     0,
     items.findIndex((item) => item.value === value),
   );
+
+  if (variant === "underline") {
+    return (
+      <div className={"flex items-center border-b border-card-border/[0.12] " + className}>
+        <div className="flex min-w-0 items-center">
+          {items.map(({ value: itemValue, label, icon: Icon, badge }) => {
+            const active = itemValue === value;
+            return (
+              <button
+                key={itemValue}
+                type="button"
+                onClick={() => onChange(itemValue)}
+                style={{ width: itemWidth ? `${itemWidth}px` : undefined, height: `${itemHeight}px` }}
+                className={
+                  "relative inline-flex min-w-0 items-center justify-center gap-2 px-2 text-body-sm leading-none transition-colors duration-150 after:absolute after:bottom-[-1px] after:left-0 after:right-0 after:h-px " +
+                  (active
+                    ? "text-card-fg/90 after:bg-brand"
+                    : "text-card-muted/55 after:bg-transparent hover:text-card-fg/80")
+                }
+              >
+                {Icon ? <Icon className="h-3.5 w-3.5 shrink-0" /> : null}
+                <span className="min-w-0 truncate">{label}</span>
+                {badge !== undefined && (
+                  <span className="shrink-0 rounded-full bg-card-chip/[0.10] px-1.5 py-0.5 text-[11px] font-semibold leading-none text-card-chip-fg/65">
+                    {badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {endAdornment ? <div className="ml-auto flex items-center">{endAdornment}</div> : null}
+      </div>
+    );
+  }
 
   return (
     <div

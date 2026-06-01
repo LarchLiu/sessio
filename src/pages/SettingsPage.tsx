@@ -4,28 +4,27 @@ import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import AiGenerate2Icon from '@iconify-react/ri/ai-generate-2';
 import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
 import { ArrowLeft, Check, ChevronDown, Circle, GripVertical, Languages, Monitor, Moon, Pencil, Plus, RefreshCw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
-import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, RuntimeAgentOptionMetadata, StageAssistantInfo, WorkflowInfo } from "../api";
+import type { Agent, AgentInfo, AssistantInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, StageAssistantInfo, WorkflowInfo } from "../api";
 import {
-  createAssistant,
   createProjectStage,
   createWorkflow,
-  deleteAssistant,
   deleteProjectStage,
   listAgents,
   listAssistants,
   listWorkflowStages,
   listWorkflows,
-  updateAssistant,
   updateProjectStage,
   updateProjectStageAssistants,
   updateRuntimeAgentPreferences,
 } from "../api";
-import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
+import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import AssistantBotIcon from "../components/AssistantBotIcon";
+import AssistantCard from "../components/AssistantCard";
 import { AgentGlyph } from "../components/AgentIcon";
 import InlineMenuSelect from "../components/InlineMenuSelect";
 import { runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import ScrollArea from "../components/ScrollArea";
+import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { type Lang, useI18n } from "../i18n";
@@ -804,16 +803,8 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
   const [assistants, setAssistants] = useState<AssistantInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [name, setName] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState("");
-  const runtimeAgents = useMemo(() => dbAgentsAsRuntimeAgents(agents), [agents]);
-  const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(() => ({
-    id: "",
-    name: "",
-    model: "",
-    mode: "",
-    effort: "",
-  }));
+  const [tab, setTab] = useState<"builtin" | "custom">("builtin");
+  const [showCreate, setShowCreate] = useState(false);
 
   const reload = async () => {
     setLoading(true);
@@ -835,78 +826,53 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
     void reload();
   }, []);
 
-  useEffect(() => {
-    if (runtimeAgents.some((agent) => agent.agent === agentDraft.id)) return;
-    if (runtimeAgents[0]) setAgentDraft(defaultAssistantAgent(runtimeAgents[0]));
-  }, [agentDraft.id, runtimeAgents]);
-
-  const create = async () => {
-    const nextName = name.trim();
-    if (!nextName) return;
-    try {
-      const assistant = await createAssistant({
-        name: nextName,
-        agent: agentDraft,
-        systemPrompt,
-        type: "custom" satisfies AssistantType,
-      });
-      setAssistants((prev) => [assistant, ...prev]);
-      setName("");
-      setSystemPrompt("");
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
   const sharedAssistants = assistants.filter((assistant) => assistant.projectId === null && assistant.workflowId === null);
   const builtin = sharedAssistants.filter((assistant) => assistant.type === "builtin");
   const custom = sharedAssistants.filter((assistant) => assistant.type === "custom");
+  const visible = tab === "builtin" ? builtin : custom;
 
   return (
     <section>
-      <SettingsGroup title={t("assistant.builtin")}>
+      <div className="mb-3 flex items-center justify-between gap-4">
+        <SegmentedTabs
+          items={[
+            { value: "builtin", label: t("assistant.builtin") },
+            { value: "custom", label: t("assistant.custom") },
+          ]}
+          value={tab}
+          onChange={setTab}
+          itemWidth={96}
+          itemHeight={28}
+          padding={3}
+        />
+        <button type="button" onClick={() => setShowCreate(true)} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90">
+          <Plus className="h-4 w-4" />
+          {t("assistant.add")}
+        </button>
+      </div>
+      <div className="rounded-lg border border-card-border/[0.12] bg-card p-5">
         <div className="grid gap-2">
-          {builtin.map((assistant) => (
+          {visible.map((assistant) => (
             <AssistantCard
               key={assistant.id}
               assistant={assistant}
               agents={agents}
-              deletable={false}
-              onUpdated={(next) => setAssistants((prev) => prev.map((item) => item.id === next.id ? next : item))}
-              onDeleted={() => {}}
-              onError={onError}
-            />
-          ))}
-          {!loading && builtin.length === 0 && <EmptyState label={t("assistant.empty")} />}
-        </div>
-      </SettingsGroup>
-      <SettingsGroup title={t("assistant.add")}>
-        <div className="grid gap-2">
-          <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("assistant.name")} className={inputClassName} />
-          <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
-          <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} placeholder={t("assistant.system_prompt")} rows={4} className={textareaClassName} />
-          <button type="button" onClick={() => void create()} disabled={!name.trim() || !agentDraft.id} className="inline-flex h-8 w-fit items-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
-            <Plus className="h-4 w-4" />
-            {t("assistant.add")}
-          </button>
-        </div>
-      </SettingsGroup>
-      <SettingsGroup title={t("assistant.custom")}>
-        <div className="grid gap-2">
-          {custom.map((assistant) => (
-            <AssistantCard
-              key={assistant.id}
-              assistant={assistant}
-              agents={agents}
-              deletable
               onUpdated={(next) => setAssistants((prev) => prev.map((item) => item.id === next.id ? next : item))}
               onDeleted={(id) => setAssistants((prev) => prev.filter((item) => item.id !== id))}
               onError={onError}
             />
           ))}
-          {!loading && custom.length === 0 && <EmptyState label={t("assistant.empty")} />}
+          {!loading && visible.length === 0 && <EmptyState label={t("assistant.empty")} />}
         </div>
-      </SettingsGroup>
+      </div>
+      {showCreate && (
+        <CreateAssistantDialog
+          agents={agents}
+          onCreated={(assistant) => setAssistants((prev) => [assistant, ...prev])}
+          onClose={() => setShowCreate(false)}
+          onError={onError}
+        />
+      )}
     </section>
   );
 }
@@ -1346,118 +1312,6 @@ function WorkflowStageSwitch({
         {checked ? <Check className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
       </button>
     </Tooltip>
-  );
-}
-
-function AssistantCard({
-  assistant,
-  agents,
-  deletable,
-  onUpdated,
-  onDeleted,
-  onError,
-}: {
-  assistant: AssistantInfo;
-  agents: AgentInfo[];
-  deletable: boolean;
-  onUpdated: (assistant: AssistantInfo) => void;
-  onDeleted: (assistantId: string) => void;
-  onError: (error: string | null) => void;
-}) {
-  const { t } = useI18n();
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(assistant.name);
-  const [agentDraft, setAgentDraft] = useState<AssistantAgentInfo>(assistant.agent);
-  const [systemPrompt, setSystemPrompt] = useState(assistant.systemPrompt ?? "");
-  const [enabled, setEnabled] = useState(assistant.enabled);
-
-  useEffect(() => {
-    setName(assistant.name);
-    setAgentDraft(assistant.agent);
-    setSystemPrompt(assistant.systemPrompt ?? "");
-    setEnabled(assistant.enabled);
-  }, [assistant]);
-
-  const save = async () => {
-    try {
-      onUpdated(await updateAssistant(assistant.id, { name, agent: agentDraft, systemPrompt, enabled }));
-      setEditing(false);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const remove = async () => {
-    if (!deletable) return;
-    try {
-      await deleteAssistant(assistant.id);
-      onDeleted(assistant.id);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const toggleEnabled = async () => {
-    try {
-      onUpdated(await updateAssistant(assistant.id, { enabled: !assistant.enabled }));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  const updateAgent = async (agent: AssistantAgentInfo) => {
-    try {
-      onUpdated(await updateAssistant(assistant.id, { agent }));
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
-  return (
-    <div className={`rounded-lg border border-card-border/[0.12] bg-card p-3 ${assistant.enabled ? "" : "opacity-45"}`}>
-      {editing ? (
-        <div className="grid gap-2">
-          <input value={name} onChange={(event) => setName(event.target.value)} className={inputClassName} />
-          <AssistantAgentSelector agent={agentDraft} agents={agents} onChange={setAgentDraft} />
-          <div className="flex h-8 w-fit items-center gap-2 rounded-md border border-card-border/[0.12] bg-card-chip/[0.05] px-2 text-caption text-card-fg/75">
-            <SwitchControl checked={enabled} onToggle={() => setEnabled(!enabled)} />
-            {enabled ? t("stage.enabled") : t("stage.disabled")}
-          </div>
-          <textarea value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} rows={4} className={textareaClassName} />
-          <div className="flex justify-end gap-2">
-            <button type="button" onClick={() => setEditing(false)} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
-            <button type="button" onClick={() => void save()} className="rounded-md bg-ink px-3 py-1.5 text-body-sm text-[rgb(var(--color-bg-panel))]">{t("project.save")}</button>
-          </div>
-        </div>
-      ) : (
-        <div className="flex items-start gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <AssistantBotIcon color={assistant.color} className="h-4 w-4 shrink-0 text-card-icon/55" />
-              <span className="truncate text-body-sm font-medium text-card-fg/75">{assistant.name}</span>
-              <span className="shrink-0 rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{assistant.type}</span>
-              <div className="min-w-[280px] flex-1">
-                <AssistantAgentSelector agent={assistant.agent} agents={agents} onChange={(agent) => void updateAgent(agent)} />
-              </div>
-            </div>
-            {assistant.systemPrompt && <div className="mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-card-muted/60">{assistant.systemPrompt}</div>}
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <Tooltip content={t("assistant.edit")} placement="top">
-              <button type="button" onClick={() => setEditing(true)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><Pencil className="h-4 w-4" /></button>
-            </Tooltip>
-            <SwitchControl
-              checked={assistant.enabled}
-              tooltip={assistant.enabled ? t("assistant.disable") : t("assistant.enable")}
-              onToggle={() => void toggleEnabled()}
-            />
-            {deletable && (
-              <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
   );
 }
 
