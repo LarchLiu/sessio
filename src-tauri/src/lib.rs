@@ -423,6 +423,7 @@ fn create_assistant(
     name: String,
     agent: AssistantAgentInfo,
     system_prompt: Option<String>,
+    color: Option<String>,
     assistant_type: AssistantType,
     workflow_id: Option<String>,
     project_id: Option<String>,
@@ -434,6 +435,7 @@ fn create_assistant(
             &name,
             agent,
             system_prompt.as_deref(),
+            color.as_deref(),
             assistant_type,
             workflow_id,
             project_id.as_deref(),
@@ -450,17 +452,20 @@ fn update_assistant(
     name: Option<String>,
     agent: Option<AssistantAgentInfo>,
     system_prompt: Option<Option<String>>,
+    color: Option<Option<String>>,
     enabled: Option<bool>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<AssistantInfo, String> {
     let system_prompt_ref = system_prompt.as_ref().map(|value| value.as_deref());
+    let color_ref = color.as_ref().map(|value| value.as_deref());
     let assistant = store
         .update_assistant(
             &assistant_id,
             name.as_deref(),
             agent,
             system_prompt_ref,
+            color_ref,
             enabled,
         )
         .map_err(|e| e.to_string())?;
@@ -560,11 +565,18 @@ fn create_project_stage(
     workflow_id: Option<String>,
     name: String,
     description: Option<String>,
+    icon: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectStageInfo, String> {
     let stage = store
-        .create_project_stage(&project_id, workflow_id, &name, description.as_deref())
+        .create_project_stage(
+            &project_id,
+            workflow_id,
+            &name,
+            description.as_deref(),
+            icon.as_deref(),
+        )
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
@@ -575,6 +587,7 @@ fn update_project_stage(
     stage_id: String,
     name: Option<String>,
     description: Option<Option<String>>,
+    icon: Option<Option<String>>,
     order: Option<i64>,
     enabled: Option<bool>,
     allow_empty_assistants: Option<bool>,
@@ -582,11 +595,13 @@ fn update_project_stage(
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectStageInfo, String> {
     let description_ref = description.as_ref().map(|value| value.as_deref());
+    let icon_ref = icon.as_ref().map(|value| value.as_deref());
     let stage = store
         .update_project_stage(
             &stage_id,
             name.as_deref(),
             description_ref,
+            icon_ref,
             order,
             enabled,
             allow_empty_assistants,

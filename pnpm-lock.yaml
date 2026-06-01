@@ -17,6 +17,9 @@ importers:
       '@iconify-react/mynaui':
         specifier: ^1.0.2
         version: 1.0.2(react@19.2.6)
+      '@iconify-react/ri':
+        specifier: ^1.0.2
+        version: 1.0.2(react@19.2.6)
       '@lobehub/icons':
         specifier: ^5.8.0
         version: 5.8.0(@lobehub/ui@5.12.0)(@types/react@19.2.14)(antd@6.4.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
@@ -560,6 +563,9 @@ packages:
 
   '@iconify-react/mynaui@1.0.2':
     resolution: {integrity: sha512-yDGEc/MAljI814UIOHTRRLYgojgqhLY5rZc09qiSQkIix62ZCfNDlClHVrqSDNUn+CjjEexNd2aMGTzOhalEZA==}
+
+  '@iconify-react/ri@1.0.2':
+    resolution: {integrity: sha512-I8UugTKMp5AggweGbaQEUZhfncr0n34sBp5N1RNN6pQUWDVJNMyaBaFrvN+b/xZXAO2y2TOJdWOvb5i8POf91w==}
 
   '@iconify/css-react@1.0.2':
     resolution: {integrity: sha512-k33FKG4jGgd8odos+1HdSwCKZOQ5F1heQxwl/zDrA53tLg5IseDPMqsmQbcCEZ6E0Zgcrmfo4ceFSBmbuEvGtw==}
@@ -4033,6 +4039,12 @@ snapshots:
       - react
 
   '@iconify-react/mynaui@1.0.2(react@19.2.6)':
+    dependencies:
+      '@iconify/css-react': 1.0.2(react@19.2.6)
+    transitivePeerDependencies:
+      - react
+
+  '@iconify-react/ri@1.0.2(react@19.2.6)':
     dependencies:
       '@iconify/css-react': 1.0.2(react@19.2.6)
     transitivePeerDependencies:

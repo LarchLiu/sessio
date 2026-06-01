@@ -215,6 +215,7 @@ pub struct AssistantInfo {
     pub name: String,
     pub agent: AssistantAgentInfo,
     pub system_prompt: Option<String>,
+    pub color: Option<String>,
     #[serde(rename = "type")]
     pub assistant_type: AssistantType,
     pub workflow_id: Option<String>,
@@ -229,6 +230,7 @@ pub struct AssistantInfo {
 pub struct StageAssistantInfo {
     pub assistant_id: String,
     pub name: String,
+    pub color: Option<String>,
     pub agent: AssistantAgentInfo,
     pub order: i64,
 }
@@ -328,6 +330,7 @@ pub struct ProjectStageInfo {
     pub kind: Option<StageType>,
     pub name: Option<String>,
     pub description: Option<String>,
+    pub icon: Option<String>,
     pub order: i64,
     pub enabled: bool,
     pub allow_empty_assistants: bool,
@@ -353,6 +356,7 @@ pub struct StageInfo {
     pub kind: Option<StageType>,
     pub name: Option<String>,
     pub description: Option<String>,
+    pub icon: Option<String>,
     pub order: i64,
     pub enabled: bool,
     pub allow_empty_assistants: bool,

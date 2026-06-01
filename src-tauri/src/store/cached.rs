@@ -244,6 +244,7 @@ impl SessionStore for CachedStore {
         name: &str,
         agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
+        color: Option<&str>,
         assistant_type: AssistantType,
         workflow_id: Option<String>,
         project_id: Option<&str>,
@@ -252,6 +253,7 @@ impl SessionStore for CachedStore {
             name,
             agent,
             system_prompt,
+            color,
             assistant_type,
             workflow_id,
             project_id,
@@ -264,10 +266,11 @@ impl SessionStore for CachedStore {
         name: Option<&str>,
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
+        color: Option<Option<&str>>,
         enabled: Option<bool>,
     ) -> Result<AssistantInfo> {
         self.inner
-            .update_assistant(assistant_id, name, agent, system_prompt, enabled)
+            .update_assistant(assistant_id, name, agent, system_prompt, color, enabled)
     }
 
     fn delete_assistant(&self, assistant_id: &str) -> Result<()> {
@@ -316,9 +319,10 @@ impl SessionStore for CachedStore {
         workflow_id: Option<String>,
         name: &str,
         description: Option<&str>,
+        icon: Option<&str>,
     ) -> Result<ProjectStageInfo> {
         self.inner
-            .create_project_stage(project_id, workflow_id, name, description)
+            .create_project_stage(project_id, workflow_id, name, description, icon)
     }
 
     fn update_project_stage(
@@ -326,6 +330,7 @@ impl SessionStore for CachedStore {
         stage_id: &str,
         name: Option<&str>,
         description: Option<Option<&str>>,
+        icon: Option<Option<&str>>,
         order: Option<i64>,
         enabled: Option<bool>,
         allow_empty_assistants: Option<bool>,
@@ -334,6 +339,7 @@ impl SessionStore for CachedStore {
             stage_id,
             name,
             description,
+            icon,
             order,
             enabled,
             allow_empty_assistants,

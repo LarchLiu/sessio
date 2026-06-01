@@ -11,16 +11,18 @@ import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
-import { Bot, Check, Circle, Clapperboard, Copy, FilePenLine, GitBranch, GripVertical, Link2, ListChecks, LoaderCircle, Palette, Pencil, Plus, Scissors, SpellCheck, Trash2, Unlink, CircleDot, CircleGauge, CircleUserRound, CircleCheck, CircleSlash, type LucideIcon } from "lucide-react";
-import type { AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, StageType, ThreadInfo } from "../api";
+import { Bot, Check, Circle, Copy, GripVertical, Link2, ListChecks, LoaderCircle, Pencil, Plus, Trash2, Unlink, CircleSlash } from "lucide-react";
+import type { AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionInfo, StageInfo, ThreadInfo } from "../api";
 import { AGENT_LABEL, addThreadStage, archiveProject, createAssistant, createProjectStage, createThread, deleteAssistant, deleteProjectStage, deleteThread, deleteThreadStage, linkStageSession, linkThreadSession, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, unlinkStageSession, unlinkThreadSession, updateAssistant, updateProjectStage, updateProjectStageAssistants, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import InlineMenuSelect from "../components/InlineMenuSelect";
 import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
+import AssistantBotIcon from "../components/AssistantBotIcon";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
 import Tooltip from "../components/Tooltip";
+import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
 
 const ASSISTANT_MENU_GAP = 6;
 const ASSISTANT_MENU_MARGIN = 8;
@@ -28,40 +30,8 @@ const ASSISTANT_MENU_MAX_HEIGHT = 260;
 
 type ProjectView = "threads" | "stages" | "assistants";
 
-const STAGE_TYPE_ICONS: Record<StageType, LucideIcon> = {
-  research: CircleGauge,
-  plan: ListChecks,
-  develop: GitBranch,
-  build: GitBranch,
-  writing: FilePenLine,
-  editing: Scissors,
-  review: CircleDot,
-  proofreading: SpellCheck,
-  screenplay: FilePenLine,
-  storyboard: Clapperboard,
-  design: Palette,
-  production: Clapperboard,
-  human: CircleUserRound,
-  done: CircleCheck,
-};
-
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
-}
-
-function stageTypeLabel(type: StageType, t: (key: string) => string): string {
-  return t(`stage.type.${type}`);
-}
-
-function projectStageLabel(stage: ProjectStageInfo, t: (key: string) => string): string {
-  return stage.type === "builtin" && stage.kind
-    ? stageTypeLabel(stage.kind, t)
-    : stage.name || t("stage.custom");
-}
-
-function projectStageIcon(stage: ProjectStageInfo) {
-  const Icon = stage.kind ? STAGE_TYPE_ICONS[stage.kind] : ListChecks;
-  return <Icon className="h-3.5 w-3.5" />;
 }
 
 function stageAllowsThreadAddition(stage: ProjectStageInfo): boolean {
@@ -399,11 +369,10 @@ export function ProjectWorkbenchPage({
   );
 }
 
-function assistantNames(ids: string[], assistants: AssistantInfo[], t: (key: string) => string): string {
-  const names = ids
-    .map((id) => assistants.find((assistant) => assistant.id === id)?.name)
-    .filter((name): name is string => Boolean(name));
-  return names.length > 0 ? names.join(", ") : t("assistant.empty");
+function selectedAssistants(ids: string[], assistants: AssistantInfo[]): AssistantInfo[] {
+  return ids
+    .map((id) => assistants.find((assistant) => assistant.id === id))
+    .filter((assistant): assistant is AssistantInfo => Boolean(assistant));
 }
 
 function normalizeAssistantIds(ids: string[], assistants: AssistantInfo[]): string[] {
@@ -690,11 +659,11 @@ function CreateThreadStageChip({
         disabled={!selectable}
         className="inline-flex min-w-0 items-center gap-1.5 disabled:cursor-not-allowed"
       >
-        <span className="flex h-3.5 w-3.5 items-center justify-center rounded border border-current/25">
-          {selected && <Check className="h-3 w-3" />}
-        </span>
         {projectStageIcon(stage)}
         <span className="max-w-[140px] truncate">{label}</span>
+        <span className={"flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/55 bg-ink/8 text-ink/80"}>
+          {selected && <Check className="h-3 w-3" />}
+        </span>
       </button>
     </div>
   );
@@ -826,12 +795,11 @@ function ThreadCard({
 
   const currentStageId = thread.stageId ?? "";
   const stageOptions = thread.stages.map((stage) => {
-    const Icon = stage.kind ? STAGE_TYPE_ICONS[stage.kind] : ListChecks;
     return {
       value: stage.id,
-      label: stage.kind ? stageTypeLabel(stage.kind, t) : stage.name || t("stage.custom"),
+      label: projectStageLabel(stage, t),
       description: stage.description ?? undefined,
-      icon: <Icon className="h-3.5 w-3.5" />,
+      icon: projectStageIcon(stage),
     };
   });
   const availableProjectStageOptions = projectStages
@@ -1194,7 +1162,8 @@ function AssistantMultiPicker({
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const selected = new Set(assistantIds);
-  const label = assistantNames(assistantIds, labelAssistants ?? assistants, t);
+  const labelSource = labelAssistants ?? assistants;
+  const selectedItems = selectedAssistants(assistantIds, labelSource);
 
   const updatePosition = useCallback(() => {
     if (!open) return;
@@ -1260,10 +1229,20 @@ function AssistantMultiPicker({
         ref={buttonRef}
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className={"inline-flex h-7 min-w-[150px] items-center gap-1 border-r border-ink/10 text-caption text-ink/65 outline-none hover:text-ink " + className}
+        className={"inline-flex h-7 min-w-[150px] items-center gap-1 overflow-hidden border-r border-ink/10 text-caption text-ink/65 outline-none hover:text-ink " + className}
       >
-        <Bot className="h-3.5 w-3.5 shrink-0 text-ink/40" />
-        <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+        {selectedItems.length > 0 ? (
+          <span className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+            {selectedItems.map((assistant) => (
+              <span key={assistant.id} className="inline-flex min-w-0 shrink items-center gap-1">
+                <AssistantBotIcon color={assistant.color} className="h-3.5 w-3.5 shrink-0 text-ink/40" />
+                <span className="truncate">{assistant.name}</span>
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-left">{t("assistant.empty")}</span>
+        )}
       </button>
       {open &&
         pos &&
@@ -1294,6 +1273,7 @@ function AssistantMultiPicker({
                     <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/15 bg-ink/5">
                       {selected.has(assistant.id) && <Check className="h-3 w-3" />}
                     </span>
+                    <AssistantBotIcon color={assistant.color} className="h-3.5 w-3.5 shrink-0 text-ink/40" />
                     <span className="min-w-0 flex-1 truncate">{assistant.name}</span>
                   </button>
                 ))
@@ -1346,8 +1326,6 @@ function StageRow({
         })),
     [linkedSessionKeys, sessions, t],
   );
-  const Icon = stage.kind ? STAGE_TYPE_ICONS[stage.kind] : ListChecks;
-
   const linkSession = async (value: string) => {
     const session = sessionByKey.get(value);
     if (!session) return;
@@ -1380,9 +1358,9 @@ function StageRow({
           }}
           className="inline-flex min-w-0 items-center gap-2 text-left text-body-sm font-medium text-ink/75 hover:text-ink"
         >
-          <Icon className="h-4 w-4 shrink-0 text-ink/45" />
+          {projectStageIcon(stage, "h-4 w-4 shrink-0 text-ink/45")}
           <span>{stage.order + 1}.</span>
-          <span>{stage.kind ? stageTypeLabel(stage.kind, t) : stage.name || t("stage.custom")}</span>
+          <span>{projectStageLabel(stage, t)}</span>
           {active && <span className="rounded bg-ink/10 px-1.5 py-0.5 text-meta text-ink/50">{t("thread.active")}</span>}
         </button>
         <div className="flex items-center gap-1">
@@ -1594,6 +1572,14 @@ function AssistantRow({
     }
   };
 
+  const updateAgent = async (agent: AssistantAgentInfo) => {
+    try {
+      onUpdated(await updateAssistant(assistant.id, { agent }));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
   return (
     <div className={`rounded-md border border-ink/10 bg-surface-panel p-2 ${assistant.enabled ? "" : "opacity-45"}`}>
       {editing ? (
@@ -1608,15 +1594,16 @@ function AssistantRow({
         </div>
       ) : (
         <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-1.5">
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <AssistantBotIcon color={assistant.color} className="h-4 w-4 shrink-0 text-ink/40" />
               <div className="truncate text-body-sm font-medium text-ink/75">{assistant.name}</div>
               <span className="shrink-0 rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">
                 {builtin ? t("assistant.builtin") : t("assistant.custom")}
               </span>
-            </div>
-            <div className="mt-1 truncate text-caption text-ink/45">
-              {assistant.agent.name} · {assistant.agent.model} · {assistant.agent.mode} · {assistant.agent.effort}
+              <div className="min-w-[260px] flex-1">
+                <AssistantAgentSelector agent={assistant.agent} agents={agents} onChange={(agent) => void updateAgent(agent)} compact={compact} />
+              </div>
             </div>
             {assistant.systemPrompt && (
               <div className="mt-1 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-ink/50">

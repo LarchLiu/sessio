@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bot, Check, Circle, CircleDot, LoaderCircle } from "lucide-react";
+import { Check, Circle, CircleDot, LoaderCircle } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
 import type { Agent, ProjectInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
 import { AGENT_LABEL, listThreads } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
+import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
 import { sessionIdentityKey } from "../appUtils";
+import { projectStageIcon } from "../utils/stageDisplay";
 
 type StageState = "done" | "active" | "pending";
 
@@ -178,6 +180,7 @@ function ThreadStageStep({
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0">
               <h2 className="flex min-w-0 items-center gap-2 text-body font-medium text-ink/85">
+                {projectStageIcon(stage, "h-4 w-4 shrink-0 text-ink/45")}
                 <span className="truncate">{stageLabel(stage, t)}</span>
                 {state === "active" && (
                   <span className="shrink-0 rounded bg-ink/[0.08] px-1.5 py-0.5 text-meta font-normal text-ink/50">
@@ -211,6 +214,7 @@ function ThreadStageStep({
                   label={assistant.name}
                   agent={knownAgent(assistant.agent.id)}
                   agentLabel={assistant.agent.name}
+                  assistantColor={assistant.color}
                   sessions={stage.sessions.filter((session) => session.agent === assistant.agent.id)}
                   onSelectSession={onSelectSession}
                 />
@@ -257,12 +261,14 @@ function AssistantSessionLane({
   label,
   agent,
   agentLabel,
+  assistantColor,
   sessions,
   onSelectSession,
 }: {
   label: string;
   agent: Agent | null;
   agentLabel?: string;
+  assistantColor?: string | null;
   sessions: SessionInfo[];
   onSelectSession: (session: SessionInfo) => void;
 }) {
@@ -270,10 +276,12 @@ function AssistantSessionLane({
   return (
     <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
       <div className="flex min-w-0 items-center gap-2">
-        {agent ? (
+        {assistantColor ? (
+          <AssistantBotIcon color={assistantColor} className="h-4 w-4 shrink-0 text-ink/35" />
+        ) : agent ? (
           <AgentGlyph agent={agent} className="h-4 w-4 shrink-0" />
         ) : (
-          <Bot className="h-4 w-4 shrink-0 text-ink/35" />
+          <AssistantBotIcon className="h-4 w-4 shrink-0 text-ink/35" />
         )}
         <div className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink/75">{label}</div>
         {(agent || agentLabel) && (

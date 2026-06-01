@@ -149,6 +149,7 @@ pub trait SessionStore: Send + Sync {
         name: &str,
         agent: AssistantAgentInfo,
         system_prompt: Option<&str>,
+        color: Option<&str>,
         assistant_type: AssistantType,
         workflow_id: Option<String>,
         project_id: Option<&str>,
@@ -159,6 +160,7 @@ pub trait SessionStore: Send + Sync {
         name: Option<&str>,
         agent: Option<AssistantAgentInfo>,
         system_prompt: Option<Option<&str>>,
+        color: Option<Option<&str>>,
         enabled: Option<bool>,
     ) -> Result<AssistantInfo>;
     fn delete_assistant(&self, assistant_id: &str) -> Result<()>;
@@ -185,12 +187,14 @@ pub trait SessionStore: Send + Sync {
         workflow_id: Option<String>,
         name: &str,
         description: Option<&str>,
+        icon: Option<&str>,
     ) -> Result<ProjectStageInfo>;
     fn update_project_stage(
         &self,
         stage_id: &str,
         name: Option<&str>,
         description: Option<Option<&str>>,
+        icon: Option<Option<&str>>,
         order: Option<i64>,
         enabled: Option<bool>,
         allow_empty_assistants: Option<bool>,

@@ -1,7 +1,9 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { ArrowLeft, Bot, Check, ChevronDown, Circle, GripVertical, Languages, ListChecks, Monitor, Moon, Pencil, Plus, RefreshCw, Search, Settings, Sun, Trash2, Workflow } from "lucide-react";
+import AiAgentLineIcon from '@iconify-react/ri/ai-agent-line';
+import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
+import { ArrowLeft, Check, ChevronDown, Circle, GripVertical, Languages, Monitor, Moon, Pencil, Plus, RefreshCw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
 import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, RuntimeAgentOptionMetadata, StageAssistantInfo, WorkflowInfo } from "../api";
 import {
   createAssistant,
@@ -19,14 +21,18 @@ import {
   updateRuntimeAgentPreferences,
 } from "../api";
 import AssistantAgentSelector, { dbAgentsAsRuntimeAgents, defaultAssistantAgent } from "../components/AssistantAgentSelector";
+import AssistantBotIcon from "../components/AssistantBotIcon";
 import { AgentGlyph } from "../components/AgentIcon";
 import InlineMenuSelect from "../components/InlineMenuSelect";
-import { runtimePermissionModeIcon, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
+import { runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import ScrollArea from "../components/ScrollArea";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
+import { projectStageIcon } from "../utils/stageDisplay";
+import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
+import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
 type SettingsSection = "general" | "agents" | "assistants" | "workflows";
 
@@ -55,9 +61,9 @@ export default function SettingsPage({
   const [section, setSection] = useState<SettingsSection>("general");
 
   const navItems = [
-    { id: "general" as const, label: t("settings.general"), icon: Settings },
-    { id: "agents" as const, label: t("agent.title"), icon: Bot },
-    { id: "assistants" as const, label: t("assistant.title"), icon: Bot },
+    { id: "general" as const, label: t("settings.general"), icon: Settings2 },
+    { id: "agents" as const, label: t("agent.title"), icon: AiAgentLineIcon },
+    { id: "assistants" as const, label: t("assistant.title"), icon: Robot3LineIcon },
     { id: "workflows" as const, label: t("settings.workflows"), icon: Workflow },
   ];
   const sectionTitle = navItems.find((item) => item.id === section)?.label ?? t("settings.general");
@@ -349,13 +355,46 @@ function AgentListRow({
       <button type="button" onClick={() => onSelect(agent.id)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <AgentGlyph agent={runtimeAgentId(agent.id)} className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-medium text-card-fg/78">{agent.displayName}</span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate font-medium text-card-fg/78">{agent.displayName}</span>
+            {agent.transport === "acp" && <AcpLogo className="h-2 w-auto shrink-0 opacity-70" />}
+          </span>
           <span className="mt-0.5 block truncate text-meta text-card-muted/45">{agent.model || t("agent.no_model")}</span>
         </span>
         <span className={"h-1.5 w-1.5 rounded-full " + (agent.enabled ? "bg-ink/70" : "bg-ink/20")} />
       </button>
     </div>
   );
+}
+
+function AcpLogo({ className }: { className?: string }) {
+  const theme = useEffectiveThemeType();
+  return (
+    <Tooltip content="ACP" placement="top">
+      <span className="inline-flex shrink-0 items-center">
+        <img src={theme === "light" ? acpMarkBlackUrl : acpMarkWhiteUrl} alt="ACP" className={className} draggable={false} />
+      </span>
+    </Tooltip>
+  );
+}
+
+function useEffectiveThemeType(): "light" | "dark" {
+  const [themeType, setThemeType] = useState<"light" | "dark">(() =>
+    document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark",
+  );
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const update = () => {
+      setThemeType(root.getAttribute("data-theme") === "light" ? "light" : "dark");
+    };
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
+
+  return themeType;
 }
 
 function AgentEditor({
@@ -489,8 +528,11 @@ function AgentEditor({
             <AgentGlyph agent={runtimeAgent} className="h-5 w-5" />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 items-center gap-2">
-              <h2 className="truncate text-title font-semibold text-card-fg/88">{agent.displayName}</h2>
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h2 className="flex min-w-0 items-center gap-2 text-title font-semibold text-card-fg/88">
+                <span className="truncate">{agent.displayName}</span>
+                {agent.transport === "acp" && <AcpLogo className="h-2.5 w-auto shrink-0 opacity-75" />}
+              </h2>
               <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{agent.type}</span>
               <span className={"rounded px-1.5 py-0.5 text-meta " + (agent.enabled ? "bg-ink/[0.09] text-ink/70" : "bg-card-chip/8 text-card-muted/50")}>
                 {agent.enabled ? t("agent.active") : t("agent.disabled")}
@@ -1149,6 +1191,8 @@ function StageTemplateRow({
   const assistantOptions = assistants.map((assistant) => ({
     value: assistant.id,
     label: assistant.name,
+    color: assistant.color,
+    agentId: assistant.agent.id,
     description: `${assistant.agent.name} · ${assistant.agent.model}`,
   }));
 
@@ -1216,7 +1260,7 @@ function StageTemplateRow({
         </button>
         <button type="button" onClick={() => setExpanded((value) => !value)} className="min-w-0 flex-1 text-left">
           <div className="flex min-w-0 items-center gap-2">
-            <ListChecks className="h-4 w-4 shrink-0 text-card-icon/55" />
+            {projectStageIcon(stage, "h-4 w-4 shrink-0 text-card-icon/55")}
             <span className="truncate text-body-sm font-medium text-card-fg/85">{label}</span>
             <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{stage.type}</span>
           </div>
@@ -1262,6 +1306,7 @@ function StageTemplateRow({
                 return (
                   <button key={option.value} type="button" onClick={() => void toggleAssistant(option.value)} className={"inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " + (active ? "border-card-border/[0.22] bg-surface text-card-fg/92" : "border-card-border/[0.10] bg-card-chip/[0.06] text-card-muted/60 hover:border-card-border/[0.16] hover:bg-card-chip/[0.08] hover:text-card-fg")}>
                     {active && <Check className="h-3 w-3 shrink-0" />}
+                    <AssistantBotIcon color={option.color} className="h-3.5 w-3.5 shrink-0" />
                     {option.label}
                   </button>
                 );
@@ -1361,6 +1406,14 @@ function AssistantCard({
     }
   };
 
+  const updateAgent = async (agent: AssistantAgentInfo) => {
+    try {
+      onUpdated(await updateAssistant(assistant.id, { agent }));
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
   return (
     <div className={`rounded-lg border border-card-border/[0.12] bg-card p-3 ${assistant.enabled ? "" : "opacity-45"}`}>
       {editing ? (
@@ -1381,10 +1434,12 @@ function AssistantCard({
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 items-center gap-2">
-              <Bot className="h-4 w-4 shrink-0 text-card-icon/55" />
+              <AssistantBotIcon color={assistant.color} className="h-4 w-4 shrink-0 text-card-icon/55" />
               <span className="truncate text-body-sm font-medium text-card-fg/75">{assistant.name}</span>
-              <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{assistant.type}</span>
-              <AssistantAgentPill agent={assistant.agent} agents={agents} />
+              <span className="shrink-0 rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{assistant.type}</span>
+              <div className="min-w-[280px] flex-1">
+                <AssistantAgentSelector agent={assistant.agent} agents={agents} onChange={(agent) => void updateAgent(agent)} />
+              </div>
             </div>
             {assistant.systemPrompt && <div className="mt-2 line-clamp-3 whitespace-pre-wrap text-caption leading-relaxed text-card-muted/60">{assistant.systemPrompt}</div>}
           </div>
@@ -1407,31 +1462,6 @@ function AssistantCard({
   );
 }
 
-function AssistantAgentPill({ agent, agents }: { agent: AssistantAgentInfo; agents: AgentInfo[] }) {
-  const agentId = (agent.id === "claude" || agent.id === "gemini" ? agent.id : "codex") as Agent;
-  const dbAgent = agents.find((item) => item.id === agent.id);
-  const selectedModel = dbAgent?.models.find((option) => option.value === agent.model);
-  const selectedEffort = dbAgent?.efforts.find((option) => option.value === agent.effort);
-  const selectedMode = dbAgent?.permissionModes.find((option) => option.value === agent.mode);
-  const modelName = selectedModel?.displayName || selectedModel?.label || agent.model;
-  const effortName = selectedEffort?.displayName || selectedEffort?.label || agent.effort;
-  const modeName = selectedMode?.displayName || selectedMode?.label || agent.mode;
-  return (
-    <span className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-caption text-ink/60">
-      <span className="inline-flex h-7 min-w-0 max-w-[260px] items-center gap-1.5 rounded-md px-1.5 py-1">
-        <AgentGlyph agent={agentId} className="h-3.5 w-3.5 shrink-0" />
-        <span className="truncate">{modelName}</span>
-        {effortName && <span className="shrink-0 text-ink/38">{effortName}</span>}
-      </span>
-      <span className="text-ink/35">·</span>
-      <span className="inline-flex h-7 min-w-0 max-w-[190px] items-center gap-1.5 rounded-md px-1.5 py-1">
-        {runtimePermissionModeIcon(agentId, agent.mode)}
-        <span className="truncate">{modeName}</span>
-      </span>
-    </span>
-  );
-}
-
 function AssistantSummary({ assistants }: { assistants: StageAssistantInfo[] }) {
   const { t } = useI18n();
   if (assistants.length === 0) {
@@ -1441,7 +1471,7 @@ function AssistantSummary({ assistants }: { assistants: StageAssistantInfo[] }) 
     <div className="mt-2 flex flex-wrap gap-1.5">
       {assistants.map((assistant) => (
         <span key={assistant.assistantId} className="inline-flex h-7 items-center rounded-md border border-card-border/[0.22] bg-surface px-2 text-caption text-card-fg/92">
-          <Bot className="mr-1.5 h-3 w-3 shrink-0" />
+          <AssistantBotIcon color={assistant.color} className="mr-1.5 h-3.5 w-3.5 shrink-0" />
           {assistant.name}
         </span>
       ))}

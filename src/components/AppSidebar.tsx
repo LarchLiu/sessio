@@ -12,12 +12,12 @@ import {
   FolderOpen,
   FolderPlus,
   Key,
+  Kanban,
   LoaderCircle,
   MailPlus,
   MessagesSquare,
   PanelLeftClose,
   Settings,
-  SquareKanban,
   SquarePen,
   X,
 } from "lucide-react";
@@ -763,7 +763,6 @@ function ProjectSidebarGroup({
         ref={projectButtonRef}
         type="button"
         onClick={onSelectProject}
-        title={project.path ?? project.label}
         className={
           "group flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition " +
           (projectActive ? "bg-ink/10 text-ink" : "text-ink/70 hover:bg-ink/5 hover:text-ink")
@@ -776,7 +775,7 @@ function ProjectSidebarGroup({
             (expanded ? "scale-105" : "scale-100")
           }
         />
-        <span className="min-w-0 flex-1 truncate text-body">{project.label}</span>
+        <span className="min-w-0 flex-1 truncate text-body" title={project.path ?? project.label}>{project.label}</span>
         <span className="text-meta text-ink/40 tabular-nums group-hover:hidden">
           {displayCount}
         </span>
@@ -818,7 +817,7 @@ function ProjectSidebarGroup({
               }}
               className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
             >
-              <SquareKanban className="h-3.5 w-3.5" />
+              <Kanban className="h-3.5 w-3.5" />
             </span>
           </Tooltip>
           <Tooltip content={t("sidebar.new_chat")} placement="top">

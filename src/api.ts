@@ -65,6 +65,7 @@ export interface AssistantInfo {
   name: string;
   agent: AssistantAgentInfo;
   systemPrompt: string | null;
+  color: string | null;
   type: AssistantType;
   workflowId: string | null;
   projectId: string | null;
@@ -76,6 +77,7 @@ export interface AssistantInfo {
 export interface StageAssistantInfo {
   assistantId: string;
   name: string;
+  color: string | null;
   agent: AssistantAgentInfo;
   order: number;
 }
@@ -110,6 +112,7 @@ export interface StageInfo {
   kind: StageType | null;
   name: string | null;
   description: string | null;
+  icon: string | null;
   order: number;
   enabled: boolean;
   allowEmptyAssistants: boolean;
@@ -126,6 +129,7 @@ export interface ProjectStageInfo {
   kind: StageType | null;
   name: string | null;
   description: string | null;
+  icon: string | null;
   order: number;
   enabled: boolean;
   allowEmptyAssistants: boolean;
@@ -716,6 +720,7 @@ export async function createAssistant(input: {
   agent: AssistantAgentInfo;
   name: string;
   systemPrompt?: string | null;
+  color?: string | null;
   type: AssistantType;
   workflowId?: string | null;
   projectId?: string | null;
@@ -724,6 +729,7 @@ export async function createAssistant(input: {
     name: input.name,
     agent: input.agent,
     systemPrompt: input.systemPrompt ?? null,
+    color: input.color ?? null,
     assistantType: input.type,
     workflowId: input.workflowId ?? null,
     projectId: input.projectId ?? null,
@@ -736,6 +742,7 @@ export async function updateAssistant(
     name?: string | null;
     agent?: AssistantAgentInfo | null;
     systemPrompt?: string | null;
+    color?: string | null;
     enabled?: boolean | null;
   },
 ): Promise<AssistantInfo> {
@@ -744,6 +751,12 @@ export async function updateAssistant(
     name: patch.name ?? null,
     agent: patch.agent ?? null,
     enabled: patch.enabled ?? null,
+    color:
+      Object.prototype.hasOwnProperty.call(patch, "color")
+        ? patch.color === null
+          ? null
+          : patch.color
+        : undefined,
     systemPrompt:
       Object.prototype.hasOwnProperty.call(patch, "systemPrompt")
         ? patch.systemPrompt === null
@@ -807,12 +820,14 @@ export async function createProjectStage(
   name: string,
   description?: string | null,
   workflowId?: string | null,
+  icon?: string | null,
 ): Promise<ProjectStageInfo> {
   return invoke<ProjectStageInfo>("create_project_stage", {
     projectId,
     workflowId: workflowId ?? null,
     name,
     description: description ?? null,
+    icon: icon ?? null,
   });
 }
 
@@ -821,6 +836,7 @@ export async function updateProjectStage(
   patch: {
     name?: string | null;
     description?: string | null;
+    icon?: string | null;
     order?: number | null;
     enabled?: boolean | null;
     allowEmptyAssistants?: boolean | null;
@@ -830,12 +846,14 @@ export async function updateProjectStage(
     stageId: string;
     name?: string | null;
     description?: string | null;
+    icon?: string | null;
     order?: number | null;
     enabled?: boolean | null;
     allowEmptyAssistants?: boolean | null;
   } = { stageId };
   if ("name" in patch) payload.name = patch.name ?? null;
   if ("description" in patch) payload.description = patch.description ?? null;
+  if ("icon" in patch) payload.icon = patch.icon ?? null;
   if ("order" in patch) payload.order = patch.order ?? null;
   if ("enabled" in patch) payload.enabled = patch.enabled ?? null;
   if ("allowEmptyAssistants" in patch) payload.allowEmptyAssistants = patch.allowEmptyAssistants ?? null;
