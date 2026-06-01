@@ -20,7 +20,7 @@ export default function SwitchControl({
       className={
         "relative h-5 w-9 rounded-full border transition " +
         (checked
-          ? "border-card-border/[0.18] bg-card-chip/[0.22]"
+          ? "border-brand/45 bg-brand/20"
           : "border-card-border/[0.12] bg-card-panel") +
         (className ? ` ${className}` : "")
       }
@@ -29,7 +29,7 @@ export default function SwitchControl({
         className={
           "absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full transition " +
           (checked
-            ? "left-[18px] bg-card-fg/75"
+            ? "left-[18px] bg-brand"
             : "left-1 bg-card-subtle/45")
         }
       />

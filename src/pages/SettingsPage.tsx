@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import AiAgentLineIcon from '@iconify-react/ri/ai-agent-line';
+import AiGenerate2Icon from '@iconify-react/ri/ai-generate-2';
 import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
 import { ArrowLeft, Check, ChevronDown, Circle, GripVertical, Languages, Monitor, Moon, Pencil, Plus, RefreshCw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
 import type { Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, ProjectStageInfo, RuntimeAgentOptionMetadata, StageAssistantInfo, WorkflowInfo } from "../api";
@@ -62,7 +62,7 @@ export default function SettingsPage({
 
   const navItems = [
     { id: "general" as const, label: t("settings.general"), icon: Settings2 },
-    { id: "agents" as const, label: t("agent.title"), icon: AiAgentLineIcon },
+    { id: "agents" as const, label: t("agent.title"), icon: AiGenerate2Icon },
     { id: "assistants" as const, label: t("assistant.title"), icon: Robot3LineIcon },
     { id: "workflows" as const, label: t("settings.workflows"), icon: Workflow },
   ];
@@ -361,7 +361,7 @@ function AgentListRow({
           </span>
           <span className="mt-0.5 block truncate text-meta text-card-muted/45">{agent.model || t("agent.no_model")}</span>
         </span>
-        <span className={"h-1.5 w-1.5 rounded-full " + (agent.enabled ? "bg-ink/70" : "bg-ink/20")} />
+        <span className={"h-1.5 w-1.5 rounded-full " + (agent.enabled ? "bg-brand" : "bg-ink/20")} />
       </button>
     </div>
   );
@@ -1269,25 +1269,24 @@ function StageTemplateRow({
         </button>
         <div className="flex shrink-0 items-center gap-1">
           <>
-            <WorkflowStageSwitch
-              checked={stage.enabled}
-              tooltip={stage.enabled ? t("stage.enabled") : t("stage.disabled")}
-              onToggle={() => void toggleEnabled()}
-              variant="track"
-            />
-            <WorkflowStageSwitch
-              checked={stage.allowEmptyAssistants}
-              tooltip={t("stage.allow_empty_assistants")}
-              onToggle={() => void toggleAllowEmptyAssistants()}
-              variant="icon"
-            />
             <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4 rotate-180" /></button>
             <button type="button" onClick={() => void onMove(stage, 1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4" /></button>
             {custom && (
               <button type="button" onClick={() => void remove()} className="rounded p-1 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-4 w-4" /></button>
             )}
           </>
-          <button type="button" onClick={() => setExpanded((value) => !value)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><Pencil className="h-4 w-4" /></button>
+          <WorkflowStageSwitch
+            checked={stage.allowEmptyAssistants}
+            tooltip={t("stage.allow_empty_assistants")}
+            onToggle={() => void toggleAllowEmptyAssistants()}
+            variant="icon"
+          />
+          <WorkflowStageSwitch
+            checked={stage.enabled}
+            tooltip={stage.enabled ? t("stage.enabled") : t("stage.disabled")}
+            onToggle={() => void toggleEnabled()}
+            variant="track"
+          />
         </div>
       </div>
       {expanded && (

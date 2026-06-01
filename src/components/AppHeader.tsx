@@ -127,7 +127,7 @@ export default function AppHeader({
           <HeaderEntityTitle title={entityTitle} />
         )}
       </div>
-      <div data-tauri-drag-region="false" className="flex h-full items-center justify-self-center">
+      <div data-tauri-drag-region className="flex h-full items-center justify-self-center">
         {contextTitle ? (
           <HeaderContextTitle title={contextTitle} project={projectContext} />
         ) : null}
@@ -171,12 +171,12 @@ function HeaderEntityTitle({
       data-tauri-drag-region
       className="flex min-w-0 max-w-[min(42vw,620px)] items-center gap-2"
     >
-      <Icon className="h-4 w-4 shrink-0 text-ink/45" />
-      <span className="min-w-0 truncate text-body font-medium leading-none text-ink/85">
+      <Icon data-tauri-drag-region className="h-4 w-4 shrink-0 pointer-events-none text-ink/45" />
+      <span data-tauri-drag-region className="min-w-0 truncate text-body font-medium leading-none text-ink/85">
         {title.title}
       </span>
       {title.pill && (
-        <span className="shrink-0 rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-2 py-0.5 text-meta uppercase leading-none text-card-fg/55">
+        <span data-tauri-drag-region className="shrink-0 rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-2 py-0.5 text-meta uppercase leading-none text-card-fg/55">
           {title.pill}
         </span>
       )}
@@ -197,17 +197,17 @@ function HeaderContextTitle({
       data-tauri-drag-region
       className="inline-flex h-6 max-w-[min(52vw,760px)] items-center gap-2 text-body-sm font-medium leading-none text-ink/50"
     >
-      <span className="inline-flex min-w-0 items-center gap-2 uppercase tracking-[0.12em]">
-        <Icon className="h-4 w-4 shrink-0" />
-        <span className="truncate">{title.label}</span>
+      <span data-tauri-drag-region className="inline-flex min-w-0 items-center gap-2 uppercase tracking-[0.12em]">
+        <Icon data-tauri-drag-region className="h-4 w-4 shrink-0 pointer-events-none" />
+        <span data-tauri-drag-region className="truncate">{title.label}</span>
       </span>
       {project && (
         <>
-          <span className="shrink-0 text-ink/28">·</span>
-          <span className="min-w-0 truncate text-body-sm uppercase leading-none tracking-normal text-ink/72">
+          <span data-tauri-drag-region className="shrink-0 text-ink/28">·</span>
+          <span data-tauri-drag-region className="min-w-0 truncate text-body-sm uppercase leading-none tracking-normal text-ink/72">
             {project.name}
           </span>
-          <span className="shrink-0 rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-1.5 py-0.5 text-meta leading-none tracking-normal first-letter:uppercase text-card-fg/55">
+          <span data-tauri-drag-region className="shrink-0 rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-1.5 py-0.5 text-meta leading-none tracking-normal first-letter:uppercase text-card-fg/55">
             {project.workflowId}
           </span>
         </>

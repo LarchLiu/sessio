@@ -59,6 +59,7 @@ export default {
           bg: "rgb(var(--color-tooltip-bg) / <alpha-value>)",
           fg: "rgb(var(--color-tooltip-fg) / <alpha-value>)",
         },
+        brand: "rgb(var(--color-brand) / <alpha-value>)",
         "accent-purple": "rgb(var(--color-accent-purple) / <alpha-value>)",
         emerald: "rgb(var(--color-emerald) / <alpha-value>)",
         status: {

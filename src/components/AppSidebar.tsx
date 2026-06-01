@@ -330,14 +330,10 @@ function StatusDot({
       {ripple && (
         <span
           onAnimationIteration={onIterationEnd}
-          className="absolute inset-0 rounded-full animate-ping"
-          style={{ background: "rgb(var(--color-emerald))" }}
+          className="absolute inset-0 rounded-full animate-ping bg-brand"
         />
       )}
-      <span
-        className="absolute inset-0 rounded-full"
-        style={{ background: "rgb(var(--color-emerald))" }}
-      />
+      <span className="absolute inset-0 rounded-full bg-brand" />
     </span>
   );
 }
@@ -1039,14 +1035,14 @@ function SidebarSessionStatus({
   }
   if (activity === "running") {
     return (
-      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
+      <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-brand">
         <LoaderCircle className="h-3 w-3 animate-spin" />
       </span>
     );
   }
   if (!unread) return null;
   return (
-    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-emerald">
+    <span className="pointer-events-none absolute left-2 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center text-brand">
       <MailPlus className="h-3 w-3" />
     </span>
   );

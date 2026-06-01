@@ -27,6 +27,7 @@
   --color-input-focus-border: var(--color-fg);
   --color-tooltip-bg: 43 49 59;
   --color-tooltip-fg: 235 239 246;
+  --color-brand: 69 201 185;
   --color-accent-purple: 167 139 250;
   --color-emerald: 16 163 127;
   --color-orange: 217 119 87;
@@ -62,6 +63,7 @@
   --color-input-focus-border: var(--color-fg);
   --color-tooltip-bg: 252 252 250;
   --color-tooltip-fg: 31 35 43;
+  --color-brand: 38 161 148;
   --color-accent-purple: 109 40 217;
   --color-emerald: 13 138 106;
   --color-orange: 196 90 53;
@@ -234,7 +236,7 @@ body {
   left: 0;
   width: 2px;
   border-radius: 0;
-  background: rgb(var(--color-card-fg) / 0.36);
+  background: rgb(var(--color-brand) / 0.90);
 }
 
 .chat-composer-textarea {
