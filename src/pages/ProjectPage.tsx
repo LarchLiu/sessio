@@ -11,18 +11,20 @@ import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
-import { Bot, Check, Circle, Copy, GripVertical, Link2, ListChecks, LoaderCircle, Pencil, Plus, Trash2, Unlink, CircleSlash } from "lucide-react";
+import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
+import { Check, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Unlink, Workflow } from "lucide-react";
 import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, archiveProject, createProjectStage, createThread, deleteProjectStage, deleteThread, deleteThreadStage, linkStageSession, linkThreadSession, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, unlinkStageSession, unlinkThreadSession, updateProjectStage, updateProjectStageAssistants, updateThread } from "../api";
+import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, linkStageSession, linkThreadSession, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, unlinkStageSession, unlinkThreadSession, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import InlineMenuSelect from "../components/InlineMenuSelect";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
+import CreateStageDialog from "../components/CreateStageDialog";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import AssistantCard from "../components/AssistantCard";
+import StageList from "../components/StageList";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
-import Tooltip from "../components/Tooltip";
 import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
 
 const ASSISTANT_MENU_GAP = 6;
@@ -188,13 +190,11 @@ function formatBytes(bytes: number): string {
 export function ProjectWorkbenchPage({
   project,
   sessions,
-  onProjectArchived,
   onSelectSession,
   onError,
 }: {
   project: ProjectInfo;
   sessions: SessionInfo[];
-  onProjectArchived: (projectId: string) => void;
   onSelectSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
 }) {
@@ -202,8 +202,8 @@ export function ProjectWorkbenchPage({
   const projectViewTabs = useMemo<SegmentedTabItem<ProjectView>[]>(
     () => [
       { value: "threads", label: t("thread.title"), icon: HashIcon },
-      { value: "stages", label: t("stage.project_stages"), icon: ListChecks },
-      { value: "assistants", label: t("assistant.title"), icon: Bot },
+      { value: "stages", label: t("project.workflowId"), icon: Workflow },
+      { value: "assistants", label: t("assistant.title"), icon: Robot3LineIcon },
     ],
     [t],
   );
@@ -235,16 +235,6 @@ export function ProjectWorkbenchPage({
       cancelled = true;
     };
   }, [onError, project.id]);
-
-  const archive = async () => {
-    onError(null);
-    try {
-      await archiveProject(project.id);
-      onProjectArchived(project.id);
-    } catch (err) {
-      onError(String(err));
-    }
-  };
 
   const patchThread = (thread: ThreadInfo) => {
     setThreads((prev) => prev.map((current) => (current.id === thread.id ? thread : current)));
@@ -279,7 +269,7 @@ export function ProjectWorkbenchPage({
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div className="flex shrink-0 items-center justify-between gap-4 px-5 pt-5">
+        <div className="flex shrink-0 items-center gap-4 px-5 pt-5">
           <SegmentedTabs
             items={projectViewTabs}
             value={activeView}
@@ -288,15 +278,6 @@ export function ProjectWorkbenchPage({
             itemHeight={32}
             padding={4}
           />
-          <Tooltip content={t("project.archive")} placement="bottom">
-            <button
-              type="button"
-              onClick={() => void archive()}
-              className="rounded-md p-2 text-ink/45 transition hover:bg-status-error/10 hover:text-status-error"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </Tooltip>
         </div>
         <ScrollArea
           className="min-h-0 flex-1"
@@ -346,6 +327,9 @@ export function ProjectWorkbenchPage({
               onCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
               onUpdated={patchProjectStage}
               onDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
+              onReload={async () => {
+                setProjectStages((await listProjectStages(project.id)).sort((a, b) => a.order - b.order));
+              }}
               onError={onError}
             />
           )}
@@ -968,6 +952,7 @@ function ProjectStagePicker({
   onCreated,
   onUpdated,
   onDeleted,
+  onReload,
   onError,
 }: {
   project: ProjectInfo;
@@ -976,11 +961,11 @@ function ProjectStagePicker({
   onCreated: (stage: ProjectStageInfo) => void;
   onUpdated: (stage: ProjectStageInfo) => void;
   onDeleted: (stageId: string) => void;
+  onReload: () => Promise<void>;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
   const projectAssistants = useMemo(
     () => assistants.filter((assistant) => assistant.projectId === project.id),
     [assistants, project.id],
@@ -990,153 +975,35 @@ function ProjectStagePicker({
     [projectAssistants],
   );
 
-  const create = async () => {
-    const nextName = name.trim();
-    const nextDescription = description.trim();
-    if (!nextName) return;
-    try {
-      onCreated(await createProjectStage(project.id, nextName, nextDescription || null));
-      setName("");
-      setDescription("");
-    } catch (err) {
-      onError(String(err));
-    }
-  };
-
   return (
-    <div className="mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-3">
-      <div className="mb-2 flex items-center gap-2 text-body-sm font-medium text-ink/65">
-        <ListChecks className="h-4 w-4 text-ink/40" />
-        {t("stage.project_stages")}
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {stages.map((stage) => {
-          const custom = stage.type === "custom";
-          const stageAssistantIds = stage.assistants.map((assistant) => assistant.assistantId);
-          return (
-            <div
-              key={stage.id}
-              className={`grid max-w-[260px] gap-1 rounded-md bg-surface-panel px-1.5 py-1 text-caption text-ink/65 ${stage.enabled ? "" : "opacity-45"}`}
-            >
-              <div className="flex min-h-6 items-center gap-1">
-                {projectStageIcon(stage)}
-                {custom ? (
-                  <div className="flex min-w-0 items-center gap-1">
-                    <input
-                      defaultValue={stage.name ?? ""}
-                      onBlur={async (event) => {
-                        const nextName = event.target.value.trim();
-                        if (!nextName || nextName === stage.name) return;
-                        try {
-                          onUpdated(await updateProjectStage(stage.id, { name: nextName }));
-                        } catch (err) {
-                          onError(String(err));
-                        }
-                      }}
-                      className="h-6 w-24 rounded bg-ink/5 px-1 text-caption text-ink outline-none"
-                    />
-                    <input
-                      defaultValue={stage.description ?? ""}
-                      placeholder={t("stage.description")}
-                      onBlur={async (event) => {
-                        const nextDescription = event.target.value.trim();
-                        if ((stage.description ?? "") === nextDescription) return;
-                        try {
-                          onUpdated(await updateProjectStage(stage.id, { description: nextDescription || null }));
-                        } catch (err) {
-                          onError(String(err));
-                        }
-                      }}
-                      className="h-6 w-32 rounded bg-ink/5 px-1 text-caption text-ink outline-none placeholder:text-ink/30"
-                    />
-                  </div>
-                ) : (
-                  <span className="min-w-0 flex-1 truncate px-1">{projectStageLabel(stage, t)}</span>
-                )}
-                <span className="rounded bg-ink/8 px-1 py-0.5 text-meta text-ink/40">
-                  {stage.type === "builtin" ? t("stage.builtin") : t("stage.custom")}
-                </span>
-                <Tooltip content={custom ? t("delete.title") : stage.enabled ? t("stage.disable") : t("stage.enable")} placement="top">
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        if (custom) {
-                          await deleteProjectStage(stage.id);
-                          onDeleted(stage.id);
-                        } else {
-                          onUpdated(await updateProjectStage(stage.id, { enabled: !stage.enabled }));
-                        }
-                      } catch (err) {
-                        onError(String(err));
-                      }
-                    }}
-                    className={`rounded p-0.5 ${custom ? "text-ink/25 hover:bg-status-error/10 hover:text-status-error" : "text-ink/30 hover:bg-ink/8 hover:text-ink/70"}`}
-                  >
-                    {custom ? <Trash2 className="h-3 w-3" /> : <CircleSlash className="h-3 w-3" />}
-                  </button>
-                </Tooltip>
-                <Tooltip content={t("stage.allow_empty_assistants")} placement="top">
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={stage.allowEmptyAssistants}
-                    onClick={async () => {
-                      try {
-                        onUpdated(await updateProjectStage(stage.id, { allowEmptyAssistants: !stage.allowEmptyAssistants }));
-                      } catch (err) {
-                        onError(String(err));
-                      }
-                    }}
-                    className={`rounded p-0.5 ${stage.allowEmptyAssistants ? "bg-ink/10 text-ink/65" : "text-ink/25 hover:bg-ink/8 hover:text-ink/55"}`}
-                  >
-                    {stage.allowEmptyAssistants ? <Check className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
-                  </button>
-                </Tooltip>
-              </div>
-              <AssistantMultiPicker
-                assistantIds={stageAssistantIds}
-                assistants={enabledAssistants}
-                labelAssistants={projectAssistants}
-                onChange={async (assistantIds) => {
-                  try {
-                    onUpdated(await updateProjectStageAssistants(stage.id, assistantIds));
-                  } catch (err) {
-                    onError(String(err));
-                  }
-                }}
-                className="border-r-0 pl-5"
-              />
-              {stage.description && !custom && (
-                <div className="line-clamp-2 pl-5 text-meta leading-snug text-ink/40">
-                  {stage.description}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        <input
-          value={name}
-          onChange={(event) => setName(event.target.value)}
-          placeholder={t("stage.name")}
-          className="h-7 min-w-[140px] rounded-md border border-ink/10 bg-surface-panel px-2 text-caption text-ink outline-none placeholder:text-ink/35"
+    <div className="mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-5">
+      <div className="grid gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-body-sm font-semibold text-card-fg/85">{t("stage.project_stages")}</div>
+          <button type="button" onClick={() => setShowCreate((value) => !value)} className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:text-card-fg/90">
+            <Plus className="h-3.5 w-3.5" />
+            {t("stage.add")}
+          </button>
+        </div>
+        <StageList
+          stages={stages}
+          assistants={enabledAssistants}
+          loading={false}
+          dragGroup="project-stages"
+          onUpdated={onUpdated}
+          onDeleted={onDeleted}
+          onReload={onReload}
+          onError={onError}
         />
-        <input
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          placeholder={t("stage.description")}
-          className="h-7 min-w-[160px] rounded-md border border-ink/10 bg-surface-panel px-2 text-caption text-ink outline-none placeholder:text-ink/35"
-        />
-        <button
-          type="button"
-          disabled={!name.trim()}
-          onClick={() => void create()}
-          className="inline-flex h-7 items-center gap-1 rounded-md bg-ink/80 px-2 text-caption font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {t("stage.add")}
-        </button>
       </div>
+      {showCreate && (
+        <CreateStageDialog
+          projectId={project.id}
+          onCreated={onCreated}
+          onClose={() => setShowCreate(false)}
+          onError={onError}
+        />
+      )}
     </div>
   );
 }
@@ -1452,7 +1319,7 @@ function AssistantManagementPanel({
       {loading ? (
         <div className="py-8 text-center text-body-sm text-ink/40">{t("memory_search.searching")}</div>
       ) : (
-        <div className="rounded-lg border border-card-border/[0.12] bg-card p-5">
+        <div className="rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5">
           <SegmentedTabs
             items={[
               { value: "builtin", label: t("assistant.builtin"), badge: builtin.length },
@@ -1465,13 +1332,13 @@ function AssistantManagementPanel({
             itemHeight={34}
             className="mb-4"
             endAdornment={
-              <button type="button" onClick={() => setShowCreate(true)} className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90">
+              <button type="button" onClick={() => setShowCreate(true)} className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-body-sm font-medium text-card-fg/75 transition hover:text-card-fg/90">
                 <Plus className="h-3.5 w-3.5" />
                 {t("assistant.add")}
               </button>
             }
           />
-          <div className="grid gap-2">
+          <div className="grid gap-3">
             {visible.map((assistant) => (
               <AssistantCard
                 key={assistant.id}

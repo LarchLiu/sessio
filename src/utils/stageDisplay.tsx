@@ -18,6 +18,12 @@ import BuildOutlineRoundedIcon from "@iconify-react/material-symbols/build-outli
 import DrawOutlineRoundedIcon from "@iconify-react/material-symbols/draw-outline-rounded";
 import FactCheckOutlineRoundedIcon from "@iconify-react/material-symbols/fact-check-outline-rounded";
 import DoneAllRoundedIcon from "@iconify-react/material-symbols/done-all-rounded";
+import AccountTreeOutlineRoundedIcon from "@iconify-react/material-symbols/account-tree-outline-rounded";
+import AutoAwesomeOutlineRoundedIcon from "@iconify-react/material-symbols/auto-awesome-outline-rounded";
+import BoltOutlineRoundedIcon from "@iconify-react/material-symbols/bolt-outline-rounded";
+import PsychologyOutlineRoundedIcon from "@iconify-react/material-symbols/psychology-outline-rounded";
+import RocketLaunchOutlineRoundedIcon from "@iconify-react/material-symbols/rocket-launch-outline-rounded";
+import SchemaOutlineRoundedIcon from "@iconify-react/material-symbols/schema-outline-rounded";
 import { Clapperboard, FilePenLine, GitBranch, ListChecks, Palette, Scissors, SpellCheck, CircleDot, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
 import type { ProjectStageInfo, StageInfo, StageType } from "../api";
@@ -62,7 +68,15 @@ export const STAGE_ICON_SET: Record<string, IconComponent> = {
   "material-symbols:draw-outline-rounded": DrawOutlineRoundedIcon,
   "material-symbols:fact-check-outline-rounded": FactCheckOutlineRoundedIcon,
   "material-symbols:done-all-rounded": DoneAllRoundedIcon,
+  "material-symbols:account-tree-outline-rounded": AccountTreeOutlineRoundedIcon,
+  "material-symbols:auto-awesome-outline-rounded": AutoAwesomeOutlineRoundedIcon,
+  "material-symbols:bolt-outline-rounded": BoltOutlineRoundedIcon,
+  "material-symbols:psychology-outline-rounded": PsychologyOutlineRoundedIcon,
+  "material-symbols:rocket-launch-outline-rounded": RocketLaunchOutlineRoundedIcon,
+  "material-symbols:schema-outline-rounded": SchemaOutlineRoundedIcon,
 };
+
+export const STAGE_ICON_OPTIONS = Object.entries(STAGE_ICON_SET).map(([id, Icon]) => ({ id, Icon }));
 
 export const DEFAULT_STAGE_TYPE_ICON_IDS: Partial<Record<StageType, string>> = {
   research: "material-symbols:search-rounded",
