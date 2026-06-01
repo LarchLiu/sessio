@@ -111,10 +111,6 @@ export default function PopupMenu<T extends string = string>({
             disabled={option.disabled}
             className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-body-sm text-ink/72 transition hover:bg-ink/[0.08] hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
             role="menuitem"
-            onPointerDown={(event) => {
-              event.preventDefault();
-              select(option.key, option.disabled);
-            }}
             onClick={() => select(option.key, option.disabled)}
           >
             {option.icon && <span className="shrink-0 text-ink/55">{option.icon}</span>}

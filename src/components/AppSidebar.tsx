@@ -5,7 +5,6 @@ import { createPortal } from "react-dom";
 import HashIcon from "@iconify-react/mynaui/hash";
 import {
   ChevronDown,
-  Check,
   CircleAlert,
   Download,
   Folder,
@@ -44,6 +43,7 @@ import { AgentGlyph } from "./AgentIcon";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
 import ScrollArea from "./ScrollArea";
+import StageSelectChip from "./StageSelectChip";
 import Tooltip from "./Tooltip";
 
 const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
@@ -633,20 +633,12 @@ function ProjectActionsButton({
                 {(workflowStages[form.workflowId] ?? []).filter((stage) => stage.type === "builtin").map((stage) => {
                   const selected = form.enabledStageIds.includes(stage.id);
                   return (
-                    <button
+                    <StageSelectChip
                       key={stage.id}
-                      type="button"
-                      onClick={() => toggleStage(stage.id)}
-                      className={
-                        "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " +
-                        (selected
-                          ? "border-ink/18 bg-ink/8 text-ink/80"
-                          : "border-ink/10 bg-ink/[0.03] text-ink/45 hover:text-ink/70")
-                      }
-                    >
-                      {selected && <Check className="h-3 w-3" />}
-                      {stage.kind ? t(`stage.type.${stage.kind}`) : stage.name || t("stage.custom")}
-                    </button>
+                      stage={stage}
+                      selected={selected}
+                      onToggle={toggleStage}
+                    />
                   );
                 })}
               </div>

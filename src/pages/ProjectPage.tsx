@@ -12,7 +12,7 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import HashIcon from "@iconify-react/mynaui/hash";
 import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
-import { Check, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Unlink, Workflow } from "lucide-react";
+import { Check, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Unlink, Workflow, X } from "lucide-react";
 import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
 import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, linkStageSession, linkThreadSession, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, unlinkStageSession, unlinkThreadSession, updateThread } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
@@ -22,6 +22,7 @@ import CreateStageDialog from "../components/CreateStageDialog";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import AssistantCard from "../components/AssistantCard";
 import StageList from "../components/StageList";
+import StageSelectChip from "../components/StageSelectChip";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
@@ -409,6 +410,7 @@ function ThreadWorkflowPanel({
   const { t } = useI18n();
   const [goal, setGoal] = useState("");
   const [description, setDescription] = useState("");
+  const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const enabledProjectStages = useMemo(
     () => projectStages.filter((stage) => stage.enabled),
@@ -499,6 +501,7 @@ function ThreadWorkflowPanel({
       onThreadCreated(nextThread);
       setGoal("");
       setDescription("");
+      setCreateOpen(false);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -508,53 +511,88 @@ function ThreadWorkflowPanel({
 
   return (
     <div className="min-w-0">
-        <div className="mb-3 grid gap-3 rounded-lg border border-ink/10 bg-ink/[0.035] p-3">
-          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-          <div className="grid min-w-0 gap-2">
-            <input
-              value={goal}
-              onChange={(event) => setGoal(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) void create();
-              }}
-              placeholder={t("thread.goal_placeholder")}
-              className="min-w-0 rounded-md border border-ink/10 bg-surface-panel px-3 py-2 text-body text-ink outline-none placeholder:text-ink/35 focus:border-ink/25"
-            />
-            <input
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder={t("thread.description_placeholder")}
-              className="min-w-0 rounded-md border border-ink/10 bg-surface-panel px-3 py-2 text-body-sm text-ink outline-none placeholder:text-ink/35 focus:border-ink/25"
-            />
-          </div>
+        <div className="mb-3 flex justify-end">
           <button
             type="button"
-            onClick={() => void create()}
-            disabled={creating || !goal.trim()}
-            className="inline-flex h-10 items-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
+            onClick={() => setCreateOpen(true)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] hover:opacity-90"
           >
-            {creating ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            <Plus className="h-4 w-4" />
             {t("thread.add")}
           </button>
-          </div>
-          {orderedCreateStages.length > 0 && (
-            <DragDropProvider onDragEnd={handleCreateStageDragEnd}>
-              <div className="flex flex-wrap gap-1.5 border-t border-ink/10 pt-2">
-                {orderedCreateStages.map((stage, index) => (
-                  <CreateThreadStageChip
-                    key={stage.id}
-                    stage={stage}
-                    index={index}
-                    selected={selectedStageIds.includes(stage.id)}
-                    selectable={stageAllowsThreadAddition(stage)}
-                    onToggle={toggleCreateStage}
-                    label={projectStageLabel(stage, t)}
-                  />
-                ))}
-              </div>
-            </DragDropProvider>
-          )}
         </div>
+        {createOpen &&
+          createPortal(
+            <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4">
+              <div className="w-full max-w-[720px] rounded-xl border border-ink/10 bg-surface-panel p-4 shadow-2xl">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div className="text-body font-medium text-ink">{t("thread.add")}</div>
+                  <button
+                    type="button"
+                    onClick={() => setCreateOpen(false)}
+                    className="rounded-md p-1 text-ink/45 hover:bg-ink/5 hover:text-ink"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="grid gap-3">
+                  <input
+                    value={goal}
+                    onChange={(event) => setGoal(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) void create();
+                      if (event.key === "Escape") setCreateOpen(false);
+                    }}
+                    autoFocus
+                    placeholder={t("thread.goal_placeholder")}
+                    className="min-w-0 rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body text-ink outline-none placeholder:text-ink/35 focus:border-ink/25"
+                  />
+                  <textarea
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    placeholder={t("thread.description_placeholder")}
+                    rows={3}
+                    className="min-w-0 resize-none rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body-sm text-ink outline-none placeholder:text-ink/35 focus:border-ink/25"
+                  />
+                  {orderedCreateStages.length > 0 && (
+                    <DragDropProvider onDragEnd={handleCreateStageDragEnd}>
+                      <div className="flex flex-wrap gap-1.5 border-t border-ink/10 pt-3">
+                        {orderedCreateStages.map((stage, index) => (
+                          <CreateThreadStageChip
+                            key={stage.id}
+                            stage={stage}
+                            index={index}
+                            selected={selectedStageIds.includes(stage.id)}
+                            selectable={stageAllowsThreadAddition(stage)}
+                            onToggle={toggleCreateStage}
+                          />
+                        ))}
+                      </div>
+                    </DragDropProvider>
+                  )}
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCreateOpen(false)}
+                    className="rounded-md px-3 py-1.5 text-body-sm text-ink/60 hover:bg-ink/5 hover:text-ink"
+                  >
+                    {t("delete.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void create()}
+                    disabled={creating || !goal.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-ink px-3 py-1.5 text-body-sm text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
+                  >
+                    {creating ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                    {t("thread.add")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )}
         {loading ? (
           <div className="py-12 text-center text-body-sm text-ink/45">{t("memory_search.searching")}</div>
         ) : threads.length === 0 ? (
@@ -591,14 +629,12 @@ function CreateThreadStageChip({
   index,
   selected,
   selectable,
-  label,
   onToggle,
 }: {
   stage: ProjectStageInfo;
   index: number;
   selected: boolean;
   selectable: boolean;
-  label: string;
   onToggle: (stageId: string) => void;
 }) {
   const { handleRef, isDragSource, isDropTarget, ref } = useSortable({
@@ -613,41 +649,29 @@ function CreateThreadStageChip({
   });
 
   return (
-    <div
+    <StageSelectChip
       ref={ref}
-      className={
-        "inline-flex h-7 items-center gap-1.5 rounded-md border px-1.5 text-caption transition duration-150 " +
-        (isDragSource
-          ? "z-20 cursor-grabbing border-ink/30 bg-surface-panel shadow-lg"
+      stage={stage}
+      selected={selected}
+      selectable={selectable}
+      onToggle={onToggle}
+      state={
+        isDragSource
+          ? "dragging"
           : isDropTarget
-            ? "border-ink/35 bg-ink/12 shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.28)]"
-            : !selectable
-              ? "cursor-not-allowed border-ink/10 bg-surface-panel text-ink/25 opacity-55"
-              : selected
-                ? "border-ink/25 bg-ink/10 text-ink/75"
-                : "border-ink/10 bg-surface-panel text-ink/45 hover:bg-ink/5 hover:text-ink/65")
+            ? "drop-target"
+            : "idle"
       }
-    >
-      <button
-        ref={handleRef}
-        type="button"
-        className="cursor-grab touch-none rounded p-0.5 text-current/50 hover:bg-ink/5 active:cursor-grabbing"
-      >
-        <GripVertical className="h-3.5 w-3.5" />
-      </button>
-      <button
-        type="button"
-        onClick={() => onToggle(stage.id)}
-        disabled={!selectable}
-        className="inline-flex min-w-0 items-center gap-1.5 disabled:cursor-not-allowed"
-      >
-        {projectStageIcon(stage)}
-        <span className="max-w-[140px] truncate">{label}</span>
-        <span className={"flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/55 bg-ink/8 text-ink/80"}>
-          {selected && <Check className="h-3 w-3" />}
-        </span>
-      </button>
-    </div>
+      dragHandle={
+        <button
+          ref={handleRef}
+          type="button"
+          className="cursor-grab touch-none rounded p-0.5 text-current/50 hover:bg-ink/5 active:cursor-grabbing"
+        >
+          <GripVertical className="h-3.5 w-3.5" />
+        </button>
+      }
+    />
   );
 }
 
