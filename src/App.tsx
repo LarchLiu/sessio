@@ -611,6 +611,7 @@ export default function App() {
           runtimeSessionAliases={runtimeSessionAliases}
           selectedAncestorSessions={selectedAncestorSessions}
           newChatProjectKey={newChatProjectKey}
+          setNewChatProjectKey={setNewChatProjectKey}
           projectGroups={projectGroups}
           availableSessions={availableSessions}
           dispatchLiveEvent={dispatchLiveRuntimeEvent}

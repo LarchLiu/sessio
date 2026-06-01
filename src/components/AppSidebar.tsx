@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { createPortal } from "react-dom";
 import HashIcon from "@iconify-react/mynaui/hash";
+import HashesOutlineIcon from '@iconify-react/bitcoin-icons/hashes-outline';
 import {
   ChevronDown,
   CircleAlert,
@@ -568,7 +569,7 @@ function ProjectActionsButton({
           className="rounded-md p-0.5 text-ink/45 transition hover:bg-ink/5 hover:text-ink"
           aria-label={t("project.add")}
         >
-          <FolderPlus className="h-3.5 w-3.5" />
+          <FolderPlus className="h-4 w-4" />
         </button>
       </Tooltip>
       {openMenu && buttonRef.current && (
@@ -734,7 +735,7 @@ function ProjectSidebarGroup({
   const canToggleSessionLimit =
     listMode === "sessions" && sessionEntries.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
   const displayCount = listMode === "threads" ? threads.length : project.count;
-  const ProjectListModeIcon = listMode === "threads" ? MessagesSquare : HashIcon;
+  const ProjectListModeIcon = listMode === "threads" ? MessagesSquare : HashesOutlineIcon;
   const projectActive = selectedProjectId === project.project.id;
   const toggleSessionLimit = () => {
     const collapsing = sessionsExpanded;
@@ -785,7 +786,7 @@ function ProjectSidebarGroup({
               }}
               className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
             >
-              <ProjectListModeIcon className="h-3.5 w-3.5" />
+              <ProjectListModeIcon className="h-4 w-4" />
             </span>
           </Tooltip>
           <Tooltip content={t("project.workbench")} placement="top">
@@ -805,7 +806,7 @@ function ProjectSidebarGroup({
               }}
               className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
             >
-              <Kanban className="h-3.5 w-3.5" />
+              <Kanban className="h-4 w-4" />
             </span>
           </Tooltip>
           <Tooltip content={t("sidebar.new_chat")} placement="top">
@@ -825,7 +826,7 @@ function ProjectSidebarGroup({
               }}
               className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
             >
-              <SquarePen className="h-3.5 w-3.5" />
+              <SquarePen className="h-4 w-4" />
             </span>
           </Tooltip>
         </span>

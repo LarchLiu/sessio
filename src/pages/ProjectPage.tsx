@@ -19,9 +19,11 @@ import { AgentGlyph } from "../components/AgentIcon";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
 import AssistantCard from "../components/AssistantCard";
+import ConfirmTooltip from "../components/ConfirmTooltip";
 import MultiPicker from "../components/MultiPicker";
 import StageList from "../components/StageList";
 import StageSelectChip from "../components/StageSelectChip";
+import Tooltip from "../components/Tooltip";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
@@ -201,10 +203,12 @@ function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Reco
 
 export function ProjectWorkbenchPage({
   project,
+  onNewThreadChat,
   onSelectSession,
   onError,
 }: {
   project: ProjectInfo;
+  onNewThreadChat: (thread: ThreadInfo) => void;
   onSelectSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
 }) {
@@ -313,7 +317,6 @@ export function ProjectWorkbenchPage({
                     thread.id === stage.threadId
                       ? {
                           ...thread,
-                          stageId: thread.stageId ?? stage.id,
                           stages: [...thread.stages, stage].sort((a, b) => a.order - b.order),
                         }
                       : thread,
@@ -329,6 +332,7 @@ export function ProjectWorkbenchPage({
                 )
               }
               onSelectSession={onSelectSession}
+              onNewThreadChat={onNewThreadChat}
               onError={onError}
             />
           )}
@@ -384,6 +388,18 @@ function reorderThreadStages(stages: StageInfo[], movedStage: StageInfo): StageI
   return withoutMoved.map((stage, index) => ({ ...stage, order: index }));
 }
 
+function stageActivationBody(
+  fromIndex: number,
+  toIndex: number,
+  stageLabel: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (fromIndex < 0) return t("thread.activate_stage_body", { stage: stageLabel });
+  if (toIndex < fromIndex) return t("thread.activate_stage_back_body", { stage: stageLabel });
+  if (toIndex > fromIndex + 1) return t("thread.activate_stage_skip_body", { stage: stageLabel });
+  return t("thread.activate_stage_forward_body", { stage: stageLabel });
+}
+
 function ThreadWorkflowPanel({
   project,
   threads,
@@ -396,6 +412,7 @@ function ThreadWorkflowPanel({
   onStageUpdated,
   onStageDeleted,
   onSelectSession,
+  onNewThreadChat,
   onError,
 }: {
   project: ProjectInfo;
@@ -409,6 +426,7 @@ function ThreadWorkflowPanel({
   onStageUpdated: (stage: StageInfo) => void;
   onStageDeleted: (threadId: string, stageId: string) => void;
   onSelectSession: (session: SessionInfo) => void;
+  onNewThreadChat: (thread: ThreadInfo) => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
@@ -519,7 +537,6 @@ function ThreadWorkflowPanel({
         const stage = await addThreadStage(thread.id, stageId, []);
         nextThread = {
           ...nextThread,
-          stageId: nextThread.stageId ?? stage.id,
           stages: [...nextThread.stages, stage].sort((a, b) => a.order - b.order),
           updatedAt: Math.max(nextThread.updatedAt, stage.updatedAt),
         };
@@ -660,6 +677,7 @@ function ThreadWorkflowPanel({
                   setSelectedThreadChatThreadId(threadId);
                   setPanelView("thread-chats");
                 }}
+                onNewThreadChat={onNewThreadChat}
                 onError={onError}
               />
             ))}
@@ -767,6 +785,9 @@ function ThreadStageChip({
   index,
   active,
   locked,
+  confirmationBody,
+  confirmLabel,
+  removeBody,
   onSelect,
   onRemove,
 }: {
@@ -774,6 +795,9 @@ function ThreadStageChip({
   index: number;
   active: boolean;
   locked: boolean;
+  confirmationBody: string;
+  confirmLabel: string;
+  removeBody: string;
   onSelect: (stageId: string) => void | Promise<void>;
   onRemove: () => void;
 }) {
@@ -792,48 +816,75 @@ function ThreadStageChip({
   const showActions = !locked && !active;
 
   return (
-    <div
-      ref={ref}
-      className={
-        "inline-flex h-7 items-center gap-1.5 rounded-md border px-1.5 text-caption transition duration-150 " +
-        (isDragSource
-          ? "z-20 cursor-grabbing border-ink/30 bg-surface-panel shadow-lg "
-          : isDropTarget
-            ? "border-ink/35 bg-ink/12 shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.28)] "
-            : active
-              ? "border-brand/45 bg-brand/15 text-ink shadow-[inset_0_0_0_1px_rgb(var(--color-brand)/0.12)] "
-              : "border-ink/10 bg-surface-panel text-ink/50 hover:bg-ink/5 hover:text-ink/70 ") +
-        (locked ? "opacity-90 " : "")
-      }
-    >
-      {showActions && (
-        <button
-          ref={handleRef}
-          type="button"
-          className="cursor-grab touch-none rounded p-0.5 text-current/50 hover:bg-ink/5 active:cursor-grabbing"
+    <ConfirmTooltip>
+      {(confirm) => (
+        <div
+          ref={ref}
+          className={
+            "inline-flex h-7 items-center gap-1.5 rounded-md border px-1.5 text-caption transition duration-150 " +
+            (isDragSource
+              ? "z-20 cursor-grabbing border-ink/30 bg-surface-panel shadow-lg "
+              : isDropTarget
+                ? "border-ink/35 bg-ink/12 shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.28)] "
+                : active
+                  ? "border-brand/45 bg-brand/15 text-ink shadow-[inset_0_0_0_1px_rgb(var(--color-brand)/0.12)] "
+                  : "border-ink/10 bg-surface-panel text-ink/50 hover:bg-ink/5 hover:text-ink/70 ") +
+            (locked ? "opacity-90 " : "")
+          }
         >
-          <GripVertical className="h-3.5 w-3.5" />
-        </button>
+          {showActions && (
+            <Tooltip content={t("stage.reorder")} placement="top">
+              <button
+                ref={handleRef}
+                type="button"
+                className="cursor-grab touch-none rounded p-0.5 text-current/50 hover:bg-ink/5 active:cursor-grabbing"
+              >
+                <GripVertical className="h-3.5 w-3.5" />
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip content={active ? t("thread.active") : confirmLabel} placement="top">
+            <button
+              type="button"
+              onClick={(event) => {
+                if (active) return;
+                confirm(event, {
+                  title: confirmLabel,
+                  body: confirmationBody,
+                  confirmLabel,
+                  placement: "top",
+                  onConfirm: () => onSelect(stage.id),
+                });
+              }}
+              className="inline-flex min-w-0 items-center gap-1.5 text-left"
+            >
+              {projectStageIcon(stage)}
+              <span className="max-w-[140px] truncate">{label}</span>
+            </button>
+          </Tooltip>
+          {showActions && (
+            <Tooltip content={t("thread.remove_stage")} placement="top">
+              <button
+                type="button"
+                aria-label={t("thread.remove_stage")}
+                onClick={(event) =>
+                  confirm(event, {
+                    title: t("delete.title"),
+                    body: removeBody,
+                    confirmLabel: t("delete.confirm"),
+                    placement: "top",
+                    onConfirm: onRemove,
+                  })
+                }
+                className="rounded p-0.5 text-current/35 hover:bg-status-error/10 hover:text-status-error"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </Tooltip>
+          )}
+        </div>
       )}
-      <button
-        type="button"
-        onClick={() => void onSelect(stage.id)}
-        className="inline-flex min-w-0 items-center gap-1.5 text-left"
-      >
-        {projectStageIcon(stage)}
-        <span className="max-w-[140px] truncate">{label}</span>
-      </button>
-      {showActions && (
-        <button
-          type="button"
-          aria-label={t("delete.title")}
-          onClick={onRemove}
-          className="rounded p-0.5 text-current/35 hover:bg-status-error/10 hover:text-status-error"
-        >
-          <X className="h-3 w-3" />
-        </button>
-      )}
-    </div>
+    </ConfirmTooltip>
   );
 }
 
@@ -846,6 +897,7 @@ function ThreadCard({
   onStageUpdated,
   onStageDeleted,
   onShowSessions,
+  onNewThreadChat,
   onError,
 }: {
   thread: ThreadInfo;
@@ -856,6 +908,7 @@ function ThreadCard({
   onStageUpdated: (stage: StageInfo) => void;
   onStageDeleted: (threadId: string, stageId: string) => void;
   onShowSessions: (threadId: string) => void;
+  onNewThreadChat: (thread: ThreadInfo) => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
@@ -987,7 +1040,7 @@ function ThreadCard({
     <section className="rounded-lg border border-ink/10 bg-surface-panel p-3 shadow-sm">
       {editing ? (
         <div className="grid gap-2">
-          <div className="flex items-start gap-3">
+          <div className="flex items-center gap-3">
             <input
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
@@ -1016,19 +1069,48 @@ function ThreadCard({
               }
             >
               <span>{thread.goal}</span>
-              <button
-                type="button"
-                onClick={() => onShowSessions(thread.id)}
-                className="ml-2 inline-flex items-center gap-1 rounded px-1 align-middle text-caption font-normal text-ink/40 transition hover:bg-ink/5 hover:text-ink/65"
-              >
-                <Link2 className="h-3.5 w-3.5 shrink-0" />
-                {t("thread.chats_count", { count: linkedSessionCount })}
-              </button>
+              <Tooltip content={t("thread.chats")} placement="top">
+                <button
+                  type="button"
+                  onClick={() => onShowSessions(thread.id)}
+                  className="ml-2 inline-flex items-center gap-1 rounded px-1 align-middle text-caption font-normal text-ink/40 transition hover:bg-ink/5 hover:text-ink/65"
+                >
+                  <Link2 className="h-3.5 w-3.5 shrink-0" />
+                  {t("thread.chats_count", { count: linkedSessionCount })}
+                </button>
+              </Tooltip>
             </div>
-            <div className="flex shrink-0 items-center gap-1">
-              <button type="button" onClick={() => setEditing(true)} className="rounded p-1.5 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
-              <button type="button" onClick={() => void remove()} className="rounded p-1.5 text-ink/35 hover:bg-status-error/10 hover:text-status-error"><Trash2 className="h-3.5 w-3.5" /></button>
-            </div>
+            <ConfirmTooltip>
+              {(confirm) => (
+                <div className="flex shrink-0 items-center gap-1">
+                  <Tooltip content={t("thread.new_chat")} placement="top">
+                    <button type="button" onClick={() => onNewThreadChat(thread)} className="rounded p-1.5 text-ink/35 hover:bg-ink/5 hover:text-ink/70">
+                      <HashtagChatLinearIcon className="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
+                  <Tooltip content={t("thread.edit")} placement="top">
+                    <button type="button" onClick={() => setEditing(true)} className="rounded p-1.5 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
+                  </Tooltip>
+                  <Tooltip content={t("thread.remove")} placement="top">
+                    <button
+                      type="button"
+                      onClick={(event) =>
+                        confirm(event, {
+                          title: t("thread.remove"),
+                          body: t("thread.delete_body", { goal: thread.goal }),
+                          confirmLabel: t("thread.remove"),
+                          placement: "top",
+                          onConfirm: remove,
+                        })
+                      }
+                      className="rounded p-1.5 text-ink/35 hover:bg-status-error/10 hover:text-status-error"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
+                </div>
+              )}
+            </ConfirmTooltip>
           </div>
           {thread.description && (
             <div
@@ -1042,21 +1124,24 @@ function ThreadCard({
             </div>
           )}
           {textOverflowing && (
-            <button
-              type="button"
-              onClick={() => setExpandedText((value) => !value)}
-              aria-expanded={expandedText}
-              className="mt-1 inline-flex h-5 items-center gap-1 rounded px-1.5 text-caption text-ink/40 transition hover:bg-ink/5 hover:text-ink/65"
-            >
-              <span>{t(expandedText ? "detail.collapse" : "detail.expand")}</span>
-              <ChevronDown className={"h-3 w-3 transition-transform " + (expandedText ? "rotate-180" : "")} />
-            </button>
+            <Tooltip content={t(expandedText ? "detail.collapse" : "detail.expand")} placement="top">
+              <button
+                type="button"
+                onClick={() => setExpandedText((value) => !value)}
+                aria-expanded={expandedText}
+                className="mt-1 inline-flex h-5 items-center gap-1 rounded px-1.5 text-caption text-ink/40 transition hover:bg-ink/5 hover:text-ink/65"
+              >
+                <span>{t(expandedText ? "detail.collapse" : "detail.expand")}</span>
+                <ChevronDown className={"h-3 w-3 transition-transform " + (expandedText ? "rotate-180" : "")} />
+              </button>
+            </Tooltip>
           )}
           {(orderedThreadStages.length > 0 || availableProjectStages.length > 0) && (
             <DragDropProvider onDragEnd={handleThreadStageDragEnd}>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {orderedThreadStages.map((stage, index) => {
                   const locked = isStageLocked(index);
+                  const label = projectStageLabel(stage, t);
                   return (
                     <ThreadStageChip
                       key={stage.id}
@@ -1064,6 +1149,9 @@ function ThreadCard({
                       index={index}
                       active={stage.id === currentStageId}
                       locked={locked}
+                      confirmationBody={stageActivationBody(activeStageIndex, index, label, t)}
+                      confirmLabel={t("thread.activate_stage")}
+                      removeBody={t("thread.delete_stage_body", { stage: label })}
                       onSelect={async (stageId) => {
                         if (stageId === currentStageId) return;
                         try {
@@ -1084,14 +1172,16 @@ function ThreadCard({
                       onChange={setSelectedStageIds}
                       placeholder={t("stage.add")}
                     />
-                    <button
-                      type="button"
-                      disabled={selectedStageIds.length === 0}
-                      onClick={() => void add()}
-                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center border-l border-ink/10 text-ink/45 transition hover:bg-ink/5 hover:text-ink/75 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink/45"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                    </button>
+                    <Tooltip content={t("stage.add_selected")} placement="top">
+                      <button
+                        type="button"
+                        disabled={selectedStageIds.length === 0}
+                        onClick={() => void add()}
+                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center border-l border-ink/10 text-ink/45 transition hover:bg-ink/5 hover:text-ink/75 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink/45"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
                   </div>
                 )}
               </div>

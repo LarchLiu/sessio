@@ -4364,17 +4364,10 @@ impl SessionStore for SqliteStore {
             params![id, thread_id, stage_id, next_order, now, now],
         )?;
         replace_thread_stage_assistants(&tx, &id, &assistant_bindings, now)?;
-        if thread.stage_id.is_none() {
-            tx.execute(
-                "UPDATE threads SET stage_id = ?, updated_at = ? WHERE id = ?",
-                params![id, now, thread_id],
-            )?;
-        } else {
-            tx.execute(
-                "UPDATE threads SET updated_at = ? WHERE id = ?",
-                params![now, thread_id],
-            )?;
-        }
+        tx.execute(
+            "UPDATE threads SET updated_at = ? WHERE id = ?",
+            params![now, thread_id],
+        )?;
         let stage = load_thread_stage_by_id(&tx, &id)?;
         tx.commit()?;
         Ok(stage)
@@ -7124,6 +7117,14 @@ mod migration_tests {
             .unwrap();
         assert_eq!(default_research.assistant_ids, vec![assistant.id.clone()]);
         assert_eq!(default_research.assistants[0].agent.id, "codex");
+        assert!(store
+            .list_threads(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == default_thread.id)
+            .unwrap()
+            .stage_id
+            .is_none());
         let assistant_disable_error = store
             .update_assistant(&assistant.id, None, None, None, None, Some(false))
             .unwrap_err()
@@ -7198,6 +7199,14 @@ mod migration_tests {
             .unwrap();
         assert!(human.assistant_ids.is_empty());
         assert!(human.allow_empty_assistants);
+        assert!(store
+            .list_threads(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == thread.id)
+            .unwrap()
+            .stage_id
+            .is_none());
         assert!(!build_option.allow_empty_assistants);
         assert!(store
             .add_thread_stage(&thread.id, &build_option.id, &[])
@@ -7359,10 +7368,7 @@ mod migration_tests {
             .iter()
             .find(|item| item.id == thread.id)
             .unwrap();
-        assert_eq!(
-            listed_build_lane.stage_id.as_deref(),
-            Some(human.id.as_str())
-        );
+        assert!(listed_build_lane.stage_id.is_none());
         assert_eq!(listed_build_lane.stages.len(), 3);
         assert_eq!(listed_build_lane.stages[0].id, build.id);
         assert_eq!(listed_build_lane.stages[1].id, human.id);

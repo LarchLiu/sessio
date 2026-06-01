@@ -5,7 +5,7 @@ import ChatPage from "../pages/ChatPage";
 import NewChatPage from "../pages/NewChatPage";
 import { ProjectWorkbenchPage } from "../pages/ProjectPage";
 import ThreadPage from "../pages/ThreadPage";
-import { type Filter } from "../appUtils";
+import { projectFilterKey, type Filter } from "../appUtils";
 import type { PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
 import type {
   LiveRuntimeAction,
@@ -27,6 +27,7 @@ export default function AppMain({
   runtimeSessionAliases,
   selectedAncestorSessions,
   newChatProjectKey,
+  setNewChatProjectKey,
   projectGroups,
   availableSessions,
   dispatchLiveEvent,
@@ -56,6 +57,7 @@ export default function AppMain({
   runtimeSessionAliases: Record<string, string>;
   selectedAncestorSessions: SessionInfo[];
   newChatProjectKey: string | null;
+  setNewChatProjectKey: Dispatch<SetStateAction<string | null>>;
   projectGroups: ProjectGroup[];
   availableSessions: SessionInfo[];
   dispatchLiveEvent: Dispatch<LiveRuntimeAction>;
@@ -99,6 +101,15 @@ export default function AppMain({
       setSelectedThread(null);
       setSelected(session);
       setDetailMode("chat");
+    },
+    onNewThreadChat: () => {
+      const projectGroup = projectGroups.find((group) => group.project.id === project.id);
+      setSelectedProject(null);
+      setSelectedThread(null);
+      setSelected(null);
+      setDetailMode("chat");
+      setNewChatProjectKey(projectGroup?.key ?? projectFilterKey(project));
+      setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
     },
     onError,
   });

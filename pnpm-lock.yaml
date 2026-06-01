@@ -11,6 +11,9 @@ importers:
       '@dnd-kit/react':
         specifier: ^0.4.0
         version: 0.4.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+      '@iconify-react/bitcoin-icons':
+        specifier: ^1.0.3
+        version: 1.0.3(react@19.2.6)
       '@iconify-react/material-symbols':
         specifier: ^1.0.16
         version: 1.0.16(react@19.2.6)
@@ -560,6 +563,9 @@ packages:
     peerDependencies:
       react: ^16 || ^17 || ^18 || ^19
       react-dom: ^16 || ^17 || ^18 || ^19
+
+  '@iconify-react/bitcoin-icons@1.0.3':
+    resolution: {integrity: sha512-GQ0g268AKbNkXkS+GFvC88BH483n3HNBpyAnCNyvn7O+cR5wJrOScaZPOjYUdN4M72uTUcJ7CTzVL834wigSKQ==}
 
   '@iconify-react/material-symbols@1.0.16':
     resolution: {integrity: sha512-inyBSaLgwlF20L0AwENF/mjGKIXBRMlIa+o1GElxgTdUUL0ylIAhVmhGS0MmMi0f4n1EstgsgR9zltm9IBHmOQ==}
@@ -4037,6 +4043,12 @@ snapshots:
       giscus: 1.6.0
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
+
+  '@iconify-react/bitcoin-icons@1.0.3(react@19.2.6)':
+    dependencies:
+      '@iconify/css-react': 1.0.2(react@19.2.6)
+    transitivePeerDependencies:
+      - react
 
   '@iconify-react/material-symbols@1.0.16(react@19.2.6)':
     dependencies:

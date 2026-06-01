@@ -53,16 +53,6 @@ export default function ThreadPage({
   const activeIndex = thread?.stageId
     ? sortedStages.findIndex((stage) => stage.id === thread.stageId || stage.stageId === thread.stageId)
     : -1;
-  const linkedSessions = useMemo(() => {
-    if (!thread) return [];
-    const byKey = new Map<string, SessionInfo>();
-    for (const session of thread.sessions) byKey.set(sessionIdentityKey(session), session);
-    for (const stage of sortedStages) {
-      for (const session of stage.sessions) byKey.set(sessionIdentityKey(session), session);
-    }
-    return Array.from(byKey.values()).sort(compareSessionTime);
-  }, [sortedStages, thread]);
-
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
       <ScrollArea className="min-h-0 flex-1" viewportClassName="px-6 py-5">
@@ -80,7 +70,7 @@ export default function ThreadPage({
             <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
               <ThreadStat label={t("stage.project_stages")} value={String(sortedStages.length)} />
               <ThreadStat label={t("assistant.title")} value={String(uniqueAssistantCount(sortedStages))} />
-              <ThreadStat label={t("thread.sessions")} value={String(linkedSessions.length)} />
+              <ThreadStat label={t("thread.chats")} value={String(thread.sessions.length)} />
               <ThreadStat label={t("meta.updated")} value={formatDate(thread.updatedAt, lang) ?? "-"} />
             </div>
 
@@ -291,7 +281,12 @@ function AssistantSessionLane({
         )}
       </div>
       {sessions.length === 0 ? (
-        <div className="mt-2 rounded border border-dashed border-card-border/[0.10] px-2 py-2 text-caption text-ink/35">
+        <div className="mt-2 flex items-center gap-1.5 rounded border border-dashed border-card-border/[0.10] px-2 py-2 text-caption text-ink/35">
+          {agent ? (
+            <AgentGlyph agent={agent} className="h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <AssistantBotIcon className="h-3.5 w-3.5 shrink-0 text-ink/30" />
+          )}
           {t("thread.no_assistant_sessions")}
         </div>
       ) : (
