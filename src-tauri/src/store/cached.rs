@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, SessionInfo, StageInfo,
+    ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, SessionInfo, StageInfo, StageStatus,
     SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 use crate::store::{
@@ -378,6 +378,17 @@ impl SessionStore for CachedStore {
     ) -> Result<StageInfo> {
         self.inner
             .update_thread_stage(thread_stage_id, assistant_ids, order, enabled)
+    }
+
+    fn update_thread_stage_state(
+        &self,
+        thread_stage_id: &str,
+        status: Option<StageStatus>,
+        summary: Option<Option<String>>,
+        outcome: Option<Option<String>>,
+    ) -> Result<StageInfo> {
+        self.inner
+            .update_thread_stage_state(thread_stage_id, status, summary, outcome)
     }
 
     fn update_thread_stage_assistant_agent(

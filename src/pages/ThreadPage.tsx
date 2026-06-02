@@ -1,16 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-import { Check, Circle, CircleDot, LoaderCircle } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Circle, CircleAlert, CircleDot, LoaderCircle, MinusCircle } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
-import type { Agent, ProjectInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
-import { AGENT_LABEL, listThreads } from "../api";
+import type { Agent, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo } from "../api";
+import { AGENT_LABEL, listThreads, updateThreadStageState } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
 import { sessionIdentityKey } from "../appUtils";
 import { projectStageIcon } from "../utils/stageDisplay";
-
-type StageState = "done" | "active" | "pending";
 
 export default function ThreadPage({
   project,
@@ -26,6 +24,12 @@ export default function ThreadPage({
   const { t, lang } = useI18n();
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const reload = useCallback(() => {
+    return listThreads(project.id)
+      .then((rows) => setThreads(rows))
+      .catch((err) => onError(String(err)));
+  }, [onError, project.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,9 +54,6 @@ export default function ThreadPage({
     () => (thread?.stages ?? []).slice().sort((a, b) => a.order - b.order),
     [thread?.stages],
   );
-  const activeIndex = thread?.stageId
-    ? sortedStages.findIndex((stage) => stage.id === thread.stageId || stage.stageId === thread.stageId)
-    : -1;
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
       <ScrollArea className="min-h-0 flex-1" viewportClassName="px-6 py-5">
@@ -94,12 +95,18 @@ export default function ThreadPage({
                   <ThreadStageStep
                     key={stage.id}
                     stage={stage}
-                    state={stageState(index, activeIndex)}
-                    previousState={index > 0 ? stageState(index - 1, activeIndex) : null}
-                    nextState={index < sortedStages.length - 1 ? stageState(index + 1, activeIndex) : null}
+                    previousStatus={index > 0 ? sortedStages[index - 1].status : null}
                     first={index === 0}
                     last={index === sortedStages.length - 1}
                     onSelectSession={onSelectSession}
+                    onStatusChange={async (status) => {
+                      try {
+                        await updateThreadStageState(stage.id, { status });
+                        await reload();
+                      } catch (err) {
+                        onError(String(err));
+                      }
+                    }}
                   />
                 ))}
               </div>
@@ -122,25 +129,24 @@ function ThreadStat({ label, value }: { label: string; value: string }) {
 
 function ThreadStageStep({
   stage,
-  state,
-  previousState,
-  nextState,
+  previousStatus,
   first,
   last,
   onSelectSession,
+  onStatusChange,
 }: {
   stage: StageInfo;
-  state: StageState;
-  previousState: StageState | null;
-  nextState: StageState | null;
+  previousStatus: StageStatus | null;
   first: boolean;
   last: boolean;
   onSelectSession: (session: SessionInfo) => void;
+  onStatusChange: (status: StageStatus) => void;
 }) {
   const { t } = useI18n();
-  const Icon = state === "done" ? Check : state === "active" ? CircleDot : Circle;
-  const previousComplete = previousState === "done" && (state === "done" || state === "active");
-  const nextComplete = state === "done" && (nextState === "done" || nextState === "active");
+  const visual = stageStatusVisual(stage.status);
+  const Icon = visual.icon;
+  const previousComplete = previousStatus === "completed";
+  const nextComplete = stage.status === "completed";
   const completeLineClass = "bg-[rgb(var(--color-emerald)/0.75)]";
   return (
     <section className="grid grid-cols-[32px_minmax(0,1fr)] gap-3">
@@ -148,16 +154,7 @@ function ThreadStageStep({
         {!first && (
           <div className={"absolute top-0 h-5 w-px " + (previousComplete ? completeLineClass : "bg-ink/[0.12]")} />
         )}
-        <span
-          className={
-            "relative z-10 mt-5 flex h-8 w-8 items-center justify-center rounded-full border " +
-            (state === "active"
-              ? "border-[rgb(var(--color-emerald)/0.80)] bg-surface-panel text-[rgb(var(--color-emerald))]"
-              : state === "done"
-                ? "border-[rgb(var(--color-emerald)/0.80)] bg-[rgb(var(--color-emerald))] text-[rgb(var(--color-bg-panel))]"
-                : "border-ink/15 bg-surface-panel text-ink/30")
-          }
-        >
+        <span className={"relative z-10 mt-5 flex h-8 w-8 items-center justify-center rounded-full border " + visual.markerClass}>
           <Icon className="h-4 w-4" />
         </span>
         {!last && (
@@ -172,11 +169,6 @@ function ThreadStageStep({
               <h2 className="flex min-w-0 items-center gap-2 text-body font-medium text-ink/85">
                 {projectStageIcon(stage, "h-4 w-4 shrink-0 text-ink/45")}
                 <span className="truncate">{stageLabel(stage, t)}</span>
-                {state === "active" && (
-                  <span className="shrink-0 rounded bg-ink/[0.08] px-1.5 py-0.5 text-meta font-normal text-ink/50">
-                    {t("thread.active")}
-                  </span>
-                )}
               </h2>
               {stage.description && (
                 <p className="mt-1 max-w-[720px] whitespace-pre-wrap text-body-sm leading-relaxed text-ink/50">
@@ -184,9 +176,22 @@ function ThreadStageStep({
                 </p>
               )}
             </div>
-            <span className="rounded bg-ink/[0.08] px-1.5 py-0.5 text-meta text-ink/40">
-              {stage.sessions.length}
-            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <select
+                value={stage.status}
+                onChange={(event) => onStatusChange(event.target.value as StageStatus)}
+                className={"rounded border border-ink/15 bg-surface-panel px-1.5 py-0.5 text-meta font-medium " + visual.textClass}
+              >
+                {STAGE_STATUS_ORDER.map((status) => (
+                  <option key={status} value={status}>
+                    {t(`stage.status.${status}`)}
+                  </option>
+                ))}
+              </select>
+              <span className="rounded bg-ink/[0.08] px-1.5 py-0.5 text-meta text-ink/40">
+                {stage.sessions.length}
+              </span>
+            </div>
           </div>
 
           <div className="mt-3 grid gap-2">
@@ -312,11 +317,63 @@ function AssistantSessionLane({
   );
 }
 
-function stageState(index: number, activeIndex: number): StageState {
-  if (activeIndex < 0) return "pending";
-  if (index < activeIndex) return "done";
-  if (index === activeIndex) return "active";
-  return "pending";
+const STAGE_STATUS_ORDER: StageStatus[] = [
+  "not_started",
+  "in_progress",
+  "needs_review",
+  "blocked",
+  "completed",
+  "skipped",
+];
+
+type StageStatusVisual = {
+  icon: typeof Circle;
+  markerClass: string;
+  textClass: string;
+};
+
+function stageStatusVisual(status: StageStatus): StageStatusVisual {
+  switch (status) {
+    case "completed":
+      return {
+        icon: Check,
+        markerClass:
+          "border-[rgb(var(--color-emerald)/0.80)] bg-[rgb(var(--color-emerald))] text-[rgb(var(--color-bg-panel))]",
+        textClass: "text-[rgb(var(--color-emerald))]",
+      };
+    case "in_progress":
+      return {
+        icon: CircleDot,
+        markerClass:
+          "border-[rgb(var(--color-emerald)/0.80)] bg-surface-panel text-[rgb(var(--color-emerald))]",
+        textClass: "text-[rgb(var(--color-emerald))]",
+      };
+    case "needs_review":
+      return {
+        icon: CircleDot,
+        markerClass: "border-sky-500/70 bg-surface-panel text-sky-500",
+        textClass: "text-sky-500",
+      };
+    case "blocked":
+      return {
+        icon: CircleAlert,
+        markerClass: "border-amber-500/70 bg-surface-panel text-amber-500",
+        textClass: "text-amber-500",
+      };
+    case "skipped":
+      return {
+        icon: MinusCircle,
+        markerClass: "border-ink/15 bg-surface-panel text-ink/30",
+        textClass: "text-ink/40",
+      };
+    case "not_started":
+    default:
+      return {
+        icon: Circle,
+        markerClass: "border-ink/15 bg-surface-panel text-ink/30",
+        textClass: "text-ink/45",
+      };
+  }
 }
 
 function stageLabel(stage: StageInfo, t: (key: string) => string): string {

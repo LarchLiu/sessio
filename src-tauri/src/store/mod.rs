@@ -8,7 +8,7 @@ use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
     ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo,
-    StageInfo, SubagentInfo, ThreadInfo, WorkflowInfo,
+    StageInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -217,6 +217,13 @@ pub trait SessionStore: Send + Sync {
         assistant_ids: Option<&[String]>,
         order: Option<i64>,
         enabled: Option<bool>,
+    ) -> Result<StageInfo>;
+    fn update_thread_stage_state(
+        &self,
+        thread_stage_id: &str,
+        status: Option<StageStatus>,
+        summary: Option<Option<String>>,
+        outcome: Option<Option<String>>,
     ) -> Result<StageInfo>;
     fn update_thread_stage_assistant_agent(
         &self,

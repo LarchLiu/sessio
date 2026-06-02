@@ -30,7 +30,7 @@ use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
     ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo,
-    StageInfo, ThreadInfo, WorkflowInfo,
+    StageInfo, StageStatus, ThreadInfo, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -664,6 +664,32 @@ fn update_thread_stage(
 ) -> Result<StageInfo, String> {
     let stage = store
         .update_thread_stage(&thread_stage_id, assistant_ids.as_deref(), order, enabled)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(stage)
+}
+
+#[tauri::command]
+fn update_thread_stage_state(
+    thread_stage_id: String,
+    status: Option<String>,
+    summary: Option<String>,
+    outcome: Option<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageInfo, String> {
+    let status = match status {
+        Some(value) => Some(
+            StageStatus::from_db_str(&value)
+                .ok_or_else(|| format!("invalid stage status: {value}"))?,
+        ),
+        None => None,
+    };
+    // An omitted field leaves the value unchanged; an empty string clears it.
+    let summary = summary.map(|value| (!value.is_empty()).then_some(value));
+    let outcome = outcome.map(|value| (!value.is_empty()).then_some(value));
+    let stage = store
+        .update_thread_stage_state(&thread_stage_id, status, summary, outcome)
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
@@ -2453,6 +2479,7 @@ pub fn run() {
             delete_project_stage,
             add_thread_stage,
             update_thread_stage,
+            update_thread_stage_state,
             update_thread_stage_assistant_agent,
             delete_thread_stage,
             set_thread_stage,

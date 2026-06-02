@@ -14,7 +14,7 @@ use crate::models::{
     Agent, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo,
     AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType,
     RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo,
-    StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
+    StageStatus, StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -469,6 +469,16 @@ CREATE TABLE IF NOT EXISTS thread_stages (
     FOREIGN KEY(stage_id) REFERENCES stages(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS thread_stage_states (
+    thread_stage_id TEXT PRIMARY KEY,
+    status          TEXT NOT NULL DEFAULT 'not_started',
+    summary         TEXT,
+    outcome         TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_thread_stages_stage
     ON thread_stages(stage_id);
 
@@ -540,6 +550,18 @@ CREATE INDEX IF NOT EXISTS idx_agents_type_enabled
     ON agents(type, enabled, sort_order, display_name COLLATE NOCASE);
 "#;
 
+const SCHEMA_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_stage_states (
+    thread_stage_id TEXT PRIMARY KEY,
+    status          TEXT NOT NULL DEFAULT 'not_started',
+    summary         TEXT,
+    outcome         TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE CASCADE
+);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -603,6 +625,15 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V5)?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)",
+            [],
+        )?;
+    }
+    if current < 6 {
+        // The v5 bootstrap schema already includes thread_stage_states, so
+        // fresh installs can ignore the duplicate CREATE.
+        let _ = conn.execute_batch(SCHEMA_V6);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
             [],
         )?;
     }
@@ -1635,6 +1666,7 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
     let stage_type_raw: String = row.get(4)?;
     let workflow_id_raw: Option<String> = row.get(5)?;
     let stage_kind_raw: Option<String> = row.get(6)?;
+    let status_raw: Option<String> = row.get(15)?;
     Ok(StageInfo {
         id: row.get(0)?,
         thread_id: row.get(1)?,
@@ -1650,6 +1682,12 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
         description: row.get(8)?,
         icon: row.get(9)?,
         order: row.get(10)?,
+        status: status_raw
+            .as_deref()
+            .and_then(StageStatus::from_db_str)
+            .unwrap_or(StageStatus::NotStarted),
+        summary: row.get(16)?,
+        outcome: row.get(17)?,
         enabled: row.get::<_, i64>(11)? != 0,
         allow_empty_assistants: row.get::<_, i64>(12)? != 0,
         created_at: row.get(13)?,
@@ -1976,10 +2014,12 @@ fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<S
     let mut stage = conn
         .query_row(
             "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description, s.icon,
-                    ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at
+                    ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at,
+                    tss.status, tss.summary, tss.outcome
              FROM thread_stages ts
              INNER JOIN threads t ON t.id = ts.thread_id
              INNER JOIN stages s ON s.id = ts.stage_id
+             LEFT JOIN thread_stage_states tss ON tss.thread_stage_id = ts.id
              WHERE ts.id = ?",
             params![thread_stage_id],
             thread_stage_from_row,
@@ -2847,17 +2887,56 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
 fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
     let mut stmt = conn.prepare(
         "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description, s.icon,
-                ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at
+                ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at,
+                tss.status, tss.summary, tss.outcome
          FROM thread_stages ts
          INNER JOIN threads t ON t.id = ts.thread_id
          INNER JOIN stages s ON s.id = ts.stage_id
+         LEFT JOIN thread_stage_states tss ON tss.thread_stage_id = ts.id
          WHERE ts.thread_id = ?
          ORDER BY ts.sort_order ASC, ts.created_at ASC",
     )?;
     let mut stages = stmt
         .query_map(params![thread_id], thread_stage_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for stage in stages.iter_mut() {
+
+    // Lazy default: thread stages without an explicit thread_stage_states row
+    // get a status derived from their order relative to the active stage
+    // (before -> completed, active -> in_progress, after -> not_started). This
+    // keeps pre-V6 threads coherent without materializing rows on read.
+    let stored: HashSet<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT tss.thread_stage_id
+             FROM thread_stage_states tss
+             INNER JOIN thread_stages ts ON ts.id = tss.thread_stage_id
+             WHERE ts.thread_id = ?",
+        )?;
+        let ids = stmt
+            .query_map(params![thread_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?;
+        ids
+    };
+    let active_stage_id: Option<String> = conn
+        .query_row(
+            "SELECT stage_id FROM threads WHERE id = ?",
+            params![thread_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let active_index = active_stage_id.as_deref().and_then(|active| {
+        stages
+            .iter()
+            .position(|stage| stage.id == active || stage.stage_id == active)
+    });
+    for (index, stage) in stages.iter_mut().enumerate() {
+        if !stored.contains(&stage.id) {
+            stage.status = match active_index {
+                Some(active) if index < active => StageStatus::Completed,
+                Some(active) if index == active => StageStatus::InProgress,
+                _ => StageStatus::NotStarted,
+            };
+        }
         stage.assistants = load_stage_assistants(conn, &stage.id)?;
         stage.assistant_ids = stage
             .assistants
@@ -4465,6 +4544,55 @@ impl SessionStore for SqliteStore {
         Ok(stage)
     }
 
+    fn update_thread_stage_state(
+        &self,
+        thread_stage_id: &str,
+        status: Option<StageStatus>,
+        summary: Option<Option<String>>,
+        outcome: Option<Option<String>>,
+    ) -> Result<StageInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Resolve the current effective stage (also validates existence and
+        // applies the order-relative lazy default when no row exists yet).
+        let current = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        let next_status = status.unwrap_or(current.status);
+        let next_summary = match summary {
+            Some(value) => value,
+            None => current.summary.clone(),
+        };
+        let next_outcome = match outcome {
+            Some(value) => value,
+            None => current.outcome.clone(),
+        };
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO thread_stage_states
+                (thread_stage_id, status, summary, outcome, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(thread_stage_id) DO UPDATE SET
+                status = excluded.status,
+                summary = excluded.summary,
+                outcome = excluded.outcome,
+                updated_at = excluded.updated_at",
+            params![
+                thread_stage_id,
+                next_status.as_str(),
+                next_summary,
+                next_outcome,
+                now,
+                now
+            ],
+        )?;
+        tx.execute(
+            "UPDATE threads SET updated_at = ? WHERE id = ?",
+            params![now, current.thread_id],
+        )?;
+        let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        tx.commit()?;
+        Ok(stage)
+    }
+
     fn update_thread_stage_assistant_agent(
         &self,
         thread_stage_id: &str,
@@ -5811,7 +5939,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 5);
+        assert_eq!(latest_schema_version, 6);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -6581,6 +6709,67 @@ mod migration_tests {
         assert!(store
             .add_thread_stage(&thread.id, &project_research.id, &[assistant.id])
             .is_ok());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn thread_stage_state_defaults_and_updates() {
+        let path = unique_db("sessio-thread-stage-state");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-stage-state-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "stage-state",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let templates = store.list_project_stages(&project.id).unwrap();
+        let first_id = templates[0].id.clone();
+        let second_id = templates[1].id.clone();
+        let thread = store
+            .create_thread(&project.id, "State thread", None)
+            .unwrap();
+        let stage_a = store.add_thread_stage(&thread.id, &first_id, &[]).unwrap();
+        let stage_b = store.add_thread_stage(&thread.id, &second_id, &[]).unwrap();
+
+        // Lazy default: with no active stage and no stored state, all stages
+        // read as not_started.
+        let stages = load_thread_stages(&store.conn.lock().unwrap(), &thread.id).unwrap();
+        assert!(stages
+            .iter()
+            .all(|stage| stage.status == StageStatus::NotStarted));
+
+        // Setting the active stage derives completed/in_progress for rows that
+        // still have no explicit state.
+        store.set_thread_stage(&thread.id, &stage_b.id).unwrap();
+        let stages = load_thread_stages(&store.conn.lock().unwrap(), &thread.id).unwrap();
+        let status_of = |id: &str| stages.iter().find(|s| s.id == id).unwrap().status;
+        assert_eq!(status_of(&stage_a.id), StageStatus::Completed);
+        assert_eq!(status_of(&stage_b.id), StageStatus::InProgress);
+
+        // An explicit write persists and overrides the derived default.
+        let updated = store
+            .update_thread_stage_state(
+                &stage_a.id,
+                Some(StageStatus::Blocked),
+                Some(Some("hit an API limit".to_string())),
+                None,
+            )
+            .unwrap();
+        assert_eq!(updated.status, StageStatus::Blocked);
+        assert_eq!(updated.summary.as_deref(), Some("hit an API limit"));
+        let stages = load_thread_stages(&store.conn.lock().unwrap(), &thread.id).unwrap();
+        assert_eq!(
+            stages.iter().find(|s| s.id == stage_a.id).unwrap().status,
+            StageStatus::Blocked
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);

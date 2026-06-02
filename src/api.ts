@@ -100,6 +100,14 @@ export type StageType =
 
 export type ProjectStageType = "builtin" | "custom";
 
+export type StageStatus =
+  | "not_started"
+  | "in_progress"
+  | "blocked"
+  | "needs_review"
+  | "completed"
+  | "skipped";
+
 export interface StageInfo {
   id: string;
   threadId: string;
@@ -114,6 +122,9 @@ export interface StageInfo {
   description: string | null;
   icon: string | null;
   order: number;
+  status: StageStatus;
+  summary: string | null;
+  outcome: string | null;
   enabled: boolean;
   allowEmptyAssistants: boolean;
   createdAt: number;
@@ -895,6 +906,22 @@ export async function updateThreadStage(
     assistantIds: patch.assistantIds ?? null,
     order: patch.order ?? null,
     enabled: patch.enabled ?? null,
+  });
+}
+
+export async function updateThreadStageState(
+  threadStageId: string,
+  patch: {
+    status?: StageStatus;
+    summary?: string | null;
+    outcome?: string | null;
+  },
+): Promise<StageInfo> {
+  return invoke<StageInfo>("update_thread_stage_state", {
+    threadStageId,
+    status: patch.status ?? null,
+    summary: patch.summary === undefined ? null : patch.summary ?? "",
+    outcome: patch.outcome === undefined ? null : patch.outcome ?? "",
   });
 }
 

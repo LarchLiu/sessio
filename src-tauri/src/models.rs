@@ -296,6 +296,42 @@ impl StageType {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatus {
+    NotStarted,
+    InProgress,
+    Blocked,
+    NeedsReview,
+    Completed,
+    Skipped,
+}
+
+impl StageStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StageStatus::NotStarted => "not_started",
+            StageStatus::InProgress => "in_progress",
+            StageStatus::Blocked => "blocked",
+            StageStatus::NeedsReview => "needs_review",
+            StageStatus::Completed => "completed",
+            StageStatus::Skipped => "skipped",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "not_started" => Some(StageStatus::NotStarted),
+            "in_progress" => Some(StageStatus::InProgress),
+            "blocked" => Some(StageStatus::Blocked),
+            "needs_review" => Some(StageStatus::NeedsReview),
+            "completed" => Some(StageStatus::Completed),
+            "skipped" => Some(StageStatus::Skipped),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectStageType {
     Builtin,
@@ -358,6 +394,9 @@ pub struct StageInfo {
     pub description: Option<String>,
     pub icon: Option<String>,
     pub order: i64,
+    pub status: StageStatus,
+    pub summary: Option<String>,
+    pub outcome: Option<String>,
     pub enabled: bool,
     pub allow_empty_assistants: bool,
     pub created_at: i64,
