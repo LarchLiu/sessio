@@ -853,16 +853,22 @@ function MessageStream({
 
   useEffect(() => {
     let cancelled = false;
+    setWorkSnapshotSources(null);
     getThreadWorkSnapshot(agent, sessionId)
       .then((snapshot) => {
-        if (!cancelled) setWorkSnapshot(snapshot);
+        if (cancelled) return;
+        setWorkSnapshot(snapshot);
+        if (!snapshot) {
+          setWorkSnapshotSources(null);
+          return;
+        }
+        getThreadWorkSnapshotSources(agent, sessionId)
+          .then((sources) => {
+            if (!cancelled) setWorkSnapshotSources(sources);
+          })
+          .catch((err) => console.warn("load thread work snapshot sources failed", err));
       })
       .catch((err) => console.warn("load thread work snapshot failed", err));
-    getThreadWorkSnapshotSources(agent, sessionId)
-      .then((sources) => {
-        if (!cancelled) setWorkSnapshotSources(sources);
-      })
-      .catch((err) => console.warn("load thread work snapshot sources failed", err));
     return () => {
       cancelled = true;
     };

@@ -152,7 +152,7 @@ export function stageStatusVisual(status: StageStatus): StageStatusVisual {
       };
     case "needs_review":
       return {
-        icon: CircleDot,
+        icon: CircleGauge,
         markerClass: "border-sky-500/70 bg-surface-panel text-sky-500",
         textClass: "text-sky-500",
       };
