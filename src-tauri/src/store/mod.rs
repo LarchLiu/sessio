@@ -177,6 +177,7 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<AssistantInfo>;
     fn delete_assistant(&self, assistant_id: &str) -> Result<()>;
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>>;
+    fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo>;
     fn create_thread(
         &self,
         project_id: &str,

@@ -47,6 +47,9 @@ import {
   type SessionHistorySnapshotGroup,
   type SessionHistoryTurn,
   type SetRuntimeAgentSelectionRequest,
+  type ThreadWorkSnapshotResult,
+  type ThreadWorkSnapshotSourceRef,
+  type ThreadWorkSnapshotSourcesResult,
   SessionInfo,
   RuntimeAgentMetadata,
   RuntimeCapabilitySet,
@@ -55,6 +58,8 @@ import {
   ensureAgentRuntimeSession,
   getSessionHistory,
   getSessionHistorySnapshots,
+  getThreadWorkSnapshot,
+  getThreadWorkSnapshotSources,
   readLocalImageDataUrl,
   readLocalTextFile,
   cancelAgentTurn,
@@ -467,6 +472,91 @@ function TabButton({
   );
 }
 
+function ThreadWorkSnapshotPanel({
+  snapshot,
+  sources,
+}: {
+  snapshot: ThreadWorkSnapshotResult;
+  sources: ThreadWorkSnapshotSourceRef[];
+}) {
+  const work = snapshot.snapshot;
+  const stages = Array.isArray(work.stages) ? work.stages : [];
+  const openIssues = work.rollup.openIssues ?? stages.reduce(
+    (total, stage) => total + (stage.issues ?? []).filter((issue) => issue.status === "open").length,
+    0,
+  );
+  return (
+    <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5 text-body-sm">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-caption uppercase text-ink/35">Thread snapshot</div>
+          <div className="truncate font-medium text-ink/80">{work.goal}</div>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
+          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
+            {work.rollup.completed}/{work.rollup.total} complete
+          </span>
+          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
+            {work.rollup.blocked} blocked
+          </span>
+          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
+            {openIssues} open issues
+          </span>
+        </div>
+      </div>
+      <div className="mt-2 grid gap-1.5">
+        {stages.map((stage) => (
+          <div
+            key={stage.threadStageId}
+            className={
+              "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-md border px-2 py-1.5 " +
+              (stage.threadStageId === work.focusedStageId
+                ? "border-[rgb(var(--color-emerald)/0.35)] bg-[rgb(var(--color-emerald)/0.06)]"
+                : "border-card-border/[0.10] bg-card-panel")
+            }
+          >
+            <div className="min-w-0">
+              <div className="truncate font-medium text-ink/70">{stage.name}</div>
+              {(stage.summary || stage.outcome) && (
+                <div className="truncate text-caption text-ink/40">
+                  {stage.summary ?? stage.outcome}
+                </div>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-1.5 text-caption text-ink/45">
+              <span>{stage.status}</span>
+              {(stage.issues ?? []).filter((issue) => issue.status === "open").length > 0 && (
+                <span className="rounded bg-ink/[0.06] px-1 py-0.5">
+                  {(stage.issues ?? []).filter((issue) => issue.status === "open").length} issues
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {sources.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {sources.slice(0, 10).map((source) => (
+            <span
+              key={`${source.kind}:${source.id}`}
+              title={source.filePath ?? source.sessionId ?? source.id}
+              className="max-w-[260px] truncate rounded border border-card-border/[0.10] bg-card-panel px-1.5 py-0.5 text-caption text-ink/45"
+            >
+              {source.kind}: {source.label}
+              {source.ancestorIndex != null ? ` #${source.ancestorIndex}` : ""}
+            </span>
+          ))}
+          {sources.length > 10 && (
+            <span className="rounded border border-card-border/[0.10] bg-card-panel px-1.5 py-0.5 text-caption text-ink/35">
+              +{sources.length - 10}
+            </span>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function MessageStream({
   agent,
   filePath,
@@ -558,6 +648,8 @@ function MessageStream({
       ? cachedAncestorHistoryGroups(readableAncestorSessions)
       : [],
   );
+  const [workSnapshot, setWorkSnapshot] = useState<ThreadWorkSnapshotResult | null>(null);
+  const [workSnapshotSources, setWorkSnapshotSources] = useState<ThreadWorkSnapshotSourcesResult | null>(null);
   const [loading, setLoading] = useState(() => !isFreshCache);
   const [ancestorsLoading, setAncestorsLoading] = useState(() =>
     readableAncestorSessions.length > 0 && !allAncestorCacheFresh,
@@ -752,6 +844,23 @@ function MessageStream({
       cancelled = true;
     };
   }, [agent, ancestorSessions, sessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    getThreadWorkSnapshot(agent, sessionId)
+      .then((snapshot) => {
+        if (!cancelled) setWorkSnapshot(snapshot);
+      })
+      .catch((err) => console.warn("load thread work snapshot failed", err));
+    getThreadWorkSnapshotSources(agent, sessionId)
+      .then((sources) => {
+        if (!cancelled) setWorkSnapshotSources(sources);
+      })
+      .catch((err) => console.warn("load thread work snapshot sources failed", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [agent, sessionId]);
 
   useEffect(() => {
     if (!ancestorSnapshotState.loaded) {
@@ -1250,6 +1359,12 @@ function MessageStream({
             <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
           )}
           <div ref={chatContentRef} className="flex flex-col gap-2">
+            {workSnapshot && (
+              <ThreadWorkSnapshotPanel
+                snapshot={workSnapshot}
+                sources={workSnapshotSources?.sources ?? []}
+              />
+            )}
             <AcpSessionStatePanel
               state={acpViewModel.sessionState}
               sessioRuntimeSessionId={sessionStateRuntimeSessionId}

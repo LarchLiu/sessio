@@ -282,6 +282,10 @@ impl SessionStore for CachedStore {
         self.inner.list_threads(project_id)
     }
 
+    fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo> {
+        self.inner.get_thread_work_state(thread_id)
+    }
+
     fn create_thread(
         &self,
         project_id: &str,

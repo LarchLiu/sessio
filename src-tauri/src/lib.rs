@@ -35,7 +35,9 @@ use models::{
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
-use store::{SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord};
+use store::{
+    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
+};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -496,6 +498,16 @@ fn list_threads(
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Vec<ThreadInfo>, String> {
     store.list_threads(&project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_thread_work_state(
+    thread_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ThreadInfo, String> {
+    store
+        .get_thread_work_state(&thread_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1098,6 +1110,31 @@ struct ThreadWorkSnapshotResult {
     snapshot: serde_json::Value,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadWorkSnapshotSourcesResult {
+    child_agent: Agent,
+    child_session_id: String,
+    thread_id: String,
+    stage_id: Option<String>,
+    sources: Vec<ThreadWorkSnapshotSourceRef>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadWorkSnapshotSourceRef {
+    kind: String,
+    id: String,
+    label: String,
+    thread_id: Option<String>,
+    thread_stage_id: Option<String>,
+    issue_id: Option<String>,
+    agent: Option<Agent>,
+    session_id: Option<String>,
+    file_path: Option<String>,
+    ancestor_index: Option<i64>,
+}
+
 #[tauri::command]
 fn save_thread_work_snapshot(
     child_agent: Agent,
@@ -1144,6 +1181,288 @@ fn get_thread_work_snapshot(
         version: record.version,
         created_at: record.created_at,
         snapshot,
+    }))
+}
+
+fn build_thread_work_snapshot_sources(
+    record: &ThreadWorkSnapshotRecord,
+    snapshot: &serde_json::Value,
+    current_thread: Option<&ThreadInfo>,
+    history_snapshots: &[SessionHistorySnapshotRecord],
+) -> Vec<ThreadWorkSnapshotSourceRef> {
+    let mut sources = Vec::new();
+    let mut seen = HashSet::new();
+    push_snapshot_source(
+        &mut sources,
+        &mut seen,
+        ThreadWorkSnapshotSourceRef {
+            kind: "thread".to_string(),
+            id: record.thread_id.clone(),
+            label: snapshot
+                .get("goal")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Thread")
+                .to_string(),
+            thread_id: Some(record.thread_id.clone()),
+            thread_stage_id: None,
+            issue_id: None,
+            agent: None,
+            session_id: None,
+            file_path: None,
+            ancestor_index: None,
+        },
+    );
+    if let Some(stages) = snapshot.get("stages").and_then(|value| value.as_array()) {
+        for stage in stages {
+            let Some(thread_stage_id) = stage
+                .get("threadStageId")
+                .or_else(|| stage.get("thread_stage_id"))
+                .and_then(|value| value.as_str())
+            else {
+                continue;
+            };
+            let stage_label = stage
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Stage")
+                .to_string();
+            push_snapshot_source(
+                &mut sources,
+                &mut seen,
+                ThreadWorkSnapshotSourceRef {
+                    kind: "stage".to_string(),
+                    id: thread_stage_id.to_string(),
+                    label: stage_label.clone(),
+                    thread_id: Some(record.thread_id.clone()),
+                    thread_stage_id: Some(thread_stage_id.to_string()),
+                    issue_id: None,
+                    agent: None,
+                    session_id: None,
+                    file_path: None,
+                    ancestor_index: None,
+                },
+            );
+
+            if let Some(issues) = stage.get("issues").and_then(|value| value.as_array()) {
+                for issue in issues {
+                    let Some(issue_id) = issue.get("id").and_then(|value| value.as_str()) else {
+                        continue;
+                    };
+                    let title = issue
+                        .get("title")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("Issue")
+                        .to_string();
+                    push_snapshot_source(
+                        &mut sources,
+                        &mut seen,
+                        ThreadWorkSnapshotSourceRef {
+                            kind: "issue".to_string(),
+                            id: issue_id.to_string(),
+                            label: format!("{stage_label}: {title}"),
+                            thread_id: Some(record.thread_id.clone()),
+                            thread_stage_id: Some(thread_stage_id.to_string()),
+                            issue_id: Some(issue_id.to_string()),
+                            agent: None,
+                            session_id: None,
+                            file_path: None,
+                            ancestor_index: None,
+                        },
+                    );
+                }
+            }
+
+            if let Some(session_refs) = stage.get("sessionRefs").and_then(|value| value.as_array())
+            {
+                for session_ref in session_refs {
+                    push_session_source(
+                        &mut sources,
+                        &mut seen,
+                        "stage_session",
+                        thread_stage_id,
+                        &record.thread_id,
+                        session_ref,
+                        current_thread,
+                        history_snapshots,
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(session_refs) = snapshot
+        .get("threadSessionRefs")
+        .and_then(|value| value.as_array())
+    {
+        for session_ref in session_refs {
+            push_session_source(
+                &mut sources,
+                &mut seen,
+                "thread_session",
+                "",
+                &record.thread_id,
+                session_ref,
+                current_thread,
+                history_snapshots,
+            );
+        }
+    }
+
+    for snapshot in history_snapshots {
+        let id = format!(
+            "{}:{}:{}",
+            snapshot.ancestor_agent.as_str(),
+            snapshot.ancestor_session_id,
+            snapshot.ancestor_index
+        );
+        push_snapshot_source(
+            &mut sources,
+            &mut seen,
+            ThreadWorkSnapshotSourceRef {
+                kind: "history_snapshot".to_string(),
+                id,
+                label: format!(
+                    "History snapshot {}:{}",
+                    snapshot.ancestor_agent.as_str(),
+                    snapshot.ancestor_session_id
+                ),
+                thread_id: Some(record.thread_id.clone()),
+                thread_stage_id: None,
+                issue_id: None,
+                agent: Some(snapshot.ancestor_agent),
+                session_id: Some(snapshot.ancestor_session_id.clone()),
+                file_path: lookup_session_file_path(
+                    current_thread,
+                    snapshot.ancestor_agent,
+                    &snapshot.ancestor_session_id,
+                ),
+                ancestor_index: Some(snapshot.ancestor_index),
+            },
+        );
+    }
+
+    sources
+}
+
+fn push_session_source(
+    sources: &mut Vec<ThreadWorkSnapshotSourceRef>,
+    seen: &mut HashSet<String>,
+    kind: &str,
+    thread_stage_id: &str,
+    thread_id: &str,
+    session_ref: &serde_json::Value,
+    current_thread: Option<&ThreadInfo>,
+    history_snapshots: &[SessionHistorySnapshotRecord],
+) {
+    let Some(agent_raw) = session_ref.get("agent").and_then(|value| value.as_str()) else {
+        return;
+    };
+    let Some(agent) = Agent::from_db_str(agent_raw) else {
+        return;
+    };
+    let Some(session_id) = session_ref
+        .get("sessionId")
+        .or_else(|| session_ref.get("session_id"))
+        .and_then(|value| value.as_str())
+    else {
+        return;
+    };
+    let title = session_ref
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or(session_id)
+        .to_string();
+    let file_path = session_ref
+        .get("filePath")
+        .or_else(|| session_ref.get("file_path"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .or_else(|| lookup_session_file_path(current_thread, agent, session_id));
+    let ancestor_index = history_snapshots
+        .iter()
+        .find(|snapshot| {
+            snapshot.ancestor_agent == agent && snapshot.ancestor_session_id == session_id
+        })
+        .map(|snapshot| snapshot.ancestor_index);
+    push_snapshot_source(
+        sources,
+        seen,
+        ThreadWorkSnapshotSourceRef {
+            kind: kind.to_string(),
+            id: format!("{}:{}", agent.as_str(), session_id),
+            label: title,
+            thread_id: Some(thread_id.to_string()),
+            thread_stage_id: (!thread_stage_id.is_empty()).then(|| thread_stage_id.to_string()),
+            issue_id: None,
+            agent: Some(agent),
+            session_id: Some(session_id.to_string()),
+            file_path,
+            ancestor_index,
+        },
+    );
+}
+
+fn lookup_session_file_path(
+    thread: Option<&ThreadInfo>,
+    agent: Agent,
+    session_id: &str,
+) -> Option<String> {
+    let thread = thread?;
+    for session in &thread.sessions {
+        if session.agent == agent && session.id == session_id && !session.file_path.is_empty() {
+            return Some(session.file_path.clone());
+        }
+    }
+    for stage in &thread.stages {
+        for session in &stage.sessions {
+            if session.agent == agent && session.id == session_id && !session.file_path.is_empty() {
+                return Some(session.file_path.clone());
+            }
+        }
+    }
+    None
+}
+
+fn push_snapshot_source(
+    sources: &mut Vec<ThreadWorkSnapshotSourceRef>,
+    seen: &mut HashSet<String>,
+    source: ThreadWorkSnapshotSourceRef,
+) {
+    let key = format!("{}:{}", source.kind, source.id);
+    if seen.insert(key) {
+        sources.push(source);
+    }
+}
+
+#[tauri::command]
+fn get_thread_work_snapshot_sources(
+    child_agent: Agent,
+    child_session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Option<ThreadWorkSnapshotSourcesResult>, String> {
+    let record = store
+        .get_thread_work_snapshot(child_agent, &child_session_id)
+        .map_err(|e| e.to_string())?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&record.snapshot_json).map_err(|e| e.to_string())?;
+    let history_snapshots = store
+        .get_session_history_snapshots(record.child_agent, &record.child_session_id)
+        .map_err(|e| e.to_string())?;
+    let current_thread = store.get_thread_work_state(&record.thread_id).ok();
+    Ok(Some(ThreadWorkSnapshotSourcesResult {
+        child_agent: record.child_agent,
+        child_session_id: record.child_session_id.clone(),
+        thread_id: record.thread_id.clone(),
+        stage_id: record.stage_id.clone(),
+        sources: build_thread_work_snapshot_sources(
+            &record,
+            &snapshot,
+            current_thread.as_ref(),
+            &history_snapshots,
+        ),
     }))
 }
 
@@ -2642,6 +2961,7 @@ pub fn run() {
             update_assistant,
             delete_assistant,
             list_threads,
+            get_thread_work_state,
             create_thread,
             update_thread,
             delete_thread,
@@ -2677,6 +2997,7 @@ pub fn run() {
             save_session_history_snapshots,
             save_thread_work_snapshot,
             get_thread_work_snapshot,
+            get_thread_work_snapshot_sources,
             get_session_history,
             update_session_history_count,
             create_pending_session,

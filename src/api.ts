@@ -178,6 +178,8 @@ export interface ThreadInfo {
   sessions: SessionInfo[];
 }
 
+export interface ThreadWorkState extends ThreadInfo {}
+
 export type KanbanStatus =
   | "todo"
   | "in_progress"
@@ -801,6 +803,10 @@ export async function listThreads(projectId: string): Promise<ThreadInfo[]> {
   return invoke<ThreadInfo[]>("list_threads", { projectId });
 }
 
+export async function getThreadWorkState(threadId: string): Promise<ThreadWorkState> {
+  return invoke<ThreadWorkState>("get_thread_work_state", { threadId });
+}
+
 export async function createThread(
   projectId: string,
   goal: string,
@@ -1129,13 +1135,37 @@ export async function saveSessionHistorySnapshots(
 
 export interface ThreadWorkSnapshotStage {
   threadStageId: string;
+  projectStageId?: string | null;
   name: string;
   kind: StageType | null;
+  icon?: string | null;
   status: StageStatus;
   summary: string | null;
   outcome: string | null;
+  assistants?: StageAssistantInfo[];
   issues?: StageIssueInfo[];
-  sessionRefs: { agent: Agent; sessionId: string; title: string | null }[];
+  sessionRefs: ThreadWorkSnapshotSessionRef[];
+}
+
+export interface ThreadWorkSnapshotSessionRef {
+  agent: Agent;
+  sessionId: string;
+  title: string | null;
+  filePath?: string | null;
+  sourceKind?: "thread" | "stage";
+  ancestorIndex?: number | null;
+}
+
+export interface ThreadWorkSnapshotDetailRefs {
+  threadId: string;
+  focusedStageId: string | null;
+  stageIds: string[];
+  issueIds: string[];
+  sessionRefs: ThreadWorkSnapshotSessionRef[];
+}
+
+export interface ThreadWorkSnapshotRelatedContext {
+  sessionExcerptRefs: ThreadWorkSnapshotSessionRef[];
 }
 
 export interface ThreadWorkSnapshot {
@@ -1146,6 +1176,9 @@ export interface ThreadWorkSnapshot {
   activeStageId: string | null;
   focusedStageId: string | null;
   stages: ThreadWorkSnapshotStage[];
+  threadSessionRefs?: ThreadWorkSnapshotSessionRef[];
+  relatedContext?: ThreadWorkSnapshotRelatedContext;
+  detailRefs?: ThreadWorkSnapshotDetailRefs;
   rollup: {
     completed: number;
     incomplete: number;
@@ -1165,6 +1198,27 @@ export interface ThreadWorkSnapshotResult {
   version: number;
   createdAt: number;
   snapshot: ThreadWorkSnapshot;
+}
+
+export interface ThreadWorkSnapshotSourceRef {
+  kind: string;
+  id: string;
+  label: string;
+  threadId: string | null;
+  threadStageId: string | null;
+  issueId: string | null;
+  agent: Agent | null;
+  sessionId: string | null;
+  filePath: string | null;
+  ancestorIndex: number | null;
+}
+
+export interface ThreadWorkSnapshotSourcesResult {
+  childAgent: Agent;
+  childSessionId: string;
+  threadId: string;
+  stageId: string | null;
+  sources: ThreadWorkSnapshotSourceRef[];
 }
 
 export async function saveThreadWorkSnapshot(
@@ -1188,6 +1242,16 @@ export async function getThreadWorkSnapshot(
   childSessionId: string,
 ): Promise<ThreadWorkSnapshotResult | null> {
   return invoke<ThreadWorkSnapshotResult | null>("get_thread_work_snapshot", {
+    childAgent,
+    childSessionId,
+  });
+}
+
+export async function getThreadWorkSnapshotSources(
+  childAgent: Agent,
+  childSessionId: string,
+): Promise<ThreadWorkSnapshotSourcesResult | null> {
+  return invoke<ThreadWorkSnapshotSourcesResult | null>("get_thread_work_snapshot_sources", {
     childAgent,
     childSessionId,
   });

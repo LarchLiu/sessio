@@ -3,6 +3,7 @@ import type {
   StageStatus,
   ThreadInfo,
   ThreadWorkSnapshot,
+  ThreadWorkSnapshotSessionRef,
   ThreadWorkSnapshotStage,
 } from "./api";
 
@@ -11,16 +12,21 @@ const COMPLETED: StageStatus[] = ["completed", "skipped"];
 function snapshotStage(stage: StageInfo): ThreadWorkSnapshotStage {
   return {
     threadStageId: stage.id,
+    projectStageId: stage.stageId,
     name: stage.name ?? stage.kind ?? stage.stageId,
     kind: stage.kind,
+    icon: stage.icon,
     status: stage.status,
     summary: stage.summary,
     outcome: stage.outcome,
+    assistants: stage.assistants,
     issues: stage.issues ?? [],
     sessionRefs: stage.sessions.map((session) => ({
       agent: session.agent,
       sessionId: session.id,
       title: session.title ?? session.firstUserMessage,
+      filePath: session.filePath || null,
+      sourceKind: "stage",
     })),
   };
 }
@@ -44,6 +50,15 @@ export function buildThreadWorkSnapshot(
     (total, stage) => total + (stage.issues ?? []).filter((issue) => issue.status === "open").length,
     0,
   );
+  const threadSessionRefs = thread.sessions.map((session) => ({
+    agent: session.agent,
+    sessionId: session.id,
+    title: session.title ?? session.firstUserMessage,
+    filePath: session.filePath || null,
+    sourceKind: "thread" as const,
+  }));
+  const stageSessionRefs = stages.flatMap((stage) => stage.sessionRefs);
+  const allSessionRefs = dedupeSessionRefs([...threadSessionRefs, ...stageSessionRefs]);
   return {
     threadId: thread.id,
     projectId: thread.projectId,
@@ -52,6 +67,17 @@ export function buildThreadWorkSnapshot(
     activeStageId: thread.stageId,
     focusedStageId: focusedStage?.id ?? null,
     stages,
+    threadSessionRefs,
+    relatedContext: {
+      sessionExcerptRefs: allSessionRefs,
+    },
+    detailRefs: {
+      threadId: thread.id,
+      focusedStageId: focusedStage?.id ?? null,
+      stageIds: stages.map((stage) => stage.threadStageId),
+      issueIds: stages.flatMap((stage) => (stage.issues ?? []).map((issue) => issue.id)),
+      sessionRefs: allSessionRefs,
+    },
     rollup: {
       completed,
       incomplete: stages.length - completed,
@@ -62,6 +88,18 @@ export function buildThreadWorkSnapshot(
     },
     capturedAt,
   };
+}
+
+function dedupeSessionRefs(refs: ThreadWorkSnapshotSessionRef[]): ThreadWorkSnapshotSessionRef[] {
+  const seen = new Set<string>();
+  const result: ThreadWorkSnapshotSessionRef[] = [];
+  for (const ref of refs) {
+    const key = `${ref.agent}:${ref.sessionId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(ref);
+  }
+  return result;
 }
 
 function statusLabel(status: StageStatus): string {
@@ -112,7 +150,6 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot): string {
       lines.push(`    [${ref.agent}:${ref.sessionId}] ${ref.title ?? ""}`.trimEnd());
     }
   }
-
   const focusedId = snapshot.focusedStageId;
   if (focusedId) {
     lines.push("");

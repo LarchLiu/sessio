@@ -2101,6 +2101,19 @@ fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<S
         )
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("thread stage not found: {thread_stage_id}"))?;
+    let has_stored_state: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM thread_stage_states WHERE thread_stage_id = ? LIMIT 1",
+            params![thread_stage_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if has_stored_state.is_none() {
+        let stages = load_thread_stages(conn, &stage.thread_id)?;
+        if let Some(effective) = stages.into_iter().find(|item| item.id == stage.id) {
+            stage.status = effective.status;
+        }
+    }
     stage.assistants = load_stage_assistants(conn, &stage.id)?;
     stage.assistant_ids = stage
         .assistants
@@ -4168,6 +4181,11 @@ impl SessionStore for SqliteStore {
             thread.sessions = load_thread_sessions(&conn, &thread.id)?;
         }
         Ok(threads)
+    }
+
+    fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo> {
+        let conn = self.conn.lock().unwrap();
+        load_thread_by_id(&conn, thread_id)
     }
 
     fn create_thread(
@@ -7036,12 +7054,16 @@ mod migration_tests {
         let path = unique_db("sessio-thread-stage-issues");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
-        let parent =
-            temp_child_path(&std::env::temp_dir(), "sessio-thread-stage-issues-parent");
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-stage-issues-parent");
         std::fs::create_dir(&parent).unwrap();
 
         let project = store
-            .create_project(&parent.to_string_lossy(), "issues", "code".to_string(), None)
+            .create_project(
+                &parent.to_string_lossy(),
+                "issues",
+                "code".to_string(),
+                None,
+            )
             .unwrap();
         let templates = store.list_project_stages(&project.id).unwrap();
         let first_id = templates[0].id.clone();
@@ -7088,7 +7110,10 @@ mod migration_tests {
 
         // deleting the parent thread stage cascades to its issues.
         store.delete_thread_stage(&stage.id).unwrap();
-        assert!(store.list_thread_stage_issues(&stage.id).unwrap().is_empty());
+        assert!(store
+            .list_thread_stage_issues(&stage.id)
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);

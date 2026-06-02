@@ -5,7 +5,9 @@ use crate::memory::qmd;
 use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
-use crate::models::{Agent, IssueSeverity, IssueStatus, SessionHistoryBlock, SessionHistoryTurn, StageStatus};
+use crate::models::{
+    Agent, IssueSeverity, IssueStatus, SessionHistoryBlock, SessionHistoryTurn, StageStatus,
+};
 use crate::store::sqlite::SqliteStore;
 use crate::store::SessionStore;
 use anyhow::{bail, Context, Result};
@@ -58,6 +60,14 @@ enum StageCommand {
     SetStatus {
         id: String,
         status: String,
+        summary: Option<String>,
+        outcome: Option<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Update {
+        id: String,
+        status: Option<String>,
         summary: Option<String>,
         outcome: Option<String>,
         db_path: Option<String>,
@@ -820,6 +830,36 @@ fn run_stage(cmd: StageCommand) -> Result<()> {
             }
             Ok(())
         }
+        StageCommand::Update {
+            id,
+            status,
+            summary,
+            outcome,
+            db_path,
+            json,
+        } => {
+            let parsed = match status.as_deref() {
+                Some(value) => Some(
+                    StageStatus::from_db_str(value)
+                        .with_context(|| format!("invalid stage status: {value}"))?,
+                ),
+                None => None,
+            };
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let stage = store.update_thread_stage_state(
+                &id,
+                parsed,
+                summary.map(Some),
+                outcome.map(Some),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stage)?);
+            } else {
+                println!("stage\t{}\t{}", stage.id, stage.status.as_str());
+            }
+            Ok(())
+        }
         StageCommand::Issue(cmd) => run_stage_issue(cmd),
     }
 }
@@ -838,8 +878,12 @@ fn run_stage_issue(cmd: IssueCommand) -> Result<()> {
                 .with_context(|| format!("invalid issue severity: {severity}"))?;
             let store = open_store(db_path.as_deref())?;
             store.init()?;
-            let issue =
-                store.create_thread_stage_issue(&stage_id, &title, description.as_deref(), parsed)?;
+            let issue = store.create_thread_stage_issue(
+                &stage_id,
+                &title,
+                description.as_deref(),
+                parsed,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&issue)?);
             } else {
@@ -935,7 +979,10 @@ fn find_thread_by_id(store: &SqliteStore, thread_id: &str) -> Result<crate::mode
     bail!("thread not found: {thread_id}")
 }
 
-fn find_stage_by_id(store: &SqliteStore, thread_stage_id: &str) -> Result<crate::models::StageInfo> {
+fn find_stage_by_id(
+    store: &SqliteStore,
+    thread_stage_id: &str,
+) -> Result<crate::models::StageInfo> {
     for project in store.list_projects()? {
         for thread in store.list_threads(&project.id)? {
             if let Some(stage) = thread
@@ -1557,8 +1604,11 @@ fn parse_stage(args: &[String]) -> Result<Cli> {
                 match args[i].as_str() {
                     "--thread-id" => {
                         i += 1;
-                        thread_id =
-                            Some(args.get(i).context("missing value for --thread-id")?.clone());
+                        thread_id = Some(
+                            args.get(i)
+                                .context("missing value for --thread-id")?
+                                .clone(),
+                        );
                     }
                     "--db-path" => {
                         i += 1;
@@ -1644,6 +1694,52 @@ fn parse_stage(args: &[String]) -> Result<Cli> {
                 command: Command::Stage(StageCommand::SetStatus {
                     id: id.context("missing --id")?,
                     status: status.context("missing --status")?,
+                    summary,
+                    outcome,
+                    db_path,
+                    json,
+                }),
+            })
+        }
+        "update" => {
+            let mut id = None;
+            let mut status = None;
+            let mut summary = None;
+            let mut outcome = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--id" => {
+                        i += 1;
+                        id = Some(args.get(i).context("missing value for --id")?.clone());
+                    }
+                    "--status" => {
+                        i += 1;
+                        status = Some(args.get(i).context("missing value for --status")?.clone());
+                    }
+                    "--summary" => {
+                        i += 1;
+                        summary = Some(args.get(i).context("missing value for --summary")?.clone());
+                    }
+                    "--outcome" => {
+                        i += 1;
+                        outcome = Some(args.get(i).context("missing value for --outcome")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown stage update option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Update {
+                    id: id.context("missing --id")?,
+                    status,
                     summary,
                     outcome,
                     db_path,
@@ -2051,6 +2147,7 @@ Usage:
   sessio stage list --thread-id <threadId> [--db-path <path>] [--json]
   sessio stage show --id <threadStageId> [--db-path <path>] [--json]
   sessio stage set-status --id <threadStageId> --status <not_started|in_progress|blocked|needs_review|completed|skipped> [--summary <text>] [--outcome <text>] [--db-path <path>] [--json]
+  sessio stage update --id <threadStageId> [--status <not_started|in_progress|blocked|needs_review|completed|skipped>] [--summary <text>] [--outcome <text>] [--db-path <path>] [--json]
   sessio stage issue add --stage-id <threadStageId> --title <text> --severity <low|medium|high|critical> [--description <text>] [--db-path <path>] [--json]
   sessio stage issue list --stage-id <threadStageId> [--db-path <path>] [--json]
   sessio stage issue set --id <issueId> [--status <open|resolved|dismissed>] [--severity <low|medium|high|critical>] [--title <text>] [--description <text>] [--db-path <path>] [--json]
