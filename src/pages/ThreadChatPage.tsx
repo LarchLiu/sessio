@@ -88,6 +88,7 @@ export default function ThreadChatPage({
     : selectedThread?.stageId
       ? sortedStages.find((stage) => stage.id === selectedThread.stageId || stage.stageId === selectedThread.stageId) ?? null
       : null;
+  const linkStageId = snapshotContext.stage ? focusedStage?.id ?? null : null;
   const threadOptions: InlineMenuSelectOption[] = threads.map((thread) => ({
     value: thread.id,
     label: thread.goal,
@@ -189,12 +190,12 @@ export default function ThreadChatPage({
         historySnapshots,
         workSnapshot: {
           threadId: selectedThread.id,
-          stageId: focusedStage?.id ?? null,
+          stageId: linkStageId,
           snapshot: snapshotWithSources,
         },
         threadLink: {
           threadId: selectedThread.id,
-          stageId: focusedStage?.id ?? null,
+          stageId: linkStageId,
         },
       },
     });

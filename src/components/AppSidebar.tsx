@@ -721,26 +721,28 @@ function ProjectSidebarGroup({
           {displayCount}
         </span>
         <span className="ml-auto hidden shrink-0 items-center gap-0.5 group-hover:flex">
-          <Tooltip content={listMode === "threads" ? "Chats" : t("thread.title")} placement="top">
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label={t("thread.title")}
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleListMode();
-              }}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return;
-                event.preventDefault();
-                event.stopPropagation();
-                onToggleListMode();
-              }}
-              className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
-            >
-              <ProjectListModeIcon className="h-4 w-4" />
-            </span>
-          </Tooltip>
+          {expanded && (
+            <Tooltip content={listMode === "threads" ? "Chats" : t("thread.title")} placement="top">
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={t("thread.title")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleListMode();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onToggleListMode();
+                }}
+                className="rounded p-0.5 text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
+              >
+                <ProjectListModeIcon className="h-4 w-4" />
+              </span>
+            </Tooltip>
+          )}
           <Tooltip content={t("project.workbench")} placement="top">
             <span
               role="button"
