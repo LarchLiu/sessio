@@ -15,7 +15,7 @@ import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
 import { sessionIdentityKey } from "../appUtils";
-import { projectStageIcon, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
+import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
 export default function ThreadPage({
   project,
@@ -190,7 +190,7 @@ function ThreadStageStep({
             <div className="min-w-0">
               <h2 className="flex min-w-0 items-center gap-2 text-body font-medium text-ink/85">
                 {projectStageIcon(stage, "h-4 w-4 shrink-0 text-ink/45")}
-                <span className="truncate">{stageLabel(stage, t)}</span>
+                <span className="truncate">{projectStageLabel(stage, t)}</span>
               </h2>
               {stage.description && (
                 <p className="mt-1 max-w-[720px] whitespace-pre-wrap text-body-sm leading-relaxed text-ink/50">
@@ -528,11 +528,6 @@ function AssistantSessionLane({
       )}
     </div>
   );
-}
-
-function stageLabel(stage: StageInfo, t: (key: string) => string): string {
-  if (stage.type === "custom") return stage.name ?? t("stage.custom");
-  return stage.kind ? t(`stage.type.${stage.kind}`) : stage.name ?? t("stage.type");
 }
 
 function issueSeverityDotClass(severity: IssueSeverity): string {

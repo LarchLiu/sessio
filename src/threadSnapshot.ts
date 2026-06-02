@@ -83,7 +83,9 @@ export function buildThreadWorkSnapshot(
       incomplete: stages.length - completed,
       blocked,
       openIssues,
-      currentStage: focusedStage ? snapshotStage(focusedStage).name : null,
+      currentStage: focusedStage
+        ? focusedStage.name ?? focusedStage.kind ?? focusedStage.stageId
+        : null,
       total: stages.length,
     },
     capturedAt,
