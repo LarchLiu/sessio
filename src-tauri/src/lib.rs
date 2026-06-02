@@ -2343,6 +2343,36 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Expose the running app binary at a stable path (~/.sessio/bin/sessio) so
+/// agents working inside a project can invoke the Sessio CLI without knowing
+/// where the app was installed. Best-effort: failures only warn.
+fn link_cli_binary(sessio_home: &std::path::Path) {
+    let current = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            log::warn!("link_cli_binary: current_exe failed: {e}");
+            return;
+        }
+    };
+    let bin_dir = sessio_home.join("bin");
+    if let Err(e) = std::fs::create_dir_all(&bin_dir) {
+        log::warn!("link_cli_binary: create {bin_dir:?} failed: {e}");
+        return;
+    }
+    let link = bin_dir.join("sessio");
+    // Replace any stale link/file pointing at a previous install.
+    if link.exists() || std::fs::symlink_metadata(&link).is_ok() {
+        let _ = std::fs::remove_file(&link);
+    }
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink(&current, &link);
+    #[cfg(windows)]
+    let result = std::fs::copy(&current, &link).map(|_| ());
+    if let Err(e) = result {
+        log::warn!("link_cli_binary: link {link:?} -> {current:?} failed: {e}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2357,11 +2387,12 @@ pub fn run() {
                 )?;
             }
 
-            let data_dir = dirs::home_dir()
+            let sessio_home = dirs::home_dir()
                 .ok_or_else(|| anyhow::anyhow!("no home dir"))?
-                .join(".sessio")
-                .join("db-data");
+                .join(".sessio");
+            let data_dir = sessio_home.join("db-data");
             std::fs::create_dir_all(&data_dir).ok();
+            link_cli_binary(&sessio_home);
             let db_path = data_dir.join("sessio-index.db");
             let sqlite = Arc::new(SqliteStore::open(&db_path)?);
             sqlite.init()?;

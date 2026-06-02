@@ -5,7 +5,7 @@ use crate::memory::qmd;
 use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
-use crate::models::{Agent, SessionHistoryBlock, SessionHistoryTurn};
+use crate::models::{Agent, SessionHistoryBlock, SessionHistoryTurn, StageStatus};
 use crate::store::sqlite::SqliteStore;
 use crate::store::SessionStore;
 use anyhow::{bail, Context, Result};
@@ -24,7 +24,45 @@ enum Command {
     Sessions(SessionsCommand),
     Memory(MemoryCommand),
     Config(ConfigCommand),
+    Thread(ThreadCommand),
+    Stage(StageCommand),
     Help,
+}
+
+#[derive(Debug)]
+enum ThreadCommand {
+    List {
+        project: Option<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Show {
+        id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+}
+
+#[derive(Debug)]
+enum StageCommand {
+    List {
+        thread_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Show {
+        id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    SetStatus {
+        id: String,
+        status: String,
+        summary: Option<String>,
+        outcome: Option<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -176,6 +214,8 @@ fn run() -> Result<()> {
         Command::Sessions(cmd) => run_sessions(cmd),
         Command::Memory(cmd) => run_memory(cmd),
         Command::Config(cmd) => run_config(cmd),
+        Command::Thread(cmd) => run_thread(cmd),
+        Command::Stage(cmd) => run_stage(cmd),
         Command::Help => {
             print_help();
             Ok(())
@@ -616,6 +656,184 @@ fn run_memory(cmd: MemoryCommand) -> Result<()> {
     }
 }
 
+fn run_thread(cmd: ThreadCommand) -> Result<()> {
+    match cmd {
+        ThreadCommand::List {
+            project,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let projects = store.list_projects()?;
+            let selected: Vec<_> = match project.as_deref() {
+                Some(filter) => {
+                    let wanted = normalize_project_filter(filter);
+                    projects
+                        .into_iter()
+                        .filter(|p| normalize_project_filter(&p.path) == wanted)
+                        .collect()
+                }
+                None => projects,
+            };
+            let mut threads = Vec::new();
+            for project in &selected {
+                threads.extend(store.list_threads(&project.id)?);
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&threads)?);
+            } else {
+                for thread in &threads {
+                    println!(
+                        "{}\t{}\t{} stages",
+                        thread.id,
+                        thread.goal,
+                        thread.stages.len()
+                    );
+                }
+            }
+            Ok(())
+        }
+        ThreadCommand::Show { id, db_path, json } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let thread = find_thread_by_id(&store, &id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&thread)?);
+            } else {
+                println!("thread\t{}\t{}", thread.id, thread.goal);
+                if let Some(description) = &thread.description {
+                    println!("description\t{description}");
+                }
+                let mut stages = thread.stages;
+                stages.sort_by(|a, b| a.order.cmp(&b.order));
+                for stage in &stages {
+                    println!(
+                        "stage\t{}\t{}\t{}",
+                        stage.id,
+                        stage.status.as_str(),
+                        stage_display_name(stage)
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_stage(cmd: StageCommand) -> Result<()> {
+    match cmd {
+        StageCommand::List {
+            thread_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let thread = find_thread_by_id(&store, &thread_id)?;
+            let mut stages = thread.stages;
+            stages.sort_by(|a, b| a.order.cmp(&b.order));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stages)?);
+            } else {
+                for stage in &stages {
+                    println!(
+                        "{}\t{}\t{}",
+                        stage.id,
+                        stage.status.as_str(),
+                        stage_display_name(stage)
+                    );
+                }
+            }
+            Ok(())
+        }
+        StageCommand::Show { id, db_path, json } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let stage = find_stage_by_id(&store, &id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stage)?);
+            } else {
+                println!("stage\t{}\t{}", stage.id, stage.status.as_str());
+                println!("name\t{}", stage_display_name(&stage));
+                if let Some(summary) = &stage.summary {
+                    println!("summary\t{summary}");
+                }
+                if let Some(outcome) = &stage.outcome {
+                    println!("outcome\t{outcome}");
+                }
+                for session in &stage.sessions {
+                    println!("session\t{}\t{}", session.agent.as_str(), session.id);
+                }
+            }
+            Ok(())
+        }
+        StageCommand::SetStatus {
+            id,
+            status,
+            summary,
+            outcome,
+            db_path,
+            json,
+        } => {
+            let parsed = StageStatus::from_db_str(&status)
+                .with_context(|| format!("invalid stage status: {status}"))?;
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let stage = store.update_thread_stage_state(
+                &id,
+                Some(parsed),
+                summary.map(Some),
+                outcome.map(Some),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stage)?);
+            } else {
+                println!("stage\t{}\t{}", stage.id, stage.status.as_str());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn find_thread_by_id(store: &SqliteStore, thread_id: &str) -> Result<crate::models::ThreadInfo> {
+    for project in store.list_projects()? {
+        if let Some(thread) = store
+            .list_threads(&project.id)?
+            .into_iter()
+            .find(|thread| thread.id == thread_id)
+        {
+            return Ok(thread);
+        }
+    }
+    bail!("thread not found: {thread_id}")
+}
+
+fn find_stage_by_id(store: &SqliteStore, thread_stage_id: &str) -> Result<crate::models::StageInfo> {
+    for project in store.list_projects()? {
+        for thread in store.list_threads(&project.id)? {
+            if let Some(stage) = thread
+                .stages
+                .into_iter()
+                .find(|stage| stage.id == thread_stage_id)
+            {
+                return Ok(stage);
+            }
+        }
+    }
+    bail!("thread stage not found: {thread_stage_id}")
+}
+
+fn stage_display_name(stage: &crate::models::StageInfo) -> String {
+    if let Some(name) = &stage.name {
+        return name.clone();
+    }
+    if let Some(kind) = &stage.kind {
+        return kind.as_str().to_string();
+    }
+    stage.stage_id.clone()
+}
+
 fn run_sessions(cmd: SessionsCommand) -> Result<()> {
     match cmd {
         SessionsCommand::List {
@@ -732,6 +950,8 @@ fn parse_args(args: Vec<String>) -> Result<Cli> {
         "sessions" => parse_sessions(&args[1..]),
         "memory" => parse_memory(&args[1..]),
         "config" => parse_config(&args[1..]),
+        "thread" => parse_thread(&args[1..]),
+        "stage" => parse_stage(&args[1..]),
         other => bail!("unknown command '{other}'"),
     }
 }
@@ -1132,6 +1352,183 @@ fn parse_config_bool(value: &str) -> Result<bool> {
     }
 }
 
+fn parse_thread(args: &[String]) -> Result<Cli> {
+    let Some(subcommand) = args.first() else {
+        bail!("missing thread subcommand");
+    };
+    match subcommand.as_str() {
+        "list" => {
+            let mut project = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--project" => {
+                        i += 1;
+                        project = Some(args.get(i).context("missing value for --project")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown thread list option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Thread(ThreadCommand::List {
+                    project,
+                    db_path,
+                    json,
+                }),
+            })
+        }
+        "show" => {
+            let mut id = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--id" => {
+                        i += 1;
+                        id = Some(args.get(i).context("missing value for --id")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown thread show option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Thread(ThreadCommand::Show {
+                    id: id.context("missing --id")?,
+                    db_path,
+                    json,
+                }),
+            })
+        }
+        other => bail!("unknown thread subcommand '{other}'"),
+    }
+}
+
+fn parse_stage(args: &[String]) -> Result<Cli> {
+    let Some(subcommand) = args.first() else {
+        bail!("missing stage subcommand");
+    };
+    match subcommand.as_str() {
+        "list" => {
+            let mut thread_id = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--thread-id" => {
+                        i += 1;
+                        thread_id =
+                            Some(args.get(i).context("missing value for --thread-id")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown stage list option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Stage(StageCommand::List {
+                    thread_id: thread_id.context("missing --thread-id")?,
+                    db_path,
+                    json,
+                }),
+            })
+        }
+        "show" => {
+            let mut id = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--id" => {
+                        i += 1;
+                        id = Some(args.get(i).context("missing value for --id")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown stage show option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Show {
+                    id: id.context("missing --id")?,
+                    db_path,
+                    json,
+                }),
+            })
+        }
+        "set-status" => {
+            let mut id = None;
+            let mut status = None;
+            let mut summary = None;
+            let mut outcome = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--id" => {
+                        i += 1;
+                        id = Some(args.get(i).context("missing value for --id")?.clone());
+                    }
+                    "--status" => {
+                        i += 1;
+                        status = Some(args.get(i).context("missing value for --status")?.clone());
+                    }
+                    "--summary" => {
+                        i += 1;
+                        summary = Some(args.get(i).context("missing value for --summary")?.clone());
+                    }
+                    "--outcome" => {
+                        i += 1;
+                        outcome = Some(args.get(i).context("missing value for --outcome")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown stage set-status option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Stage(StageCommand::SetStatus {
+                    id: id.context("missing --id")?,
+                    status: status.context("missing --status")?,
+                    summary,
+                    outcome,
+                    db_path,
+                    json,
+                }),
+            })
+        }
+        other => bail!("unknown stage subcommand '{other}'"),
+    }
+}
+
 fn parse_sessions(args: &[String]) -> Result<Cli> {
     let Some(subcommand) = args.first() else {
         bail!("missing sessions subcommand");
@@ -1375,6 +1772,11 @@ fn print_help() {
 Usage:
   sessio sessions list [--project <path>] [--db-path <path>] [--json]
   sessio sessions messages --agent <codex|claude|gemini> [--session-id <id>] [--file-path <path>] [--json]
+  sessio thread list [--project <path>] [--db-path <path>] [--json]
+  sessio thread show --id <threadId> [--db-path <path>] [--json]
+  sessio stage list --thread-id <threadId> [--db-path <path>] [--json]
+  sessio stage show --id <threadStageId> [--db-path <path>] [--json]
+  sessio stage set-status --id <threadStageId> --status <not_started|in_progress|blocked|needs_review|completed|skipped> [--summary <text>] [--outcome <text>] [--db-path <path>] [--json]
   sessio config show [--json]
   sessio config memory set [--binary <path>] [--index <name>] [--artifacts-root <path>] [--auto-embed <bool>] [--install-command <cmd>] [--json]
   sessio memory build --project <path> [--artifacts-root <path>] [--db-path <path>] [--json]
