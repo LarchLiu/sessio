@@ -403,6 +403,78 @@ pub struct StageInfo {
     pub updated_at: i64,
     #[serde(default)]
     pub sessions: Vec<SessionInfo>,
+    #[serde(default)]
+    pub issues: Vec<StageIssueInfo>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueStatus {
+    Open,
+    Resolved,
+    Dismissed,
+}
+
+impl IssueStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IssueStatus::Open => "open",
+            IssueStatus::Resolved => "resolved",
+            IssueStatus::Dismissed => "dismissed",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(IssueStatus::Open),
+            "resolved" => Some(IssueStatus::Resolved),
+            "dismissed" => Some(IssueStatus::Dismissed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl IssueSeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IssueSeverity::Low => "low",
+            IssueSeverity::Medium => "medium",
+            IssueSeverity::High => "high",
+            IssueSeverity::Critical => "critical",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(IssueSeverity::Low),
+            "medium" => Some(IssueSeverity::Medium),
+            "high" => Some(IssueSeverity::High),
+            "critical" => Some(IssueSeverity::Critical),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageIssueInfo {
+    pub id: String,
+    pub thread_stage_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: IssueStatus,
+    pub severity: IssueSeverity,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

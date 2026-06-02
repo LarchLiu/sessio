@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Circle, CircleAlert, CircleDot, LoaderCircle, MessageSquarePlus, MinusCircle } from "lucide-react";
+import { LoaderCircle, MessageSquarePlus, Plus, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
-import type { Agent, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo } from "../api";
-import { AGENT_LABEL, listThreads, updateThreadStageState } from "../api";
+import type { Agent, IssueSeverity, IssueStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo } from "../api";
+import {
+  AGENT_LABEL,
+  createThreadStageIssue,
+  deleteThreadStageIssue,
+  listThreads,
+  updateThreadStageIssue,
+  updateThreadStageState,
+} from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
 import { sessionIdentityKey } from "../appUtils";
-import { projectStageIcon } from "../utils/stageDisplay";
+import { projectStageIcon, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
 export default function ThreadPage({
   project,
@@ -102,6 +109,8 @@ export default function ThreadPage({
                     last={index === sortedStages.length - 1}
                     onSelectSession={onSelectSession}
                     onNewChat={() => onNewStageChat(thread, stage)}
+                    onError={onError}
+                    reload={reload}
                     onStatusChange={async (status) => {
                       try {
                         await updateThreadStageState(stage.id, { status });
@@ -137,6 +146,8 @@ function ThreadStageStep({
   last,
   onSelectSession,
   onNewChat,
+  onError,
+  reload,
   onStatusChange,
 }: {
   stage: StageInfo;
@@ -145,6 +156,8 @@ function ThreadStageStep({
   last: boolean;
   onSelectSession: (session: SessionInfo) => void;
   onNewChat: () => void;
+  onError: (error: string | null) => void;
+  reload: () => Promise<void>;
   onStatusChange: (status: StageStatus) => void;
 }) {
   const { t } = useI18n();
@@ -153,6 +166,10 @@ function ThreadStageStep({
   const previousComplete = previousStatus === "completed";
   const nextComplete = stage.status === "completed";
   const completeLineClass = "bg-[rgb(var(--color-emerald)/0.75)]";
+  const handleIssueError = useCallback(
+    (err: unknown) => onError(String(err)),
+    [onError],
+  );
   return (
     <section className="grid grid-cols-[32px_minmax(0,1fr)] gap-3">
       <div className="relative flex justify-center">
@@ -230,9 +247,191 @@ function ThreadStageStep({
               ))
             )}
           </div>
+
+          <StageIssueSection
+            stage={stage}
+            reload={reload}
+            onError={handleIssueError}
+          />
         </div>
       </div>
     </section>
+  );
+}
+
+const ISSUE_STATUS_ORDER: IssueStatus[] = ["open", "resolved", "dismissed"];
+const ISSUE_SEVERITY_ORDER: IssueSeverity[] = ["low", "medium", "high", "critical"];
+
+function StageIssueSection({
+  stage,
+  reload,
+  onError,
+}: {
+  stage: StageInfo;
+  reload: () => Promise<void>;
+  onError: (error: unknown) => void;
+}) {
+  const { t } = useI18n();
+  const [newTitle, setNewTitle] = useState("");
+  const [newSeverity, setNewSeverity] = useState<IssueSeverity>("medium");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  const addDisabled = adding || newTitle.trim().length === 0;
+
+  const handleAdd = async () => {
+    const title = newTitle.trim();
+    if (!title) return;
+    setAdding(true);
+    try {
+      await createThreadStageIssue(stage.id, title, newSeverity);
+      setNewTitle("");
+      setNewSeverity("medium");
+      await reload();
+    } catch (err) {
+      onError(err);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleUpdate = async (
+    issueId: string,
+    patch: { status?: IssueStatus; severity?: IssueSeverity },
+  ) => {
+    setBusyId(issueId);
+    try {
+      await updateThreadStageIssue(issueId, patch);
+      await reload();
+    } catch (err) {
+      onError(err);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDelete = async (issueId: string) => {
+    setBusyId(issueId);
+    try {
+      await deleteThreadStageIssue(issueId);
+      await reload();
+    } catch (err) {
+      onError(err);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-body-sm font-medium text-ink/75">{t("issue.title")}</div>
+        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/35">
+          {stage.issues.length}
+        </span>
+      </div>
+
+      {stage.issues.length === 0 ? (
+        <div className="rounded border border-dashed border-card-border/[0.10] px-2 py-2 text-caption text-ink/35">
+          {t("issue.empty")}
+        </div>
+      ) : (
+        <div className="grid gap-1.5">
+          {stage.issues.map((issue) => {
+            const disabled = busyId === issue.id;
+            return (
+              <div
+                key={issue.id}
+                className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5"
+              >
+                <div className="min-w-0">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className={"h-2 w-2 shrink-0 rounded-full " + issueSeverityDotClass(issue.severity)} />
+                    <div className="min-w-0 truncate text-body-sm text-ink/75">{issue.title}</div>
+                  </div>
+                  {issue.description && (
+                    <div className="mt-1 whitespace-pre-wrap text-caption leading-relaxed text-ink/40">
+                      {issue.description}
+                    </div>
+                  )}
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+                  <select
+                    value={issue.status}
+                    disabled={disabled}
+                    onChange={(event) => handleUpdate(issue.id, { status: event.target.value as IssueStatus })}
+                    className="rounded border border-ink/15 bg-surface-panel px-1.5 py-0.5 text-meta text-ink/55 disabled:opacity-50"
+                  >
+                    {ISSUE_STATUS_ORDER.map((status) => (
+                      <option key={status} value={status}>
+                        {t(`issue.status.${status}`)}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={issue.severity}
+                    disabled={disabled}
+                    onChange={(event) => handleUpdate(issue.id, { severity: event.target.value as IssueSeverity })}
+                    className={"rounded border border-ink/15 bg-surface-panel px-1.5 py-0.5 text-meta font-medium disabled:opacity-50 " + issueSeverityTextClass(issue.severity)}
+                  >
+                    {ISSUE_SEVERITY_ORDER.map((severity) => (
+                      <option key={severity} value={severity}>
+                        {t(`issue.severity.${severity}`)}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => handleDelete(issue.id)}
+                    title={t("issue.delete")}
+                    className="flex h-6 w-6 items-center justify-center rounded border border-ink/10 bg-surface-panel text-ink/40 hover:bg-red-500/[0.08] hover:text-red-500 disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_auto] gap-1.5">
+        <input
+          value={newTitle}
+          onChange={(event) => setNewTitle(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void handleAdd();
+            }
+          }}
+          placeholder={t("issue.new_placeholder")}
+          className="min-w-0 rounded border border-ink/15 bg-surface-panel px-2 py-1 text-body-sm text-ink/75 outline-none placeholder:text-ink/30 focus:border-[rgb(var(--color-emerald)/0.45)]"
+        />
+        <select
+          value={newSeverity}
+          disabled={adding}
+          onChange={(event) => setNewSeverity(event.target.value as IssueSeverity)}
+          className={"rounded border border-ink/15 bg-surface-panel px-1.5 py-1 text-meta font-medium disabled:opacity-50 " + issueSeverityTextClass(newSeverity)}
+        >
+          {ISSUE_SEVERITY_ORDER.map((severity) => (
+            <option key={severity} value={severity}>
+              {t(`issue.severity.${severity}`)}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={addDisabled}
+          onClick={() => void handleAdd()}
+          title={t("issue.add")}
+          className="flex h-8 w-8 items-center justify-center rounded border border-ink/15 bg-surface-panel text-ink/50 hover:bg-ink/[0.05] hover:text-ink/80 disabled:opacity-40"
+        >
+          {adding ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -331,68 +530,37 @@ function AssistantSessionLane({
   );
 }
 
-const STAGE_STATUS_ORDER: StageStatus[] = [
-  "not_started",
-  "in_progress",
-  "needs_review",
-  "blocked",
-  "completed",
-  "skipped",
-];
-
-type StageStatusVisual = {
-  icon: typeof Circle;
-  markerClass: string;
-  textClass: string;
-};
-
-function stageStatusVisual(status: StageStatus): StageStatusVisual {
-  switch (status) {
-    case "completed":
-      return {
-        icon: Check,
-        markerClass:
-          "border-[rgb(var(--color-emerald)/0.80)] bg-[rgb(var(--color-emerald))] text-[rgb(var(--color-bg-panel))]",
-        textClass: "text-[rgb(var(--color-emerald))]",
-      };
-    case "in_progress":
-      return {
-        icon: CircleDot,
-        markerClass:
-          "border-[rgb(var(--color-emerald)/0.80)] bg-surface-panel text-[rgb(var(--color-emerald))]",
-        textClass: "text-[rgb(var(--color-emerald))]",
-      };
-    case "needs_review":
-      return {
-        icon: CircleDot,
-        markerClass: "border-sky-500/70 bg-surface-panel text-sky-500",
-        textClass: "text-sky-500",
-      };
-    case "blocked":
-      return {
-        icon: CircleAlert,
-        markerClass: "border-amber-500/70 bg-surface-panel text-amber-500",
-        textClass: "text-amber-500",
-      };
-    case "skipped":
-      return {
-        icon: MinusCircle,
-        markerClass: "border-ink/15 bg-surface-panel text-ink/30",
-        textClass: "text-ink/40",
-      };
-    case "not_started":
-    default:
-      return {
-        icon: Circle,
-        markerClass: "border-ink/15 bg-surface-panel text-ink/30",
-        textClass: "text-ink/45",
-      };
-  }
-}
-
 function stageLabel(stage: StageInfo, t: (key: string) => string): string {
   if (stage.type === "custom") return stage.name ?? t("stage.custom");
   return stage.kind ? t(`stage.type.${stage.kind}`) : stage.name ?? t("stage.type");
+}
+
+function issueSeverityDotClass(severity: IssueSeverity): string {
+  switch (severity) {
+    case "critical":
+      return "bg-red-500";
+    case "high":
+      return "bg-amber-500";
+    case "medium":
+      return "bg-sky-500";
+    case "low":
+    default:
+      return "bg-ink/25";
+  }
+}
+
+function issueSeverityTextClass(severity: IssueSeverity): string {
+  switch (severity) {
+    case "critical":
+      return "text-red-500";
+    case "high":
+      return "text-amber-500";
+    case "medium":
+      return "text-sky-500";
+    case "low":
+    default:
+      return "text-ink/45";
+  }
 }
 
 function uniqueAssistantCount(stages: StageInfo[]): number {

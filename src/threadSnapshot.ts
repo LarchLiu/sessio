@@ -16,6 +16,7 @@ function snapshotStage(stage: StageInfo): ThreadWorkSnapshotStage {
     status: stage.status,
     summary: stage.summary,
     outcome: stage.outcome,
+    issues: stage.issues ?? [],
     sessionRefs: stage.sessions.map((session) => ({
       agent: session.agent,
       sessionId: session.id,
@@ -39,6 +40,10 @@ export function buildThreadWorkSnapshot(
     .map(snapshotStage);
   const completed = stages.filter((stage) => COMPLETED.includes(stage.status)).length;
   const blocked = stages.filter((stage) => stage.status === "blocked").length;
+  const openIssues = stages.reduce(
+    (total, stage) => total + (stage.issues ?? []).filter((issue) => issue.status === "open").length,
+    0,
+  );
   return {
     threadId: thread.id,
     projectId: thread.projectId,
@@ -51,6 +56,8 @@ export function buildThreadWorkSnapshot(
       completed,
       incomplete: stages.length - completed,
       blocked,
+      openIssues,
+      currentStage: focusedStage ? snapshotStage(focusedStage).name : null,
       total: stages.length,
     },
     capturedAt,
@@ -86,7 +93,9 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot): string {
   if (snapshot.description) lines.push(`Description: ${snapshot.description}`);
   lines.push(
     `Progress: ${snapshot.rollup.completed}/${snapshot.rollup.total} stages complete` +
-      (snapshot.rollup.blocked > 0 ? `, ${snapshot.rollup.blocked} blocked` : ""),
+      (snapshot.rollup.blocked > 0 ? `, ${snapshot.rollup.blocked} blocked` : "") +
+      ((snapshot.rollup.openIssues ?? 0) > 0 ? `, ${snapshot.rollup.openIssues} open issues` : "") +
+      (snapshot.rollup.currentStage ? `, current stage: ${snapshot.rollup.currentStage}` : ""),
   );
   lines.push("");
   lines.push("## Stages");
@@ -95,12 +104,16 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot): string {
     lines.push(`- ${statusLabel(stage.status)} ${stage.name}${focus}`);
     if (stage.summary) lines.push(`    summary: ${stage.summary}`);
     if (stage.outcome) lines.push(`    outcome: ${stage.outcome}`);
+    for (const issue of (stage.issues ?? []).filter((item) => item.status === "open")) {
+      lines.push(`    issue [${issue.severity}] ${issue.title}`);
+      if (issue.description) lines.push(`      ${issue.description}`);
+    }
     for (const ref of stage.sessionRefs) {
       lines.push(`    [${ref.agent}:${ref.sessionId}] ${ref.title ?? ""}`.trimEnd());
     }
   }
 
-  const focusedId = snapshot.focusedStageId ?? snapshot.activeStageId;
+  const focusedId = snapshot.focusedStageId;
   if (focusedId) {
     lines.push("");
     lines.push("## Report progress back to Sessio");
@@ -112,6 +125,10 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot): string {
     lines.push("If blocked, record why:");
     lines.push(
       `  sessio stage set-status --id ${focusedId} --status blocked --summary "what is blocking" --json`,
+    );
+    lines.push("To add a structured issue:");
+    lines.push(
+      `  sessio stage issue add --stage-id ${focusedId} --title "what is wrong" --severity medium --json`,
     );
     lines.push("(sessio resolves to ~/.sessio/bin/sessio)");
   }

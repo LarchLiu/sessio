@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, SessionInfo, StageInfo, StageStatus,
-    SubagentInfo, ThreadInfo, WorkflowInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, IssueSeverity, IssueStatus,
+    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata,
+    SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -390,6 +390,37 @@ impl SessionStore for CachedStore {
     ) -> Result<StageInfo> {
         self.inner
             .update_thread_stage_state(thread_stage_id, status, summary, outcome)
+    }
+
+    fn list_thread_stage_issues(&self, thread_stage_id: &str) -> Result<Vec<StageIssueInfo>> {
+        self.inner.list_thread_stage_issues(thread_stage_id)
+    }
+
+    fn create_thread_stage_issue(
+        &self,
+        thread_stage_id: &str,
+        title: &str,
+        description: Option<&str>,
+        severity: IssueSeverity,
+    ) -> Result<StageIssueInfo> {
+        self.inner
+            .create_thread_stage_issue(thread_stage_id, title, description, severity)
+    }
+
+    fn update_thread_stage_issue(
+        &self,
+        issue_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<IssueStatus>,
+        severity: Option<IssueSeverity>,
+    ) -> Result<StageIssueInfo> {
+        self.inner
+            .update_thread_stage_issue(issue_id, title, description, status, severity)
+    }
+
+    fn delete_thread_stage_issue(&self, issue_id: &str) -> Result<()> {
+        self.inner.delete_thread_stage_issue(issue_id)
     }
 
     fn update_thread_stage_assistant_agent(

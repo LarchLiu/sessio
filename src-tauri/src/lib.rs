@@ -28,9 +28,10 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo,
-    StageInfo, StageStatus, ThreadInfo, WorkflowInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, IssueSeverity, IssueStatus,
+    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata,
+    SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus, ThreadInfo,
+    WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -42,7 +43,7 @@ use tauri::{
 };
 
 const HISTORY_CACHE_VERSION: i64 = 1;
-const THREAD_WORK_SNAPSHOT_VERSION: i64 = 1;
+const THREAD_WORK_SNAPSHOT_VERSION: i64 = 2;
 
 fn default_workflow_id() -> String {
     "code".to_string()
@@ -694,6 +695,86 @@ fn update_thread_stage_state(
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(stage)
+}
+
+#[tauri::command]
+fn list_thread_stage_issues(
+    thread_stage_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<StageIssueInfo>, String> {
+    store
+        .list_thread_stage_issues(&thread_stage_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_thread_stage_issue(
+    thread_stage_id: String,
+    title: String,
+    description: Option<String>,
+    severity: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageIssueInfo, String> {
+    let severity = IssueSeverity::from_db_str(&severity)
+        .ok_or_else(|| format!("invalid issue severity: {severity}"))?;
+    let issue = store
+        .create_thread_stage_issue(&thread_stage_id, &title, description.as_deref(), severity)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(issue)
+}
+
+#[tauri::command]
+fn update_thread_stage_issue(
+    issue_id: String,
+    title: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    severity: Option<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<StageIssueInfo, String> {
+    let status = match status {
+        Some(value) => Some(
+            IssueStatus::from_db_str(&value)
+                .ok_or_else(|| format!("invalid issue status: {value}"))?,
+        ),
+        None => None,
+    };
+    let severity = match severity {
+        Some(value) => Some(
+            IssueSeverity::from_db_str(&value)
+                .ok_or_else(|| format!("invalid issue severity: {value}"))?,
+        ),
+        None => None,
+    };
+    // An omitted field leaves the value unchanged; an empty string clears it.
+    let description = description.map(|value| (!value.is_empty()).then_some(value));
+    let issue = store
+        .update_thread_stage_issue(
+            &issue_id,
+            title.as_deref(),
+            description.as_ref().map(|inner| inner.as_deref()),
+            status,
+            severity,
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(issue)
+}
+
+#[tauri::command]
+fn delete_thread_stage_issue(
+    issue_id: String,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .delete_thread_stage_issue(&issue_id)
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2573,6 +2654,10 @@ pub fn run() {
             add_thread_stage,
             update_thread_stage,
             update_thread_stage_state,
+            list_thread_stage_issues,
+            create_thread_stage_issue,
+            update_thread_stage_issue,
+            delete_thread_stage_issue,
             update_thread_stage_assistant_agent,
             delete_thread_stage,
             set_thread_stage,

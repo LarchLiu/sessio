@@ -30,4 +30,8 @@ export interface PendingNewChatSession {
     stageId: string | null;
     snapshot: ThreadWorkSnapshot;
   };
+  threadLink?: {
+    threadId: string;
+    stageId: string | null;
+  };
 }

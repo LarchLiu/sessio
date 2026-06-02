@@ -108,6 +108,21 @@ export type StageStatus =
   | "completed"
   | "skipped";
 
+export type IssueStatus = "open" | "resolved" | "dismissed";
+
+export type IssueSeverity = "low" | "medium" | "high" | "critical";
+
+export interface StageIssueInfo {
+  id: string;
+  threadStageId: string;
+  title: string;
+  description: string | null;
+  status: IssueStatus;
+  severity: IssueSeverity;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface StageInfo {
   id: string;
   threadId: string;
@@ -130,6 +145,7 @@ export interface StageInfo {
   createdAt: number;
   updatedAt: number;
   sessions: SessionInfo[];
+  issues: StageIssueInfo[];
 }
 
 export interface ProjectStageInfo {
@@ -925,6 +941,48 @@ export async function updateThreadStageState(
   });
 }
 
+export async function listThreadStageIssues(
+  threadStageId: string,
+): Promise<StageIssueInfo[]> {
+  return invoke<StageIssueInfo[]>("list_thread_stage_issues", { threadStageId });
+}
+
+export async function createThreadStageIssue(
+  threadStageId: string,
+  title: string,
+  severity: IssueSeverity,
+  description?: string | null,
+): Promise<StageIssueInfo> {
+  return invoke<StageIssueInfo>("create_thread_stage_issue", {
+    threadStageId,
+    title,
+    severity,
+    description: description ?? null,
+  });
+}
+
+export async function updateThreadStageIssue(
+  issueId: string,
+  patch: {
+    title?: string;
+    description?: string | null;
+    status?: IssueStatus;
+    severity?: IssueSeverity;
+  },
+): Promise<StageIssueInfo> {
+  return invoke<StageIssueInfo>("update_thread_stage_issue", {
+    issueId,
+    title: patch.title ?? null,
+    description: patch.description === undefined ? null : patch.description ?? "",
+    status: patch.status ?? null,
+    severity: patch.severity ?? null,
+  });
+}
+
+export async function deleteThreadStageIssue(issueId: string): Promise<void> {
+  return invoke<void>("delete_thread_stage_issue", { issueId });
+}
+
 export async function updateThreadStageAssistantAgent(
   threadStageId: string,
   assistantId: string,
@@ -1076,6 +1134,7 @@ export interface ThreadWorkSnapshotStage {
   status: StageStatus;
   summary: string | null;
   outcome: string | null;
+  issues?: StageIssueInfo[];
   sessionRefs: { agent: Agent; sessionId: string; title: string | null }[];
 }
 
@@ -1091,6 +1150,8 @@ export interface ThreadWorkSnapshot {
     completed: number;
     incomplete: number;
     blocked: number;
+    openIssues?: number;
+    currentStage?: string | null;
     total: number;
   };
   capturedAt: number;

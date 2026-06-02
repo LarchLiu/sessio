@@ -6,9 +6,10 @@ use std::collections::HashSet;
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo,
-    StageInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, IssueSeverity, IssueStatus,
+    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata,
+    SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
+    ThreadInfo, WorkflowInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -236,6 +237,23 @@ pub trait SessionStore: Send + Sync {
         summary: Option<Option<String>>,
         outcome: Option<Option<String>>,
     ) -> Result<StageInfo>;
+    fn list_thread_stage_issues(&self, thread_stage_id: &str) -> Result<Vec<StageIssueInfo>>;
+    fn create_thread_stage_issue(
+        &self,
+        thread_stage_id: &str,
+        title: &str,
+        description: Option<&str>,
+        severity: IssueSeverity,
+    ) -> Result<StageIssueInfo>;
+    fn update_thread_stage_issue(
+        &self,
+        issue_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<IssueStatus>,
+        severity: Option<IssueSeverity>,
+    ) -> Result<StageIssueInfo>;
+    fn delete_thread_stage_issue(&self, issue_id: &str) -> Result<()>;
     fn update_thread_stage_assistant_agent(
         &self,
         thread_stage_id: &str,

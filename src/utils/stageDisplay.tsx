@@ -24,9 +24,9 @@ import BoltOutlineRoundedIcon from "@iconify-react/material-symbols/bolt-outline
 import PsychologyOutlineRoundedIcon from "@iconify-react/material-symbols/psychology-outline-rounded";
 import RocketLaunchOutlineRoundedIcon from "@iconify-react/material-symbols/rocket-launch-outline-rounded";
 import SchemaOutlineRoundedIcon from "@iconify-react/material-symbols/schema-outline-rounded";
-import { Clapperboard, FilePenLine, GitBranch, ListChecks, Palette, Scissors, SpellCheck, CircleDot, CircleGauge, CircleUserRound, CircleCheck, type LucideIcon } from "lucide-react";
+import { Clapperboard, FilePenLine, GitBranch, ListChecks, Palette, Scissors, SpellCheck, Check, Circle, CircleAlert, CircleDot, CircleGauge, CircleUserRound, CircleCheck, MinusCircle, type LucideIcon } from "lucide-react";
 import type { ComponentType } from "react";
-import type { ProjectStageInfo, StageInfo, StageType } from "../api";
+import type { ProjectStageInfo, StageInfo, StageStatus, StageType } from "../api";
 
 export const STAGE_TYPE_ICONS: Record<StageType, LucideIcon> = {
   research: CircleGauge,
@@ -117,4 +117,63 @@ export function projectStageIcon(stage: Pick<ProjectStageInfo | StageInfo, "kind
   }
   const Icon = projectStageIconClass(stage);
   return <Icon className={className} />;
+}
+
+export const STAGE_STATUS_ORDER: StageStatus[] = [
+  "not_started",
+  "in_progress",
+  "needs_review",
+  "blocked",
+  "completed",
+  "skipped",
+];
+
+export type StageStatusVisual = {
+  icon: LucideIcon;
+  markerClass: string;
+  textClass: string;
+};
+
+export function stageStatusVisual(status: StageStatus): StageStatusVisual {
+  switch (status) {
+    case "completed":
+      return {
+        icon: Check,
+        markerClass:
+          "border-[rgb(var(--color-emerald)/0.80)] bg-[rgb(var(--color-emerald))] text-[rgb(var(--color-bg-panel))]",
+        textClass: "text-[rgb(var(--color-emerald))]",
+      };
+    case "in_progress":
+      return {
+        icon: CircleDot,
+        markerClass:
+          "border-[rgb(var(--color-emerald)/0.80)] bg-surface-panel text-[rgb(var(--color-emerald))]",
+        textClass: "text-[rgb(var(--color-emerald))]",
+      };
+    case "needs_review":
+      return {
+        icon: CircleDot,
+        markerClass: "border-sky-500/70 bg-surface-panel text-sky-500",
+        textClass: "text-sky-500",
+      };
+    case "blocked":
+      return {
+        icon: CircleAlert,
+        markerClass: "border-amber-500/70 bg-surface-panel text-amber-500",
+        textClass: "text-amber-500",
+      };
+    case "skipped":
+      return {
+        icon: MinusCircle,
+        markerClass: "border-ink/15 bg-surface-panel text-ink/30",
+        textClass: "text-ink/40",
+      };
+    case "not_started":
+    default:
+      return {
+        icon: Circle,
+        markerClass: "border-ink/15 bg-surface-panel text-ink/30",
+        textClass: "text-ink/45",
+      };
+  }
 }

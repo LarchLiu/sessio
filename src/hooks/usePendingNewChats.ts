@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import {
   createPendingSession,
   linkKanbanItemSession,
+  linkStageSession,
+  linkThreadSession,
   saveSessionHistorySnapshots,
   saveThreadWorkSnapshot,
   updateKanbanItemStatus,
@@ -117,6 +119,13 @@ export function usePendingNewChats({
               pending.workSnapshot.stageId,
               pending.workSnapshot.snapshot,
             ).catch((err) => console.warn("save work snapshot failed", err));
+          }
+          if (pending.threadLink) {
+            if (pending.threadLink.stageId) {
+              await linkStageSession(pending.threadLink.stageId, pending.agent, agentSessionId);
+            } else {
+              await linkThreadSession(pending.threadLink.threadId, pending.agent, agentSessionId);
+            }
           }
           let linkedKanbanItem: KanbanItem | null = null;
           if (pending.kanbanItemId) {

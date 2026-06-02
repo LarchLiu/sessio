@@ -5,6 +5,7 @@ import ChatPage from "../pages/ChatPage";
 import NewChatPage from "../pages/NewChatPage";
 import { ProjectWorkbenchPage } from "../pages/ProjectPage";
 import ThreadPage from "../pages/ThreadPage";
+import ThreadChatPage from "../pages/ThreadChatPage";
 import { projectFilterKey, type Filter } from "../appUtils";
 import type { PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
 import type {
@@ -84,6 +85,7 @@ export default function AppMain({
   } | null>(null);
 
   const addPendingSession = (pending: PendingNewChatSession) => {
+    setNewChatSnapshot(null);
     setPendingNewChats((prev) => ({
       ...prev,
       [pending.sessioRuntimeSessionId]: pending,
@@ -115,9 +117,9 @@ export default function AppMain({
       setSelected(session);
       setDetailMode("chat");
     },
-    onNewThreadChat: () => {
+    onNewThreadChat: (thread: ThreadInfo) => {
       const projectGroup = projectGroups.find((group) => group.project.id === project.id);
-      setNewChatSnapshot(null);
+      setNewChatSnapshot({ thread, stage: null });
       setSelectedProject(null);
       setSelectedThread(null);
       setSelected(null);
@@ -147,6 +149,29 @@ export default function AppMain({
   }
 
   if (!selected) {
+    if (newChatSnapshot) {
+      return (
+        <ThreadChatPage
+          projects={projectGroups}
+          initialProjectKey={newChatProjectKey}
+          snapshotContext={newChatSnapshot}
+          runtimeAgents={runtimeAgents}
+          lastRuntimeAgentSelection={lastRuntimeAgentSelection}
+          rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
+          liveState={liveState}
+          dispatchLiveEvent={dispatchLiveEvent}
+          onError={onError}
+          onPendingSession={addPendingSession}
+          onSelectSession={(session) => {
+            setNewChatSnapshot(null);
+            setSelectedProject(null);
+            setSelectedThread(null);
+            setSelected(session);
+            setDetailMode("chat");
+          }}
+        />
+      );
+    }
     return (
       <NewChatPage
         projects={projectGroups}
@@ -158,7 +183,6 @@ export default function AppMain({
         dispatchLiveEvent={dispatchLiveEvent}
         onError={onError}
         onPendingSession={addPendingSession}
-        snapshotContext={newChatSnapshot}
       />
     );
   }

@@ -5,7 +5,7 @@ use crate::memory::qmd;
 use crate::memory::records::safe_id_part;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemoryRecord, MemorySearchOptions, MemoryStore, RecordContinuation};
-use crate::models::{Agent, SessionHistoryBlock, SessionHistoryTurn, StageStatus};
+use crate::models::{Agent, IssueSeverity, IssueStatus, SessionHistoryBlock, SessionHistoryTurn, StageStatus};
 use crate::store::sqlite::SqliteStore;
 use crate::store::SessionStore;
 use anyhow::{bail, Context, Result};
@@ -60,6 +60,33 @@ enum StageCommand {
         status: String,
         summary: Option<String>,
         outcome: Option<String>,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Issue(IssueCommand),
+}
+
+#[derive(Debug)]
+enum IssueCommand {
+    Add {
+        stage_id: String,
+        title: String,
+        description: Option<String>,
+        severity: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    List {
+        stage_id: String,
+        db_path: Option<String>,
+        json: bool,
+    },
+    Set {
+        id: String,
+        status: Option<String>,
+        severity: Option<String>,
+        title: Option<String>,
+        description: Option<String>,
         db_path: Option<String>,
         json: bool,
     },
@@ -790,6 +817,105 @@ fn run_stage(cmd: StageCommand) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&stage)?);
             } else {
                 println!("stage\t{}\t{}", stage.id, stage.status.as_str());
+            }
+            Ok(())
+        }
+        StageCommand::Issue(cmd) => run_stage_issue(cmd),
+    }
+}
+
+fn run_stage_issue(cmd: IssueCommand) -> Result<()> {
+    match cmd {
+        IssueCommand::Add {
+            stage_id,
+            title,
+            description,
+            severity,
+            db_path,
+            json,
+        } => {
+            let parsed = IssueSeverity::from_db_str(&severity)
+                .with_context(|| format!("invalid issue severity: {severity}"))?;
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let issue =
+                store.create_thread_stage_issue(&stage_id, &title, description.as_deref(), parsed)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&issue)?);
+            } else {
+                println!(
+                    "issue\t{}\t{}\t{}",
+                    issue.id,
+                    issue.severity.as_str(),
+                    issue.title
+                );
+            }
+            Ok(())
+        }
+        IssueCommand::List {
+            stage_id,
+            db_path,
+            json,
+        } => {
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let issues = store.list_thread_stage_issues(&stage_id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&issues)?);
+            } else {
+                for issue in &issues {
+                    println!(
+                        "issue\t{}\t{}\t{}\t{}",
+                        issue.id,
+                        issue.status.as_str(),
+                        issue.severity.as_str(),
+                        issue.title
+                    );
+                }
+            }
+            Ok(())
+        }
+        IssueCommand::Set {
+            id,
+            status,
+            severity,
+            title,
+            description,
+            db_path,
+            json,
+        } => {
+            let status = match status.as_deref() {
+                Some(value) => Some(
+                    IssueStatus::from_db_str(value)
+                        .with_context(|| format!("invalid issue status: {value}"))?,
+                ),
+                None => None,
+            };
+            let severity = match severity.as_deref() {
+                Some(value) => Some(
+                    IssueSeverity::from_db_str(value)
+                        .with_context(|| format!("invalid issue severity: {value}"))?,
+                ),
+                None => None,
+            };
+            let store = open_store(db_path.as_deref())?;
+            store.init()?;
+            let issue = store.update_thread_stage_issue(
+                &id,
+                title.as_deref(),
+                description.as_deref().map(Some),
+                status,
+                severity,
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&issue)?);
+            } else {
+                println!(
+                    "issue\t{}\t{}\t{}",
+                    issue.id,
+                    issue.status.as_str(),
+                    issue.title
+                );
             }
             Ok(())
         }
@@ -1525,7 +1651,155 @@ fn parse_stage(args: &[String]) -> Result<Cli> {
                 }),
             })
         }
+        "issue" => parse_stage_issue(&args[1..]),
         other => bail!("unknown stage subcommand '{other}'"),
+    }
+}
+
+fn parse_stage_issue(args: &[String]) -> Result<Cli> {
+    let Some(subcommand) = args.first() else {
+        bail!("missing stage issue subcommand");
+    };
+    match subcommand.as_str() {
+        "add" => {
+            let mut stage_id = None;
+            let mut title = None;
+            let mut description = None;
+            let mut severity = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--stage-id" => {
+                        i += 1;
+                        stage_id =
+                            Some(args.get(i).context("missing value for --stage-id")?.clone());
+                    }
+                    "--title" => {
+                        i += 1;
+                        title = Some(args.get(i).context("missing value for --title")?.clone());
+                    }
+                    "--description" => {
+                        i += 1;
+                        description = Some(
+                            args.get(i)
+                                .context("missing value for --description")?
+                                .clone(),
+                        );
+                    }
+                    "--severity" => {
+                        i += 1;
+                        severity =
+                            Some(args.get(i).context("missing value for --severity")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown stage issue add option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Issue(IssueCommand::Add {
+                    stage_id: stage_id.context("missing --stage-id")?,
+                    title: title.context("missing --title")?,
+                    description,
+                    severity: severity.context("missing --severity")?,
+                    db_path,
+                    json,
+                })),
+            })
+        }
+        "list" => {
+            let mut stage_id = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--stage-id" => {
+                        i += 1;
+                        stage_id =
+                            Some(args.get(i).context("missing value for --stage-id")?.clone());
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown stage issue list option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Issue(IssueCommand::List {
+                    stage_id: stage_id.context("missing --stage-id")?,
+                    db_path,
+                    json,
+                })),
+            })
+        }
+        "set" => {
+            let mut id = None;
+            let mut status = None;
+            let mut severity = None;
+            let mut title = None;
+            let mut description = None;
+            let mut db_path = None;
+            let mut json = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--id" => {
+                        i += 1;
+                        id = Some(args.get(i).context("missing value for --id")?.clone());
+                    }
+                    "--status" => {
+                        i += 1;
+                        status = Some(args.get(i).context("missing value for --status")?.clone());
+                    }
+                    "--severity" => {
+                        i += 1;
+                        severity =
+                            Some(args.get(i).context("missing value for --severity")?.clone());
+                    }
+                    "--title" => {
+                        i += 1;
+                        title = Some(args.get(i).context("missing value for --title")?.clone());
+                    }
+                    "--description" => {
+                        i += 1;
+                        description = Some(
+                            args.get(i)
+                                .context("missing value for --description")?
+                                .clone(),
+                        );
+                    }
+                    "--db-path" => {
+                        i += 1;
+                        db_path = Some(args.get(i).context("missing value for --db-path")?.clone());
+                    }
+                    "--json" => json = true,
+                    other => bail!("unknown stage issue set option '{other}'"),
+                }
+                i += 1;
+            }
+            Ok(Cli {
+                command: Command::Stage(StageCommand::Issue(IssueCommand::Set {
+                    id: id.context("missing --id")?,
+                    status,
+                    severity,
+                    title,
+                    description,
+                    db_path,
+                    json,
+                })),
+            })
+        }
+        other => bail!("unknown stage issue subcommand '{other}'"),
     }
 }
 
@@ -1777,6 +2051,9 @@ Usage:
   sessio stage list --thread-id <threadId> [--db-path <path>] [--json]
   sessio stage show --id <threadStageId> [--db-path <path>] [--json]
   sessio stage set-status --id <threadStageId> --status <not_started|in_progress|blocked|needs_review|completed|skipped> [--summary <text>] [--outcome <text>] [--db-path <path>] [--json]
+  sessio stage issue add --stage-id <threadStageId> --title <text> --severity <low|medium|high|critical> [--description <text>] [--db-path <path>] [--json]
+  sessio stage issue list --stage-id <threadStageId> [--db-path <path>] [--json]
+  sessio stage issue set --id <issueId> [--status <open|resolved|dismissed>] [--severity <low|medium|high|critical>] [--title <text>] [--description <text>] [--db-path <path>] [--json]
   sessio config show [--json]
   sessio config memory set [--binary <path>] [--index <name>] [--artifacts-root <path>] [--auto-embed <bool>] [--install-command <cmd>] [--json]
   sessio memory build --project <path> [--artifacts-root <path>] [--db-path <path>] [--json]

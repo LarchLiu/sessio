@@ -12,9 +12,10 @@ use crate::memory::{
 };
 use crate::models::{
     Agent, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo,
-    AssistantType, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType,
-    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo,
-    StageStatus, StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
+    AssistantType, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
+    ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
+    SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus, StageType,
+    SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -36,7 +37,8 @@ impl SqliteStore {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA foreign_keys = ON;",
+             PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;",
         )?;
         Ok(SqliteStore {
             conn: Mutex::new(conn),
@@ -579,6 +581,23 @@ CREATE INDEX IF NOT EXISTS idx_thread_work_snapshots_thread
     ON thread_work_snapshots(thread_id);
 "#;
 
+const SCHEMA_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_stage_issues (
+    id               TEXT PRIMARY KEY,
+    thread_stage_id  TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    description      TEXT,
+    status           TEXT NOT NULL DEFAULT 'open',
+    severity         TEXT NOT NULL DEFAULT 'medium',
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_stage_issues_stage
+    ON thread_stage_issues(thread_stage_id);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -658,6 +677,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V7)?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
+            [],
+        )?;
+    }
+    if current < 8 {
+        conn.execute_batch(SCHEMA_V8)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)",
             [],
         )?;
     }
@@ -1443,6 +1469,15 @@ fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
     )
 }
 
+fn stable_issue_id(thread_stage_id: &str, title: &str, now: i64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(thread_stage_id.as_bytes());
+    hasher.update(title.as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    format!("issue-{}", hex::encode(hasher.finalize())[..16].to_string())
+}
+
 fn stable_workflow_id(name: &str, now: i64) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -1595,6 +1630,21 @@ fn kanban_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<KanbanItem>
     })
 }
 
+fn issue_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageIssueInfo> {
+    let status_raw: String = row.get(4)?;
+    let severity_raw: String = row.get(5)?;
+    Ok(StageIssueInfo {
+        id: row.get(0)?,
+        thread_stage_id: row.get(1)?,
+        title: row.get(2)?,
+        description: row.get(3)?,
+        status: IssueStatus::from_db_str(&status_raw).unwrap_or(IssueStatus::Open),
+        severity: IssueSeverity::from_db_str(&severity_raw).unwrap_or(IssueSeverity::Medium),
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
 fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
     let models_json: String = row.get(5)?;
     let efforts_json: String = row.get(7)?;
@@ -1717,6 +1767,7 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
         sessions: Vec::new(),
+        issues: Vec::new(),
     })
 }
 
@@ -2057,6 +2108,7 @@ fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<S
         .map(|assistant| assistant.assistant_id.clone())
         .collect();
     stage.sessions = load_stage_sessions(conn, &stage.id)?;
+    stage.issues = load_stage_issues(conn, &stage.id)?;
     Ok(stage)
 }
 
@@ -2764,6 +2816,29 @@ fn load_kanban_item_by_id(conn: &Connection, item_id: &str) -> Result<KanbanItem
     Ok(item)
 }
 
+fn load_stage_issues(conn: &Connection, thread_stage_id: &str) -> Result<Vec<StageIssueInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, thread_stage_id, title, description, status, severity, created_at, updated_at
+         FROM thread_stage_issues
+         WHERE thread_stage_id = ?
+         ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![thread_stage_id], issue_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_stage_issue_by_id(conn: &Connection, issue_id: &str) -> Result<StageIssueInfo> {
+    conn.query_row(
+        "SELECT id, thread_stage_id, title, description, status, severity, created_at, updated_at
+         FROM thread_stage_issues
+         WHERE id = ?",
+        params![issue_id],
+        issue_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("issue not found: {issue_id}"))
+}
+
 fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
     let mut stmt = conn.prepare(
@@ -2968,6 +3043,7 @@ fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInf
             .map(|assistant| assistant.assistant_id.clone())
             .collect();
         stage.sessions = load_stage_sessions(conn, &stage.id)?;
+        stage.issues = load_stage_issues(conn, &stage.id)?;
     }
     Ok(stages)
 }
@@ -4617,6 +4693,108 @@ impl SessionStore for SqliteStore {
         Ok(stage)
     }
 
+    fn list_thread_stage_issues(&self, thread_stage_id: &str) -> Result<Vec<StageIssueInfo>> {
+        let conn = self.conn.lock().unwrap();
+        load_stage_issues(&conn, thread_stage_id)
+    }
+
+    fn create_thread_stage_issue(
+        &self,
+        thread_stage_id: &str,
+        title: &str,
+        description: Option<&str>,
+        severity: IssueSeverity,
+    ) -> Result<StageIssueInfo> {
+        let title = title.trim();
+        if title.is_empty() {
+            anyhow::bail!("issue title cannot be empty");
+        }
+        let description = description.map(str::trim).filter(|s| !s.is_empty());
+        let conn = self.conn.lock().unwrap();
+        // Validate the parent stage exists (surfaces a clear error otherwise).
+        load_thread_stage_by_id(&conn, thread_stage_id)?;
+        let now = now_ms();
+        let id = stable_issue_id(thread_stage_id, title, now);
+        conn.execute(
+            "INSERT INTO thread_stage_issues (
+                id, thread_stage_id, title, description, status, severity, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id,
+                thread_stage_id,
+                title,
+                description,
+                IssueStatus::Open.as_str(),
+                severity.as_str(),
+                now,
+                now,
+            ],
+        )?;
+        load_stage_issue_by_id(&conn, &id)
+    }
+
+    fn update_thread_stage_issue(
+        &self,
+        issue_id: &str,
+        title: Option<&str>,
+        description: Option<Option<&str>>,
+        status: Option<IssueStatus>,
+        severity: Option<IssueSeverity>,
+    ) -> Result<StageIssueInfo> {
+        let conn = self.conn.lock().unwrap();
+        let current = load_stage_issue_by_id(&conn, issue_id)?;
+        let next_title = match title {
+            Some(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    anyhow::bail!("issue title cannot be empty");
+                }
+                trimmed.to_string()
+            }
+            None => current.title,
+        };
+        let next_description = match description {
+            Some(Some(value)) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            Some(None) => None,
+            None => current.description,
+        };
+        let next_status = status.unwrap_or(current.status);
+        let next_severity = severity.unwrap_or(current.severity);
+        conn.execute(
+            "UPDATE thread_stage_issues
+             SET title = ?, description = ?, status = ?, severity = ?, updated_at = ?
+             WHERE id = ?",
+            params![
+                next_title,
+                next_description,
+                next_status.as_str(),
+                next_severity.as_str(),
+                now_ms(),
+                issue_id,
+            ],
+        )?;
+        load_stage_issue_by_id(&conn, issue_id)
+    }
+
+    fn delete_thread_stage_issue(&self, issue_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "DELETE FROM thread_stage_issues WHERE id = ?",
+            params![issue_id],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("issue not found: {issue_id}");
+        }
+        Ok(())
+    }
+
     fn update_thread_stage_assistant_agent(
         &self,
         thread_stage_id: &str,
@@ -6016,7 +6194,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 7);
+        assert_eq!(latest_schema_version, 8);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -6149,6 +6327,7 @@ mod migration_tests {
             "stages",
             "thread_stages",
             "stage_sessions",
+            "thread_stage_issues",
         ] {
             let exists: i64 = conn
                 .query_row(
@@ -6847,6 +7026,69 @@ mod migration_tests {
             stages.iter().find(|s| s.id == stage_a.id).unwrap().status,
             StageStatus::Blocked
         );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn thread_stage_issues_crud_and_cascade() {
+        let path = unique_db("sessio-thread-stage-issues");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent =
+            temp_child_path(&std::env::temp_dir(), "sessio-thread-stage-issues-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(&parent.to_string_lossy(), "issues", "code".to_string(), None)
+            .unwrap();
+        let templates = store.list_project_stages(&project.id).unwrap();
+        let first_id = templates[0].id.clone();
+        let thread = store
+            .create_thread(&project.id, "Issue thread", None)
+            .unwrap();
+        let stage = store.add_thread_stage(&thread.id, &first_id, &[]).unwrap();
+
+        // create defaults to open and round-trips the provided fields.
+        let issue = store
+            .create_thread_stage_issue(
+                &stage.id,
+                "API rate limit",
+                Some("429s"),
+                IssueSeverity::High,
+            )
+            .unwrap();
+        assert_eq!(issue.status, IssueStatus::Open);
+        assert_eq!(issue.severity, IssueSeverity::High);
+        assert_eq!(issue.title, "API rate limit");
+        assert_eq!(issue.description.as_deref(), Some("429s"));
+
+        // list + load_thread_stages both surface the issue under its stage.
+        assert_eq!(store.list_thread_stage_issues(&stage.id).unwrap().len(), 1);
+        let stages = load_thread_stages(&store.conn.lock().unwrap(), &thread.id).unwrap();
+        let stage_row = stages.iter().find(|s| s.id == stage.id).unwrap();
+        assert_eq!(stage_row.issues.len(), 1);
+        assert_eq!(stage_row.issues[0].id, issue.id);
+
+        // update merges fields: empty description clears, omitted title stays.
+        let updated = store
+            .update_thread_stage_issue(
+                &issue.id,
+                None,
+                Some(None),
+                Some(IssueStatus::Resolved),
+                Some(IssueSeverity::Low),
+            )
+            .unwrap();
+        assert_eq!(updated.status, IssueStatus::Resolved);
+        assert_eq!(updated.severity, IssueSeverity::Low);
+        assert_eq!(updated.description, None);
+        assert_eq!(updated.title, "API rate limit");
+
+        // deleting the parent thread stage cascades to its issues.
+        store.delete_thread_stage(&stage.id).unwrap();
+        assert!(store.list_thread_stage_issues(&stage.id).unwrap().is_empty());
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);

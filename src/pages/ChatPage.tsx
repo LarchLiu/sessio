@@ -4777,7 +4777,7 @@ function useEffectiveThemeType(): "light" | "dark" {
   return themeType;
 }
 
-interface MarkdownImage {
+export interface MarkdownImage {
   alt: string;
   src: string;
 }
@@ -5250,7 +5250,7 @@ function todoToolTitle(): string {
   return "Update Todos";
 }
 
-function MarkdownContent({
+export function MarkdownContent({
   text,
   onPreviewImage,
 }: {
