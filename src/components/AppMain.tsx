@@ -1,5 +1,5 @@
-import type { Dispatch, SetStateAction } from "react";
-import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo } from "../api";
+import { useState, type Dispatch, type SetStateAction } from "react";
+import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo, StageInfo, ThreadInfo } from "../api";
 import type { ActiveMessageMeta } from "../pages/ChatPage";
 import ChatPage from "../pages/ChatPage";
 import NewChatPage from "../pages/NewChatPage";
@@ -78,11 +78,24 @@ export default function AppMain({
   onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
   onError: (error: string | null) => void;
 }) {
+  const [newChatSnapshot, setNewChatSnapshot] = useState<{
+    thread: ThreadInfo;
+    stage: StageInfo | null;
+  } | null>(null);
+
   const addPendingSession = (pending: PendingNewChatSession) => {
     setPendingNewChats((prev) => ({
       ...prev,
       [pending.sessioRuntimeSessionId]: pending,
     }));
+  };
+
+  const openNewChatForStage = (thread: ThreadInfo, stage: StageInfo | null) => {
+    setNewChatSnapshot({ thread, stage });
+    setSelectedProject(null);
+    setSelectedThread(null);
+    setSelected(null);
+    setDetailMode("chat");
   };
 
   const projectWorkbenchProps = (project: ProjectInfo) => ({
@@ -104,6 +117,7 @@ export default function AppMain({
     },
     onNewThreadChat: () => {
       const projectGroup = projectGroups.find((group) => group.project.id === project.id);
+      setNewChatSnapshot(null);
       setSelectedProject(null);
       setSelectedThread(null);
       setSelected(null);
@@ -122,6 +136,7 @@ export default function AppMain({
             project={activeProject}
             threadId={selectedThreadId}
             onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
+            onNewStageChat={openNewChatForStage}
             onError={onError}
           />
         ) : (
@@ -143,6 +158,7 @@ export default function AppMain({
         dispatchLiveEvent={dispatchLiveEvent}
         onError={onError}
         onPendingSession={addPendingSession}
+        snapshotContext={newChatSnapshot}
       />
     );
   }

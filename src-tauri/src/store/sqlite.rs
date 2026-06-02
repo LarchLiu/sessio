@@ -19,6 +19,7 @@ use crate::models::{
 use crate::store::{
     IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
     RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
+    ThreadWorkSnapshotRecord,
 };
 
 pub struct SqliteStore {
@@ -562,6 +563,22 @@ CREATE TABLE IF NOT EXISTS thread_stage_states (
 );
 "#;
 
+const SCHEMA_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_work_snapshots (
+    child_agent      TEXT NOT NULL,
+    child_session_id TEXT NOT NULL,
+    thread_id        TEXT NOT NULL,
+    stage_id         TEXT,
+    snapshot_json    TEXT NOT NULL,
+    version          INTEGER NOT NULL,
+    created_at       INTEGER NOT NULL,
+    PRIMARY KEY(child_agent, child_session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_work_snapshots_thread
+    ON thread_work_snapshots(thread_id);
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -634,6 +651,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         let _ = conn.execute_batch(SCHEMA_V6);
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
+            [],
+        )?;
+    }
+    if current < 7 {
+        conn.execute_batch(SCHEMA_V7)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
             [],
         )?;
     }
@@ -5062,6 +5086,59 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
+    fn save_thread_work_snapshot(&self, snapshot: &ThreadWorkSnapshotRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO thread_work_snapshots
+                (child_agent, child_session_id, thread_id, stage_id, snapshot_json, version, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(child_agent, child_session_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                stage_id = excluded.stage_id,
+                snapshot_json = excluded.snapshot_json,
+                version = excluded.version,
+                created_at = excluded.created_at",
+            params![
+                snapshot.child_agent.as_str(),
+                snapshot.child_session_id,
+                snapshot.thread_id,
+                snapshot.stage_id,
+                snapshot.snapshot_json,
+                snapshot.version,
+                snapshot.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_thread_work_snapshot(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+    ) -> Result<Option<ThreadWorkSnapshotRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT child_agent, child_session_id, thread_id, stage_id, snapshot_json, version, created_at
+             FROM thread_work_snapshots
+             WHERE child_agent = ? AND child_session_id = ?",
+            params![child_agent.as_str(), child_session_id],
+            |row| {
+                let agent_raw: String = row.get(0)?;
+                Ok(ThreadWorkSnapshotRecord {
+                    child_agent: Agent::from_db_str(&agent_raw).unwrap_or(child_agent),
+                    child_session_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    stage_id: row.get(3)?,
+                    snapshot_json: row.get(4)?,
+                    version: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         insert_session(&conn, scope, session)
@@ -5939,7 +6016,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 6);
+        assert_eq!(latest_schema_version, 7);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();

@@ -3,6 +3,7 @@ import {
   createPendingSession,
   linkKanbanItemSession,
   saveSessionHistorySnapshots,
+  saveThreadWorkSnapshot,
   updateKanbanItemStatus,
   type Agent,
   type KanbanItem,
@@ -107,6 +108,15 @@ export function usePendingNewChats({
               agentSessionId,
               pending.historySnapshots,
             ).catch((err) => console.warn("save history snapshots failed", err));
+          }
+          if (pending.workSnapshot) {
+            saveThreadWorkSnapshot(
+              pending.agent,
+              agentSessionId,
+              pending.workSnapshot.threadId,
+              pending.workSnapshot.stageId,
+              pending.workSnapshot.snapshot,
+            ).catch((err) => console.warn("save work snapshot failed", err));
           }
           let linkedKanbanItem: KanbanItem | null = null;
           if (pending.kanbanItemId) {

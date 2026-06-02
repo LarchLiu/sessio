@@ -29,6 +29,8 @@ import {
   type RuntimeAgentMetadata,
   type RuntimeAgentSelection,
   type SetRuntimeAgentSelectionRequest,
+  type StageInfo,
+  type ThreadInfo,
   listKanbanItems,
   sendAgentInput,
   startAgentSession,
@@ -53,6 +55,7 @@ import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions }
 import Tooltip from "../components/Tooltip";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
+import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
 import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
 import {
   runtimeAgentForSelection,
@@ -91,6 +94,7 @@ interface NewChatPageProps {
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onError: (error: string | null) => void;
   onPendingSession: (session: PendingNewChatSession) => void;
+  snapshotContext?: { thread: ThreadInfo; stage: StageInfo | null } | null;
 }
 
 export default function NewChatPage({
@@ -103,6 +107,7 @@ export default function NewChatPage({
   dispatchLiveEvent,
   onError,
   onPendingSession,
+  snapshotContext,
 }: NewChatPageProps) {
   const { t } = useI18n();
   const initialRuntimeAgent =
@@ -391,6 +396,9 @@ export default function NewChatPage({
         permissionMode,
       });
       const timestamp = Date.now();
+      const workSnapshot = snapshotContext
+        ? buildThreadWorkSnapshot(snapshotContext.thread, snapshotContext.stage, timestamp)
+        : null;
       dispatchSessionStartedFallback({
         dispatch: dispatchLiveEvent,
         handle,
@@ -407,9 +415,19 @@ export default function NewChatPage({
         timestamp,
         kanbanItemId: selectedKanbanItem?.id,
         kanbanItemStatus: selectedKanbanItem?.status,
+        workSnapshot: workSnapshot
+          ? {
+              threadId: snapshotContext!.thread.id,
+              stageId: snapshotContext!.stage?.id ?? null,
+              snapshot: workSnapshot,
+            }
+          : undefined,
       });
+      const inputText = workSnapshot
+        ? `${renderThreadWorkContext(workSnapshot)}\n\n---\n\n${prompt}`
+        : prompt;
       await sendAgentInput(handle.sessioRuntimeSessionId, {
-        text: prompt,
+        text: inputText,
         attachments: attachments.map(({ path, mimeType, kind }) => ({ path, mimeType, kind })),
       });
       setText("");

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, Circle, CircleAlert, CircleDot, LoaderCircle, MinusCircle } from "lucide-react";
+import { Check, Circle, CircleAlert, CircleDot, LoaderCircle, MessageSquarePlus, MinusCircle } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
 import type { Agent, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo } from "../api";
 import { AGENT_LABEL, listThreads, updateThreadStageState } from "../api";
@@ -14,11 +14,13 @@ export default function ThreadPage({
   project,
   threadId,
   onSelectSession,
+  onNewStageChat,
   onError,
 }: {
   project: ProjectInfo;
   threadId: string;
   onSelectSession: (session: SessionInfo) => void;
+  onNewStageChat: (thread: ThreadInfo, stage: StageInfo | null) => void;
   onError: (error: string | null) => void;
 }) {
   const { t, lang } = useI18n();
@@ -99,6 +101,7 @@ export default function ThreadPage({
                     first={index === 0}
                     last={index === sortedStages.length - 1}
                     onSelectSession={onSelectSession}
+                    onNewChat={() => onNewStageChat(thread, stage)}
                     onStatusChange={async (status) => {
                       try {
                         await updateThreadStageState(stage.id, { status });
@@ -133,6 +136,7 @@ function ThreadStageStep({
   first,
   last,
   onSelectSession,
+  onNewChat,
   onStatusChange,
 }: {
   stage: StageInfo;
@@ -140,6 +144,7 @@ function ThreadStageStep({
   first: boolean;
   last: boolean;
   onSelectSession: (session: SessionInfo) => void;
+  onNewChat: () => void;
   onStatusChange: (status: StageStatus) => void;
 }) {
   const { t } = useI18n();
@@ -177,6 +182,15 @@ function ThreadStageStep({
               )}
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={onNewChat}
+                title={t("stage.new_chat")}
+                className="flex items-center gap-1 rounded border border-ink/15 bg-surface-panel px-1.5 py-0.5 text-meta text-ink/55 hover:bg-ink/[0.05] hover:text-ink/80"
+              >
+                <MessageSquarePlus className="h-3.5 w-3.5" />
+                {t("stage.new_chat")}
+              </button>
               <select
                 value={stage.status}
                 onChange={(event) => onStatusChange(event.target.value as StageStatus)}

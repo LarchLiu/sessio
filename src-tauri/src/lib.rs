@@ -34,7 +34,7 @@ use models::{
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
-use store::{SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore};
+use store::{SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord};
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -42,6 +42,7 @@ use tauri::{
 };
 
 const HISTORY_CACHE_VERSION: i64 = 1;
+const THREAD_WORK_SNAPSHOT_VERSION: i64 = 1;
 
 fn default_workflow_id() -> String {
     "code".to_string()
@@ -1002,6 +1003,67 @@ fn save_session_history_snapshots(
     store
         .replace_session_history_snapshots(child_agent, &child_session_id, &snapshots)
         .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadWorkSnapshotResult {
+    child_agent: Agent,
+    child_session_id: String,
+    thread_id: String,
+    stage_id: Option<String>,
+    version: i64,
+    created_at: i64,
+    snapshot: serde_json::Value,
+}
+
+#[tauri::command]
+fn save_thread_work_snapshot(
+    child_agent: Agent,
+    child_session_id: String,
+    thread_id: String,
+    stage_id: Option<String>,
+    snapshot: serde_json::Value,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    let snapshot_json = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
+    let record = ThreadWorkSnapshotRecord {
+        child_agent,
+        child_session_id,
+        thread_id,
+        stage_id,
+        snapshot_json,
+        version: THREAD_WORK_SNAPSHOT_VERSION,
+        created_at: now_ms(),
+    };
+    store
+        .save_thread_work_snapshot(&record)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_thread_work_snapshot(
+    child_agent: Agent,
+    child_session_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Option<ThreadWorkSnapshotResult>, String> {
+    let record = store
+        .get_thread_work_snapshot(child_agent, &child_session_id)
+        .map_err(|e| e.to_string())?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&record.snapshot_json).map_err(|e| e.to_string())?;
+    Ok(Some(ThreadWorkSnapshotResult {
+        child_agent: record.child_agent,
+        child_session_id: record.child_session_id,
+        thread_id: record.thread_id,
+        stage_id: record.stage_id,
+        version: record.version,
+        created_at: record.created_at,
+        snapshot,
+    }))
 }
 
 #[cfg(test)]
@@ -2528,6 +2590,8 @@ pub fn run() {
             get_session_ancestors,
             get_session_history_snapshots,
             save_session_history_snapshots,
+            save_thread_work_snapshot,
+            get_thread_work_snapshot,
             get_session_history,
             update_session_history_count,
             create_pending_session,

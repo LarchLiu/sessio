@@ -85,6 +85,17 @@ pub struct SessionHistorySnapshotRecord {
     pub turns: Vec<SessionHistoryTurn>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ThreadWorkSnapshotRecord {
+    pub child_agent: Agent,
+    pub child_session_id: String,
+    pub thread_id: String,
+    pub stage_id: Option<String>,
+    pub snapshot_json: String,
+    pub version: i64,
+    pub created_at: i64,
+}
+
 pub trait SessionStore: Send + Sync {
     fn init(&self) -> Result<()>;
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
@@ -307,6 +318,12 @@ pub trait SessionStore: Send + Sync {
         child_session_id: &str,
         snapshots: &[SessionHistorySnapshotRecord],
     ) -> Result<()>;
+    fn save_thread_work_snapshot(&self, snapshot: &ThreadWorkSnapshotRecord) -> Result<()>;
+    fn get_thread_work_snapshot(
+        &self,
+        child_agent: Agent,
+        child_session_id: &str,
+    ) -> Result<Option<ThreadWorkSnapshotRecord>>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(

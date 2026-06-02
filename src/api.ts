@@ -1069,6 +1069,69 @@ export async function saveSessionHistorySnapshots(
   });
 }
 
+export interface ThreadWorkSnapshotStage {
+  threadStageId: string;
+  name: string;
+  kind: StageType | null;
+  status: StageStatus;
+  summary: string | null;
+  outcome: string | null;
+  sessionRefs: { agent: Agent; sessionId: string; title: string | null }[];
+}
+
+export interface ThreadWorkSnapshot {
+  threadId: string;
+  projectId: string;
+  goal: string;
+  description: string | null;
+  activeStageId: string | null;
+  focusedStageId: string | null;
+  stages: ThreadWorkSnapshotStage[];
+  rollup: {
+    completed: number;
+    incomplete: number;
+    blocked: number;
+    total: number;
+  };
+  capturedAt: number;
+}
+
+export interface ThreadWorkSnapshotResult {
+  childAgent: Agent;
+  childSessionId: string;
+  threadId: string;
+  stageId: string | null;
+  version: number;
+  createdAt: number;
+  snapshot: ThreadWorkSnapshot;
+}
+
+export async function saveThreadWorkSnapshot(
+  childAgent: Agent,
+  childSessionId: string,
+  threadId: string,
+  stageId: string | null,
+  snapshot: ThreadWorkSnapshot,
+): Promise<void> {
+  return invoke<void>("save_thread_work_snapshot", {
+    childAgent,
+    childSessionId,
+    threadId,
+    stageId,
+    snapshot,
+  });
+}
+
+export async function getThreadWorkSnapshot(
+  childAgent: Agent,
+  childSessionId: string,
+): Promise<ThreadWorkSnapshotResult | null> {
+  return invoke<ThreadWorkSnapshotResult | null>("get_thread_work_snapshot", {
+    childAgent,
+    childSessionId,
+  });
+}
+
 export async function getIndexStatus(): Promise<IndexStatus> {
   return invoke<IndexStatus>("get_index_status");
 }

@@ -1,7 +1,7 @@
 export type ViewMode = "native" | "cross";
 export type DetailMode = "chat" | "project";
 
-import type { Agent, KanbanStatus, ProjectInfo, SessionHistorySnapshotGroup, SessionInfo } from "./api";
+import type { Agent, KanbanStatus, ProjectInfo, SessionHistorySnapshotGroup, SessionInfo, ThreadWorkSnapshot } from "./api";
 
 export interface ProjectGroup {
   key: string;
@@ -25,4 +25,9 @@ export interface PendingNewChatSession {
   kanbanItemId?: string;
   kanbanItemStatus?: KanbanStatus;
   historySnapshots?: SessionHistorySnapshotGroup[];
+  workSnapshot?: {
+    threadId: string;
+    stageId: string | null;
+    snapshot: ThreadWorkSnapshot;
+  };
 }
