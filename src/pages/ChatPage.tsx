@@ -479,6 +479,7 @@ function ThreadWorkSnapshotPanel({
   snapshot: ThreadWorkSnapshotResult;
   sources: ThreadWorkSnapshotSourceRef[];
 }) {
+  const { t } = useI18n();
   const work = snapshot.snapshot;
   const stages = Array.isArray(work.stages) ? work.stages : [];
   const openIssues = work.rollup.openIssues ?? stages.reduce(
@@ -489,18 +490,21 @@ function ThreadWorkSnapshotPanel({
     <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5 text-body-sm">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
-          <div className="text-caption uppercase text-ink/35">Thread snapshot</div>
+          <div className="text-caption uppercase text-ink/35">{t("thread.snapshot")}</div>
           <div className="truncate font-medium text-ink/80">{work.goal}</div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
           <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
-            {work.rollup.completed}/{work.rollup.total} complete
+            {t("thread.snapshot_complete", {
+              completed: work.rollup.completed,
+              total: work.rollup.total,
+            })}
           </span>
           <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
-            {work.rollup.blocked} blocked
+            {t("thread.snapshot_blocked", { count: work.rollup.blocked })}
           </span>
           <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
-            {openIssues} open issues
+            {t("thread.snapshot_open_issues", { count: openIssues })}
           </span>
         </div>
       </div>
@@ -524,10 +528,12 @@ function ThreadWorkSnapshotPanel({
               )}
             </div>
             <div className="flex shrink-0 items-center gap-1.5 text-caption text-ink/45">
-              <span>{stage.status}</span>
+              <span>{t(`stage.status.${stage.status}`)}</span>
               {(stage.issues ?? []).filter((issue) => issue.status === "open").length > 0 && (
                 <span className="rounded bg-ink/[0.06] px-1 py-0.5">
-                  {(stage.issues ?? []).filter((issue) => issue.status === "open").length} issues
+                  {t("thread.snapshot_stage_issues", {
+                    count: (stage.issues ?? []).filter((issue) => issue.status === "open").length,
+                  })}
                 </span>
               )}
             </div>
