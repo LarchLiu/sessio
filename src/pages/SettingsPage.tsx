@@ -3,7 +3,7 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import AiGenerate2Icon from '@iconify-react/ri/ai-generate-2';
 import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
-import { ArrowLeft, Check, Circle, GripVertical, Languages, Monitor, Moon, Pencil, Plus, RefreshCw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
+import { ArrowLeft, Check, Circle, Download, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
 import type { Agent, AgentInfo, AssistantInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
 import {
   createWorkflow,
@@ -26,6 +26,7 @@ import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
+import { formatVersionLabel, type UpdateState } from "../updater";
 import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
 import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
@@ -41,6 +42,9 @@ export default function SettingsPage({
   onBack,
   onError,
   onRebuildFinished,
+  appVersion,
+  update,
+  onOpenUpdate,
 }: {
   lang: Lang;
   onLangChange: (lang: Lang) => void;
@@ -51,6 +55,9 @@ export default function SettingsPage({
   onBack: () => void;
   onError: (error: string | null) => void;
   onRebuildFinished: () => Promise<void> | void;
+  appVersion: string;
+  update: UpdateState;
+  onOpenUpdate: () => void;
 }) {
   const { t } = useI18n();
   const [section, setSection] = useState<SettingsSection>("general");
@@ -114,6 +121,9 @@ export default function SettingsPage({
                 onThemeModeChange={onThemeModeChange}
                 onError={onError}
                 onRebuildFinished={onRebuildFinished}
+                appVersion={appVersion}
+                update={update}
+                onOpenUpdate={onOpenUpdate}
               />
             )}
             {section === "agents" && <AgentsSettings onError={onError} />}
@@ -126,24 +136,109 @@ export default function SettingsPage({
   );
 }
 
+function AboutGroup({
+  appVersion,
+  lang,
+  update,
+  onOpenUpdate,
+}: {
+  appVersion: string;
+  lang: Lang;
+  update: UpdateState;
+  onOpenUpdate: () => void;
+}) {
+  const { t } = useI18n();
+  const status = update.updateReady
+    ? t("settings.update_ready")
+    : update.hasUpdate && update.latestVersion
+      ? t("settings.update_available_version", { version: formatVersionLabel(update.latestVersion) })
+      : update.checking
+        ? t("settings.update_checking")
+        : t("settings.update_up_to_date");
+  const actionLabel = update.updateReady
+    ? t("update_dialog.restart_now")
+    : update.canInstall
+      ? t("update_dialog.update_now")
+      : t("update_dialog.download_now");
+  const ActionIcon = update.updateReady ? RotateCcw : Download;
+
+  return (
+    <SettingsGroup title={t("settings.about")} flush>
+      <SettingsRow icon={<Info className="h-4 w-4" />} label={t("settings.about")} description={t("settings.about_description")}>
+        <div className="text-right text-caption text-ink/58">
+          <div className="font-semibold text-ink/78">{formatVersionLabel(appVersion)}</div>
+          <div>{status}</div>
+        </div>
+      </SettingsRow>
+      <SettingsRow
+        icon={<RefreshCw className="h-4 w-4" />}
+        label={t("settings.update_status")}
+        description={t("settings.last_checked_value", {
+          value: update.lastCheckedAt ? formatSettingsDate(update.lastCheckedAt, lang) : t("settings.never"),
+        })}
+      >
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {(update.hasUpdate || update.updateReady) && update.latestVersion && (
+            <button
+              type="button"
+              disabled={update.installing}
+              onClick={onOpenUpdate}
+              className="inline-flex h-8 items-center gap-2 rounded-md bg-blue px-3 text-body-sm font-medium text-white outline-none transition hover:bg-blue/92 focus-visible:ring-2 focus-visible:ring-blue/45 disabled:opacity-55"
+            >
+              {update.installing ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+              ) : (
+                <ActionIcon className="h-4 w-4" />
+              )}
+              {actionLabel}
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={update.checking || update.installing}
+            onClick={update.check}
+            className="inline-flex h-8 items-center gap-2 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-45"
+          >
+            <RefreshCw className={"h-4 w-4 " + (update.checking ? "animate-spin" : "")} />
+            {t("settings.check_for_updates")}
+          </button>
+        </div>
+      </SettingsRow>
+    </SettingsGroup>
+  );
+}
+
+function formatSettingsDate(ts: number, lang: Lang): string {
+  return new Intl.DateTimeFormat(lang === "zh" ? "zh-CN" : "en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(ts));
+}
+
 function GeneralSettings({
   lang,
   themeMode,
   rebuilding,
   indexing,
+  appVersion,
+  update,
   onLangChange,
   onThemeModeChange,
   onError,
   onRebuildFinished,
+  onOpenUpdate,
 }: {
   lang: Lang;
   themeMode: ThemeMode;
   rebuilding: boolean;
   indexing: boolean;
+  appVersion: string;
+  update: UpdateState;
   onLangChange: (lang: Lang) => void;
   onThemeModeChange: (mode: ThemeMode) => void;
   onError: (error: string | null) => void;
   onRebuildFinished: () => Promise<void> | void;
+  onOpenUpdate: () => void;
 }) {
   const { t } = useI18n();
   return (
@@ -183,6 +278,12 @@ function GeneralSettings({
           </button>
         </SettingsRow>
       </SettingsGroup>
+      <AboutGroup
+        appVersion={appVersion}
+        lang={lang}
+        update={update}
+        onOpenUpdate={onOpenUpdate}
+      />
     </section>
   );
 }

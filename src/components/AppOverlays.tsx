@@ -26,6 +26,9 @@ type AppOverlaysProps = {
   updateReleaseNotes: string | null;
   updateCanInstall: boolean;
   updateInstalling: boolean;
+  updateReady: boolean;
+  updateDownloadedBytes: number;
+  updateTotalBytes: number | null;
   onCloseMetaPopover: () => void;
   onMetaPopoverExited: () => void;
   onCloseMemorySearch: () => void;
@@ -54,6 +57,9 @@ export default function AppOverlays({
   updateReleaseNotes,
   updateCanInstall,
   updateInstalling,
+  updateReady,
+  updateDownloadedBytes,
+  updateTotalBytes,
   onCloseMetaPopover,
   onMetaPopoverExited,
   onCloseMemorySearch,
@@ -130,6 +136,9 @@ export default function AppOverlays({
           releaseNotes={updateReleaseNotes}
           canInstall={updateCanInstall}
           installing={updateInstalling}
+          updateReady={updateReady}
+          downloadedBytes={updateDownloadedBytes}
+          totalBytes={updateTotalBytes}
           onCancel={onCancelUpdateConfirm}
           onConfirm={onConfirmUpdate}
           onExited={onUpdateConfirmExited}

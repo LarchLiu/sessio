@@ -344,7 +344,7 @@ body {
 
 .update-confirm-panel {
   transform-origin: center;
-  will-change: opacity, transform;
+  will-change: opacity;
 }
 
 .update-confirm-panel-in {
@@ -353,6 +353,15 @@ body {
 
 .update-confirm-panel-out {
   animation: update-confirm-panel-out 130ms cubic-bezier(0.7, 0, 0.84, 0) both;
+}
+
+.update-release-notes-scroll {
+  display: block;
+  max-height: min(44vh, 360px);
+}
+
+.update-release-notes-viewport {
+  max-height: min(44vh, 360px);
 }
 
 .update-release-notes > :first-child {
@@ -369,12 +378,37 @@ body {
 
 .update-release-notes ul,
 .update-release-notes ol {
-  margin: 0.4rem 0 0.8rem;
-  padding-left: 1.1rem;
+  margin: 0.45rem 0 0.85rem;
+  padding-inline-start: 1.5rem;
+}
+
+.update-release-notes ul {
+  list-style-position: outside;
+  list-style-type: disc;
+}
+
+.update-release-notes ol {
+  list-style-position: outside;
+  list-style-type: decimal;
 }
 
 .update-release-notes li {
   margin: 0.28rem 0;
+  padding-left: 0.2rem;
+  display: list-item;
+}
+
+.update-release-notes li::marker {
+  color: rgb(var(--color-fg) / 0.42);
+}
+
+.update-release-notes li > p {
+  margin: 0.2rem 0;
+}
+
+.update-release-notes li > ul,
+.update-release-notes li > ol {
+  margin: 0.35rem 0 0.45rem;
 }
 
 .update-release-notes strong {
@@ -386,6 +420,11 @@ body {
   margin: 0.8rem 0;
   border: 0;
   border-top: 1px solid rgb(var(--color-fg) / 0.1);
+}
+
+.update-progress-indeterminate {
+  width: 42%;
+  animation: update-progress-indeterminate 1.05s ease-in-out infinite;
 }
 
 @keyframes theme-wipe-ltr {
@@ -467,22 +506,27 @@ body {
 @keyframes update-confirm-panel-in {
   from {
     opacity: 0;
-    transform: translateY(10px) scale(0.985);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
   }
 }
 
 @keyframes update-confirm-panel-out {
   from {
     opacity: 1;
-    transform: translateY(0) scale(1);
   }
   to {
     opacity: 0;
-    transform: translateY(6px) scale(0.985);
+  }
+}
+
+@keyframes update-progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(240%);
   }
 }
 
@@ -499,7 +543,8 @@ body {
   .update-confirm-dialog-in,
   .update-confirm-dialog-out,
   .update-confirm-panel-in,
-  .update-confirm-panel-out {
+  .update-confirm-panel-out,
+  .update-progress-indeterminate {
     animation-duration: 1ms;
   }
 }

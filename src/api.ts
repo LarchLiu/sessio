@@ -442,6 +442,7 @@ export interface RuntimeAgentMetadata {
 
 export interface DebugConfig {
   acpConfig: boolean;
+  updatePreview: boolean;
 }
 
 export interface RuntimeAgentOptionMetadata {

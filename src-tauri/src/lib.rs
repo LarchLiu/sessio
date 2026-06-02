@@ -2805,6 +2805,11 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+#[tauri::command]
+fn reveal_main_window(app: AppHandle) {
+    show_main_window(&app);
+}
+
 /// Expose the running app binary through a stable path (~/.sessio/bin/sessio)
 /// so agents working inside a project can invoke the Sessio CLI without knowing
 /// where the app was installed. Best-effort: failures only warn.
@@ -3043,6 +3048,7 @@ pub fn run() {
             read_local_text_file,
             set_window_appearance,
             get_system_appearance,
+            reveal_main_window,
             rebuild_session_index,
             get_index_status,
             get_memory_backend_status,

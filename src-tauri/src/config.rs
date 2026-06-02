@@ -16,6 +16,7 @@ pub struct AppConfig {
 #[serde(rename_all = "camelCase")]
 pub struct DebugConfig {
     pub acp_config: bool,
+    pub update_preview: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +43,7 @@ struct RawConfig {
 #[derive(Debug, Clone, Default)]
 struct RawDebugConfig {
     acp_config: Option<bool>,
+    update_preview: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -152,6 +154,7 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
             },
             Section::Debug => match key {
                 "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
+                "update_preview" => raw.debug.update_preview = value.map(parse_bool).transpose()?,
                 other => bail!("unknown key in [debug]: {other}"),
             },
             Section::Root | Section::Ignored => {}
@@ -265,6 +268,7 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
 fn resolve_debug_config(raw: RawConfig) -> DebugConfig {
     DebugConfig {
         acp_config: raw.debug.acp_config.unwrap_or(false),
+        update_preview: raw.debug.update_preview.unwrap_or(false),
     }
 }
 
@@ -359,6 +363,11 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
         defaults.debug.acp_config,
         &mut changed,
     );
+    merge_option(
+        &mut raw.debug.update_preview,
+        defaults.debug.update_preview,
+        &mut changed,
+    );
 
     Ok((raw, changed))
 }
@@ -388,7 +397,10 @@ fn write_default_config_file(path: &Path) -> Result<()> {
 fn default_app_config() -> Result<AppConfig> {
     Ok(AppConfig {
         memory: default_memory_config()?,
-        debug: DebugConfig { acp_config: false },
+        debug: DebugConfig {
+            acp_config: false,
+            update_preview: false,
+        },
     })
 }
 
@@ -452,6 +464,9 @@ fn serialize_debug_config(config: &DebugConfig) -> String {
     out.push_str("[debug]\n");
     out.push_str("acp_config = ");
     out.push_str(if config.acp_config { "true" } else { "false" });
+    out.push('\n');
+    out.push_str("update_preview = ");
+    out.push_str(if config.update_preview { "true" } else { "false" });
     out.push('\n');
     out
 }
@@ -588,5 +603,6 @@ mod tests {
         assert!(changed);
         assert_eq!(config.memory.backend, "qmd");
         assert!(!config.debug.acp_config);
+        assert!(!config.debug.update_preview);
     }
 }

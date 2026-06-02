@@ -28,6 +28,7 @@ import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
 import AppSidebar from "./components/AppSidebar";
 import MemoryBackendMissingButton from "./components/MemoryBackendMissingButton";
 import ToastStack from "./components/ToastStack";
+import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppData } from "./hooks/useAppData";
 import { usePendingNewChats } from "./hooks/usePendingNewChats";
@@ -69,6 +70,20 @@ function readViewMode(): ViewMode {
 
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+
+async function revealMainWindow(): Promise<void> {
+  try {
+    await invoke("reveal_main_window");
+    return;
+  } catch {
+    const win = getCurrentWindow();
+    await Promise.allSettled([
+      win.unminimize(),
+      win.show(),
+      win.setFocus(),
+    ]);
+  }
+}
 
 export default function App() {
   const [error, setError] = useState<string | null>(null);
@@ -120,26 +135,28 @@ export default function App() {
     rememberSelection: rememberRuntimeAgentSelection,
   } = useRuntimeAgents();
   const [debugAcpConfig, setDebugAcpConfig] = useState(false);
-  const update = useUpdateCheck(__APP_VERSION__);
+  const [debugUpdatePreview, setDebugUpdatePreview] = useState(false);
+  const update = useUpdateCheck(__APP_VERSION__, debugUpdatePreview);
   const indexing = indexPhase !== "idle";
   const rebuilding = indexPhase === "rebuilding";
   const openUpdateConfirm = useCallback(() => {
     if (!update.hasUpdate || !update.latestVersion || update.installing) return;
-    const window = getCurrentWindow();
-    void window.show().catch(() => {});
-    void window.setFocus().catch(() => {});
+    void revealMainWindow();
+    setUpdateConfirmOpen(true);
     setUpdateConfirmMounted(true);
-    requestAnimationFrame(() => setUpdateConfirmOpen(true));
   }, [update.hasUpdate, update.installing, update.latestVersion]);
 
   const handleInstallUpdate = useCallback(async () => {
     try {
-      setUpdateConfirmOpen(false);
+      if (update.updateReady) {
+        await update.restart();
+        return;
+      }
       await update.install();
     } catch (err) {
       setError(String(err));
     }
-  }, [update.install]);
+  }, [update.install, update.restart, update.updateReady]);
 
   const availableSessions = useMemo(
     () => sessions.filter((s) => s.available),
@@ -150,7 +167,10 @@ export default function App() {
     let cancelled = false;
     getDebugConfig()
       .then((config) => {
-        if (!cancelled) setDebugAcpConfig(config.acpConfig);
+        if (!cancelled) {
+          setDebugAcpConfig(config.acpConfig);
+          setDebugUpdatePreview(config.updatePreview);
+        }
       })
       .catch((err) => console.warn("load debug config failed", err));
     return () => {
@@ -599,6 +619,9 @@ export default function App() {
       updateReleaseNotes={update.releaseNotes}
       updateCanInstall={update.canInstall}
       updateInstalling={update.installing}
+      updateReady={update.updateReady}
+      updateDownloadedBytes={update.downloadedBytes}
+      updateTotalBytes={update.totalBytes}
       onCloseMetaPopover={() => setMetaPopoverOpen(false)}
       onMetaPopoverExited={() => setMetaPopoverMounted(false)}
       onCloseMemorySearch={() => setMemorySearchOpen(false)}
@@ -630,7 +653,30 @@ export default function App() {
           onBack={() => setSettingsOpen(false)}
           onError={setError}
           onRebuildFinished={refreshMemoryBackend}
+          appVersion={__APP_VERSION__}
+          update={update}
+          onOpenUpdate={openUpdateConfirm}
         />
+        {updateConfirmMounted && update.latestVersion && (
+          <UpdateConfirmDialog
+            open={updateConfirmOpen}
+            currentVersion={__APP_VERSION__}
+            latestVersion={update.latestVersion}
+            releaseNotes={update.releaseNotes}
+            canInstall={update.canInstall}
+            installing={update.installing}
+            updateReady={update.updateReady}
+            downloadedBytes={update.downloadedBytes}
+            totalBytes={update.totalBytes}
+            onCancel={() => {
+              if (!update.installing) setUpdateConfirmOpen(false);
+            }}
+            onConfirm={() => {
+              void handleInstallUpdate();
+            }}
+            onExited={() => setUpdateConfirmMounted(false)}
+          />
+        )}
         <ToastStack message={error} onMessageConsumed={() => setError(null)} />
       </div>
     );
