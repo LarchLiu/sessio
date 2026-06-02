@@ -112,12 +112,16 @@ pnpm bundle
 
 ## Platform Notes
 
-GitHub Actions currently builds artifacts for:
+GitHub Actions currently builds release installers and updater artifacts for:
 
-- macOS universal binary
-- Linux `x86_64`
-- Linux `arm64`
-- Windows `x86_64`
+- macOS universal `.dmg` plus signed `.app.tar.gz` updater package
+- Linux `x86_64` AppImage plus updater signature
+- Linux `arm64` AppImage plus updater signature
+- Windows `x86_64` NSIS installer plus updater signature
+
+The release workflow requires the Tauri updater private key in the
+`TAURI_SIGNING_PRIVATE_KEY` GitHub secret. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+is optional when the key has no password.
 
 Linux builds usually need Tauri/WebKitGTK dependencies such as:
 

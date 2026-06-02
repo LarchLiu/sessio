@@ -39,7 +39,7 @@ import {
   liveSessionActivity,
   type LiveRuntimeState,
 } from "../runtimeChat";
-import { openReleasePage, useUpdateCheck } from "../updater";
+import { useUpdateCheck } from "../updater";
 import { AgentGlyph } from "./AgentIcon";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
@@ -69,7 +69,6 @@ type AppSidebarProps = {
   runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
   update: ReturnType<typeof useUpdateCheck>;
-  indexing: boolean;
   onCloseSidebar: () => void;
   onNewChat: () => void;
   onToggleProjectSection: () => void;
@@ -86,6 +85,7 @@ type AppSidebarProps = {
     pos: { x: number; y: number },
   ) => void;
   onOpenSettings: () => void;
+  onInstallUpdate: () => void;
   onError: (error: string | null) => void;
 };
 
@@ -104,7 +104,6 @@ export default function AppSidebar({
   runtimeSessionAliases,
   unreadSessionIds,
   update,
-  indexing,
   onCloseSidebar,
   onNewChat,
   onToggleProjectSection,
@@ -118,6 +117,7 @@ export default function AppSidebar({
   onProjectContextMenu,
   onSessionContextMenu,
   onOpenSettings,
+  onInstallUpdate,
   onError,
 }: AppSidebarProps) {
   const { t } = useI18n();
@@ -263,92 +263,21 @@ export default function AppSidebar({
 
       <SidebarFooter
         update={update}
-        indexing={indexing}
-        onError={onError}
         onOpenSettings={onOpenSettings}
+        onInstallUpdate={onInstallUpdate}
       />
     </aside>
   );
 }
 
-function IndexStatusDot({ indexing }: { indexing: boolean }) {
-  const { t } = useI18n();
-  const MIN_ITERATIONS = 2;
-  const [animating, setAnimating] = useState(indexing);
-  const indexingRef = useRef(indexing);
-  const iterRef = useRef(0);
-  useEffect(() => {
-    indexingRef.current = indexing;
-    if (indexing) {
-      iterRef.current = 0;
-      setAnimating(true);
-    }
-  }, [indexing]);
-
-  const tip = (
-    <div className="flex flex-col gap-2 py-0.5">
-      <div className="flex items-center gap-2.5">
-        <StatusDot />
-        <span>{t("sidebar.status_idle")}</span>
-      </div>
-      <div className="flex items-center gap-2.5">
-        <StatusDot ripple />
-        <span>{t("sidebar.status_indexing")}</span>
-      </div>
-    </div>
-  );
-  return (
-    <Tooltip content={tip} placement="top">
-      <span
-        aria-label={
-          animating ? t("sidebar.status_indexing") : t("sidebar.status_idle")
-        }
-        className="inline-flex items-center justify-center p-1.5 -m-1.5"
-      >
-        <StatusDot
-          ripple={animating}
-          onIterationEnd={() => {
-            iterRef.current += 1;
-            if (!indexingRef.current && iterRef.current >= MIN_ITERATIONS) {
-              setAnimating(false);
-            }
-          }}
-        />
-      </span>
-    </Tooltip>
-  );
-}
-
-function StatusDot({
-  ripple,
-  onIterationEnd,
-}: {
-  ripple?: boolean;
-  onIterationEnd?: () => void;
-}) {
-  return (
-    <span className="relative inline-block w-1.5 h-1.5 shrink-0">
-      {ripple && (
-        <span
-          onAnimationIteration={onIterationEnd}
-          className="absolute inset-0 rounded-full animate-ping bg-brand"
-        />
-      )}
-      <span className="absolute inset-0 rounded-full bg-brand" />
-    </span>
-  );
-}
-
 function SidebarFooter({
   update,
-  indexing,
-  onError,
   onOpenSettings,
+  onInstallUpdate,
 }: {
   update: ReturnType<typeof useUpdateCheck>;
-  indexing: boolean;
-  onError: (error: string | null) => void;
   onOpenSettings: () => void;
+  onInstallUpdate: () => void;
 }) {
   const { t } = useI18n();
 
@@ -366,35 +295,59 @@ function SidebarFooter({
               <Settings className="w-4 h-4" />
             </button>
           </Tooltip>
+        </div>
+        <div className="shrink-0 flex items-center justify-end gap-1">
           {update.hasUpdate && update.latestVersion && (
             <Tooltip
-              content={t("sidebar.update_available", {
-                version: update.latestVersion,
-              })}
+              content={
+                update.installing
+                  ? updateProgressLabel(update, t)
+                  : update.canInstall
+                    ? t("sidebar.update_available_install", { version: update.latestVersion })
+                    : t("sidebar.update_available_download", { version: update.latestVersion })
+              }
               placement="top"
             >
               <button
                 type="button"
-                aria-label={t("sidebar.update_available", {
-                  version: update.latestVersion,
-                })}
-                onClick={() => {
-                  openReleasePage(update.releaseUrl).catch((err) => {
-                    onError(String(err));
-                  });
-                }}
-                className="relative p-1 text-ink/55 hover:text-ink transition rounded-md"
+                aria-label={
+                  update.installing
+                    ? updateProgressLabel(update, t)
+                    : update.canInstall
+                      ? t("sidebar.update_available_install", { version: update.latestVersion })
+                      : t("sidebar.update_available_download", { version: update.latestVersion })
+                }
+                disabled={update.installing}
+                onClick={onInstallUpdate}
+                className="relative p-1 text-ink/55 transition rounded-md hover:text-ink disabled:cursor-default disabled:opacity-70"
               >
-                <Download className="w-4 h-4" />
+                {update.installing ? (
+                  <LoaderCircle className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
                 <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent-purple" />
               </button>
             </Tooltip>
           )}
         </div>
-        <IndexStatusDot indexing={indexing} />
       </div>
     </div>
   );
+}
+
+function updateProgressLabel(
+  update: ReturnType<typeof useUpdateCheck>,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (update.totalBytes && update.totalBytes > 0) {
+    const pct = Math.max(
+      0,
+      Math.min(99, Math.round((update.downloadedBytes / update.totalBytes) * 100)),
+    );
+    return t("sidebar.update_installing_progress", { progress: pct });
+  }
+  return t("sidebar.update_installing");
 }
 
 function SectionHeader({

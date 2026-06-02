@@ -48,6 +48,8 @@
     "@tauri-apps/api": "^2.4.0",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-opener": "^2.5.4",
+    "@tauri-apps/plugin-process": "~2.3.1",
+    "@tauri-apps/plugin-updater": "~2.10.1",
     "katex": "^0.16.47",
     "lucide-react": "^1.14.0",
     "react": "^19.1.0",

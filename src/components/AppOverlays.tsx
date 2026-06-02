@@ -3,6 +3,7 @@ import { useI18n } from "../i18n";
 import { SessionMetaList } from "../pages/ProjectPage";
 import ConfirmPopover from "./ConfirmPopover";
 import ProjectMemorySearchDialog from "./ProjectMemorySearchDialog";
+import UpdateConfirmDialog from "./UpdateConfirmDialog";
 
 export type DeleteTarget =
   | { kind: "session"; session: SessionInfo; pos: { x: number; y: number } }
@@ -18,12 +19,22 @@ type AppOverlaysProps = {
   memorySearchProjects: Array<{ key: string; label: string }>;
   activeMemorySearchProjectKey: string | null;
   deleteTarget: DeleteTarget | null;
+  updateConfirmMounted: boolean;
+  updateConfirmOpen: boolean;
+  updateCurrentVersion: string;
+  updateLatestVersion: string | null;
+  updateReleaseNotes: string | null;
+  updateCanInstall: boolean;
+  updateInstalling: boolean;
   onCloseMetaPopover: () => void;
   onMetaPopoverExited: () => void;
   onCloseMemorySearch: () => void;
   onMemorySearchExited: () => void;
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
+  onCancelUpdateConfirm: () => void;
+  onConfirmUpdate: () => void;
+  onUpdateConfirmExited: () => void;
 };
 
 export default function AppOverlays({
@@ -36,12 +47,22 @@ export default function AppOverlays({
   memorySearchProjects,
   activeMemorySearchProjectKey,
   deleteTarget,
+  updateConfirmMounted,
+  updateConfirmOpen,
+  updateCurrentVersion,
+  updateLatestVersion,
+  updateReleaseNotes,
+  updateCanInstall,
+  updateInstalling,
   onCloseMetaPopover,
   onMetaPopoverExited,
   onCloseMemorySearch,
   onMemorySearchExited,
   onCancelDelete,
   onConfirmDelete,
+  onCancelUpdateConfirm,
+  onConfirmUpdate,
+  onUpdateConfirmExited,
 }: AppOverlaysProps) {
   const { t } = useI18n();
 
@@ -98,6 +119,20 @@ export default function AppOverlays({
           pos={deleteTarget.pos}
           onCancel={onCancelDelete}
           onConfirm={onConfirmDelete}
+        />
+      )}
+
+      {updateConfirmMounted && updateLatestVersion && (
+        <UpdateConfirmDialog
+          open={updateConfirmOpen}
+          currentVersion={updateCurrentVersion}
+          latestVersion={updateLatestVersion}
+          releaseNotes={updateReleaseNotes}
+          canInstall={updateCanInstall}
+          installing={updateInstalling}
+          onCancel={onCancelUpdateConfirm}
+          onConfirm={onConfirmUpdate}
+          onExited={onUpdateConfirmExited}
         />
       )}
     </>

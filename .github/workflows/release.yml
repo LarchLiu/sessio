@@ -1,8 +1,6 @@
 name: release
 
-# Build Sessio as raw binaries for the platforms we want to publish first.
-# This intentionally does not create Tauri installers yet; each job builds the
-# Vite frontend into dist/ and then compiles the Tauri/Rust binary against it.
+# Build Sessio installers and Tauri updater artifacts.
 #
 # Trigger: push a tag like `v0.1.0`. Manual dispatch can rebuild artifacts for
 # an existing release without creating another tag.
@@ -23,6 +21,10 @@ concurrency:
 
 permissions:
   contents: write
+
+env:
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
 jobs:
   build-macos:
@@ -46,21 +48,20 @@ jobs:
           workspaces: src-tauri
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build arm64
-        run: pnpm ci:build --target aarch64-apple-darwin
-      - name: Build x86_64
-        run: pnpm ci:build --target x86_64-apple-darwin
-      - name: Lipo universal binary
+      - name: Build universal app and DMG
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci
+      - name: Stage artifacts
         run: |
-          lipo -create \
-            src-tauri/target/aarch64-apple-darwin/release/sessio \
-            src-tauri/target/x86_64-apple-darwin/release/sessio \
-            -output sessio-darwin-universal
-          file sessio-darwin-universal
+          set -euo pipefail
+          mkdir -p staged
+          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz staged/sessio-macos-universal.app.tar.gz
+          cp src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig staged/sessio-macos-universal.app.tar.gz.sig
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg staged/sessio-macos-universal.dmg
+          ls -la staged
       - uses: actions/upload-artifact@v7
         with:
-          name: sessio-darwin-universal
-          path: sessio-darwin-universal
+          name: sessio-macos-universal
+          path: staged/*
           if-no-files-found: error
 
   build-linux-x86_64:
@@ -88,17 +89,23 @@ jobs:
             libgtk-3-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
-            libssl-dev
+            libssl-dev \
+            patchelf
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build
-        run: pnpm ci:build
-      - name: Stage asset
-        run: cp src-tauri/target/release/sessio sessio-linux-x86_64
+      - name: Build AppImage
+        run: pnpm tauri build --bundles appimage --ci
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p staged
+          cp src-tauri/target/release/bundle/appimage/*.AppImage staged/sessio-linux-x86_64.AppImage
+          cp src-tauri/target/release/bundle/appimage/*.AppImage.sig staged/sessio-linux-x86_64.AppImage.sig
+          ls -la staged
       - uses: actions/upload-artifact@v7
         with:
           name: sessio-linux-x86_64
-          path: sessio-linux-x86_64
+          path: staged/*
           if-no-files-found: error
 
   build-linux-arm64:
@@ -126,17 +133,23 @@ jobs:
             libgtk-3-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
-            libssl-dev
+            libssl-dev \
+            patchelf
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build
-        run: pnpm ci:build
-      - name: Stage asset
-        run: cp src-tauri/target/release/sessio sessio-linux-arm64
+      - name: Build AppImage
+        run: pnpm tauri build --bundles appimage --ci
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p staged
+          cp src-tauri/target/release/bundle/appimage/*.AppImage staged/sessio-linux-aarch64.AppImage
+          cp src-tauri/target/release/bundle/appimage/*.AppImage.sig staged/sessio-linux-aarch64.AppImage.sig
+          ls -la staged
       - uses: actions/upload-artifact@v7
         with:
-          name: sessio-linux-arm64
-          path: sessio-linux-arm64
+          name: sessio-linux-aarch64
+          path: staged/*
           if-no-files-found: error
 
   build-windows:
@@ -158,15 +171,19 @@ jobs:
           workspaces: src-tauri
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build
-        run: pnpm ci:build
-      - name: Stage asset
+      - name: Build NSIS installer
+        run: pnpm tauri build --bundles nsis --ci
+      - name: Stage artifacts
         shell: pwsh
-        run: Copy-Item src-tauri\target\release\sessio.exe sessio-windows-x86_64.exe
+        run: |
+          New-Item -ItemType Directory -Force staged | Out-Null
+          Copy-Item src-tauri\target\release\bundle\nsis\*.exe staged\sessio-windows-x86_64-setup.exe
+          Copy-Item src-tauri\target\release\bundle\nsis\*.exe.sig staged\sessio-windows-x86_64-setup.exe.sig
+          Get-ChildItem staged
       - uses: actions/upload-artifact@v7
         with:
-          name: sessio-windows-x86_64.exe
-          path: sessio-windows-x86_64.exe
+          name: sessio-windows-x86_64
+          path: staged/*
           if-no-files-found: error
 
   release:
@@ -189,30 +206,25 @@ jobs:
           path: artifacts
       - name: Stage release assets
         run: |
+          set -euo pipefail
           mkdir -p staged
           find artifacts -type f -print -exec mv {} staged/ \;
           ls -la staged
-      - name: Restore executable bits
-        run: |
-          chmod +x staged/sessio-darwin-universal
-          chmod +x staged/sessio-linux-x86_64
-          chmod +x staged/sessio-linux-arm64
+      - name: Generate release changelog
+        run: npx changelogithub --output RELEASE_NOTES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate updater manifest
+        run: node scripts/generate-updater-manifest.mjs --dir staged --tag "${{ inputs.tag || github.ref_name }}" --repo "${{ github.repository }}" --notes RELEASE_NOTES.md
       - name: Generate SHA256SUMS
         run: |
+          set -euo pipefail
           cd staged
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
-      - name: Generate release changelog
-        run: npx changelogithub
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          files: |
-            staged/sessio-darwin-universal
-            staged/sessio-linux-x86_64
-            staged/sessio-linux-arm64
-            staged/sessio-windows-x86_64.exe
-            staged/SHA256SUMS
+          body_path: RELEASE_NOTES.md
+          files: staged/*
           fail_on_unmatched_files: true

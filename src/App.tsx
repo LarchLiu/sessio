@@ -92,6 +92,8 @@ export default function App() {
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
+  const [updateConfirmMounted, setUpdateConfirmMounted] = useState(false);
   const [viewMode] = useState<ViewMode>(() => readViewMode());
   const [detailMode, setDetailMode] = useState<DetailMode>("chat");
   const [metaPopoverOpen, setMetaPopoverOpen] = useState(false);
@@ -121,6 +123,23 @@ export default function App() {
   const update = useUpdateCheck(__APP_VERSION__);
   const indexing = indexPhase !== "idle";
   const rebuilding = indexPhase === "rebuilding";
+  const openUpdateConfirm = useCallback(() => {
+    if (!update.hasUpdate || !update.latestVersion || update.installing) return;
+    const window = getCurrentWindow();
+    void window.show().catch(() => {});
+    void window.setFocus().catch(() => {});
+    setUpdateConfirmMounted(true);
+    requestAnimationFrame(() => setUpdateConfirmOpen(true));
+  }, [update.hasUpdate, update.installing, update.latestVersion]);
+
+  const handleInstallUpdate = useCallback(async () => {
+    try {
+      setUpdateConfirmOpen(false);
+      await update.install();
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [update.install]);
 
   const availableSessions = useMemo(
     () => sessions.filter((s) => s.available),
@@ -310,8 +329,23 @@ export default function App() {
       resumeCommand: t("menubar.resume_command"),
       crossCommand: t("menubar.cross_command"),
       crossPromptPlaceholder: t("list.cross_prompt_placeholder"),
-    }, systemAppearance);
-  }, [recentForMenu, t, systemAppearance]);
+      updateAvailable: t("menubar.update_available"),
+      updateInstalling: t("sidebar.update_installing"),
+    }, systemAppearance, {
+      hasUpdate: update.hasUpdate,
+      latestVersion: update.latestVersion,
+      installing: update.installing,
+      install: openUpdateConfirm,
+    });
+  }, [
+    recentForMenu,
+    t,
+    systemAppearance,
+    update.hasUpdate,
+    update.latestVersion,
+    update.installing,
+    openUpdateConfirm,
+  ]);
 
   const removeSessionsInScope = async (scope: SessionScope) => {
     const targets = availableSessions.filter(
@@ -440,7 +474,6 @@ export default function App() {
       runtimeSessionAliases={runtimeSessionAliases}
       unreadSessionIds={unreadSessionIds}
       update={update}
-      indexing={indexing}
       onCloseSidebar={() => setSidebarOpen(false)}
       onNewChat={() => {
         setSelectedProject(null);
@@ -518,6 +551,7 @@ export default function App() {
         void openSessionMenu(session, pos);
       }}
       onOpenSettings={() => setSettingsOpen(true)}
+      onInstallUpdate={openUpdateConfirm}
       onError={setError}
     />
   );
@@ -558,6 +592,13 @@ export default function App() {
       }))}
       activeMemorySearchProjectKey={filter.kind === "project" ? filter.key : null}
       deleteTarget={deleteTarget}
+      updateConfirmMounted={updateConfirmMounted}
+      updateConfirmOpen={updateConfirmOpen}
+      updateCurrentVersion={__APP_VERSION__}
+      updateLatestVersion={update.latestVersion}
+      updateReleaseNotes={update.releaseNotes}
+      updateCanInstall={update.canInstall}
+      updateInstalling={update.installing}
       onCloseMetaPopover={() => setMetaPopoverOpen(false)}
       onMetaPopoverExited={() => setMetaPopoverMounted(false)}
       onCloseMemorySearch={() => setMemorySearchOpen(false)}
@@ -566,6 +607,13 @@ export default function App() {
       onConfirmDelete={() => {
         void confirmDelete();
       }}
+      onCancelUpdateConfirm={() => {
+        if (!update.installing) setUpdateConfirmOpen(false);
+      }}
+      onConfirmUpdate={() => {
+        void handleInstallUpdate();
+      }}
+      onUpdateConfirmExited={() => setUpdateConfirmMounted(false)}
     />
   );
 

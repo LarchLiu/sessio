@@ -80,6 +80,15 @@ export interface TrayTexts {
   resumeCommand: string;
   crossCommand: string;
   crossPromptPlaceholder: string;
+  updateAvailable: string;
+  updateInstalling: string;
+}
+
+export interface TrayUpdateState {
+  hasUpdate: boolean;
+  latestVersion: string | null;
+  installing: boolean;
+  install: () => void | Promise<void>;
 }
 
 type ItemHandle =
@@ -142,6 +151,7 @@ async function buildMenu(
   recent: SessionInfo[],
   texts: TrayTexts,
   theme: TrayTheme,
+  update: TrayUpdateState,
 ): Promise<Menu> {
   const iconBytes: Record<Agent, Uint8Array> = {
     codex: await getAgentIcon("codex", theme),
@@ -164,6 +174,20 @@ async function buildMenu(
     }
   }
 
+  if (update.hasUpdate && update.latestVersion) {
+    items.push(await PredefinedMenuItem.new({ item: "Separator" }));
+    items.push(await MenuItem.new({
+      id: "tray-update",
+      text: update.installing
+        ? texts.updateInstalling
+        : texts.updateAvailable.replace("{version}", update.latestVersion),
+      enabled: !update.installing,
+      action: () => {
+        void update.install();
+      },
+    }));
+  }
+
   items.push(await PredefinedMenuItem.new({ item: "Separator" }));
   items.push(await MenuItem.new({ id: "show", text: texts.show }));
   items.push(await PredefinedMenuItem.new({ item: "Separator" }));
@@ -176,6 +200,7 @@ export async function syncTrayMenu(
   recent: SessionInfo[],
   texts: TrayTexts,
   theme: TrayTheme,
+  update: TrayUpdateState,
 ): Promise<void> {
   const token = ++currentToken;
   // Serialize against any in-flight sync so we never race two setMenu calls.
@@ -184,7 +209,7 @@ export async function syncTrayMenu(
     try {
       const tray = await TrayIcon.getById(TRAY_ID);
       if (!tray) return;
-      const menu = await buildMenu(recent, texts, theme);
+      const menu = await buildMenu(recent, texts, theme, update);
       if (token !== currentToken) {
         await menu.close();
         return;

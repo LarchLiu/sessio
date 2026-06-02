@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,6 +41,17 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkyRkM4QTQ2RkZFNzk2MwpSV1JqZWY1dnBNZ3ZDZkwvN2lEaUYybnBUNmZWaXZDeDFDRHNpQVhKOWg0WnZnN3o2REMxUllnVAo=",
+      "endpoints": [
+        "https://github.com/LarchLiu/sessio/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

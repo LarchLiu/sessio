@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { Update } from "@tauri-apps/plugin-updater";
 
 const REPO = "LarchLiu/sessio";
 const API_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
@@ -8,9 +9,15 @@ const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 export interface UpdateState {
   latestVersion: string | null;
   releaseUrl: string | null;
+  releaseNotes: string | null;
   hasUpdate: boolean;
+  canInstall: boolean;
   checking: boolean;
+  installing: boolean;
+  downloadedBytes: number;
+  totalBytes: number | null;
   check: () => void;
+  install: () => Promise<void>;
 }
 
 function stripV(tag: string): string {
@@ -29,16 +36,31 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-async function fetchLatest(): Promise<{ tag: string; url: string } | null> {
+async function fetchLatest(): Promise<{ tag: string; url: string; body: string | null } | null> {
   try {
     const res = await fetch(API_URL, {
       headers: { Accept: "application/vnd.github+json" },
     });
     if (!res.ok) return null;
-    const data: { tag_name?: string; html_url?: string } = await res.json();
+    const data: { tag_name?: string; html_url?: string; body?: string | null } = await res.json();
     if (!data.tag_name) return null;
-    return { tag: data.tag_name, url: data.html_url ?? RELEASES_PAGE };
+    return {
+      tag: data.tag_name,
+      url: data.html_url ?? RELEASES_PAGE,
+      body: data.body?.trim() || null,
+    };
   } catch {
+    return null;
+  }
+}
+
+async function checkInstallableUpdate(): Promise<Update | null> {
+  if (import.meta.env.DEV) return null;
+  try {
+    const { check: checkTauriUpdate } = await import("@tauri-apps/plugin-updater");
+    return await checkTauriUpdate();
+  } catch (error) {
+    console.warn("tauri updater check failed", error);
     return null;
   }
 }
@@ -47,23 +69,51 @@ export function useUpdateCheck(current: string): UpdateState {
   const [info, setInfo] = useState<{
     latestVersion: string | null;
     releaseUrl: string | null;
+    releaseNotes: string | null;
     hasUpdate: boolean;
-  }>({ latestVersion: null, releaseUrl: null, hasUpdate: false });
+    canInstall: boolean;
+  }>({
+    latestVersion: null,
+    releaseUrl: null,
+    releaseNotes: null,
+    hasUpdate: false,
+    canInstall: false,
+  });
   const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+  const [totalBytes, setTotalBytes] = useState<number | null>(null);
   const runningRef = useRef(false);
+  const installRef = useRef(false);
+  const updateRef = useRef<Update | null>(null);
 
   const check = useCallback(async () => {
     if (runningRef.current) return;
     runningRef.current = true;
     setChecking(true);
     try {
+      const tauriUpdate = await checkInstallableUpdate();
+      if (tauriUpdate) {
+        updateRef.current = tauriUpdate;
+        setInfo({
+          latestVersion: stripV(tauriUpdate.version),
+          releaseUrl: null,
+          releaseNotes: tauriUpdate.body?.trim() || null,
+          hasUpdate: true,
+          canInstall: true,
+        });
+        return;
+      }
+      updateRef.current = null;
+
       const latest = await fetchLatest();
-      if (!latest) return;
-      const newer = compareSemver(latest.tag, current) > 0;
+      const newer = latest ? compareSemver(latest.tag, current) > 0 : false;
       setInfo({
-        latestVersion: stripV(latest.tag),
-        releaseUrl: latest.url,
+        latestVersion: latest ? stripV(latest.tag) : null,
+        releaseUrl: latest?.url ?? RELEASES_PAGE,
+        releaseNotes: latest?.body ?? null,
         hasUpdate: newer,
+        canInstall: false,
       });
     } finally {
       runningRef.current = false;
@@ -78,7 +128,46 @@ export function useUpdateCheck(current: string): UpdateState {
     return () => window.clearInterval(id);
   }, [check]);
 
-  return { ...info, checking, check };
+  const install = useCallback(async () => {
+    if (installRef.current) return;
+    installRef.current = true;
+    setInstalling(true);
+    setDownloadedBytes(0);
+    setTotalBytes(null);
+    try {
+      let update = updateRef.current;
+      if (!update) {
+        update = await checkInstallableUpdate();
+        updateRef.current = update;
+      }
+      if (!update) {
+        await openReleasePage(info.releaseUrl);
+        return;
+      }
+      let downloaded = 0;
+      let total: number | null = null;
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          downloaded = 0;
+          total = event.data.contentLength ?? null;
+          setDownloadedBytes(0);
+          setTotalBytes(total);
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          setDownloadedBytes(downloaded);
+        } else if (event.event === "Finished") {
+          setDownloadedBytes((value) => total ?? value);
+        }
+      });
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } finally {
+      installRef.current = false;
+      setInstalling(false);
+    }
+  }, [info.releaseUrl]);
+
+  return { ...info, checking, installing, downloadedBytes, totalBytes, check, install };
 }
 
 export async function openReleasePage(url: string | null): Promise<void> {

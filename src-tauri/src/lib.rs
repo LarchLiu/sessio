@@ -2805,8 +2805,8 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// Expose the running app binary at a stable path (~/.sessio/bin/sessio) so
-/// agents working inside a project can invoke the Sessio CLI without knowing
+/// Expose the running app binary through a stable path (~/.sessio/bin/sessio)
+/// so agents working inside a project can invoke the Sessio CLI without knowing
 /// where the app was installed. Best-effort: failures only warn.
 fn link_cli_binary(sessio_home: &std::path::Path) {
     let current = match std::env::current_exe() {
@@ -2821,25 +2821,63 @@ fn link_cli_binary(sessio_home: &std::path::Path) {
         log::warn!("link_cli_binary: create {bin_dir:?} failed: {e}");
         return;
     }
-    let link = bin_dir.join("sessio");
-    // Replace any stale link/file pointing at a previous install.
-    if link.exists() || std::fs::symlink_metadata(&link).is_ok() {
-        let _ = std::fs::remove_file(&link);
-    }
     #[cfg(unix)]
-    let result = std::os::unix::fs::symlink(&current, &link);
+    {
+        let link = bin_dir.join("sessio");
+        if let Ok(existing) = std::fs::read_link(&link) {
+            if existing == current {
+                return;
+            }
+        }
+        // Replace stale links/files pointing at a previous install.
+        if link.exists() || std::fs::symlink_metadata(&link).is_ok() {
+            let _ = std::fs::remove_file(&link);
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&current, &link) {
+            log::warn!("link_cli_binary: link {link:?} -> {current:?} failed: {e}");
+        }
+    }
+
     #[cfg(windows)]
-    let result = std::fs::copy(&current, &link).map(|_| ());
-    if let Err(e) = result {
-        log::warn!("link_cli_binary: link {link:?} -> {current:?} failed: {e}");
+    {
+        let script = windows_cli_shim(&current);
+        let cmd_path = bin_dir.join("sessio.cmd");
+        let bare_path = bin_dir.join("sessio");
+        write_cli_shim_if_changed(&cmd_path, &script);
+        write_cli_shim_if_changed(&bare_path, &script);
+    }
+}
+
+#[cfg(windows)]
+fn windows_cli_shim(current: &std::path::Path) -> String {
+    let exe = current.to_string_lossy();
+    format!("@echo off\r\n\"{exe}\" %*\r\n")
+}
+
+#[cfg(windows)]
+fn write_cli_shim_if_changed(path: &std::path::Path, content: &str) {
+    if matches!(std::fs::read_to_string(path), Ok(existing) if existing == content) {
+        return;
+    }
+    if path.exists() || std::fs::symlink_metadata(path).is_ok() {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Err(e) = std::fs::write(path, content) {
+        log::warn!("link_cli_binary: write shim {path:?} failed: {e}");
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

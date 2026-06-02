@@ -112,12 +112,16 @@ pnpm bundle
 
 ## 平台说明
 
-仓库当前已包含多平台发布配置，GitHub Actions 会产出：
+仓库当前已包含多平台发布配置，GitHub Actions 会产出安装包和 updater 产物：
 
-- macOS 通用二进制
-- Linux `x86_64`
-- Linux `arm64`
-- Windows `x86_64`
+- macOS 通用 `.dmg`，以及签名后的 `.app.tar.gz` updater 包
+- Linux `x86_64` AppImage 及 updater 签名
+- Linux `arm64` AppImage 及 updater 签名
+- Windows `x86_64` NSIS 安装器及 updater 签名
+
+发布 workflow 需要在 GitHub Secrets 中配置 Tauri updater 私钥
+`TAURI_SIGNING_PRIVATE_KEY`。如果私钥没有密码，
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 可以不配置。
 
 Linux 构建通常需要先安装 Tauri/WebKitGTK 依赖，例如：
 

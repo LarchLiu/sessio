@@ -330,6 +330,64 @@ body {
   animation: memory-search-panel-out 130ms cubic-bezier(0.7, 0, 0.84, 0) both;
 }
 
+.update-confirm-dialog {
+  will-change: opacity;
+}
+
+.update-confirm-dialog-in {
+  animation: update-confirm-backdrop-in 160ms ease-out both;
+}
+
+.update-confirm-dialog-out {
+  animation: update-confirm-backdrop-out 140ms ease-in both;
+}
+
+.update-confirm-panel {
+  transform-origin: center;
+  will-change: opacity, transform;
+}
+
+.update-confirm-panel-in {
+  animation: update-confirm-panel-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.update-confirm-panel-out {
+  animation: update-confirm-panel-out 130ms cubic-bezier(0.7, 0, 0.84, 0) both;
+}
+
+.update-release-notes > :first-child {
+  margin-top: 0;
+}
+
+.update-release-notes > :last-child {
+  margin-bottom: 0;
+}
+
+.update-release-notes p {
+  margin: 0.35rem 0;
+}
+
+.update-release-notes ul,
+.update-release-notes ol {
+  margin: 0.4rem 0 0.8rem;
+  padding-left: 1.1rem;
+}
+
+.update-release-notes li {
+  margin: 0.28rem 0;
+}
+
+.update-release-notes strong {
+  color: rgb(var(--color-fg) / 0.82);
+  font-weight: 600;
+}
+
+.update-release-notes hr {
+  margin: 0.8rem 0;
+  border: 0;
+  border-top: 1px solid rgb(var(--color-fg) / 0.1);
+}
+
 @keyframes theme-wipe-ltr {
   from {
     clip-path: inset(0 100% 0 0);
@@ -388,6 +446,46 @@ body {
   }
 }
 
+@keyframes update-confirm-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes update-confirm-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes update-confirm-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes update-confirm-panel-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root[data-theme-transition]::view-transition-new(root),
   :root[data-theme-transition]::view-transition-old(root) {
@@ -397,7 +495,11 @@ body {
   .project-memory-search-dialog-in,
   .project-memory-search-dialog-out,
   .project-memory-search-panel-in,
-  .project-memory-search-panel-out {
+  .project-memory-search-panel-out,
+  .update-confirm-dialog-in,
+  .update-confirm-dialog-out,
+  .update-confirm-panel-in,
+  .update-confirm-panel-out {
     animation-duration: 1ms;
   }
 }
