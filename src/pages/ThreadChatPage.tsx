@@ -83,12 +83,16 @@ export default function ThreadChatPage({
     () => (selectedThread?.stages ?? []).slice().sort((a, b) => a.order - b.order),
     [selectedThread?.stages],
   );
-  const focusedStage = snapshotContext.stage
-    ? sortedStages.find((stage) => stage.id === snapshotContext.stage?.id) ?? null
-    : selectedThread?.stageId
-      ? sortedStages.find((stage) => stage.id === selectedThread.stageId || stage.stageId === selectedThread.stageId) ?? null
+  const snapshotStageId =
+    selectedThread?.id === snapshotContext.thread.id
+      ? snapshotContext.stage?.id ?? null
       : null;
-  const linkStageId = snapshotContext.stage ? focusedStage?.id ?? null : null;
+  const focusedStage = snapshotStageId
+    ? sortedStages.find((stage) => stage.id === snapshotStageId) ?? null
+    : selectedThread?.stageId
+      ? sortedStages.find((stage) => stage.id === selectedThread.stageId) ?? null
+      : null;
+  const linkStageId = snapshotStageId ? focusedStage?.id ?? null : null;
   const threadOptions: InlineMenuSelectOption[] = threads.map((thread) => ({
     value: thread.id,
     label: thread.goal,
