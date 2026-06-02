@@ -605,8 +605,7 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
-fn unique_suffix() -> String {
+fn unique_nonce() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -616,6 +615,11 @@ fn unique_suffix() -> String {
         .unwrap_or(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{nanos}-{count}")
+}
+
+#[cfg(test)]
+fn unique_suffix() -> String {
+    unique_nonce()
 }
 
 fn run_migrations(conn: &Connection) -> Result<()> {
@@ -1469,12 +1473,13 @@ fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
     )
 }
 
-fn stable_issue_id(thread_stage_id: &str, title: &str, now: i64) -> String {
+fn stable_issue_id(thread_stage_id: &str, title: &str, now: i64, nonce: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(thread_stage_id.as_bytes());
     hasher.update(title.as_bytes());
     hasher.update(now.to_string().as_bytes());
+    hasher.update(nonce.as_bytes());
     format!("issue-{}", hex::encode(hasher.finalize())[..16].to_string())
 }
 
@@ -4729,10 +4734,20 @@ impl SessionStore for SqliteStore {
         }
         let description = description.map(str::trim).filter(|s| !s.is_empty());
         let conn = self.conn.lock().unwrap();
-        // Validate the parent stage exists (surfaces a clear error otherwise).
-        load_thread_stage_by_id(&conn, thread_stage_id)?;
+        // Validate the parent stage exists without loading its nested sessions/issues.
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM thread_stages WHERE id = ?",
+                params![thread_stage_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            anyhow::bail!("thread stage not found: {thread_stage_id}");
+        }
         let now = now_ms();
-        let id = stable_issue_id(thread_stage_id, title, now);
+        let id = stable_issue_id(thread_stage_id, title, now, &unique_nonce());
         conn.execute(
             "INSERT INTO thread_stage_issues (
                 id, thread_stage_id, title, description, status, severity, created_at, updated_at
