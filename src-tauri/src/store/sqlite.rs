@@ -11,11 +11,11 @@ use crate::memory::{
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{
-    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo,
-    AssistantType, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
-    ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
-    SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus, StageType,
-    SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
+    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo,
+    AssistantInfo, AssistantType, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
+    ProjectInfo, ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata,
+    SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus,
+    StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
     AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -1054,18 +1054,98 @@ fn ai_providers_from_json(json: &str) -> Vec<AgentAiProviderInfo> {
     serde_json::from_str::<Vec<AgentAiProviderInfo>>(json).unwrap_or_default()
 }
 
+fn normalize_ai_providers_for_save(values: &[AgentAiProviderInfo]) -> Vec<AgentAiProviderInfo> {
+    let mut seen = HashSet::new();
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, provider)| {
+            let mut id = provider.id.trim().to_string();
+            if id.is_empty() || seen.contains(&id) {
+                id = unique_ai_provider_id(&seen);
+            }
+            seen.insert(id.clone());
+            let provider_id = provider.provider.trim();
+            let mut next = provider.clone();
+            next.id = id.clone();
+            next.display_name = provider
+                .display_name
+                .trim()
+                .to_string()
+                .if_empty_then(|| provider_id.to_string())
+                .if_empty_then(|| id.clone());
+            next.provider = provider_id.to_string().if_empty_then(|| id.clone());
+            next.api = trimmed_string(provider.api.as_deref());
+            next.base_url = trimmed_string(provider.base_url.as_deref());
+            next.api_key = trimmed_string(provider.api_key.as_deref());
+            next.model = trimmed_string(provider.model.as_deref());
+            next.models = runtime_options(provider.models.clone());
+            next.order = index as i64;
+            next
+        })
+        .collect()
+}
+
+fn unique_ai_provider_id(existing: &HashSet<String>) -> String {
+    loop {
+        let candidate = format!("custom-provider-{}", unique_nonce());
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+    }
+}
+
+fn trimmed_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+trait EmptyStringFallback {
+    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String;
+}
+
+impl EmptyStringFallback for String {
+    fn if_empty_then(self, fallback: impl FnOnce() -> String) -> String {
+        if self.is_empty() {
+            fallback()
+        } else {
+            self
+        }
+    }
+}
+
+fn selected_ai_provider_id(
+    providers: &[AgentAiProviderInfo],
+    preferred: Option<&str>,
+) -> Option<String> {
+    if let Some(preferred) = preferred {
+        if providers.iter().any(|provider| provider.id == preferred) {
+            return Some(preferred.to_string());
+        }
+    }
+    providers
+        .iter()
+        .find(|provider| provider.enabled)
+        .or_else(|| providers.first())
+        .map(|provider| provider.id.clone())
+        .filter(|id| !id.is_empty())
+}
+
 fn astra_default_ai_providers() -> Vec<AgentAiProviderInfo> {
     vec![AgentAiProviderInfo {
-        id: "openai".to_string(),
-        display_name: "OpenAI".to_string(),
+        id: "cc-switch".to_string(),
+        display_name: "CC Switch".to_string(),
         provider: "openai".to_string(),
         api: Some("openai-responses".to_string()),
-        base_url: None,
-        api_key: None,
-        model: Some("gpt-5-mini".to_string()),
+        base_url: Some("http://127.0.0.1:15721/v1".to_string()),
+        api_key: Some("ccw".to_string()),
+        model: Some("gpt-5.5".to_string()),
         models: runtime_options(vec![
-            runtime_option("gpt-5-mini", "GPT-5 mini"),
-            runtime_option("gpt-5", "GPT-5"),
+            runtime_option("gpt-5.5", "GPT 5.5"),
+            runtime_option("gpt-5.4", "GPT 5.4"),
+            runtime_option("gpt-5.3-codex", "GPT 5.3 Codex"),
         ]),
         enabled: true,
         order: 0,
@@ -1136,12 +1216,12 @@ fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
             "Astra",
             "Astra",
             "astra",
-            "openai",
+            "cc-switch",
             serde_json::to_string(&ai_providers)?,
             "openai-responses",
-            Option::<&str>::None,
-            Option::<&str>::None,
-            "gpt-5-mini",
+            "http://127.0.0.1:15721/v1",
+            "ccw",
+            "gpt-5.5",
             runtime_options_json(&ai_providers[0].models)?,
             "off",
             serde_json::to_string(&vec![
@@ -4370,10 +4450,17 @@ impl SessionStore for SqliteStore {
         let next_display_name = display_name
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let next_ai_provider = ai_provider
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let next_ai_providers = match ai_providers {
+        let normalized_ai_providers = ai_providers.map(normalize_ai_providers_for_save);
+        let next_ai_provider = selected_ai_provider_id(
+            normalized_ai_providers
+                .as_deref()
+                .unwrap_or(&current.ai_providers),
+            ai_provider
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or(current.ai_provider.as_deref()),
+        );
+        let next_ai_providers = match normalized_ai_providers.as_deref() {
             Some(values) => serde_json::to_string(values)?,
             None => serde_json::to_string(&current.ai_providers)?,
         };
@@ -4415,7 +4502,7 @@ impl SessionStore for SqliteStore {
              WHERE id = ? AND type = 'builtin'",
             params![
                 next_display_name,
-                next_ai_provider,
+                next_ai_provider.as_deref(),
                 next_ai_providers,
                 if clear_model { 1_i64 } else { 0_i64 },
                 next_model,
@@ -8618,6 +8705,33 @@ mod migration_tests {
             .efforts
             .iter()
             .any(|option| option.value == "xhigh"));
+        let astra_agent = agents.iter().find(|agent| agent.id == "astra").unwrap();
+        assert_eq!(astra_agent.ai_provider.as_deref(), Some("cc-switch"));
+        assert_eq!(astra_agent.model.as_deref(), Some("gpt-5.5"));
+        let astra_provider = astra_agent
+            .ai_providers
+            .iter()
+            .find(|provider| provider.id == "cc-switch")
+            .unwrap();
+        assert_eq!(astra_provider.display_name, "CC Switch");
+        assert_eq!(
+            astra_provider.base_url.as_deref(),
+            Some("http://127.0.0.1:15721/v1")
+        );
+        assert_eq!(astra_provider.api_key.as_deref(), Some("ccw"));
+        assert_eq!(astra_provider.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            astra_provider
+                .models
+                .iter()
+                .map(|option| (option.value.as_str(), option.display_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("gpt-5.5", "GPT 5.5"),
+                ("gpt-5.4", "GPT 5.4"),
+                ("gpt-5.3-codex", "GPT 5.3 Codex"),
+            ]
+        );
         let claude_agent = agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(
             claude_agent.commands.version.first().map(String::as_str),
@@ -9384,6 +9498,64 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(codex.model.as_deref(), Some("gpt-5.5"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn astra_provider_ids_are_assigned_by_store() {
+        let path = unique_db("sessio-astra-provider-id");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let mut providers = store
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.id == "astra")
+            .unwrap()
+            .ai_providers;
+        providers.push(AgentAiProviderInfo {
+            id: "".to_string(),
+            display_name: "Local OpenAI".to_string(),
+            provider: "openai".to_string(),
+            api: Some("openai-responses".to_string()),
+            base_url: Some("http://127.0.0.1:15721/v1".to_string()),
+            api_key: Some("ccw".to_string()),
+            model: Some("gpt-5.5".to_string()),
+            models: runtime_options(vec![runtime_option("gpt-5.5", "GPT 5.5")]),
+            enabled: true,
+            order: 1,
+        });
+
+        let astra = store
+            .update_agent_preferences_by_id(
+                "astra",
+                None,
+                None,
+                None,
+                Some(""),
+                Some(&providers),
+                Some("gpt-5.5"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let generated = astra
+            .ai_providers
+            .iter()
+            .find(|provider| provider.display_name == "Local OpenAI")
+            .unwrap();
+        assert!(generated.id.starts_with("custom-provider-"));
+        assert!(!generated.id.trim().is_empty());
+        assert_eq!(astra.ai_provider.as_deref(), Some("cc-switch"));
+        assert!(astra
+            .ai_providers
+            .iter()
+            .any(|provider| Some(provider.id.as_str()) == astra.ai_provider.as_deref()));
 
         let _ = std::fs::remove_file(&path);
     }

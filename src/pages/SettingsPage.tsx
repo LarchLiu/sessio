@@ -585,7 +585,7 @@ function AgentEditor({
     setProviderDialog(null);
   }, [agent]);
 
-  const persist = async (patch: AgentPreferencePatch) => {
+  const persist = async (patch: AgentPreferencePatch): Promise<AgentInfo | null> => {
     try {
       let next: AgentInfo | undefined;
       if (runtimeAgent) {
@@ -610,10 +610,14 @@ function AgentEditor({
           ...patch,
         });
       }
-      if (next) onUpdated(next);
+      if (next) {
+        onUpdated(next);
+        return next;
+      }
     } catch (err) {
       onError(String(err));
     }
+    return null;
   };
 
   const selectModel = async (nextModel: string) => {
@@ -742,7 +746,7 @@ function AgentEditor({
     nextProviderId = aiProvider,
     nextModel: string | null | undefined = undefined,
     nextEditingProviderId = editingAiProvider,
-  ) => {
+  ): Promise<AgentInfo | null> => {
     const orderedProviders = normalizeProviderOrders(nextProviders);
     const providersWithModel = nextEditingProviderId && nextModel !== undefined
       ? updateProviderInfo(orderedProviders, nextEditingProviderId, { model: nextModel ?? null })
@@ -757,25 +761,34 @@ function AgentEditor({
       ?? null;
     const persistedProviderId = activeProvider?.id ?? nextProviderId;
     const selectedProviderWithModel = providersWithModel.find((provider) => provider.id === selectedProvider?.id) ?? selectedProvider;
-    const selectedModels = selectedProviderWithModel?.models ?? [];
     const activeModelsForPersist = activeProvider?.models ?? [];
     const persistedModel = activeModelsForPersist.some((item) => item.value === (activeProvider?.model ?? ""))
       ? activeProvider?.model
       : defaultModelValue(activeModelsForPersist);
-    const editingModel = selectedModels.some((item) => item.value === (selectedProviderWithModel?.model ?? ""))
-      ? selectedProviderWithModel?.model
-      : defaultModelValue(selectedModels);
-    setAiProviders(providersWithModel);
-    setAiProvider(persistedProviderId);
-    setEditingAiProvider(selectedProviderWithModel?.id ?? "");
-    setModels(selectedModels);
-    setModel(editingModel ?? "");
-    await persist({
+    const persistedAgent = await persist({
       aiProvider: persistedProviderId,
       aiProviders: providersWithModel,
       models: activeModelsForPersist,
       model: persistedModel ?? "",
     });
+    if (!persistedAgent) {
+      return null;
+    }
+    const persistedActiveProvider =
+      persistedAgent.aiProviders.find((provider) => provider.id === persistedAgent.aiProvider)
+      ?? persistedAgent.aiProviders.find((provider) => provider.enabled)
+      ?? persistedAgent.aiProviders[0]
+      ?? null;
+    const persistedSelectedProvider =
+      findPersistedProvider(persistedAgent.aiProviders, selectedProviderWithModel)
+      ?? persistedActiveProvider;
+    const persistedSelectedModels = persistedSelectedProvider?.models ?? [];
+    setAiProviders(persistedAgent.aiProviders);
+    setAiProvider(persistedActiveProvider?.id ?? persistedAgent.aiProvider ?? "");
+    setEditingAiProvider(persistedSelectedProvider?.id ?? "");
+    setModels(persistedSelectedModels);
+    setModel(persistedSelectedProvider?.model ?? defaultModelValue(persistedSelectedModels) ?? "");
+    return persistedAgent;
   };
   const selectAiProviderForEditing = (nextProviderId: string) => {
     const provider = aiProviders.find((item) => item.id === nextProviderId) ?? null;
@@ -795,9 +808,8 @@ function AgentEditor({
     await saveAstraProviders(nextProviders, nextProviderId, nextModel, nextProviderId);
   };
   const createProviderDraft = (): AgentAiProviderInfo => {
-    const providerId = uniqueProviderId(aiProviders, "custom-provider");
     return {
-      id: providerId,
+      id: "",
       displayName: t("agent.custom_provider"),
       provider: "openai",
       api: "openai-responses",
@@ -815,23 +827,24 @@ function AgentEditor({
   const openEditProviderDialog = (provider: AgentAiProviderInfo) => {
     setProviderDialog({ mode: "edit", provider: { ...provider, models: provider.models.slice() } });
   };
-  const saveProviderDialog = async (provider: AgentAiProviderInfo) => {
+  const saveProviderDialog = async (provider: AgentAiProviderInfo): Promise<boolean> => {
     const nextProvider = normalizeProviderOrders([provider])[0];
-    if (!nextProvider) return;
+    if (!nextProvider) return false;
     if (providerDialog?.mode === "edit") {
       const nextProviders = updateProviderInfo(aiProviders, provider.id, nextProvider);
       const nextProviderId = aiProvider || activeAiProvider?.id || nextProvider.id;
       const selectedProvider = nextProviders.find((item) => item.id === editingAiProvider) ?? nextProvider;
-      setEditingAiProvider(selectedProvider.id);
-      await saveAstraProviders(nextProviders, nextProviderId, undefined, selectedProvider.id);
+      const saved = await saveAstraProviders(nextProviders, nextProviderId, undefined, selectedProvider.id);
+      if (!saved) return false;
     } else {
       const providerToAdd = { ...nextProvider, enabled: aiProviders.length === 0 };
       const nextProviders = [...aiProviders, providerToAdd];
-      setEditingAiProvider(nextProvider.id);
       const nextProviderId = aiProvider || activeAiProvider?.id || providerToAdd.id;
-      await saveAstraProviders(nextProviders, nextProviderId, undefined, nextProvider.id);
+      const saved = await saveAstraProviders(nextProviders, nextProviderId, undefined, nextProvider.id);
+      if (!saved) return false;
     }
     setProviderDialog(null);
+    return true;
   };
   const deleteProvider = async (providerId: string) => {
     if (aiProviders.length <= 1) return;
@@ -1052,7 +1065,7 @@ function AgentProviderDialog({
   mode: "add" | "edit";
   provider: AgentAiProviderInfo;
   onClose: () => void;
-  onSave: (provider: AgentAiProviderInfo) => Promise<void>;
+  onSave: (provider: AgentAiProviderInfo) => Promise<boolean>;
 }) {
   const { t } = useI18n();
   const [displayName, setDisplayName] = useState(provider.displayName);
@@ -1060,6 +1073,7 @@ function AgentProviderDialog({
   const [api, setApi] = useState(provider.api ?? "");
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl ?? "");
   const [apiKey, setApiKey] = useState(provider.apiKey ?? "");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setDisplayName(provider.displayName);
@@ -1067,9 +1081,11 @@ function AgentProviderDialog({
     setApi(provider.api ?? "");
     setBaseUrl(provider.baseUrl ?? "");
     setApiKey(provider.apiKey ?? "");
+    setSaving(false);
   }, [provider]);
 
   const save = async () => {
+    if (saving) return;
     const nextProvider: AgentAiProviderInfo = {
       ...provider,
       displayName: displayName.trim() || piProvider.trim() || provider.id,
@@ -1078,7 +1094,9 @@ function AgentProviderDialog({
       baseUrl: baseUrl.trim() || null,
       apiKey: apiKey.trim() || null,
     };
-    await onSave(nextProvider);
+    setSaving(true);
+    const saved = await onSave(nextProvider);
+    if (!saved) setSaving(false);
   };
   const selectPiProvider = (nextPiProvider: string) => {
     const currentDefaultBaseUrl = defaultBaseUrlForPiProvider(piProvider);
@@ -1090,7 +1108,9 @@ function AgentProviderDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4" onClick={() => {
+      if (!saving) onClose();
+    }}>
       <div className="w-full max-w-[520px] rounded-lg border border-card-border/[0.12] bg-surface-panel p-4 shadow-[0_24px_80px_rgba(0,0,0,0.22)]" onClick={(event) => event.stopPropagation()}>
         <div className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{mode === "add" ? t("agent.add_provider") : t("agent.edit_provider")}</div>
         <div className="grid gap-2">
@@ -1120,8 +1140,8 @@ function AgentProviderDialog({
             <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="sk-..." className={inputClassName} />
           </AgentProviderDialogField>
           <div className="mt-1 flex justify-end gap-2">
-            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
-            <button type="button" onClick={() => void save()} disabled={!piProvider.trim()} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90 disabled:opacity-35">
+            <button type="button" onClick={onClose} disabled={saving} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5 disabled:opacity-35">{t("delete.cancel")}</button>
+            <button type="button" onClick={() => void save()} disabled={saving || !piProvider.trim()} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90 disabled:opacity-35">
               <Check className="h-4 w-4" />
               {t("project.save")}
             </button>
@@ -1396,7 +1416,7 @@ function normalizeModelOrders(options: RuntimeAgentOptionMetadata[]): RuntimeAge
 function normalizeProviderOrders(options: AgentAiProviderInfo[]): AgentAiProviderInfo[] {
   return options.map((provider, index) => ({
     ...provider,
-    id: provider.id.trim() || `provider-${index + 1}`,
+    id: provider.id.trim(),
     displayName: provider.displayName.trim() || provider.provider.trim() || provider.id,
     provider: provider.provider.trim() || provider.id.trim() || `provider-${index + 1}`,
     api: provider.api?.trim() || null,
@@ -1592,15 +1612,16 @@ function updateProviderModels(
   return updateProviderInfo(providers, providerId, { models });
 }
 
-function uniqueProviderId(providers: AgentAiProviderInfo[], baseId: string): string {
-  const existing = new Set(providers.map((provider) => provider.id));
-  let index = providers.length + 1;
-  let candidate = baseId;
-  while (existing.has(candidate)) {
-    candidate = `${baseId}-${index}`;
-    index += 1;
+function findPersistedProvider(
+  providers: AgentAiProviderInfo[],
+  draft: AgentAiProviderInfo | null,
+): AgentAiProviderInfo | null {
+  if (!draft) return null;
+  if (draft.id) {
+    const byId = providers.find((provider) => provider.id === draft.id);
+    if (byId) return byId;
   }
-  return candidate;
+  return providers.find((provider) => provider.order === draft.order) ?? null;
 }
 
 function moveAgentOption(options: AgentInfo[], from: number, to: number): AgentInfo[] {
