@@ -9,14 +9,18 @@ use crate::indexer::{IndexPhase, IndexTask, IndexerHandle};
 use crate::models::Agent;
 use crate::store::{IndexedSessionRecord, IndexedSubagentRecord, SessionStore};
 
-pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
+pub fn spawn_polling(
+    store: Arc<dyn SessionStore>,
+    indexer: IndexerHandle,
+    poll_interval: Duration,
+) {
     thread::spawn(move || {
         let mut claude_index_mtimes: HashMap<PathBuf, Option<i64>> = HashMap::new();
         let mut codex_lineage_backfill_checked: HashSet<String> = HashSet::new();
         let mut first_tick = true;
         loop {
             if !first_tick {
-                thread::sleep(Duration::from_secs(10));
+                thread::sleep(poll_interval);
             }
             first_tick = false;
             // Skip while the indexer is busy. A full rebuild can take a long
@@ -24,7 +28,7 @@ pub fn spawn_polling(store: Arc<dyn SessionStore>, indexer: IndexerHandle) {
             // and our DB snapshot would be stale mid-rebuild — every file we
             // saw would look "not yet indexed" and we'd submit redundant
             // per-file reindex tasks whose outcomes re-trigger the heavy
-            // memory work. The next tick (10s later) will catch real changes.
+            // memory work. The next polling tick will catch real changes.
             if !matches!(indexer.status().phase, IndexPhase::Idle) {
                 continue;
             }
@@ -46,6 +50,7 @@ fn poll_once(
     claude_index_mtimes: &mut HashMap<PathBuf, Option<i64>>,
     codex_lineage_backfill_checked: &mut HashSet<String>,
 ) -> Result<()> {
+    let enabled_agents = indexer.enabled_agents();
     let indexed = store.list_indexed_sessions()?;
     if indexed.is_empty() {
         // Fresh / wiped DB: skip the per-file submission storm. FullRebuild
@@ -53,13 +58,18 @@ fn poll_once(
         // pipeline runs once per project instead of once per session file.
         // Subsequent ticks see indexing=true and skip until the rebuild
         // finishes, then resume the normal per-file diffing flow.
-        log::info!("polling: indexed DB is empty, submitting FullRebuild");
         indexer.submit(IndexTask::FullRebuild)?;
         return Ok(());
     }
-    poll_codex(&indexed, indexer, codex_lineage_backfill_checked)?;
-    poll_claude(&indexed, claude_index_mtimes, store.as_ref(), indexer)?;
-    poll_gemini(&indexed, store.as_ref(), indexer)?;
+    if enabled_agents.contains(&Agent::Codex) {
+        poll_codex(&indexed, indexer, codex_lineage_backfill_checked)?;
+    }
+    if enabled_agents.contains(&Agent::Claude) {
+        poll_claude(&indexed, claude_index_mtimes, store.as_ref(), indexer)?;
+    }
+    if enabled_agents.contains(&Agent::Gemini) {
+        poll_gemini(&indexed, store.as_ref(), indexer)?;
+    }
     Ok(())
 }
 
@@ -323,22 +333,11 @@ fn poll_gemini(
         let scope = chat_path.to_string_lossy().into_owned();
         present_scopes.insert(scope.clone());
         let rows = by_scope.remove(&scope).unwrap_or_default();
-        let live_rows: Vec<&IndexedSessionRecord> = rows
-            .iter()
-            .filter_map(|row| row.available.then_some(*row))
-            .collect();
         let needs_reindex = rows.is_empty()
             || rows
                 .iter()
                 .any(|row| file_changed(&chat_path, row.file_size, row.file_mtime));
         if needs_reindex {
-            log::info!(
-                "polling: submit {:?} for {} (rows={}, live_rows={})",
-                IndexTask::ReindexGeminiFile(chat_path.clone()),
-                scope,
-                rows.len(),
-                live_rows.len(),
-            );
             indexer.submit(IndexTask::ReindexGeminiFile(chat_path))?;
         }
     }

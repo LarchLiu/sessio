@@ -2531,6 +2531,7 @@ fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
     cache: State<'_, RuntimeAgentsCache>,
+    indexer: State<'_, IndexerHandle>,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<models::RuntimeAgentMetadata, String> {
     let models = runtime_option_inputs_to_metadata(req.models);
@@ -2556,6 +2557,12 @@ fn update_runtime_agent_preferences(
         .find(|metadata| metadata.agent == req.agent)
         .cloned()
         .ok_or_else(|| format!("runtime agent is not configured: {}", req.agent.as_str()))?;
+    indexer
+        .refresh_enabled_agents(store.inner().as_ref())
+        .map_err(|e| e.to_string())?;
+    if let Some(watcher) = app.try_state::<watch::WatcherHandle>() {
+        watcher.refresh().map_err(|e| e.to_string())?;
+    }
     app.emit("runtime_agents_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(updated)
@@ -3029,14 +3036,17 @@ pub fn run() {
             );
             log::info!("indexer spawned");
 
-            polling::spawn_polling(store.clone(), indexer_handle.clone());
+            polling::spawn_polling(
+                store.clone(),
+                indexer_handle.clone(),
+                std::time::Duration::from_secs(app_config.index.poll_interval_seconds),
+            );
             log::info!("polling thread spawned");
 
-            match watch::spawn(indexer_handle.clone()) {
+            match watch::spawn(store.clone(), indexer_handle.clone()) {
                 Ok(handle) => {
                     log::info!("watcher spawned successfully");
-                    // Keep watcher alive for the lifetime of the process.
-                    Box::leak(Box::new(handle));
+                    app.manage(handle);
                 }
                 Err(e) => log::warn!("watcher failed to start: {e}"),
             }

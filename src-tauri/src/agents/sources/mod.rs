@@ -6,9 +6,10 @@ pub mod shared;
 pub mod types;
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::time::SystemTime;
 
-use crate::models::SessionInfo;
+use crate::models::{Agent, AgentInfo, SessionInfo};
 
 pub fn list_all() -> Vec<SessionInfo> {
     let mut out = Vec::new();
@@ -32,9 +33,31 @@ pub fn system_time_to_millis(t: SystemTime) -> Option<i64> {
 }
 
 pub fn builtin_agent_sources() -> registry::AgentSourceRegistry {
+    builtin_agent_sources_for([Agent::Codex, Agent::Claude, Agent::Gemini])
+}
+
+pub fn builtin_agent_sources_for<I>(agents: I) -> registry::AgentSourceRegistry
+where
+    I: IntoIterator<Item = Agent>,
+{
+    let enabled: HashSet<Agent> = agents.into_iter().collect();
     let mut registry = registry::AgentSourceRegistry::new();
-    registry.register(codex::CodexSource);
-    registry.register(claude::ClaudeSource);
-    registry.register(gemini::GeminiSource);
+    if enabled.contains(&Agent::Codex) {
+        registry.register(codex::CodexSource);
+    }
+    if enabled.contains(&Agent::Claude) {
+        registry.register(claude::ClaudeSource);
+    }
+    if enabled.contains(&Agent::Gemini) {
+        registry.register(gemini::GeminiSource);
+    }
     registry
+}
+
+pub fn enabled_builtin_agents(agent_rows: &[AgentInfo]) -> HashSet<Agent> {
+    agent_rows
+        .iter()
+        .filter(|agent| agent.enabled)
+        .filter_map(|agent| Agent::from_db_str(&agent.id))
+        .collect()
 }

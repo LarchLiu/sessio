@@ -8,7 +8,14 @@ use serde::Serialize;
 pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
+    pub index: IndexConfig,
     pub debug: DebugConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexConfig {
+    pub poll_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -36,7 +43,13 @@ pub struct QmdBackendConfig {
 #[derive(Debug, Clone, Default)]
 struct RawConfig {
     memory: Option<RawMemoryConfig>,
+    index: RawIndexConfig,
     debug: RawDebugConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawIndexConfig {
+    poll_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -183,6 +196,12 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 }
                 other => bail!("unknown key in [memory.backends.qmd]: {other}"),
             },
+            Section::Index => match key {
+                "poll_interval_seconds" => {
+                    raw.index.poll_interval_seconds = value.map(parse_u64).transpose()?
+                }
+                other => bail!("unknown key in [index]: {other}"),
+            },
             Section::Debug => match key {
                 "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
                 "update_preview" => raw.debug.update_preview = value.map(parse_bool).transpose()?,
@@ -200,6 +219,7 @@ enum Section {
     Root,
     Memory,
     MemoryBackendsQmd,
+    Index,
     Debug,
     Ignored,
 }
@@ -220,6 +240,7 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
     }
     Ok(Some(match parts.as_slice() {
         [a] if a == "memory" => Section::Memory,
+        [a] if a == "index" => Section::Index,
         [a] if a == "debug" => Section::Debug,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
         _ => Section::Ignored,
@@ -246,6 +267,12 @@ fn parse_bool(value: String) -> Result<bool> {
         "false" | "0" | "no" | "off" => Ok(false),
         other => bail!("invalid boolean value: {other}"),
     }
+}
+
+fn parse_u64(value: String) -> Result<u64> {
+    value
+        .parse::<u64>()
+        .with_context(|| format!("invalid unsigned integer value: {value}"))
 }
 
 fn unescape_string(value: &str) -> Result<String> {
@@ -297,8 +324,15 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
         .transpose()?;
     Ok(AppConfig {
         memory,
+        index: resolve_index_config(raw.clone()),
         debug: resolve_debug_config(raw),
     })
+}
+
+fn resolve_index_config(raw: RawConfig) -> IndexConfig {
+    IndexConfig {
+        poll_interval_seconds: raw.index.poll_interval_seconds.unwrap_or(60),
+    }
 }
 
 fn resolve_debug_config(raw: RawConfig) -> DebugConfig {
@@ -364,6 +398,11 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
     let defaults = parse_raw_config(&serialize_app_config(&default_app_config()?))?;
     let mut changed = false;
     merge_option(
+        &mut raw.index.poll_interval_seconds,
+        defaults.index.poll_interval_seconds,
+        &mut changed,
+    );
+    merge_option(
         &mut raw.debug.acp_config,
         defaults.debug.acp_config,
         &mut changed,
@@ -402,6 +441,9 @@ fn write_default_config_file(path: &Path) -> Result<()> {
 fn default_app_config() -> Result<AppConfig> {
     Ok(AppConfig {
         memory: None,
+        index: IndexConfig {
+            poll_interval_seconds: 60,
+        },
         debug: DebugConfig {
             acp_config: false,
             update_preview: false,
@@ -449,7 +491,18 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
         out.push_str(&serialize_memory_config(memory));
         out.push('\n');
     }
+    out.push_str(&serialize_index_config(&config.index));
+    out.push('\n');
     out.push_str(&serialize_debug_config(&config.debug));
+    out
+}
+
+fn serialize_index_config(config: &IndexConfig) -> String {
+    let mut out = String::new();
+    out.push_str("[index]\n");
+    out.push_str("poll_interval_seconds = ");
+    out.push_str(&config.poll_interval_seconds.to_string());
+    out.push('\n');
     out
 }
 
@@ -560,6 +613,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_index_poll_interval_seconds() {
+        let raw = parse_raw_config(
+            r#"
+            [index]
+            poll_interval_seconds = 120
+            "#,
+        )
+        .unwrap();
+        let config = super::resolve_app_config(raw, false).unwrap();
+
+        assert_eq!(config.index.poll_interval_seconds, 120);
+    }
+
+    #[test]
     fn ignores_unknown_sections() {
         let raw = parse_raw_config(
             r#"
@@ -604,9 +671,12 @@ mod tests {
         let config = super::resolve_app_config(raw, false).unwrap();
 
         assert!(!serialized.contains("[memory]"));
+        assert!(serialized.contains("[index]"));
+        assert!(serialized.contains("poll_interval_seconds = 60"));
         assert!(serialized.contains("[debug]"));
         assert!(!serialized.contains("[agents.runtime"));
         assert!(config.memory.is_none());
+        assert_eq!(config.index.poll_interval_seconds, 60);
     }
 
     #[test]
@@ -617,6 +687,7 @@ mod tests {
 
         assert!(changed);
         assert!(config.memory.is_none());
+        assert_eq!(config.index.poll_interval_seconds, 60);
         assert!(!config.debug.acp_config);
         assert!(!config.debug.update_preview);
     }

@@ -117,6 +117,16 @@ impl MemoryService {
         self.backend.clone()
     }
 
+    pub fn with_registry(&self, registry: Arc<AgentSourceRegistry>) -> Self {
+        Self {
+            repository: self.repository.clone(),
+            registry,
+            backend: self.backend.clone(),
+            artifact_sink: self.artifact_sink.clone(),
+            artifacts_root: self.artifacts_root.clone(),
+        }
+    }
+
     pub fn build_project(
         &self,
         options: MemoryBuildOptions,

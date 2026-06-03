@@ -1,70 +1,56 @@
 use anyhow::{Context, Result};
 use notify::{EventKind, RecursiveMode, Watcher};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::agents::sources::registry::AgentSourceRegistry;
 use crate::agents::sources::types::{PathEvent, PathEventKind, SourceIndexTask, SourceKind};
 use crate::indexer::{IndexTask, IndexerHandle};
+use crate::store::SessionStore;
+
+type DebouncerHandle = Debouncer<notify::RecommendedWatcher, FileIdMap>;
 
 pub struct WatcherHandle {
-    _debouncer: Box<dyn std::any::Any + Send>,
+    state: Arc<Mutex<WatcherState>>,
+    store: Arc<dyn SessionStore>,
 }
 
-pub fn spawn(indexer: IndexerHandle) -> Result<WatcherHandle> {
+struct WatcherState {
+    debouncer: DebouncerHandle,
+    registry: AgentSourceRegistry,
+    watched_roots: HashMap<PathBuf, RecursiveMode>,
+}
+
+pub fn spawn(store: Arc<dyn SessionStore>, indexer: IndexerHandle) -> Result<WatcherHandle> {
     let (tx, rx) = mpsc::channel::<DebounceEventResult>();
-    let mut debouncer =
+    let debouncer =
         new_debouncer(Duration::from_millis(500), None, tx).context("create file debouncer")?;
 
-    let registry = crate::agents::sources::builtin_agent_sources();
-    let watch_roots = registry.watch_roots().context("collect watch roots")?;
-
-    for root in &watch_roots {
-        let mode = if root.recursive {
-            RecursiveMode::Recursive
-        } else {
-            RecursiveMode::NonRecursive
-        };
-        let watch_path = root.path.clone();
-
-        if !watch_path.exists() {
-            log::warn!(
-                "watcher: skipping missing root {} (agent={}, purpose={:?})",
-                watch_path.display(),
-                root.agent.as_str(),
-                root.purpose
-            );
-            continue;
-        }
-
-        match debouncer
-            .watcher()
-            .watch(&watch_path, mode)
-            .with_context(|| format!("watch {}", watch_path.display()))
-        {
-            Ok(()) => log::info!(
-                "watcher: watching {} ({:?}, agent={}, purpose={:?})",
-                watch_path.display(),
-                mode,
-                root.agent.as_str(),
-                root.purpose
-            ),
-            Err(e) => log::warn!("watcher: failed to register {}: {e}", watch_path.display()),
-        }
-    }
+    let registry = AgentSourceRegistry::new();
+    let state = Arc::new(Mutex::new(WatcherState {
+        debouncer,
+        registry,
+        watched_roots: HashMap::new(),
+    }));
+    let handle = WatcherHandle {
+        state: state.clone(),
+        store: store.clone(),
+    };
+    handle.refresh()?;
 
     thread::spawn(move || {
         log::info!("watcher: event loop started");
         while let Ok(result) = rx.recv() {
             match result {
                 Ok(events) => {
-                    log::info!("watcher: received {} events", events.len());
                     for ev in events {
                         let kind = path_event_kind(ev.event.kind);
                         for path in &ev.event.paths {
-                            log::info!("watcher: event {:?} on {}", ev.event.kind, path.display());
                             if is_platform_junk(path) {
                                 continue;
                             }
@@ -72,11 +58,17 @@ pub fn spawn(indexer: IndexerHandle) -> Result<WatcherHandle> {
                                 path: path.clone(),
                                 kind,
                             };
-                            for task in registry.classify_path_event(&path_event) {
+                            let tasks = match state.lock() {
+                                Ok(state) => state.registry.classify_path_event(&path_event),
+                                Err(e) => {
+                                    log::warn!("watcher: state lock poisoned: {e}");
+                                    Vec::new()
+                                }
+                            };
+                            for task in tasks {
                                 let Some(index_task) = source_task_to_index_task(task) else {
                                     continue;
                                 };
-                                log::info!("watcher: dispatching task {:?}", index_task);
                                 if let Err(e) = indexer.submit(index_task) {
                                     log::warn!("indexer submit failed: {e}");
                                 }
@@ -94,9 +86,82 @@ pub fn spawn(indexer: IndexerHandle) -> Result<WatcherHandle> {
         log::warn!("watcher: event loop exited");
     });
 
-    Ok(WatcherHandle {
-        _debouncer: Box::new(debouncer),
-    })
+    Ok(handle)
+}
+
+impl WatcherHandle {
+    pub fn refresh(&self) -> Result<()> {
+        let agents = self.store.list_agents()?;
+        let enabled_agents = crate::agents::sources::enabled_builtin_agents(&agents);
+        let registry = crate::agents::sources::builtin_agent_sources_for(enabled_agents);
+        let watch_roots = registry.watch_roots().context("collect watch roots")?;
+        let mut next_roots: HashMap<PathBuf, RecursiveMode> = HashMap::new();
+
+        for root in &watch_roots {
+            let mode = if root.recursive {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
+            next_roots.insert(root.path.clone(), mode);
+        }
+
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| anyhow::anyhow!("watcher state lock poisoned: {e}"))?;
+
+        let stale_roots: Vec<PathBuf> = state
+            .watched_roots
+            .keys()
+            .filter(|path| !next_roots.contains_key(*path))
+            .cloned()
+            .collect();
+        for path in stale_roots {
+            if let Err(e) = state.debouncer.watcher().unwatch(&path) {
+                log::warn!("watcher: failed to unwatch {}: {e}", path.display());
+            }
+            state.watched_roots.remove(&path);
+        }
+
+        for root in &watch_roots {
+            let mode = if root.recursive {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
+            let watch_path = root.path.clone();
+
+            if !watch_path.exists() {
+                log::warn!(
+                    "watcher: skipping missing root {} (agent={}, purpose={:?})",
+                    watch_path.display(),
+                    root.agent.as_str(),
+                    root.purpose
+                );
+                continue;
+            }
+
+            if state.watched_roots.get(&watch_path) == Some(&mode) {
+                continue;
+            }
+            if state.watched_roots.contains_key(&watch_path) {
+                if let Err(e) = state.debouncer.watcher().unwatch(&watch_path) {
+                    log::warn!("watcher: failed to refresh {}: {e}", watch_path.display());
+                }
+            }
+
+            match state.debouncer.watcher().watch(&watch_path, mode) {
+                Ok(()) => {
+                    state.watched_roots.insert(watch_path, mode);
+                }
+                Err(e) => log::warn!("watcher: failed to register {}: {e}", watch_path.display()),
+            }
+        }
+
+        state.registry = registry;
+        Ok(())
+    }
 }
 
 fn path_event_kind(kind: EventKind) -> PathEventKind {

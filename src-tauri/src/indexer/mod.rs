@@ -55,6 +55,7 @@ pub struct IndexerHandle {
 struct IndexerState {
     phase: Mutex<IndexPhase>,
     last_error: Mutex<Option<String>>,
+    enabled_agents: Mutex<HashSet<Agent>>,
 }
 
 impl IndexerHandle {
@@ -70,6 +71,16 @@ impl IndexerHandle {
             last_error: self.state.last_error.lock().unwrap().clone(),
         }
     }
+
+    pub fn enabled_agents(&self) -> HashSet<Agent> {
+        self.state.enabled_agents.lock().unwrap().clone()
+    }
+
+    pub fn refresh_enabled_agents(&self, store: &dyn SessionStore) -> Result<()> {
+        let enabled_agents = enabled_agents_for_store(store, "indexer");
+        *self.state.enabled_agents.lock().unwrap() = enabled_agents;
+        Ok(())
+    }
 }
 
 pub fn spawn(
@@ -80,9 +91,11 @@ pub fn spawn(
 ) -> IndexerHandle {
     let (tx, rx) = unbounded::<IndexTask>();
     let (backend_sync_tx, backend_sync_rx) = unbounded::<MemoryBackendSyncJob>();
+    let enabled_agents = enabled_agents_for_store(store.as_ref(), "indexer");
     let state = Arc::new(IndexerState {
         phase: Mutex::new(IndexPhase::Idle),
         last_error: Mutex::new(None),
+        enabled_agents: Mutex::new(enabled_agents),
     });
     let handle = IndexerHandle {
         tx: tx.clone(),
@@ -167,24 +180,14 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
                 .app
                 .emit("sessions_index_status", current_status(&ctx.state));
         }
-        log::info!("indexer: received tasks {:?}", coalesced);
+        let enabled_agents = ctx.state.enabled_agents.lock().unwrap().clone();
         let mut had_error = false;
         let mut last_error = None;
         let mut affected_projects = HashMap::new();
         let mut affected_sources = HashMap::new();
         for task in coalesced {
-            log::info!("indexer: executing task {:?}", task);
-            match execute(&task, ctx.store.as_ref()) {
+            match execute(&task, ctx.store.as_ref(), &enabled_agents) {
                 Ok(outcome) => {
-                    if !outcome.affected_projects.is_empty() || !outcome.affected_sources.is_empty()
-                    {
-                        log::info!(
-                            "indexer: task {:?} affected {} projects and {} sources",
-                            task,
-                            outcome.affected_projects.len(),
-                            outcome.affected_sources.len()
-                        );
-                    }
                     for project in outcome.affected_projects {
                         affected_projects.insert(project.project_key.clone(), project);
                     }
@@ -209,12 +212,12 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
         let mut backend_sync_jobs: HashMap<String, MemoryBackendSyncJob> = HashMap::new();
         let mut deferred_requeues: Vec<PathBuf> = Vec::new();
         if let Some(service) = ctx.service.as_ref() {
+            let registry = Arc::new(crate::agents::sources::builtin_agent_sources_for(
+                enabled_agents.iter().copied(),
+            ));
+            let service = service.with_registry(registry);
             for source in affected_sources.values() {
-                match build_source_memory_for_indexer(
-                    source,
-                    ctx.memory_store.as_ref(),
-                    service.as_ref(),
-                ) {
+                match build_source_memory_for_indexer(source, ctx.memory_store.as_ref(), &service) {
                     Ok(Some(job)) => {
                         deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                         backend_sync_jobs.insert(job.project_key.clone(), job);
@@ -243,11 +246,8 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
                 if already_covered {
                     continue;
                 }
-                match build_project_memory_for_indexer(
-                    project,
-                    ctx.memory_store.as_ref(),
-                    service.as_ref(),
-                ) {
+                match build_project_memory_for_indexer(project, ctx.memory_store.as_ref(), &service)
+                {
                     Ok(Some(job)) => {
                         deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
                         backend_sync_jobs.insert(job.project_key.clone(), job);
@@ -275,28 +275,18 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
             // memory + backend sync pipeline for files we already covered. Drop them
             // and re-queue real deletes (those carry information the rebuild
             // doesn't always reconstruct, e.g. subagent removals).
-            let mut dropped = 0;
-            let mut requeued = 0;
             while let Ok(task) = rx.try_recv() {
                 match task {
                     IndexTask::DeleteFile(_) | IndexTask::DeleteSubagentFile(_) => {
-                        if tx.send(task).is_ok() {
-                            requeued += 1;
-                        }
+                        let _ = tx.send(task);
                     }
-                    _ => dropped += 1,
+                    _ => {}
                 }
-            }
-            if dropped > 0 || requeued > 0 {
-                log::info!(
-                    "indexer: post-FullRebuild drain dropped={} requeued={}",
-                    dropped,
-                    requeued
-                );
             }
         }
         if !deferred_requeues.is_empty() {
-            let registry = crate::agents::sources::builtin_agent_sources();
+            let registry =
+                crate::agents::sources::builtin_agent_sources_for(enabled_agents.iter().copied());
             // Seed with paths already in this batch's affected_sources so we
             // don't re-queue a build we're about to do anyway. Both sides
             // canonicalize to PathBuf for set equality.
@@ -304,7 +294,6 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
                 .values()
                 .map(|source| PathBuf::from(&source.file_path))
                 .collect();
-            let mut requeued = 0usize;
             for path in deferred_requeues {
                 if !seen.insert(path.clone()) {
                     continue;
@@ -325,7 +314,6 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
                         );
                         continue;
                     }
-                    requeued += 1;
                     routed = true;
                 }
                 if !routed {
@@ -334,9 +322,6 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
                         path.display()
                     );
                 }
-            }
-            if requeued > 0 {
-                log::info!("indexer: requeued {} dependent source tasks", requeued);
             }
         }
         {
@@ -362,6 +347,18 @@ fn current_status(state: &IndexerState) -> IndexStatus {
 
 fn set_phase(state: &IndexerState, phase: IndexPhase) {
     *state.phase.lock().unwrap() = phase;
+}
+
+fn enabled_agents_for_store(store: &dyn SessionStore, owner: &str) -> HashSet<Agent> {
+    store
+        .list_agents()
+        .map(|agents| crate::agents::sources::enabled_builtin_agents(&agents))
+        .unwrap_or_else(|e| {
+            log::warn!("{owner}: failed to load enabled agents, using all sources: {e}");
+            [Agent::Codex, Agent::Claude, Agent::Gemini]
+                .into_iter()
+                .collect()
+        })
 }
 
 fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
@@ -440,14 +437,33 @@ struct TaskOutcome {
     affected_sources: Vec<SessionSource>,
 }
 
-fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<TaskOutcome> {
+fn execute(
+    task: &IndexTask,
+    store: &dyn SessionStore,
+    enabled_agents: &HashSet<Agent>,
+) -> Result<TaskOutcome> {
     match task {
-        IndexTask::FullRebuild => full_rebuild(store),
-        IndexTask::ReindexCodexFile(path) => reindex_codex_file(path, store),
-        IndexTask::ReindexClaudeFile(path) => reindex_claude_file(path, store),
-        IndexTask::ReindexClaudeProject(dir) => reindex_claude_project(dir, store),
-        IndexTask::ReindexClaudeSubagentFile(path) => reindex_claude_subagent_file(path, store),
-        IndexTask::ReindexGeminiFile(path) => reindex_gemini_file(path, store),
+        IndexTask::FullRebuild => full_rebuild(store, enabled_agents),
+        IndexTask::ReindexCodexFile(path) if enabled_agents.contains(&Agent::Codex) => {
+            reindex_codex_file(path, store)
+        }
+        IndexTask::ReindexClaudeFile(path) if enabled_agents.contains(&Agent::Claude) => {
+            reindex_claude_file(path, store)
+        }
+        IndexTask::ReindexClaudeProject(dir) if enabled_agents.contains(&Agent::Claude) => {
+            reindex_claude_project(dir, store)
+        }
+        IndexTask::ReindexClaudeSubagentFile(path) if enabled_agents.contains(&Agent::Claude) => {
+            reindex_claude_subagent_file(path, store)
+        }
+        IndexTask::ReindexGeminiFile(path) if enabled_agents.contains(&Agent::Gemini) => {
+            reindex_gemini_file(path, store)
+        }
+        IndexTask::ReindexCodexFile(_)
+        | IndexTask::ReindexClaudeFile(_)
+        | IndexTask::ReindexClaudeProject(_)
+        | IndexTask::ReindexClaudeSubagentFile(_)
+        | IndexTask::ReindexGeminiFile(_) => Ok(TaskOutcome::default()),
         IndexTask::DeleteFile(path) => {
             let path_str = path.to_string_lossy();
             store.mark_file_path_unavailable(&path_str)?;
@@ -461,69 +477,75 @@ fn execute(task: &IndexTask, store: &dyn SessionStore) -> Result<TaskOutcome> {
     }
 }
 
-fn full_rebuild(store: &dyn SessionStore) -> Result<TaskOutcome> {
+fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Result<TaskOutcome> {
     let mut affected_projects = HashMap::new();
-    let mut codex_scopes: HashSet<String> = HashSet::new();
-    match crate::agents::sources::codex::parser::list_sessions() {
-        Ok(sessions) => {
-            for info in sessions {
-                insert_session_project(&mut affected_projects, &info);
-                let scope = info.file_path.clone();
-                store.replace_by_scope(&scope, Agent::Codex, std::slice::from_ref(&info))?;
-                for sub in &info.subagents {
-                    store.upsert_subagent(Agent::Codex, &scope, &info.id, sub)?;
-                }
-                codex_scopes.insert(scope);
-            }
-        }
-        Err(e) => log::warn!("codex list sessions failed: {e}"),
-    }
-    store.mark_missing_scopes_unavailable(Agent::Codex, &codex_scopes)?;
-
-    let mut claude_scopes: HashSet<String> = HashSet::new();
-    if let Some(root) = crate::agents::sources::claude::parser::root_dir()? {
-        for entry in std::fs::read_dir(&root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let dir = entry.path();
-            let scope = dir.to_string_lossy().into_owned();
-            match crate::agents::sources::claude::parser::scan_project_dir(&dir) {
-                Ok(sessions) => {
-                    for session in &sessions {
-                        insert_session_project(&mut affected_projects, session);
+    if enabled_agents.contains(&Agent::Codex) {
+        let mut codex_scopes: HashSet<String> = HashSet::new();
+        match crate::agents::sources::codex::parser::list_sessions() {
+            Ok(sessions) => {
+                for info in sessions {
+                    insert_session_project(&mut affected_projects, &info);
+                    let scope = info.file_path.clone();
+                    store.replace_by_scope(&scope, Agent::Codex, std::slice::from_ref(&info))?;
+                    for sub in &info.subagents {
+                        store.upsert_subagent(Agent::Codex, &scope, &info.id, sub)?;
                     }
-                    store.replace_by_scope(&scope, Agent::Claude, &sessions)?;
-                    // Write subagent rows on their own path, mirroring
-                    // reindex_claude_project.
-                    for session in &sessions {
-                        for sub in &session.subagents {
-                            store.upsert_subagent(Agent::Claude, &scope, &session.id, sub)?;
+                    codex_scopes.insert(scope);
+                }
+            }
+            Err(e) => log::warn!("codex list sessions failed: {e}"),
+        }
+        store.mark_missing_scopes_unavailable(Agent::Codex, &codex_scopes)?;
+    }
+
+    if enabled_agents.contains(&Agent::Claude) {
+        let mut claude_scopes: HashSet<String> = HashSet::new();
+        if let Some(root) = crate::agents::sources::claude::parser::root_dir()? {
+            for entry in std::fs::read_dir(&root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let dir = entry.path();
+                let scope = dir.to_string_lossy().into_owned();
+                match crate::agents::sources::claude::parser::scan_project_dir(&dir) {
+                    Ok(sessions) => {
+                        for session in &sessions {
+                            insert_session_project(&mut affected_projects, session);
                         }
+                        store.replace_by_scope(&scope, Agent::Claude, &sessions)?;
+                        // Write subagent rows on their own path, mirroring
+                        // reindex_claude_project.
+                        for session in &sessions {
+                            for sub in &session.subagents {
+                                store.upsert_subagent(Agent::Claude, &scope, &session.id, sub)?;
+                            }
+                        }
+                        claude_scopes.insert(scope);
                     }
-                    claude_scopes.insert(scope);
+                    Err(e) => log::warn!("claude scan {} failed: {e}", dir.display()),
                 }
-                Err(e) => log::warn!("claude scan {} failed: {e}", dir.display()),
             }
         }
+        store.mark_missing_scopes_unavailable(Agent::Claude, &claude_scopes)?;
     }
-    store.mark_missing_scopes_unavailable(Agent::Claude, &claude_scopes)?;
 
-    let mut gemini_scopes: HashSet<String> = HashSet::new();
-    match crate::agents::sources::gemini::parser::list_sessions() {
-        Ok(sessions) => {
-            for session in &sessions {
-                insert_session_project(&mut affected_projects, &session);
+    if enabled_agents.contains(&Agent::Gemini) {
+        let mut gemini_scopes: HashSet<String> = HashSet::new();
+        match crate::agents::sources::gemini::parser::list_sessions() {
+            Ok(sessions) => {
+                for session in &sessions {
+                    insert_session_project(&mut affected_projects, &session);
+                }
+                for (scope, group) in group_by(sessions, |session| session.file_path.clone()) {
+                    store.replace_by_scope(&scope, Agent::Gemini, &group)?;
+                    gemini_scopes.insert(scope);
+                }
             }
-            for (scope, group) in group_by(sessions, |session| session.file_path.clone()) {
-                store.replace_by_scope(&scope, Agent::Gemini, &group)?;
-                gemini_scopes.insert(scope);
-            }
+            Err(e) => log::warn!("gemini list sessions failed: {e}"),
         }
-        Err(e) => log::warn!("gemini list sessions failed: {e}"),
+        store.mark_missing_scopes_unavailable(Agent::Gemini, &gemini_scopes)?;
     }
-    store.mark_missing_scopes_unavailable(Agent::Gemini, &gemini_scopes)?;
 
     Ok(TaskOutcome {
         affected_projects: affected_projects.into_values().collect(),
