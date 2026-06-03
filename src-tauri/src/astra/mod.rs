@@ -1757,7 +1757,6 @@ impl AstraService {
     fn apply_protocol_event(&self, event: AstraProtocolEvent) -> Result<()> {
         let event_type = event.params.event_type.clone();
         let event_data = event.params.data.clone();
-        let store = self.inner.store.clone();
         let Some((run, emit)) = self.mutate_existing_run(&event.params.run_id, move |run| {
             let mut emit = Some((event_type.clone(), event_data.clone()));
             match event_type.as_str() {
@@ -1771,14 +1770,19 @@ impl AstraService {
                 "cancelled" => run.status = AstraRunStatus::Cancelled,
                 "error" => run.status = AstraRunStatus::Errored,
                 "complete" => {
-                    let thread = store.get_thread_work_state(&run.thread_id)?;
-                    let complete = thread_all_stages_terminal(&thread);
-                    if complete {
+                    let status = event_data.get("status").and_then(Value::as_str);
+                    let reason = event_data.get("reason").and_then(Value::as_str);
+                    if status == Some("cancelled") {
+                        run.status = AstraRunStatus::Cancelled;
+                    } else if astra_run_all_approved_tasks_finished(run)
+                        || reason == Some("all_stages_terminal")
+                    {
                         run.status = AstraRunStatus::Completed;
+                        run.error = None;
                     } else {
                         run.status = AstraRunStatus::Running;
-                        let message =
-                            "Astra reported complete before all stages were terminal".to_string();
+                        let message = "Astra reported complete before all approved tasks finished"
+                            .to_string();
                         run.error = Some(message.clone());
                         emit = Some((
                             "error".to_string(),
@@ -2622,7 +2626,6 @@ fn extract_result_text(value: &Value) -> Option<String> {
     }
 }
 
-#[cfg(test)]
 fn astra_run_all_approved_tasks_finished(run: &AstraRun) -> bool {
     !run.approved_task_ids.is_empty()
         && run.approved_task_ids.iter().all(|task_id| {
@@ -2632,6 +2635,7 @@ fn astra_run_all_approved_tasks_finished(run: &AstraRun) -> bool {
         })
 }
 
+#[cfg(test)]
 fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
     !thread.stages.is_empty()
         && thread

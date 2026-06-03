@@ -129,13 +129,14 @@ async function runConfirmedPlan(
   while (!cancelledRuns.has(runId)) {
     const snapshot = await loadProjectSnapshot(runId, callTool);
     if (allStagesTerminal(snapshot)) {
-      await write(event(runId, "complete", { status: "completed", results }));
+      await write(event(runId, "complete", { status: "completed", reason: "all_stages_terminal", results }));
       return results;
     }
 
     const task = nextApprovedTask(approved, completedTaskIds, snapshot);
     if (!task) {
-      throw new Error("Astra has no approved task for remaining non-terminal stages");
+      await write(event(runId, "complete", { status: "completed", reason: "approved_tasks_exhausted", results }));
+      return results;
     }
 
     await write(event(runId, "status", { status: "running", taskId: task.id, threadStageId: task.targetStageId ?? null }));
