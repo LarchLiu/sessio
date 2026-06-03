@@ -3,7 +3,37 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import AiGenerate2Icon from '@iconify-react/ri/ai-generate-2';
 import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
-import { Claude, Gemini, OpenAI } from "@lobehub/icons";
+import {
+  Anthropic,
+  Aws,
+  Azure,
+  Bedrock,
+  Cerebras,
+  Claude,
+  Cloudflare,
+  DeepSeek,
+  Fireworks,
+  Gemini,
+  GithubCopilot,
+  Google,
+  GoogleCloud,
+  Groq,
+  HuggingFace,
+  Kimi,
+  Minimax,
+  Mistral,
+  Moonshot,
+  OpenAI,
+  OpenCode,
+  OpenRouter,
+  Together,
+  Vercel,
+  VertexAI,
+  WorkersAI,
+  XAI,
+  XiaomiMiMo,
+  ZAI,
+} from "@lobehub/icons";
 import { ArrowLeft, Check, Circle, Download, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
 import type { Agent, AgentAiProviderInfo, AgentInfo, AssistantInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
 import {
@@ -926,11 +956,11 @@ function AgentProviderRow({
   ].filter((item) => item && item.trim().length > 0);
 
   return (
-    <div className={"grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-card-border/[0.08] px-3 py-2.5 transition last:border-b-0 " + (selected ? "bg-card-active" : "hover:bg-card-action-hover/5")}>
+    <div className={"grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b px-3 py-2.5 transition last:border-b-0 " + (selected ? "border-card-border/[0.16] bg-card-active shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.34)]" : "border-card-border/[0.08] hover:bg-card-action-hover/5")}>
       <button type="button" onClick={() => void onSelect(provider.id)} className="flex min-w-0 items-center gap-3 text-left">
         <ProviderGlyph provider={provider} />
         <span className="min-w-0">
-          <span className="block truncate text-body-sm font-medium text-card-fg/82">{provider.displayName || provider.provider || provider.id}</span>
+          <span className={"block truncate text-body-sm font-medium " + (selected ? "text-card-fg/92" : "text-card-fg/82")}>{provider.displayName || provider.provider || provider.id}</span>
           <span className="mt-0.5 block truncate text-caption text-card-muted/56">{detailItems.join(" / ")}</span>
         </span>
       </button>
@@ -1081,11 +1111,9 @@ function AgentDialogSelect({
 }
 
 function ProviderGlyph({ provider }: { provider: AgentAiProviderInfo }) {
-  const normalized = provider.provider.trim().toLowerCase();
+  const Icon = providerIconFor(provider.provider);
   const className = "h-5 w-5 shrink-0";
-  if (normalized.includes("openai")) return <OpenAI className={className} />;
-  if (normalized.includes("anthropic") || normalized.includes("claude")) return <Claude.Color className={className} />;
-  if (normalized.includes("google") || normalized.includes("gemini")) return <Gemini.Color className={className} />;
+  if (Icon) return <Icon className={className} />;
   const label = provider.displayName.trim() || provider.provider.trim() || provider.id;
   const initial = label.trim().charAt(0).toUpperCase() || "?";
   return (
@@ -1093,6 +1121,32 @@ function ProviderGlyph({ provider }: { provider: AgentAiProviderInfo }) {
       {initial}
     </span>
   );
+}
+
+type ProviderIconComponent = (props: { className?: string }) => ReactNode;
+
+function providerIconFor(provider: string): ProviderIconComponent | null {
+  const key = normalizeProviderKey(provider);
+  const icon = PROVIDER_ICON_BY_KEY[key];
+  if (icon) return icon;
+  if (key.includes("openai")) return OpenAI;
+  if (key.includes("anthropic") || key.includes("claude")) return iconColor(Anthropic, Claude.Color);
+  if (key.includes("google") || key.includes("gemini")) return iconColor(Google, Gemini.Color);
+  if (key.includes("azure")) return iconColor(Azure, Azure);
+  if (key.includes("githubcopilot")) return iconColor(GithubCopilot, GithubCopilot);
+  if (key.includes("cloudflare")) return iconColor(Cloudflare, Cloudflare);
+  if (key.includes("moonshot") || key.includes("kimi")) return iconColor(Moonshot, iconColor(Kimi, Moonshot));
+  if (key.includes("minimax")) return iconColor(Minimax, Minimax);
+  if (key.includes("xiaomi")) return iconColor(XiaomiMiMo, XiaomiMiMo);
+  return null;
+}
+
+function iconColor(icon: unknown, fallback: ProviderIconComponent): ProviderIconComponent {
+  return ((icon as { Color?: ProviderIconComponent }).Color ?? fallback);
+}
+
+function normalizeProviderKey(provider: string): string {
+  return provider.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function AgentModelRow({
@@ -1328,6 +1382,76 @@ const PI_PROVIDER_PRESETS = [
   "xiaomi-token-plan-sgp",
 ];
 
+const PROVIDER_LABEL_BY_ID: Record<string, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google AI",
+  "google-vertex": "Google Vertex AI",
+  "amazon-bedrock": "Amazon Bedrock",
+  "azure-openai-responses": "Azure OpenAI",
+  "openai-codex": "OpenAI Codex",
+  deepseek: "DeepSeek",
+  "github-copilot": "GitHub Copilot",
+  xai: "xAI",
+  groq: "Groq",
+  cerebras: "Cerebras",
+  openrouter: "OpenRouter",
+  "vercel-ai-gateway": "Vercel AI Gateway",
+  zai: "Z.ai",
+  mistral: "Mistral",
+  minimax: "MiniMax",
+  "minimax-cn": "MiniMax CN",
+  moonshotai: "Moonshot AI",
+  "moonshotai-cn": "Moonshot AI CN",
+  huggingface: "Hugging Face",
+  fireworks: "Fireworks",
+  together: "Together AI",
+  opencode: "OpenCode",
+  "opencode-go": "OpenCode Go",
+  "kimi-coding": "Kimi Coding",
+  "cloudflare-workers-ai": "Cloudflare Workers AI",
+  "cloudflare-ai-gateway": "Cloudflare AI Gateway",
+  xiaomi: "Xiaomi",
+  "xiaomi-token-plan-cn": "Xiaomi Token Plan CN",
+  "xiaomi-token-plan-ams": "Xiaomi Token Plan AMS",
+  "xiaomi-token-plan-sgp": "Xiaomi Token Plan SGP",
+};
+
+const PROVIDER_ICON_BY_KEY: Record<string, ProviderIconComponent> = {
+  openai: OpenAI,
+  anthropic: iconColor(Anthropic, Claude.Color),
+  google: iconColor(Google, Gemini.Color),
+  googlevertex: iconColor(VertexAI, iconColor(GoogleCloud, iconColor(Google, Gemini.Color))),
+  amazonbedrock: iconColor(Bedrock, iconColor(Aws, Aws)),
+  azureopenairesponses: iconColor(Azure, Azure),
+  openaicodex: OpenAI,
+  deepseek: iconColor(DeepSeek, DeepSeek),
+  githubcopilot: iconColor(GithubCopilot, GithubCopilot),
+  xai: iconColor(XAI, XAI),
+  groq: iconColor(Groq, Groq),
+  cerebras: iconColor(Cerebras, Cerebras),
+  openrouter: iconColor(OpenRouter, OpenRouter),
+  vercelaigateway: iconColor(Vercel, Vercel),
+  zai: iconColor(ZAI, ZAI),
+  mistral: iconColor(Mistral, Mistral),
+  minimax: iconColor(Minimax, Minimax),
+  minimaxcn: iconColor(Minimax, Minimax),
+  moonshotai: iconColor(Moonshot, Moonshot),
+  moonshotaicn: iconColor(Moonshot, Moonshot),
+  huggingface: iconColor(HuggingFace, HuggingFace),
+  fireworks: iconColor(Fireworks, Fireworks),
+  together: iconColor(Together, Together),
+  opencode: iconColor(OpenCode, OpenCode),
+  opencodego: iconColor(OpenCode, OpenCode),
+  kimicoding: iconColor(Kimi, iconColor(Moonshot, Kimi)),
+  cloudflareworkersai: iconColor(WorkersAI, iconColor(Cloudflare, Cloudflare)),
+  cloudflareaigateway: iconColor(Cloudflare, Cloudflare),
+  xiaomi: iconColor(XiaomiMiMo, XiaomiMiMo),
+  xiaomitokenplancn: iconColor(XiaomiMiMo, XiaomiMiMo),
+  xiaomitokenplanams: iconColor(XiaomiMiMo, XiaomiMiMo),
+  xiaomitokenplansgp: iconColor(XiaomiMiMo, XiaomiMiMo),
+};
+
 const PI_API_PRESETS = [
   "openai-responses",
   "openai-completions",
@@ -1365,14 +1489,21 @@ const DEFAULT_BASE_URL_BY_PI_PROVIDER: Record<string, string> = {
   "cloudflare-ai-gateway": "https://gateway.ai.cloudflare.com/v1",
 };
 
-function presetOptions(presets: string[], selected: string): Array<{ value: string; label: string }> {
-  const options = presets.map((value) => ({ value, label: value }));
-  if (selected && !presets.includes(selected)) return [{ value: selected, label: selected }, ...options];
+function presetOptions(presets: string[], selected: string, labels: Record<string, string> = {}): Array<{ value: string; label: string }> {
+  const options = presets.map((value) => ({ value, label: labels[value] ?? value }));
+  if (selected && !presets.includes(selected)) return [{ value: selected, label: labels[selected] ?? selected }, ...options];
   return options;
 }
 
-function piProviderOptions(selected: string): Array<{ value: string; label: string }> {
-  return presetOptions(PI_PROVIDER_PRESETS, selected);
+function piProviderOptions(selected: string): Array<{ value: string; label: string; icon?: ReactNode; menuIcon?: ReactNode }> {
+  return presetOptions(PI_PROVIDER_PRESETS, selected, PROVIDER_LABEL_BY_ID).map((option) => {
+    const Icon = providerIconFor(option.value);
+    return {
+      ...option,
+      icon: Icon ? <Icon className="h-4 w-4" /> : undefined,
+      menuIcon: Icon ? <Icon className="h-4 w-4" /> : undefined,
+    };
+  });
 }
 
 function piApiOptions(selected: string): Array<{ value: string; label: string }> {
