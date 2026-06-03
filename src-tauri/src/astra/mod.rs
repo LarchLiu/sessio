@@ -544,6 +544,20 @@ impl AstraService {
 
     pub fn cancel_thread_astra(&self, req: CancelThreadAstraRequest) -> Result<AstraHandle> {
         let mut run = self.load_run(&req.run_id)?;
+        // Abort every delegated session this run launched: interrupt the ACP
+        // agents and release any blocked dispatch waiter. Sessions started by
+        // other runs or by the user are left untouched.
+        let delegated_sessions: Vec<String> = match self.inner.delegated_sessions.lock() {
+            Ok(delegated) => delegated
+                .iter()
+                .filter(|(_, state)| state.run_id == run.run_id && !state.finished)
+                .map(|(session_id, _)| session_id.clone())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        for session_id in &delegated_sessions {
+            self.abort_delegated_session(session_id);
+        }
         let _ = self.request(
             "astra/cancel",
             json!({ "runId": run.run_id }),
@@ -553,9 +567,10 @@ impl AstraService {
         run.updated_at = now_ms();
         self.inner.store.upsert_astra_run(&run_to_record(&run))?;
         log::info!(
-            "[sessio-astra:run:cancel] runId={} threadId={}",
+            "[sessio-astra:run:cancel] runId={} threadId={} delegatedSessions={}",
             run.run_id,
-            run.thread_id
+            run.thread_id,
+            delegated_sessions.len()
         );
         self.emit(&run, "cancelled", json!({ "status": run.status.as_str() }));
         Ok(run_to_handle(run))
@@ -579,6 +594,7 @@ impl AstraService {
         resolved_thread_stage_id: Option<&str>,
         attempt_count: u32,
         retry_limit_reached: bool,
+        task_waiter: Option<mpsc::Sender<AstraTaskResult>>,
     ) -> Result<AgentSessionHandle> {
         let stage_context = resolved_thread_stage_id
             .map(|stage_id| build_stage_task_context(thread, stage_id, task))
@@ -623,6 +639,16 @@ impl AstraService {
             &handle.sessio_runtime_session_id,
             stage_context,
         )?;
+        // Register the result waiter before sending the prompt: a fast (or
+        // synchronous fake) turn can reach a terminal state inside send_input,
+        // so the waiter must already be in place or its wakeup is lost.
+        if let Some(waiter) = task_waiter {
+            self.inner
+                .task_waiters
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Astra task waiter lock poisoned"))?
+                .insert(handle.sessio_runtime_session_id.clone(), waiter);
+        }
         if !initial_prompt.trim().is_empty() {
             self.inner.runtime.send_input(
                 &handle.sessio_runtime_session_id,
@@ -707,6 +733,10 @@ impl AstraService {
         next.updated_at = now_ms();
         self.inner.store.upsert_astra_run(&run_to_record(&next))?;
 
+        // Create the waiter channel up front and hand the sender to dispatch_task
+        // so it is registered before the prompt is sent (avoids the lost-wakeup
+        // race where a synchronous turn finishes before we start waiting).
+        let (sender, receiver) = mpsc::channel();
         let handle = self.dispatch_task(
             &next,
             &thread,
@@ -714,6 +744,7 @@ impl AstraService {
             stage_id.as_deref(),
             attempt_count,
             false,
+            Some(sender),
         )?;
         log::info!(
             "[sessio-astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
@@ -725,34 +756,47 @@ impl AstraService {
             attempt_count
         );
 
-        if let Some(existing) = self
-            .load_run(&next.run_id)?
-            .task_results
-            .into_iter()
-            .find(|result| result.task_id == task.id)
-        {
-            return Ok(existing);
-        }
-
-        let (sender, receiver) = mpsc::channel();
-        self.inner
-            .task_waiters
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Astra task waiter lock poisoned"))?
-            .insert(handle.sessio_runtime_session_id.clone(), sender);
         match receiver.recv_timeout(Duration::from_secs(60 * 60)) {
             Ok(result) => Ok(result),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.inner
-                    .task_waiters
-                    .lock()
-                    .ok()
-                    .and_then(|mut waiters| waiters.remove(&handle.sessio_runtime_session_id));
+                self.abort_delegated_session(&handle.sessio_runtime_session_id);
                 bail!("delegated task timed out: {}", task.id)
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.abort_delegated_session(&handle.sessio_runtime_session_id);
                 bail!("delegated task waiter disconnected: {}", task.id)
             }
+        }
+    }
+
+    /// Best-effort termination of a delegated runtime session. Marks the
+    /// delegated state finished so a late runtime event cannot double-record a
+    /// result, cancels any active turn (which also interrupts the real ACP
+    /// agent), disposes the runtime session, and drops the task waiter so a
+    /// blocked `dispatch_task_and_wait` is released.
+    fn abort_delegated_session(&self, sessio_runtime_session_id: &str) {
+        let turn_id = match self.inner.delegated_sessions.lock() {
+            Ok(mut delegated) => match delegated.get_mut(sessio_runtime_session_id) {
+                Some(state) => {
+                    state.finished = true;
+                    state.last_turn_id.clone()
+                }
+                None => None,
+            },
+            Err(_) => None,
+        };
+        if let Some(turn_id) = turn_id.as_deref() {
+            let _ = self
+                .inner
+                .runtime
+                .cancel_turn(sessio_runtime_session_id, turn_id);
+        }
+        let _ = self
+            .inner
+            .runtime
+            .dispose_session_silent(sessio_runtime_session_id);
+        if let Ok(mut waiters) = self.inner.task_waiters.lock() {
+            waiters.remove(sessio_runtime_session_id);
         }
     }
 
