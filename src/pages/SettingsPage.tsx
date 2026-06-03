@@ -1001,13 +1001,31 @@ function AgentProviderDialog({
             <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="OpenAI" className={inputClassName} />
           </AgentProviderDialogField>
           <AgentProviderDialogField label={t("agent.pi_provider")}>
-            <input value={piProvider} onChange={(event) => setPiProvider(event.target.value)} placeholder="openai" className={inputClassName} />
+            <AgentDialogSelect
+              value={piProvider}
+              options={piProviderOptions(piProvider)}
+              placeholder={t("agent.pi_provider")}
+              onChange={setPiProvider}
+            />
           </AgentProviderDialogField>
           <AgentProviderDialogField label={t("agent.pi_api")}>
-            <input value={api} onChange={(event) => setApi(event.target.value)} placeholder="openai-responses" className={inputClassName} />
+            <AgentDialogSelect
+              value={api}
+              options={piApiOptions(api)}
+              placeholder={t("agent.pi_api")}
+              onChange={setApi}
+            />
           </AgentProviderDialogField>
           <AgentProviderDialogField label={t("agent.api_base_url")}>
-            <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" className={inputClassName} />
+            <div className="grid grid-cols-[minmax(0,1fr)_160px] gap-2">
+              <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" className={inputClassName} />
+              <AgentDialogSelect
+                value={baseUrlPresetValue(baseUrl)}
+                options={baseUrlOptions(baseUrl)}
+                placeholder={t("agent.base_url_preset")}
+                onChange={setBaseUrl}
+              />
+            </div>
           </AgentProviderDialogField>
           <AgentProviderDialogField label={t("agent.api_key")}>
             <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="sk-..." className={inputClassName} />
@@ -1031,6 +1049,33 @@ function AgentProviderDialogField({ label, children }: { label: string; children
       <span className="text-caption font-medium text-card-muted/60">{label}</span>
       {children}
     </label>
+  );
+}
+
+function AgentDialogSelect({
+  value,
+  options,
+  placeholder,
+  onChange,
+}: {
+  value: string;
+  options: Array<{ value: string; label: string; description?: string }>;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <InlineMenuSelect
+      value={value}
+      options={options}
+      onChange={onChange}
+      menuAlign="trigger"
+      placeholder={placeholder}
+      ariaLabel={placeholder}
+      className="h-9 w-full !max-w-full rounded-md border border-input-border/[0.16] bg-input px-3 text-input-fg hover:text-input-fg"
+      menuClassName="bg-surface-panel"
+      minMenuWidth={260}
+      emptyContent={placeholder}
+    />
   );
 }
 
@@ -1241,6 +1286,95 @@ function normalizeProviderOrders(options: AgentAiProviderInfo[]): AgentAiProvide
     enabled: provider.enabled ?? true,
     order: index,
   }));
+}
+
+const PI_PROVIDER_PRESETS = [
+  "openai",
+  "anthropic",
+  "google",
+  "google-vertex",
+  "amazon-bedrock",
+  "azure-openai-responses",
+  "openai-codex",
+  "deepseek",
+  "github-copilot",
+  "xai",
+  "groq",
+  "cerebras",
+  "openrouter",
+  "vercel-ai-gateway",
+  "zai",
+  "mistral",
+  "minimax",
+  "minimax-cn",
+  "moonshotai",
+  "moonshotai-cn",
+  "huggingface",
+  "fireworks",
+  "together",
+  "opencode",
+  "opencode-go",
+  "kimi-coding",
+  "cloudflare-workers-ai",
+  "cloudflare-ai-gateway",
+  "xiaomi",
+  "xiaomi-token-plan-cn",
+  "xiaomi-token-plan-ams",
+  "xiaomi-token-plan-sgp",
+];
+
+const PI_API_PRESETS = [
+  "openai-responses",
+  "openai-completions",
+  "openai-codex-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+  "google-vertex",
+  "azure-openai-responses",
+  "bedrock-converse-stream",
+  "mistral-conversations",
+];
+
+const BASE_URL_PRESETS = [
+  { value: "https://api.openai.com/v1", label: "OpenAI" },
+  { value: "https://api.anthropic.com/v1", label: "Anthropic" },
+  { value: "https://generativelanguage.googleapis.com/v1beta", label: "Google" },
+  { value: "https://openrouter.ai/api/v1", label: "OpenRouter" },
+  { value: "https://api.x.ai/v1", label: "xAI" },
+  { value: "https://api.groq.com/openai/v1", label: "Groq" },
+  { value: "https://api.together.xyz/v1", label: "Together" },
+  { value: "https://api.fireworks.ai/inference/v1", label: "Fireworks" },
+  { value: "https://api.cerebras.ai/v1", label: "Cerebras" },
+  { value: "https://api.mistral.ai/v1", label: "Mistral" },
+  { value: "https://api.deepseek.com/v1", label: "DeepSeek" },
+  { value: "https://api.moonshot.ai/v1", label: "Moonshot" },
+  { value: "https://api.kimi.com/v1", label: "Kimi" },
+  { value: "https://api.minimax.io/v1", label: "MiniMax" },
+  { value: "https://api.z.ai/api/paas/v4", label: "Z.ai" },
+  { value: "https://gateway.ai.cloudflare.com/v1", label: "Cloudflare" },
+];
+
+function presetOptions(presets: string[], selected: string): Array<{ value: string; label: string }> {
+  const options = presets.map((value) => ({ value, label: value }));
+  if (selected && !presets.includes(selected)) return [{ value: selected, label: selected }, ...options];
+  return options;
+}
+
+function piProviderOptions(selected: string): Array<{ value: string; label: string }> {
+  return presetOptions(PI_PROVIDER_PRESETS, selected);
+}
+
+function piApiOptions(selected: string): Array<{ value: string; label: string }> {
+  return presetOptions(PI_API_PRESETS, selected);
+}
+
+function baseUrlOptions(_selected: string): Array<{ value: string; label: string; description: string }> {
+  return BASE_URL_PRESETS.map((preset) => ({ ...preset, description: preset.value }));
+}
+
+function baseUrlPresetValue(value: string): string {
+  const trimmed = value.trim();
+  return BASE_URL_PRESETS.some((preset) => preset.value === trimmed) ? trimmed : "";
 }
 
 function updateProviderInfo(
