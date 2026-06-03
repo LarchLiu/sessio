@@ -526,6 +526,7 @@ function AgentEditor({
   const isAstra = agent.id === "astra";
   const [aiProvider, setAiProvider] = useState(agent.aiProvider ?? "");
   const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);
+  const [providerDialog, setProviderDialog] = useState<{ mode: "add" | "edit"; provider: AgentAiProviderInfo } | null>(null);
   const selectedAiProvider = aiProviders.find((provider) => provider.id === aiProvider) ?? aiProviders.find((provider) => provider.enabled) ?? aiProviders[0] ?? null;
 
   useEffect(() => {
@@ -537,6 +538,7 @@ function AgentEditor({
     setNewModelDisplayName("");
     setAiProvider(agent.aiProvider ?? "");
     setAiProviders(agent.aiProviders);
+    setProviderDialog(null);
   }, [agent]);
 
   const persist = async (patch: AgentPreferencePatch) => {
@@ -684,21 +686,14 @@ function AgentEditor({
       model: nextModel,
     });
   };
-  const updateProviderDraft = (providerId: string, patch: Partial<AgentAiProviderInfo>) => {
-    setAiProviders((prev) => updateProviderInfo(prev, providerId, patch));
-  };
-  const saveSelectedProvider = async () => {
-    if (!selectedAiProvider) return;
-    await saveAstraProviders(aiProviders, selectedAiProvider.id, model || selectedAiProvider.models[0]?.value);
-  };
   const selectAiProvider = async (nextProviderId: string) => {
     const provider = aiProviders.find((item) => item.id === nextProviderId) ?? null;
     const nextModel = provider?.models.find((item) => item.enabled)?.value ?? provider?.models[0]?.value ?? null;
     await saveAstraProviders(aiProviders, nextProviderId, nextModel);
   };
-  const addProvider = async () => {
+  const createProviderDraft = (): AgentAiProviderInfo => {
     const providerId = uniqueProviderId(aiProviders, "custom-provider");
-    const nextProvider: AgentAiProviderInfo = {
+    return {
       id: providerId,
       displayName: t("agent.custom_provider"),
       provider: "openai",
@@ -709,19 +704,36 @@ function AgentEditor({
       enabled: true,
       order: aiProviders.length,
     };
-    await saveAstraProviders([...aiProviders, nextProvider], providerId, undefined);
   };
-  const deleteProvider = async () => {
-    if (!selectedAiProvider || aiProviders.length <= 1) return;
-    const nextProviders = aiProviders.filter((provider) => provider.id !== selectedAiProvider.id);
-    const nextProvider = nextProviders[0] ?? null;
+  const openAddProviderDialog = () => {
+    setProviderDialog({ mode: "add", provider: createProviderDraft() });
+  };
+  const openEditProviderDialog = (provider: AgentAiProviderInfo) => {
+    setProviderDialog({ mode: "edit", provider: { ...provider, models: provider.models.slice() } });
+  };
+  const saveProviderDialog = async (provider: AgentAiProviderInfo) => {
+    const nextProvider = normalizeProviderOrders([provider])[0];
+    if (!nextProvider) return;
+    if (providerDialog?.mode === "edit") {
+      const nextProviders = updateProviderInfo(aiProviders, provider.id, nextProvider);
+      const nextProviderId = selectedAiProvider?.id ?? nextProvider.id;
+      const selectedProvider = nextProviders.find((item) => item.id === nextProviderId) ?? nextProvider;
+      const nextModel = selectedProvider.id === nextProvider.id
+        ? (model || selectedProvider.models[0]?.value || null)
+        : selectedProvider.models.find((item) => item.enabled)?.value ?? selectedProvider.models[0]?.value ?? null;
+      await saveAstraProviders(nextProviders, nextProviderId, nextModel);
+    } else {
+      await saveAstraProviders([...aiProviders, nextProvider], nextProvider.id, nextProvider.models[0]?.value ?? null);
+    }
+    setProviderDialog(null);
+  };
+  const deleteProvider = async (providerId: string) => {
+    if (aiProviders.length <= 1) return;
+    const nextProviders = aiProviders.filter((provider) => provider.id !== providerId);
+    const nextProvider = nextProviders.find((provider) => provider.id === selectedAiProvider?.id) ?? nextProviders[0] ?? null;
     const nextModel = nextProvider?.models.find((item) => item.enabled)?.value ?? nextProvider?.models[0]?.value ?? null;
     await saveAstraProviders(nextProviders, nextProvider?.id ?? "", nextModel);
   };
-  const providerOptions = aiProviders.map((provider) => ({
-    value: provider.id,
-    label: provider.displayName || provider.provider || provider.id,
-  }));
 
   return (
     <>
@@ -763,73 +775,29 @@ function AgentEditor({
         </div>
       </SettingsGroup>
       {isAstra && (
-        <SettingsGroup title={t("agent.providers")}>
-          <div className="grid gap-2">
-            <AgentPreferenceRow label={t("agent.provider")}>
-              <div className="flex min-w-0 items-center gap-2">
-                <AgentInlineSelect
-                  value={selectedAiProvider?.id ?? ""}
-                  options={providerOptions}
-                  placeholder={t("agent.provider")}
-                  onChange={(value) => void selectAiProvider(value)}
-                />
-                <Tooltip content={t("agent.add_provider")} placement="top">
-                  <button type="button" onClick={() => void addProvider()} className="rounded p-1.5 text-card-subtle/55 hover:bg-card-action-hover/5 hover:text-card-fg/75">
-                    <Plus className="h-4 w-4" />
-                  </button>
-                </Tooltip>
-                <Tooltip content={t("agent.delete_provider")} placement="top">
-                  <button type="button" onClick={() => void deleteProvider()} disabled={aiProviders.length <= 1} className="rounded p-1.5 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error disabled:opacity-30">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </Tooltip>
-              </div>
-            </AgentPreferenceRow>
-            {selectedAiProvider && (
-              <>
-                <AgentPreferenceRow label={t("agent.provider_name")}>
-                  <AgentInlineInput
-                    value={selectedAiProvider.displayName}
-                    placeholder="OpenAI"
-                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { displayName: value })}
-                    onBlur={saveSelectedProvider}
-                  />
-                </AgentPreferenceRow>
-                <AgentPreferenceRow label={t("agent.pi_provider")}>
-                  <AgentInlineInput
-                    value={selectedAiProvider.provider}
-                    placeholder="openai"
-                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { provider: value })}
-                    onBlur={saveSelectedProvider}
-                  />
-                </AgentPreferenceRow>
-                <AgentPreferenceRow label={t("agent.pi_api")}>
-                  <AgentInlineInput
-                    value={selectedAiProvider.api ?? ""}
-                    placeholder="openai-responses"
-                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { api: value || null })}
-                    onBlur={saveSelectedProvider}
-                  />
-                </AgentPreferenceRow>
-                <AgentPreferenceRow label={t("agent.api_base_url")}>
-                  <AgentInlineInput
-                    value={selectedAiProvider.baseUrl ?? ""}
-                    placeholder="https://api.openai.com/v1"
-                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { baseUrl: value || null })}
-                    onBlur={saveSelectedProvider}
-                  />
-                </AgentPreferenceRow>
-                <AgentPreferenceRow label={t("agent.api_key")}>
-                  <AgentInlineInput
-                    value={selectedAiProvider.apiKey ?? ""}
-                    placeholder="sk-..."
-                    type="password"
-                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { apiKey: value || null })}
-                    onBlur={saveSelectedProvider}
-                  />
-                </AgentPreferenceRow>
-              </>
-            )}
+        <SettingsGroup
+          title={t("agent.providers")}
+          action={
+            <button type="button" onClick={openAddProviderDialog} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-body-sm font-medium leading-none text-card-fg/75 transition hover:bg-card-action-hover/5 hover:text-card-fg/90">
+              <Plus className="h-4 w-4" />
+              {t("agent.add_provider")}
+            </button>
+          }
+          flush
+        >
+          <div className="divide-y divide-card-border/[0.08]">
+            {aiProviders.map((provider) => (
+              <AgentProviderRow
+                key={provider.id}
+                provider={provider}
+                selected={provider.id === selectedAiProvider?.id}
+                canDelete={aiProviders.length > 1}
+                onSelect={selectAiProvider}
+                onEdit={openEditProviderDialog}
+                onDelete={deleteProvider}
+              />
+            ))}
+            {aiProviders.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_providers")} /></div>}
           </div>
         </SettingsGroup>
       )}
@@ -893,7 +861,145 @@ function AgentEditor({
           </DragDropProvider>
         </div>
       </SettingsGroup>
+      {providerDialog && (
+        <AgentProviderDialog
+          mode={providerDialog.mode}
+          provider={providerDialog.provider}
+          onClose={() => setProviderDialog(null)}
+          onSave={saveProviderDialog}
+        />
+      )}
     </>
+  );
+}
+
+function AgentProviderRow({
+  provider,
+  selected,
+  canDelete,
+  onSelect,
+  onEdit,
+  onDelete,
+}: {
+  provider: AgentAiProviderInfo;
+  selected: boolean;
+  canDelete: boolean;
+  onSelect: (providerId: string) => Promise<void>;
+  onEdit: (provider: AgentAiProviderInfo) => void;
+  onDelete: (providerId: string) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const detailItems = [
+    provider.provider,
+    provider.api,
+    provider.baseUrl,
+    t("agent.model_count", { count: provider.models.length }),
+  ].filter((item) => item && item.trim().length > 0);
+
+  return (
+    <div className={"grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 transition " + (selected ? "bg-card-active" : "hover:bg-card-action-hover/5")}>
+      <button type="button" onClick={() => void onSelect(provider.id)} className="flex min-w-0 items-center gap-3 text-left">
+        <span className={"flex h-5 w-5 shrink-0 items-center justify-center rounded-full border " + (selected ? "border-brand/55 bg-brand/15 text-brand" : "border-card-border/[0.14] text-transparent")}>
+          {selected && <Check className="h-3.5 w-3.5" />}
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-body-sm font-medium text-card-fg/82">{provider.displayName || provider.provider || provider.id}</span>
+          <span className="mt-0.5 block truncate text-caption text-card-muted/56">{detailItems.join(" / ")}</span>
+        </span>
+      </button>
+      <div className="flex items-center gap-1">
+        <Tooltip content={t("agent.edit_provider")} placement="top">
+          <button type="button" onClick={() => onEdit(provider)} className="rounded p-1.5 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75">
+            <Pencil className="h-4 w-4" />
+          </button>
+        </Tooltip>
+        <Tooltip content={t("agent.delete_provider")} placement="top">
+          <button type="button" onClick={() => void onDelete(provider.id)} disabled={!canDelete} className="rounded p-1.5 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-card-subtle/45">
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </Tooltip>
+      </div>
+    </div>
+  );
+}
+
+function AgentProviderDialog({
+  mode,
+  provider,
+  onClose,
+  onSave,
+}: {
+  mode: "add" | "edit";
+  provider: AgentAiProviderInfo;
+  onClose: () => void;
+  onSave: (provider: AgentAiProviderInfo) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [displayName, setDisplayName] = useState(provider.displayName);
+  const [piProvider, setPiProvider] = useState(provider.provider);
+  const [api, setApi] = useState(provider.api ?? "");
+  const [baseUrl, setBaseUrl] = useState(provider.baseUrl ?? "");
+  const [apiKey, setApiKey] = useState(provider.apiKey ?? "");
+
+  useEffect(() => {
+    setDisplayName(provider.displayName);
+    setPiProvider(provider.provider);
+    setApi(provider.api ?? "");
+    setBaseUrl(provider.baseUrl ?? "");
+    setApiKey(provider.apiKey ?? "");
+  }, [provider]);
+
+  const save = async () => {
+    const nextProvider: AgentAiProviderInfo = {
+      ...provider,
+      displayName: displayName.trim() || piProvider.trim() || provider.id,
+      provider: piProvider.trim() || provider.id,
+      api: api.trim() || null,
+      baseUrl: baseUrl.trim() || null,
+      apiKey: apiKey.trim() || null,
+    };
+    await onSave(nextProvider);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4" onClick={onClose}>
+      <div className="w-full max-w-[520px] rounded-lg border border-card-border/[0.12] bg-surface-panel p-4 shadow-[0_24px_80px_rgba(0,0,0,0.22)]" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{mode === "add" ? t("agent.add_provider") : t("agent.edit_provider")}</div>
+        <div className="grid gap-2">
+          <AgentProviderDialogField label={t("agent.provider_name")}>
+            <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="OpenAI" className={inputClassName} />
+          </AgentProviderDialogField>
+          <AgentProviderDialogField label={t("agent.pi_provider")}>
+            <input value={piProvider} onChange={(event) => setPiProvider(event.target.value)} placeholder="openai" className={inputClassName} />
+          </AgentProviderDialogField>
+          <AgentProviderDialogField label={t("agent.pi_api")}>
+            <input value={api} onChange={(event) => setApi(event.target.value)} placeholder="openai-responses" className={inputClassName} />
+          </AgentProviderDialogField>
+          <AgentProviderDialogField label={t("agent.api_base_url")}>
+            <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" className={inputClassName} />
+          </AgentProviderDialogField>
+          <AgentProviderDialogField label={t("agent.api_key")}>
+            <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="sk-..." className={inputClassName} />
+          </AgentProviderDialogField>
+          <div className="mt-1 flex justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
+            <button type="button" onClick={() => void save()} disabled={!piProvider.trim()} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90 disabled:opacity-35">
+              <Check className="h-4 w-4" />
+              {t("project.save")}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentProviderDialogField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="grid gap-1.5">
+      <span className="text-caption font-medium text-card-muted/60">{label}</span>
+      {children}
+    </label>
   );
 }
 
@@ -1009,31 +1115,6 @@ function AgentPreferenceRow({ label, children }: { label: string; children: Reac
       <span className="text-caption font-medium text-card-muted/60">{label}</span>
       <div className="min-w-0 justify-self-start">{children}</div>
     </div>
-  );
-}
-
-function AgentInlineInput({
-  value,
-  placeholder,
-  type = "text",
-  onChange,
-  onBlur,
-}: {
-  value: string;
-  placeholder: string;
-  type?: "text" | "password";
-  onChange: (value: string) => void;
-  onBlur: () => Promise<void> | void;
-}) {
-  return (
-    <input
-      value={value}
-      type={type}
-      placeholder={placeholder}
-      onChange={(event) => onChange(event.target.value)}
-      onBlur={() => void onBlur()}
-      className="h-8 w-[320px] max-w-full min-w-0 rounded-md border border-input-border/[0.12] bg-input px-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30"
-    />
   );
 }
 
