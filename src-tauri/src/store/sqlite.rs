@@ -769,10 +769,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     ] {
         let _ = conn.execute(statement, []);
     }
-    seed_builtin_workflows(conn)?;
-    seed_builtin_workflow_stages(conn)?;
-    seed_builtin_agents(conn)?;
     if current < 5 {
+        seed_builtin_workflows(conn)?;
+        seed_builtin_workflow_stages(conn)?;
+        seed_builtin_agents(conn)?;
         seed_builtin_workflow_stage_assistants(conn, now_ms())?;
     }
     Ok(())
@@ -782,13 +782,8 @@ fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
     let now = now_ms();
     for (id, name, description) in BUILTIN_WORKFLOW_SEEDS {
         conn.execute(
-            "INSERT INTO workflows (id, name, description, type, created_at, updated_at)
-             VALUES (?, ?, ?, 'builtin', ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name,
-                description = excluded.description,
-                type = excluded.type,
-                updated_at = excluded.updated_at",
+            "INSERT OR IGNORE INTO workflows (id, name, description, type, created_at, updated_at)
+             VALUES (?, ?, ?, 'builtin', ?, ?)",
             params![id, name, description, now, now],
         )?;
     }
@@ -806,16 +801,8 @@ fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
             let id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
             let allow_empty_assistants = matches!(kind, StageType::Human | StageType::Done);
             conn.execute(
-                "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
-                 VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, NULL, ?, 1, ?, ?, ?)
-                 ON CONFLICT(id) DO UPDATE SET
-                    type = excluded.type,
-                    workflow_id = excluded.workflow_id,
-                    kind = excluded.kind,
-                    name = excluded.name,
-                    description = excluded.description,
-                    icon = COALESCE(stages.icon, excluded.icon),
-                    updated_at = excluded.updated_at",
+                "INSERT OR IGNORE INTO stages (id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
+                 VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, NULL, ?, 1, ?, ?, ?)",
                 params![
                     id,
                     workflow_id,
@@ -1100,33 +1087,12 @@ fn seed_builtin_agent(
 ) -> Result<()> {
     let id = agent.as_str();
     conn.execute(
-        "INSERT INTO agents (
+        "INSERT OR IGNORE INTO agents (
             id, name, display_name, icon, ai_provider, ai_providers_json, ai_api, api_base_url, api_key,
             model, models_json, effort, efforts_json,
             permission_mode, permission_modes_json, type, enabled, transport,
             commands_json, sort_order, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            display_name = COALESCE(agents.display_name, excluded.display_name),
-            icon = COALESCE(agents.icon, excluded.icon),
-            ai_provider = COALESCE(agents.ai_provider, excluded.ai_provider),
-            ai_providers_json = COALESCE(NULLIF(agents.ai_providers_json, '[]'), excluded.ai_providers_json),
-            ai_api = COALESCE(agents.ai_api, excluded.ai_api),
-            api_base_url = COALESCE(agents.api_base_url, excluded.api_base_url),
-            api_key = COALESCE(agents.api_key, excluded.api_key),
-            model = COALESCE(agents.model, excluded.model),
-            models_json = COALESCE(NULLIF(agents.models_json, '{}'), excluded.models_json),
-            effort = COALESCE(agents.effort, excluded.effort),
-            efforts_json = excluded.efforts_json,
-            permission_mode = COALESCE(agents.permission_mode, excluded.permission_mode),
-            permission_modes_json = excluded.permission_modes_json,
-            type = excluded.type,
-            enabled = agents.enabled,
-            transport = COALESCE(agents.transport, excluded.transport),
-            commands_json = excluded.commands_json,
-            sort_order = agents.sort_order,
-            updated_at = excluded.updated_at",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             id,
             runtime_agent_name(agent),
@@ -1158,33 +1124,12 @@ fn seed_builtin_agent(
 fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
     let ai_providers = astra_default_ai_providers();
     conn.execute(
-        "INSERT INTO agents (
+        "INSERT OR IGNORE INTO agents (
             id, name, display_name, icon, ai_provider, ai_providers_json, ai_api, api_base_url, api_key,
             model, models_json, effort, efforts_json,
             permission_mode, permission_modes_json, type, enabled, transport,
             commands_json, sort_order, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            display_name = COALESCE(agents.display_name, excluded.display_name),
-            icon = COALESCE(agents.icon, excluded.icon),
-            ai_provider = COALESCE(agents.ai_provider, excluded.ai_provider),
-            ai_providers_json = COALESCE(NULLIF(agents.ai_providers_json, '[]'), excluded.ai_providers_json),
-            ai_api = COALESCE(agents.ai_api, excluded.ai_api),
-            api_base_url = agents.api_base_url,
-            api_key = agents.api_key,
-            model = COALESCE(agents.model, excluded.model),
-            models_json = COALESCE(NULLIF(agents.models_json, '{}'), excluded.models_json),
-            effort = COALESCE(agents.effort, excluded.effort),
-            efforts_json = excluded.efforts_json,
-            permission_mode = NULL,
-            permission_modes_json = '[]',
-            type = excluded.type,
-            enabled = 1,
-            transport = excluded.transport,
-            commands_json = excluded.commands_json,
-            sort_order = COALESCE(agents.sort_order, excluded.sort_order),
-            updated_at = excluded.updated_at",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             "astra",
             "Astra",
@@ -3070,9 +3015,7 @@ fn seed_workflow_builtin_assistant(
          SELECT ?, name, agent_json, system_prompt, color, type, ?, NULL, enabled, ?, ?
          FROM assistants
          WHERE id = ?
-         ON CONFLICT(id) DO UPDATE SET
-            color = COALESCE(assistants.color, excluded.color),
-            updated_at = excluded.updated_at",
+         ON CONFLICT(id) DO NOTHING",
         params![
             workflow_assistant_id,
             workflow_id,
@@ -3203,15 +3146,7 @@ fn upsert_builtin_assistant(
         "INSERT INTO assistants (
             id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, 'builtin', NULL, NULL, 1, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            agent_json = excluded.agent_json,
-            system_prompt = excluded.system_prompt,
-            color = COALESCE(assistants.color, excluded.color),
-            type = excluded.type,
-            workflow_id = excluded.workflow_id,
-            project_id = excluded.project_id,
-            updated_at = excluded.updated_at",
+         ON CONFLICT(id) DO NOTHING",
         params![
             seed.id,
             seed.name,
@@ -4441,7 +4376,9 @@ impl SessionStore for SqliteStore {
             Some(values) => serde_json::to_string(values)?,
             None => serde_json::to_string(&current.ai_providers)?,
         };
-        let next_model = model.map(str::trim).filter(|value| !value.is_empty());
+        let trimmed_model = model.map(str::trim);
+        let clear_model = id == "astra" && matches!(trimmed_model, Some(""));
+        let next_model = trimmed_model.filter(|value| !value.is_empty());
         let next_effort = effort.map(str::trim).filter(|value| !value.is_empty());
         let next_permission_mode = permission_mode
             .map(str::trim)
@@ -4465,7 +4402,7 @@ impl SessionStore for SqliteStore {
              SET display_name = COALESCE(?, display_name),
                  ai_provider = COALESCE(?, ai_provider),
                  ai_providers_json = ?,
-                 model = COALESCE(?, model),
+                 model = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, model) END,
                  models_json = ?,
                  effort = COALESCE(?, effort),
                  efforts_json = ?,
@@ -4479,6 +4416,7 @@ impl SessionStore for SqliteStore {
                 next_display_name,
                 next_ai_provider,
                 next_ai_providers,
+                if clear_model { 1_i64 } else { 0_i64 },
                 next_model,
                 next_models,
                 next_effort,
@@ -4491,7 +4429,6 @@ impl SessionStore for SqliteStore {
                 id,
             ],
         )?;
-        seed_builtin_assistants(&conn, now)?;
         load_agent_by_id(&conn, id)
     }
 
@@ -9403,6 +9340,88 @@ mod migration_tests {
         assert_eq!(loaded.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(loaded.effort.as_deref(), Some("high"));
         assert_eq!(loaded.permission_mode.as_deref(), Some("read-only"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn astra_preferences_can_clear_model_without_affecting_runtime_agents() {
+        let path = unique_db("sessio-astra-clear-model");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let astra = store
+            .update_agent_preferences_by_id(
+                "astra",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(""),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(astra.model, None);
+
+        let codex = store
+            .update_builtin_agent_preferences(
+                Agent::Codex,
+                None,
+                None,
+                None,
+                Some(""),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(codex.model.as_deref(), Some("gpt-5.5"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn builtin_agent_seed_does_not_overwrite_existing_preferences_on_reinit() {
+        let path = unique_db("sessio-agent-seed-preserve");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        store
+            .update_builtin_agent_preferences(
+                Agent::Codex,
+                Some("Custom Codex"),
+                Some(false),
+                Some(99),
+                Some("custom-model"),
+                Some("medium"),
+                Some("auto"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        store.init().unwrap();
+
+        let codex = store
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.id == "codex")
+            .unwrap();
+        assert_eq!(codex.display_name, "Custom Codex");
+        assert_eq!(codex.model.as_deref(), Some("custom-model"));
+        assert_eq!(codex.effort.as_deref(), Some("medium"));
+        assert_eq!(codex.permission_mode.as_deref(), Some("auto"));
+        assert!(!codex.enabled);
+        assert_eq!(codex.order, 99);
 
         let _ = std::fs::remove_file(&path);
     }
