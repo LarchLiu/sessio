@@ -305,7 +305,7 @@ function GeneralSettings({
 function AgentsSettings({ onError }: { onError: (error: string | null) => void }) {
   const { t } = useI18n();
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [selectedAgentId, setSelectedAgentId] = useState<string>("codex");
+  const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const builtinAgents = useMemo(
