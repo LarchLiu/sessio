@@ -63,6 +63,7 @@ export interface AstraModelConfig {
   baseUrl?: string | null;
   apiKey?: string | null;
   modelId?: string | null;
+  thinkingLevel?: string | null;
   fauxPlanJson?: string | null;
 }
 

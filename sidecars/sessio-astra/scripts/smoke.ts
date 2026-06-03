@@ -3,13 +3,7 @@ function sidecarEnv(extra: Record<string, string> = {}): Record<string, string> 
   for (const [key, value] of Object.entries(Bun.env)) {
     if (typeof value === "string") env[key] = value;
   }
-  delete env.SESSIO_ASTRA_MODEL_PROVIDER;
-  delete env.SESSIO_ASTRA_PROVIDER;
-  delete env.SESSIO_ASTRA_MODEL_ID;
-  delete env.SESSIO_ASTRA_MODEL;
   delete env.SESSIO_ASTRA_ALLOW_MISSING_API_KEY;
-  delete env.SESSIO_ASTRA_FAUX_MODEL_ID;
-  delete env.SESSIO_ASTRA_FAUX_PLAN_JSON;
   return { ...env, ...extra };
 }
 

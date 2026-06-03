@@ -456,6 +456,7 @@ impl AstraService {
                 "baseUrl": provider.base_url,
                 "apiKey": provider.api_key,
                 "modelId": model_id,
+                "thinkingLevel": agent.effort,
             }))
         });
         let params = json!({

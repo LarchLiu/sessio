@@ -834,16 +834,18 @@ function AgentEditor({
               onChange={(value) => void selectModel(value)}
             />
           </AgentPreferenceRow>
+          {agent.efforts.length > 0 && (
+            <AgentPreferenceRow label={isAstra ? t("agent.thinking_level") : t("assistant.effort")}>
+              <AgentInlineSelect
+                value={effort}
+                options={effortOptions}
+                placeholder={isAstra ? t("agent.thinking_level") : t("assistant.effort")}
+                onChange={(value) => void selectEffort(value)}
+              />
+            </AgentPreferenceRow>
+          )}
           {!isAstra && (
             <>
-              <AgentPreferenceRow label={t("assistant.effort")}>
-                <AgentInlineSelect
-                  value={effort}
-                  options={effortOptions}
-                  placeholder={t("assistant.effort")}
-                  onChange={(value) => void selectEffort(value)}
-                />
-              </AgentPreferenceRow>
               <AgentPreferenceRow label={t("assistant.permission_mode")}>
                 <AgentInlineSelect
                   value={permissionMode}

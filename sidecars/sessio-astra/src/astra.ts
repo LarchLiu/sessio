@@ -56,8 +56,8 @@ type PiModules = {
 };
 type PlannerConfig =
   | { kind: "none" }
-  | { kind: "configured"; provider: string; api?: string; baseUrl?: string; modelId: string; apiKey: string }
-  | { kind: "faux"; provider: "faux"; api: "faux"; modelId: string; planJson: string; apiKey: string };
+  | { kind: "configured"; provider: string; api?: string; baseUrl?: string; modelId: string; apiKey: string; thinkingLevel: string }
+  | { kind: "faux"; provider: "faux"; api: "faux"; modelId: string; planJson: string; apiKey: string; thinkingLevel: string };
 type PiPlanner = {
   agent: PiAgent;
   provider: string;
@@ -153,6 +153,7 @@ function readPlannerConfig(rawConfig: AstraModelConfig | null | undefined): Plan
   const apiKey = normalizeConfigText(rawConfig?.apiKey);
   const baseUrl = normalizeConfigText(rawConfig?.baseUrl);
   const fauxPlanJson = normalizeConfigText(rawConfig?.fauxPlanJson);
+  const thinkingLevel = normalizeThinkingLevel(rawConfig?.thinkingLevel);
 
   if (provider === "faux" && api === "faux" && fauxPlanJson) {
     return {
@@ -162,18 +163,24 @@ function readPlannerConfig(rawConfig: AstraModelConfig | null | undefined): Plan
       modelId: modelId || "sessio-astra-faux",
       apiKey: apiKey || "faux",
       planJson: fauxPlanJson,
+      thinkingLevel,
     };
   }
 
   if (!provider || !modelId) return { kind: "none" };
   if (!apiKey) return { kind: "none" };
-  return { kind: "configured", provider, api, baseUrl, modelId, apiKey };
+  return { kind: "configured", provider, api, baseUrl, modelId, apiKey, thinkingLevel };
 }
 
 function normalizeConfigText(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.trim();
   return text ? text : undefined;
+}
+
+function normalizeThinkingLevel(value: string | null | undefined): string {
+  const text = normalizeConfigText(value);
+  return ["off", "minimal", "low", "medium", "high", "xhigh"].includes(text ?? "") ? text! : "off";
 }
 
 function createPiPlanner(modules: PiModules, config: PlannerConfig): PiPlanner {
@@ -212,7 +219,7 @@ function createPlanningAgent(modules: PiModules, model: unknown, config: Exclude
     initialState: {
       systemPrompt: ASTRA_SYSTEM_PROMPT,
       model,
-      thinkingLevel: readThinkingLevel(),
+      thinkingLevel: config.thinkingLevel,
     },
     streamFn: (nextModel, context, options = {}) =>
       modules.streamSimple(nextModel, context, {
@@ -230,7 +237,7 @@ function customModel(config: Extract<PlannerConfig, { kind: "configured" }>): Re
     api: config.api || "openai-responses",
     provider: config.provider,
     baseUrl: config.baseUrl || "https://api.openai.com/v1",
-    reasoning: false,
+    reasoning: config.thinkingLevel !== "off",
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
@@ -439,11 +446,6 @@ function stringifyForPrompt(value: unknown, maxLength = 24000): string {
 function allowMissingApiKey(): boolean {
   const value = Bun.env.SESSIO_ASTRA_ALLOW_MISSING_API_KEY?.trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes";
-}
-
-function readThinkingLevel(): string {
-  const value = Bun.env.SESSIO_ASTRA_THINKING_LEVEL?.trim();
-  return value || "off";
 }
 
 function readPositiveIntegerEnv(name: string, fallback: number): number {
