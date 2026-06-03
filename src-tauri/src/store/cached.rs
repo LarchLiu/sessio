@@ -113,6 +113,14 @@ fn file_mtime_for(file_path: &str) -> Option<i64> {
         })
 }
 
+fn is_virtual_session_ref(value: &str) -> bool {
+    value.trim_start().starts_with("astra://")
+}
+
+fn is_placeholder_session(record: &IndexedSessionRecord) -> bool {
+    record.file_size == 0 && record.available
+}
+
 impl SessionStore for CachedStore {
     fn init(&self) -> Result<()> {
         self.inner.init()
@@ -665,7 +673,12 @@ impl SessionStore for CachedStore {
         // Mirror inner's semantics: rows whose session_id isn't in the new set
         // get marked unavailable; rows that match are replaced wholesale.
         for ((rec_agent, sid, rec_scope), rec) in snap.by_pk.iter_mut() {
-            if *rec_agent == agent && rec_scope == scope && !new_ids.contains(sid) {
+            if *rec_agent == agent
+                && rec_scope == scope
+                && !new_ids.contains(sid)
+                && !is_virtual_session_ref(&rec.scope)
+                && !is_virtual_session_ref(&rec.file_path)
+            {
                 rec.available = false;
             }
         }
@@ -731,6 +744,9 @@ impl SessionStore for CachedStore {
 
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()> {
         self.inner.mark_file_path_unavailable(file_path)?;
+        if is_virtual_session_ref(file_path) {
+            return Ok(());
+        }
         let mut snap = self.snapshot.write().unwrap();
         for rec in snap.by_pk.values_mut() {
             if rec.file_path == file_path {
@@ -769,12 +785,75 @@ impl SessionStore for CachedStore {
         for rec in snap.by_pk.values_mut() {
             if rec.agent == agent
                 && !present.contains(&rec.scope)
-                && !(rec.file_size == 0 && rec.available)
+                && !is_placeholder_session(rec)
+                && !is_virtual_session_ref(&rec.scope)
+                && !is_virtual_session_ref(&rec.file_path)
             {
                 rec.available = false;
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::sqlite::SqliteStore;
+    use std::path::PathBuf;
+
+    fn unique_db(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{prefix}-{}-{}.db", std::process::id(), now_ms()))
+    }
+
+    #[test]
+    fn cached_store_preserves_virtual_sessions_when_scopes_disappear() {
+        let path = unique_db("sessio-cached-astra-virtual-scope");
+        let sqlite = Arc::new(SqliteStore::open(&path).unwrap());
+        sqlite.init().unwrap();
+        let store = CachedStore::new(sqlite).unwrap();
+        let virtual_path = "astra://run-1/session/astra-child";
+        let session = SessionInfo {
+            id: "astra-child".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 1,
+            rename_title: Some("Astra delegated task".to_string()),
+            title: None,
+            first_user_message: Some("# Sessio stage task".to_string()),
+            file_path: virtual_path.to_string(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+
+        store.upsert_session(virtual_path, &session).unwrap();
+        store
+            .mark_missing_scopes_unavailable(Agent::Codex, &HashSet::new())
+            .unwrap();
+        store
+            .replace_by_scope(virtual_path, Agent::Codex, &[])
+            .unwrap();
+        store.mark_file_path_unavailable(virtual_path).unwrap();
+
+        let row = store
+            .list_indexed_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.session_id == "astra-child")
+            .unwrap();
+        assert!(row.available);
+        assert_eq!(row.scope, virtual_path);
+        assert_eq!(row.file_path, virtual_path);
+
+        let _ = std::fs::remove_file(path);
     }
 }
 

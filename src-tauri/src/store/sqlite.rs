@@ -1294,7 +1294,7 @@ fn load_identity_session_rows(
 }
 
 fn is_real_session_file_path(file_path: &str) -> bool {
-    !file_path.trim().is_empty() && !is_virtual_session_path(file_path)
+    !file_path.trim().is_empty() && !is_virtual_session_ref(file_path)
 }
 
 fn choose_identity_title(
@@ -5940,7 +5940,8 @@ impl SessionStore for SqliteStore {
             if !new_ids.contains(sid.as_str()) {
                 tx.execute(
                     "UPDATE sessions SET available = 0
-                     WHERE scope = ? AND agent = ? AND session_id = ?",
+                     WHERE scope = ? AND agent = ? AND session_id = ?
+                       AND NOT (scope LIKE 'astra://%' OR file_path LIKE 'astra://%')",
                     params![scope, agent.as_str(), sid],
                 )?;
             }
@@ -5953,7 +5954,7 @@ impl SessionStore for SqliteStore {
     }
 
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()> {
-        if is_virtual_session_path(file_path) {
+        if is_virtual_session_ref(file_path) {
             return Ok(());
         }
         let conn = self.conn.lock().unwrap();
@@ -6099,7 +6100,7 @@ impl SessionStore for SqliteStore {
                  SET available = 0
                  WHERE scope = ? AND agent = ?
                    AND NOT (file_size = 0 AND partial = 1)
-                   AND scope NOT LIKE 'astra://%'",
+                   AND NOT (scope LIKE 'astra://%' OR file_path LIKE 'astra://%')",
                 params![scope, agent.as_str()],
             )?;
         }
@@ -6134,8 +6135,8 @@ fn is_codex_guardian_index_row(session: &SessionInfo) -> bool {
     false
 }
 
-fn is_virtual_session_path(file_path: &str) -> bool {
-    file_path.starts_with("astra://")
+fn is_virtual_session_ref(value: &str) -> bool {
+    value.trim_start().starts_with("astra://")
 }
 
 impl MemoryStore for SqliteStore {
@@ -7331,6 +7332,58 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(db_row_count, 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn astra_virtual_session_refs_stay_available_when_scopes_disappear() {
+        let path = unique_db("sessio-astra-virtual-scope-guard");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let virtual_session = SessionInfo {
+            id: "astra-child".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 1,
+            rename_title: Some("Astra delegated task".to_string()),
+            title: None,
+            first_user_message: Some("# Sessio stage task".to_string()),
+            file_path: "astra://run-1/session/astra-child".to_string(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store
+            .upsert_session(&virtual_session.file_path, &virtual_session)
+            .unwrap();
+
+        store
+            .mark_missing_scopes_unavailable(Agent::Codex, &HashSet::new())
+            .unwrap();
+        store
+            .replace_by_scope(&virtual_session.file_path, Agent::Codex, &[])
+            .unwrap();
+        store
+            .mark_file_path_unavailable(&virtual_session.file_path)
+            .unwrap();
+
+        let row = store
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.id == "astra-child")
+            .unwrap();
+        assert!(row.available);
+        assert_eq!(row.file_path, virtual_session.file_path);
 
         let _ = std::fs::remove_file(&path);
     }
