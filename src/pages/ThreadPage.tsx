@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Bot, LoaderCircle, MessageSquarePlus, Plus, Sparkles, Square, Trash2 } from "lucide-react";
+import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
 import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal, AstraTaskResult, IssueSeverity, IssueStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo } from "../api";
 import {
@@ -339,6 +339,15 @@ function ThreadAstraPanel({
 
         {activeRun && activeRun.delegatedSessionIds.length > 0 && (
           <AstraDelegatedSessions run={activeRun} />
+        )}
+        {activeRun?.error && (
+          <div
+            title={activeRun.error}
+            className="flex min-w-0 items-start gap-1.5 rounded-md border border-status-error/20 bg-status-error/10 px-2.5 py-2 text-caption leading-relaxed text-status-error"
+          >
+            <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 break-words">{activeRun.error}</span>
+          </div>
         )}
       </div>
     </section>

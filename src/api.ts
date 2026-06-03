@@ -246,6 +246,7 @@ export interface AstraHandle {
   completedTaskIds: string[];
   stageAttemptCounts: Record<string, number>;
   retryLimit: number;
+  error: string | null;
   createdAt: number;
   updatedAt: number;
 }

@@ -113,6 +113,7 @@ pub struct AstraHandle {
     pub completed_task_ids: Vec<String>,
     pub stage_attempt_counts: HashMap<String, u32>,
     pub retry_limit: u32,
+    pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -467,25 +468,41 @@ impl AstraService {
             "modelConfig": model_config,
         });
 
+        let service = self.clone();
+        let run_id = run.run_id.clone();
+        thread::spawn(move || {
+            if let Err(error) = service.run_start_planning(&run_id, params) {
+                log::warn!("[sessio-astra:run:start-worker] {error}");
+            }
+        });
+
+        Ok(run_to_handle(run))
+    }
+
+    fn run_start_planning(&self, run_id: &str, params: Value) -> Result<()> {
         let response = match self.request("astra/start", params, Some(Duration::from_secs(20))) {
             Ok(response) => response,
             Err(error) => {
-                let failed = self.update_status(
-                    &run.run_id,
+                let (failed, changed) = self.update_active_status(
+                    run_id,
                     AstraRunStatus::Errored,
                     Some(error.to_string()),
                 )?;
-                self.emit(&failed, "error", json!({ "message": error.to_string() }));
+                if changed {
+                    self.emit(&failed, "error", json!({ "message": error.to_string() }));
+                }
                 return Err(error);
             }
         };
         if let Some(error) = response.error {
-            let failed = self.update_status(
-                &run.run_id,
+            let (failed, changed) = self.update_active_status(
+                run_id,
                 AstraRunStatus::Errored,
                 Some(error.message.clone()),
             )?;
-            self.emit(&failed, "error", json!({ "message": error.message }));
+            if changed {
+                self.emit(&failed, "error", json!({ "message": error.message }));
+            }
             bail!("Astra start failed: {}", error.code);
         }
 
@@ -502,16 +519,17 @@ impl AstraService {
             .map(serde_json::from_value::<Vec<AstraTaskProposal>>)
             .transpose()?
             .unwrap_or_default();
-        let (next, applied) = self.mutate_run(&run.run_id, move |next| {
+        let (next, applied) = self.mutate_run(run_id, move |next| {
             if !next.status.active() {
                 return Ok(false);
             }
             next.status = AstraRunStatus::AwaitingApproval;
             next.proposed_tasks = tasks;
+            next.error = None;
             Ok(true)
         })?;
         if !applied {
-            return Ok(run_to_handle(next));
+            return Ok(());
         }
         log::info!(
             "[sessio-astra:run:plan] runId={} threadId={} taskCount={}",
@@ -527,7 +545,7 @@ impl AstraService {
                 "summary": summary,
             }),
         );
-        Ok(run_to_handle(next))
+        Ok(())
     }
 
     pub fn confirm_thread_astra(&self, req: ConfirmThreadAstraRequest) -> Result<AstraHandle> {
@@ -1367,16 +1385,16 @@ impl AstraService {
         let response = match timeout {
             Some(timeout) => receiver
                 .recv_timeout(timeout)
-                .map_err(|_| anyhow::anyhow!("Astra request timed out: {}", message.method))?,
+                .map_err(|_| anyhow::anyhow!("Astra request timed out: {}", message.method)),
             None => receiver
                 .recv()
-                .map_err(|_| anyhow::anyhow!("Astra response channel closed"))?,
+                .map_err(|_| anyhow::anyhow!("Astra response channel closed")),
         };
         pending
             .lock()
             .ok()
             .and_then(|mut pending| pending.remove(&id));
-        Ok(response)
+        Ok(response?)
     }
 
     fn spawn_sidecar(&self) -> Result<SidecarHandle> {
@@ -1422,25 +1440,30 @@ impl AstraService {
                     Ok(value)
                         if value.get("method").and_then(Value::as_str) == Some("tool/call") =>
                     {
-                        let response = match serde_json::from_value::<AstraProtocolRequest>(value) {
-                            Ok(request) => service.handle_tool_request(request),
-                            Err(error) => AstraProtocolResponse {
-                                protocol_version: PROTOCOL_VERSION,
-                                id: "unknown".to_string(),
-                                result: None,
-                                error: Some(AstraProtocolError {
-                                    code: "invalid_request".to_string(),
-                                    message: error.to_string(),
-                                    data: None,
-                                }),
-                            },
-                        };
-                        if let Ok(line) = serde_json::to_string(&response) {
-                            if let Ok(mut stdin) = stdin_reader.lock() {
-                                let _ = writeln!(stdin, "{line}");
-                                let _ = stdin.flush();
+                        let service = service.clone();
+                        let stdin_writer = stdin_reader.clone();
+                        thread::spawn(move || {
+                            let response =
+                                match serde_json::from_value::<AstraProtocolRequest>(value) {
+                                    Ok(request) => service.handle_tool_request(request),
+                                    Err(error) => AstraProtocolResponse {
+                                        protocol_version: PROTOCOL_VERSION,
+                                        id: "unknown".to_string(),
+                                        result: None,
+                                        error: Some(AstraProtocolError {
+                                            code: "invalid_request".to_string(),
+                                            message: error.to_string(),
+                                            data: None,
+                                        }),
+                                    },
+                                };
+                            if let Ok(line) = serde_json::to_string(&response) {
+                                if let Ok(mut stdin) = stdin_writer.lock() {
+                                    let _ = writeln!(stdin, "{line}");
+                                    let _ = stdin.flush();
+                                }
                             }
-                        }
+                        });
                     }
                     Ok(value) => match serde_json::from_value::<AstraProtocolResponse>(value) {
                         Ok(response) => {
@@ -2439,6 +2462,7 @@ fn run_to_handle(run: AstraRun) -> AstraHandle {
         completed_task_ids: run.completed_task_ids,
         stage_attempt_counts: run.stage_attempt_counts,
         retry_limit: run.retry_limit,
+        error: run.error,
         created_at: run.created_at,
         updated_at: run.updated_at,
     }

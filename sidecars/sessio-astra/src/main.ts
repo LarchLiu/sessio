@@ -300,10 +300,11 @@ async function runStdio(): Promise<void> {
       params: { runId, name, args },
     };
     return new Promise((resolve, reject) => {
+      const timeoutMs = name === "sessio.agent.dispatch_task" ? 65 * 60_000 : 60_000;
       const timeout = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`tool call timed out: ${name}`));
-      }, 60_000);
+      }, timeoutMs);
       pending.set(id, { resolve, reject, timeout });
       void write(message).catch((error) => {
         clearTimeout(timeout);
