@@ -720,7 +720,7 @@ function AgentEditor({
       displayName: t("agent.custom_provider"),
       provider: "openai",
       api: "openai-responses",
-      baseUrl: null,
+      baseUrl: defaultBaseUrlForPiProvider("openai"),
       apiKey: null,
       models: [],
       enabled: true,
@@ -991,6 +991,14 @@ function AgentProviderDialog({
     };
     await onSave(nextProvider);
   };
+  const selectPiProvider = (nextPiProvider: string) => {
+    const currentDefaultBaseUrl = defaultBaseUrlForPiProvider(piProvider);
+    const nextDefaultBaseUrl = defaultBaseUrlForPiProvider(nextPiProvider);
+    const shouldReplaceBaseUrl =
+      !baseUrl.trim() || (currentDefaultBaseUrl !== null && baseUrl.trim() === currentDefaultBaseUrl);
+    setPiProvider(nextPiProvider);
+    if (nextDefaultBaseUrl && shouldReplaceBaseUrl) setBaseUrl(nextDefaultBaseUrl);
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4" onClick={onClose}>
@@ -1005,7 +1013,7 @@ function AgentProviderDialog({
               value={piProvider}
               options={piProviderOptions(piProvider)}
               placeholder={t("agent.pi_provider")}
-              onChange={setPiProvider}
+              onChange={selectPiProvider}
             />
           </AgentProviderDialogField>
           <AgentProviderDialogField label={t("agent.pi_api")}>
@@ -1017,15 +1025,7 @@ function AgentProviderDialog({
             />
           </AgentProviderDialogField>
           <AgentProviderDialogField label={t("agent.api_base_url")}>
-            <div className="grid grid-cols-[minmax(0,1fr)_160px] gap-2">
-              <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" className={inputClassName} />
-              <AgentDialogSelect
-                value={baseUrlPresetValue(baseUrl)}
-                options={baseUrlOptions(baseUrl)}
-                placeholder={t("agent.base_url_preset")}
-                onChange={setBaseUrl}
-              />
-            </div>
+            <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" className={inputClassName} />
           </AgentProviderDialogField>
           <AgentProviderDialogField label={t("agent.api_key")}>
             <input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} placeholder="sk-..." className={inputClassName} />
@@ -1335,24 +1335,30 @@ const PI_API_PRESETS = [
   "mistral-conversations",
 ];
 
-const BASE_URL_PRESETS = [
-  { value: "https://api.openai.com/v1", label: "OpenAI" },
-  { value: "https://api.anthropic.com/v1", label: "Anthropic" },
-  { value: "https://generativelanguage.googleapis.com/v1beta", label: "Google" },
-  { value: "https://openrouter.ai/api/v1", label: "OpenRouter" },
-  { value: "https://api.x.ai/v1", label: "xAI" },
-  { value: "https://api.groq.com/openai/v1", label: "Groq" },
-  { value: "https://api.together.xyz/v1", label: "Together" },
-  { value: "https://api.fireworks.ai/inference/v1", label: "Fireworks" },
-  { value: "https://api.cerebras.ai/v1", label: "Cerebras" },
-  { value: "https://api.mistral.ai/v1", label: "Mistral" },
-  { value: "https://api.deepseek.com/v1", label: "DeepSeek" },
-  { value: "https://api.moonshot.ai/v1", label: "Moonshot" },
-  { value: "https://api.kimi.com/v1", label: "Kimi" },
-  { value: "https://api.minimax.io/v1", label: "MiniMax" },
-  { value: "https://api.z.ai/api/paas/v4", label: "Z.ai" },
-  { value: "https://gateway.ai.cloudflare.com/v1", label: "Cloudflare" },
-];
+const DEFAULT_BASE_URL_BY_PI_PROVIDER: Record<string, string> = {
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta",
+  "google-vertex": "https://generativelanguage.googleapis.com/v1beta",
+  "azure-openai-responses": "https://{resource}.openai.azure.com/openai/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  xai: "https://api.x.ai/v1",
+  groq: "https://api.groq.com/openai/v1",
+  cerebras: "https://api.cerebras.ai/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+  "vercel-ai-gateway": "https://ai-gateway.vercel.sh/v1",
+  zai: "https://api.z.ai/api/paas/v4",
+  mistral: "https://api.mistral.ai/v1",
+  minimax: "https://api.minimax.io/v1",
+  "minimax-cn": "https://api.minimax.chat/v1",
+  moonshotai: "https://api.moonshot.ai/v1",
+  "moonshotai-cn": "https://api.moonshot.cn/v1",
+  huggingface: "https://router.huggingface.co/v1",
+  fireworks: "https://api.fireworks.ai/inference/v1",
+  together: "https://api.together.xyz/v1",
+  "kimi-coding": "https://api.kimi.com/v1",
+  "cloudflare-ai-gateway": "https://gateway.ai.cloudflare.com/v1",
+};
 
 function presetOptions(presets: string[], selected: string): Array<{ value: string; label: string }> {
   const options = presets.map((value) => ({ value, label: value }));
@@ -1368,13 +1374,8 @@ function piApiOptions(selected: string): Array<{ value: string; label: string }>
   return presetOptions(PI_API_PRESETS, selected);
 }
 
-function baseUrlOptions(_selected: string): Array<{ value: string; label: string; description: string }> {
-  return BASE_URL_PRESETS.map((preset) => ({ ...preset, description: preset.value }));
-}
-
-function baseUrlPresetValue(value: string): string {
-  const trimmed = value.trim();
-  return BASE_URL_PRESETS.some((preset) => preset.value === trimmed) ? trimmed : "";
+function defaultBaseUrlForPiProvider(provider: string): string | null {
+  return DEFAULT_BASE_URL_BY_PI_PROVIDER[provider.trim()] ?? null;
 }
 
 function updateProviderInfo(
