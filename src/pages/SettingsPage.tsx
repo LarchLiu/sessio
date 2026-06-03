@@ -1005,7 +1005,7 @@ function AgentProviderRow({
   ].filter((item) => item && item.trim().length > 0);
 
   return (
-    <div className={"grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b px-3 py-2.5 transition last:border-b-0 " + (selected ? "border-card-border/[0.16] bg-card-active shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.34)]" : "border-card-border/[0.08] hover:bg-card-action-hover/5")}>
+    <div className={"grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b px-3 py-2.5 transition last:border-b-0 " + (selected ? "border-card-border/[0.16] bg-card-action-hover/5" : "border-card-border/[0.08] hover:bg-card-action-hover/5")}>
       <button type="button" onClick={() => void onSelect(provider.id)} className="flex min-w-0 items-center gap-3 text-left">
         <ProviderGlyph provider={provider} />
         <span className="min-w-0">
