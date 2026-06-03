@@ -556,9 +556,11 @@ function AgentEditor({
   const runtimeAgent = isRuntimeAgent(agent.id) ? agent.id : null;
   const isAstra = agent.id === "astra";
   const [aiProvider, setAiProvider] = useState(agent.aiProvider ?? "");
+  const [editingAiProvider, setEditingAiProvider] = useState(agent.aiProvider ?? "");
   const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);
   const [providerDialog, setProviderDialog] = useState<{ mode: "add" | "edit"; provider: AgentAiProviderInfo } | null>(null);
-  const selectedAiProvider = aiProviders.find((provider) => provider.id === aiProvider) ?? aiProviders.find((provider) => provider.enabled) ?? aiProviders[0] ?? null;
+  const activeAiProvider = aiProviders.find((provider) => provider.id === aiProvider) ?? aiProviders.find((provider) => provider.enabled) ?? aiProviders[0] ?? null;
+  const selectedAiProvider = aiProviders.find((provider) => provider.id === editingAiProvider) ?? activeAiProvider;
 
   useEffect(() => {
     setModel(agent.model ?? agent.models.find((item) => item.enabled)?.value ?? "");
@@ -568,6 +570,10 @@ function AgentEditor({
     setNewModelValue("");
     setNewModelDisplayName("");
     setAiProvider(agent.aiProvider ?? "");
+    setEditingAiProvider((current) => {
+      const defaultProviderId = agent.aiProvider ?? agent.aiProviders.find((provider) => provider.enabled)?.id ?? agent.aiProviders[0]?.id ?? "";
+      return agent.id === "astra" && agent.aiProviders.some((provider) => provider.id === current) ? current : defaultProviderId;
+    });
     setAiProviders(agent.aiProviders);
     setProviderDialog(null);
   }, [agent]);
@@ -627,10 +633,10 @@ function AgentEditor({
     setModels(nextModels);
     setNewModelValue("");
     setNewModelDisplayName("");
-    const nextModel = effectiveModel || value;
-    setModel(nextModel);
+    const nextModel = selectedAiProvider?.id === activeAiProvider?.id ? (effectiveModel || value) : persistedAstraModel;
+    if (selectedAiProvider?.id === activeAiProvider?.id) setModel(nextModel ?? "");
     if (isAstra && selectedAiProvider) {
-      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, nextModel);
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), aiProvider, nextModel);
       return;
     }
     await persist({ models: nextModels, model: nextModel });
@@ -640,11 +646,14 @@ function AgentEditor({
     const sourceModels = activeModels;
     const nextModels = sourceModels.filter((item) => item.value !== value);
     const orderedModels = normalizeModelOrders(nextModels);
-    const nextModel = effectiveModel === value ? defaultModelValue(orderedModels) : effectiveModel || defaultModelValue(orderedModels);
+    const selectedIsActive = selectedAiProvider?.id === activeAiProvider?.id;
+    const nextModel = selectedIsActive
+      ? (effectiveModel === value ? defaultModelValue(orderedModels) : effectiveModel || defaultModelValue(orderedModels))
+      : persistedAstraModel;
     setModels(orderedModels);
-    setModel(nextModel ?? "");
+    if (selectedIsActive) setModel(nextModel ?? "");
     if (isAstra && selectedAiProvider) {
-      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, orderedModels), selectedAiProvider.id, nextModel);
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, orderedModels), aiProvider, nextModel);
       return;
     }
     await persist({ models: orderedModels, model: nextModel });
@@ -656,11 +665,14 @@ function AgentEditor({
     if (!value || sourceModels.some((item) => item.value === value && item.value !== previousValue)) return;
     const displayName = nextDisplayName.trim() || value;
     const nextModels = normalizeModelOrders(sourceModels.map((item) => item.value === previousValue ? { ...item, value, label: displayName, displayName } : item));
-    const nextModel = effectiveModel === previousValue ? value : effectiveModel || defaultModelValue(nextModels);
+    const selectedIsActive = selectedAiProvider?.id === activeAiProvider?.id;
+    const nextModel = selectedIsActive
+      ? (effectiveModel === previousValue ? value : effectiveModel || defaultModelValue(nextModels))
+      : persistedAstraModel;
     setModels(nextModels);
-    setModel(nextModel ?? "");
+    if (selectedIsActive) setModel(nextModel ?? "");
     if (isAstra && selectedAiProvider) {
-      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, nextModel);
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), aiProvider, nextModel);
       return;
     }
     await persist({ models: nextModels, model: nextModel });
@@ -670,15 +682,21 @@ function AgentEditor({
     const nextModels = normalizeModelOrders(moveOption(activeModels, from, to));
     setModels(nextModels);
     if (isAstra && selectedAiProvider) {
-      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, effectiveModel || defaultModelValue(nextModels));
+      const nextModel = selectedAiProvider.id === activeAiProvider?.id ? effectiveModel || defaultModelValue(nextModels) : persistedAstraModel;
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), aiProvider, nextModel);
       return;
     }
     await persist({ models: nextModels });
   };
 
   const setDefaultModel = async (value: string) => {
+    if (isAstra && selectedAiProvider?.id !== activeAiProvider?.id) return;
     if (effectiveModel === value) return;
     setModel(value);
+    if (isAstra) {
+      await saveAstraProviders(aiProviders, aiProvider, value);
+      return;
+    }
     await persist({ model: value });
   };
 
@@ -689,9 +707,10 @@ function AgentEditor({
       ? effectiveModel
       : defaultModelValue(nextModels);
     setModels(nextModels);
-    setModel(nextModel ?? "");
+    const persistedModel = selectedAiProvider?.id === activeAiProvider?.id ? nextModel : persistedAstraModel;
+    if (selectedAiProvider?.id === activeAiProvider?.id) setModel(nextModel ?? "");
     if (isAstra && selectedAiProvider) {
-      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, nextModel);
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), aiProvider, persistedModel);
       return;
     }
     await persist({ models: nextModels, model: nextModel });
@@ -706,8 +725,12 @@ function AgentEditor({
   };
 
   const activeModels = isAstra && selectedAiProvider ? selectedAiProvider.models : models;
-  const effectiveModel = isAstra && !activeModels.some((item) => item.value === model) ? "" : model;
-  const modelOptions = optionRows(activeModels, effectiveModel);
+  const activeProviderModels = activeAiProvider?.models ?? [];
+  const preferenceModels = isAstra ? activeProviderModels : activeModels;
+  const effectiveModel = !preferenceModels.some((item) => item.value === model) ? "" : model;
+  const persistedAstraModel = activeProviderModels.some((item) => item.value === model) ? model : defaultModelValue(activeProviderModels);
+  const selectedProviderIsActive = !isAstra || selectedAiProvider?.id === activeAiProvider?.id;
+  const modelOptions = optionRows(preferenceModels, effectiveModel);
   const effortOptions = optionRows(agent.efforts, effort);
   const permissionOptions = runtimeAgent
     ? runtimePermissionModeOptions(optionRows(agent.permissionModes, permissionMode), permissionMode, runtimeAgent)
@@ -717,33 +740,49 @@ function AgentEditor({
   const saveAstraProviders = async (
     nextProviders: AgentAiProviderInfo[],
     nextProviderId = aiProvider,
-    nextModel: string | null | undefined = effectiveModel,
+    nextModel: string | null | undefined = persistedAstraModel,
+    nextEditingProviderId = editingAiProvider,
   ) => {
     const orderedProviders = normalizeProviderOrders(nextProviders);
-    setAiProviders(orderedProviders);
-    setAiProvider(nextProviderId);
-    const selectedProvider = orderedProviders.find((provider) => provider.id === nextProviderId) ?? orderedProviders[0] ?? null;
+    const selectedProvider = orderedProviders.find((provider) => provider.id === nextEditingProviderId)
+      ?? orderedProviders.find((provider) => provider.id === nextProviderId)
+      ?? orderedProviders[0]
+      ?? null;
+    const activeProvider = orderedProviders.find((provider) => provider.id === nextProviderId)
+      ?? orderedProviders.find((provider) => provider.enabled)
+      ?? orderedProviders[0]
+      ?? null;
+    const persistedProviderId = activeProvider?.id ?? nextProviderId;
     const selectedModels = selectedProvider?.models ?? [];
-    const persistedModel = nextModel ?? "";
+    const activeModelsForPersist = activeProvider?.models ?? [];
+    const persistedModel = nextModel === undefined
+      ? (activeModelsForPersist.some((item) => item.value === model) ? model : defaultModelValue(activeModelsForPersist))
+      : nextModel;
+    setAiProviders(orderedProviders);
+    setAiProvider(persistedProviderId);
+    setEditingAiProvider(selectedProvider?.id ?? "");
     setModels(selectedModels);
-    setModel(persistedModel);
+    setModel(persistedModel ?? "");
     await persist({
-      aiProvider: nextProviderId,
+      aiProvider: persistedProviderId,
       aiProviders: orderedProviders,
-      models: selectedModels,
-      model: persistedModel,
+      models: activeModelsForPersist,
+      model: persistedModel ?? "",
     });
   };
-  const selectAiProvider = async (nextProviderId: string) => {
+  const selectAiProviderForEditing = (nextProviderId: string) => {
     const provider = aiProviders.find((item) => item.id === nextProviderId) ?? null;
-    const nextModel = defaultModelValue(provider?.models ?? []);
-    await saveAstraProviders(aiProviders, nextProviderId, nextModel);
+    setEditingAiProvider(nextProviderId);
+    setModels(provider?.models ?? []);
+    setNewModelValue("");
+    setNewModelDisplayName("");
   };
   const activateAiProvider = async (nextProviderId: string) => {
     const nextProviders = aiProviders.map((provider) => ({ ...provider, enabled: provider.id === nextProviderId }));
     const provider = nextProviders.find((item) => item.id === nextProviderId) ?? null;
     const nextModel = defaultModelValue(provider?.models ?? []);
-    await saveAstraProviders(nextProviders, nextProviderId, nextModel);
+    setEditingAiProvider(nextProviderId);
+    await saveAstraProviders(nextProviders, nextProviderId, nextModel, nextProviderId);
   };
   const createProviderDraft = (): AgentAiProviderInfo => {
     const providerId = uniqueProviderId(aiProviders, "custom-provider");
@@ -755,7 +794,7 @@ function AgentEditor({
       baseUrl: defaultBaseUrlForPiProvider("openai"),
       apiKey: null,
       models: [],
-      enabled: true,
+      enabled: aiProviders.length === 0,
       order: aiProviders.length,
     };
   };
@@ -770,23 +809,32 @@ function AgentEditor({
     if (!nextProvider) return;
     if (providerDialog?.mode === "edit") {
       const nextProviders = updateProviderInfo(aiProviders, provider.id, nextProvider);
-      const nextProviderId = selectedAiProvider?.id ?? nextProvider.id;
-      const selectedProvider = nextProviders.find((item) => item.id === nextProviderId) ?? nextProvider;
-      const nextModel = selectedProvider.id === nextProvider.id
-        ? (selectedProvider.models.some((item) => item.value === effectiveModel) ? effectiveModel : defaultModelValue(selectedProvider.models))
-        : defaultModelValue(selectedProvider.models);
-      await saveAstraProviders(nextProviders, nextProviderId, nextModel);
+      const nextProviderId = aiProvider || activeAiProvider?.id || nextProvider.id;
+      const selectedProvider = nextProviders.find((item) => item.id === editingAiProvider) ?? nextProvider;
+      setEditingAiProvider(selectedProvider.id);
+      await saveAstraProviders(nextProviders, nextProviderId, persistedAstraModel, selectedProvider.id);
     } else {
-      await saveAstraProviders([...aiProviders, nextProvider], nextProvider.id, defaultModelValue(nextProvider.models));
+      const providerToAdd = { ...nextProvider, enabled: aiProviders.length === 0 };
+      const nextProviders = [...aiProviders, providerToAdd];
+      setEditingAiProvider(nextProvider.id);
+      const nextProviderId = aiProvider || activeAiProvider?.id || providerToAdd.id;
+      const nextModel = aiProvider || activeAiProvider?.id ? persistedAstraModel : defaultModelValue(providerToAdd.models);
+      await saveAstraProviders(nextProviders, nextProviderId, nextModel, nextProvider.id);
     }
     setProviderDialog(null);
   };
   const deleteProvider = async (providerId: string) => {
     if (aiProviders.length <= 1) return;
     const nextProviders = aiProviders.filter((provider) => provider.id !== providerId);
-    const nextProvider = nextProviders.find((provider) => provider.id === selectedAiProvider?.id) ?? nextProviders[0] ?? null;
-    const nextModel = defaultModelValue(nextProvider?.models ?? []);
-    await saveAstraProviders(nextProviders, nextProvider?.id ?? "", nextModel);
+    const nextActiveProvider = nextProviders.find((provider) => provider.id === aiProvider)
+      ?? nextProviders.find((provider) => provider.enabled)
+      ?? nextProviders[0]
+      ?? null;
+    const nextEditingProvider = nextProviders.find((provider) => provider.id === editingAiProvider)
+      ?? nextActiveProvider;
+    const nextModel = providerId === aiProvider ? defaultModelValue(nextActiveProvider?.models ?? []) : persistedAstraModel;
+    setEditingAiProvider(nextEditingProvider?.id ?? "");
+    await saveAstraProviders(nextProviders, nextActiveProvider?.id ?? "", nextModel, nextEditingProvider?.id ?? "");
   };
 
   return (
@@ -846,7 +894,7 @@ function AgentEditor({
                 provider={provider}
                 selected={provider.id === selectedAiProvider?.id}
                 canDelete={aiProviders.length > 1}
-                onSelect={selectAiProvider}
+                onSelect={selectAiProviderForEditing}
                 onActivate={activateAiProvider}
                 onEdit={openEditProviderDialog}
                 onDelete={deleteProvider}
@@ -907,7 +955,8 @@ function AgentEditor({
                   key={item.value}
                   item={item}
                   index={index}
-                  defaultModel={item.value === effectiveModel}
+                  defaultModel={selectedProviderIsActive && item.value === effectiveModel}
+                  canSetDefault={selectedProviderIsActive}
                   onSetDefault={setDefaultModel}
                   onSave={saveModel}
                   onToggleEnabled={toggleModelEnabled}
@@ -943,7 +992,7 @@ function AgentProviderRow({
   provider: AgentAiProviderInfo;
   selected: boolean;
   canDelete: boolean;
-  onSelect: (providerId: string) => Promise<void>;
+  onSelect: (providerId: string) => void;
   onActivate: (providerId: string) => Promise<void>;
   onEdit: (provider: AgentAiProviderInfo) => void;
   onDelete: (providerId: string) => Promise<void>;
@@ -1153,6 +1202,7 @@ function AgentModelRow({
   item,
   index,
   defaultModel,
+  canSetDefault,
   onSetDefault,
   onSave,
   onToggleEnabled,
@@ -1161,6 +1211,7 @@ function AgentModelRow({
   item: RuntimeAgentOptionMetadata;
   index: number;
   defaultModel: boolean;
+  canSetDefault: boolean;
   onSetDefault: (value: string) => Promise<void>;
   onSave: (previousValue: string, nextValue: string, nextLabel: string) => Promise<void>;
   onToggleEnabled: (value: string) => Promise<void>;
@@ -1232,13 +1283,14 @@ function AgentModelRow({
           <span className="block truncate text-caption text-card-muted/62">{item.displayName || item.value}</span>
         )}
       </div>
-      <Tooltip content={t("agent.make_default")} placement="top">
+      <Tooltip content={canSetDefault ? t("agent.make_default") : t("agent.activate_provider")} placement="top">
         <button
           type="button"
           role="radio"
           aria-checked={defaultModel}
+          disabled={!canSetDefault}
           onClick={() => void onSetDefault(item.value)}
-          className={`rounded p-1 ${defaultModel ? "bg-card-chip/[0.12] text-card-fg/75" : "text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"}`}
+          className={`rounded p-1 disabled:opacity-35 ${defaultModel ? "bg-card-chip/[0.12] text-card-fg/75" : "text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75 disabled:hover:bg-transparent disabled:hover:text-card-subtle/45"}`}
         >
           {defaultModel ? <Check className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
         </button>
