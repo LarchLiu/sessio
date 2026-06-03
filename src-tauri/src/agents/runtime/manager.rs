@@ -19,8 +19,8 @@ use super::fake;
 use super::types::{
     AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentRuntimeSessionConfig,
     AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle, EnsureAgentRuntimeSession,
-    RuntimeCapabilitySet, RuntimeError, RuntimeSessionStatus, RuntimeStatus, RuntimeTransportKind,
-    RuntimeTurnStatus, StartAgentSession,
+    RuntimeCapabilitySet, RuntimeError, RuntimeMetadata, RuntimeSessionStatus, RuntimeStatus,
+    RuntimeTransportKind, RuntimeTurnStatus, StartAgentSession,
 };
 use crate::models::Agent;
 use crate::turns::{
@@ -38,6 +38,7 @@ struct RuntimeManagerInner {
     sequence: AtomicU64,
     id_counter: AtomicU64,
     sessions: Mutex<HashMap<String, RuntimeSessionState>>,
+    event_listeners: Mutex<Vec<mpsc::Sender<AgentRuntimeEvent>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,8 +64,19 @@ impl RuntimeManager {
                 sequence: AtomicU64::new(1),
                 id_counter: AtomicU64::new(1),
                 sessions: Mutex::new(HashMap::new()),
+                event_listeners: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    pub fn subscribe_events(&self) -> Result<mpsc::Receiver<AgentRuntimeEvent>> {
+        let (sender, receiver) = mpsc::channel();
+        self.inner
+            .event_listeners
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime event listeners lock poisoned"))?
+            .push(sender);
+        Ok(receiver)
     }
 
     pub fn status(&self, agent: Agent) -> RuntimeStatus {
@@ -209,6 +221,7 @@ impl RuntimeManager {
             transport: handle.transport,
             workspace_path: handle.workspace_path.clone(),
             capabilities: handle.capabilities.clone(),
+            metadata: req.options.clone(),
         })?;
 
         if let Some(text) = req.initial_prompt {
@@ -343,6 +356,7 @@ impl RuntimeManager {
             transport: handle.transport,
             workspace_path: handle.workspace_path.clone(),
             capabilities: handle.capabilities.clone(),
+            metadata: req.options.clone(),
         })?;
 
         Ok(handle)
@@ -771,6 +785,7 @@ impl RuntimeManager {
             transport: handle.transport,
             workspace_path: handle.workspace_path,
             capabilities: handle.capabilities,
+            metadata: RuntimeMetadata::default(),
         })
     }
 
@@ -820,6 +835,7 @@ impl RuntimeManager {
             payload,
         };
         let snapshot = self.apply_event_to_turn_state(&event);
+        self.notify_event_listeners(&event);
         self.inner
             .app
             .emit("agent-runtime-event", event)
@@ -831,6 +847,13 @@ impl RuntimeManager {
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         }
         Ok(())
+    }
+
+    fn notify_event_listeners(&self, event: &AgentRuntimeEvent) {
+        let Ok(mut listeners) = self.inner.event_listeners.lock() else {
+            return;
+        };
+        listeners.retain(|sender| sender.send(event.clone()).is_ok());
     }
 
     fn apply_event_to_turn_state(

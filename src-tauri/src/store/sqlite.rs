@@ -18,7 +18,7 @@ use crate::models::{
     SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
-    IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
+    AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
     RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
     ThreadWorkSnapshotRecord,
 };
@@ -598,6 +598,41 @@ CREATE INDEX IF NOT EXISTS idx_thread_stage_issues_stage
     ON thread_stage_issues(thread_stage_id);
 "#;
 
+const SCHEMA_V9: &str = r#"
+CREATE TABLE IF NOT EXISTS astra_runs (
+    run_id                     TEXT PRIMARY KEY,
+    thread_id                  TEXT NOT NULL,
+    project_id                 TEXT NOT NULL,
+    project_path               TEXT NOT NULL,
+    status                     TEXT NOT NULL,
+    proposed_tasks_json        TEXT NOT NULL DEFAULT '[]',
+    approved_task_ids_json     TEXT NOT NULL DEFAULT '[]',
+    delegated_session_ids_json TEXT NOT NULL DEFAULT '[]',
+    error                      TEXT,
+    created_at                 INTEGER NOT NULL,
+    updated_at                 INTEGER NOT NULL,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_updated
+    ON astra_runs(thread_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_active
+    ON astra_runs(thread_id, status);
+"#;
+
+const SCHEMA_V10: &str = r#"
+ALTER TABLE astra_runs ADD COLUMN task_results_json TEXT NOT NULL DEFAULT '[]';
+"#;
+
+const SCHEMA_V11: &str = r#"
+ALTER TABLE astra_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'auto';
+ALTER TABLE astra_runs ADD COLUMN current_stage_id TEXT;
+ALTER TABLE astra_runs ADD COLUMN completed_task_ids_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE astra_runs ADD COLUMN stage_attempt_counts_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE astra_runs ADD COLUMN retry_limit INTEGER NOT NULL DEFAULT 3;
+"#;
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -688,6 +723,27 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V8)?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)",
+            [],
+        )?;
+    }
+    if current < 9 {
+        conn.execute_batch(SCHEMA_V9)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)",
+            [],
+        )?;
+    }
+    if current < 10 {
+        let _ = conn.execute_batch(SCHEMA_V10);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)",
+            [],
+        )?;
+    }
+    if current < 11 {
+        let _ = conn.execute_batch(SCHEMA_V11);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (11)",
             [],
         )?;
     }
@@ -1869,6 +1925,28 @@ fn runtime_agent_selection_from_row(
         effort: row.get(2)?,
         permission_mode: row.get(3)?,
         updated_at: row.get(4)?,
+    })
+}
+
+fn astra_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunRecord> {
+    Ok(AstraRunRecord {
+        run_id: row.get(0)?,
+        thread_id: row.get(1)?,
+        project_id: row.get(2)?,
+        project_path: row.get(3)?,
+        status: row.get(4)?,
+        mode: row.get(5)?,
+        proposed_tasks_json: row.get(6)?,
+        approved_task_ids_json: row.get(7)?,
+        delegated_session_ids_json: row.get(8)?,
+        task_results_json: row.get(9)?,
+        current_stage_id: row.get(10)?,
+        completed_task_ids_json: row.get(11)?,
+        stage_attempt_counts_json: row.get(12)?,
+        retry_limit: row.get(13)?,
+        error: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -5350,6 +5428,115 @@ impl SessionStore for SqliteStore {
         .map_err(Into::into)
     }
 
+    fn upsert_astra_run(&self, run: &AstraRunRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO astra_runs (
+                run_id, thread_id, project_id, project_path, status, mode,
+                proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
+                current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
+                error, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(run_id) DO UPDATE SET
+                thread_id = excluded.thread_id,
+                project_id = excluded.project_id,
+                project_path = excluded.project_path,
+                status = excluded.status,
+                mode = excluded.mode,
+                proposed_tasks_json = excluded.proposed_tasks_json,
+                approved_task_ids_json = excluded.approved_task_ids_json,
+                delegated_session_ids_json = excluded.delegated_session_ids_json,
+                task_results_json = excluded.task_results_json,
+                current_stage_id = excluded.current_stage_id,
+                completed_task_ids_json = excluded.completed_task_ids_json,
+                stage_attempt_counts_json = excluded.stage_attempt_counts_json,
+                retry_limit = excluded.retry_limit,
+                error = excluded.error,
+                updated_at = excluded.updated_at",
+            params![
+                run.run_id,
+                run.thread_id,
+                run.project_id,
+                run.project_path,
+                run.status,
+                run.mode,
+                run.proposed_tasks_json,
+                run.approved_task_ids_json,
+                run.delegated_session_ids_json,
+                run.task_results_json,
+                run.current_stage_id,
+                run.completed_task_ids_json,
+                run.stage_attempt_counts_json,
+                run.retry_limit,
+                run.error,
+                run.created_at,
+                run.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT run_id, thread_id, project_id, project_path, status, mode,
+                    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
+                    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
+                    error, created_at, updated_at
+             FROM astra_runs
+             WHERE run_id = ?",
+            params![run_id],
+            astra_run_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT run_id, thread_id, project_id, project_path, status, mode,
+                    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
+                    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
+                    error, created_at, updated_at
+             FROM astra_runs
+             WHERE thread_id = ?
+               AND status IN ('planning', 'awaiting_approval', 'dispatching', 'running')
+             ORDER BY updated_at DESC
+             LIMIT 1",
+            params![thread_id],
+            astra_run_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, thread_id, project_id, project_path, status, mode,
+                    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
+                    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
+                    error, created_at, updated_at
+             FROM astra_runs
+             WHERE thread_id = ?
+             ORDER BY updated_at DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![thread_id], astra_run_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn interrupt_active_astra_runs(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE astra_runs
+             SET status = 'interrupted', updated_at = ?
+             WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')",
+            params![now_ms()],
+        )?;
+        Ok(())
+    }
+
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         insert_session(&conn, scope, session)
@@ -6227,7 +6414,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 8);
+        assert_eq!(latest_schema_version, 11);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -6286,6 +6473,27 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(snapshot_table, 1);
+
+        let astra_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='astra_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(astra_table, 1);
+
+        let astra_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(astra_runs)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(astra_columns.contains(&"task_results_json".to_string()));
+        assert!(astra_columns.contains(&"mode".to_string()));
+        assert!(astra_columns.contains(&"current_stage_id".to_string()));
+        assert!(astra_columns.contains(&"completed_task_ids_json".to_string()));
+        assert!(astra_columns.contains(&"stage_attempt_counts_json".to_string()));
+        assert!(astra_columns.contains(&"retry_limit".to_string()));
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
@@ -6353,6 +6561,18 @@ mod migration_tests {
         };
         assert!(snapshot_columns.contains(&"history_cache_version".to_string()));
 
+        let astra_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(astra_runs)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(astra_columns.contains(&"task_results_json".to_string()));
+        assert!(astra_columns.contains(&"mode".to_string()));
+        assert!(astra_columns.contains(&"current_stage_id".to_string()));
+        assert!(astra_columns.contains(&"completed_task_ids_json".to_string()));
+        assert!(astra_columns.contains(&"stage_attempt_counts_json".to_string()));
+        assert!(astra_columns.contains(&"retry_limit".to_string()));
+
         for table in [
             "agents",
             "assistants",
@@ -6361,6 +6581,7 @@ mod migration_tests {
             "thread_stages",
             "stage_sessions",
             "thread_stage_issues",
+            "astra_runs",
         ] {
             let exists: i64 = conn
                 .query_row(
@@ -6374,6 +6595,62 @@ mod migration_tests {
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn astra_run_persistence_and_recovery() {
+        let path = unique_db("sessio-astra-runs");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_path =
+            std::env::temp_dir().join(format!("sessio-astra-project-{}", unique_suffix()));
+        std::fs::create_dir_all(&project_path).unwrap();
+        let project = store
+            .add_project(
+                &project_path.to_string_lossy(),
+                Some("Astra Project"),
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Coordinate Astra", None)
+            .unwrap();
+
+        let run = AstraRunRecord {
+            run_id: "astra-run-1".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: "running".to_string(),
+            mode: "auto".to_string(),
+            proposed_tasks_json: r#"[{"id":"task-1"}]"#.to_string(),
+            approved_task_ids_json: r#"["task-1"]"#.to_string(),
+            delegated_session_ids_json: r#"["runtime-1"]"#.to_string(),
+            task_results_json: r#"[{"taskId":"task-1","status":"completed"}]"#.to_string(),
+            current_stage_id: Some("stage-1".to_string()),
+            completed_task_ids_json: r#"["task-1"]"#.to_string(),
+            stage_attempt_counts_json: r#"{"stage-1":1}"#.to_string(),
+            retry_limit: 3,
+            error: None,
+            created_at: 10,
+            updated_at: 20,
+        };
+        store.upsert_astra_run(&run).unwrap();
+        let active = store.get_active_astra_run(&thread.id).unwrap().unwrap();
+        assert_eq!(active.run_id, "astra-run-1");
+        assert_eq!(active.status, "running");
+
+        store.interrupt_active_astra_runs().unwrap();
+        assert!(store.get_active_astra_run(&thread.id).unwrap().is_none());
+        let interrupted = store.get_astra_run("astra-run-1").unwrap().unwrap();
+        assert_eq!(interrupted.status, "interrupted");
+
+        let runs = store.list_astra_runs(&thread.id).unwrap();
+        assert_eq!(runs.len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_path);
     }
 
     #[test]

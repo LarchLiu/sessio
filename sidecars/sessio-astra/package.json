@@ -1,0 +1,23 @@
+{
+  "name": "sessio-astra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/main.ts --stdio",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/main.ts --target=bun --outdir=dist",
+    "smoke": "bun run scripts/smoke.ts",
+    "compile:mac-arm64": "bun build --compile --target=bun-darwin-arm64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-aarch64-apple-darwin",
+    "compile:mac-x64": "bun build --compile --target=bun-darwin-x64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-x86_64-apple-darwin",
+    "compile:win-x64": "bun build --compile --target=bun-windows-x64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-x86_64-pc-windows-msvc.exe"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.78.0",
+    "@earendil-works/pi-ai": "0.78.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.3"
+  }
+}

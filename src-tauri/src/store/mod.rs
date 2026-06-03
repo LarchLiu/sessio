@@ -13,6 +13,27 @@ use crate::models::{
 };
 
 #[derive(Debug, Clone)]
+pub struct AstraRunRecord {
+    pub run_id: String,
+    pub thread_id: String,
+    pub project_id: String,
+    pub project_path: String,
+    pub status: String,
+    pub mode: String,
+    pub proposed_tasks_json: String,
+    pub approved_task_ids_json: String,
+    pub delegated_session_ids_json: String,
+    pub task_results_json: String,
+    pub current_stage_id: Option<String>,
+    pub completed_task_ids_json: String,
+    pub stage_attempt_counts_json: String,
+    pub retry_limit: i64,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct IndexedSubagentRecord {
     pub parent_agent: Agent,
     pub parent_session_id: String,
@@ -343,6 +364,11 @@ pub trait SessionStore: Send + Sync {
         child_agent: Agent,
         child_session_id: &str,
     ) -> Result<Option<ThreadWorkSnapshotRecord>>;
+    fn upsert_astra_run(&self, run: &AstraRunRecord) -> Result<()>;
+    fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>>;
+    fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>>;
+    fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>>;
+    fn interrupt_active_astra_runs(&self) -> Result<()>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(

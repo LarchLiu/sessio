@@ -337,6 +337,7 @@ export function dispatchSessionStartedFallback({
       transport: handle.transport,
       workspacePath: handle.workspacePath,
       capabilities: handle.capabilities,
+      metadata: {},
     },
   });
 }

@@ -16,6 +16,19 @@
     "updater:default",
     "process:allow-restart",
     {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/sessio-astra",
+          "cmd": "binaries/sessio-astra",
+          "sidecar": true,
+          "args": [
+            "--stdio"
+          ]
+        }
+      ]
+    },
+    {
       "identifier": "opener:allow-open-url",
       "allow": [
         { "url": "https://github.com/LarchLiu/sessio/releases/*" }

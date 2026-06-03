@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod astra;
 pub mod cli;
 pub mod config;
 pub mod indexer;
@@ -23,6 +24,10 @@ use agents::runtime::types::{
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
+use astra::{
+    AstraHandle, AstraService, CancelThreadAstraRequest, ConfirmThreadAstraRequest,
+    StartThreadAstraRequest,
+};
 use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
@@ -2592,6 +2597,40 @@ fn respond_agent_permission(
 }
 
 #[tauri::command]
+fn start_thread_astra(
+    req: StartThreadAstraRequest,
+    astra: State<'_, AstraService>,
+) -> Result<AstraHandle, String> {
+    astra.start_thread_astra(req).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn confirm_thread_astra(
+    req: ConfirmThreadAstraRequest,
+    astra: State<'_, AstraService>,
+) -> Result<AstraHandle, String> {
+    astra.confirm_thread_astra(req).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cancel_thread_astra(
+    req: CancelThreadAstraRequest,
+    astra: State<'_, AstraService>,
+) -> Result<AstraHandle, String> {
+    astra.cancel_thread_astra(req).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_thread_astra_runs(
+    thread_id: String,
+    astra: State<'_, AstraService>,
+) -> Result<Vec<AstraHandle>, String> {
+    astra
+        .get_thread_astra_runs(&thread_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_window_appearance(window: tauri::Window, theme: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -2877,7 +2916,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init());
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
@@ -2925,14 +2965,28 @@ pub fn run() {
                 Err(e) => log::warn!("watcher failed to start: {e}"),
             }
             app.manage(store.clone());
-            app.manage(memory_store);
+            app.manage(memory_store.clone());
             app.manage(indexer_handle);
             let runtime_probe_store = store.clone();
             let runtime_agents_cache = RuntimeAgentsCache::default();
             let initial_runtime_agents =
                 runtime_agents_from_db(store.clone(), &[]).unwrap_or_default();
             runtime_agents_cache.set(initial_runtime_agents);
-            app.manage(RuntimeManager::new(app.handle().clone()));
+            let runtime = RuntimeManager::new(app.handle().clone());
+            app.manage(runtime.clone());
+            let astra_service = AstraService::new(
+                app.handle().clone(),
+                store.clone(),
+                memory_store.clone(),
+                runtime,
+            );
+            if let Err(error) = astra_service.recover_interrupted_runs() {
+                log::warn!("[sessio-astra:recover] {error}");
+            }
+            if let Err(error) = astra_service.watch_runtime_events() {
+                log::warn!("[sessio-astra:runtime-watch] {error}");
+            }
+            app.manage(astra_service);
             app.manage(runtime_agents_cache);
             let app_handle = app.handle().clone();
 
@@ -3068,6 +3122,10 @@ pub fn run() {
             cancel_agent_turn,
             set_agent_session_config_option,
             respond_agent_permission,
+            start_thread_astra,
+            confirm_thread_astra,
+            cancel_thread_astra,
+            list_thread_astra_runs,
             remove_session_files,
             remove_sessions_by_scope
         ])

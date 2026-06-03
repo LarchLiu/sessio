@@ -216,6 +216,8 @@ pub enum AgentRuntimeEventPayload {
         transport: RuntimeTransportKind,
         workspace_path: String,
         capabilities: RuntimeCapabilitySet,
+        #[serde(default)]
+        metadata: RuntimeMetadata,
     },
     TurnStarted {
         sessio_runtime_session_id: String,

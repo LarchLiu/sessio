@@ -8,7 +8,7 @@ use crate::models::{
     SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 use crate::store::{
-    IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
+    AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
     RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
     ThreadWorkSnapshotRecord,
 };
@@ -587,6 +587,26 @@ impl SessionStore for CachedStore {
     ) -> Result<Option<ThreadWorkSnapshotRecord>> {
         self.inner
             .get_thread_work_snapshot(child_agent, child_session_id)
+    }
+
+    fn upsert_astra_run(&self, run: &AstraRunRecord) -> Result<()> {
+        self.inner.upsert_astra_run(run)
+    }
+
+    fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>> {
+        self.inner.get_astra_run(run_id)
+    }
+
+    fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>> {
+        self.inner.get_active_astra_run(thread_id)
+    }
+
+    fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>> {
+        self.inner.list_astra_runs(thread_id)
+    }
+
+    fn interrupt_active_astra_runs(&self) -> Result<()> {
+        self.inner.interrupt_active_astra_runs()
     }
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {

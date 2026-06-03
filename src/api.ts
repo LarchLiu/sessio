@@ -180,6 +180,70 @@ export interface ThreadInfo {
 
 export interface ThreadWorkState extends ThreadInfo {}
 
+export type AstraRunStatus =
+  | "planning"
+  | "awaiting_approval"
+  | "dispatching"
+  | "running"
+  | "completed"
+  | "cancelled"
+  | "errored"
+  | "interrupted";
+
+export type AstraTaskRisk = "low" | "medium" | "high";
+
+export interface AstraTaskProposal {
+  id: string;
+  title: string;
+  targetStageId: string | null;
+  targetAgent: Agent;
+  prompt: string;
+  expectedOutput: string;
+  risk: AstraTaskRisk;
+}
+
+export type AstraTaskResultStatus = "completed" | "failed" | "errored" | "cancelled";
+
+export interface AstraTaskResult {
+  taskId: string;
+  threadStageId: string | null;
+  sessioRuntimeSessionId: string;
+  turnId: string | null;
+  status: AstraTaskResultStatus;
+  output: string;
+  error: string | null;
+  attemptCount: number;
+  retryLimitReached: boolean;
+  completedAt: number;
+}
+
+export interface AstraHandle {
+  runId: string;
+  threadId: string;
+  projectId: string;
+  status: AstraRunStatus;
+  proposedTasks: AstraTaskProposal[];
+  approvedTaskIds: string[];
+  delegatedSessionIds: string[];
+  taskResults: AstraTaskResult[];
+  mode: string;
+  currentStageId: string | null;
+  completedTaskIds: string[];
+  stageAttemptCounts: Record<string, number>;
+  retryLimit: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AstraEvent {
+  runId: string;
+  threadId: string;
+  status: AstraRunStatus;
+  eventType: string;
+  data: unknown;
+  timestamp: number;
+}
+
 export type KanbanStatus =
   | "todo"
   | "in_progress"
@@ -560,6 +624,7 @@ export type AgentRuntimeEventPayload =
       transport: RuntimeTransportKind;
       workspacePath: string;
       capabilities: RuntimeCapabilitySet;
+      metadata: Record<string, unknown>;
     }
   | { kind: "turnStarted"; sessioRuntimeSessionId: string; turnId: string }
   | { kind: "textDelta"; sessioRuntimeSessionId: string; turnId: string; text: string }
@@ -839,6 +904,32 @@ export async function updateThread(
 
 export async function deleteThread(threadId: string): Promise<void> {
   return invoke<void>("delete_thread", { threadId });
+}
+
+export async function startThreadAstra(
+  threadId: string,
+  prompt?: string | null,
+): Promise<AstraHandle> {
+  return invoke<AstraHandle>("start_thread_astra", {
+    req: { threadId, prompt: prompt ?? null },
+  });
+}
+
+export async function confirmThreadAstra(
+  runId: string,
+  approvedTaskIds: string[],
+): Promise<AstraHandle> {
+  return invoke<AstraHandle>("confirm_thread_astra", {
+    req: { runId, approvedTaskIds },
+  });
+}
+
+export async function cancelThreadAstra(runId: string): Promise<AstraHandle> {
+  return invoke<AstraHandle>("cancel_thread_astra", { req: { runId } });
+}
+
+export async function listThreadAstraRuns(threadId: string): Promise<AstraHandle[]> {
+  return invoke<AstraHandle[]>("list_thread_astra_runs", { threadId });
 }
 
 export async function listProjectStages(projectId: string): Promise<ProjectStageInfo[]> {
