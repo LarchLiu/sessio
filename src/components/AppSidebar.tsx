@@ -39,6 +39,7 @@ import {
   liveSessionActivity,
   type LiveRuntimeState,
 } from "../runtimeChat";
+import { sessionDisplayTitle } from "../appUtils";
 import { useUpdateCheck } from "../updater";
 import { AgentGlyph } from "./AgentIcon";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
@@ -874,7 +875,7 @@ function SidebarSessionItem({
   onContextMenu: (e: MouseEvent) => void;
 }) {
   const { t } = useI18n();
-  const title = item.title ?? item.firstUserMessage ?? t("list.no_user_message");
+  const title = sessionDisplayTitle(item) ?? t("list.no_user_message");
   const relativeTime = formatShortRelativeTime(item.updatedAt ?? item.startedAt, t);
   return (
     <button
@@ -908,7 +909,7 @@ function SidebarSessionItem({
           (item.archived ? "text-ink/45" : "text-inherit")
         }
       >
-        {item.title ?? item.firstUserMessage ?? (
+        {sessionDisplayTitle(item) ?? (
           <span className="text-ink/30">{t("list.no_user_message")}</span>
         )}
       </span>

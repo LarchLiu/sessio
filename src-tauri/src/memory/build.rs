@@ -1623,6 +1623,7 @@ mod tests {
                     started_at: Some(1_000),
                     updated_at: Some(1_500),
                     message_count: 0,
+                    rename_title: None,
                     title: None,
                     first_user_message: None,
                     file_path: earlier_source.file_path.clone(),

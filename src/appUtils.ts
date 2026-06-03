@@ -43,6 +43,14 @@ export function sessionIdentity(agent: Agent, sessionId: string): string {
   return `${agent}:${sessionId}`;
 }
 
+export function sessionDisplayTitle(session: SessionInfo): string | null {
+  return session.renameTitle ?? session.title ?? session.firstUserMessage ?? null;
+}
+
+function isRealSessionFilePath(filePath: string): boolean {
+  return filePath.trim() !== "" && !filePath.startsWith("astra://");
+}
+
 export function sessionUnreadKeys(
   session: SessionInfo,
   runtimeSessionAliases: Record<string, string>,
@@ -71,6 +79,35 @@ export function runtimeEventUnreadKeys(
     break;
   }
   return Array.from(keys);
+}
+
+type RuntimeSessionAliasSource = {
+  agent: Agent;
+  agentRuntimeSessionId: string;
+  sessioRuntimeSessionId: string;
+};
+
+export function mergeRuntimeSessionAliases<T extends RuntimeSessionAliasSource>(
+  aliases: Record<string, string>,
+  liveSessions: Record<string, T>,
+): Record<string, string> {
+  let next = aliases;
+  for (const liveSession of Object.values(liveSessions)) {
+    const agentSessionId = liveSession.agentRuntimeSessionId.trim();
+    const liveRuntimeSessionId = liveSession.sessioRuntimeSessionId.trim();
+    if (!agentSessionId || !liveRuntimeSessionId) continue;
+    if (!isPersistableAgentSessionId(agentSessionId)) continue;
+
+    const identity = sessionIdentity(liveSession.agent, agentSessionId);
+    if (next[identity] === liveRuntimeSessionId) continue;
+    if (next === aliases) next = { ...aliases };
+    next[identity] = liveRuntimeSessionId;
+  }
+  return next;
+}
+
+function isPersistableAgentSessionId(sessionId: string): boolean {
+  return sessionId !== "pending" && !sessionId.startsWith("fake-agent-session");
 }
 
 export function intersectsSet(keys: Iterable<string>, lookup: Set<string>): boolean {
@@ -105,7 +142,7 @@ export function ancestorSessionsFor(session: SessionInfo, sessions: SessionInfo[
   for (const item of sessions) {
     const key = sessionIdentityKey(item);
     const current = byIdentity.get(key);
-    if (!current || isBetterLineageCandidate(item, current)) {
+    if (!current || betterSessionCandidate(item, current)) {
       byIdentity.set(key, item);
     }
   }
@@ -131,8 +168,12 @@ export function ancestorSessionsFor(session: SessionInfo, sessions: SessionInfo[
   return chain.reverse();
 }
 
-function isBetterLineageCandidate(candidate: SessionInfo, current: SessionInfo): boolean {
+export function betterSessionCandidate(candidate: SessionInfo, current: SessionInfo): boolean {
   if (candidate.available !== current.available) return candidate.available;
+  if (candidate.partial !== current.partial) return !candidate.partial;
+  const candidateRealPath = isRealSessionFilePath(candidate.filePath);
+  const currentRealPath = isRealSessionFilePath(current.filePath);
+  if (candidateRealPath !== currentRealPath) return candidateRealPath;
   if (Boolean(candidate.filePath) !== Boolean(current.filePath)) return Boolean(candidate.filePath);
   return (candidate.updatedAt ?? candidate.startedAt ?? 0) > (current.updatedAt ?? current.startedAt ?? 0);
 }
@@ -147,6 +188,7 @@ export function mergePendingSession(sessions: SessionInfo[], pending: SessionInf
     ...existing,
     forkedFromAgent: existing.forkedFromAgent ?? pending.forkedFromAgent ?? null,
     forkedFromId: existing.forkedFromId ?? pending.forkedFromId ?? null,
+    renameTitle: existing.renameTitle ?? pending.renameTitle ?? null,
     filePath: existing.filePath || pending.filePath,
     fileSize: existing.filePath ? existing.fileSize : pending.fileSize,
     partial: existing.filePath ? existing.partial : pending.partial,

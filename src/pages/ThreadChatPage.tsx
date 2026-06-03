@@ -24,6 +24,7 @@ import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
 import type { LiveRuntimeAction, LiveRuntimeState } from "../runtimeChat";
+import { sessionDisplayTitle } from "../appUtils";
 import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
 import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 
@@ -232,7 +233,7 @@ export default function ThreadChatPage({
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="truncate text-body-sm font-medium text-ink/75">
-                    {historyTarget.title ?? historyTarget.firstUserMessage ?? t("list.no_user_message")}
+                    {sessionDisplayTitle(historyTarget) ?? t("list.no_user_message")}
                   </div>
                   <div className="text-caption text-ink/35">
                     {historyTarget.agent}:{historyTarget.id}
@@ -401,7 +402,7 @@ function ThreadWorkOverview({
                       className="flex max-w-[260px] items-center gap-1.5 rounded border border-card-border/[0.10] bg-card px-2 py-1 text-caption text-ink/55 hover:bg-card-hover hover:text-ink/80"
                     >
                       <Bot className="h-3.5 w-3.5 shrink-0 text-ink/35" />
-                      <span className="truncate">{session.title ?? session.firstUserMessage ?? session.id}</span>
+                      <span className="truncate">{sessionDisplayTitle(session) ?? session.id}</span>
                     </button>
                   ))}
                 </div>

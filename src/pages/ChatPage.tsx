@@ -255,6 +255,7 @@ function snapshotGroupsToAncestorHistoryGroups(
       startedAt: null,
       updatedAt: null,
       messageCount: group.turns.length,
+      renameTitle: null,
       title: null,
       firstUserMessage: null,
       filePath: "",

@@ -358,6 +358,7 @@ fn parse_chat_file(
         started_at,
         updated_at,
         message_count: messages.len(),
+        rename_title: None,
         title: first_user.clone(),
         first_user_message: first_user,
         file_path: path.to_string_lossy().into_owned(),

@@ -296,6 +296,8 @@ struct AstraServiceInner {
     sidecar: Mutex<Option<SidecarHandle>>,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
     task_waiters: Mutex<HashMap<String, mpsc::Sender<AstraTaskResult>>>,
+    // Serializes read-modify-write cycles on a single run row (see mutate_run).
+    run_write_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,6 +344,7 @@ impl AstraService {
                 sidecar: Mutex::new(None),
                 delegated_sessions: Mutex::new(HashMap::new()),
                 task_waiters: Mutex::new(HashMap::new()),
+                run_write_lock: Mutex::new(()),
             }),
         }
     }
@@ -476,12 +479,16 @@ impl AstraService {
 
     pub fn confirm_thread_astra(&self, req: ConfirmThreadAstraRequest) -> Result<AstraHandle> {
         let mut run = self.load_run(&req.run_id)?;
-        if !matches!(
+        // Idempotent: a run that is already dispatching/running/completed has
+        // been confirmed once; return it without spawning a second worker, which
+        // would issue a duplicate astra/confirm and double-dispatch the plan.
+        if matches!(
             run.status,
-            AstraRunStatus::AwaitingApproval
-                | AstraRunStatus::Dispatching
-                | AstraRunStatus::Running
+            AstraRunStatus::Dispatching | AstraRunStatus::Running | AstraRunStatus::Completed
         ) {
+            return Ok(run_to_handle(run));
+        }
+        if !matches!(run.status, AstraRunStatus::AwaitingApproval) {
             bail!("Astra run is not awaiting approval");
         }
         let approved: Vec<String> = req
@@ -677,12 +684,15 @@ impl AstraService {
             bail!("task is not approved: {}", task.id);
         }
 
-        let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+        let mut thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
         let stage_id = task
             .target_stage_id
             .as_deref()
             .map(|id| resolve_thread_stage_id(&thread, id))
             .transpose()?;
+        if let Some(stage_id) = stage_id.as_deref() {
+            thread = self.prepare_stage_for_delegated_task(&run.thread_id, stage_id)?;
+        }
         let mut next = run.clone();
         next.status = AstraRunStatus::Running;
         next.current_stage_id = stage_id.clone();
@@ -959,13 +969,17 @@ impl AstraService {
             AgentRuntimeEventPayload::SessionEnded {
                 sessio_runtime_session_id,
             } => {
+                // A normally-completed turn already finished the task via
+                // TurnCompleted (finished=true). Reaching here unfinished means
+                // the delegated session ended without a terminal turn (crash or
+                // abnormal exit), so record it as errored rather than completed.
                 let should_finish = {
-                    let mut delegated =
+                    let delegated =
                         self.inner.delegated_sessions.lock().map_err(|_| {
                             anyhow::anyhow!("Astra delegated session lock poisoned")
                         })?;
                     delegated
-                        .get_mut(&sessio_runtime_session_id)
+                        .get(&sessio_runtime_session_id)
                         .map(|state| !state.finished)
                         .unwrap_or(false)
                 };
@@ -976,9 +990,9 @@ impl AstraService {
                     self.finish_delegated_task(
                         &sessio_runtime_session_id,
                         None,
-                        AstraTaskResultStatus::Completed,
+                        AstraTaskResultStatus::Errored,
                         output,
-                        None,
+                        Some("delegated session ended before turn completion".to_string()),
                     )?;
                 }
             }
@@ -1053,7 +1067,7 @@ impl AstraService {
         let context = match (state_context, thread_stage_id) {
             (Some(context), _) => Some(context),
             (None, Some(stage_id)) => {
-                let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+                let thread = self.prepare_stage_for_delegated_task(&run.thread_id, stage_id)?;
                 Some(build_stage_task_context(&thread, stage_id, &task)?)
             }
             (None, None) => None,
@@ -1105,6 +1119,31 @@ impl AstraService {
             sessio_runtime_session_id
         );
         Ok(())
+    }
+
+    fn prepare_stage_for_delegated_task(
+        &self,
+        thread_id: &str,
+        thread_stage_id: &str,
+    ) -> Result<ThreadInfo> {
+        let thread = self.inner.store.get_thread_work_state(thread_id)?;
+        let Some(stage) = thread
+            .stages
+            .iter()
+            .find(|stage| stage.id == thread_stage_id)
+        else {
+            return Ok(thread);
+        };
+        if stage.status == StageStatus::NotStarted {
+            self.inner.store.update_thread_stage_state(
+                thread_stage_id,
+                Some(StageStatus::InProgress),
+                None,
+                None,
+            )?;
+            return self.inner.store.get_thread_work_state(thread_id);
+        }
+        Ok(thread)
     }
 
     fn finish_delegated_task(
@@ -1180,17 +1219,20 @@ impl AstraService {
     }
 
     fn record_task_result(&self, run_id: &str, result: AstraTaskResult) -> Result<AstraRun> {
-        let mut run = self.load_run(run_id)?;
-        if let Some(existing) = run.task_results.iter_mut().find(|existing| {
-            existing.task_id == result.task_id
-                && existing.sessio_runtime_session_id == result.sessio_runtime_session_id
-        }) {
-            *existing = result;
-        } else {
-            run.task_results.push(result);
-        }
-        run.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+        let key = (
+            result.task_id.clone(),
+            result.sessio_runtime_session_id.clone(),
+        );
+        let (run, _) = self.mutate_run(run_id, move |run| {
+            if let Some(existing) = run.task_results.iter_mut().find(|existing| {
+                existing.task_id == key.0 && existing.sessio_runtime_session_id == key.1
+            }) {
+                *existing = result;
+            } else {
+                run.task_results.push(result);
+            }
+            Ok(())
+        })?;
         Ok(run)
     }
 
@@ -1495,6 +1537,9 @@ impl AstraService {
         run: &AstraRun,
         args: &Value,
     ) -> Result<AstraStageMutationResult> {
+        if let Some(rejection) = inactive_run_mutation_error(run) {
+            return Ok(rejection);
+        }
         let stage_id = args
             .get("threadStageId")
             .or_else(|| args.get("stageId"))
@@ -1551,6 +1596,9 @@ impl AstraService {
         run: &AstraRun,
         args: &Value,
     ) -> Result<AstraStageMutationResult> {
+        if let Some(rejection) = inactive_run_mutation_error(run) {
+            return Ok(rejection);
+        }
         match self.add_or_update_issue(run, args) {
             Ok(issue) => {
                 let result = AstraStageMutationResult {
@@ -1672,6 +1720,28 @@ impl AstraService {
         Ok(run)
     }
 
+    /// Serialize a read-modify-write cycle on a single Astra run row. The
+    /// confirm worker thread, the sidecar tool thread, and the runtime-event
+    /// thread all mutate the same run; without this lock they each load, change
+    /// different fields, and clobber one another on the full-row upsert (losing
+    /// attempt counts, delegated session ids, or task results). The closure runs
+    /// against the freshly loaded run; updated_at and the upsert are handled here.
+    fn mutate_run<F, T>(&self, run_id: &str, mutate: F) -> Result<(AstraRun, T)>
+    where
+        F: FnOnce(&mut AstraRun) -> Result<T>,
+    {
+        let _guard = self
+            .inner
+            .run_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
+        let mut run = self.load_run(run_id)?;
+        let value = mutate(&mut run)?;
+        run.updated_at = now_ms();
+        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+        Ok((run, value))
+    }
+
     fn load_run(&self, run_id: &str) -> Result<AstraRun> {
         self.inner
             .store
@@ -1745,7 +1815,7 @@ fn record_and_link_ready_delegated_session(
     let first_user_message = stage_task_context
         .map(|context| context.prompt.clone())
         .or_else(|| Some(task.prompt.clone()));
-    let title = stage_task_context
+    let rename_title = stage_task_context
         .map(|context| context.session_title())
         .unwrap_or_else(|| format!("Astra: {}", task.title));
     let session = SessionInfo {
@@ -1758,7 +1828,8 @@ fn record_and_link_ready_delegated_session(
         started_at: Some(now),
         updated_at: Some(now),
         message_count: 0,
-        title: Some(title),
+        rename_title: Some(rename_title),
+        title: None,
         first_user_message,
         file_path: String::new(),
         file_size: 0,
@@ -1857,6 +1928,26 @@ fn save_stage_task_work_snapshot(
     })
 }
 
+/// Mutation tools may only change state while the run is actively orchestrating.
+/// A cancelled, completed, errored, or interrupted run must not have its stages
+/// or issues mutated by a late or stray sidecar tool call.
+fn inactive_run_mutation_error(run: &AstraRun) -> Option<AstraStageMutationResult> {
+    if matches!(
+        run.status,
+        AstraRunStatus::Dispatching | AstraRunStatus::Running
+    ) {
+        None
+    } else {
+        Some(AstraStageMutationResult {
+            ok: false,
+            stage: None,
+            issue: None,
+            error: Some(format!("Astra run is not active: {}", run.status.as_str())),
+            applied_at: now_ms(),
+        })
+    }
+}
+
 fn is_persistable_agent_session_id(agent_runtime_session_id: &str) -> bool {
     !agent_runtime_session_id.trim().is_empty()
         && !agent_runtime_session_id.starts_with("fake-agent-session")
@@ -1868,6 +1959,11 @@ fn build_stage_task_snapshot(
 ) -> Value {
     let mut stages = thread.stages.clone();
     stages.sort_by_key(|stage| stage.order);
+    let current_stage_label = stages
+        .iter()
+        .find(|stage| stage.id == focused_stage.id)
+        .map(stage_label)
+        .unwrap_or_else(|| stage_label(focused_stage));
     let completed = stages
         .iter()
         .filter(|stage| matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
@@ -1957,7 +2053,7 @@ fn build_stage_task_snapshot(
             "incomplete": stages.len().saturating_sub(completed),
             "blocked": blocked,
             "openIssues": open_issues,
-            "currentStage": stage_label(focused_stage),
+            "currentStage": current_stage_label,
             "total": stages.len(),
         },
         "capturedAt": now_ms(),
@@ -2124,7 +2220,11 @@ fn session_ref_json(session: &SessionInfo, source_kind: &str) -> Value {
     json!({
         "agent": session.agent,
         "sessionId": session.id,
-        "title": session.title.as_deref().or(session.first_user_message.as_deref()),
+        "title": session
+            .rename_title
+            .as_deref()
+            .or(session.title.as_deref())
+            .or(session.first_user_message.as_deref()),
         "filePath": if session.file_path.is_empty() { None::<&str> } else { Some(session.file_path.as_str()) },
         "sourceKind": source_kind,
     })
@@ -2377,6 +2477,7 @@ fn extract_result_text(value: &Value) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn astra_run_all_approved_tasks_finished(run: &AstraRun) -> bool {
     !run.approved_task_ids.is_empty()
         && run.approved_task_ids.iter().all(|task_id| {
@@ -2581,9 +2682,10 @@ mod tests {
         assert_eq!(updated_stage.sessions.len(), 1);
         assert_eq!(updated_stage.sessions[0].id, "agent-session-real");
         assert_eq!(
-            updated_stage.sessions[0].title.as_deref(),
+            updated_stage.sessions[0].rename_title.as_deref(),
             Some("Astra: Build stage worker")
         );
+        assert_eq!(updated_stage.sessions[0].title, None);
         assert_eq!(updated_stage.sessions[0].file_path, "");
         assert!(updated_stage.sessions[0].partial);
         assert!(store
@@ -2715,7 +2817,6 @@ mod tests {
         let stage = store
             .add_thread_stage(&thread.id, &stage_option.id, &[])
             .unwrap();
-        let thread_state = store.get_thread_work_state(&thread.id).unwrap();
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             title: "Research stage".to_string(),
@@ -2725,7 +2826,15 @@ mod tests {
             expected_output: "Research summary.".to_string(),
             risk: AstraTaskRisk::Low,
         };
+        store
+            .update_thread_stage_state(&stage.id, Some(StageStatus::InProgress), None, None)
+            .unwrap();
+        let thread_state = store.get_thread_work_state(&thread.id).unwrap();
         let context = build_stage_task_context(&thread_state, &stage.id, &task).unwrap();
+        assert_eq!(
+            context.snapshot["stages"][0]["status"],
+            Value::String("in_progress".to_string())
+        );
         let run = AstraRun {
             run_id: "astra-run-ready".to_string(),
             thread_id: thread.id.clone(),
@@ -2777,9 +2886,10 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(
-            updated_stage.sessions[0].title.as_deref(),
+            updated_stage.sessions[0].rename_title.as_deref(),
             Some("Astra: Research-Promote session")
         );
+        assert_eq!(updated_stage.sessions[0].title, None);
         assert!(store
             .get_thread_work_snapshot(Agent::Codex, "agent-session-real")
             .unwrap()
@@ -2795,6 +2905,7 @@ mod tests {
             started_at: Some(2),
             updated_at: Some(3),
             message_count: 4,
+            rename_title: None,
             title: Some("# Sessio stage task".to_string()),
             first_user_message: Some("# Sessio stage task".to_string()),
             file_path: Path::new(&project.path)
@@ -2820,6 +2931,43 @@ mod tests {
         assert_eq!(indexed_stage.sessions[0].id, "agent-session-real");
         assert_eq!(indexed_stage.sessions[0].file_path, real_session.file_path);
         assert!(!indexed_stage.sessions[0].partial);
+        assert_eq!(
+            indexed_stage.sessions[0].rename_title.as_deref(),
+            Some("Astra: Research-Promote session")
+        );
+        assert_eq!(
+            indexed_stage.sessions[0].title.as_deref(),
+            Some("# Sessio stage task")
+        );
+        store
+            .upsert_session(&real_session.file_path, &real_session)
+            .unwrap();
+        let reindexed = store.get_thread_work_state(&thread.id).unwrap();
+        let reindexed_stage = reindexed
+            .stages
+            .iter()
+            .find(|item| item.id == stage.id)
+            .unwrap();
+        assert_eq!(
+            reindexed_stage.sessions[0].file_path,
+            real_session.file_path
+        );
+        assert!(!reindexed_stage.sessions[0].partial);
+        assert_eq!(
+            reindexed_stage.sessions[0].rename_title.as_deref(),
+            Some("Astra: Research-Promote session")
+        );
+        assert_eq!(
+            reindexed_stage.sessions[0].title.as_deref(),
+            Some("# Sessio stage task")
+        );
+        let session_row_count = store
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .filter(|session| session.agent == Agent::Codex && session.id == "agent-session-real")
+            .count();
+        assert_eq!(session_row_count, 1);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));
@@ -2841,7 +2989,7 @@ mod tests {
             description: Some("Implement the API surface.".to_string()),
             icon: None,
             order: 0,
-            status: StageStatus::InProgress,
+            status: StageStatus::NotStarted,
             summary: Some("Routes are scaffolded.".to_string()),
             outcome: None,
             enabled: true,
@@ -2887,6 +3035,10 @@ mod tests {
         assert_eq!(
             context.snapshot["focusedStageId"],
             Value::String("thread-stage-1".to_string())
+        );
+        assert_eq!(
+            context.snapshot["stages"][0]["status"],
+            Value::String("not_started".to_string())
         );
         assert_eq!(
             context.snapshot["goal"],

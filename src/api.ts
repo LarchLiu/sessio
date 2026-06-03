@@ -274,6 +274,7 @@ export interface SessionInfo {
   startedAt: number | null;
   updatedAt: number | null;
   messageCount: number;
+  renameTitle: string | null;
   title: string | null;
   firstUserMessage: string | null;
   filePath: string;
@@ -719,6 +720,14 @@ export type SessionScope =
 
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function updateSessionRenameTitle(
+  agent: Agent,
+  sessionId: string,
+  renameTitle: string | null,
+): Promise<void> {
+  return invoke<void>("update_session_rename_title", { agent, sessionId, renameTitle });
 }
 
 export async function listProjects(): Promise<ProjectInfo[]> {

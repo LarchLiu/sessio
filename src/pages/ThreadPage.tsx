@@ -19,7 +19,7 @@ import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
-import { sessionIdentityKey } from "../appUtils";
+import { sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result"]);
@@ -799,7 +799,7 @@ function AssistantSessionLane({
               className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5 text-left transition hover:bg-card-hover"
             >
               <div className="truncate text-body-sm text-ink/75">
-                {session.title ?? session.firstUserMessage ?? t("list.no_user_message")}
+                {sessionDisplayTitle(session) ?? t("list.no_user_message")}
               </div>
               <div className="mt-0.5 text-meta text-ink/35">
                 {t("list.msgs", { count: session.messageCount })}

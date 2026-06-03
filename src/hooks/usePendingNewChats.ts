@@ -71,6 +71,7 @@ export function usePendingNewChats({
         startedAt: pending.timestamp,
         updatedAt: pending.timestamp,
         messageCount: 0,
+        renameTitle: null,
         title: pending.prompt,
         firstUserMessage: pending.prompt,
         filePath: "",

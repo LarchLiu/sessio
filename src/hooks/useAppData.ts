@@ -5,6 +5,7 @@ import {
   getMemoryBackendStatus,
   listProjects,
   listSessions,
+  type AstraEvent,
   type IndexPhase,
   type MemoryBackendStatus,
   type ProjectInfo,
@@ -84,6 +85,11 @@ export function useAppData({
       void refreshProjects();
       void refreshSessions();
     });
+    const astraUnlisten = listen<AstraEvent>("thread-astra-event", (event) => {
+      if (event.payload.eventType !== "delegated") return;
+      void refreshSessions();
+      void refreshProjects();
+    });
     const statusUnlisten = listen("sessions_index_status", (event) => {
       const payload = event.payload as {
         phase?: IndexPhase;
@@ -95,6 +101,7 @@ export function useAppData({
     return () => {
       unlisten.then((f) => f()).catch(() => {});
       projectsUnlisten.then((f) => f()).catch(() => {});
+      astraUnlisten.then((f) => f()).catch(() => {});
       statusUnlisten.then((f) => f()).catch(() => {});
     };
   }, [refreshMemoryBackend, refreshProjects, refreshSessions, setError]);

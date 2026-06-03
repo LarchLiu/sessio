@@ -15,6 +15,7 @@ import {
   RESUME_CMD,
   buildCrossCommandForSession,
 } from "./cross";
+import { sessionDisplayTitle } from "./appUtils";
 
 const AGENT_ICONS: Record<Agent, MenuIconComponent> = {
   codex: OpenAI as MenuIconComponent,
@@ -136,7 +137,7 @@ async function buildSessionSubmenu(
     });
     subItems.push(item);
   }
-  const titleSource = s.title ?? s.firstUserMessage ?? texts.noMessage;
+  const titleSource = sessionDisplayTitle(s) ?? texts.noMessage;
   const text = fitTitle(titleSource) || texts.noMessage;
   const icon = await Image.fromBytes(iconBytes[s.agent]);
   return Submenu.new({

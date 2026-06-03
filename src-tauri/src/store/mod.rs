@@ -123,6 +123,12 @@ pub trait SessionStore: Send + Sync {
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
+    fn update_session_rename_title(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        rename_title: Option<&str>,
+    ) -> Result<()>;
     fn list_workflows(&self) -> Result<Vec<WorkflowInfo>>;
     fn create_workflow(&self, name: &str, description: Option<&str>) -> Result<WorkflowInfo>;
     fn update_workflow(

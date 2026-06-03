@@ -3,6 +3,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type { Agent, ProjectInfo, SessionInfo } from "../api";
 import type { DetailMode } from "../navigation";
 import {
+  betterSessionCandidate,
   projectFilterKey,
   sessionIdentityKey,
   sessionKey,
@@ -40,9 +41,14 @@ export function useSelectedSessionSync({
 }) {
   useEffect(() => {
     if (!selected) return;
-    const next =
-      availableSessions.find((s) => sessionKey(s) === sessionKey(selected)) ??
-      availableSessions.find((s) => sessionIdentityKey(s) === sessionIdentityKey(selected));
+    const exact = availableSessions.find((s) => sessionKey(s) === sessionKey(selected));
+    const sameIdentity = availableSessions.filter(
+      (s) => sessionIdentityKey(s) === sessionIdentityKey(selected),
+    );
+    const next = sameIdentity.reduce<SessionInfo | null>((best, session) => {
+      if (!best) return session;
+      return betterSessionCandidate(session, best) ? session : best;
+    }, exact ?? null);
     if (!next) {
       setSelected(null);
       return;
@@ -54,11 +60,15 @@ export function useSelectedSessionSync({
 
   useEffect(() => {
     if (!pendingSelectSession) return;
-    const next = availableSessions.find(
+    const matches = availableSessions.filter(
       (session) =>
         session.agent === pendingSelectSession.agent &&
         session.id === pendingSelectSession.sessionId,
     );
+    const next = matches.reduce<SessionInfo | null>((best, session) => {
+      if (!best) return session;
+      return betterSessionCandidate(session, best) ? session : best;
+    }, null);
     if (!next) return;
     setSelected(next);
     setSelectedThread(null);

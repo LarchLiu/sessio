@@ -17,6 +17,7 @@ import {
   SessionInfo,
   removeSessionsByScope,
   removeSessionFiles,
+  updateSessionRenameTitle,
   type SessionScope,
 } from "./api";
 import { syncTrayMenu } from "./tray";
@@ -50,8 +51,10 @@ import type { DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
   isSubagentOnly,
   matchesScope,
+  mergeRuntimeSessionAliases,
   projectFilterKey,
   scopeForFilter,
+  sessionDisplayTitle,
   sessionIdentityKey,
   sessionKey,
   type Filter,
@@ -230,6 +233,12 @@ export default function App() {
     setPendingNewChats,
     setError,
   });
+
+  useEffect(() => {
+    setRuntimeSessionAliases((prev) =>
+      mergeRuntimeSessionAliases(prev, liveRuntimeState.sessions),
+    );
+  }, [liveRuntimeState.sessions]);
 
   const handleActiveMessageMeta = useCallback((meta: ActiveMessageMeta) => {
     setActiveMessageMeta(meta);
@@ -412,18 +421,53 @@ export default function App() {
     }
   };
 
+  const renameSession = async (session: SessionInfo) => {
+    const currentTitle = session.renameTitle ?? sessionDisplayTitle(session) ?? "";
+    const nextTitle = window.prompt(t("session.rename_title"), currentTitle);
+    if (nextTitle === null) return;
+    try {
+      const trimmed = nextTitle.trim();
+      await updateSessionRenameTitle(session.agent, session.id, trimmed || null);
+      setSessions((prev) =>
+        prev.map((item) =>
+          item.agent === session.agent && item.id === session.id
+            ? { ...item, renameTitle: trimmed || null }
+            : item,
+        ),
+      );
+      setSelected((prev) =>
+        prev && prev.agent === session.agent && prev.id === session.id
+          ? { ...prev, renameTitle: trimmed || null }
+          : prev,
+      );
+      void refreshSessions();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
   const openDeleteMenu = async (
     pos: { x: number; y: number },
     onDelete: (pos: { x: number; y: number }) => void,
+    session?: SessionInfo,
   ) => {
     try {
+      const renameItem = session
+        ? await MenuItem.new({
+            id: "rename",
+            text: t("session.rename"),
+            action: async () => {
+              await renameSession(session);
+            },
+          })
+        : null;
       const removeItem = await MenuItem.new({
         id: "delete",
         text: t("sidebar.remove"),
         action: async () => onDelete(await getMenuClickPos()),
       });
       const menu = await Menu.new({
-        items: [removeItem],
+        items: renameItem ? [renameItem, removeItem] : [removeItem],
       });
       await menu.popup(
         new LogicalPosition(pos.x + 1, pos.y),
@@ -439,12 +483,15 @@ export default function App() {
   };
 
   const openSessionMenu = async (session: SessionInfo, pos: { x: number; y: number }) => {
-    await openDeleteMenu(pos, (clickPos) => setDeleteTarget({ kind: "session", session, pos: clickPos }));
+    await openDeleteMenu(
+      pos,
+      (clickPos) => setDeleteTarget({ kind: "session", session, pos: clickPos }),
+      session,
+    );
   };
 
   const detailTitle =
-    selected?.title ??
-    selected?.firstUserMessage ??
+    (selected ? sessionDisplayTitle(selected) : null) ??
     t("list.no_user_message");
 
   const memoryBackendMissing =

@@ -1507,6 +1507,7 @@ mod ancestor_tests {
             started_at: Some(1),
             updated_at: Some(1),
             message_count: 1,
+            rename_title: None,
             title: None,
             first_user_message: None,
             file_path: file_path.to_string(),
@@ -2269,6 +2270,22 @@ fn create_pending_session(
     let scope = session.file_path.clone();
     store
         .upsert_session(&scope, &session)
+        .map_err(|e| e.to_string())?;
+    app.emit("sessions_index_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn update_session_rename_title(
+    agent: Agent,
+    session_id: String,
+    rename_title: Option<String>,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<(), String> {
+    store
+        .update_session_rename_title(agent, &session_id, rename_title.as_deref())
         .map_err(|e| e.to_string())?;
     app.emit("sessions_index_updated", ())
         .map_err(|e| e.to_string())?;
@@ -3098,6 +3115,7 @@ pub fn run() {
             get_session_history,
             update_session_history_count,
             create_pending_session,
+            update_session_rename_title,
             read_local_image_data_url,
             read_local_text_file,
             set_window_appearance,

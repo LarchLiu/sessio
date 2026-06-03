@@ -28,6 +28,7 @@ import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
 import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
+import { sessionDisplayTitle } from "../appUtils";
 
 type ProjectView = "threads" | "stages" | "assistants";
 type ThreadPanelView = "threads" | "thread-chats";
@@ -57,7 +58,7 @@ export function SessionMetaList({
   const { lang, t } = useI18n();
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const rows: MetaRow[] = [
-    { label: t("meta.title"), value: session.title, clampLines: 2 },
+    { label: t("meta.title"), value: sessionDisplayTitle(session), clampLines: 2 },
     { label: t("meta.agent"), value: AGENT_LABEL[session.agent] },
     { label: t("meta.session_id"), value: session.id, copyable: true },
     {
@@ -714,7 +715,7 @@ function ThreadChatList({
           <AgentGlyph agent={session.agent} className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1">
             <span className="block truncate text-body-sm font-medium text-ink/75">
-              {session.title ?? session.firstUserMessage ?? t("list.no_user_message")}
+              {sessionDisplayTitle(session) ?? t("list.no_user_message")}
             </span>
             <span className="mt-0.5 block text-caption text-ink/40">
               {AGENT_LABEL[session.agent]} · {t("list.msgs", { count: session.messageCount })}

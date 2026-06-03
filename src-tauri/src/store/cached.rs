@@ -130,6 +130,17 @@ impl SessionStore for CachedStore {
         Ok(self.snapshot.read().unwrap().to_vec())
     }
 
+    fn update_session_rename_title(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        rename_title: Option<&str>,
+    ) -> Result<()> {
+        self.inner
+            .update_session_rename_title(agent, session_id, rename_title)?;
+        self.refresh_from_inner()
+    }
+
     fn list_workflows(&self) -> Result<Vec<WorkflowInfo>> {
         self.inner.list_workflows()
     }

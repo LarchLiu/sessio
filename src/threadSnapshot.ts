@@ -6,6 +6,7 @@ import type {
   ThreadWorkSnapshotSessionRef,
   ThreadWorkSnapshotStage,
 } from "./api";
+import { sessionDisplayTitle } from "./appUtils";
 
 const COMPLETED: StageStatus[] = ["completed", "skipped"];
 
@@ -24,7 +25,7 @@ function snapshotStage(stage: StageInfo): ThreadWorkSnapshotStage {
     sessionRefs: stage.sessions.map((session) => ({
       agent: session.agent,
       sessionId: session.id,
-      title: session.title ?? session.firstUserMessage,
+      title: sessionDisplayTitle(session),
       filePath: session.filePath || null,
       sourceKind: "stage",
     })),
@@ -53,7 +54,7 @@ export function buildThreadWorkSnapshot(
   const threadSessionRefs = thread.sessions.map((session) => ({
     agent: session.agent,
     sessionId: session.id,
-    title: session.title ?? session.firstUserMessage,
+    title: sessionDisplayTitle(session),
     filePath: session.filePath || null,
     sourceKind: "thread" as const,
   }));
