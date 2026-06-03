@@ -466,7 +466,11 @@ fn serialize_debug_config(config: &DebugConfig) -> String {
     out.push_str(if config.acp_config { "true" } else { "false" });
     out.push('\n');
     out.push_str("update_preview = ");
-    out.push_str(if config.update_preview { "true" } else { "false" });
+    out.push_str(if config.update_preview {
+        "true"
+    } else {
+        "false"
+    });
     out.push('\n');
     out
 }

@@ -22,6 +22,8 @@ import { localeTag, useI18n } from "../i18n";
 import { sessionIdentityKey } from "../appUtils";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
+const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result"]);
+
 export default function ThreadPage({
   project,
   threadId,
@@ -183,13 +185,16 @@ function ThreadAstraPanel({
     listen<AstraEvent>("thread-astra-event", (event) => {
       if (event.payload.threadId !== thread.id) return;
       void reloadRuns();
+      if (THREAD_REFRESH_ASTRA_EVENTS.has(event.payload.eventType)) {
+        void onReload();
+      }
     }).then((fn) => {
       unlisten = fn;
     }).catch((err) => onError(String(err)));
     return () => {
       unlisten?.();
     };
-  }, [onError, reloadRuns, thread.id]);
+  }, [onError, onReload, reloadRuns, thread.id]);
 
   useEffect(() => {
     if (!activeRun || activeRun.status !== "awaiting_approval") return;

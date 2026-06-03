@@ -26,6 +26,27 @@ User / Thread / Stage
 
 Astra must not directly spawn or own Codex, Claude, Gemini, or future external ACP agents. It can only request orchestration actions through Sessio tools, and Sessio decides whether those actions are valid and allowed.
 
+## Goals And Non-Goals
+
+V1 must deliver one closed orchestration loop. Each goal maps to a concrete mechanism described later in this document:
+
+1. **Delegate by context** — read thread/stage/memory via `sessio.project.snapshot` / `sessio.memory.search` and dispatch a task to an ACP agent.
+2. **Receive task results** — `sessio.agent.dispatch_task` returns an `AstraTaskResult` when the delegated ACP turn reaches a terminal state.
+3. **Decide stage updates** — judge the result and submit an `AstraStageDecision` (a request, not an applied mutation).
+4. **Receive update results** — Sessio validates and applies the decision, then returns an `AstraStageMutationResult` (success or structured error).
+5. **Re-dispatch by stage state** — refresh the snapshot and choose the next task from updated stage state.
+6. **Close the loop** — repeat until every thread stage is terminal; Sessio marks the run `completed` and emits `complete`.
+7. **Retry the same stage** — when unsatisfied with a result, request another delegated task for the same stage.
+8. **Bounded retries** — Sessio counts per-stage attempts and enforces a configurable retry limit, returning `retryLimitReached` to force a new decision.
+
+Non-Goals (V1):
+
+- Astra does not spawn ACP agents, run shell, write project files, or invoke the `sessio` CLI directly.
+- Astra does not count its own retries or enforce limits — Sessio does.
+- Astra is not added to the indexed historical `Agent` enum.
+- No automatic resume of an interrupted run; state is preserved and inspectable, continuation is manual.
+- At most one concurrent orchestration run per thread.
+
 ## Name And Product Meaning
 
 **Astra** comes from Latin and means **stars / celestial bodies**: stars, stellar bodies, and the wider sky of navigable relationships.
@@ -479,24 +500,43 @@ On app restart:
 - users can inspect the interrupted loop position, delegated task results, and per-stage attempt counts
 - users can inspect or continue the delegated sessions through normal Sessio UI
 
-## Implementation Steps
+## Phased Implementation Plan
 
-1. Create `sidecars/sessio-astra` with TypeScript, package scripts, and a stdio JSONL entrypoint.
-2. Add Astra bootstrap code using `@earendil-works/pi-ai` and `@earendil-works/pi-agent-core`.
-3. Implement sidecar protocol helpers for reading JSONL, writing responses, writing events, and calling Sessio tools.
-4. Add Rust protocol structs and JSONL framing helpers.
-5. Add `AstraService` with sidecar startup, request routing, crash detection, timeout handling, and cancellation.
-6. Add read-only tools first: project snapshot, thread/stage snapshot, and memory search.
-7. Add Tauri commands and frontend API wrappers for start, confirm, and cancel.
-8. Add Thread-level "Astra" UI with plan preview and task approval.
-9. Add confirmed-run task dispatch through existing `RuntimeManager`, blocking each Astra tool response until the delegated ACP turn reaches a terminal state and returning `AstraTaskResult`.
-10. Add the automatic orchestration loop, snapshot refresh, same-stage retry branch, and final-stage `completed` terminal condition.
-11. Add stage update and issue decision-submission tools with strict Rust-side validation, Sessio-side execution, and success/failure result notification back to Astra.
-12. Persist minimal orchestration run metadata, including loop position, task results, per-stage attempt counts, and retry limit configuration.
-13. Add Sessio-side retry-limit enforcement so repeated dispatches for the same stage can be refused with `retryLimitReached`.
-14. Add Bun sidecar scripts for dev, typecheck, JS build, and target-specific compiled binaries.
-15. Add Tauri `externalBin` configuration and copy compiled binaries to `src-tauri/binaries`.
-16. Add structured logs tagged with `runId`, `threadId`, `taskId`, `threadStageId`, and delegated `sessioRuntimeSessionId`.
+Each phase is independently shippable and ends with an explicit exit check. Phases 2–5 build the closed loop in dependency order. Step numbers in parentheses map back to the flat steps this plan replaces, so no work item is lost.
+
+**Phase 0 — Sidecar skeleton & protocol handshake** (steps 1–5)
+- Create `sidecars/sessio-astra` (TypeScript, package scripts, stdio JSONL entrypoint); Astra bootstrap on `@earendil-works/pi-ai` + `@earendil-works/pi-agent-core`; sidecar protocol helpers (read JSONL, write responses/events, call Sessio tools).
+- Rust: protocol structs + JSONL framing; `AstraService` with sidecar startup, request routing, crash detection, timeout handling, and cancellation.
+- Exit: JSONL parser unit tests (partial lines, invalid JSON, unknown method, duplicate id, missing `protocolVersion`); compiled-sidecar smoke test (handshake, agent init, `getModel`, no-network planning path); clean start/stop.
+
+**Phase 1 — Read-only context, proposal & UI** (steps 6–8)
+- Read-only tools first: `sessio.project.snapshot`, thread/stage snapshot, `sessio.memory.search`, and `sessio.agent.plan_task` (proposal only, no ACP start).
+- Tauri commands + frontend API wrappers for start/confirm/cancel; Thread-level "Astra" UI with plan preview and full-plan/subset approval.
+- Exit: starting on a real thread returns a run handle and emits a `plan` event whose proposals carry valid thread/stage ids; memory failure degrades to a tool error without aborting the run.
+
+**Phase 2 — Single approval & blocking dispatch (Goals 1–2)** (step 9)
+- Confirmed-run task dispatch through existing `RuntimeManager`, blocking each Astra tool response until the delegated ACP turn reaches a terminal state and returning `AstraTaskResult`; timeout + cancel unblock it.
+- Exit: dispatch fails before confirmation and for tasks outside the confirmed plan; after confirmation a single task dispatches and returns a structured result at the turn's terminal state; a permission request mid-turn blocks then resumes; cancel kills only this run's sessions.
+
+**Phase 3 — Stage update & issue: decide → execute → report (Goals 3–4)** (step 11)
+- `sessio.stage.update` and `sessio.stage.issue.add_or_update` as decision-submission tools: strict Rust-side validation, Sessio-side execution (store APIs / `sessio` CLI stage entrypoint), and an `AstraStageMutationResult` (success or structured error) returned to Astra.
+- Exit: both success and failure of a stage mutation reach Astra; invalid ids / unconfirmed run are rejected in Rust; Astra cannot treat a failed mutation as a completed stage.
+
+**Phase 4 — Autonomous loop & termination (Goals 5–6)** (step 10)
+- The automatic orchestration loop: snapshot refresh after each task/mutation result, next-task selection, and the final-stage `completed` terminal condition that emits `complete`.
+- Exit: after a single whole-plan approval the loop advances all stages with no per-task prompts; the last stage reaching terminal state marks the run `completed`; loop progress (`currentStageId`, completed task ids) is visible in the UI.
+
+**Phase 5 — Retry & Sessio threshold circuit breaker (Goals 7–8)** (steps 10, 13)
+- Same-stage retry branch in the loop; Sessio-side retry-limit enforcement so repeated dispatches for the same stage are refused with `retryLimitReached`, forcing Astra to re-decide (switch agent / change prompt / split task / mark stage blocked / abort run).
+- Exit: retrying the same stage increments Sessio's per-stage attempt count; reaching the threshold circuit-breaks and routes Astra into the re-decide branch without a stuck loop.
+
+**Phase 6 — Persistence, recovery & observability** (steps 12, 16)
+- Persist minimal run metadata (loop position, delegated task results, per-stage attempt counts, retry limit configuration); structured logs tagged with `runId`, `threadId`, `taskId`, `threadStageId`, and delegated `sessioRuntimeSessionId`.
+- Exit: on restart active runs become `interrupted` with inspectable loop position/results/attempt counts; sidecar crash marks the run `errored` while delegated ACP sessions stay visible; integration tests cover crash/restart/cancel.
+
+**Phase 7 — Packaging & release** (steps 14–15)
+- Bun sidecar scripts for dev/typecheck/JS build/target-specific compiled binaries; Tauri `externalBin` configuration with compiled binaries copied to `src-tauri/binaries`; debug launches source, release launches the bundled binary.
+- Exit: compiled-sidecar smoke test, `tauri build --no-bundle` with the binary present, and `pnpm check` all pass.
 
 ## Test Plan
 

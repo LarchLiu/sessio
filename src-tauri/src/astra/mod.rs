@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::agents::runtime::types::{
-    AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, RuntimeMetadata,
+    AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, RuntimeMetadata,
     StartAgentSession,
 };
 use crate::agents::runtime::RuntimeManager;
@@ -303,6 +303,9 @@ struct DelegatedSessionState {
     run_id: String,
     task_id: String,
     thread_stage_id: Option<String>,
+    agent_session_id: Option<String>,
+    stage_task_context: Option<StageTaskContext>,
+    session_recorded: bool,
     attempt_count: u32,
     retry_limit_reached: bool,
     text: String,
@@ -597,33 +600,37 @@ impl AstraService {
             "astraRetryLimitReached".to_string(),
             Value::Bool(retry_limit_reached),
         );
+        let initial_prompt = stage_context
+            .as_ref()
+            .map(|context| context.prompt.clone())
+            .unwrap_or_else(|| task.prompt.clone());
         let mut req = StartAgentSession {
             agent: task.target_agent,
             workspace_path: run.project_path.clone(),
-            initial_prompt: Some(
-                stage_context
-                    .as_ref()
-                    .map(|context| context.prompt.clone())
-                    .unwrap_or_else(|| task.prompt.clone()),
-            ),
+            initial_prompt: None,
             source_session_id: None,
             source_agent: None,
             options,
         };
         hydrate_start_request_for_astra(&mut req, self.inner.store.as_ref())?;
         let handle = self.inner.runtime.start_session(req)?;
-        record_and_link_delegated_session(
-            self.inner.store.as_ref(),
-            run,
-            &handle,
+        self.track_delegated_session(
+            &run.run_id,
+            &task.id,
             resolved_thread_stage_id,
+            attempt_count,
+            retry_limit_reached,
+            &handle.sessio_runtime_session_id,
+            stage_context,
         )?;
-        if let Some(context) = stage_context {
-            save_stage_task_work_snapshot(
-                self.inner.store.as_ref(),
-                &handle,
-                &context,
-                resolved_thread_stage_id,
+        if !initial_prompt.trim().is_empty() {
+            self.inner.runtime.send_input(
+                &handle.sessio_runtime_session_id,
+                AgentInput {
+                    text: initial_prompt,
+                    attachments: Vec::new(),
+                    options: RuntimeMetadata::default(),
+                },
             )?;
         }
         Ok(handle)
@@ -708,46 +715,10 @@ impl AstraService {
             attempt_count,
             false,
         )?;
-        self.track_delegated_session(
-            &next.run_id,
-            &task.id,
-            stage_id.as_deref(),
-            attempt_count,
-            false,
-            &handle.sessio_runtime_session_id,
-        )?;
-
-        let mut run_with_session = self.load_run(&next.run_id)?;
-        if !run_with_session
-            .delegated_session_ids
-            .iter()
-            .any(|id| id == &handle.sessio_runtime_session_id)
-        {
-            run_with_session
-                .delegated_session_ids
-                .push(handle.sessio_runtime_session_id.clone());
-            run_with_session.updated_at = now_ms();
-            self.inner
-                .store
-                .upsert_astra_run(&run_to_record(&run_with_session))?;
-        }
-        self.emit(
-            &run_with_session,
-            "delegated",
-            json!({
-                "taskId": task.id,
-                "threadStageId": stage_id,
-                "targetStageId": task.target_stage_id,
-                "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
-                "agent": handle.agent,
-                "attemptCount": attempt_count,
-                "retryLimitReached": false,
-            }),
-        );
         log::info!(
-            "[sessio-astra:task:delegated] runId={} threadId={} taskId={} threadStageId={:?} sessioRuntimeSessionId={} attemptCount={}",
-            run_with_session.run_id,
-            run_with_session.thread_id,
+            "[sessio-astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
+            next.run_id,
+            next.thread_id,
             task.id,
             stage_id,
             handle.sessio_runtime_session_id,
@@ -755,10 +726,10 @@ impl AstraService {
         );
 
         if let Some(existing) = self
-            .load_run(&run_with_session.run_id)?
+            .load_run(&next.run_id)?
             .task_results
             .into_iter()
-            .find(|result| result.sessio_runtime_session_id == handle.sessio_runtime_session_id)
+            .find(|result| result.task_id == task.id)
         {
             return Ok(existing);
         }
@@ -793,6 +764,7 @@ impl AstraService {
         attempt_count: u32,
         retry_limit_reached: bool,
         sessio_runtime_session_id: &str,
+        stage_task_context: Option<StageTaskContext>,
     ) -> Result<()> {
         let mut delegated = self
             .inner
@@ -807,11 +779,17 @@ impl AstraService {
                 state.thread_stage_id = thread_stage_id.map(ToString::to_string);
                 state.attempt_count = attempt_count;
                 state.retry_limit_reached = retry_limit_reached;
+                if stage_task_context.is_some() {
+                    state.stage_task_context = stage_task_context.clone();
+                }
             })
             .or_insert_with(|| DelegatedSessionState {
                 run_id: run_id.to_string(),
                 task_id: task_id.to_string(),
                 thread_stage_id: thread_stage_id.map(ToString::to_string),
+                agent_session_id: None,
+                stage_task_context,
+                session_recorded: false,
                 attempt_count,
                 retry_limit_reached,
                 text: String::new(),
@@ -825,6 +803,8 @@ impl AstraService {
         match event.payload {
             AgentRuntimeEventPayload::SessionStarted {
                 sessio_runtime_session_id,
+                agent,
+                agent_runtime_session_id,
                 metadata,
                 ..
             } => {
@@ -843,14 +823,25 @@ impl AstraService {
                     .get("astraRetryLimitReached")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                self.track_delegated_session(
-                    run_id,
-                    task_id,
-                    thread_stage_id,
-                    attempt_count,
-                    retry_limit_reached,
-                    &sessio_runtime_session_id,
-                )?;
+                if is_persistable_agent_session_id(&agent_runtime_session_id) {
+                    self.track_delegated_session(
+                        run_id,
+                        task_id,
+                        thread_stage_id,
+                        attempt_count,
+                        retry_limit_reached,
+                        &sessio_runtime_session_id,
+                        None,
+                    )?;
+                    self.record_ready_delegated_session(
+                        run_id,
+                        agent,
+                        task_id,
+                        thread_stage_id,
+                        &agent_runtime_session_id,
+                        &sessio_runtime_session_id,
+                    )?;
+                }
             }
             AgentRuntimeEventPayload::TurnStarted {
                 sessio_runtime_session_id,
@@ -980,6 +971,98 @@ impl AstraService {
             })
     }
 
+    fn record_ready_delegated_session(
+        &self,
+        run_id: &str,
+        agent: Agent,
+        task_id: &str,
+        thread_stage_id: Option<&str>,
+        agent_session_id: &str,
+        sessio_runtime_session_id: &str,
+    ) -> Result<()> {
+        let (state_context, already_recorded) = {
+            let delegated = self
+                .inner
+                .delegated_sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Astra delegated session lock poisoned"))?;
+            let state = delegated.get(sessio_runtime_session_id);
+            let context = state.and_then(|state| state.stage_task_context.clone());
+            let recorded = state
+                .map(|state| {
+                    state.session_recorded
+                        && state.agent_session_id.as_deref() == Some(agent_session_id)
+                })
+                .unwrap_or(false);
+            (context, recorded)
+        };
+        if already_recorded {
+            return Ok(());
+        }
+        let mut run = self.load_run(run_id)?;
+        let task = run
+            .proposed_tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Astra task not found: {task_id}"))?;
+        let context = match (state_context, thread_stage_id) {
+            (Some(context), _) => Some(context),
+            (None, Some(stage_id)) => {
+                let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+                Some(build_stage_task_context(&thread, stage_id, &task)?)
+            }
+            (None, None) => None,
+        };
+        record_and_link_ready_delegated_session(
+            self.inner.store.as_ref(),
+            &run,
+            agent,
+            agent_session_id,
+            &task,
+            thread_stage_id,
+            context.as_ref(),
+        )?;
+        run.delegated_session_ids
+            .retain(|id| id != sessio_runtime_session_id);
+        if !run
+            .delegated_session_ids
+            .iter()
+            .any(|id| id == agent_session_id)
+        {
+            run.delegated_session_ids.push(agent_session_id.to_string());
+        }
+        run.updated_at = now_ms();
+        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+        self.update_delegated_state(sessio_runtime_session_id, |state| {
+            state.agent_session_id = Some(agent_session_id.to_string());
+            state.session_recorded = true;
+        })?;
+        self.emit(
+            &run,
+            "delegated",
+            json!({
+                "taskId": task.id,
+                "threadStageId": thread_stage_id,
+                "targetStageId": task.target_stage_id,
+                "sessioRuntimeSessionId": agent_session_id,
+                "agentRuntimeSessionId": agent_session_id,
+                "liveRuntimeSessionId": sessio_runtime_session_id,
+                "agent": agent,
+            }),
+        );
+        log::info!(
+            "[sessio-astra:task:delegated] runId={} threadId={} taskId={} threadStageId={:?} agentSessionId={} runtimeSessionId={}",
+            run.run_id,
+            run.thread_id,
+            task.id,
+            thread_stage_id,
+            agent_session_id,
+            sessio_runtime_session_id
+        );
+        Ok(())
+    }
+
     fn finish_delegated_task(
         &self,
         sessio_runtime_session_id: &str,
@@ -1009,7 +1092,10 @@ impl AstraService {
         let result = AstraTaskResult {
             task_id: state.task_id.clone(),
             thread_stage_id: state.thread_stage_id.clone(),
-            sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            sessio_runtime_session_id: state
+                .agent_session_id
+                .clone()
+                .unwrap_or_else(|| sessio_runtime_session_id.to_string()),
             turn_id: turn_id.or(state.last_turn_id),
             status,
             output,
@@ -1024,7 +1110,7 @@ impl AstraService {
             .task_waiters
             .lock()
             .ok()
-            .and_then(|mut waiters| waiters.remove(&result.sessio_runtime_session_id))
+            .and_then(|mut waiters| waiters.remove(sessio_runtime_session_id))
         {
             let _ = sender.send(result.clone());
         }
@@ -1040,8 +1126,9 @@ impl AstraService {
 
         let service = self.clone();
         let run_id = run.run_id.clone();
+        let result_for_notify = result.clone();
         thread::spawn(move || {
-            if let Err(error) = service.notify_astra_task_result(&run_id, &result) {
+            if let Err(error) = service.notify_astra_task_result(&run_id, &result_for_notify) {
                 log::warn!("[sessio-astra:task:result:notify] runId={run_id} {error}");
             }
         });
@@ -1058,44 +1145,8 @@ impl AstraService {
         } else {
             run.task_results.push(result);
         }
-        if !matches!(
-            run.status,
-            AstraRunStatus::Cancelled | AstraRunStatus::Errored | AstraRunStatus::Interrupted
-        ) && astra_run_all_approved_tasks_finished(&run)
-        {
-            if run
-                .task_results
-                .iter()
-                .any(|result| result.status == AstraTaskResultStatus::Errored)
-            {
-                run.status = AstraRunStatus::Errored;
-                run.error = Some("one or more delegated tasks errored".to_string());
-            } else if run
-                .task_results
-                .iter()
-                .any(|result| result.status == AstraTaskResultStatus::Cancelled)
-            {
-                run.status = AstraRunStatus::Cancelled;
-            } else {
-                run.status = AstraRunStatus::Completed;
-            }
-        }
         run.updated_at = now_ms();
         self.inner.store.upsert_astra_run(&run_to_record(&run))?;
-        if matches!(
-            run.status,
-            AstraRunStatus::Completed | AstraRunStatus::Errored | AstraRunStatus::Cancelled
-        ) {
-            self.emit(
-                &run,
-                "complete",
-                json!({
-                    "status": run.status.as_str(),
-                    "taskResults": run.task_results.clone(),
-                    "error": run.error.clone(),
-                }),
-            );
-        }
         Ok(run)
     }
 
@@ -1438,11 +1489,7 @@ impl AstraService {
                     error: None,
                     applied_at: now_ms(),
                 };
-                self.emit(
-                    &next,
-                    "stage_mutation_result",
-                    serde_json::to_value(&result)?,
-                );
+                self.emit(&next, "stage_update_result", serde_json::to_value(&result)?);
                 Ok(result)
             }
             Err(error) => Ok(AstraStageMutationResult {
@@ -1469,7 +1516,7 @@ impl AstraService {
                     error: None,
                     applied_at: now_ms(),
                 };
-                self.emit(run, "stage_mutation_result", serde_json::to_value(&result)?);
+                self.emit(run, "stage_update_result", serde_json::to_value(&result)?);
                 Ok(result)
             }
             Err(error) => Ok(AstraStageMutationResult {
@@ -1534,6 +1581,8 @@ impl AstraService {
         else {
             return Ok(());
         };
+        let mut emit_type = event.params.event_type.clone();
+        let mut emit_data = event.params.data.clone();
         match event.params.event_type.as_str() {
             "plan" => {
                 if let Some(tasks) = event.params.data.get("tasks") {
@@ -1543,11 +1592,25 @@ impl AstraService {
             }
             "cancelled" => run.status = AstraRunStatus::Cancelled,
             "error" => run.status = AstraRunStatus::Errored,
+            "complete" => {
+                let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+                let complete = thread_all_stages_terminal(&thread);
+                if complete {
+                    run.status = AstraRunStatus::Completed;
+                } else {
+                    run.status = AstraRunStatus::Running;
+                    let message =
+                        "Astra reported complete before all stages were terminal".to_string();
+                    run.error = Some(message.clone());
+                    emit_type = "error".to_string();
+                    emit_data = json!({ "message": message, "originalEvent": "complete" });
+                }
+            }
             _ => {}
         }
         run.updated_at = now_ms();
         self.inner.store.upsert_astra_run(&run_to_record(&run))?;
-        self.emit(&run, &event.params.event_type, event.params.data);
+        self.emit(&run, &emit_type, emit_data);
         Ok(())
     }
 
@@ -1619,11 +1682,14 @@ fn astra_command(app: &AppHandle) -> Result<Command> {
     Ok(command)
 }
 
-fn record_and_link_delegated_session(
+fn record_and_link_ready_delegated_session(
     store: &dyn SessionStore,
     run: &AstraRun,
-    handle: &AgentSessionHandle,
+    agent: Agent,
+    agent_session_id: &str,
+    task: &AstraTaskProposal,
     resolved_thread_stage_id: Option<&str>,
+    stage_task_context: Option<&StageTaskContext>,
 ) -> Result<()> {
     let project_name = store
         .list_projects()?
@@ -1632,9 +1698,15 @@ fn record_and_link_delegated_session(
         .map(|project| project.name)
         .unwrap_or_else(|| run.project_id.clone());
     let now = now_ms();
+    let first_user_message = stage_task_context
+        .map(|context| context.prompt.clone())
+        .or_else(|| Some(task.prompt.clone()));
+    let title = stage_task_context
+        .map(|context| context.session_title())
+        .unwrap_or_else(|| format!("Astra: {}", task.title));
     let session = SessionInfo {
-        id: handle.sessio_runtime_session_id.clone(),
-        agent: handle.agent,
+        id: agent_session_id.to_string(),
+        agent,
         forked_from_agent: None,
         forked_from_id: None,
         project_path: Some(run.project_path.clone()),
@@ -1642,12 +1714,9 @@ fn record_and_link_delegated_session(
         started_at: Some(now),
         updated_at: Some(now),
         message_count: 0,
-        title: Some("Astra delegated task".to_string()),
-        first_user_message: None,
-        file_path: format!(
-            "astra://{}/{}",
-            run.run_id, handle.sessio_runtime_session_id
-        ),
+        title: Some(title),
+        first_user_message,
+        file_path: String::new(),
         file_size: 0,
         partial: true,
         available: true,
@@ -1658,34 +1727,48 @@ fn record_and_link_delegated_session(
 
     if let Some(stage_id) = resolved_thread_stage_id {
         store
-            .link_stage_session(stage_id, handle.agent, &handle.sessio_runtime_session_id)
+            .link_stage_session(stage_id, agent, agent_session_id)
             .with_context(|| {
                 format!(
                     "link Astra delegated session {} to stage {stage_id}",
-                    handle.sessio_runtime_session_id
+                    agent_session_id
                 )
             })?;
     } else {
         store
-            .link_thread_session(
-                &run.thread_id,
-                handle.agent,
-                &handle.sessio_runtime_session_id,
-            )
+            .link_thread_session(&run.thread_id, agent, agent_session_id)
             .with_context(|| {
                 format!(
                     "link Astra delegated session {} to thread {}",
-                    handle.sessio_runtime_session_id, run.thread_id
+                    agent_session_id, run.thread_id
                 )
             })?;
+    }
+    if let Some(context) = stage_task_context {
+        save_stage_task_work_snapshot(
+            store,
+            agent,
+            agent_session_id,
+            context,
+            resolved_thread_stage_id,
+        )?;
     }
     Ok(())
 }
 
+#[derive(Debug, Clone)]
 struct StageTaskContext {
     thread_id: String,
+    thread_goal: String,
+    stage_name: String,
     snapshot: Value,
     prompt: String,
+}
+
+impl StageTaskContext {
+    fn session_title(&self) -> String {
+        format!("Astra: {}-{}", self.stage_name, self.thread_goal)
+    }
 }
 
 fn build_stage_task_context(
@@ -1697,11 +1780,15 @@ fn build_stage_task_context(
         .stages
         .iter()
         .find(|stage| stage.id == thread_stage_id)
-        .ok_or_else(|| anyhow::anyhow!("stage does not belong to Astra run thread: {thread_stage_id}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("stage does not belong to Astra run thread: {thread_stage_id}")
+        })?;
     let snapshot = build_stage_task_snapshot(thread, stage);
     let prompt = render_stage_task_prompt(thread, stage, &snapshot, task);
     Ok(StageTaskContext {
         thread_id: thread.id.clone(),
+        thread_goal: thread.goal.clone(),
+        stage_name: stage_label(stage),
         snapshot,
         prompt,
     })
@@ -1709,14 +1796,15 @@ fn build_stage_task_context(
 
 fn save_stage_task_work_snapshot(
     store: &dyn SessionStore,
-    handle: &AgentSessionHandle,
+    agent: Agent,
+    agent_session_id: &str,
     context: &StageTaskContext,
     resolved_thread_stage_id: Option<&str>,
 ) -> Result<()> {
     let snapshot_json = serde_json::to_string(&context.snapshot)?;
     store.save_thread_work_snapshot(&ThreadWorkSnapshotRecord {
-        child_agent: handle.agent,
-        child_session_id: handle.sessio_runtime_session_id.clone(),
+        child_agent: agent,
+        child_session_id: agent_session_id.to_string(),
         thread_id: context.thread_id.clone(),
         stage_id: resolved_thread_stage_id.map(ToString::to_string),
         snapshot_json,
@@ -1725,7 +1813,15 @@ fn save_stage_task_work_snapshot(
     })
 }
 
-fn build_stage_task_snapshot(thread: &ThreadInfo, focused_stage: &crate::models::StageInfo) -> Value {
+fn is_persistable_agent_session_id(agent_runtime_session_id: &str) -> bool {
+    !agent_runtime_session_id.trim().is_empty()
+        && !agent_runtime_session_id.starts_with("fake-agent-session")
+}
+
+fn build_stage_task_snapshot(
+    thread: &ThreadInfo,
+    focused_stage: &crate::models::StageInfo,
+) -> Value {
     let mut stages = thread.stages.clone();
     stages.sort_by_key(|stage| stage.order);
     let completed = stages
@@ -1835,18 +1931,38 @@ fn render_stage_task_prompt(
     lines.push(String::new());
     lines.push("You are working on a delegated stage task from Astra. Treat this as a Sessio stage chat, not a general thread chat.".to_string());
     lines.push(format!("Thread goal: {}", thread.goal));
-    if let Some(description) = thread.description.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(description) = thread
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         lines.push(format!("Thread description: {description}"));
     }
     lines.push(format!("Target threadStageId: {}", focused_stage.id));
     lines.push(format!("Target stage: {}", stage_label(focused_stage)));
-    if let Some(description) = focused_stage.description.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(description) = focused_stage
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         lines.push(format!("Stage description: {description}"));
     }
-    if let Some(summary) = focused_stage.summary.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(summary) = focused_stage
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         lines.push(format!("Current stage summary: {summary}"));
     }
-    if let Some(outcome) = focused_stage.outcome.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(outcome) = focused_stage
+        .outcome
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         lines.push(format!("Current stage outcome: {outcome}"));
     }
     let completed = snapshot
@@ -1872,15 +1988,35 @@ fn render_stage_task_prompt(
     lines.push("## Stage work snapshot".to_string());
     if let Some(stages) = snapshot.get("stages").and_then(Value::as_array) {
         for stage in stages {
-            let id = stage.get("threadStageId").and_then(Value::as_str).unwrap_or("");
+            let id = stage
+                .get("threadStageId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let name = stage.get("name").and_then(Value::as_str).unwrap_or(id);
-            let status = stage.get("status").and_then(Value::as_str).unwrap_or("not_started");
-            let focus = if id == focused_stage.id { " <- you are here" } else { "" };
+            let status = stage
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("not_started");
+            let focus = if id == focused_stage.id {
+                " <- you are here"
+            } else {
+                ""
+            };
             lines.push(format!("- [{}] {name}{focus}", status_label(status)));
-            if let Some(summary) = stage.get("summary").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(summary) = stage
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 lines.push(format!("    summary: {summary}"));
             }
-            if let Some(outcome) = stage.get("outcome").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()) {
+            if let Some(outcome) = stage
+                .get("outcome")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
                 lines.push(format!("    outcome: {outcome}"));
             }
             if let Some(issues) = stage.get("issues").and_then(Value::as_array) {
@@ -1892,7 +2028,10 @@ fn render_stage_task_prompt(
                         .get("severity")
                         .and_then(Value::as_str)
                         .unwrap_or("medium");
-                    let title = issue.get("title").and_then(Value::as_str).unwrap_or("issue");
+                    let title = issue
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("issue");
                     lines.push(format!("    issue [{severity}] {title}"));
                     if let Some(description) = issue
                         .get("description")
@@ -1906,16 +2045,20 @@ fn render_stage_task_prompt(
             }
             if let Some(session_refs) = stage.get("sessionRefs").and_then(Value::as_array) {
                 for reference in session_refs {
-                    let agent = reference.get("agent").and_then(Value::as_str).unwrap_or("agent");
+                    let agent = reference
+                        .get("agent")
+                        .and_then(Value::as_str)
+                        .unwrap_or("agent");
                     let session_id = reference
                         .get("sessionId")
                         .and_then(Value::as_str)
                         .unwrap_or("session");
-                    let title = reference
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    lines.push(format!("    [{agent}:{session_id}] {title}").trim_end().to_string());
+                    let title = reference.get("title").and_then(Value::as_str).unwrap_or("");
+                    lines.push(
+                        format!("    [{agent}:{session_id}] {title}")
+                            .trim_end()
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -2199,6 +2342,14 @@ fn astra_run_all_approved_tasks_finished(run: &AstraRun) -> bool {
         })
 }
 
+fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
+    !thread.stages.is_empty()
+        && thread
+            .stages
+            .iter()
+            .all(|stage| matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
+}
+
 fn short_hash(input: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2216,9 +2367,6 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::runtime::types::{
-        RuntimeCapabilitySet, RuntimeSessionStatus, RuntimeTransportKind,
-    };
     use crate::store::sqlite::SqliteStore;
     use std::path::Path;
 
@@ -2339,6 +2487,15 @@ mod tests {
         let stage = store
             .add_thread_stage(&thread.id, &stage_option.id, &[])
             .unwrap();
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Build stage worker".to_string(),
+            target_stage_id: Some(stage.id.clone()),
+            target_agent: Agent::Codex,
+            prompt: "Do the stage work.".to_string(),
+            expected_output: "Stage result.".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
         let run = AstraRun {
             run_id: "astra-run-stage-link".to_string(),
             thread_id: thread.id.clone(),
@@ -2358,17 +2515,17 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        let handle = AgentSessionHandle {
-            sessio_runtime_session_id: "runtime-stage-session".to_string(),
-            agent: Agent::Codex,
-            transport: RuntimeTransportKind::Fake,
-            agent_runtime_session_id: "fake-agent-session".to_string(),
-            workspace_path: project.path.clone(),
-            status: RuntimeSessionStatus::Active,
-            capabilities: RuntimeCapabilitySet::fake(),
-        };
 
-        record_and_link_delegated_session(&store, &run, &handle, Some(&stage.id)).unwrap();
+        record_and_link_ready_delegated_session(
+            &store,
+            &run,
+            Agent::Codex,
+            "agent-session-real",
+            &task,
+            Some(&stage.id),
+            None,
+        )
+        .unwrap();
 
         let updated = store.get_thread_work_state(&thread.id).unwrap();
         assert!(updated.sessions.is_empty());
@@ -2378,14 +2535,17 @@ mod tests {
             .find(|item| item.id == stage.id)
             .unwrap();
         assert_eq!(updated_stage.sessions.len(), 1);
+        assert_eq!(updated_stage.sessions[0].id, "agent-session-real");
         assert_eq!(
-            updated_stage.sessions[0].id,
-            handle.sessio_runtime_session_id
+            updated_stage.sessions[0].title.as_deref(),
+            Some("Astra: Build stage worker")
         );
-        assert_eq!(
-            updated_stage.sessions[0].file_path,
-            "astra://astra-run-stage-link/runtime-stage-session"
-        );
+        assert_eq!(updated_stage.sessions[0].file_path, "");
+        assert!(updated_stage.sessions[0].partial);
+        assert!(store
+            .get_thread_work_snapshot(Agent::Codex, "runtime-stage-session")
+            .unwrap()
+            .is_none());
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));
@@ -2446,20 +2606,18 @@ mod tests {
             risk: AstraTaskRisk::Low,
         };
         let context = build_stage_task_context(&thread, &stage.id, &task).unwrap();
-        let handle = AgentSessionHandle {
-            sessio_runtime_session_id: "runtime-stage-snapshot".to_string(),
-            agent: Agent::Codex,
-            transport: RuntimeTransportKind::Fake,
-            agent_runtime_session_id: "fake-agent-session".to_string(),
-            workspace_path: project.path.clone(),
-            status: RuntimeSessionStatus::Active,
-            capabilities: RuntimeCapabilitySet::fake(),
-        };
 
-        save_stage_task_work_snapshot(&store, &handle, &context, Some(&stage.id)).unwrap();
+        save_stage_task_work_snapshot(
+            &store,
+            Agent::Codex,
+            "agent-stage-snapshot",
+            &context,
+            Some(&stage.id),
+        )
+        .unwrap();
 
         let saved = store
-            .get_thread_work_snapshot(Agent::Codex, "runtime-stage-snapshot")
+            .get_thread_work_snapshot(Agent::Codex, "agent-stage-snapshot")
             .unwrap()
             .unwrap();
         assert_eq!(saved.thread_id, thread.id);
@@ -2474,6 +2632,150 @@ mod tests {
             snapshot["rollup"]["currentStage"],
             Value::String("Implement".to_string())
         );
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    #[test]
+    fn promotes_delegated_runtime_session_to_agent_session_identity() {
+        let db_path = std::env::temp_dir().join(format!(
+            "sessio-astra-session-promote-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "sessio-astra-session-promote-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Session Promote",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let stage_option = store
+            .create_project_stage(&project.id, None, "Research", None, None)
+            .unwrap();
+        store
+            .update_project_stage(&stage_option.id, None, None, None, None, None, Some(true))
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Promote session", None)
+            .unwrap();
+        let stage = store
+            .add_thread_stage(&thread.id, &stage_option.id, &[])
+            .unwrap();
+        let thread_state = store.get_thread_work_state(&thread.id).unwrap();
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Research stage".to_string(),
+            target_stage_id: Some(stage.id.clone()),
+            target_agent: Agent::Codex,
+            prompt: "Research the stage.".to_string(),
+            expected_output: "Research summary.".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
+        let context = build_stage_task_context(&thread_state, &stage.id, &task).unwrap();
+        let run = AstraRun {
+            run_id: "astra-run-ready".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: AstraRunStatus::Running,
+            proposed_tasks: vec![task.clone()],
+            approved_task_ids: Vec::new(),
+            delegated_session_ids: Vec::new(),
+            task_results: Vec::new(),
+            mode: "auto".to_string(),
+            current_stage_id: Some(stage.id.clone()),
+            completed_task_ids: Vec::new(),
+            stage_attempt_counts: HashMap::new(),
+            retry_limit: 3,
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.upsert_astra_run(&run_to_record(&run)).unwrap();
+        assert!(store
+            .get_thread_work_snapshot(Agent::Codex, "runtime-stage-session")
+            .unwrap()
+            .is_none());
+
+        record_and_link_ready_delegated_session(
+            &store,
+            &run,
+            Agent::Codex,
+            "agent-session-real",
+            &task,
+            Some(&stage.id),
+            Some(&context),
+        )
+        .unwrap();
+
+        let updated = store.get_thread_work_state(&thread.id).unwrap();
+        let updated_stage = updated
+            .stages
+            .iter()
+            .find(|item| item.id == stage.id)
+            .unwrap();
+        assert_eq!(updated_stage.sessions.len(), 1);
+        assert_eq!(updated_stage.sessions[0].id, "agent-session-real");
+        assert_eq!(updated_stage.sessions[0].file_path, "");
+        assert!(updated_stage.sessions[0].partial);
+        assert!(store
+            .get_thread_work_snapshot(Agent::Codex, "runtime-stage-session")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            updated_stage.sessions[0].title.as_deref(),
+            Some("Astra: Research-Promote session")
+        );
+        assert!(store
+            .get_thread_work_snapshot(Agent::Codex, "agent-session-real")
+            .unwrap()
+            .is_some());
+
+        let real_session = SessionInfo {
+            id: "agent-session-real".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(2),
+            updated_at: Some(3),
+            message_count: 4,
+            title: Some("# Sessio stage task".to_string()),
+            first_user_message: Some("# Sessio stage task".to_string()),
+            file_path: Path::new(&project.path)
+                .join("real-session.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store
+            .upsert_session(&real_session.file_path, &real_session)
+            .unwrap();
+        let indexed = store.get_thread_work_state(&thread.id).unwrap();
+        let indexed_stage = indexed
+            .stages
+            .iter()
+            .find(|item| item.id == stage.id)
+            .unwrap();
+        assert_eq!(indexed_stage.sessions.len(), 1);
+        assert_eq!(indexed_stage.sessions[0].id, "agent-session-real");
+        assert_eq!(indexed_stage.sessions[0].file_path, real_session.file_path);
+        assert!(!indexed_stage.sessions[0].partial);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));
@@ -2556,7 +2858,9 @@ mod tests {
         assert!(context
             .prompt
             .contains("Stage description: Implement the API surface."));
-        assert!(context.prompt.contains("issue [high] Need persistence check"));
+        assert!(context
+            .prompt
+            .contains("issue [high] Need persistence check"));
         assert!(context.prompt.contains("## Astra task"));
         assert!(context
             .prompt
@@ -2610,5 +2914,60 @@ mod tests {
             completed_at: 2,
         });
         assert!(astra_run_all_approved_tasks_finished(&complete));
+    }
+
+    #[test]
+    fn thread_completion_requires_all_stages_terminal() {
+        let mut thread = ThreadInfo {
+            id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            goal: "Ship the thread".to_string(),
+            description: None,
+            stage_id: None,
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+            stages: Vec::new(),
+            sessions: Vec::new(),
+        };
+        assert!(!thread_all_stages_terminal(&thread));
+
+        thread
+            .stages
+            .push(test_stage("stage-1", StageStatus::Completed));
+        thread
+            .stages
+            .push(test_stage("stage-2", StageStatus::InProgress));
+        assert!(!thread_all_stages_terminal(&thread));
+
+        thread.stages[1].status = StageStatus::Skipped;
+        assert!(thread_all_stages_terminal(&thread));
+    }
+
+    fn test_stage(id: &str, status: StageStatus) -> crate::models::StageInfo {
+        crate::models::StageInfo {
+            id: id.to_string(),
+            thread_id: "thread-1".to_string(),
+            stage_id: format!("project-{id}"),
+            project_id: "project-1".to_string(),
+            assistant_ids: Vec::new(),
+            assistants: Vec::new(),
+            stage_type: crate::models::ProjectStageType::Custom,
+            workflow_id: None,
+            kind: None,
+            name: Some(id.to_string()),
+            description: None,
+            icon: None,
+            order: 0,
+            status,
+            summary: None,
+            outcome: None,
+            enabled: true,
+            allow_empty_assistants: true,
+            created_at: 1,
+            updated_at: 1,
+            sessions: Vec::new(),
+            issues: Vec::new(),
+        }
     }
 }

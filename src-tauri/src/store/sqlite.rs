@@ -1318,6 +1318,15 @@ struct ExistingPlaceholder {
 
 fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
     if let Some(existing) = existing_placeholder(conn, s.agent, &s.id, scope, s)? {
+        let (message_count, partial) =
+            existing_session_count_state(conn, s.agent, &existing.session_id, &existing.scope)?
+                .map(|(existing_message_count, existing_partial)| {
+                    (
+                        existing_message_count.max(s.message_count as i64),
+                        if s.partial { existing_partial } else { 0 },
+                    )
+                })
+                .unwrap_or((s.message_count as i64, s.partial as i64));
         let (existing_forked_from_agent, existing_forked_from_id) =
             existing_session_lineage(conn, s.agent, &existing.session_id, &existing.scope)?;
         let (forked_from_agent, forked_from_id) = merge_session_lineage(
@@ -1330,7 +1339,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             "UPDATE sessions
              SET session_id = ?, scope = ?, file_path = ?, project_path = ?, project_name = ?,
                  started_at = ?, updated_at = ?, title = ?, first_user_message = ?,
-                 file_size = ?, file_mtime = ?, available = ?, archived = ?,
+                 message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
                  last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?
              WHERE agent = ? AND session_id = ? AND scope = ?",
             params![
@@ -1343,8 +1352,10 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                 s.updated_at,
                 s.title,
                 s.first_user_message,
+                message_count,
                 s.file_size as i64,
                 file_mtime_for(&s.file_path),
+                partial,
                 s.available as i64,
                 s.archived as i64,
                 now_ms(),
@@ -1358,6 +1369,12 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
         return Ok(());
     }
     let (message_count, partial) = existing_session_count_state(conn, s.agent, &s.id, scope)?
+        .map(|(existing_message_count, existing_partial)| {
+            (
+                existing_message_count.max(s.message_count as i64),
+                if s.partial { existing_partial } else { 0 },
+            )
+        })
         .unwrap_or((s.message_count as i64, s.partial as i64));
     let (existing_forked_from_agent, existing_forked_from_id) =
         existing_session_lineage(conn, s.agent, &s.id, scope)?;
@@ -5573,6 +5590,9 @@ impl SessionStore for SqliteStore {
     }
 
     fn mark_file_path_unavailable(&self, file_path: &str) -> Result<()> {
+        if is_virtual_session_path(file_path) {
+            return Ok(());
+        }
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE sessions SET available = 0 WHERE file_path = ?",
@@ -5714,7 +5734,8 @@ impl SessionStore for SqliteStore {
                 "UPDATE sessions
                  SET available = 0
                  WHERE scope = ? AND agent = ?
-                   AND NOT (file_size = 0 AND partial = 1)",
+                   AND NOT (file_size = 0 AND partial = 1)
+                   AND scope NOT LIKE 'astra://%'",
                 params![scope, agent.as_str()],
             )?;
         }
@@ -5747,6 +5768,10 @@ fn is_codex_guardian_index_row(session: &SessionInfo) -> bool {
             == Some("guardian");
     }
     false
+}
+
+fn is_virtual_session_path(file_path: &str) -> bool {
+    file_path.starts_with("astra://")
 }
 
 impl MemoryStore for SqliteStore {

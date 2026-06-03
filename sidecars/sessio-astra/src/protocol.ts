@@ -72,7 +72,7 @@ export interface TaskResultParams {
     taskId: string;
     sessioRuntimeSessionId: string;
     turnId?: string | null;
-    status: "completed" | "errored" | "cancelled";
+    status: "completed" | "failed" | "errored" | "cancelled";
     output?: string;
     error?: string | null;
     completedAt?: number;

@@ -46,6 +46,7 @@ struct RuntimeSessionState {
     handle: AgentSessionHandle,
     active_turn_id: Option<String>,
     turn_state: RuntimeTurnState,
+    metadata: RuntimeMetadata,
     turn_cancellations: HashMap<String, Arc<AtomicBool>>,
     permission_waiters: HashMap<String, mpsc::Sender<RuntimePermissionDecision>>,
     acp_controller: Option<AcpSessionController>,
@@ -207,6 +208,7 @@ impl RuntimeManager {
                         handle.workspace_path.clone(),
                         handle.capabilities.clone(),
                     ),
+                    metadata: req.options.clone(),
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
@@ -342,6 +344,7 @@ impl RuntimeManager {
                         handle.workspace_path.clone(),
                         handle.capabilities.clone(),
                     ),
+                    metadata: req.options.clone(),
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
@@ -761,7 +764,7 @@ impl RuntimeManager {
         agent_runtime_session_id: String,
         capabilities: RuntimeCapabilitySet,
     ) -> Result<()> {
-        let handle = {
+        let (handle, metadata) = {
             let mut sessions = self
                 .inner
                 .sessions
@@ -775,7 +778,7 @@ impl RuntimeManager {
             if state.handle.status == RuntimeSessionStatus::Starting {
                 state.handle.status = RuntimeSessionStatus::Idle;
             }
-            state.handle.clone()
+            (state.handle.clone(), state.metadata.clone())
         };
 
         self.emit(AgentRuntimeEventPayload::SessionStarted {
@@ -785,7 +788,7 @@ impl RuntimeManager {
             transport: handle.transport,
             workspace_path: handle.workspace_path,
             capabilities: handle.capabilities,
-            metadata: RuntimeMetadata::default(),
+            metadata,
         })
     }
 

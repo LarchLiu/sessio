@@ -119,16 +119,16 @@ async function runConfirmedPlan(
   for (const task of approved) {
     if (cancelledRuns.has(runId)) break;
     write(event(runId, "status", { status: "running", taskId: task.id, threadStageId: task.targetStageId ?? null }));
-    const result = await callTool(runId, "sessio.agent.dispatch_task", { taskId: task.id }) as AstraTaskResult;
-    results.push(result);
-    write(event(runId, "task_result", result));
+    const result = await dispatchTaskWithRetry(runId, task, callTool, write, results);
     if (result.retryLimitReached) {
-      await callTool(runId, "sessio.stage.issue.add_or_update", {
+      const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
         threadStageId: task.targetStageId,
         title: `Retry limit reached for ${task.title}`,
         description: result.error ?? "Sessio refused another direct dispatch for this stage.",
         severity: "high",
       });
+      write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+      assertMutationOk(mutation, `retry-limit issue update failed for ${task.title}`);
       continue;
     }
     if (result.status === "completed" && task.targetStageId) {
@@ -140,6 +140,7 @@ async function runConfirmedPlan(
         outcome: result.output ?? "",
       });
       write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+      assertMutationOk(mutation, `stage update failed for ${task.title}`);
     } else if (task.targetStageId) {
       const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
         threadStageId: task.targetStageId,
@@ -148,10 +149,48 @@ async function runConfirmedPlan(
         severity: result.status === "cancelled" ? "medium" : "high",
       });
       write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+      assertMutationOk(mutation, `issue update failed for ${task.title}`);
     }
   }
   write(event(runId, "complete", { status: cancelledRuns.has(runId) ? "cancelled" : "completed", results }));
   return results;
+}
+
+async function dispatchTaskWithRetry(
+  runId: string,
+  task: AstraTaskProposal,
+  callTool: ToolCaller,
+  write: Writer,
+  results: AstraTaskResult[],
+): Promise<AstraTaskResult> {
+  const first = await callTool(runId, "sessio.agent.dispatch_task", { taskId: task.id }) as AstraTaskResult;
+  results.push(first);
+  write(event(runId, "task_result", first));
+  if (first.status === "completed" || first.retryLimitReached || cancelledRuns.has(runId)) {
+    return first;
+  }
+
+  write(event(runId, "status", {
+    status: "running",
+    taskId: task.id,
+    threadStageId: task.targetStageId ?? null,
+    retrying: true,
+  }));
+  const retry = await callTool(runId, "sessio.agent.dispatch_task", { taskId: task.id }) as AstraTaskResult;
+  results.push(retry);
+  write(event(runId, "task_result", retry));
+  return retry;
+}
+
+function assertMutationOk(value: unknown, message: string): void {
+  if (!value || typeof value !== "object") {
+    throw new Error(message);
+  }
+  const result = value as { ok?: unknown; error?: unknown };
+  if (result.ok !== true) {
+    const detail = typeof result.error === "string" && result.error.trim() ? `: ${result.error}` : "";
+    throw new Error(`${message}${detail}`);
+  }
 }
 
 function summarizeResult(output: string | undefined): string {
@@ -174,7 +213,10 @@ function isTaskResult(value: unknown): value is TaskResultParams["result"] {
     result.taskId.length > 0 &&
     typeof result.sessioRuntimeSessionId === "string" &&
     result.sessioRuntimeSessionId.length > 0 &&
-    (result.status === "completed" || result.status === "errored" || result.status === "cancelled")
+    (result.status === "completed" ||
+      result.status === "failed" ||
+      result.status === "errored" ||
+      result.status === "cancelled")
   );
 }
 

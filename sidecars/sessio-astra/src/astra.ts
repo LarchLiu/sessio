@@ -42,39 +42,34 @@ export async function resolveModelSmoke(): Promise<PiBootstrapState> {
 
 function deterministicPlan(params: StartParams): AstraPlan {
   const stages = (params.thread.stages ?? []).slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-  const blocked = stages.filter((stage) => stage.status === "blocked");
-  const active =
-    stages.find((stage) => stage.status === "in_progress" || stage.status === "needs_review") ??
-    stages.find((stage) => stage.status === "not_started") ??
-    stages[0] ??
-    null;
   const tasks: AstraTaskProposal[] = [];
+  const pendingStages = stages.filter((stage) => stage.status !== "completed" && stage.status !== "skipped");
 
-  for (const stage of blocked.slice(0, 2)) {
+  for (const stage of pendingStages) {
+    const blocked = stage.status === "blocked";
+    const targetAgent = pickAgent(stage);
+    if (!targetAgent) continue;
     tasks.push({
-      id: taskId(params.thread.id, stage.id, "unblock", tasks.length),
-      title: `Unblock ${stageLabel(stage)}`,
+      id: taskId(params.thread.id, stage.id, blocked ? "unblock" : "advance", tasks.length),
+      title: `${blocked ? "Unblock" : "Advance"} ${stageLabel(stage)}`,
       targetStageId: stage.id,
-      targetAgent: pickAgent(stage, "codex"),
-      prompt: buildPrompt(params.thread, stage, params.prompt, "Identify the blocker, propose the smallest next action, and update the stage with concrete recovery steps."),
-      expectedOutput: "A short blocker diagnosis, recommended next action, and any stage issue updates needed.",
-      risk: "medium",
+      targetAgent,
+      prompt: buildPrompt(
+        params.thread,
+        stage,
+        params.prompt,
+        blocked
+          ? "Identify the blocker, propose the smallest next action, and return concrete recovery steps."
+          : "Work on this stage goal and return a concise implementation or research result with verification notes.",
+      ),
+      expectedOutput: blocked
+        ? "A short blocker diagnosis, recommended next action, and any stage issue updates needed."
+        : "Stage progress with files, decisions, or verification steps clearly summarized.",
+      risk: stageRisk(stage),
     });
   }
 
-  if (active) {
-    tasks.push({
-      id: taskId(params.thread.id, active.id, "advance", tasks.length),
-      title: `Advance ${stageLabel(active)}`,
-      targetStageId: active.id,
-      targetAgent: pickAgent(active, "codex"),
-      prompt: buildPrompt(params.thread, active, params.prompt, "Work on the current stage goal and return a concise implementation or research result with verification notes."),
-      expectedOutput: "Stage progress with files, decisions, or verification steps clearly summarized.",
-      risk: stageRisk(active),
-    });
-  }
-
-  if (tasks.length === 0) {
+  if (tasks.length === 0 && pendingStages.length === 0) {
     tasks.push({
       id: taskId(params.thread.id, "thread", "survey", 0),
       title: "Survey thread state",
@@ -93,16 +88,12 @@ function deterministicPlan(params: StartParams): AstraPlan {
 }
 
 function buildPrompt(
-  thread: ThreadSnapshot,
-  stage: { id: string; name?: string | null; description?: string | null },
+  _thread: ThreadSnapshot,
+  _stage: { id: string; name?: string | null; description?: string | null },
   userPrompt: string | null | undefined,
   instruction: string,
 ): string {
   const parts = [
-    `Thread goal: ${thread.goal}`,
-    thread.description ? `Thread description: ${thread.description}` : null,
-    `Target stage: ${stageLabel(stage)}`,
-    stage.description ? `Stage description: ${stage.description}` : null,
     userPrompt ? `User orchestration instruction: ${userPrompt}` : null,
     instruction,
   ].filter(Boolean);
@@ -121,10 +112,9 @@ function stageRisk(stage: { status?: string; issues?: unknown[] }): "low" | "med
 
 function pickAgent(
   stage: { assistants?: { agent?: { id?: string } }[] },
-  fallback: "codex" | "claude" | "gemini",
-): "codex" | "claude" | "gemini" {
+): "codex" | "claude" | "gemini" | null {
   const id = stage.assistants?.map((assistant) => assistant.agent?.id).find(Boolean);
-  return id === "claude" || id === "gemini" || id === "codex" ? id : fallback;
+  return id === "claude" || id === "gemini" || id === "codex" ? id : null;
 }
 
 function taskId(threadId: string, stageId: string, kind: string, index: number): string {

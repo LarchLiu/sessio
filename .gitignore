@@ -46,3 +46,7 @@ src-tauri/gen
 # Misc
 .cache
 coverage
+
+src-tauri/binaries/*
+
+.claude/*

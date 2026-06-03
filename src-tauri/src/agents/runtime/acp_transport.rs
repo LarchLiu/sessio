@@ -973,8 +973,8 @@ fn spawn_prompt_task(
                     let turn_id = turn_id.clone();
                     move || {
                         std::thread::sleep(std::time::Duration::from_millis(250));
-                        clear_current_turn(&current_turn_id, &turn_id);
                         let _ = manager.complete_turn(&sessio_runtime_session_id, &turn_id);
+                        clear_current_turn(&current_turn_id, &turn_id);
                     }
                 });
             }
