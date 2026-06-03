@@ -1,4 +1,5 @@
 import type {
+  AstraModelConfig,
   AstraPlan,
   AstraTaskProposal,
   ProtocolRequest,
@@ -48,7 +49,6 @@ type FauxProviderRegistration = {
 type PiModules = {
   Agent: PiAgentConstructor;
   getModel(provider: string, modelId: string): unknown;
-  getEnvApiKey(provider: string): string | undefined;
   parseJsonWithRepair<T>(json: string): T;
   streamSimple(model: unknown, context: unknown, options?: Record<string, unknown>): unknown;
   registerFauxProvider(options?: Record<string, unknown>): FauxProviderRegistration;
@@ -56,8 +56,8 @@ type PiModules = {
 };
 type PlannerConfig =
   | { kind: "none" }
-  | { kind: "env"; provider: string; modelId: string; apiKey: string | undefined }
-  | { kind: "faux"; provider: "faux"; modelId: string; planJson: string };
+  | { kind: "configured"; provider: string; api?: string; baseUrl?: string; modelId: string; apiKey: string }
+  | { kind: "faux"; provider: "faux"; api: "faux"; modelId: string; planJson: string; apiKey: string };
 type PiPlanner = {
   agent: PiAgent;
   provider: string;
@@ -90,43 +90,14 @@ export async function bootstrapPi(): Promise<PiBootstrapState> {
     };
   }
 
-  const config = readPlannerConfig(modules);
-  if (config.kind === "none") {
-    return {
-      available: true,
-      agentAvailable: true,
-      modelConfigured: false,
-      apiKeyConfigured: false,
-      planningMode: "deterministic",
-      detail: "Pi packages loaded; no Astra model configured, using deterministic planner",
-    };
-  }
-
-  try {
-    const planner = createPiPlanner(modules, config);
-    planner.cleanup?.();
-    return {
-      available: true,
-      agentAvailable: true,
-      modelConfigured: true,
-      apiKeyConfigured: planner.apiKeyConfigured,
-      planningMode: "pi-agent",
-      provider: planner.provider,
-      modelId: planner.modelId,
-      detail: `Pi Agent ready with ${planner.provider}/${planner.modelId}`,
-    };
-  } catch (error) {
-    return {
-      available: true,
-      agentAvailable: true,
-      modelConfigured: false,
-      apiKeyConfigured: config.kind === "env" ? Boolean(config.apiKey) : true,
-      planningMode: "deterministic",
-      provider: config.provider,
-      modelId: config.modelId,
-      detail: `Pi packages loaded; configured model unavailable, using deterministic planner: ${errorMessage(error)}`,
-    };
-  }
+  return {
+    available: true,
+    agentAvailable: true,
+    modelConfigured: false,
+    apiKeyConfigured: false,
+    planningMode: "deterministic",
+    detail: "Pi packages loaded; Astra model configuration is supplied per request",
+  };
 }
 
 export async function createPlan(params: StartParams): Promise<AstraPlan> {
@@ -134,7 +105,7 @@ export async function createPlan(params: StartParams): Promise<AstraPlan> {
   const modules = await loadPiModules();
   if ("error" in modules) return fallback;
 
-  const config = readPlannerConfig(modules);
+  const config = readPlannerConfig(params.modelConfig);
   if (config.kind === "none") return fallback;
 
   let planner: PiPlanner | null = null;
@@ -163,7 +134,6 @@ async function loadPiModules(): Promise<PiModules | { error: string }> {
       return {
         Agent: piAgentCore.Agent as unknown as PiAgentConstructor,
         getModel: piAi.getModel as unknown as PiModules["getModel"],
-        getEnvApiKey: piAi.getEnvApiKey as unknown as PiModules["getEnvApiKey"],
         parseJsonWithRepair: piAi.parseJsonWithRepair as unknown as PiModules["parseJsonWithRepair"],
         streamSimple: piAi.streamSimple as unknown as PiModules["streamSimple"],
         registerFauxProvider: piAi.registerFauxProvider as unknown as PiModules["registerFauxProvider"],
@@ -176,26 +146,34 @@ async function loadPiModules(): Promise<PiModules | { error: string }> {
   return piModulesPromise;
 }
 
-function readPlannerConfig(modules: PiModules): PlannerConfig {
-  const fauxPlanJson = Bun.env.SESSIO_ASTRA_FAUX_PLAN_JSON?.trim();
-  if (fauxPlanJson) {
+function readPlannerConfig(rawConfig: AstraModelConfig | null | undefined): PlannerConfig {
+  const provider = normalizeConfigText(rawConfig?.provider);
+  const api = normalizeConfigText(rawConfig?.api);
+  const modelId = normalizeConfigText(rawConfig?.modelId);
+  const apiKey = normalizeConfigText(rawConfig?.apiKey);
+  const baseUrl = normalizeConfigText(rawConfig?.baseUrl);
+  const fauxPlanJson = normalizeConfigText(rawConfig?.fauxPlanJson);
+
+  if (provider === "faux" && api === "faux" && fauxPlanJson) {
     return {
       kind: "faux",
       provider: "faux",
-      modelId: Bun.env.SESSIO_ASTRA_FAUX_MODEL_ID?.trim() || "sessio-astra-faux",
+      api: "faux",
+      modelId: modelId || "sessio-astra-faux",
+      apiKey: apiKey || "faux",
       planJson: fauxPlanJson,
     };
   }
 
-  const provider = Bun.env.SESSIO_ASTRA_MODEL_PROVIDER?.trim() || Bun.env.SESSIO_ASTRA_PROVIDER?.trim();
-  const modelId = Bun.env.SESSIO_ASTRA_MODEL_ID?.trim() || Bun.env.SESSIO_ASTRA_MODEL?.trim();
   if (!provider || !modelId) return { kind: "none" };
+  if (!apiKey) return { kind: "none" };
+  return { kind: "configured", provider, api, baseUrl, modelId, apiKey };
+}
 
-  const apiKey = modules.getEnvApiKey(provider);
-  if (!apiKey && !allowMissingApiKey()) {
-    return { kind: "none" };
-  }
-  return { kind: "env", provider, modelId, apiKey };
+function normalizeConfigText(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text ? text : undefined;
 }
 
 function createPiPlanner(modules: PiModules, config: PlannerConfig): PiPlanner {
@@ -218,7 +196,9 @@ function createPiPlanner(modules: PiModules, config: PlannerConfig): PiPlanner {
     };
   }
 
-  const model = modules.getModel(config.provider, config.modelId);
+  const model = config.api || config.baseUrl
+    ? customModel(config)
+    : modules.getModel(config.provider, config.modelId);
   return {
     agent: createPlanningAgent(modules, model, config),
     provider: config.provider,
@@ -228,21 +208,34 @@ function createPiPlanner(modules: PiModules, config: PlannerConfig): PiPlanner {
 }
 
 function createPlanningAgent(modules: PiModules, model: unknown, config: Exclude<PlannerConfig, { kind: "none" }>): PiAgent {
-  const apiKey = config.kind === "env" ? config.apiKey : undefined;
   return new modules.Agent({
     initialState: {
       systemPrompt: ASTRA_SYSTEM_PROMPT,
       model,
       thinkingLevel: readThinkingLevel(),
     },
-    getApiKey: config.kind === "env" ? (provider: string) => modules.getEnvApiKey(provider) : undefined,
     streamFn: (nextModel, context, options = {}) =>
       modules.streamSimple(nextModel, context, {
         ...options,
-        apiKey: typeof options.apiKey === "string" && options.apiKey.trim() ? options.apiKey : apiKey,
+        apiKey: config.apiKey,
         maxTokens: readPositiveIntegerEnv("SESSIO_ASTRA_PLAN_MAX_TOKENS", 4096),
       }),
   });
+}
+
+function customModel(config: Extract<PlannerConfig, { kind: "configured" }>): Record<string, unknown> {
+  return {
+    id: config.modelId,
+    name: config.modelId,
+    api: config.api || "openai-responses",
+    provider: config.provider,
+    baseUrl: config.baseUrl || "https://api.openai.com/v1",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 4096,
+  };
 }
 
 async function createPiAgentPlan(
@@ -567,5 +560,10 @@ export function assertStartParams(request: ProtocolRequest): StartParams {
     thread: params.thread,
     snapshot: params.snapshot,
     prompt: typeof params.prompt === "string" ? params.prompt : null,
+    modelConfig: isModelConfig(params.modelConfig) ? params.modelConfig : null,
   };
+}
+
+function isModelConfig(value: unknown): value is AstraModelConfig {
+  return !value || typeof value === "object";
 }

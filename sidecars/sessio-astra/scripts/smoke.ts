@@ -129,9 +129,23 @@ const fauxPlan = {
     },
   ],
 };
-const piProc = spawnSidecar({ SESSIO_ASTRA_FAUX_PLAN_JSON: JSON.stringify(fauxPlan) });
+const piProc = spawnSidecar();
 
-piProc.stdin.write(`${JSON.stringify({ ...request, id: "pi-plan-1", params: { ...request.params, runId: "pi-run" } })}\n`);
+piProc.stdin.write(`${JSON.stringify({
+  ...request,
+  id: "pi-plan-1",
+  params: {
+    ...request.params,
+    runId: "pi-run",
+    modelConfig: {
+      provider: "faux",
+      api: "faux",
+      modelId: "sessio-astra-faux",
+      apiKey: "faux",
+      fauxPlanJson: JSON.stringify(fauxPlan),
+    },
+  },
+})}\n`);
 piProc.stdin.end();
 
 const piOutput = await new Response(piProc.stdout).text();

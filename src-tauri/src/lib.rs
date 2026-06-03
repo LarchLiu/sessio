@@ -33,10 +33,10 @@ use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, IssueSeverity, IssueStatus,
-    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata,
-    SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus, ThreadInfo,
-    WorkflowInfo,
+    Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
+    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo,
+    RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus,
+    ThreadInfo, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -73,6 +73,23 @@ struct UpdateRuntimeAgentPreferencesRequest {
     display_name: Option<String>,
     enabled: Option<bool>,
     order: Option<i64>,
+    model: Option<String>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
+    models: Option<Vec<RuntimeAgentOptionInput>>,
+    efforts: Option<Vec<RuntimeAgentOptionInput>>,
+    permission_modes: Option<Vec<RuntimeAgentOptionInput>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAgentPreferencesRequest {
+    agent_id: String,
+    display_name: Option<String>,
+    enabled: Option<bool>,
+    order: Option<i64>,
+    ai_provider: Option<String>,
+    ai_providers: Option<Vec<AgentAiProviderInfo>>,
     model: Option<String>,
     effort: Option<String>,
     permission_mode: Option<String>,
@@ -309,6 +326,36 @@ fn archive_project(
 #[tauri::command]
 fn list_agents(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<AgentInfo>, String> {
     store.list_agents().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_agent_preferences(
+    req: UpdateAgentPreferencesRequest,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<AgentInfo, String> {
+    let models = runtime_option_inputs_to_metadata(req.models);
+    let efforts = runtime_option_inputs_to_metadata(req.efforts);
+    let permission_modes = runtime_option_inputs_to_metadata(req.permission_modes);
+    let updated = store
+        .update_agent_preferences_by_id(
+            &req.agent_id,
+            req.display_name.as_deref(),
+            req.enabled,
+            req.order,
+            req.ai_provider.as_deref(),
+            req.ai_providers.as_deref(),
+            req.model.as_deref(),
+            req.effort.as_deref(),
+            req.permission_mode.as_deref(),
+            models.as_deref(),
+            efforts.as_deref(),
+            permission_modes.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("runtime_agents_updated", ())
+        .map_err(|e| e.to_string())?;
+    Ok(updated)
 }
 
 fn runtime_option_inputs_to_metadata(
@@ -3070,6 +3117,7 @@ pub fn run() {
             update_project,
             archive_project,
             list_agents,
+            update_agent_preferences,
             list_assistants,
             create_assistant,
             update_assistant,

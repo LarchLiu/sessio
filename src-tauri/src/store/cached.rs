@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, IssueSeverity, IssueStatus,
-    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata,
-    SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
+    Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
+    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo,
+    RuntimeAgentOptionMetadata, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
+    ThreadInfo, WorkflowInfo,
 };
 use crate::store::{
     AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
@@ -211,6 +212,37 @@ impl SessionStore for CachedStore {
 
     fn list_agents(&self) -> Result<Vec<AgentInfo>> {
         self.inner.list_agents()
+    }
+
+    fn update_agent_preferences_by_id(
+        &self,
+        agent_id: &str,
+        display_name: Option<&str>,
+        enabled: Option<bool>,
+        order: Option<i64>,
+        ai_provider: Option<&str>,
+        ai_providers: Option<&[AgentAiProviderInfo]>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+        models: Option<&[RuntimeAgentOptionMetadata]>,
+        efforts: Option<&[RuntimeAgentOptionMetadata]>,
+        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+    ) -> Result<AgentInfo> {
+        self.inner.update_agent_preferences_by_id(
+            agent_id,
+            display_name,
+            enabled,
+            order,
+            ai_provider,
+            ai_providers,
+            model,
+            effort,
+            permission_mode,
+            models,
+            efforts,
+            permission_modes,
+        )
     }
 
     fn update_builtin_agent_preferences(

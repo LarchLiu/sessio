@@ -429,11 +429,41 @@ impl AstraService {
         );
         self.emit(&run, "status", json!({ "status": run.status.as_str() }));
 
+        let astra_agent = self
+            .inner
+            .store
+            .list_agents()?
+            .into_iter()
+            .find(|agent| agent.id == "astra");
+        let model_config = astra_agent.and_then(|agent| {
+            let selected_provider_id = agent.ai_provider.as_deref().unwrap_or("");
+            let provider = agent
+                .ai_providers
+                .iter()
+                .find(|provider| provider.id == selected_provider_id)
+                .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
+                .or_else(|| agent.ai_providers.first())?;
+            let model_id = agent.model.or_else(|| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.enabled)
+                    .map(|model| model.value.clone())
+            });
+            Some(json!({
+                "provider": provider.provider,
+                "api": provider.api,
+                "baseUrl": provider.base_url,
+                "apiKey": provider.api_key,
+                "modelId": model_id,
+            }))
+        });
         let params = json!({
             "runId": run.run_id,
             "thread": thread,
             "snapshot": project_snapshot(&project, &thread),
             "prompt": req.prompt,
+            "modelConfig": model_config,
         });
 
         let response = match self.request("astra/start", params, Some(Duration::from_secs(20))) {

@@ -54,6 +54,16 @@ export interface StartParams {
   thread: ThreadSnapshot;
   snapshot?: unknown;
   prompt?: string | null;
+  modelConfig?: AstraModelConfig | null;
+}
+
+export interface AstraModelConfig {
+  provider?: string | null;
+  api?: string | null;
+  baseUrl?: string | null;
+  apiKey?: string | null;
+  modelId?: string | null;
+  fauxPlanJson?: string | null;
 }
 
 export interface ConfirmParams {

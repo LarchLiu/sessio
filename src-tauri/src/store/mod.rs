@@ -6,10 +6,10 @@ use std::collections::HashSet;
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType, IssueSeverity, IssueStatus,
-    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, RuntimeAgentOptionMetadata,
-    SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
-    ThreadInfo, WorkflowInfo,
+    Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
+    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo,
+    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo,
+    StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 
 #[derive(Debug, Clone)]
@@ -161,6 +161,21 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<ProjectInfo>;
     fn archive_project(&self, project_id: &str) -> Result<()>;
     fn list_agents(&self) -> Result<Vec<AgentInfo>>;
+    fn update_agent_preferences_by_id(
+        &self,
+        agent_id: &str,
+        display_name: Option<&str>,
+        enabled: Option<bool>,
+        order: Option<i64>,
+        ai_provider: Option<&str>,
+        ai_providers: Option<&[AgentAiProviderInfo]>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+        models: Option<&[RuntimeAgentOptionMetadata]>,
+        efforts: Option<&[RuntimeAgentOptionMetadata]>,
+        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+    ) -> Result<AgentInfo>;
     fn update_builtin_agent_preferences(
         &self,
         agent: Agent,

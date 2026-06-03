@@ -30,6 +30,8 @@ export interface AgentInfo {
   name: string;
   displayName: string;
   icon: string | null;
+  aiProvider: string | null;
+  aiProviders: AgentAiProviderInfo[];
   model: string | null;
   models: RuntimeAgentOptionMetadata[];
   effort: string | null;
@@ -43,6 +45,18 @@ export interface AgentInfo {
   order: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface AgentAiProviderInfo {
+  id: string;
+  displayName: string;
+  provider: string;
+  api: string | null;
+  baseUrl: string | null;
+  apiKey: string | null;
+  models: RuntimeAgentOptionMetadata[];
+  enabled: boolean;
+  order: number;
 }
 
 export interface AgentCommandsInfo {
@@ -523,6 +537,21 @@ export interface UpdateRuntimeAgentPreferencesRequest {
   displayName?: string | null;
   enabled?: boolean | null;
   order?: number | null;
+  model?: string | null;
+  effort?: string | null;
+  permissionMode?: string | null;
+  models?: RuntimeAgentOptionMetadata[];
+  efforts?: RuntimeAgentOptionMetadata[];
+  permissionModes?: RuntimeAgentOptionMetadata[];
+}
+
+export interface UpdateAgentPreferencesRequest {
+  agentId: string;
+  displayName?: string | null;
+  enabled?: boolean | null;
+  order?: number | null;
+  aiProvider?: string | null;
+  aiProviders?: AgentAiProviderInfo[];
   model?: string | null;
   effort?: string | null;
   permissionMode?: string | null;
@@ -1455,6 +1484,12 @@ export async function updateRuntimeAgentPreferences(
   req: UpdateRuntimeAgentPreferencesRequest,
 ): Promise<RuntimeAgentMetadata> {
   return invoke<RuntimeAgentMetadata>("update_runtime_agent_preferences", { req });
+}
+
+export async function updateAgentPreferences(
+  req: UpdateAgentPreferencesRequest,
+): Promise<AgentInfo> {
+  return invoke<AgentInfo>("update_agent_preferences", { req });
 }
 
 export async function startAgentSession(

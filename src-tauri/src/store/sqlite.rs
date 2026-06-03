@@ -11,7 +11,7 @@ use crate::memory::{
     RecordContinuation, SessionTimeInfo, TurnFingerprint, TurnFingerprintCandidate,
 };
 use crate::models::{
-    Agent, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo,
+    Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo, AssistantInfo,
     AssistantType, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
     ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
     SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus, StageType,
@@ -534,6 +534,11 @@ CREATE TABLE IF NOT EXISTS agents (
     name             TEXT NOT NULL,
     display_name     TEXT NOT NULL,
     icon             TEXT,
+    ai_provider      TEXT,
+    ai_providers_json TEXT NOT NULL DEFAULT '[]',
+    ai_api           TEXT,
+    api_base_url     TEXT,
+    api_key          TEXT,
     model            TEXT,
     models_json      TEXT NOT NULL DEFAULT '{}',
     effort           TEXT,
@@ -755,6 +760,15 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     // Current unreleased schema shape: explicit user/Astra session titles live
     // outside indexed parser titles. Keep this unversioned until release.
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_RENAME_TITLE);
+    for statement in [
+        "ALTER TABLE agents ADD COLUMN ai_provider TEXT",
+        "ALTER TABLE agents ADD COLUMN ai_providers_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE agents ADD COLUMN ai_api TEXT",
+        "ALTER TABLE agents ADD COLUMN api_base_url TEXT",
+        "ALTER TABLE agents ADD COLUMN api_key TEXT",
+    ] {
+        let _ = conn.execute(statement, []);
+    }
     seed_builtin_workflows(conn)?;
     seed_builtin_workflow_stages(conn)?;
     seed_builtin_agents(conn)?;
@@ -1049,6 +1063,27 @@ fn runtime_options_from_json(json: &str) -> Vec<RuntimeAgentOptionMetadata> {
     options
 }
 
+fn ai_providers_from_json(json: &str) -> Vec<AgentAiProviderInfo> {
+    serde_json::from_str::<Vec<AgentAiProviderInfo>>(json).unwrap_or_default()
+}
+
+fn astra_default_ai_providers() -> Vec<AgentAiProviderInfo> {
+    vec![AgentAiProviderInfo {
+        id: "openai".to_string(),
+        display_name: "OpenAI".to_string(),
+        provider: "openai".to_string(),
+        api: Some("openai-responses".to_string()),
+        base_url: None,
+        api_key: None,
+        models: runtime_options(vec![
+            runtime_option("gpt-5-mini", "GPT-5 mini"),
+            runtime_option("gpt-5", "GPT-5"),
+        ]),
+        enabled: true,
+        order: 0,
+    }]
+}
+
 fn seed_builtin_agent(
     conn: &Connection,
     agent: Agent,
@@ -1066,14 +1101,20 @@ fn seed_builtin_agent(
     let id = agent.as_str();
     conn.execute(
         "INSERT INTO agents (
-            id, name, display_name, icon, model, models_json, effort, efforts_json,
+            id, name, display_name, icon, ai_provider, ai_providers_json, ai_api, api_base_url, api_key,
+            model, models_json, effort, efforts_json,
             permission_mode, permission_modes_json, type, enabled, transport,
             commands_json, sort_order, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             display_name = COALESCE(agents.display_name, excluded.display_name),
             icon = COALESCE(agents.icon, excluded.icon),
+            ai_provider = COALESCE(agents.ai_provider, excluded.ai_provider),
+            ai_providers_json = COALESCE(NULLIF(agents.ai_providers_json, '[]'), excluded.ai_providers_json),
+            ai_api = COALESCE(agents.ai_api, excluded.ai_api),
+            api_base_url = COALESCE(agents.api_base_url, excluded.api_base_url),
+            api_key = COALESCE(agents.api_key, excluded.api_key),
             model = COALESCE(agents.model, excluded.model),
             models_json = COALESCE(NULLIF(agents.models_json, '{}'), excluded.models_json),
             effort = COALESCE(agents.effort, excluded.effort),
@@ -1091,6 +1132,11 @@ fn seed_builtin_agent(
             runtime_agent_name(agent),
             runtime_agent_display_name(agent),
             id,
+            Option::<&str>::None,
+            "[]",
+            Option::<&str>::None,
+            Option::<&str>::None,
+            Option::<&str>::None,
             model,
             runtime_options_json(&models)?,
             effort,
@@ -1102,6 +1148,64 @@ fn seed_builtin_agent(
             transport_kind_to_db(transport),
             serde_json::to_string(&commands)?,
             runtime_agent_order(agent),
+            now,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
+    let ai_providers = astra_default_ai_providers();
+    conn.execute(
+        "INSERT INTO agents (
+            id, name, display_name, icon, ai_provider, ai_providers_json, ai_api, api_base_url, api_key,
+            model, models_json, effort, efforts_json,
+            permission_mode, permission_modes_json, type, enabled, transport,
+            commands_json, sort_order, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            display_name = COALESCE(agents.display_name, excluded.display_name),
+            icon = COALESCE(agents.icon, excluded.icon),
+            ai_provider = COALESCE(agents.ai_provider, excluded.ai_provider),
+            ai_providers_json = COALESCE(NULLIF(agents.ai_providers_json, '[]'), excluded.ai_providers_json),
+            ai_api = COALESCE(agents.ai_api, excluded.ai_api),
+            api_base_url = agents.api_base_url,
+            api_key = agents.api_key,
+            model = COALESCE(agents.model, excluded.model),
+            models_json = COALESCE(NULLIF(agents.models_json, '{}'), excluded.models_json),
+            effort = NULL,
+            efforts_json = '[]',
+            permission_mode = NULL,
+            permission_modes_json = '[]',
+            type = excluded.type,
+            enabled = 1,
+            transport = excluded.transport,
+            commands_json = excluded.commands_json,
+            sort_order = COALESCE(agents.sort_order, excluded.sort_order),
+            updated_at = excluded.updated_at",
+        params![
+            "astra",
+            "Astra",
+            "Astra",
+            "astra",
+            "openai",
+            serde_json::to_string(&ai_providers)?,
+            "openai-responses",
+            Option::<&str>::None,
+            Option::<&str>::None,
+            "gpt-5-mini",
+            runtime_options_json(&ai_providers[0].models)?,
+            Option::<&str>::None,
+            "[]",
+            Option::<&str>::None,
+            "[]",
+            AgentType::Builtin.as_str(),
+            1_i64,
+            transport_kind_to_db(RuntimeTransportKind::PlainCli),
+            serde_json::to_string(&AgentCommandsInfo::default())?,
+            100_i64,
             now,
             now,
         ],
@@ -1146,6 +1250,7 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         Agent::Claude,
         Some("claude-opus-4-7"),
         runtime_options(vec![
+            runtime_option("claude-opus-4-8", "Opus 4.8"),
             runtime_option("claude-opus-4-7", "Opus 4.7"),
             runtime_option("claude-opus-4-6", "Opus 4.6"),
         ]),
@@ -1193,6 +1298,7 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         },
         now,
     )?;
+    seed_astra_agent(conn, now)?;
     seed_builtin_assistants(conn, now)?;
     Ok(())
 }
@@ -2014,12 +2120,14 @@ fn issue_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageIssueInfo> {
 }
 
 fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
-    let models_json: String = row.get(5)?;
-    let efforts_json: String = row.get(7)?;
-    let permission_modes_json: String = row.get(9)?;
-    let agent_type_raw: String = row.get(10)?;
-    let transport_raw: String = row.get(12)?;
-    let commands_json: String = row.get(13)?;
+    let ai_providers_json: String = row.get(5)?;
+    let models_json: String = row.get(7)?;
+    let efforts_json: String = row.get(9)?;
+    let permission_modes_json: String = row.get(11)?;
+    let agent_type_raw: String = row.get(12)?;
+    let transport_raw: String = row.get(14)?;
+    let commands_json: String = row.get(15)?;
+    let ai_providers = ai_providers_from_json(&ai_providers_json);
     let models = runtime_options_from_json(&models_json);
     let efforts =
         serde_json::from_str::<Vec<RuntimeAgentOptionMetadata>>(&efforts_json).unwrap_or_default();
@@ -2037,19 +2145,21 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
         name: row.get(1)?,
         display_name: row.get(2)?,
         icon: row.get(3)?,
-        model: row.get(4)?,
+        ai_provider: row.get(4)?,
+        ai_providers,
+        model: row.get(6)?,
         models,
-        effort: row.get(6)?,
+        effort: row.get(8)?,
         efforts,
-        permission_mode: row.get(8)?,
+        permission_mode: row.get(10)?,
         permission_modes,
         agent_type: AgentType::from_db_str(&agent_type_raw).unwrap_or(AgentType::Custom),
-        enabled: row.get::<_, i64>(11)? != 0,
+        enabled: row.get::<_, i64>(13)? != 0,
         transport: transport_kind_from_db(&transport_raw),
         commands,
-        order: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        order: row.get(16)?,
+        created_at: row.get(17)?,
+        updated_at: row.get(18)?,
     })
 }
 
@@ -2197,7 +2307,8 @@ fn load_workflow_by_id(conn: &Connection, workflow_id: &str) -> Result<WorkflowI
 
 fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
     conn.query_row(
-        "SELECT id, name, display_name, icon, model, models_json, effort, efforts_json,
+        "SELECT id, name, display_name, icon, ai_provider, ai_providers_json,
+                model, models_json, effort, efforts_json,
                 permission_mode, permission_modes_json, type, enabled, transport,
                 commands_json, sort_order, created_at, updated_at
          FROM agents
@@ -2211,7 +2322,8 @@ fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
 
 fn load_agents(conn: &Connection) -> Result<Vec<AgentInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, display_name, icon, model, models_json, effort, efforts_json,
+        "SELECT id, name, display_name, icon, ai_provider, ai_providers_json,
+                model, models_json, effort, efforts_json,
                 permission_mode, permission_modes_json, type, enabled, transport,
                 commands_json, sort_order, created_at, updated_at
          FROM agents
@@ -4288,12 +4400,14 @@ impl SessionStore for SqliteStore {
         load_agents(&conn)
     }
 
-    fn update_builtin_agent_preferences(
+    fn update_agent_preferences_by_id(
         &self,
-        agent: Agent,
+        agent_id: &str,
         display_name: Option<&str>,
         enabled: Option<bool>,
         order: Option<i64>,
+        ai_provider: Option<&str>,
+        ai_providers: Option<&[AgentAiProviderInfo]>,
         model: Option<&str>,
         effort: Option<&str>,
         permission_mode: Option<&str>,
@@ -4302,7 +4416,10 @@ impl SessionStore for SqliteStore {
         permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
     ) -> Result<AgentInfo> {
         let conn = self.conn.lock().unwrap();
-        let id = agent.as_str();
+        let id = agent_id.trim();
+        if id.is_empty() {
+            anyhow::bail!("agentId is required");
+        }
         let current = load_agent_by_id(&conn, id)?;
         if current.agent_type != AgentType::Builtin {
             anyhow::bail!("agent is not builtin: {id}");
@@ -4310,6 +4427,13 @@ impl SessionStore for SqliteStore {
         let next_display_name = display_name
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let next_ai_provider = ai_provider
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let next_ai_providers = match ai_providers {
+            Some(values) => serde_json::to_string(values)?,
+            None => serde_json::to_string(&current.ai_providers)?,
+        };
         let next_model = model.map(str::trim).filter(|value| !value.is_empty());
         let next_effort = effort.map(str::trim).filter(|value| !value.is_empty());
         let next_permission_mode = permission_mode
@@ -4327,10 +4451,13 @@ impl SessionStore for SqliteStore {
             Some(values) => serde_json::to_string(values)?,
             None => serde_json::to_string(&current.permission_modes)?,
         };
+        let next_enabled = if id == "astra" { Some(true) } else { enabled };
         let now = now_ms();
         conn.execute(
             "UPDATE agents
              SET display_name = COALESCE(?, display_name),
+                 ai_provider = COALESCE(?, ai_provider),
+                 ai_providers_json = ?,
                  model = COALESCE(?, model),
                  models_json = ?,
                  effort = COALESCE(?, effort),
@@ -4343,13 +4470,15 @@ impl SessionStore for SqliteStore {
              WHERE id = ? AND type = 'builtin'",
             params![
                 next_display_name,
+                next_ai_provider,
+                next_ai_providers,
                 next_model,
                 next_models,
                 next_effort,
                 next_efforts,
                 next_permission_mode,
                 next_permission_modes,
-                enabled.map(|value| if value { 1_i64 } else { 0_i64 }),
+                next_enabled.map(|value| if value { 1_i64 } else { 0_i64 }),
                 order,
                 now,
                 id,
@@ -4357,6 +4486,36 @@ impl SessionStore for SqliteStore {
         )?;
         seed_builtin_assistants(&conn, now)?;
         load_agent_by_id(&conn, id)
+    }
+
+    fn update_builtin_agent_preferences(
+        &self,
+        agent: Agent,
+        display_name: Option<&str>,
+        enabled: Option<bool>,
+        order: Option<i64>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        permission_mode: Option<&str>,
+        models: Option<&[RuntimeAgentOptionMetadata]>,
+        efforts: Option<&[RuntimeAgentOptionMetadata]>,
+        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+    ) -> Result<AgentInfo> {
+        let id = agent.as_str();
+        self.update_agent_preferences_by_id(
+            id,
+            display_name,
+            enabled,
+            order,
+            None,
+            None,
+            model,
+            effort,
+            permission_mode,
+            models,
+            efforts,
+            permission_modes,
+        )
     }
 
     fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>> {

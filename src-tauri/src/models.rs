@@ -153,6 +153,8 @@ pub struct AgentInfo {
     pub name: String,
     pub display_name: String,
     pub icon: Option<String>,
+    pub ai_provider: Option<String>,
+    pub ai_providers: Vec<AgentAiProviderInfo>,
     pub model: Option<String>,
     pub models: Vec<RuntimeAgentOptionMetadata>,
     pub effort: Option<String>,
@@ -167,6 +169,20 @@ pub struct AgentInfo {
     pub order: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAiProviderInfo {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+    pub api: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub models: Vec<RuntimeAgentOptionMetadata>,
+    pub enabled: bool,
+    pub order: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

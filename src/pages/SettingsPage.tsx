@@ -4,13 +4,14 @@ import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import AiGenerate2Icon from '@iconify-react/ri/ai-generate-2';
 import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
 import { ArrowLeft, Check, Circle, Download, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
-import type { Agent, AgentInfo, AssistantInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AssistantInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
 import {
   createWorkflow,
   listAgents,
   listAssistants,
   listWorkflowStages,
   listWorkflows,
+  updateAgentPreferences,
   updateRuntimeAgentPreferences,
 } from "../api";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
@@ -31,6 +32,18 @@ import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
 import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
 type SettingsSection = "general" | "agents" | "assistants" | "workflows";
+
+type AgentPreferencePatch = {
+  displayName?: string | null;
+  enabled?: boolean;
+  order?: number;
+  aiProvider?: string | null;
+  aiProviders?: AgentAiProviderInfo[];
+  model?: string | null;
+  effort?: string | null;
+  permissionMode?: string | null;
+  models?: RuntimeAgentOptionMetadata[];
+};
 
 export default function SettingsPage({
   lang,
@@ -295,7 +308,7 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const builtinAgents = useMemo(
-    () => agents.filter((agent) => agent.type === "builtin" && isRuntimeAgent(agent.id)),
+    () => agents.filter((agent) => agent.type === "builtin" && isSettingsAgent(agent.id)),
     [agents],
   );
   const filteredAgents = useMemo(() => {
@@ -314,8 +327,8 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
       const rows = await listAgents();
       setAgents(rows);
       setSelectedAgentId((current) => {
-        const currentExists = rows.some((agent) => agent.id === current && isRuntimeAgent(agent.id));
-        return currentExists ? current : rows.find((agent) => isRuntimeAgent(agent.id))?.id ?? current;
+        const currentExists = rows.some((agent) => agent.id === current && isSettingsAgent(agent.id));
+        return currentExists ? current : rows.find((agent) => isSettingsAgent(agent.id))?.id ?? current;
       });
     } catch (err) {
       onError(String(err));
@@ -336,8 +349,8 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
     const nextAgents = moveAgentOption(builtinAgents, from, to).map((agent, index) => ({ ...agent, order: index }));
     setAgents((prev) => prev.map((agent) => nextAgents.find((item) => item.id === agent.id) ?? agent));
     try {
-      await Promise.all(nextAgents.map((agent) => updateRuntimeAgentPreferences({
-        agent: runtimeAgentId(agent.id),
+      await Promise.all(nextAgents.map((agent) => updateAgentPreferences({
+        agentId: agent.id,
         order: agent.order,
       })));
       const rows = await listAgents();
@@ -449,7 +462,7 @@ function AgentListRow({
         <GripVertical className="h-4 w-4" />
       </button>
       <button type="button" onClick={() => onSelect(agent.id)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-        <AgentGlyph agent={runtimeAgentId(agent.id)} className="h-4 w-4 shrink-0" />
+        <SettingsAgentGlyph agentId={agent.id} className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate font-medium text-card-fg/78">{agent.displayName}</span>
@@ -509,7 +522,11 @@ function AgentEditor({
   const [models, setModels] = useState<RuntimeAgentOptionMetadata[]>(agent.models);
   const [newModelValue, setNewModelValue] = useState("");
   const [newModelDisplayName, setNewModelDisplayName] = useState("");
-  const runtimeAgent = runtimeAgentId(agent.id);
+  const runtimeAgent = isRuntimeAgent(agent.id) ? agent.id : null;
+  const isAstra = agent.id === "astra";
+  const [aiProvider, setAiProvider] = useState(agent.aiProvider ?? "");
+  const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);
+  const selectedAiProvider = aiProviders.find((provider) => provider.id === aiProvider) ?? aiProviders.find((provider) => provider.enabled) ?? aiProviders[0] ?? null;
 
   useEffect(() => {
     setModel(agent.model ?? agent.models.find((item) => item.enabled)?.value ?? "");
@@ -518,24 +535,35 @@ function AgentEditor({
     setModels(agent.models);
     setNewModelValue("");
     setNewModelDisplayName("");
+    setAiProvider(agent.aiProvider ?? "");
+    setAiProviders(agent.aiProviders);
   }, [agent]);
 
-  const persist = async (patch: {
-    displayName?: string | null;
-    enabled?: boolean;
-    order?: number;
-    model?: string | null;
-    effort?: string | null;
-    permissionMode?: string | null;
-    models?: RuntimeAgentOptionMetadata[];
-  }) => {
+  const persist = async (patch: AgentPreferencePatch) => {
     try {
-      await updateRuntimeAgentPreferences({
-        agent: runtimeAgent,
-        ...patch,
-      });
-      const rows = await listAgents();
-      const next = rows.find((item) => item.id === agent.id);
+      let next: AgentInfo | undefined;
+      if (runtimeAgent) {
+        const runtimePatch = {
+          displayName: patch.displayName,
+          enabled: patch.enabled,
+          order: patch.order,
+          model: patch.model,
+          effort: patch.effort,
+          permissionMode: patch.permissionMode,
+          models: patch.models,
+        };
+        await updateRuntimeAgentPreferences({
+          agent: runtimeAgent,
+          ...runtimePatch,
+        });
+        const rows = await listAgents();
+        next = rows.find((item) => item.id === agent.id);
+      } else {
+        next = await updateAgentPreferences({
+          agentId: agent.id,
+          ...patch,
+        });
+      }
       if (next) onUpdated(next);
     } catch (err) {
       onError(String(err));
@@ -559,40 +587,59 @@ function AgentEditor({
 
   const addModel = async () => {
     const value = newModelValue.trim();
-    if (!value || models.some((item) => item.value === value)) return;
+    const sourceModels = activeModels;
+    if (!value || sourceModels.some((item) => item.value === value)) return;
     const displayName = newModelDisplayName.trim() || value;
-    const nextModels = normalizeModelOrders([...models, { value, label: displayName, displayName, enabled: true, order: models.length }]);
+    const nextModels = normalizeModelOrders([...sourceModels, { value, label: displayName, displayName, enabled: true, order: sourceModels.length }]);
     setModels(nextModels);
     setNewModelValue("");
     setNewModelDisplayName("");
     const nextModel = model || value;
     setModel(nextModel);
+    if (isAstra && selectedAiProvider) {
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, nextModel);
+      return;
+    }
     await persist({ models: nextModels, model: nextModel });
   };
 
   const deleteModel = async (value: string) => {
-    const nextModels = models.filter((item) => item.value !== value);
+    const sourceModels = activeModels;
+    const nextModels = sourceModels.filter((item) => item.value !== value);
     const orderedModels = normalizeModelOrders(nextModels);
-    const nextModel = model === value ? nextModels[0]?.value ?? null : model;
+    const nextModel = model === value ? orderedModels[0]?.value ?? null : model;
     setModels(orderedModels);
     setModel(nextModel ?? "");
+    if (isAstra && selectedAiProvider) {
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, orderedModels), selectedAiProvider.id, nextModel);
+      return;
+    }
     await persist({ models: orderedModels, model: nextModel });
   };
 
   const saveModel = async (previousValue: string, nextValue: string, nextDisplayName: string) => {
     const value = nextValue.trim();
-    if (!value || models.some((item) => item.value === value && item.value !== previousValue)) return;
+    const sourceModels = activeModels;
+    if (!value || sourceModels.some((item) => item.value === value && item.value !== previousValue)) return;
     const displayName = nextDisplayName.trim() || value;
-    const nextModels = normalizeModelOrders(models.map((item) => item.value === previousValue ? { ...item, value, label: displayName, displayName } : item));
+    const nextModels = normalizeModelOrders(sourceModels.map((item) => item.value === previousValue ? { ...item, value, label: displayName, displayName } : item));
     const nextModel = model === previousValue ? value : model;
     setModels(nextModels);
     setModel(nextModel ?? "");
+    if (isAstra && selectedAiProvider) {
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, nextModel);
+      return;
+    }
     await persist({ models: nextModels, model: nextModel });
   };
 
   const moveModel = async (from: number, to: number) => {
-    const nextModels = normalizeModelOrders(moveOption(models, from, to));
+    const nextModels = normalizeModelOrders(moveOption(activeModels, from, to));
     setModels(nextModels);
+    if (isAstra && selectedAiProvider) {
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, model || nextModels[0]?.value);
+      return;
+    }
     await persist({ models: nextModels });
   };
 
@@ -610,18 +657,78 @@ function AgentEditor({
     void moveModel(source.initialIndex, source.index);
   };
 
-  const modelOptions = optionRows(models, model);
+  const activeModels = isAstra && selectedAiProvider ? selectedAiProvider.models : models;
+  const modelOptions = optionRows(activeModels, model);
   const effortOptions = optionRows(agent.efforts, effort);
-  const permissionOptions = runtimePermissionModeOptions(optionRows(agent.permissionModes, permissionMode), permissionMode, runtimeAgent);
+  const permissionOptions = runtimeAgent
+    ? runtimePermissionModeOptions(optionRows(agent.permissionModes, permissionMode), permissionMode, runtimeAgent)
+    : optionRows(agent.permissionModes, permissionMode);
   const sessionCommand = agent.commands.session[0] ?? "";
   const versionCommand = agent.commands.version[0] ?? "";
+  const saveAstraProviders = async (
+    nextProviders: AgentAiProviderInfo[],
+    nextProviderId = aiProvider,
+    nextModel: string | null | undefined = model,
+  ) => {
+    const orderedProviders = normalizeProviderOrders(nextProviders);
+    setAiProviders(orderedProviders);
+    setAiProvider(nextProviderId);
+    const selectedProvider = orderedProviders.find((provider) => provider.id === nextProviderId) ?? orderedProviders[0] ?? null;
+    const selectedModels = selectedProvider?.models ?? [];
+    setModels(selectedModels);
+    setModel(nextModel ?? "");
+    await persist({
+      aiProvider: nextProviderId,
+      aiProviders: orderedProviders,
+      models: selectedModels,
+      model: nextModel,
+    });
+  };
+  const updateProviderDraft = (providerId: string, patch: Partial<AgentAiProviderInfo>) => {
+    setAiProviders((prev) => updateProviderInfo(prev, providerId, patch));
+  };
+  const saveSelectedProvider = async () => {
+    if (!selectedAiProvider) return;
+    await saveAstraProviders(aiProviders, selectedAiProvider.id, model || selectedAiProvider.models[0]?.value);
+  };
+  const selectAiProvider = async (nextProviderId: string) => {
+    const provider = aiProviders.find((item) => item.id === nextProviderId) ?? null;
+    const nextModel = provider?.models.find((item) => item.enabled)?.value ?? provider?.models[0]?.value ?? null;
+    await saveAstraProviders(aiProviders, nextProviderId, nextModel);
+  };
+  const addProvider = async () => {
+    const providerId = uniqueProviderId(aiProviders, "custom-provider");
+    const nextProvider: AgentAiProviderInfo = {
+      id: providerId,
+      displayName: t("agent.custom_provider"),
+      provider: "openai",
+      api: "openai-responses",
+      baseUrl: null,
+      apiKey: null,
+      models: [],
+      enabled: true,
+      order: aiProviders.length,
+    };
+    await saveAstraProviders([...aiProviders, nextProvider], providerId, undefined);
+  };
+  const deleteProvider = async () => {
+    if (!selectedAiProvider || aiProviders.length <= 1) return;
+    const nextProviders = aiProviders.filter((provider) => provider.id !== selectedAiProvider.id);
+    const nextProvider = nextProviders[0] ?? null;
+    const nextModel = nextProvider?.models.find((item) => item.enabled)?.value ?? nextProvider?.models[0]?.value ?? null;
+    await saveAstraProviders(nextProviders, nextProvider?.id ?? "", nextModel);
+  };
+  const providerOptions = aiProviders.map((provider) => ({
+    value: provider.id,
+    label: provider.displayName || provider.provider || provider.id,
+  }));
 
   return (
     <>
       <SettingsGroup title={agent.displayName}>
         <div className="flex items-start gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-card-chip/[0.08]">
-            <AgentGlyph agent={runtimeAgent} className="h-5 w-5" />
+            <SettingsAgentGlyph agentId={agent.id} className="h-5 w-5" />
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -640,13 +747,92 @@ function AgentEditor({
               {versionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{versionCommand}</span>}
             </div>
           </div>
-          <SwitchControl
-            checked={agent.enabled}
-            tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
-            onToggle={() => void persist({ enabled: !agent.enabled })}
-          />
+          {isAstra ? (
+            <SwitchControl
+              checked
+              tooltip={t("agent.always_enabled")}
+              onToggle={() => undefined}
+            />
+          ) : (
+            <SwitchControl
+              checked={agent.enabled}
+              tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
+              onToggle={() => void persist({ enabled: !agent.enabled })}
+            />
+          )}
         </div>
       </SettingsGroup>
+      {isAstra && (
+        <SettingsGroup title={t("agent.providers")}>
+          <div className="grid gap-2">
+            <AgentPreferenceRow label={t("agent.provider")}>
+              <div className="flex min-w-0 items-center gap-2">
+                <AgentInlineSelect
+                  value={selectedAiProvider?.id ?? ""}
+                  options={providerOptions}
+                  placeholder={t("agent.provider")}
+                  onChange={(value) => void selectAiProvider(value)}
+                />
+                <Tooltip content={t("agent.add_provider")} placement="top">
+                  <button type="button" onClick={() => void addProvider()} className="rounded p-1.5 text-card-subtle/55 hover:bg-card-action-hover/5 hover:text-card-fg/75">
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+                <Tooltip content={t("agent.delete_provider")} placement="top">
+                  <button type="button" onClick={() => void deleteProvider()} disabled={aiProviders.length <= 1} className="rounded p-1.5 text-card-subtle/45 hover:bg-status-error/10 hover:text-status-error disabled:opacity-30">
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </Tooltip>
+              </div>
+            </AgentPreferenceRow>
+            {selectedAiProvider && (
+              <>
+                <AgentPreferenceRow label={t("agent.provider_name")}>
+                  <AgentInlineInput
+                    value={selectedAiProvider.displayName}
+                    placeholder="OpenAI"
+                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { displayName: value })}
+                    onBlur={saveSelectedProvider}
+                  />
+                </AgentPreferenceRow>
+                <AgentPreferenceRow label={t("agent.pi_provider")}>
+                  <AgentInlineInput
+                    value={selectedAiProvider.provider}
+                    placeholder="openai"
+                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { provider: value })}
+                    onBlur={saveSelectedProvider}
+                  />
+                </AgentPreferenceRow>
+                <AgentPreferenceRow label={t("agent.pi_api")}>
+                  <AgentInlineInput
+                    value={selectedAiProvider.api ?? ""}
+                    placeholder="openai-responses"
+                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { api: value || null })}
+                    onBlur={saveSelectedProvider}
+                  />
+                </AgentPreferenceRow>
+                <AgentPreferenceRow label={t("agent.api_base_url")}>
+                  <AgentInlineInput
+                    value={selectedAiProvider.baseUrl ?? ""}
+                    placeholder="https://api.openai.com/v1"
+                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { baseUrl: value || null })}
+                    onBlur={saveSelectedProvider}
+                  />
+                </AgentPreferenceRow>
+                <AgentPreferenceRow label={t("agent.api_key")}>
+                  <AgentInlineInput
+                    value={selectedAiProvider.apiKey ?? ""}
+                    placeholder="sk-..."
+                    type="password"
+                    onChange={(value) => updateProviderDraft(selectedAiProvider.id, { apiKey: value || null })}
+                    onBlur={saveSelectedProvider}
+                  />
+                </AgentPreferenceRow>
+              </>
+            )}
+          </div>
+        </SettingsGroup>
+      )}
       <SettingsGroup title={t("agent.preferences")}>
         <div className="grid gap-2">
           <AgentPreferenceRow label={t("assistant.model")}>
@@ -657,37 +843,41 @@ function AgentEditor({
               onChange={(value) => void selectModel(value)}
             />
           </AgentPreferenceRow>
-          <AgentPreferenceRow label={t("assistant.effort")}>
-            <AgentInlineSelect
-              value={effort}
-              options={effortOptions}
-              placeholder={t("assistant.effort")}
-              onChange={(value) => void selectEffort(value)}
-            />
-          </AgentPreferenceRow>
-          <AgentPreferenceRow label={t("assistant.permission_mode")}>
-            <AgentInlineSelect
-              value={permissionMode}
-              options={permissionOptions}
-              placeholder={t("assistant.permission_mode")}
-              onChange={(value) => void selectPermissionMode(value)}
-            />
-          </AgentPreferenceRow>
+          {!isAstra && (
+            <>
+              <AgentPreferenceRow label={t("assistant.effort")}>
+                <AgentInlineSelect
+                  value={effort}
+                  options={effortOptions}
+                  placeholder={t("assistant.effort")}
+                  onChange={(value) => void selectEffort(value)}
+                />
+              </AgentPreferenceRow>
+              <AgentPreferenceRow label={t("assistant.permission_mode")}>
+                <AgentInlineSelect
+                  value={permissionMode}
+                  options={permissionOptions}
+                  placeholder={t("assistant.permission_mode")}
+                  onChange={(value) => void selectPermissionMode(value)}
+                />
+              </AgentPreferenceRow>
+            </>
+          )}
         </div>
       </SettingsGroup>
-      <SettingsGroup title={t("agent.models")}>
+      <SettingsGroup title={isAstra ? t("agent.provider_models") : t("agent.models")}>
         <div className="grid gap-3">
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_auto] gap-2">
             <input value={newModelValue} onChange={(event) => setNewModelValue(event.target.value)} placeholder={t("agent.model_id")} className={inputClassName} />
             <input value={newModelDisplayName} onChange={(event) => setNewModelDisplayName(event.target.value)} placeholder={t("agent.model_name")} className={inputClassName} />
-            <button type="button" onClick={() => void addModel()} disabled={!newModelValue.trim()} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
+            <button type="button" onClick={() => void addModel()} disabled={!newModelValue.trim() || (isAstra && !selectedAiProvider)} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
               <Plus className="h-4 w-4" />
               {t("agent.add_model")}
             </button>
           </div>
           <DragDropProvider onDragEnd={handleModelDragEnd}>
             <div className="overflow-hidden rounded-md border border-card-border/[0.10]">
-              {models.map((item, index) => (
+              {activeModels.map((item, index) => (
                 <AgentModelRow
                   key={item.value}
                   item={item}
@@ -698,7 +888,7 @@ function AgentEditor({
                   onDelete={deleteModel}
                 />
               ))}
-              {models.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_models")} /></div>}
+              {activeModels.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_models")} /></div>}
             </div>
           </DragDropProvider>
         </div>
@@ -822,6 +1012,31 @@ function AgentPreferenceRow({ label, children }: { label: string; children: Reac
   );
 }
 
+function AgentInlineInput({
+  value,
+  placeholder,
+  type = "text",
+  onChange,
+  onBlur,
+}: {
+  value: string;
+  placeholder: string;
+  type?: "text" | "password";
+  onChange: (value: string) => void;
+  onBlur: () => Promise<void> | void;
+}) {
+  return (
+    <input
+      value={value}
+      type={type}
+      placeholder={placeholder}
+      onChange={(event) => onChange(event.target.value)}
+      onBlur={() => void onBlur()}
+      className="h-8 w-[320px] max-w-full min-w-0 rounded-md border border-input-border/[0.12] bg-input px-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30"
+    />
+  );
+}
+
 function AgentInlineSelect({
   value,
   options,
@@ -879,6 +1094,48 @@ function normalizeModelOrders(options: RuntimeAgentOptionMetadata[]): RuntimeAge
   }));
 }
 
+function normalizeProviderOrders(options: AgentAiProviderInfo[]): AgentAiProviderInfo[] {
+  return options.map((provider, index) => ({
+    ...provider,
+    id: provider.id.trim() || `provider-${index + 1}`,
+    displayName: provider.displayName.trim() || provider.provider.trim() || provider.id,
+    provider: provider.provider.trim() || provider.id.trim() || `provider-${index + 1}`,
+    api: provider.api?.trim() || null,
+    baseUrl: provider.baseUrl?.trim() || null,
+    apiKey: provider.apiKey?.trim() || null,
+    models: normalizeModelOrders(provider.models),
+    enabled: provider.enabled ?? true,
+    order: index,
+  }));
+}
+
+function updateProviderInfo(
+  providers: AgentAiProviderInfo[],
+  providerId: string,
+  patch: Partial<AgentAiProviderInfo>,
+): AgentAiProviderInfo[] {
+  return providers.map((provider) => provider.id === providerId ? { ...provider, ...patch } : provider);
+}
+
+function updateProviderModels(
+  providers: AgentAiProviderInfo[],
+  providerId: string,
+  models: RuntimeAgentOptionMetadata[],
+): AgentAiProviderInfo[] {
+  return updateProviderInfo(providers, providerId, { models });
+}
+
+function uniqueProviderId(providers: AgentAiProviderInfo[], baseId: string): string {
+  const existing = new Set(providers.map((provider) => provider.id));
+  let index = providers.length + 1;
+  let candidate = baseId;
+  while (existing.has(candidate)) {
+    candidate = `${baseId}-${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
 function moveAgentOption(options: AgentInfo[], from: number, to: number): AgentInfo[] {
   if (from < 0 || to < 0 || from >= options.length || to >= options.length || from === to) return options;
   const next = [...options];
@@ -887,12 +1144,25 @@ function moveAgentOption(options: AgentInfo[], from: number, to: number): AgentI
   return next;
 }
 
+function SettingsAgentGlyph({
+  agentId,
+  className,
+}: {
+  agentId: string;
+  className?: string;
+}) {
+  if (isRuntimeAgent(agentId)) {
+    return <AgentGlyph agent={agentId} className={className} />;
+  }
+  return <AiGenerate2Icon className={className} />;
+}
+
 function isRuntimeAgent(id: string): id is Agent {
   return id === "codex" || id === "claude" || id === "gemini";
 }
 
-function runtimeAgentId(id: string): Agent {
-  return isRuntimeAgent(id) ? id : "codex";
+function isSettingsAgent(id: string): boolean {
+  return isRuntimeAgent(id) || id === "astra";
 }
 
 function AssistantsSettings({ onError }: { onError: (error: string | null) => void }) {
