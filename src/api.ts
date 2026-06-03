@@ -54,6 +54,7 @@ export interface AgentAiProviderInfo {
   api: string | null;
   baseUrl: string | null;
   apiKey: string | null;
+  model: string | null;
   models: RuntimeAgentOptionMetadata[];
   enabled: boolean;
   order: number;

@@ -180,6 +180,8 @@ pub struct AgentAiProviderInfo {
     pub api: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub models: Vec<RuntimeAgentOptionMetadata>,
     pub enabled: bool,
     pub order: i64,

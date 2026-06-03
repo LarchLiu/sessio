@@ -1062,6 +1062,7 @@ fn astra_default_ai_providers() -> Vec<AgentAiProviderInfo> {
         api: Some("openai-responses".to_string()),
         base_url: None,
         api_key: None,
+        model: Some("gpt-5-mini".to_string()),
         models: runtime_options(vec![
             runtime_option("gpt-5-mini", "GPT-5 mini"),
             runtime_option("gpt-5", "GPT-5"),
