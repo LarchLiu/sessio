@@ -3,6 +3,7 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import AiGenerate2Icon from '@iconify-react/ri/ai-generate-2';
 import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
+import { Claude, Gemini, OpenAI } from "@lobehub/icons";
 import { ArrowLeft, Check, Circle, Download, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
 import type { Agent, AgentAiProviderInfo, AgentInfo, AssistantInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
 import {
@@ -651,6 +652,21 @@ function AgentEditor({
     await persist({ model: value });
   };
 
+  const toggleModelEnabled = async (value: string) => {
+    const sourceModels = activeModels;
+    const nextModels = normalizeModelOrders(sourceModels.map((item) => item.value === value ? { ...item, enabled: !item.enabled } : item));
+    const nextModel = nextModels.some((item) => item.value === model && item.enabled)
+      ? model
+      : nextModels.find((item) => item.enabled)?.value ?? nextModels[0]?.value ?? null;
+    setModels(nextModels);
+    setModel(nextModel ?? "");
+    if (isAstra && selectedAiProvider) {
+      await saveAstraProviders(updateProviderModels(aiProviders, selectedAiProvider.id, nextModels), selectedAiProvider.id, nextModel);
+      return;
+    }
+    await persist({ models: nextModels, model: nextModel });
+  };
+
   const handleModelDragEnd = (event: DragEndEvent) => {
     if (event.canceled) return;
     const { source } = event.operation;
@@ -690,6 +706,12 @@ function AgentEditor({
     const provider = aiProviders.find((item) => item.id === nextProviderId) ?? null;
     const nextModel = provider?.models.find((item) => item.enabled)?.value ?? provider?.models[0]?.value ?? null;
     await saveAstraProviders(aiProviders, nextProviderId, nextModel);
+  };
+  const activateAiProvider = async (nextProviderId: string) => {
+    const nextProviders = aiProviders.map((provider) => ({ ...provider, enabled: provider.id === nextProviderId }));
+    const provider = nextProviders.find((item) => item.id === nextProviderId) ?? null;
+    const nextModel = provider?.models.find((item) => item.enabled)?.value ?? provider?.models[0]?.value ?? null;
+    await saveAstraProviders(nextProviders, nextProviderId, nextModel);
   };
   const createProviderDraft = (): AgentAiProviderInfo => {
     const providerId = uniqueProviderId(aiProviders, "custom-provider");
@@ -785,7 +807,7 @@ function AgentEditor({
           }
           flush
         >
-          <div className="divide-y divide-card-border/[0.08]">
+          <div className="m-3 overflow-hidden rounded-md border border-card-border/[0.12]">
             {aiProviders.map((provider) => (
               <AgentProviderRow
                 key={provider.id}
@@ -793,6 +815,7 @@ function AgentEditor({
                 selected={provider.id === selectedAiProvider?.id}
                 canDelete={aiProviders.length > 1}
                 onSelect={selectAiProvider}
+                onActivate={activateAiProvider}
                 onEdit={openEditProviderDialog}
                 onDelete={deleteProvider}
               />
@@ -853,6 +876,7 @@ function AgentEditor({
                   defaultModel={item.value === model}
                   onSetDefault={setDefaultModel}
                   onSave={saveModel}
+                  onToggleEnabled={toggleModelEnabled}
                   onDelete={deleteModel}
                 />
               ))}
@@ -878,6 +902,7 @@ function AgentProviderRow({
   selected,
   canDelete,
   onSelect,
+  onActivate,
   onEdit,
   onDelete,
 }: {
@@ -885,6 +910,7 @@ function AgentProviderRow({
   selected: boolean;
   canDelete: boolean;
   onSelect: (providerId: string) => Promise<void>;
+  onActivate: (providerId: string) => Promise<void>;
   onEdit: (provider: AgentAiProviderInfo) => void;
   onDelete: (providerId: string) => Promise<void>;
 }) {
@@ -897,17 +923,20 @@ function AgentProviderRow({
   ].filter((item) => item && item.trim().length > 0);
 
   return (
-    <div className={"grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-3 py-2.5 transition " + (selected ? "bg-card-active" : "hover:bg-card-action-hover/5")}>
+    <div className={"grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-card-border/[0.08] px-3 py-2.5 transition last:border-b-0 " + (selected ? "bg-card-active" : "hover:bg-card-action-hover/5")}>
       <button type="button" onClick={() => void onSelect(provider.id)} className="flex min-w-0 items-center gap-3 text-left">
-        <span className={"flex h-5 w-5 shrink-0 items-center justify-center rounded-full border " + (selected ? "border-brand/55 bg-brand/15 text-brand" : "border-card-border/[0.14] text-transparent")}>
-          {selected && <Check className="h-3.5 w-3.5" />}
-        </span>
+        <ProviderGlyph provider={provider} />
         <span className="min-w-0">
           <span className="block truncate text-body-sm font-medium text-card-fg/82">{provider.displayName || provider.provider || provider.id}</span>
           <span className="mt-0.5 block truncate text-caption text-card-muted/56">{detailItems.join(" / ")}</span>
         </span>
       </button>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-1.5">
+        <SwitchControl
+          checked={provider.enabled}
+          tooltip={provider.enabled ? t("agent.active_provider") : t("agent.activate_provider")}
+          onToggle={() => void onActivate(provider.id)}
+        />
         <Tooltip content={t("agent.edit_provider")} placement="top">
           <button type="button" onClick={() => onEdit(provider)} className="rounded p-1.5 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75">
             <Pencil className="h-4 w-4" />
@@ -1003,12 +1032,28 @@ function AgentProviderDialogField({ label, children }: { label: string; children
   );
 }
 
+function ProviderGlyph({ provider }: { provider: AgentAiProviderInfo }) {
+  const normalized = provider.provider.trim().toLowerCase();
+  const className = "h-5 w-5 shrink-0";
+  if (normalized.includes("openai")) return <OpenAI className={className} />;
+  if (normalized.includes("anthropic") || normalized.includes("claude")) return <Claude.Color className={className} />;
+  if (normalized.includes("google") || normalized.includes("gemini")) return <Gemini.Color className={className} />;
+  const label = provider.displayName.trim() || provider.provider.trim() || provider.id;
+  const initial = label.trim().charAt(0).toUpperCase() || "?";
+  return (
+    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-card-border/[0.16] bg-card-chip/[0.08] text-caption font-semibold text-card-fg/70">
+      {initial}
+    </span>
+  );
+}
+
 function AgentModelRow({
   item,
   index,
   defaultModel,
   onSetDefault,
   onSave,
+  onToggleEnabled,
   onDelete,
 }: {
   item: RuntimeAgentOptionMetadata;
@@ -1016,6 +1061,7 @@ function AgentModelRow({
   defaultModel: boolean;
   onSetDefault: (value: string) => Promise<void>;
   onSave: (previousValue: string, nextValue: string, nextLabel: string) => Promise<void>;
+  onToggleEnabled: (value: string) => Promise<void>;
   onDelete: (value: string) => Promise<void>;
 }) {
   const { t } = useI18n();
@@ -1048,7 +1094,7 @@ function AgentModelRow({
     <div
       ref={ref}
       className={
-        "grid min-h-12 grid-cols-[auto_minmax(0,1fr)_minmax(0,0.72fr)_auto_auto_auto] items-center gap-2 border-b border-card-border/[0.08] px-3 py-2 transition last:border-b-0 " +
+        "grid min-h-12 grid-cols-[auto_minmax(0,1fr)_minmax(0,0.72fr)_auto_auto_auto_auto] items-center gap-2 border-b border-card-border/[0.08] px-3 py-2 transition last:border-b-0 " +
         (isDragSource
           ? "z-20 cursor-grabbing bg-card shadow-[0_12px_28px_rgba(0,0,0,0.22)]"
           : isDropTarget
@@ -1105,6 +1151,11 @@ function AgentModelRow({
           <Trash2 className="h-4 w-4" />
         </button>
       </Tooltip>
+      <SwitchControl
+        checked={item.enabled}
+        tooltip={item.enabled ? t("agent.disable_model") : t("agent.enable_model")}
+        onToggle={() => void onToggleEnabled(item.value)}
+      />
     </div>
   );
 }

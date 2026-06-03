@@ -440,7 +440,7 @@ impl AstraService {
             let provider = agent
                 .ai_providers
                 .iter()
-                .find(|provider| provider.id == selected_provider_id)
+                .find(|provider| provider.id == selected_provider_id && provider.enabled)
                 .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
                 .or_else(|| agent.ai_providers.first())?;
             let model_id = agent.model.or_else(|| {

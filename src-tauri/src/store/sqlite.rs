@@ -1205,7 +1205,7 @@ fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
             1_i64,
             transport_kind_to_db(RuntimeTransportKind::PlainCli),
             serde_json::to_string(&AgentCommandsInfo::default())?,
-            100_i64,
+            0_i64,
             now,
             now,
         ],
@@ -1215,6 +1215,7 @@ fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
 
 fn seed_builtin_agents(conn: &Connection) -> Result<()> {
     let now = now_ms();
+    seed_astra_agent(conn, now)?;
     seed_builtin_agent(
         conn,
         Agent::Codex,
@@ -1298,7 +1299,6 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
         },
         now,
     )?;
-    seed_astra_agent(conn, now)?;
     seed_builtin_assistants(conn, now)?;
     Ok(())
 }
@@ -1339,9 +1339,9 @@ fn runtime_agent_display_name(agent: Agent) -> &'static str {
 
 fn runtime_agent_order(agent: Agent) -> i64 {
     match agent {
-        Agent::Codex => 0,
-        Agent::Claude => 1,
-        Agent::Gemini => 2,
+        Agent::Codex => 1,
+        Agent::Claude => 2,
+        Agent::Gemini => 3,
     }
 }
 
@@ -8653,6 +8653,13 @@ mod migration_tests {
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
         let agents = store.list_agents().unwrap();
+        assert_eq!(
+            agents
+                .iter()
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["astra", "codex", "claude", "gemini"]
+        );
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
         assert_eq!(codex_agent.model.as_deref(), Some("gpt-5.5"));
