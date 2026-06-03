@@ -75,6 +75,8 @@ const ASTRA_SYSTEM_PROMPT = [
   "Create delegatable work only. Do not claim stage mutations have already happened.",
 ].join("\n");
 
+const ASTRA_PLAN_TIMEOUT_MS = 30000;
+
 let piModulesPromise: Promise<PiModules | { error: string }> | null = null;
 
 export async function bootstrapPi(): Promise<PiBootstrapState> {
@@ -225,7 +227,6 @@ function createPlanningAgent(modules: PiModules, model: unknown, config: Exclude
       modules.streamSimple(nextModel, context, {
         ...options,
         apiKey: config.apiKey,
-        maxTokens: readPositiveIntegerEnv("SESSIO_ASTRA_PLAN_MAX_TOKENS", 4096),
       }),
   });
 }
@@ -251,8 +252,7 @@ async function createPiAgentPlan(
   params: StartParams,
   fallback: AstraPlan,
 ): Promise<AstraPlan> {
-  const timeoutMs = readPositiveIntegerEnv("SESSIO_ASTRA_PLAN_TIMEOUT_MS", 30000);
-  const timeout = setTimeout(() => planner.agent.abort(), timeoutMs);
+  const timeout = setTimeout(() => planner.agent.abort(), ASTRA_PLAN_TIMEOUT_MS);
   try {
     await planner.agent.prompt(buildPlanningPrompt(params, fallback));
     await planner.agent.waitForIdle();
@@ -441,18 +441,6 @@ function stringifyForPrompt(value: unknown, maxLength = 24000): string {
   const text = JSON.stringify(value, null, 2);
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength)}\n...truncated`;
-}
-
-function allowMissingApiKey(): boolean {
-  const value = Bun.env.SESSIO_ASTRA_ALLOW_MISSING_API_KEY?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
-}
-
-function readPositiveIntegerEnv(name: string, fallback: number): number {
-  const raw = Bun.env[name]?.trim();
-  if (!raw) return fallback;
-  const value = Number.parseInt(raw, 10);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function errorMessage(error: unknown): string {

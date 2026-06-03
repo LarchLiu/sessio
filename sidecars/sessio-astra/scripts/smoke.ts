@@ -3,7 +3,6 @@ function sidecarEnv(extra: Record<string, string> = {}): Record<string, string> 
   for (const [key, value] of Object.entries(Bun.env)) {
     if (typeof value === "string") env[key] = value;
   }
-  delete env.SESSIO_ASTRA_ALLOW_MISSING_API_KEY;
   return { ...env, ...extra };
 }
 
