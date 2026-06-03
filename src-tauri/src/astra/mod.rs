@@ -315,6 +315,16 @@ struct DelegatedSessionState {
     finished: bool,
 }
 
+enum DispatchTaskDecision {
+    RetryLimit {
+        result: AstraTaskResult,
+        retry_limit: u32,
+    },
+    Dispatch {
+        attempt_count: u32,
+    },
+}
+
 struct SidecarHandle {
     child: Child,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -370,10 +380,6 @@ impl AstraService {
         if req.thread_id.trim().is_empty() {
             bail!("threadId is required");
         }
-        if let Some(active) = self.inner.store.get_active_astra_run(&req.thread_id)? {
-            return Ok(run_to_handle(record_to_run(active)?));
-        }
-
         let thread = self.inner.store.get_thread_work_state(&req.thread_id)?;
         let project = self
             .inner
@@ -382,27 +388,39 @@ impl AstraService {
             .into_iter()
             .find(|project| project.id == thread.project_id)
             .ok_or_else(|| anyhow::anyhow!("project not found: {}", thread.project_id))?;
-        let now = now_ms();
-        let run = AstraRun {
-            run_id: stable_run_id(&thread.id, now),
-            thread_id: thread.id.clone(),
-            project_id: thread.project_id.clone(),
-            project_path: project.path.clone(),
-            status: AstraRunStatus::Planning,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
-            mode: "auto".to_string(),
-            current_stage_id: None,
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: 3,
-            error: None,
-            created_at: now,
-            updated_at: now,
+        let run = {
+            let _guard = self
+                .inner
+                .run_write_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
+            if let Some(active) = self.inner.store.get_active_astra_run(&req.thread_id)? {
+                return Ok(run_to_handle(record_to_run(active)?));
+            }
+
+            let now = now_ms();
+            let run = AstraRun {
+                run_id: stable_run_id(&thread.id, now),
+                thread_id: thread.id.clone(),
+                project_id: thread.project_id.clone(),
+                project_path: project.path.clone(),
+                status: AstraRunStatus::Planning,
+                proposed_tasks: Vec::new(),
+                approved_task_ids: Vec::new(),
+                delegated_session_ids: Vec::new(),
+                task_results: Vec::new(),
+                mode: "auto".to_string(),
+                current_stage_id: None,
+                completed_task_ids: Vec::new(),
+                stage_attempt_counts: HashMap::new(),
+                retry_limit: 3,
+                error: None,
+                created_at: now,
+                updated_at: now,
+            };
+            self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+            run
         };
-        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
         log::info!(
             "[sessio-astra:run:start] runId={} threadId={} projectId={}",
             run.run_id,
@@ -441,6 +459,11 @@ impl AstraService {
         }
 
         let result = response.result.unwrap_or_else(|| json!({}));
+        let summary = result
+            .get("plan")
+            .and_then(|plan| plan.get("summary"))
+            .cloned()
+            .unwrap_or(Value::Null);
         let tasks = result
             .get("plan")
             .and_then(|plan| plan.get("tasks"))
@@ -448,62 +471,63 @@ impl AstraService {
             .map(serde_json::from_value::<Vec<AstraTaskProposal>>)
             .transpose()?
             .unwrap_or_default();
-        let mut next = self
-            .inner
-            .store
-            .get_astra_run(&run.run_id)?
-            .map(record_to_run)
-            .transpose()?
-            .unwrap_or(run);
-        next.status = AstraRunStatus::AwaitingApproval;
-        next.proposed_tasks = tasks;
-        next.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&next))?;
+        let (next, applied) = self.mutate_run(&run.run_id, move |next| {
+            if !next.status.active() {
+                return Ok(false);
+            }
+            next.status = AstraRunStatus::AwaitingApproval;
+            next.proposed_tasks = tasks;
+            Ok(true)
+        })?;
+        if !applied {
+            return Ok(run_to_handle(next));
+        }
         log::info!(
             "[sessio-astra:run:plan] runId={} threadId={} taskCount={}",
             next.run_id,
             next.thread_id,
             next.proposed_tasks.len()
         );
-        self.emit(&next, "plan", json!({
-            "tasks": next.proposed_tasks,
-            "summary": result.get("plan").and_then(|plan| plan.get("summary")).cloned().unwrap_or(Value::Null),
-        }));
-        Ok(run_to_handle(record_to_run(
-            self.inner
-                .store
-                .get_astra_run(&next.run_id)?
-                .context("astra run missing after start")?,
-        )?))
+        self.emit(
+            &next,
+            "plan",
+            json!({
+                "tasks": next.proposed_tasks,
+                "summary": summary,
+            }),
+        );
+        Ok(run_to_handle(next))
     }
 
     pub fn confirm_thread_astra(&self, req: ConfirmThreadAstraRequest) -> Result<AstraHandle> {
-        let mut run = self.load_run(&req.run_id)?;
-        // Idempotent: a run that is already dispatching/running/completed has
-        // been confirmed once; return it without spawning a second worker, which
-        // would issue a duplicate astra/confirm and double-dispatch the plan.
-        if matches!(
-            run.status,
-            AstraRunStatus::Dispatching | AstraRunStatus::Running | AstraRunStatus::Completed
-        ) {
+        let requested_approved = req.approved_task_ids;
+        let (run, should_spawn) = self.mutate_run(&req.run_id, move |run| {
+            // Idempotent: a run that is already dispatching/running/completed has
+            // been confirmed once; return it without spawning a second worker.
+            if matches!(
+                run.status,
+                AstraRunStatus::Dispatching | AstraRunStatus::Running | AstraRunStatus::Completed
+            ) {
+                return Ok(false);
+            }
+            if !matches!(run.status, AstraRunStatus::AwaitingApproval) {
+                bail!("Astra run is not awaiting approval");
+            }
+            let approved: Vec<String> = requested_approved
+                .into_iter()
+                .filter(|id| run.proposed_tasks.iter().any(|task| task.id == *id))
+                .collect();
+            if approved.is_empty() {
+                bail!("at least one approved task id is required");
+            }
+
+            run.status = AstraRunStatus::Dispatching;
+            run.approved_task_ids = approved;
+            Ok(true)
+        })?;
+        if !should_spawn {
             return Ok(run_to_handle(run));
         }
-        if !matches!(run.status, AstraRunStatus::AwaitingApproval) {
-            bail!("Astra run is not awaiting approval");
-        }
-        let approved: Vec<String> = req
-            .approved_task_ids
-            .into_iter()
-            .filter(|id| run.proposed_tasks.iter().any(|task| task.id == *id))
-            .collect();
-        if approved.is_empty() {
-            bail!("at least one approved task id is required");
-        }
-
-        run.status = AstraRunStatus::Dispatching;
-        run.approved_task_ids = approved.clone();
-        run.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
         log::info!(
             "[sessio-astra:run:confirm] runId={} threadId={} approvedTaskIds={:?}",
             run.run_id,
@@ -513,12 +537,12 @@ impl AstraService {
         self.emit(
             &run,
             "status",
-            json!({ "status": run.status.as_str(), "approvedTaskIds": approved }),
+            json!({ "status": run.status.as_str(), "approvedTaskIds": run.approved_task_ids }),
         );
 
         let service = self.clone();
         let run_for_worker = run.clone();
-        let approved_for_worker = approved.clone();
+        let approved_for_worker = run.approved_task_ids.clone();
         thread::spawn(move || {
             if let Err(error) = service.run_confirmed_plan(run_for_worker, approved_for_worker) {
                 log::warn!("[sessio-astra:run:confirm-worker] {error}");
@@ -528,7 +552,7 @@ impl AstraService {
         Ok(run_to_handle(run))
     }
 
-    fn run_confirmed_plan(&self, mut run: AstraRun, approved: Vec<String>) -> Result<()> {
+    fn run_confirmed_plan(&self, run: AstraRun, approved: Vec<String>) -> Result<()> {
         let response = self.request(
             "astra/confirm",
             json!({
@@ -539,18 +563,21 @@ impl AstraService {
             Some(Duration::from_secs(60 * 60 * 6)),
         )?;
         if let Some(error) = response.error {
-            run.status = AstraRunStatus::Errored;
-            run.error = Some(error.message.clone());
-            run.updated_at = now_ms();
-            self.inner.store.upsert_astra_run(&run_to_record(&run))?;
-            self.emit(&run, "error", json!({ "message": error.message }));
+            let (failed, changed) = self.update_active_status(
+                &run.run_id,
+                AstraRunStatus::Errored,
+                Some(error.message.clone()),
+            )?;
+            if changed {
+                self.emit(&failed, "error", json!({ "message": error.message }));
+            }
             bail!("Astra confirmation failed: {}", error.code);
         }
         Ok(())
     }
 
     pub fn cancel_thread_astra(&self, req: CancelThreadAstraRequest) -> Result<AstraHandle> {
-        let mut run = self.load_run(&req.run_id)?;
+        let run = self.load_run(&req.run_id)?;
         // Abort every delegated session this run launched: interrupt the ACP
         // agents and release any blocked dispatch waiter. Sessions started by
         // other runs or by the user are left untouched.
@@ -570,9 +597,7 @@ impl AstraService {
             json!({ "runId": run.run_id }),
             Some(Duration::from_secs(3)),
         );
-        run.status = AstraRunStatus::Cancelled;
-        run.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+        let run = self.update_status(&run.run_id, AstraRunStatus::Cancelled, None)?;
         log::info!(
             "[sessio-astra:run:cancel] runId={} threadId={} delegatedSessions={}",
             run.run_id,
@@ -674,16 +699,6 @@ impl AstraService {
         run: &AstraRun,
         task: &AstraTaskProposal,
     ) -> Result<AstraTaskResult> {
-        if !matches!(
-            run.status,
-            AstraRunStatus::Dispatching | AstraRunStatus::Running
-        ) {
-            bail!("Astra run is not confirmed: {}", run.run_id);
-        }
-        if !run.approved_task_ids.iter().any(|id| id == &task.id) {
-            bail!("task is not approved: {}", task.id);
-        }
-
         let mut thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
         let stage_id = task
             .target_stage_id
@@ -693,55 +708,78 @@ impl AstraService {
         if let Some(stage_id) = stage_id.as_deref() {
             thread = self.prepare_stage_for_delegated_task(&run.thread_id, stage_id)?;
         }
-        let mut next = run.clone();
-        next.status = AstraRunStatus::Running;
-        next.current_stage_id = stage_id.clone();
-        let prior_attempt_count = stage_id
-            .as_ref()
-            .map(|id| *next.stage_attempt_counts.entry(id.clone()).or_insert(0))
-            .unwrap_or(0);
-        let retry_limit_reached = stage_id
-            .as_ref()
-            .map(|_| prior_attempt_count >= next.retry_limit)
-            .unwrap_or(false);
-        if retry_limit_reached {
-            next.updated_at = now_ms();
-            self.inner.store.upsert_astra_run(&run_to_record(&next))?;
-            let result = AstraTaskResult {
-                task_id: task.id.clone(),
-                thread_stage_id: stage_id.clone(),
-                sessio_runtime_session_id: String::new(),
-                turn_id: None,
-                status: AstraTaskResultStatus::Failed,
-                output: String::new(),
-                error: Some("retry limit reached".to_string()),
-                attempt_count: prior_attempt_count,
-                retry_limit_reached: true,
-                completed_at: now_ms(),
-            };
-            let run = self.record_task_result(&next.run_id, result.clone())?;
-            self.emit(
-                &run,
-                "retry_limit",
-                json!({
-                    "taskId": task.id,
-                    "threadStageId": stage_id,
-                    "attemptCount": prior_attempt_count,
-                    "retryLimit": next.retry_limit,
-                }),
-            );
-            return Ok(result);
-        }
-        let attempt_count = stage_id
-            .as_ref()
-            .map(|id| {
-                let count = next.stage_attempt_counts.entry(id.clone()).or_insert(0);
-                *count += 1;
-                *count
-            })
-            .unwrap_or(1);
-        next.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&next))?;
+        let task_id = task.id.clone();
+        let stage_id_for_run = stage_id.clone();
+        let (next, decision) = self.mutate_run(&run.run_id, move |next| {
+            if !matches!(
+                next.status,
+                AstraRunStatus::Dispatching | AstraRunStatus::Running
+            ) {
+                bail!("Astra run is not confirmed: {}", next.run_id);
+            }
+            if !next.approved_task_ids.iter().any(|id| id == &task_id) {
+                bail!("task is not approved: {}", task_id);
+            }
+
+            next.status = AstraRunStatus::Running;
+            next.current_stage_id = stage_id_for_run.clone();
+            let prior_attempt_count = stage_id_for_run
+                .as_ref()
+                .map(|id| *next.stage_attempt_counts.entry(id.clone()).or_insert(0))
+                .unwrap_or(0);
+            let retry_limit_reached = stage_id_for_run
+                .as_ref()
+                .map(|_| prior_attempt_count >= next.retry_limit)
+                .unwrap_or(false);
+            if retry_limit_reached {
+                let result = AstraTaskResult {
+                    task_id: task_id.clone(),
+                    thread_stage_id: stage_id_for_run.clone(),
+                    sessio_runtime_session_id: String::new(),
+                    turn_id: None,
+                    status: AstraTaskResultStatus::Failed,
+                    output: String::new(),
+                    error: Some("retry limit reached".to_string()),
+                    attempt_count: prior_attempt_count,
+                    retry_limit_reached: true,
+                    completed_at: now_ms(),
+                };
+                upsert_task_result_in_run(next, result.clone());
+                return Ok(DispatchTaskDecision::RetryLimit {
+                    result,
+                    retry_limit: next.retry_limit,
+                });
+            }
+            let attempt_count = stage_id_for_run
+                .as_ref()
+                .map(|id| {
+                    let count = next.stage_attempt_counts.entry(id.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                })
+                .unwrap_or(1);
+            Ok(DispatchTaskDecision::Dispatch { attempt_count })
+        })?;
+
+        let attempt_count = match decision {
+            DispatchTaskDecision::RetryLimit {
+                result,
+                retry_limit,
+            } => {
+                self.emit(
+                    &next,
+                    "retry_limit",
+                    json!({
+                        "taskId": task.id,
+                        "threadStageId": stage_id,
+                        "attemptCount": result.attempt_count,
+                        "retryLimit": retry_limit,
+                    }),
+                );
+                return Ok(result);
+            }
+            DispatchTaskDecision::Dispatch { attempt_count } => attempt_count,
+        };
 
         // Create the waiter channel up front and hand the sender to dispatch_task
         // so it is registered before the prompt is sent (avoids the lost-wakeup
@@ -1057,7 +1095,7 @@ impl AstraService {
         if already_recorded {
             return Ok(());
         }
-        let mut run = self.load_run(run_id)?;
+        let run = self.load_run(run_id)?;
         let task = run
             .proposed_tasks
             .iter()
@@ -1081,17 +1119,20 @@ impl AstraService {
             thread_stage_id,
             context.as_ref(),
         )?;
-        run.delegated_session_ids
-            .retain(|id| id != sessio_runtime_session_id);
-        if !run
-            .delegated_session_ids
-            .iter()
-            .any(|id| id == agent_session_id)
-        {
-            run.delegated_session_ids.push(agent_session_id.to_string());
-        }
-        run.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+        let sessio_runtime_session_id_for_run = sessio_runtime_session_id.to_string();
+        let agent_session_id_for_run = agent_session_id.to_string();
+        let (run, _) = self.mutate_run(run_id, move |run| {
+            run.delegated_session_ids
+                .retain(|id| id != &sessio_runtime_session_id_for_run);
+            if !run
+                .delegated_session_ids
+                .iter()
+                .any(|id| id == &agent_session_id_for_run)
+            {
+                run.delegated_session_ids.push(agent_session_id_for_run);
+            }
+            Ok(())
+        })?;
         self.update_delegated_state(sessio_runtime_session_id, |state| {
             state.agent_session_id = Some(agent_session_id.to_string());
             state.session_recorded = true;
@@ -1219,18 +1260,8 @@ impl AstraService {
     }
 
     fn record_task_result(&self, run_id: &str, result: AstraTaskResult) -> Result<AstraRun> {
-        let key = (
-            result.task_id.clone(),
-            result.sessio_runtime_session_id.clone(),
-        );
         let (run, _) = self.mutate_run(run_id, move |run| {
-            if let Some(existing) = run.task_results.iter_mut().find(|existing| {
-                existing.task_id == key.0 && existing.sessio_runtime_session_id == key.1
-            }) {
-                *existing = result;
-            } else {
-                run.task_results.push(result);
-            }
+            upsert_task_result_in_run(run, result);
             Ok(())
         })?;
         Ok(run)
@@ -1489,17 +1520,17 @@ impl AstraService {
             }
             "sessio.agent.plan_task" => {
                 let task: AstraTaskProposal = serde_json::from_value(call.args)?;
-                let mut next = run;
-                if !next
-                    .proposed_tasks
-                    .iter()
-                    .any(|existing| existing.id == task.id)
-                {
-                    next.proposed_tasks.push(task);
-                    next.status = AstraRunStatus::AwaitingApproval;
-                    next.updated_at = now_ms();
-                    self.inner.store.upsert_astra_run(&run_to_record(&next))?;
-                }
+                let (next, _) = self.mutate_run(&run.run_id, move |next| {
+                    if !next
+                        .proposed_tasks
+                        .iter()
+                        .any(|existing| existing.id == task.id)
+                    {
+                        next.proposed_tasks.push(task);
+                        next.status = AstraRunStatus::AwaitingApproval;
+                    }
+                    Ok(())
+                })?;
                 Ok(
                     json!({ "taskIds": next.proposed_tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>() }),
                 )
@@ -1560,17 +1591,23 @@ impl AstraService {
             .update_thread_stage_state(&stage_id, status, summary, outcome)
         {
             Ok(stage) => {
-                let mut next = self.load_run(&run.run_id)?;
-                if stage.status == StageStatus::Completed {
-                    if let Some(task_id) = args.get("taskId").and_then(Value::as_str) {
-                        if !next.completed_task_ids.iter().any(|id| id == task_id) {
-                            next.completed_task_ids.push(task_id.to_string());
+                let task_id = args
+                    .get("taskId")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+                let stage_id = stage.id.clone();
+                let stage_completed = stage.status == StageStatus::Completed;
+                let (next, _) = self.mutate_run(&run.run_id, move |next| {
+                    if stage_completed {
+                        if let Some(task_id) = task_id.as_deref() {
+                            if !next.completed_task_ids.iter().any(|id| id == task_id) {
+                                next.completed_task_ids.push(task_id.to_string());
+                            }
                         }
                     }
-                }
-                next.current_stage_id = Some(stage.id.clone());
-                next.updated_at = now_ms();
-                self.inner.store.upsert_astra_run(&run_to_record(&next))?;
+                    next.current_stage_id = Some(stage_id);
+                    Ok(())
+                })?;
                 let result = AstraStageMutationResult {
                     ok: true,
                     stage: Some(serde_json::to_value(stage)?),
@@ -1664,45 +1701,47 @@ impl AstraService {
     }
 
     fn apply_protocol_event(&self, event: AstraProtocolEvent) -> Result<()> {
-        let Some(mut run) = self
-            .inner
-            .store
-            .get_astra_run(&event.params.run_id)?
-            .map(record_to_run)
-            .transpose()?
+        let event_type = event.params.event_type.clone();
+        let event_data = event.params.data.clone();
+        let store = self.inner.store.clone();
+        let Some((run, emit)) = self.mutate_existing_run(&event.params.run_id, move |run| {
+            let mut emit = Some((event_type.clone(), event_data.clone()));
+            match event_type.as_str() {
+                "plan" => {
+                    if let Some(tasks) = event_data.get("tasks") {
+                        run.proposed_tasks =
+                            serde_json::from_value(tasks.clone()).unwrap_or_default();
+                        run.status = AstraRunStatus::AwaitingApproval;
+                    }
+                }
+                "cancelled" => run.status = AstraRunStatus::Cancelled,
+                "error" => run.status = AstraRunStatus::Errored,
+                "complete" => {
+                    let thread = store.get_thread_work_state(&run.thread_id)?;
+                    let complete = thread_all_stages_terminal(&thread);
+                    if complete {
+                        run.status = AstraRunStatus::Completed;
+                    } else {
+                        run.status = AstraRunStatus::Running;
+                        let message =
+                            "Astra reported complete before all stages were terminal".to_string();
+                        run.error = Some(message.clone());
+                        emit = Some((
+                            "error".to_string(),
+                            json!({ "message": message, "originalEvent": "complete" }),
+                        ));
+                    }
+                }
+                _ => emit = None,
+            }
+            Ok(emit)
+        })?
         else {
             return Ok(());
         };
-        let mut emit_type = event.params.event_type.clone();
-        let mut emit_data = event.params.data.clone();
-        match event.params.event_type.as_str() {
-            "plan" => {
-                if let Some(tasks) = event.params.data.get("tasks") {
-                    run.proposed_tasks = serde_json::from_value(tasks.clone()).unwrap_or_default();
-                    run.status = AstraRunStatus::AwaitingApproval;
-                }
-            }
-            "cancelled" => run.status = AstraRunStatus::Cancelled,
-            "error" => run.status = AstraRunStatus::Errored,
-            "complete" => {
-                let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-                let complete = thread_all_stages_terminal(&thread);
-                if complete {
-                    run.status = AstraRunStatus::Completed;
-                } else {
-                    run.status = AstraRunStatus::Running;
-                    let message =
-                        "Astra reported complete before all stages were terminal".to_string();
-                    run.error = Some(message.clone());
-                    emit_type = "error".to_string();
-                    emit_data = json!({ "message": message, "originalEvent": "complete" });
-                }
-            }
-            _ => {}
+        if let Some((emit_type, emit_data)) = emit {
+            self.emit(&run, &emit_type, emit_data);
         }
-        run.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
-        self.emit(&run, &emit_type, emit_data);
         Ok(())
     }
 
@@ -1712,12 +1751,47 @@ impl AstraService {
         status: AstraRunStatus,
         error: Option<String>,
     ) -> Result<AstraRun> {
-        let mut run = self.load_run(run_id)?;
-        run.status = status;
-        run.error = error;
+        let (run, _) = self.mutate_run(run_id, move |run| {
+            run.status = status;
+            run.error = error;
+            Ok(())
+        })?;
+        Ok(run)
+    }
+
+    fn update_active_status(
+        &self,
+        run_id: &str,
+        status: AstraRunStatus,
+        error: Option<String>,
+    ) -> Result<(AstraRun, bool)> {
+        self.mutate_run(run_id, move |run| {
+            if !run.status.active() {
+                return Ok(false);
+            }
+            run.status = status;
+            run.error = error;
+            Ok(true)
+        })
+    }
+
+    fn mutate_existing_run<F, T>(&self, run_id: &str, mutate: F) -> Result<Option<(AstraRun, T)>>
+    where
+        F: FnOnce(&mut AstraRun) -> Result<T>,
+    {
+        let _guard = self
+            .inner
+            .run_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
+        let Some(record) = self.inner.store.get_astra_run(run_id)? else {
+            return Ok(None);
+        };
+        let mut run = record_to_run(record)?;
+        let value = mutate(&mut run)?;
         run.updated_at = now_ms();
         self.inner.store.upsert_astra_run(&run_to_record(&run))?;
-        Ok(run)
+        Ok(Some((run, value)))
     }
 
     /// Serialize a read-modify-write cycle on a single Astra run row. The
@@ -2395,6 +2469,22 @@ fn record_to_run(record: AstraRunRecord) -> Result<AstraRun> {
     })
 }
 
+fn upsert_task_result_in_run(run: &mut AstraRun, result: AstraTaskResult) {
+    let key = (
+        result.task_id.clone(),
+        result.sessio_runtime_session_id.clone(),
+    );
+    if let Some(existing) = run
+        .task_results
+        .iter_mut()
+        .find(|existing| existing.task_id == key.0 && existing.sessio_runtime_session_id == key.1)
+    {
+        *existing = result;
+    } else {
+        run.task_results.push(result);
+    }
+}
+
 fn project_snapshot(project: &ProjectInfo, thread: &ThreadInfo) -> Value {
     json!({
         "project": project,
@@ -2547,6 +2637,39 @@ mod tests {
             extract_result_text(&json!({ "output": "done" })),
             Some("done".to_string())
         );
+    }
+
+    #[test]
+    fn task_result_upsert_preserves_unrelated_run_metadata() {
+        let mut run = test_run("run-merge");
+        run.delegated_session_ids = vec!["session-1".to_string()];
+        run.stage_attempt_counts = HashMap::from([("stage-1".to_string(), 2)]);
+        run.task_results = vec![test_task_result("task-1", "session-1", "first")];
+
+        upsert_task_result_in_run(&mut run, test_task_result("task-2", "session-2", "second"));
+
+        assert_eq!(run.delegated_session_ids, vec!["session-1"]);
+        assert_eq!(run.stage_attempt_counts["stage-1"], 2);
+        assert_eq!(run.task_results.len(), 2);
+        assert!(run
+            .task_results
+            .iter()
+            .any(|result| result.task_id == "task-1"));
+        assert!(run
+            .task_results
+            .iter()
+            .any(|result| result.task_id == "task-2"));
+    }
+
+    #[test]
+    fn task_result_upsert_replaces_same_task_session_pair() {
+        let mut run = test_run("run-upsert");
+        run.task_results = vec![test_task_result("task-1", "session-1", "old")];
+
+        upsert_task_result_in_run(&mut run, test_task_result("task-1", "session-1", "new"));
+
+        assert_eq!(run.task_results.len(), 1);
+        assert_eq!(run.task_results[0].output, "new");
     }
 
     #[test]
@@ -3164,6 +3287,43 @@ mod tests {
             updated_at: 1,
             sessions: Vec::new(),
             issues: Vec::new(),
+        }
+    }
+
+    fn test_run(run_id: &str) -> AstraRun {
+        AstraRun {
+            run_id: run_id.to_string(),
+            thread_id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            project_path: "/tmp".to_string(),
+            status: AstraRunStatus::Running,
+            proposed_tasks: Vec::new(),
+            approved_task_ids: Vec::new(),
+            delegated_session_ids: Vec::new(),
+            task_results: Vec::new(),
+            mode: "auto".to_string(),
+            current_stage_id: None,
+            completed_task_ids: Vec::new(),
+            stage_attempt_counts: HashMap::new(),
+            retry_limit: 3,
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn test_task_result(task_id: &str, session_id: &str, output: &str) -> AstraTaskResult {
+        AstraTaskResult {
+            task_id: task_id.to_string(),
+            thread_stage_id: Some("stage-1".to_string()),
+            sessio_runtime_session_id: session_id.to_string(),
+            turn_id: Some("turn-1".to_string()),
+            status: AstraTaskResultStatus::Completed,
+            output: output.to_string(),
+            error: None,
+            attempt_count: 1,
+            retry_limit_reached: false,
+            completed_at: 1,
         }
     }
 }
