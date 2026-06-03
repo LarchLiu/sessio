@@ -2,6 +2,7 @@ import { createPlan, assertStartParams, resolveModelSmoke } from "./astra";
 import {
   type AstraTaskProposal,
   type AstraTaskResult,
+  type StageSnapshot,
   errorResponse,
   event,
   isRequest,
@@ -15,11 +16,18 @@ import {
   type ToolCallRequest,
 } from "./protocol";
 
-type Writer = (value: unknown) => void;
+type Writer = (value: unknown) => Promise<void> | void;
 type ToolCaller = (runId: string, name: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 const cancelledRuns = new Set<string>();
 const taskResultsByRun = new Map<string, TaskResultParams["result"][]>();
+const TERMINAL_STAGE_STATUSES = new Set(["completed", "skipped"]);
+
+function redirectConsoleToStderr(): void {
+  console.log = (...args: unknown[]) => console.error(...args);
+  console.info = (...args: unknown[]) => console.error(...args);
+  console.debug = (...args: unknown[]) => console.error(...args);
+}
 
 export async function handleRequest(
   request: ProtocolRequest,
@@ -29,27 +37,27 @@ export async function handleRequest(
   },
 ): Promise<void> {
   if (!isRequest(request)) {
-    write(errorResponse((request as { id?: string }).id ?? "unknown", "invalid_request", "invalid protocol request"));
+    await write(errorResponse((request as { id?: string }).id ?? "unknown", "invalid_request", "invalid protocol request"));
     return;
   }
 
   try {
     switch (request.method) {
       case "astra/handshake":
-        write(response(request.id, { protocolVersion: PROTOCOL_VERSION, name: "sessio-astra" }));
+        await write(response(request.id, { protocolVersion: PROTOCOL_VERSION, name: "sessio-astra" }));
         return;
       case "astra/start": {
         const params = assertStartParams(request);
         cancelledRuns.delete(params.runId);
-        write(event(params.runId, "status", { status: "planning" }));
+        await write(event(params.runId, "status", { status: "planning" }));
         const plan = await createPlan(params);
         if (cancelledRuns.has(params.runId)) {
-          write(event(params.runId, "cancelled", { status: "cancelled" }));
-          write(response(request.id, { status: "cancelled" }));
+          await write(event(params.runId, "cancelled", { status: "cancelled" }));
+          await write(response(request.id, { status: "cancelled" }));
           return;
         }
-        write(event(params.runId, "plan", plan));
-        write(response(request.id, { status: "plan_ready", plan }));
+        await write(event(params.runId, "plan", plan));
+        await write(response(request.id, { status: "plan_ready", plan }));
         return;
       }
       case "astra/confirm": {
@@ -57,10 +65,10 @@ export async function handleRequest(
         if (!params || typeof params.runId !== "string" || !Array.isArray(params.approvedTaskIds)) {
           throw new Error("runId and approvedTaskIds are required");
         }
-        write(event(params.runId, "status", { status: "dispatching", approvedTaskIds: params.approvedTaskIds }));
+        await write(event(params.runId, "status", { status: "dispatching", approvedTaskIds: params.approvedTaskIds }));
         const tasks = (Array.isArray(params.tasks) ? params.tasks : []).filter(isTaskProposal);
         const results = await runConfirmedPlan(params.runId, params.approvedTaskIds, tasks, callTool, write);
-        write(response(request.id, { status: "completed", results }));
+        await write(response(request.id, { status: "completed", results }));
         return;
       }
       case "astra/cancel": {
@@ -69,8 +77,8 @@ export async function handleRequest(
           throw new Error("runId is required");
         }
         cancelledRuns.add(params.runId);
-        write(event(params.runId, "cancelled", { status: "cancelled" }));
-        write(response(request.id, { status: "cancelled" }));
+        await write(event(params.runId, "cancelled", { status: "cancelled" }));
+        await write(response(request.id, { status: "cancelled" }));
         return;
       }
       case "astra/task_result": {
@@ -90,20 +98,20 @@ export async function handleRequest(
           results.push(params.result);
         }
         taskResultsByRun.set(params.runId, results);
-        write(event(params.runId, "task_result", params.result));
-        write(response(request.id, { status: "received", resultCount: results.length }));
+        await write(event(params.runId, "task_result", params.result));
+        await write(response(request.id, { status: "received", resultCount: results.length }));
         return;
       }
       case "astra/smoke": {
         const pi = await resolveModelSmoke();
-        write(response(request.id, { protocolVersion: PROTOCOL_VERSION, pi }));
+        await write(response(request.id, { protocolVersion: PROTOCOL_VERSION, pi }));
         return;
       }
       default:
-        write(errorResponse(request.id, "method_not_found", `unknown method: ${request.method}`));
+        await write(errorResponse(request.id, "method_not_found", `unknown method: ${request.method}`));
     }
   } catch (error) {
-    write(errorResponse(request.id, "invalid_request", error instanceof Error ? error.message : String(error)));
+    await write(errorResponse(request.id, "invalid_request", error instanceof Error ? error.message : String(error)));
   }
 }
 
@@ -116,10 +124,23 @@ async function runConfirmedPlan(
 ): Promise<AstraTaskResult[]> {
   const approved = tasks.filter((task) => approvedTaskIds.includes(task.id));
   const results: AstraTaskResult[] = [];
-  for (const task of approved) {
-    if (cancelledRuns.has(runId)) break;
-    write(event(runId, "status", { status: "running", taskId: task.id, threadStageId: task.targetStageId ?? null }));
-    const result = await dispatchTaskWithRetry(runId, task, callTool, write, results);
+  const completedTaskIds = new Set<string>();
+
+  while (!cancelledRuns.has(runId)) {
+    const snapshot = await loadProjectSnapshot(runId, callTool);
+    if (allStagesTerminal(snapshot)) {
+      await write(event(runId, "complete", { status: "completed", results }));
+      return results;
+    }
+
+    const task = nextApprovedTask(approved, completedTaskIds, snapshot);
+    if (!task) {
+      throw new Error("Astra has no approved task for remaining non-terminal stages");
+    }
+
+    await write(event(runId, "status", { status: "running", taskId: task.id, threadStageId: task.targetStageId ?? null }));
+    const result = await dispatchTask(runId, task, callTool, write, results);
+    completedTaskIds.add(task.id);
     if (result.retryLimitReached) {
       const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
         threadStageId: task.targetStageId,
@@ -127,7 +148,7 @@ async function runConfirmedPlan(
         description: result.error ?? "Sessio refused another direct dispatch for this stage.",
         severity: "high",
       });
-      write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+      await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
       assertMutationOk(mutation, `retry-limit issue update failed for ${task.title}`);
       continue;
     }
@@ -139,7 +160,7 @@ async function runConfirmedPlan(
         summary: summarizeResult(result.output),
         outcome: result.output ?? "",
       });
-      write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+      await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
       assertMutationOk(mutation, `stage update failed for ${task.title}`);
     } else if (task.targetStageId) {
       const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
@@ -148,38 +169,65 @@ async function runConfirmedPlan(
         description: result.error ?? result.output ?? "Delegated task failed without output.",
         severity: result.status === "cancelled" ? "medium" : "high",
       });
-      write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+      await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
       assertMutationOk(mutation, `issue update failed for ${task.title}`);
     }
   }
-  write(event(runId, "complete", { status: cancelledRuns.has(runId) ? "cancelled" : "completed", results }));
+  await write(event(runId, "complete", { status: "cancelled", results }));
   return results;
 }
 
-async function dispatchTaskWithRetry(
+async function dispatchTask(
   runId: string,
   task: AstraTaskProposal,
   callTool: ToolCaller,
   write: Writer,
   results: AstraTaskResult[],
 ): Promise<AstraTaskResult> {
-  const first = await callTool(runId, "sessio.agent.dispatch_task", { taskId: task.id }) as AstraTaskResult;
-  results.push(first);
-  write(event(runId, "task_result", first));
-  if (first.status === "completed" || first.retryLimitReached || cancelledRuns.has(runId)) {
-    return first;
-  }
+  const result = await callTool(runId, "sessio.agent.dispatch_task", { taskId: task.id }) as AstraTaskResult;
+  results.push(result);
+  await write(event(runId, "task_result", result));
+  return result;
+}
 
-  write(event(runId, "status", {
-    status: "running",
-    taskId: task.id,
-    threadStageId: task.targetStageId ?? null,
-    retrying: true,
-  }));
-  const retry = await callTool(runId, "sessio.agent.dispatch_task", { taskId: task.id }) as AstraTaskResult;
-  results.push(retry);
-  write(event(runId, "task_result", retry));
-  return retry;
+async function loadProjectSnapshot(runId: string, callTool: ToolCaller): Promise<unknown> {
+  return callTool(runId, "sessio.project.snapshot", {});
+}
+
+function allStagesTerminal(snapshot: unknown): boolean {
+  const stages = snapshotStages(snapshot);
+  return stages.length > 0 && stages.every((stage) => TERMINAL_STAGE_STATUSES.has(stage.status ?? ""));
+}
+
+function nextApprovedTask(
+  approved: AstraTaskProposal[],
+  completedTaskIds: Set<string>,
+  snapshot: unknown,
+): AstraTaskProposal | null {
+  const openStageIds = new Set(
+    snapshotStages(snapshot)
+      .filter((stage) => !TERMINAL_STAGE_STATUSES.has(stage.status ?? ""))
+      .flatMap((stage) => [stage.id, stage.stageId].filter((id): id is string => typeof id === "string" && id.length > 0)),
+  );
+  const task = approved.find((candidate) => {
+    if (completedTaskIds.has(candidate.id)) return false;
+    if (!candidate.targetStageId) return true;
+    return openStageIds.has(candidate.targetStageId);
+  });
+  return task ?? null;
+}
+
+function snapshotStages(snapshot: unknown): StageSnapshot[] {
+  const root = snapshot && typeof snapshot === "object" ? snapshot as { thread?: unknown; stages?: unknown } : {};
+  const thread = root.thread && typeof root.thread === "object" ? root.thread as { stages?: unknown } : null;
+  const stages = Array.isArray(thread?.stages) ? thread.stages : Array.isArray(root.stages) ? root.stages : [];
+  return stages.filter(isStageSnapshot);
+}
+
+function isStageSnapshot(value: unknown): value is StageSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const stage = value as Partial<StageSnapshot>;
+  return typeof stage.id === "string" && stage.id.length > 0;
 }
 
 function assertMutationOk(value: unknown, message: string): void {
@@ -223,11 +271,27 @@ function isTaskResult(value: unknown): value is TaskResultParams["result"] {
 async function runStdio(): Promise<void> {
   let buffer = "";
   let requestSeq = 1;
-  const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  const write = (message: unknown) => {
-    Bun.stdout.write(`${JSON.stringify(message)}\n`);
+  let closing = false;
+  let outputClosed = false;
+  let writeChain: Promise<void> = Promise.resolve();
+  const handlers = new Set<Promise<void>>();
+  const pending = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+  const write = (message: unknown): Promise<void> => {
+    const line = `${JSON.stringify(message)}\n`;
+    writeChain = writeChain.catch(() => undefined).then(async () => {
+      if (outputClosed) return;
+      await Bun.stdout.write(line);
+    });
+    return writeChain;
   };
   const callTool: ToolCaller = (runId, name, args) => {
+    if (closing) {
+      return Promise.reject(new Error("stdio closed"));
+    }
     const id = `sidecar-tool-${requestSeq++}`;
     const message: ToolCallRequest = {
       protocolVersion: PROTOCOL_VERSION,
@@ -235,43 +299,84 @@ async function runStdio(): Promise<void> {
       method: "tool/call",
       params: { runId, name, args },
     };
-    write(message);
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`tool call timed out: ${name}`));
+      }, 60_000);
+      pending.set(id, { resolve, reject, timeout });
+      void write(message).catch((error) => {
+        clearTimeout(timeout);
+        pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   };
-  for await (const chunk of Bun.stdin.stream()) {
-    buffer += new TextDecoder().decode(chunk);
-    let newline = buffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (line) {
-        try {
-          const message = JSON.parse(line);
-          if (isResponse(message) && pending.has(message.id)) {
-            const waiter = pending.get(message.id)!;
-            pending.delete(message.id);
-            if (message.error) {
-              waiter.reject(new Error(message.error.message));
-            } else {
-              waiter.resolve(message.result);
-            }
-          } else {
-            void handleRequest(message, write, callTool).catch((error) => {
-              write(errorResponse(
-                typeof message?.id === "string" ? message.id : "unknown",
-                "internal_error",
-                error instanceof Error ? error.message : String(error),
-              ));
-            });
-          }
-        } catch (error) {
-          write(errorResponse("unknown", "parse_error", error instanceof Error ? error.message : String(error)));
-        }
-      }
-      newline = buffer.indexOf("\n");
+  const rejectPending = (reason: string) => {
+    const error = new Error(reason);
+    for (const [id, waiter] of pending) {
+      clearTimeout(waiter.timeout);
+      pending.delete(id);
+      waiter.reject(error);
     }
+  };
+  const beginShutdown = (reason: string) => {
+    if (closing) return;
+    closing = true;
+    rejectPending(reason);
+  };
+  process.on("SIGTERM", () => {
+    beginShutdown("received SIGTERM");
+    process.exit(0);
+  });
+  process.on("SIGINT", () => {
+    beginShutdown("received SIGINT");
+    process.exit(0);
+  });
+
+  try {
+    for await (const chunk of Bun.stdin.stream()) {
+      buffer += new TextDecoder().decode(chunk);
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (line) {
+          try {
+            const message = JSON.parse(line);
+            if (isResponse(message) && pending.has(message.id)) {
+              const waiter = pending.get(message.id)!;
+              pending.delete(message.id);
+              clearTimeout(waiter.timeout);
+              if (message.error) {
+                waiter.reject(new Error(message.error.message));
+              } else {
+                waiter.resolve(message.result);
+              }
+            } else {
+              const handler = handleRequest(message, write, callTool).catch((error) => {
+                return write(errorResponse(
+                  typeof message?.id === "string" ? message.id : "unknown",
+                  "internal_error",
+                  error instanceof Error ? error.message : String(error),
+                ));
+              }).finally(() => {
+                handlers.delete(handler);
+              });
+              handlers.add(handler);
+            }
+          } catch (error) {
+            void write(errorResponse("unknown", "parse_error", error instanceof Error ? error.message : String(error)));
+          }
+        }
+        newline = buffer.indexOf("\n");
+      }
+    }
+  } finally {
+    beginShutdown("stdin closed");
+    await Promise.allSettled([...handlers]);
+    await writeChain;
+    outputClosed = true;
   }
 }
 
@@ -283,6 +388,7 @@ function isResponse(value: unknown): value is ProtocolResponse {
 
 if (import.meta.main) {
   if (Bun.argv.includes("--stdio")) {
+    redirectConsoleToStderr();
     await runStdio();
   } else if (Bun.argv.includes("--smoke")) {
     const pi = await resolveModelSmoke();

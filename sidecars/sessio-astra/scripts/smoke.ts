@@ -105,6 +105,7 @@ let confirmResponseSeen = false;
 let dispatchToolSeen = false;
 let stageUpdateToolSeen = false;
 let stageUpdateEventSeen = false;
+let confirmSnapshotCount = 0;
 const deadline = Date.now() + 5000;
 
 while (!confirmResponseSeen && Date.now() < deadline) {
@@ -119,7 +120,21 @@ while (!confirmResponseSeen && Date.now() < deadline) {
       confirmOutput += `${line}\n`;
       const message = JSON.parse(line);
       if (message.method === "tool/call") {
-        if (message.params?.name === "sessio.agent.dispatch_task") {
+        if (message.params?.name === "sessio.project.snapshot") {
+          confirmSnapshotCount += 1;
+          confirmProc.stdin.write(`${JSON.stringify({
+            protocolVersion: 1,
+            id: message.id,
+            result: {
+              thread: {
+                id: "thread-confirm",
+                stages: [
+                  { id: "stage-1", status: confirmSnapshotCount === 1 ? "in_progress" : "completed" },
+                ],
+              },
+            },
+          })}\n`);
+        } else if (message.params?.name === "sessio.agent.dispatch_task") {
           dispatchToolSeen = true;
           confirmProc.stdin.write(`${JSON.stringify({
             protocolVersion: 1,
@@ -177,7 +192,7 @@ await confirmProc.exited;
 if (!confirmResponseSeen) {
   throw new Error(`confirm response missing from smoke output: ${confirmOutput}`);
 }
-if (!dispatchToolSeen || !stageUpdateToolSeen || !stageUpdateEventSeen) {
+if (!dispatchToolSeen || !stageUpdateToolSeen || !stageUpdateEventSeen || confirmSnapshotCount < 2) {
   throw new Error(`confirm loop did not dispatch and update stage: ${confirmOutput}`);
 }
 
@@ -204,6 +219,7 @@ let retryOutput = "";
 let retryResponseSeen = false;
 let retryIssueToolSeen = false;
 let retryStageUpdateEventSeen = false;
+let retrySnapshotCount = 0;
 const retryDeadline = Date.now() + 5000;
 
 while (!retryResponseSeen && Date.now() < retryDeadline) {
@@ -218,7 +234,21 @@ while (!retryResponseSeen && Date.now() < retryDeadline) {
       retryOutput += `${line}\n`;
       const message = JSON.parse(line);
       if (message.method === "tool/call") {
-        if (message.params?.name === "sessio.agent.dispatch_task") {
+        if (message.params?.name === "sessio.project.snapshot") {
+          retrySnapshotCount += 1;
+          retryProc.stdin.write(`${JSON.stringify({
+            protocolVersion: 1,
+            id: message.id,
+            result: {
+              thread: {
+                id: "thread-retry",
+                stages: [
+                  { id: "stage-1", status: retrySnapshotCount === 1 ? "in_progress" : "skipped" },
+                ],
+              },
+            },
+          })}\n`);
+        } else if (message.params?.name === "sessio.agent.dispatch_task") {
           retryProc.stdin.write(`${JSON.stringify({
             protocolVersion: 1,
             id: message.id,
@@ -272,109 +302,114 @@ retryProc.stdin.end();
 retryProc.kill();
 await retryProc.exited;
 
-if (!retryResponseSeen || !retryIssueToolSeen || !retryStageUpdateEventSeen) {
+if (!retryResponseSeen || !retryIssueToolSeen || !retryStageUpdateEventSeen || retrySnapshotCount < 2) {
   throw new Error(`retry-limit loop did not record issue and return: ${retryOutput}`);
 }
 
 console.log("sessio-astra retry-limit smoke ok");
 
-const retrySuccessProc = Bun.spawn(["bun", "run", "src/main.ts", "--stdio"], {
+const failureIssueProc = Bun.spawn(["bun", "run", "src/main.ts", "--stdio"], {
   stdin: "pipe",
   stdout: "pipe",
   stderr: "pipe",
 });
 
-retrySuccessProc.stdin.write(`${JSON.stringify({
+failureIssueProc.stdin.write(`${JSON.stringify({
   ...confirmRequest,
-  id: "retry-success-1",
+  id: "failure-issue-1",
   params: {
     ...confirmRequest.params,
-    runId: "retry-success-run",
+    runId: "failure-issue-run",
   },
 })}\n`);
 
-const retrySuccessReader = retrySuccessProc.stdout.getReader();
-let retrySuccessBuffer = "";
-let retrySuccessOutput = "";
-let retrySuccessResponseSeen = false;
-let retrySuccessDispatchCount = 0;
-let retrySuccessStageUpdateSeen = false;
-const retrySuccessDeadline = Date.now() + 5000;
+const failureIssueReader = failureIssueProc.stdout.getReader();
+let failureIssueBuffer = "";
+let failureIssueOutput = "";
+let failureIssueResponseSeen = false;
+let failureIssueDispatchCount = 0;
+let failureIssueToolSeen = false;
+let failureIssueSnapshotCount = 0;
+const failureIssueDeadline = Date.now() + 5000;
 
-while (!retrySuccessResponseSeen && Date.now() < retrySuccessDeadline) {
-  const { value, done } = await retrySuccessReader.read();
+while (!failureIssueResponseSeen && Date.now() < failureIssueDeadline) {
+  const { value, done } = await failureIssueReader.read();
   if (done) break;
-  retrySuccessBuffer += decoder.decode(value);
-  let newline = retrySuccessBuffer.indexOf("\n");
+  failureIssueBuffer += decoder.decode(value);
+  let newline = failureIssueBuffer.indexOf("\n");
   while (newline >= 0) {
-    const line = retrySuccessBuffer.slice(0, newline).trim();
-    retrySuccessBuffer = retrySuccessBuffer.slice(newline + 1);
+    const line = failureIssueBuffer.slice(0, newline).trim();
+    failureIssueBuffer = failureIssueBuffer.slice(newline + 1);
     if (line) {
-      retrySuccessOutput += `${line}\n`;
+      failureIssueOutput += `${line}\n`;
       const message = JSON.parse(line);
       if (message.method === "tool/call") {
-        if (message.params?.name === "sessio.agent.dispatch_task") {
-          retrySuccessDispatchCount += 1;
-          retrySuccessProc.stdin.write(`${JSON.stringify({
+        if (message.params?.name === "sessio.project.snapshot") {
+          failureIssueSnapshotCount += 1;
+          failureIssueProc.stdin.write(`${JSON.stringify({
             protocolVersion: 1,
             id: message.id,
-            result: retrySuccessDispatchCount === 1
-              ? {
-                  taskId: "task-1",
-                  threadStageId: "stage-1",
-                  sessioRuntimeSessionId: "agent-session-retry-first",
-                  status: "failed",
-                  output: "needs another pass",
-                  error: null,
-                  attemptCount: 1,
-                  retryLimitReached: false,
-                }
-              : {
-                  taskId: "task-1",
-                  threadStageId: "stage-1",
-                  sessioRuntimeSessionId: "agent-session-retry-second",
-                  status: "completed",
-                  output: "done after retry",
-                  attemptCount: 2,
-                  retryLimitReached: false,
-                },
+            result: {
+              thread: {
+                id: "thread-failure",
+                stages: [
+                  { id: "stage-1", status: failureIssueSnapshotCount === 1 ? "in_progress" : "skipped" },
+                ],
+              },
+            },
           })}\n`);
-        } else if (message.params?.name === "sessio.stage.update") {
-          retrySuccessStageUpdateSeen = true;
-          retrySuccessProc.stdin.write(`${JSON.stringify({
+        } else if (message.params?.name === "sessio.agent.dispatch_task") {
+          failureIssueDispatchCount += 1;
+          failureIssueProc.stdin.write(`${JSON.stringify({
+            protocolVersion: 1,
+            id: message.id,
+            result: {
+              taskId: "task-1",
+              threadStageId: "stage-1",
+              sessioRuntimeSessionId: "agent-session-failure",
+              status: "failed",
+              output: "needs a different approach",
+              error: null,
+              attemptCount: 1,
+              retryLimitReached: false,
+            },
+          })}\n`);
+        } else if (message.params?.name === "sessio.stage.issue.add_or_update") {
+          failureIssueToolSeen = true;
+          failureIssueProc.stdin.write(`${JSON.stringify({
             protocolVersion: 1,
             id: message.id,
             result: {
               ok: true,
-              stage: { id: "stage-1", status: "completed" },
+              issue: { id: "issue-failure", threadStageId: "stage-1" },
               error: null,
               appliedAt: Date.now(),
             },
           })}\n`);
         } else {
-          retrySuccessProc.stdin.write(`${JSON.stringify({
+          failureIssueProc.stdin.write(`${JSON.stringify({
             protocolVersion: 1,
             id: message.id,
             error: { code: "unexpected_tool", message: `unexpected tool ${message.params?.name}` },
           })}\n`);
         }
       }
-      if (message.id === "retry-success-1" && message.result?.status === "completed") {
-        retrySuccessResponseSeen = true;
+      if (message.id === "failure-issue-1" && message.result?.status === "completed") {
+        failureIssueResponseSeen = true;
       }
     }
-    newline = retrySuccessBuffer.indexOf("\n");
+    newline = failureIssueBuffer.indexOf("\n");
   }
 }
 
-retrySuccessProc.stdin.end();
-retrySuccessProc.kill();
-await retrySuccessProc.exited;
+failureIssueProc.stdin.end();
+failureIssueProc.kill();
+await failureIssueProc.exited;
 
-if (!retrySuccessResponseSeen || retrySuccessDispatchCount !== 2 || !retrySuccessStageUpdateSeen) {
-  throw new Error(`retry success loop did not redispatch and update: ${retrySuccessOutput}`);
+if (!failureIssueResponseSeen || failureIssueDispatchCount !== 1 || !failureIssueToolSeen || failureIssueSnapshotCount < 2) {
+  throw new Error(`failure issue loop did not record issue without redispatch: ${failureIssueOutput}`);
 }
 
-console.log("sessio-astra retry-success smoke ok");
+console.log("sessio-astra failure-issue smoke ok");
 
 export {};
