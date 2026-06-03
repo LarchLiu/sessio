@@ -279,7 +279,26 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
             install_command,
             json,
         } => {
-            let mut memory = config::load_memory_config()?;
+            let mut memory = match config::load_memory_config() {
+                Ok(memory) => memory,
+                Err(_) => crate::config::MemoryConfig {
+                    backend: "qmd".to_string(),
+                    qmd: crate::config::QmdBackendConfig {
+                        binary: None,
+                        index: index
+                            .clone()
+                            .context("memory is not configured; pass --index to create it")?,
+                        artifacts_root: config::expand_path(artifacts_root.as_deref().context(
+                            "memory is not configured; pass --artifacts-root to create it",
+                        )?)?,
+                        auto_embed: auto_embed
+                            .context("memory is not configured; pass --auto-embed to create it")?,
+                        install_command: install_command.clone().context(
+                            "memory is not configured; pass --install-command to create it",
+                        )?,
+                    },
+                },
+            };
             if let Some(binary) = binary {
                 memory.qmd.binary = Some(binary);
             }

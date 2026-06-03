@@ -76,7 +76,7 @@ pub fn spawn(
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
-    memory_config: MemoryConfig,
+    memory_config: Option<MemoryConfig>,
 ) -> IndexerHandle {
     let (tx, rx) = unbounded::<IndexTask>();
     let (backend_sync_tx, backend_sync_rx) = unbounded::<MemoryBackendSyncJob>();
@@ -89,30 +89,33 @@ pub fn spawn(
         state: state.clone(),
     };
 
-    // Build MemoryService once at startup. Cloning the Arc lets the backend
-    // sync worker, the main indexer loop, and per-source builds all share the
-    // same backend / artifact sink / source registry instead of paying
-    // config-load + AgentSourceRegistry construction on every task.
-    let service = match MemoryService::from_config(
-        memory_store.clone(),
-        Arc::new(crate::agents::sources::builtin_agent_sources()),
-        &memory_config,
-    ) {
-        Ok(service) => Arc::new(service),
-        Err(e) => {
-            log::error!("indexer: failed to initialize MemoryService: {e}");
-            // Without a service the memory pipeline is dead, but the index
-            // pipeline can still service sessions list. Return the handle
-            // anyway so the desktop app stays usable.
-            return handle;
+    // Build MemoryService only when memory is explicitly configured. Cloning
+    // the Arc lets the backend sync worker, the main indexer loop, and
+    // per-source builds all share the same backend / artifact sink / source
+    // registry instead of paying config-load + AgentSourceRegistry construction
+    // on every task.
+    let service = memory_config.and_then(|memory_config| {
+        match MemoryService::from_config(
+            memory_store.clone(),
+            Arc::new(crate::agents::sources::builtin_agent_sources()),
+            &memory_config,
+        ) {
+            Ok(service) => Some(Arc::new(service)),
+            Err(e) => {
+                log::error!("indexer: failed to initialize MemoryService: {e}");
+                None
+            }
         }
-    };
-
-    let backend_sync_store = memory_store.clone();
-    let backend_sync_service = service.clone();
-    thread::spawn(move || {
-        run_backend_sync_loop(backend_sync_store, backend_sync_service, backend_sync_rx);
     });
+
+    if let Some(service) = service.clone() {
+        let backend_sync_store = memory_store.clone();
+        thread::spawn(move || {
+            run_backend_sync_loop(backend_sync_store, service, backend_sync_rx);
+        });
+    } else {
+        log::info!("indexer: memory pipeline disabled; no memory config present");
+    }
 
     let loop_tx = tx.clone();
     thread::spawn(move || {
@@ -134,7 +137,7 @@ struct IndexLoopContext {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
-    service: Arc<MemoryService>,
+    service: Option<Arc<MemoryService>>,
     backend_sync_tx: Sender<MemoryBackendSyncJob>,
     state: Arc<IndexerState>,
 }
@@ -205,56 +208,58 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
         }
         let mut backend_sync_jobs: HashMap<String, MemoryBackendSyncJob> = HashMap::new();
         let mut deferred_requeues: Vec<PathBuf> = Vec::new();
-        for source in affected_sources.values() {
-            match build_source_memory_for_indexer(
-                source,
-                ctx.memory_store.as_ref(),
-                ctx.service.as_ref(),
-            ) {
-                Ok(Some(job)) => {
-                    deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
-                    backend_sync_jobs.insert(job.project_key.clone(), job);
-                    if let Some(project) = &source.project {
-                        let _ = ctx.app.emit("memory_index_updated", project);
+        if let Some(service) = ctx.service.as_ref() {
+            for source in affected_sources.values() {
+                match build_source_memory_for_indexer(
+                    source,
+                    ctx.memory_store.as_ref(),
+                    service.as_ref(),
+                ) {
+                    Ok(Some(job)) => {
+                        deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
+                        backend_sync_jobs.insert(job.project_key.clone(), job);
+                        if let Some(project) = &source.project {
+                            let _ = ctx.app.emit("memory_index_updated", project);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "memory sync for source {}:{} failed: {e}",
+                            source.agent.as_str(),
+                            source.session_id
+                        );
                     }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    log::warn!(
-                        "memory sync for source {}:{} failed: {e}",
-                        source.agent.as_str(),
-                        source.session_id
-                    );
-                }
             }
-        }
-        for project in affected_projects.values() {
-            let already_covered = affected_sources.values().any(|source| {
-                source
-                    .project
-                    .as_ref()
-                    .map(|p| p.project_key == project.project_key)
-                    .unwrap_or(false)
-            });
-            if already_covered {
-                continue;
-            }
-            match build_project_memory_for_indexer(
-                project,
-                ctx.memory_store.as_ref(),
-                ctx.service.as_ref(),
-            ) {
-                Ok(Some(job)) => {
-                    deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
-                    backend_sync_jobs.insert(job.project_key.clone(), job);
-                    let _ = ctx.app.emit("memory_index_updated", project);
+            for project in affected_projects.values() {
+                let already_covered = affected_sources.values().any(|source| {
+                    source
+                        .project
+                        .as_ref()
+                        .map(|p| p.project_key == project.project_key)
+                        .unwrap_or(false)
+                });
+                if already_covered {
+                    continue;
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    log::warn!(
-                        "memory sync for project {} failed: {e}",
-                        project.project_key
-                    );
+                match build_project_memory_for_indexer(
+                    project,
+                    ctx.memory_store.as_ref(),
+                    service.as_ref(),
+                ) {
+                    Ok(Some(job)) => {
+                        deferred_requeues.extend(job.dependent_source_paths.iter().cloned());
+                        backend_sync_jobs.insert(job.project_key.clone(), job);
+                        let _ = ctx.app.emit("memory_index_updated", project);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "memory sync for project {} failed: {e}",
+                            project.project_key
+                        );
+                    }
                 }
             }
         }

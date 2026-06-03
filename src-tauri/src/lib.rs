@@ -2015,6 +2015,18 @@ fn get_index_status(indexer: State<'_, IndexerHandle>) -> IndexStatus {
 fn get_memory_backend_status(
     store: State<'_, Arc<dyn MemoryStore>>,
 ) -> Result<MemoryBackendStatus, String> {
+    if config::load_config()
+        .map_err(|e| e.to_string())?
+        .memory
+        .is_none()
+    {
+        return Ok(MemoryBackendStatus {
+            backend: "memory".to_string(),
+            available: false,
+            error: Some("memory is not configured".to_string()),
+            details: None,
+        });
+    }
     let service = MemoryService::new(
         store.inner().clone(),
         Arc::new(crate::agents::sources::builtin_agent_sources()),

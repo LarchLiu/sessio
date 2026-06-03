@@ -4,11 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
-use crate::memory::build::default_artifacts_root;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
-    pub memory: MemoryConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryConfig>,
     pub debug: DebugConfig,
 }
 
@@ -36,7 +35,7 @@ pub struct QmdBackendConfig {
 
 #[derive(Debug, Clone, Default)]
 struct RawConfig {
-    memory: RawMemoryConfig,
+    memory: Option<RawMemoryConfig>,
     debug: RawDebugConfig,
 }
 
@@ -76,12 +75,12 @@ pub fn load_config() -> Result<AppConfig> {
 }
 
 pub fn load_memory_config() -> Result<MemoryConfig> {
-    Ok(load_config()?.memory)
+    load_config()?.memory.context("memory is not configured")
 }
 
 pub fn save_memory_config(config: &MemoryConfig) -> Result<()> {
     let mut app_config = load_config().or_else(|_| default_app_config())?;
-    app_config.memory = config.clone();
+    app_config.memory = Some(config.clone());
     save_config(&app_config)
 }
 
@@ -139,17 +138,49 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
         let value = parse_value(value.trim())?;
         match section {
             Section::Memory => match key {
-                "backend" => raw.memory.backend = value,
+                "backend" => {
+                    raw.memory
+                        .get_or_insert_with(RawMemoryConfig::default)
+                        .backend = value
+                }
                 other => bail!("unknown key in [memory]: {other}"),
             },
             Section::MemoryBackendsQmd => match key {
-                "binary" => raw.memory.backends.qmd.binary = value,
-                "index" => raw.memory.backends.qmd.index = value,
-                "artifacts_root" => raw.memory.backends.qmd.artifacts_root = value,
-                "auto_embed" => {
-                    raw.memory.backends.qmd.auto_embed = value.map(parse_bool).transpose()?
+                "binary" => {
+                    raw.memory
+                        .get_or_insert_with(RawMemoryConfig::default)
+                        .backends
+                        .qmd
+                        .binary = value
                 }
-                "install_command" => raw.memory.backends.qmd.install_command = value,
+                "index" => {
+                    raw.memory
+                        .get_or_insert_with(RawMemoryConfig::default)
+                        .backends
+                        .qmd
+                        .index = value
+                }
+                "artifacts_root" => {
+                    raw.memory
+                        .get_or_insert_with(RawMemoryConfig::default)
+                        .backends
+                        .qmd
+                        .artifacts_root = value
+                }
+                "auto_embed" => {
+                    raw.memory
+                        .get_or_insert_with(RawMemoryConfig::default)
+                        .backends
+                        .qmd
+                        .auto_embed = value.map(parse_bool).transpose()?
+                }
+                "install_command" => {
+                    raw.memory
+                        .get_or_insert_with(RawMemoryConfig::default)
+                        .backends
+                        .qmd
+                        .install_command = value
+                }
                 other => bail!("unknown key in [memory.backends.qmd]: {other}"),
             },
             Section::Debug => match key {
@@ -259,8 +290,13 @@ fn strip_comment(line: &str) -> &str {
 }
 
 fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
+    let memory = raw
+        .memory
+        .clone()
+        .map(|memory| resolve_memory_config_inner(memory, apply_env))
+        .transpose()?;
     Ok(AppConfig {
-        memory: resolve_memory_config_inner(raw.clone(), apply_env)?,
+        memory,
         debug: resolve_debug_config(raw),
     })
 }
@@ -272,26 +308,26 @@ fn resolve_debug_config(raw: RawConfig) -> DebugConfig {
     }
 }
 
-fn resolve_memory_config_inner(raw: RawConfig, apply_env: bool) -> Result<MemoryConfig> {
-    let backend = raw.memory.backend.unwrap_or_else(|| "qmd".to_string());
+fn resolve_memory_config_inner(raw: RawMemoryConfig, apply_env: bool) -> Result<MemoryConfig> {
+    let backend = raw.backend.context("missing [memory].backend")?;
     if backend != "qmd" {
         bail!("unsupported memory backend in config: {backend}");
     }
 
-    let qmd = raw.memory.backends.qmd;
+    let qmd = raw.backends.qmd;
     let mut config = QmdBackendConfig {
         binary: qmd.binary,
-        index: qmd.index.unwrap_or_else(|| "sessio".to_string()),
-        artifacts_root: qmd
-            .artifacts_root
-            .as_deref()
-            .map(expand_path)
-            .transpose()?
-            .unwrap_or(default_artifacts_root()?),
-        auto_embed: qmd.auto_embed.unwrap_or(false),
+        index: qmd.index.context("missing [memory.backends.qmd].index")?,
+        artifacts_root: expand_path(
+            &qmd.artifacts_root
+                .context("missing [memory.backends.qmd].artifacts_root")?,
+        )?,
+        auto_embed: qmd
+            .auto_embed
+            .context("missing [memory.backends.qmd].auto_embed")?,
         install_command: qmd
             .install_command
-            .unwrap_or_else(|| "npm install -g @tobilu/qmd".to_string()),
+            .context("missing [memory.backends.qmd].install_command")?,
     };
     if apply_env {
         if let Ok(binary) = std::env::var("SESSIO_QMD_BINARY") {
@@ -327,37 +363,6 @@ fn resolve_memory_config_inner(raw: RawConfig, apply_env: bool) -> Result<Memory
 fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
     let defaults = parse_raw_config(&serialize_app_config(&default_app_config()?))?;
     let mut changed = false;
-
-    merge_option(
-        &mut raw.memory.backend,
-        defaults.memory.backend,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.memory.backends.qmd.binary,
-        defaults.memory.backends.qmd.binary,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.memory.backends.qmd.index,
-        defaults.memory.backends.qmd.index,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.memory.backends.qmd.artifacts_root,
-        defaults.memory.backends.qmd.artifacts_root,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.memory.backends.qmd.auto_embed,
-        defaults.memory.backends.qmd.auto_embed,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.memory.backends.qmd.install_command,
-        defaults.memory.backends.qmd.install_command,
-        &mut changed,
-    );
     merge_option(
         &mut raw.debug.acp_config,
         defaults.debug.acp_config,
@@ -396,23 +401,10 @@ fn write_default_config_file(path: &Path) -> Result<()> {
 
 fn default_app_config() -> Result<AppConfig> {
     Ok(AppConfig {
-        memory: default_memory_config()?,
+        memory: None,
         debug: DebugConfig {
             acp_config: false,
             update_preview: false,
-        },
-    })
-}
-
-fn default_memory_config() -> Result<MemoryConfig> {
-    Ok(MemoryConfig {
-        backend: "qmd".to_string(),
-        qmd: QmdBackendConfig {
-            binary: None,
-            index: "sessio".to_string(),
-            artifacts_root: default_artifacts_root()?,
-            auto_embed: false,
-            install_command: "npm install -g @tobilu/qmd".to_string(),
         },
     })
 }
@@ -453,8 +445,10 @@ fn toml_string(value: &str) -> String {
 
 pub fn serialize_app_config(config: &AppConfig) -> String {
     let mut out = String::new();
-    out.push_str(&serialize_memory_config(&config.memory));
-    out.push('\n');
+    if let Some(memory) = &config.memory {
+        out.push_str(&serialize_memory_config(memory));
+        out.push('\n');
+    }
     out.push_str(&serialize_debug_config(&config.debug));
     out
 }
@@ -477,13 +471,31 @@ fn serialize_debug_config(config: &DebugConfig) -> String {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Context;
+
     use super::{
         default_app_config, parse_raw_config, raw_config_with_defaults,
         resolve_memory_config_inner, serialize_app_config,
     };
 
     fn resolve_memory_config(raw: super::RawConfig) -> super::Result<super::MemoryConfig> {
-        resolve_memory_config_inner(raw, true)
+        resolve_memory_config_inner(raw.memory.context("memory is not configured")?, true)
+    }
+
+    fn complete_memory_config(extra: &str) -> String {
+        format!(
+            r#"
+            [memory]
+            backend = "qmd"
+
+            [memory.backends.qmd]
+            index = "sessio-test"
+            artifacts_root = "/tmp/sessio-artifacts"
+            auto_embed = false
+            install_command = "npm install -g @tobilu/qmd"
+            {extra}
+            "#
+        )
     }
 
     #[test]
@@ -497,6 +509,8 @@ mod tests {
             binary = "/usr/local/bin/qmd"
             index = "sessio-test"
             artifacts_root = "/tmp/sessio-artifacts"
+            auto_embed = false
+            install_command = "npm install -g @tobilu/qmd"
             "#,
         )
         .unwrap();
@@ -526,13 +540,9 @@ mod tests {
 
     #[test]
     fn parses_auto_embed_boolean_and_strips_comments() {
-        let raw = parse_raw_config(
-            r#"
-            # global comment
-            [memory.backends.qmd]
-            auto_embed = true  # inline comment after value
-            "#,
-        )
+        let raw = parse_raw_config(&complete_memory_config(
+            r#"auto_embed = true  # inline comment after value"#,
+        ))
         .unwrap();
         let config = resolve_memory_config(raw).unwrap();
         assert!(config.qmd.auto_embed);
@@ -565,6 +575,12 @@ mod tests {
 
             [memory]
             backend = "qmd"
+
+            [memory.backends.qmd]
+            index = "sessio-test"
+            artifacts_root = "/tmp/sessio-artifacts"
+            auto_embed = false
+            install_command = "npm install -g @tobilu/qmd"
             "#,
         )
         .unwrap();
@@ -574,39 +590,47 @@ mod tests {
 
     #[test]
     fn comment_inside_quoted_string_is_preserved() {
-        let raw = parse_raw_config(
-            r#"
-            [memory.backends.qmd]
-            binary = "/path/with#hash/qmd"
-            "#,
-        )
-        .unwrap();
+        let raw =
+            parse_raw_config(&complete_memory_config(r#"binary = "/path/with#hash/qmd""#)).unwrap();
         let config = resolve_memory_config(raw).unwrap();
         assert_eq!(config.qmd.binary.as_deref(), Some("/path/with#hash/qmd"));
     }
 
     #[test]
-    fn default_app_config_serializes_memory_and_debug_only() {
+    fn default_app_config_serializes_debug_without_memory() {
         let config = default_app_config().unwrap();
         let serialized = serialize_app_config(&config);
         let raw = parse_raw_config(&serialized).unwrap();
         let config = super::resolve_app_config(raw, false).unwrap();
 
-        assert!(serialized.contains("[memory]"));
+        assert!(!serialized.contains("[memory]"));
         assert!(serialized.contains("[debug]"));
         assert!(!serialized.contains("[agents.runtime"));
-        assert_eq!(config.memory.backend, "qmd");
+        assert!(config.memory.is_none());
     }
 
     #[test]
-    fn empty_config_is_completed_with_memory_and_debug_defaults() {
+    fn empty_config_is_completed_with_debug_defaults_only() {
         let raw = parse_raw_config("").unwrap();
         let (raw, changed) = raw_config_with_defaults(raw).unwrap();
         let config = super::resolve_app_config(raw, false).unwrap();
 
         assert!(changed);
-        assert_eq!(config.memory.backend, "qmd");
+        assert!(config.memory.is_none());
         assert!(!config.debug.acp_config);
         assert!(!config.debug.update_preview);
+    }
+
+    #[test]
+    fn rejects_incomplete_memory_config() {
+        let raw = parse_raw_config(
+            r#"
+            [memory]
+            backend = "qmd"
+            "#,
+        )
+        .unwrap();
+
+        assert!(resolve_memory_config(raw).is_err());
     }
 }
