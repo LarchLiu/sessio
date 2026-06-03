@@ -1,8 +1,28 @@
-const proc = Bun.spawn(["bun", "run", "src/main.ts", "--stdio"], {
-  stdin: "pipe",
-  stdout: "pipe",
-  stderr: "pipe",
-});
+function sidecarEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(Bun.env)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  delete env.SESSIO_ASTRA_MODEL_PROVIDER;
+  delete env.SESSIO_ASTRA_PROVIDER;
+  delete env.SESSIO_ASTRA_MODEL_ID;
+  delete env.SESSIO_ASTRA_MODEL;
+  delete env.SESSIO_ASTRA_ALLOW_MISSING_API_KEY;
+  delete env.SESSIO_ASTRA_FAUX_MODEL_ID;
+  delete env.SESSIO_ASTRA_FAUX_PLAN_JSON;
+  return { ...env, ...extra };
+}
+
+function spawnSidecar(extraEnv: Record<string, string> = {}) {
+  return Bun.spawn(["bun", "run", "src/main.ts", "--stdio"], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: sidecarEnv(extraEnv),
+  });
+}
+
+const proc = spawnSidecar();
 
 const request = {
   protocolVersion: 1,
@@ -68,11 +88,73 @@ if (planResponse.result?.plan?.tasks?.length !== 2) {
 
 console.log("sessio-astra smoke ok");
 
-const confirmProc = Bun.spawn(["bun", "run", "src/main.ts", "--stdio"], {
-  stdin: "pipe",
-  stdout: "pipe",
-  stderr: "pipe",
-});
+const smokeProc = spawnSidecar();
+const smokeRequest = {
+  protocolVersion: 1,
+  id: "smoke-model-1",
+  method: "astra/smoke",
+};
+
+smokeProc.stdin.write(`${JSON.stringify(smokeRequest)}\n`);
+smokeProc.stdin.end();
+
+const smokeOutput = await new Response(smokeProc.stdout).text();
+await smokeProc.exited;
+const smokeLines = smokeOutput
+  .trim()
+  .split("\n")
+  .filter(Boolean)
+  .map((line) => JSON.parse(line));
+const smokeResponse = smokeLines.find((line) => line.id === "smoke-model-1");
+if (smokeResponse?.result?.pi?.available !== true || smokeResponse.result.pi.planningMode !== "deterministic") {
+  throw new Error(`expected deterministic Pi smoke without model config: ${smokeOutput}`);
+}
+if (smokeResponse.result.pi.agentAvailable !== true || smokeResponse.result.pi.modelConfigured !== false) {
+  throw new Error(`expected Pi agent bootstrap with no configured model: ${smokeOutput}`);
+}
+
+console.log("sessio-astra model smoke ok");
+
+const fauxPlan = {
+  summary: "Faux Pi planned one task.",
+  tasks: [
+    {
+      id: "model-picked-id-is-replaced",
+      title: "Model plan task",
+      targetStageId: "stage-plan",
+      targetAgent: "codex",
+      prompt: "Use the model-supplied plan to advance the stage.",
+      expectedOutput: "A short model-planned result.",
+      risk: "medium",
+    },
+  ],
+};
+const piProc = spawnSidecar({ SESSIO_ASTRA_FAUX_PLAN_JSON: JSON.stringify(fauxPlan) });
+
+piProc.stdin.write(`${JSON.stringify({ ...request, id: "pi-plan-1", params: { ...request.params, runId: "pi-run" } })}\n`);
+piProc.stdin.end();
+
+const piOutput = await new Response(piProc.stdout).text();
+await piProc.exited;
+const piLines = piOutput
+  .trim()
+  .split("\n")
+  .filter(Boolean)
+  .map((line) => JSON.parse(line));
+const piResponse = piLines.find((line) => line.id === "pi-plan-1");
+if (piResponse?.result?.plan?.summary !== fauxPlan.summary) {
+  throw new Error(`Pi faux plan summary missing: ${piOutput}`);
+}
+if (piResponse.result.plan.tasks?.length !== 1 || piResponse.result.plan.tasks[0]?.title !== "Model plan task") {
+  throw new Error(`Pi faux plan task missing: ${piOutput}`);
+}
+if (piResponse.result.plan.tasks[0]?.id === fauxPlan.tasks[0].id) {
+  throw new Error(`Pi plan task id was not normalized: ${piOutput}`);
+}
+
+console.log("sessio-astra pi planning smoke ok");
+
+const confirmProc = spawnSidecar();
 
 const confirmRequest = {
   protocolVersion: 1,
@@ -198,11 +280,7 @@ if (!dispatchToolSeen || !stageUpdateToolSeen || !stageUpdateEventSeen || confir
 
 console.log("sessio-astra confirm smoke ok");
 
-const retryProc = Bun.spawn(["bun", "run", "src/main.ts", "--stdio"], {
-  stdin: "pipe",
-  stdout: "pipe",
-  stderr: "pipe",
-});
+const retryProc = spawnSidecar();
 
 retryProc.stdin.write(`${JSON.stringify({
   ...confirmRequest,
@@ -308,11 +386,7 @@ if (!retryResponseSeen || !retryIssueToolSeen || !retryStageUpdateEventSeen || r
 
 console.log("sessio-astra retry-limit smoke ok");
 
-const failureIssueProc = Bun.spawn(["bun", "run", "src/main.ts", "--stdio"], {
-  stdin: "pipe",
-  stdout: "pipe",
-  stderr: "pipe",
-});
+const failureIssueProc = spawnSidecar();
 
 failureIssueProc.stdin.write(`${JSON.stringify({
   ...confirmRequest,
