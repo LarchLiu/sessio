@@ -367,7 +367,8 @@ impl AstraService {
     }
 
     pub fn recover_interrupted_runs(&self) -> Result<()> {
-        self.inner.store.interrupt_active_astra_runs()
+        self.inner.store.interrupt_active_astra_runs()?;
+        Ok(())
     }
 
     pub fn start_thread_astra(&self, req: StartThreadAstraRequest) -> Result<AstraHandle> {
@@ -1359,6 +1360,12 @@ impl AstraService {
                     }
                 }
             }
+            // The loop only ends when the sidecar's stdout closes, i.e. the
+            // process exited. Planning and orchestration run async with no
+            // blocking Rust RPC, so without this a crash would strand active
+            // runs forever. Release blocked waiters, drop the dead handle, and
+            // interrupt the runs it was driving.
+            service.handle_sidecar_disconnected(&pending_reader);
         });
 
         Ok(SidecarHandle {
@@ -1366,6 +1373,55 @@ impl AstraService {
             stdin,
             pending,
         })
+    }
+
+    /// Cleanup when the sidecar process exits (reader thread observed stdout
+    /// EOF). `pending` is the dying reader's waiter map, used both to reject
+    /// blocked `request()` callers and to identify whether the cached handle is
+    /// still this sidecar (vs. one a concurrent `request()` already respawned).
+    fn handle_sidecar_disconnected(
+        &self,
+        pending: &Arc<Mutex<HashMap<String, mpsc::Sender<AstraProtocolResponse>>>>,
+    ) {
+        // Release every blocked waiter; dropping the senders makes their recv
+        // calls return Disconnected so callers fail instead of hanging.
+        if let Ok(mut waiters) = pending.lock() {
+            waiters.clear();
+        }
+        // Only clear the slot if it still holds this dead sidecar. A concurrent
+        // request() may have already spawned a replacement, whose handle must
+        // not be dropped here.
+        if let Ok(mut guard) = self.inner.sidecar.lock() {
+            let is_current = guard
+                .as_ref()
+                .map(|handle| Arc::ptr_eq(&handle.pending, pending))
+                .unwrap_or(false);
+            if is_current {
+                *guard = None;
+            }
+        }
+        // Fail the runs this sidecar was orchestrating. The async loop has no
+        // blocked RPC to surface the crash, so the run would otherwise stay
+        // active forever.
+        match self.inner.store.interrupt_active_astra_runs() {
+            Ok(interrupted) => {
+                for record in interrupted {
+                    match record_to_run(record) {
+                        Ok(run) => self.emit(
+                            &run,
+                            "error",
+                            json!({ "message": "Astra sidecar exited; run interrupted" }),
+                        ),
+                        Err(error) => {
+                            log::warn!("[sessio-astra:sidecar-disconnect] decode run: {error}")
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!("[sessio-astra:sidecar-disconnect] interrupt active runs: {error}")
+            }
+        }
     }
 
     fn handle_tool_request(&self, request: AstraProtocolRequest) -> AstraProtocolResponse {

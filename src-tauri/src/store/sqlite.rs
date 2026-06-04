@@ -6100,15 +6100,32 @@ impl SessionStore for SqliteStore {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    fn interrupt_active_astra_runs(&self) -> Result<()> {
+    fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>> {
         let conn = self.conn.lock().unwrap();
+        let now = now_ms();
+        let mut active: Vec<AstraRunRecord> = {
+            let mut stmt = conn.prepare(
+                "SELECT run_id, thread_id, project_id, project_path, status, mode,
+                        proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
+                        current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
+                        error, created_at, updated_at
+                 FROM astra_runs
+                 WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')",
+            )?;
+            let rows = stmt.query_map([], astra_run_from_row)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         conn.execute(
             "UPDATE astra_runs
              SET status = 'interrupted', updated_at = ?
              WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')",
-            params![now_ms()],
+            params![now],
         )?;
-        Ok(())
+        for run in &mut active {
+            run.status = "interrupted".to_string();
+            run.updated_at = now;
+        }
+        Ok(active)
     }
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
@@ -7227,10 +7244,16 @@ mod migration_tests {
         assert_eq!(active.run_id, "astra-run-1");
         assert_eq!(active.status, "running");
 
-        store.interrupt_active_astra_runs().unwrap();
+        let interrupted_rows = store.interrupt_active_astra_runs().unwrap();
+        assert_eq!(interrupted_rows.len(), 1);
+        assert_eq!(interrupted_rows[0].run_id, "astra-run-1");
+        assert_eq!(interrupted_rows[0].status, "interrupted");
         assert!(store.get_active_astra_run(&thread.id).unwrap().is_none());
         let interrupted = store.get_astra_run("astra-run-1").unwrap().unwrap();
         assert_eq!(interrupted.status, "interrupted");
+
+        // A second pass has nothing active left to interrupt.
+        assert!(store.interrupt_active_astra_runs().unwrap().is_empty());
 
         let runs = store.list_astra_runs(&thread.id).unwrap();
         assert_eq!(runs.len(), 1);

@@ -656,7 +656,7 @@ impl SessionStore for CachedStore {
         self.inner.list_astra_runs(thread_id)
     }
 
-    fn interrupt_active_astra_runs(&self) -> Result<()> {
+    fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>> {
         self.inner.interrupt_active_astra_runs()
     }
 

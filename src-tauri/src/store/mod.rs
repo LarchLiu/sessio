@@ -389,7 +389,9 @@ pub trait SessionStore: Send + Sync {
     fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>>;
     fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>>;
     fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>>;
-    fn interrupt_active_astra_runs(&self) -> Result<()>;
+    /// Transition every active run to `interrupted` and return the rows that
+    /// changed (with their patched status), so callers can notify listeners.
+    fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(
