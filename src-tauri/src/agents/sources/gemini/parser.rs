@@ -930,10 +930,9 @@ fn read_chat_history_acp_messages_with_locations(
         .and_then(|m| m.as_array())
         .cloned()
         .unwrap_or_default();
-    let mut counter = 0usize;
 
-    for raw in raw_messages {
-        counter += 1;
+    for (index, raw) in raw_messages.into_iter().enumerate() {
+        let counter = index + 1;
         let role = normalize_gemini_role(raw.get("type").and_then(|v| v.as_str()).unwrap_or(""));
         let ts = raw
             .get("timestamp")

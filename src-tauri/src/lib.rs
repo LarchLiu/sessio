@@ -2264,8 +2264,7 @@ fn read_session_history_result_from_source(
             let rows =
                 crate::agents::sources::codex::parser::read_history_acp_messages_with_locations(
                     &path,
-                )
-                .map_err(anyhow::Error::from)?;
+                )?;
             let count = count_source_lines(&rows);
             (rows, count)
         }
@@ -2273,8 +2272,7 @@ fn read_session_history_result_from_source(
             let rows =
                 crate::agents::sources::claude::parser::read_history_acp_messages_with_locations(
                     &path,
-                )
-                .map_err(anyhow::Error::from)?;
+                )?;
             let count = count_source_lines(&rows);
             (rows, count)
         }
@@ -2282,9 +2280,8 @@ fn read_session_history_result_from_source(
             let sid = session_id.unwrap_or_default();
             let rows =
                 crate::agents::sources::gemini::parser::read_history_acp_messages_with_locations(
-                    &path, &sid,
-                )
-                .map_err(anyhow::Error::from)?;
+                    &path, sid,
+                )?;
             let count = rows.len();
             (rows, count)
         }

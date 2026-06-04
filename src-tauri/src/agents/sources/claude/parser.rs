@@ -323,7 +323,7 @@ fn expand_message(
     };
 
     if let Some(s) = content.as_str() {
-        let text = sanitize_role_text(role_raw, s.to_string());
+        let text = s.to_string();
         if text.trim().is_empty() {
             return Vec::new();
         }
@@ -342,9 +342,8 @@ fn expand_message(
         if text_parts.is_empty() {
             return;
         }
-        let joined = text_parts.join("\n");
+        let cleaned = text_parts.join("\n");
         text_parts.clear();
-        let cleaned = sanitize_role_text(role_raw, joined);
         if cleaned.trim().is_empty() {
             return;
         }
@@ -485,14 +484,6 @@ fn history_role_content_message(
         "assistant" => history_content_update("agent_message_chunk", content, timestamp),
         "thinking" => history_content_update("agent_thought_chunk", content, timestamp),
         _ => history_content_update("agent_message_chunk", content, timestamp),
-    }
-}
-
-fn sanitize_role_text(role_raw: &str, text: String) -> String {
-    if role_raw == "user" {
-        text
-    } else {
-        text
     }
 }
 

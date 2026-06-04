@@ -1270,7 +1270,7 @@ impl AstraService {
             .lock()
             .ok()
             .and_then(|mut pending| pending.remove(&id));
-        Ok(response?)
+        response
     }
 
     fn spawn_sidecar(&self) -> Result<SidecarHandle> {

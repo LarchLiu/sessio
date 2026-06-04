@@ -762,7 +762,7 @@ fn run_thread(cmd: ThreadCommand) -> Result<()> {
                     println!("description\t{description}");
                 }
                 let mut stages = thread.stages;
-                stages.sort_by(|a, b| a.order.cmp(&b.order));
+                stages.sort_by_key(|a| a.order);
                 for stage in &stages {
                     println!(
                         "stage\t{}\t{}\t{}",
@@ -788,7 +788,7 @@ fn run_stage(cmd: StageCommand) -> Result<()> {
             store.init()?;
             let thread = find_thread_by_id(&store, &thread_id)?;
             let mut stages = thread.stages;
-            stages.sort_by(|a, b| a.order.cmp(&b.order));
+            stages.sort_by_key(|a| a.order);
             if json {
                 println!("{}", serde_json::to_string_pretty(&stages)?);
             } else {

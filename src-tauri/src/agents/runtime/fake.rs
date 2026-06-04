@@ -177,7 +177,7 @@ fn emit_fake_acp(
         "[sessio-runtime:fake-acp:session-update] {:?}",
         notification
     );
-    if let Some(event) = acp_protocol_event(
+    if let Ok(event) = acp_protocol_event(
         sessio_runtime_session_id,
         "agent_to_client",
         "notification",
@@ -188,7 +188,6 @@ fn emit_fake_acp(
         Some(fake_session_update_type(&notification.update).to_string()),
         &notification,
     )
-    .ok()
     {
         manager.emit(event)?;
     }

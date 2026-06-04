@@ -18,6 +18,7 @@ const MAX_PROTOCOL_MESSAGES: usize = 240;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct AcpCanonicalSessionState {
     pub plan: Option<AcpPlan>,
     pub available_commands: Vec<AcpAvailableCommand>,
@@ -26,17 +27,6 @@ pub struct AcpCanonicalSessionState {
     pub session_info: Option<AcpSessionInfo>,
 }
 
-impl Default for AcpCanonicalSessionState {
-    fn default() -> Self {
-        Self {
-            plan: None,
-            available_commands: Vec::new(),
-            current_mode_id: None,
-            config_options: Vec::new(),
-            session_info: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -846,14 +836,14 @@ fn apply_session_level_message(
 ) -> AcpCanonicalSessionState {
     let mut next = state.clone();
     if let Some(patch) = session_response_state(message) {
-        if patch.config_options.is_some() {
-            next.config_options = patch.config_options.unwrap();
+        if let Some(config_options) = patch.config_options {
+            next.config_options = config_options;
         }
-        if patch.current_mode_id.is_some() {
-            next.current_mode_id = patch.current_mode_id.unwrap();
+        if let Some(current_mode_id) = patch.current_mode_id {
+            next.current_mode_id = current_mode_id;
         }
-        if patch.session_info.is_some() {
-            next.session_info = patch.session_info.unwrap();
+        if let Some(session_info) = patch.session_info {
+            next.session_info = session_info;
         }
         return next;
     }
@@ -2390,10 +2380,7 @@ fn sanitize_sessio_attachment_text(text: &str) -> String {
 fn remove_file_markdown_links(text: &str) -> String {
     let mut out = text.to_string();
     let mut search_from = 0usize;
-    loop {
-        let Some(close_label_rel) = out[search_from..].find("](") else {
-            break;
-        };
+    while let Some(close_label_rel) = out[search_from..].find("](") {
         let close_label = search_from + close_label_rel;
         let Some(open_label_rel) = out[search_from..close_label].rfind('[') else {
             search_from = close_label + 2;
@@ -2571,9 +2558,7 @@ fn basename_from_uri(uri: &str) -> Option<String> {
         return None;
     }
     let path = uri.strip_prefix("file://").unwrap_or(uri);
-    path.split(['/', '\\'])
-        .filter(|part| !part.is_empty())
-        .last()
+    path.split(['/', '\\']).rfind(|part| !part.is_empty())
         .map(ToString::to_string)
 }
 

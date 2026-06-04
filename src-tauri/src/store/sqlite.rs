@@ -1959,7 +1959,7 @@ fn stable_project_id(path: &str) -> String {
     hasher.update(path.as_bytes());
     format!(
         "project-{}",
-        hex::encode(hasher.finalize())[..16].to_string()
+        &hex::encode(hasher.finalize())[..16]
     )
 }
 
@@ -1971,7 +1971,7 @@ fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
     hasher.update(now.to_string().as_bytes());
     format!(
         "kanban-{}",
-        hex::encode(hasher.finalize())[..16].to_string()
+        &hex::encode(hasher.finalize())[..16]
     )
 }
 
@@ -1982,7 +1982,7 @@ fn stable_issue_id(thread_stage_id: &str, title: &str, now: i64, nonce: &str) ->
     hasher.update(title.as_bytes());
     hasher.update(now.to_string().as_bytes());
     hasher.update(nonce.as_bytes());
-    format!("issue-{}", hex::encode(hasher.finalize())[..16].to_string())
+    format!("issue-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_workflow_id(name: &str, now: i64) -> String {
@@ -1992,7 +1992,7 @@ fn stable_workflow_id(name: &str, now: i64) -> String {
     hasher.update(now.to_string().as_bytes());
     format!(
         "workflow-{}",
-        hex::encode(hasher.finalize())[..16].to_string()
+        &hex::encode(hasher.finalize())[..16]
     )
 }
 
@@ -2014,7 +2014,7 @@ fn stable_assistant_id(
     hasher.update(now.to_string().as_bytes());
     format!(
         "assistant-{}",
-        hex::encode(hasher.finalize())[..16].to_string()
+        &hex::encode(hasher.finalize())[..16]
     )
 }
 
@@ -2025,7 +2025,7 @@ fn stable_project_builtin_assistant_id(project_id: &str, template_assistant_id: 
     hasher.update(template_assistant_id.as_bytes());
     format!(
         "assistant-{}",
-        hex::encode(hasher.finalize())[..16].to_string()
+        &hex::encode(hasher.finalize())[..16]
     )
 }
 
@@ -2045,7 +2045,7 @@ fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
     hasher.update(now.to_string().as_bytes());
     format!(
         "thread-{}",
-        hex::encode(hasher.finalize())[..16].to_string()
+        &hex::encode(hasher.finalize())[..16]
     )
 }
 
@@ -2063,7 +2063,7 @@ fn stable_project_stage_id(
     hasher.update(stage_name.as_bytes());
     hasher.update(order.to_string().as_bytes());
     hasher.update(now.to_string().as_bytes());
-    format!("stage-{}", hex::encode(hasher.finalize())[..16].to_string())
+    format!("stage-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_project_builtin_stage_id(project_id: &str, template_stage_id: &str) -> String {
@@ -2071,7 +2071,7 @@ fn stable_project_builtin_stage_id(project_id: &str, template_stage_id: &str) ->
     let mut hasher = Sha256::new();
     hasher.update(project_id.as_bytes());
     hasher.update(template_stage_id.as_bytes());
-    format!("stage-{}", hex::encode(hasher.finalize())[..16].to_string())
+    format!("stage-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_thread_stage_id(
@@ -2088,7 +2088,7 @@ fn stable_thread_stage_id(
     hasher.update(order.to_string().as_bytes());
     format!(
         "thread-stage-{}",
-        hex::encode(hasher.finalize())[..16].to_string()
+        &hex::encode(hasher.finalize())[..16]
     )
 }
 
@@ -3044,21 +3044,16 @@ fn replace_project_stage_assistants(
 }
 
 fn assistant_agent_from_db_agent(agent: &AgentInfo) -> Option<AssistantAgentInfo> {
-    let Some(model) = agent
+    let model = agent
         .model
         .clone()
-        .or_else(|| agent.models.first().map(|option| option.value.clone()))
-    else {
-        return None;
-    };
-    let Some(mode) = agent.permission_mode.clone().or_else(|| {
+        .or_else(|| agent.models.first().map(|option| option.value.clone()))?;
+    let mode = agent.permission_mode.clone().or_else(|| {
         agent
             .permission_modes
             .first()
             .map(|option| option.value.clone())
-    }) else {
-        return None;
-    };
+    })?;
     let effort = agent
         .effort
         .clone()
@@ -3316,12 +3311,7 @@ fn reorder_project_stage_scope(
 
     let mut ids = rows.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
     let id = ids.remove(current_index);
-    let insert_index = if current_index < target_index {
-        target_index
-    } else {
-        target_index
-    };
-    ids.insert(insert_index, id);
+    ids.insert(target_index, id);
 
     for (index, id) in ids.iter().enumerate() {
         conn.execute(
@@ -4255,11 +4245,9 @@ impl SessionStore for SqliteStore {
             None => current.name,
         };
         let next_description = match description {
-            Some(Some(value)) => value
+            Some(Some(value)) => if value
                 .trim()
-                .is_empty()
-                .then(|| None)
-                .unwrap_or_else(|| Some(value.trim().to_string())),
+                .is_empty() { None } else { Some(value.trim().to_string()) },
             Some(None) => None,
             None => current.description,
         };
@@ -4765,20 +4753,16 @@ impl SessionStore for SqliteStore {
             None => current.name,
         };
         let next_system_prompt = match system_prompt {
-            Some(Some(value)) => value
+            Some(Some(value)) => if value
                 .trim()
-                .is_empty()
-                .then(|| None)
-                .unwrap_or_else(|| Some(value.trim().to_string())),
+                .is_empty() { None } else { Some(value.trim().to_string()) },
             Some(None) => None,
             None => current.system_prompt,
         };
         let next_color = match color {
-            Some(Some(value)) => value
+            Some(Some(value)) => if value
                 .trim()
-                .is_empty()
-                .then(|| None)
-                .unwrap_or_else(|| Some(value.trim().to_string())),
+                .is_empty() { None } else { Some(value.trim().to_string()) },
             Some(None) => None,
             None => current.color,
         };
@@ -4888,11 +4872,9 @@ impl SessionStore for SqliteStore {
             None => current.goal,
         };
         let next_description = match description {
-            Some(Some(value)) => value
+            Some(Some(value)) => if value
                 .trim()
-                .is_empty()
-                .then(|| None)
-                .unwrap_or_else(|| Some(value.trim().to_string())),
+                .is_empty() { None } else { Some(value.trim().to_string()) },
             Some(None) => None,
             None => current.description,
         };
@@ -5060,20 +5042,16 @@ impl SessionStore for SqliteStore {
             None => current.name.unwrap_or_default(),
         };
         let next_description = match description {
-            Some(Some(value)) => value
+            Some(Some(value)) => if value
                 .trim()
-                .is_empty()
-                .then(|| None)
-                .unwrap_or_else(|| Some(value.trim().to_string())),
+                .is_empty() { None } else { Some(value.trim().to_string()) },
             Some(None) => None,
             None => current.description,
         };
         let next_icon = match icon {
-            Some(Some(value)) => value
+            Some(Some(value)) => if value
                 .trim()
-                .is_empty()
-                .then(|| None)
-                .unwrap_or_else(|| Some(value.trim().to_string())),
+                .is_empty() { None } else { Some(value.trim().to_string()) },
             Some(None) => None,
             None => current.icon,
         };
@@ -5771,11 +5749,9 @@ impl SessionStore for SqliteStore {
             None => current.title,
         };
         let next_description = match description {
-            Some(Some(value)) => value
+            Some(Some(value)) => if value
                 .trim()
-                .is_empty()
-                .then(|| None)
-                .unwrap_or_else(|| Some(value.trim().to_string())),
+                .is_empty() { None } else { Some(value.trim().to_string()) },
             Some(None) => None,
             None => current.description,
         };

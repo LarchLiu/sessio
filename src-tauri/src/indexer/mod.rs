@@ -546,7 +546,7 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
         match crate::agents::sources::gemini::parser::list_sessions() {
             Ok(sessions) => {
                 for session in &sessions {
-                    insert_session_project(&mut affected_projects, &session);
+                    insert_session_project(&mut affected_projects, session);
                 }
                 for (scope, group) in group_by(sessions, |session| session.file_path.clone()) {
                     store.replace_by_scope(&scope, Agent::Gemini, &group)?;
