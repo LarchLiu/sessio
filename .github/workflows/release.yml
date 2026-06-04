@@ -109,19 +109,10 @@ jobs:
             curl \
             wget \
             file \
-            libgtk-3-dev \
             libxdo-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev \
             libssl-dev \
-            desktop-file-utils \
-            libfuse2 \
-            patchelf \
-            squashfs-tools \
-            zsync \
-            xdg-utils
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - uses: oven-sh/setup-bun@v2
       - name: Build Astra sidecar
         working-directory: sidecars/sessio-astra
@@ -130,8 +121,8 @@ jobs:
           bun run compile:linux-x64
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build AppImage
-        run: pnpm tauri build --verbose --bundles appimage --ci
+      - name: Build Linux packages
+        run: pnpm tauri build --bundles deb,rpm --ci
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -139,8 +130,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p staged
-          cp src-tauri/target/release/bundle/appimage/*.AppImage staged/sessio-linux-x86_64.AppImage
-          cp src-tauri/target/release/bundle/appimage/*.AppImage.sig staged/sessio-linux-x86_64.AppImage.sig
+          cp src-tauri/target/release/bundle/deb/*.deb staged/sessio-linux-x86_64.deb
+          cp src-tauri/target/release/bundle/deb/*.deb.sig staged/sessio-linux-x86_64.deb.sig
+          cp src-tauri/target/release/bundle/rpm/*.rpm staged/sessio-linux-x86_64.rpm
+          cp src-tauri/target/release/bundle/rpm/*.rpm.sig staged/sessio-linux-x86_64.rpm.sig
           ls -la staged
       - uses: actions/upload-artifact@v7
         with:
@@ -174,19 +167,10 @@ jobs:
             curl \
             wget \
             file \
-            libgtk-3-dev \
             libxdo-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev \
             libssl-dev \
-            desktop-file-utils \
-            libfuse2 \
-            patchelf \
-            squashfs-tools \
-            zsync \
-            xdg-utils
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - uses: oven-sh/setup-bun@v2
       - name: Build Astra sidecar
         working-directory: sidecars/sessio-astra
@@ -195,8 +179,8 @@ jobs:
           bun run compile:linux-arm64
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build AppImage
-        run: pnpm tauri build --verbose --bundles appimage --ci
+      - name: Build Linux packages
+        run: pnpm tauri build --bundles deb,rpm --ci
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -204,8 +188,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p staged
-          cp src-tauri/target/release/bundle/appimage/*.AppImage staged/sessio-linux-aarch64.AppImage
-          cp src-tauri/target/release/bundle/appimage/*.AppImage.sig staged/sessio-linux-aarch64.AppImage.sig
+          cp src-tauri/target/release/bundle/deb/*.deb staged/sessio-linux-aarch64.deb
+          cp src-tauri/target/release/bundle/deb/*.deb.sig staged/sessio-linux-aarch64.deb.sig
+          cp src-tauri/target/release/bundle/rpm/*.rpm staged/sessio-linux-aarch64.rpm
+          cp src-tauri/target/release/bundle/rpm/*.rpm.sig staged/sessio-linux-aarch64.rpm.sig
           ls -la staged
       - uses: actions/upload-artifact@v7
         with:

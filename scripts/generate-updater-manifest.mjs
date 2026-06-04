@@ -34,12 +34,20 @@ const packages = [
     ],
   },
   {
-    file: "sessio-linux-x86_64.AppImage",
-    targets: ["linux-x86_64", "linux-x86_64-appimage"],
+    file: "sessio-linux-x86_64.deb",
+    targets: ["linux-x86_64-deb"],
   },
   {
-    file: "sessio-linux-aarch64.AppImage",
-    targets: ["linux-aarch64", "linux-aarch64-appimage"],
+    file: "sessio-linux-x86_64.rpm",
+    targets: ["linux-x86_64-rpm"],
+  },
+  {
+    file: "sessio-linux-aarch64.deb",
+    targets: ["linux-aarch64-deb"],
+  },
+  {
+    file: "sessio-linux-aarch64.rpm",
+    targets: ["linux-aarch64-rpm"],
   },
   {
     file: "sessio-windows-x86_64-setup.exe",
