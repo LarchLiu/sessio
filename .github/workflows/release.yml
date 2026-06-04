@@ -44,6 +44,13 @@ jobs:
         run: |
           rustup target add aarch64-apple-darwin x86_64-apple-darwin
           rustup target list --installed
+      - name: Verify macOS build tools
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          xcrun -find lipo
+          xcrun -find codesign
+          command -v hdiutil
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -54,6 +61,7 @@ jobs:
           bun install --frozen-lockfile
           bun run compile:mac-arm64
           bun run compile:mac-x64
+          bun run compile:mac-universal
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build universal app and DMG
@@ -97,12 +105,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
             libgtk-3-dev \
+            libxdo-dev \
             libayatana-appindicator3-dev \
+            librsvg2-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libssl-dev \
-            patchelf
+            patchelf \
+            xdg-utils
       - uses: oven-sh/setup-bun@v2
       - name: Build Astra sidecar
         working-directory: sidecars/sessio-astra
@@ -151,12 +166,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
             libgtk-3-dev \
+            libxdo-dev \
             libayatana-appindicator3-dev \
+            librsvg2-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libssl-dev \
-            patchelf
+            patchelf \
+            xdg-utils
       - uses: oven-sh/setup-bun@v2
       - name: Build Astra sidecar
         working-directory: sidecars/sessio-astra
