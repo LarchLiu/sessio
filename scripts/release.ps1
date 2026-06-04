@@ -9,11 +9,14 @@
     src-tauri/tauri.conf.json     "version": "..."
     src-tauri/Cargo.lock          via `cargo check`
 
-  Then commits + tags vX.Y.Z locally. Does NOT push; review and push:
-    git push origin <branch> vX.Y.Z
+  Then commits + tags vX.Y.Z[-prerelease] locally. Does NOT push; review and push:
+    git push origin <branch> vX.Y.Z[-prerelease]
 
 .EXAMPLE
   .\scripts\release.ps1 0.2.0
+
+.EXAMPLE
+  .\scripts\release.ps1 0.3.0-beta.1
 #>
 
 param(
@@ -28,32 +31,93 @@ $packageJson = Join-Path $root 'package.json'
 $cargoToml = Join-Path $root 'src-tauri/Cargo.toml'
 $tauriConf = Join-Path $root 'src-tauri/tauri.conf.json'
 
-$releaseTag = (git -C $root tag --list 'v*' --sort=-v:refname | Select-Object -First 1).Trim()
+function Parse-SemVer([string]$Value) {
+    $match = [regex]::Match($Value, '^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$')
+    if (-not $match.Success) {
+        throw "invalid version: $Value"
+    }
+    [pscustomobject]@{
+        Major = [int]$match.Groups[1].Value
+        Minor = [int]$match.Groups[2].Value
+        Patch = [int]$match.Groups[3].Value
+        Prerelease = $match.Groups[4].Value
+    }
+}
+
+function Compare-Prerelease([string]$Left, [string]$Right) {
+    if (-not $Left -and -not $Right) { return 0 }
+    if (-not $Left) { return 1 }
+    if (-not $Right) { return -1 }
+    $leftParts = $Left -split '\.'
+    $rightParts = $Right -split '\.'
+    $length = [Math]::Max($leftParts.Length, $rightParts.Length)
+    for ($i = 0; $i -lt $length; $i++) {
+        if ($i -ge $leftParts.Length) { return -1 }
+        if ($i -ge $rightParts.Length) { return 1 }
+        $leftIsNumber = $leftParts[$i] -match '^\d+$'
+        $rightIsNumber = $rightParts[$i] -match '^\d+$'
+        if ($leftIsNumber -and $rightIsNumber) {
+            $diff = [int]$leftParts[$i] - [int]$rightParts[$i]
+            if ($diff -ne 0) { return [Math]::Sign($diff) }
+        } elseif ($leftIsNumber -ne $rightIsNumber) {
+            if ($leftIsNumber) { return -1 }
+            return 1
+        } else {
+            $diff = [string]::CompareOrdinal($leftParts[$i], $rightParts[$i])
+            if ($diff -ne 0) { return [Math]::Sign($diff) }
+        }
+    }
+    return 0
+}
+
+function Compare-SemVer($Left, $Right) {
+    foreach ($part in @('Major', 'Minor', 'Patch')) {
+        $diff = $Left.$part - $Right.$part
+        if ($diff -ne 0) { return [Math]::Sign($diff) }
+    }
+    Compare-Prerelease $Left.Prerelease $Right.Prerelease
+}
+
+$releaseTag = ''
+$releaseVersion = $null
+foreach ($tagRow in (git -C $root tag --list 'v*')) {
+    $tag = "$tagRow".Trim()
+    if (-not $tag) { continue }
+    try {
+        $parsed = Parse-SemVer ($tag -replace '^v', '')
+    } catch {
+        continue
+    }
+    if (-not $releaseVersion -or (Compare-SemVer $parsed $releaseVersion) -gt 0) {
+        $releaseTag = $tag
+        $releaseVersion = $parsed
+    }
+}
 
 if (-not $PSBoundParameters.ContainsKey('Version') -or [string]::IsNullOrWhiteSpace($Version)) {
     Write-Error @"
 missing version
 latest release tag: $(if ($releaseTag) { $releaseTag } else { '<none>' })
-usage: .\scripts\release.ps1 0.2.0
+usage: .\scripts\release.ps1 0.2.0 or .\scripts\release.ps1 0.3.0-beta.1
 "@
     exit 2
 }
 
-if ($Version -notmatch '^\d+\.\d+\.\d+$') {
-    Write-Error "version must look like X.Y.Z (got '$Version')"
+if ($Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$') {
+    Write-Error "version must look like X.Y.Z or X.Y.Z-prerelease (got '$Version')"
     exit 2
 }
 
 if ($releaseTag) {
     $latestReleaseVersion = $releaseTag -replace '^v', ''
-    if ($latestReleaseVersion -notmatch '^\d+\.\d+\.\d+$') {
-        Write-Error "latest release tag '$releaseTag' is not in vX.Y.Z format"
+    if ($latestReleaseVersion -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$') {
+        Write-Error "latest release tag '$releaseTag' is not in vX.Y.Z[-prerelease] format"
         exit 1
     }
 
-    $newVersionValue = [version]$Version
-    $latestVersionValue = [version]$latestReleaseVersion
-    if ($newVersionValue -le $latestVersionValue) {
+    $newVersionValue = Parse-SemVer $Version
+    $latestVersionValue = Parse-SemVer $latestReleaseVersion
+    if ((Compare-SemVer $newVersionValue $latestVersionValue) -le 0) {
         Write-Error "version '$Version' must be greater than latest release tag '$releaseTag'"
         exit 1
     }

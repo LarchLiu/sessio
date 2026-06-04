@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./scripts/release.sh 0.2.0
+#   ./scripts/release.sh 0.3.0-beta.1
 #
 # Touches:
 #   package.json                  "version": "..."
@@ -10,8 +11,8 @@
 #   src-tauri/tauri.conf.json     "version": "..."
 #   src-tauri/Cargo.lock          via `cargo check`
 #
-# Then commits + tags `vX.Y.Z` locally. Does NOT push; review and push:
-#   git push origin <branch> vX.Y.Z
+# Then commits + tags `vX.Y.Z[-prerelease]` locally. Does NOT push; review and push:
+#   git push origin <branch> vX.Y.Z[-prerelease]
 
 set -eu
 
@@ -20,46 +21,116 @@ package_json="$root/package.json"
 cargo_toml="$root/src-tauri/Cargo.toml"
 tauri_conf="$root/src-tauri/tauri.conf.json"
 
-release_tag="$(git -C "$root" tag --list 'v*' --sort=-v:refname | head -n 1)"
+release_tag="$(
+    git -C "$root" tag --list 'v*' | node -e '
+const fs = require("node:fs");
+const tags = fs.readFileSync(0, "utf8").trim().split(/\n+/).filter(Boolean);
+function parse(tag) {
+  const value = tag.replace(/^v/i, "");
+  const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$/);
+  if (!match) return null;
+  return { tag, major: +match[1], minor: +match[2], patch: +match[3], prerelease: match[4] ?? "" };
+}
+function cmpPrerelease(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  const ap = a.split(".");
+  const bp = b.split(".");
+  const n = Math.max(ap.length, bp.length);
+  for (let i = 0; i < n; i++) {
+    if (ap[i] === undefined) return -1;
+    if (bp[i] === undefined) return 1;
+    const an = /^\d+$/.test(ap[i]);
+    const bn = /^\d+$/.test(bp[i]);
+    if (an && bn) {
+      const diff = Number(ap[i]) - Number(bp[i]);
+      if (diff) return diff < 0 ? -1 : 1;
+    } else if (an !== bn) {
+      return an ? -1 : 1;
+    } else if (ap[i] !== bp[i]) {
+      return ap[i] < bp[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+function cmp(a, b) {
+  for (const key of ["major", "minor", "patch"]) {
+    if (a[key] !== b[key]) return a[key] - b[key];
+  }
+  return cmpPrerelease(a.prerelease, b.prerelease);
+}
+const parsed = tags.map(parse).filter(Boolean).sort(cmp);
+if (parsed.length) process.stdout.write(parsed[parsed.length - 1].tag);
+'
+)"
 
 if [ $# -eq 0 ]; then
     cat >&2 <<EOF
 missing version
 latest release tag: ${release_tag:-<none>}
-usage: $0 <new-version>     e.g. $0 0.2.0
+usage: $0 <new-version>     e.g. $0 0.2.0 or $0 0.3.0-beta.1
 EOF
     exit 2
 fi
 
 if [ $# -ne 1 ]; then
-    echo "usage: $0 <new-version>     e.g. $0 0.2.0" >&2
+    echo "usage: $0 <new-version>     e.g. $0 0.2.0 or $0 0.3.0-beta.1" >&2
     exit 2
 fi
 
 new="$1"
-if ! printf '%s' "$new" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-    echo "version must look like X.Y.Z (got '$new')" >&2
+if ! printf '%s' "$new" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'; then
+    echo "version must look like X.Y.Z or X.Y.Z-prerelease (got '$new')" >&2
     exit 2
 fi
 
 if [ -n "$release_tag" ]; then
     latest_release_version="${release_tag#v}"
-    if ! printf '%s' "$latest_release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo "latest release tag '$release_tag' is not in vX.Y.Z format" >&2
+    if ! printf '%s' "$latest_release_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'; then
+        echo "latest release tag '$release_tag' is not in vX.Y.Z[-prerelease] format" >&2
         exit 1
     fi
 
-    if awk -v new="$new" -v latest="$latest_release_version" '
-        BEGIN {
-            split(new, a, ".")
-            split(latest, b, ".")
-            for (i = 1; i <= 3; i++) {
-                if ((a[i] + 0) < (b[i] + 0)) exit 0
-                if ((a[i] + 0) > (b[i] + 0)) exit 1
-            }
-            exit 0
-        }
-    '; then
+    if ! node - "$new" "$latest_release_version" <<'NODE'
+const [next, latest] = process.argv.slice(2);
+function parse(value) {
+  const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*))?$/);
+  if (!match) throw new Error(`invalid version: ${value}`);
+  return { major: +match[1], minor: +match[2], patch: +match[3], prerelease: match[4] ?? "" };
+}
+function cmpPrerelease(a, b) {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  const ap = a.split(".");
+  const bp = b.split(".");
+  const n = Math.max(ap.length, bp.length);
+  for (let i = 0; i < n; i++) {
+    if (ap[i] === undefined) return -1;
+    if (bp[i] === undefined) return 1;
+    const an = /^\d+$/.test(ap[i]);
+    const bn = /^\d+$/.test(bp[i]);
+    if (an && bn) {
+      const diff = Number(ap[i]) - Number(bp[i]);
+      if (diff) return diff < 0 ? -1 : 1;
+    } else if (an !== bn) {
+      return an ? -1 : 1;
+    } else if (ap[i] !== bp[i]) {
+      return ap[i] < bp[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+function cmp(a, b) {
+  for (const key of ["major", "minor", "patch"]) {
+    if (a[key] !== b[key]) return a[key] - b[key];
+  }
+  return cmpPrerelease(a.prerelease, b.prerelease);
+}
+process.exit(cmp(parse(next), parse(latest)) > 0 ? 0 : 1);
+NODE
+    then
         echo "version '$new' must be greater than latest release tag '$release_tag'" >&2
         exit 1
     fi

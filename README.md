@@ -174,6 +174,8 @@ Local release helper:
 
 ```bash
 pnpm release -- 0.3.3
+# or a beta/prerelease tag:
+pnpm release -- 0.4.0-beta.1
 ```
 
 or:
@@ -191,6 +193,7 @@ The script will:
 - create a local release commit and tag
 
 Pushing the tag triggers the GitHub Actions release workflow.
+Tags with a prerelease suffix such as `v0.4.0-beta.1` are published as GitHub prereleases and are not marked as the latest release.
 
 ## Known Limitations
 

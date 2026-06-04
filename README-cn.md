@@ -174,6 +174,8 @@ sessio memory resolve --record-id <id> --json
 
 ```bash
 pnpm release -- 0.3.3
+# 或发布 beta / prerelease tag：
+pnpm release -- 0.4.0-beta.1
 ```
 
 或直接执行：
@@ -191,6 +193,7 @@ pnpm release -- 0.3.3
 - 创建本地 release commit 和 tag
 
 推送 tag 后会触发 GitHub Actions 发布流程。
+带 prerelease 后缀的 tag（例如 `v0.4.0-beta.1`）会发布为 GitHub prerelease，并且不会被标记为 latest release。
 
 ## 已知边界
 

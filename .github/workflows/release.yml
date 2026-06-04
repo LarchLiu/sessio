@@ -226,5 +226,7 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
+          make_latest: ${{ contains(inputs.tag || github.ref_name, '-') && 'false' || 'true' }}
           files: staged/*
           fail_on_unmatched_files: true
