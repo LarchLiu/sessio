@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tauri::{AppHandle, Emitter};
 
+use crate::agents::runtime::RuntimeManager;
 use crate::agents::sources::shared::convert::session_source_from_info;
 use crate::agents::sources::types::{
     PathEvent, PathEventKind, ProjectRef, SessionSource, SourceIndexTask, SourceKind,
@@ -87,6 +88,7 @@ pub fn spawn(
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
+    runtime: RuntimeManager,
     memory_config: Option<MemoryConfig>,
 ) -> IndexerHandle {
     let (tx, rx) = unbounded::<IndexTask>();
@@ -136,6 +138,7 @@ pub fn spawn(
             app,
             store,
             memory_store,
+            runtime,
             service,
             backend_sync_tx,
             state,
@@ -150,6 +153,7 @@ struct IndexLoopContext {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
+    runtime: RuntimeManager,
     service: Option<Arc<MemoryService>>,
     backend_sync_tx: Sender<MemoryBackendSyncJob>,
     state: Arc<IndexerState>,
@@ -157,6 +161,18 @@ struct IndexLoopContext {
 
 fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask>) {
     while let Ok(first) = rx.recv() {
+        let mut batch = vec![first];
+        thread::sleep(Duration::from_millis(50));
+        while let Ok(t) = rx.try_recv() {
+            batch.push(t);
+        }
+        if ctx.runtime.has_active_acp_turn() {
+            log::info!(
+                "indexer: dropping {} task(s) while an ACP turn is active",
+                batch.len()
+            );
+            continue;
+        }
         set_phase(&ctx.state, IndexPhase::Indexing);
         {
             let mut slot = ctx.state.last_error.lock().unwrap();
@@ -165,11 +181,6 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
         let _ = ctx
             .app
             .emit("sessions_index_status", current_status(&ctx.state));
-        let mut batch = vec![first];
-        thread::sleep(Duration::from_millis(50));
-        while let Ok(t) = rx.try_recv() {
-            batch.push(t);
-        }
         let coalesced = coalesce(batch);
         let had_full_rebuild = coalesced
             .iter()

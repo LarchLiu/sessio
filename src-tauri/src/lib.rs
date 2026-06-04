@@ -3017,10 +3017,13 @@ pub fn run() {
             let memory_store: Arc<dyn MemoryStore> = sqlite;
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
             let app_config = config::load_config()?;
+            let runtime = RuntimeManager::new(app.handle().clone());
+            app.manage(runtime.clone());
             let indexer_handle = indexer::spawn(
                 app.handle().clone(),
                 store.clone(),
                 memory_store.clone(),
+                runtime.clone(),
                 app_config.memory.clone(),
             );
             log::info!("indexer spawned");
@@ -3047,8 +3050,6 @@ pub fn run() {
             let initial_runtime_agents =
                 runtime_agents_from_db(store.clone(), &[]).unwrap_or_default();
             runtime_agents_cache.set(initial_runtime_agents);
-            let runtime = RuntimeManager::new(app.handle().clone());
-            app.manage(runtime.clone());
             let astra_service = AstraService::new(
                 app.handle().clone(),
                 store.clone(),

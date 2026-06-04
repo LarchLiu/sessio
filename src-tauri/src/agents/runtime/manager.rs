@@ -123,6 +123,19 @@ impl RuntimeManager {
         })
     }
 
+    pub fn has_active_acp_turn(&self) -> bool {
+        self.inner
+            .sessions
+            .lock()
+            .map(|sessions| {
+                sessions.values().any(|session| {
+                    session.handle.transport == RuntimeTransportKind::Acp
+                        && session.active_turn_id.is_some()
+                })
+            })
+            .unwrap_or(false)
+    }
+
     pub fn dispose_session_silent(&self, sessio_runtime_session_id: &str) -> Result<()> {
         let mut sessions = self
             .inner
