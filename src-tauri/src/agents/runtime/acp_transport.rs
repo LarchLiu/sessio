@@ -1208,6 +1208,77 @@ fn extension_lower(path: &Path) -> Option<String> {
         .map(|extension| extension.to_ascii_lowercase())
 }
 
+fn session_update_type(update: &SessionUpdate) -> &'static str {
+    match update {
+        SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
+        SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
+        SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
+        SessionUpdate::ToolCall(_) => "tool_call",
+        SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+        SessionUpdate::Plan(_) => "plan",
+        SessionUpdate::AvailableCommandsUpdate(_) => "available_commands",
+        SessionUpdate::CurrentModeUpdate(_) => "current_mode",
+        SessionUpdate::ConfigOptionUpdate(_) => "config_options",
+        SessionUpdate::SessionInfoUpdate(_) => "session_info",
+        _ => "unknown",
+    }
+}
+
+fn current_turn(current_turn_id: &Arc<Mutex<Option<String>>>) -> Option<String> {
+    current_turn_id.lock().ok().and_then(|guard| guard.clone())
+}
+
+fn set_current_turn(current_turn_id: &Arc<Mutex<Option<String>>>, turn_id: Option<String>) {
+    if let Ok(mut guard) = current_turn_id.lock() {
+        *guard = turn_id;
+    }
+}
+
+fn clear_current_turn(current_turn_id: &Arc<Mutex<Option<String>>>, turn_id: &str) {
+    if let Ok(mut guard) = current_turn_id.lock() {
+        if guard.as_deref() == Some(turn_id) {
+            *guard = None;
+        }
+    }
+}
+
+fn json_id_to_string(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value,
+        other => other.to_string(),
+    }
+}
+
+pub(crate) fn default_acp_command(agent: Agent) -> &'static str {
+    match agent {
+        Agent::Codex => "npx -y @zed-industries/codex-acp@latest",
+        Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest",
+        Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp",
+    }
+}
+
+fn acp_internal_error(error: impl ToString) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::internal_error().data(error.to_string())
+}
+
+pub fn transport_requested(options: &RuntimeMetadata) -> RuntimeTransportKind {
+    options
+        .get("transport")
+        .and_then(|value| value.as_str())
+        .map(transport_from_str)
+        .unwrap_or(RuntimeTransportKind::Acp)
+}
+
+fn transport_from_str(transport: &str) -> RuntimeTransportKind {
+    match transport {
+        "acp" => RuntimeTransportKind::Acp,
+        "cliStreamJson" => RuntimeTransportKind::CliStreamJson,
+        "plainCli" => RuntimeTransportKind::PlainCli,
+        "fake" => RuntimeTransportKind::Fake,
+        _ => RuntimeTransportKind::Fake,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1394,76 +1465,5 @@ mod tests {
         let command = command_from_options(Agent::Claude, &options);
 
         assert_eq!(command, "npx -y @zed-industries/claude-code-acp@latest");
-    }
-}
-
-fn session_update_type(update: &SessionUpdate) -> &'static str {
-    match update {
-        SessionUpdate::UserMessageChunk(_) => "user_message_chunk",
-        SessionUpdate::AgentMessageChunk(_) => "agent_message_chunk",
-        SessionUpdate::AgentThoughtChunk(_) => "agent_thought_chunk",
-        SessionUpdate::ToolCall(_) => "tool_call",
-        SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
-        SessionUpdate::Plan(_) => "plan",
-        SessionUpdate::AvailableCommandsUpdate(_) => "available_commands",
-        SessionUpdate::CurrentModeUpdate(_) => "current_mode",
-        SessionUpdate::ConfigOptionUpdate(_) => "config_options",
-        SessionUpdate::SessionInfoUpdate(_) => "session_info",
-        _ => "unknown",
-    }
-}
-
-fn current_turn(current_turn_id: &Arc<Mutex<Option<String>>>) -> Option<String> {
-    current_turn_id.lock().ok().and_then(|guard| guard.clone())
-}
-
-fn set_current_turn(current_turn_id: &Arc<Mutex<Option<String>>>, turn_id: Option<String>) {
-    if let Ok(mut guard) = current_turn_id.lock() {
-        *guard = turn_id;
-    }
-}
-
-fn clear_current_turn(current_turn_id: &Arc<Mutex<Option<String>>>, turn_id: &str) {
-    if let Ok(mut guard) = current_turn_id.lock() {
-        if guard.as_deref() == Some(turn_id) {
-            *guard = None;
-        }
-    }
-}
-
-fn json_id_to_string(value: serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(value) => value,
-        other => other.to_string(),
-    }
-}
-
-pub(crate) fn default_acp_command(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Codex => "npx -y @zed-industries/codex-acp@latest",
-        Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest",
-        Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp",
-    }
-}
-
-fn acp_internal_error(error: impl ToString) -> agent_client_protocol::Error {
-    agent_client_protocol::Error::internal_error().data(error.to_string())
-}
-
-pub fn transport_requested(options: &RuntimeMetadata) -> RuntimeTransportKind {
-    options
-        .get("transport")
-        .and_then(|value| value.as_str())
-        .map(transport_from_str)
-        .unwrap_or(RuntimeTransportKind::Acp)
-}
-
-fn transport_from_str(transport: &str) -> RuntimeTransportKind {
-    match transport {
-        "acp" => RuntimeTransportKind::Acp,
-        "cliStreamJson" => RuntimeTransportKind::CliStreamJson,
-        "plainCli" => RuntimeTransportKind::PlainCli,
-        "fake" => RuntimeTransportKind::Fake,
-        _ => RuntimeTransportKind::Fake,
     }
 }

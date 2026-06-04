@@ -18,7 +18,7 @@ fn main() {
             .iter()
             .filter(|s| s.agent.as_str() == agent)
             .collect();
-        rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        rows.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         println!("\n[{agent}]");
         for s in rows.iter().take(5) {
             println!(

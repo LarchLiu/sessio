@@ -1076,6 +1076,57 @@ fn read_chat_history_acp_messages_with_locations(
     Ok(out)
 }
 
+fn parse_iso(s: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.timestamp_millis())
+}
+
+fn available_removed_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "session".to_string());
+    for i in 1.. {
+        let candidate = parent.join(format!("{file_name}.{i}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn move_file(src: &Path, dst: &Path) -> Result<()> {
+    match fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            fs::copy(src, dst).map_err(|copy_err| {
+                anyhow::anyhow!(
+                    "move {} to {} failed: rename: {}; copy fallback: {}",
+                    src.display(),
+                    dst.display(),
+                    rename_err,
+                    copy_err
+                )
+            })?;
+            fs::remove_file(src).map_err(|remove_err| {
+                let _ = fs::remove_file(dst);
+                anyhow::anyhow!(
+                    "remove original after copying {} to {} failed: {}",
+                    src.display(),
+                    dst.display(),
+                    remove_err
+                )
+            })?;
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1113,15 +1164,16 @@ mod tests {
         let image_path = dir.join("image.png");
         fs::write(&image_path, b"png").unwrap();
         let path = chats.join("session-2026-05-19T00-00-new.jsonl");
+        let user_line = format!(
+            r#"{{"id":"u1","type":"user","timestamp":"2026-05-19T00:00:00Z","displayContent":"look @{image}","content":[{{"text":"look"}},{{"fileData":{{"fileUri":"file://{image}","mimeType":"image/png"}}}}]}}"#,
+            image = image_path.to_string_lossy()
+        );
         fs::write(
             &path,
             format!(
                 "{}\n{}\n{}\n",
                 r#"{"sessionId":"new","startTime":"2026-05-19T00:00:00Z","lastUpdated":"2026-05-19T00:00:04Z","kind":"main"}"#,
-                format!(
-                    r#"{{"id":"u1","type":"user","timestamp":"2026-05-19T00:00:00Z","displayContent":"look @{image}","content":[{{"text":"look"}},{{"fileData":{{"fileUri":"file://{image}","mimeType":"image/png"}}}}]}}"#,
-                    image = image_path.to_string_lossy()
-                ),
+                user_line,
                 r#"{"id":"a1","type":"model","timestamp":"2026-05-19T00:00:01Z","thoughts":[{"subject":"Plan","description":"inspect"}],"toolCalls":[{"id":"tool-1","displayName":"ReadFile","args":{"path":"README.md"},"resultDisplay":"contents"}],"content":{"parts":[{"text":"done"}]}}"#,
             ),
         )
@@ -1556,56 +1608,5 @@ mod tests {
         assert!(turns[0].blocks.is_empty(), "{turns:#?}");
 
         let _ = fs::remove_dir_all(&dir);
-    }
-}
-
-fn parse_iso(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|d| d.timestamp_millis())
-}
-
-fn available_removed_path(path: PathBuf) -> PathBuf {
-    if !path.exists() {
-        return path;
-    }
-    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let file_name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "session".to_string());
-    for i in 1.. {
-        let candidate = parent.join(format!("{file_name}.{i}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!()
-}
-
-fn move_file(src: &Path, dst: &Path) -> Result<()> {
-    match fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        Err(rename_err) => {
-            fs::copy(src, dst).map_err(|copy_err| {
-                anyhow::anyhow!(
-                    "move {} to {} failed: rename: {}; copy fallback: {}",
-                    src.display(),
-                    dst.display(),
-                    rename_err,
-                    copy_err
-                )
-            })?;
-            fs::remove_file(src).map_err(|remove_err| {
-                let _ = fs::remove_file(dst);
-                anyhow::anyhow!(
-                    "remove original after copying {} to {} failed: {}",
-                    src.display(),
-                    dst.display(),
-                    remove_err
-                )
-            })?;
-            Ok(())
-        }
     }
 }

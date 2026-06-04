@@ -755,6 +755,15 @@ impl SessionStore for CachedStore {
     }
 }
 
+#[allow(dead_code)]
+impl CachedStore {
+    // Exposed for tests / future maintenance commands that need to drop the
+    // cache and rebuild it from the source of truth.
+    pub fn rebuild_snapshot(&self) -> Result<()> {
+        self.refresh_from_inner()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,14 +822,5 @@ mod tests {
         assert_eq!(row.file_path, virtual_path);
 
         let _ = std::fs::remove_file(path);
-    }
-}
-
-#[allow(dead_code)]
-impl CachedStore {
-    // Exposed for tests / future maintenance commands that need to drop the
-    // cache and rebuild it from the source of truth.
-    pub fn rebuild_snapshot(&self) -> Result<()> {
-        self.refresh_from_inner()
     }
 }

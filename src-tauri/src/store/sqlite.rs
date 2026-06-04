@@ -8178,7 +8178,11 @@ mod migration_tests {
             })
             .unwrap();
         assert!(store
-            .add_thread_stage(&thread.id, &research_template.id, &[assistant.id.clone()])
+            .add_thread_stage(
+                &thread.id,
+                &research_template.id,
+                std::slice::from_ref(&assistant.id),
+            )
             .is_err());
         assert!(store
             .add_thread_stage(&thread.id, &project_research.id, &[assistant.id])
@@ -8557,7 +8561,10 @@ mod migration_tests {
             .find(|stage| stage.kind == Some(StageType::Research))
             .unwrap();
         store
-            .update_project_stage_assistants(&research_template.id, &[shared_assistant.id.clone()])
+            .update_project_stage_assistants(
+                &research_template.id,
+                std::slice::from_ref(&shared_assistant.id),
+            )
             .unwrap();
 
         let project = store
@@ -8866,7 +8873,10 @@ mod migration_tests {
             )
         );
         let default_stage = store
-            .update_project_stage_assistants(&research_option.id, &[assistant.id.clone()])
+            .update_project_stage_assistants(
+                &research_option.id,
+                std::slice::from_ref(&assistant.id),
+            )
             .unwrap();
         assert_eq!(default_stage.assistants.len(), 1);
         assert_eq!(default_stage.assistants[0].assistant_id, assistant.id);

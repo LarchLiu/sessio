@@ -436,8 +436,7 @@ mod tests {
             .modified()
             .ok()
             .and_then(crate::agents::sources::system_time_to_millis);
-        let indexed = vec![
-            IndexedSessionRecord {
+        let indexed = [IndexedSessionRecord {
                 agent: Agent::Gemini,
                 session_id: "live".to_string(),
                 scope: path.to_string_lossy().to_string(),
@@ -464,8 +463,7 @@ mod tests {
                 available: false,
                 archived: false,
                 subagents: Vec::new(),
-            },
-        ];
+            }];
 
         let mut by_scope: HashMap<String, Vec<&IndexedSessionRecord>> = HashMap::new();
         for row in indexed.iter() {
@@ -495,7 +493,7 @@ mod tests {
             .modified()
             .ok()
             .and_then(crate::agents::sources::system_time_to_millis);
-        let rows = vec![IndexedSessionRecord {
+        let rows = [IndexedSessionRecord {
             agent: Agent::Gemini,
             session_id: "gone".to_string(),
             scope: path.to_string_lossy().to_string(),
@@ -515,7 +513,7 @@ mod tests {
                 .any(|row| file_changed(&path, row.file_size, row.file_mtime));
         assert!(!needs_reindex);
 
-        let changed_rows = vec![IndexedSessionRecord {
+        let changed_rows = [IndexedSessionRecord {
             file_size: meta.len() + 42,
             file_mtime: mtime.map(|v| v - 1000),
             ..rows[0].clone()
