@@ -110,6 +110,7 @@ pub struct AstraHandle {
     pub task_results: Vec<AstraTaskResult>,
     pub mode: String,
     pub current_stage_id: Option<String>,
+    pub current_task_id: Option<String>,
     pub completed_task_ids: Vec<String>,
     pub stage_attempt_counts: HashMap<String, u32>,
     pub retry_limit: u32,
@@ -399,7 +400,8 @@ impl AstraService {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
             if let Some(active) = self.inner.store.get_active_astra_run(&req.thread_id)? {
-                return Ok(run_to_handle(record_to_run(active)?));
+                let run = record_to_run(active)?;
+                return Ok(self.run_to_handle(run));
             }
 
             let now = now_ms();
@@ -479,7 +481,7 @@ impl AstraService {
             }
         });
 
-        Ok(run_to_handle(run))
+        Ok(self.run_to_handle(run))
     }
 
     fn run_start_planning(&self, run_id: &str, params: Value) -> Result<()> {
@@ -545,7 +547,7 @@ impl AstraService {
             delegated_sessions.len()
         );
         self.emit(&run, "cancelled", json!({ "status": run.status.as_str() }));
-        Ok(run_to_handle(run))
+        Ok(self.run_to_handle(run))
     }
 
     pub fn get_thread_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraHandle>> {
@@ -554,7 +556,7 @@ impl AstraService {
             .list_astra_runs(thread_id)?
             .into_iter()
             .map(record_to_run)
-            .map(|result| result.map(run_to_handle))
+            .map(|result| result.map(|run| self.run_to_handle(run)))
             .collect()
     }
 
@@ -727,6 +729,16 @@ impl AstraService {
             },
             Some(sender),
         )?;
+        self.emit(
+            &next,
+            "task_dispatch",
+            json!({
+                "taskId": task.id,
+                "threadStageId": stage_id,
+                "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
+                "attemptCount": attempt_count,
+            }),
+        );
         log::info!(
             "[sessio-astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
             next.run_id,
@@ -1839,6 +1851,39 @@ impl AstraService {
             .ok_or_else(|| anyhow::anyhow!("Astra run not found: {run_id}"))
     }
 
+    fn run_to_handle(&self, run: AstraRun) -> AstraHandle {
+        let current_task_id = self.current_task_id_for_run(&run.run_id);
+        AstraHandle {
+            run_id: run.run_id,
+            thread_id: run.thread_id,
+            project_id: run.project_id,
+            status: run.status,
+            proposed_tasks: run.proposed_tasks,
+            approved_task_ids: run.approved_task_ids,
+            delegated_session_ids: run.delegated_session_ids,
+            task_results: run.task_results,
+            mode: run.mode,
+            current_stage_id: run.current_stage_id,
+            current_task_id,
+            completed_task_ids: run.completed_task_ids,
+            stage_attempt_counts: run.stage_attempt_counts,
+            retry_limit: run.retry_limit,
+            error: run.error,
+            created_at: run.created_at,
+            updated_at: run.updated_at,
+        }
+    }
+
+    fn current_task_id_for_run(&self, run_id: &str) -> Option<String> {
+        self.inner
+            .delegated_sessions
+            .lock()
+            .ok()?
+            .values()
+            .find(|state| state.run_id == run_id && !state.finished)
+            .map(|state| state.task_id.clone())
+    }
+
     fn emit(&self, run: &AstraRun, event_type: &str, data: Value) {
         let _ = self.inner.app.emit(
             ASTRA_EVENT_NAME,
@@ -2435,27 +2480,6 @@ fn runtime_transport_option(
         crate::agents::runtime::types::RuntimeTransportKind::Fake => "fake",
     }
     .to_string()
-}
-
-fn run_to_handle(run: AstraRun) -> AstraHandle {
-    AstraHandle {
-        run_id: run.run_id,
-        thread_id: run.thread_id,
-        project_id: run.project_id,
-        status: run.status,
-        proposed_tasks: run.proposed_tasks,
-        approved_task_ids: run.approved_task_ids,
-        delegated_session_ids: run.delegated_session_ids,
-        task_results: run.task_results,
-        mode: run.mode,
-        current_stage_id: run.current_stage_id,
-        completed_task_ids: run.completed_task_ids,
-        stage_attempt_counts: run.stage_attempt_counts,
-        retry_limit: run.retry_limit,
-        error: run.error,
-        created_at: run.created_at,
-        updated_at: run.updated_at,
-    }
 }
 
 fn run_to_record(run: &AstraRun) -> AstraRunRecord {
