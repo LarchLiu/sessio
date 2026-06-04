@@ -44,8 +44,10 @@ use store::{
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow, WindowEvent,
+    AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
 };
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 
 const HISTORY_CACHE_VERSION: i64 = 1;
 const THREAD_WORK_SNAPSHOT_VERSION: i64 = 2;
@@ -2903,24 +2905,19 @@ fn install_appearance_observer(handle: AppHandle) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn set_window_alpha(window: &WebviewWindow, alpha: f64) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2::{msg_send, runtime::AnyObject};
+    use objc2::{msg_send, runtime::AnyObject};
 
-        let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())?;
-        if ns_window_ptr.is_null() {
-            return Err("ns_window is null".into());
-        }
-        unsafe {
-            let ns_window = ns_window_ptr as *mut AnyObject;
-            let _: () = msg_send![ns_window, setAlphaValue: alpha];
-        }
+    let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())?;
+    if ns_window_ptr.is_null() {
+        return Err("ns_window is null".into());
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, alpha);
+    unsafe {
+        let ns_window = ns_window_ptr as *mut AnyObject;
+        let _: () = msg_send![ns_window, setAlphaValue: alpha];
     }
+
     Ok(())
 }
 
@@ -3270,10 +3267,10 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
+        .run(|_app, _event| {
             #[cfg(target_os = "macos")]
-            if let RunEvent::Reopen { .. } = event {
-                show_main_window(app);
+            if let RunEvent::Reopen { .. } = _event {
+                show_main_window(_app);
             }
         });
 }
