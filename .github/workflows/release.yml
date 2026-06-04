@@ -17,14 +17,11 @@ on:
 
 concurrency:
   group: release-${{ inputs.tag || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
+# Build jobs only need read access; the release job elevates to write below.
 permissions:
-  contents: write
-
-env:
-  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+  contents: read
 
 jobs:
   build-macos:
@@ -40,16 +37,26 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - uses: oven-sh/setup-bun@v2
+      - name: Build Astra sidecar
+        working-directory: sidecars/sessio-astra
+        run: |
+          bun install --frozen-lockfile
+          bun run compile:mac-arm64
+          bun run compile:mac-x64
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build universal app and DMG
         run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Stage artifacts
         run: |
           set -euo pipefail
@@ -77,7 +84,7 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -91,10 +98,19 @@ jobs:
             libjavascriptcoregtk-4.1-dev \
             libssl-dev \
             patchelf
+      - uses: oven-sh/setup-bun@v2
+      - name: Build Astra sidecar
+        working-directory: sidecars/sessio-astra
+        run: |
+          bun install --frozen-lockfile
+          bun run compile:linux-x64
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build AppImage
         run: pnpm tauri build --bundles appimage --ci
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Stage artifacts
         run: |
           set -euo pipefail
@@ -121,7 +137,7 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -135,10 +151,19 @@ jobs:
             libjavascriptcoregtk-4.1-dev \
             libssl-dev \
             patchelf
+      - uses: oven-sh/setup-bun@v2
+      - name: Build Astra sidecar
+        working-directory: sidecars/sessio-astra
+        run: |
+          bun install --frozen-lockfile
+          bun run compile:linux-arm64
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build AppImage
         run: pnpm tauri build --bundles appimage --ci
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Stage artifacts
         run: |
           set -euo pipefail
@@ -165,14 +190,24 @@ jobs:
         run: corepack enable
       - name: Activate pnpm
         run: corepack prepare pnpm@11.1.0 --activate
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - uses: oven-sh/setup-bun@v2
+      - name: Build Astra sidecar
+        working-directory: sidecars/sessio-astra
+        shell: bash
+        run: |
+          bun install --frozen-lockfile
+          bun run compile:win-x64
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build NSIS installer
         run: pnpm tauri build --bundles nsis --ci
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Stage artifacts
         shell: pwsh
         run: |
@@ -193,6 +228,8 @@ jobs:
       - build-linux-arm64
       - build-windows
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -201,7 +238,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Stage release assets
@@ -211,9 +248,25 @@ jobs:
           find artifacts -type f -print -exec mv {} staged/ \;
           ls -la staged
       - name: Generate release changelog
-        run: npx changelogithub --output RELEASE_NOTES.md
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            # Prerelease (e.g. v0.5.0-beta.1): diff from the previous tag (changelogithub default).
+            npx --yes changelogithub@14.0.0 --to "$RELEASE_TAG" --output RELEASE_NOTES.md
+          else
+            # Stable release: diff from the previous STABLE tag, skipping any betas in between.
+            from_tag="$(git tag --list 'v*' --sort=-version:refname | grep -vE '\-' | awk -v cur="$RELEASE_TAG" '$0==cur{f=1;next} f{print;exit}' || true)"
+            if [ -n "$from_tag" ]; then
+              echo "changelog range: $from_tag -> $RELEASE_TAG"
+              npx --yes changelogithub@14.0.0 --from "$from_tag" --to "$RELEASE_TAG" --output RELEASE_NOTES.md
+            else
+              echo "changelog range: <repo start> -> $RELEASE_TAG"
+              npx --yes changelogithub@14.0.0 --to "$RELEASE_TAG" --output RELEASE_NOTES.md
+            fi
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       - name: Generate updater manifest
         run: node scripts/generate-updater-manifest.mjs --dir staged --tag "${{ inputs.tag || github.ref_name }}" --repo "${{ github.repository }}" --notes RELEASE_NOTES.md
       - name: Generate SHA256SUMS

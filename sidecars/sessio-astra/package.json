@@ -10,7 +10,9 @@
     "smoke": "bun run scripts/smoke.ts",
     "compile:mac-arm64": "bun build --compile --target=bun-darwin-arm64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-aarch64-apple-darwin",
     "compile:mac-x64": "bun build --compile --target=bun-darwin-x64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-x86_64-apple-darwin",
-    "compile:win-x64": "bun build --compile --target=bun-windows-x64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-x86_64-pc-windows-msvc.exe"
+    "compile:win-x64": "bun build --compile --target=bun-windows-x64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-x86_64-pc-windows-msvc.exe",
+    "compile:linux-x64": "bun build --compile --target=bun-linux-x64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-x86_64-unknown-linux-gnu",
+    "compile:linux-arm64": "bun build --compile --target=bun-linux-arm64 src/main.ts --outfile ../../src-tauri/binaries/sessio-astra-aarch64-unknown-linux-gnu"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.78.0",
