@@ -162,24 +162,40 @@ pub fn convert_session_notification(
     Ok(Some(event))
 }
 
+/// The protocol-message envelope fields for `acp_protocol_event`, grouped so
+/// the builder stays under clippy's argument limit. `direction`/`message_kind`/
+/// `method` are always static labels at call sites; the rest are per-message ids.
+pub struct AcpProtocolEnvelope {
+    pub direction: &'static str,
+    pub message_kind: &'static str,
+    pub method: &'static str,
+    pub acp_session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub request_id: Option<String>,
+    pub update_type: Option<String>,
+}
+
 pub fn acp_protocol_event<T: serde::Serialize>(
     sessio_runtime_session_id: &str,
-    direction: impl Into<String>,
-    message_kind: impl Into<String>,
-    method: impl Into<String>,
-    acp_session_id: Option<String>,
-    turn_id: Option<String>,
-    request_id: Option<String>,
-    update_type: Option<String>,
+    envelope: AcpProtocolEnvelope,
     data: &T,
 ) -> Result<AgentRuntimeEventPayload> {
+    let AcpProtocolEnvelope {
+        direction,
+        message_kind,
+        method,
+        acp_session_id,
+        turn_id,
+        request_id,
+        update_type,
+    } = envelope;
     Ok(AgentRuntimeEventPayload::AcpProtocolMessage {
         sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
         turn_id: turn_id.clone(),
         message: AcpProtocolMessage {
-            direction: direction.into(),
-            message_kind: message_kind.into(),
-            method: method.into(),
+            direction: direction.to_string(),
+            message_kind: message_kind.to_string(),
+            method: method.to_string(),
             protocol_version: Some("1".to_string()),
             acp_session_id,
             turn_id,

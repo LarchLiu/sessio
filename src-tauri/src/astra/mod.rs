@@ -319,6 +319,15 @@ enum DispatchTaskDecision {
     },
 }
 
+/// The stage/attempt coordinates that always travel together when dispatching
+/// or tracking a delegated session.
+#[derive(Clone, Copy)]
+struct DelegatedAttempt<'a> {
+    thread_stage_id: Option<&'a str>,
+    attempt_count: u32,
+    retry_limit_reached: bool,
+}
+
 struct SidecarHandle {
     child: Child,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -554,18 +563,17 @@ impl AstraService {
         run: &AstraRun,
         thread: &ThreadInfo,
         task: &AstraTaskProposal,
-        resolved_thread_stage_id: Option<&str>,
-        attempt_count: u32,
-        retry_limit_reached: bool,
+        attempt: DelegatedAttempt<'_>,
         task_waiter: Option<mpsc::Sender<AstraTaskResult>>,
     ) -> Result<AgentSessionHandle> {
-        let stage_context = resolved_thread_stage_id
+        let stage_context = attempt
+            .thread_stage_id
             .map(|stage_id| build_stage_task_context(thread, stage_id, task))
             .transpose()?;
         let mut options = RuntimeMetadata::default();
         options.insert("astraRunId".to_string(), Value::String(run.run_id.clone()));
         options.insert("astraTaskId".to_string(), Value::String(task.id.clone()));
-        if let Some(stage_id) = resolved_thread_stage_id {
+        if let Some(stage_id) = attempt.thread_stage_id {
             options.insert(
                 "astraThreadStageId".to_string(),
                 Value::String(stage_id.to_string()),
@@ -573,11 +581,11 @@ impl AstraService {
         }
         options.insert(
             "astraAttemptCount".to_string(),
-            Value::Number(serde_json::Number::from(attempt_count)),
+            Value::Number(serde_json::Number::from(attempt.attempt_count)),
         );
         options.insert(
             "astraRetryLimitReached".to_string(),
-            Value::Bool(retry_limit_reached),
+            Value::Bool(attempt.retry_limit_reached),
         );
         let initial_prompt = stage_context
             .as_ref()
@@ -596,9 +604,7 @@ impl AstraService {
         self.track_delegated_session(
             &run.run_id,
             &task.id,
-            resolved_thread_stage_id,
-            attempt_count,
-            retry_limit_reached,
+            attempt,
             &handle.sessio_runtime_session_id,
             stage_context,
         )?;
@@ -714,9 +720,11 @@ impl AstraService {
             &next,
             &thread,
             task,
-            stage_id.as_deref(),
-            attempt_count,
-            false,
+            DelegatedAttempt {
+                thread_stage_id: stage_id.as_deref(),
+                attempt_count,
+                retry_limit_reached: false,
+            },
             Some(sender),
         )?;
         log::info!(
@@ -777,9 +785,7 @@ impl AstraService {
         &self,
         run_id: &str,
         task_id: &str,
-        thread_stage_id: Option<&str>,
-        attempt_count: u32,
-        retry_limit_reached: bool,
+        attempt: DelegatedAttempt<'_>,
         sessio_runtime_session_id: &str,
         stage_task_context: Option<StageTaskContext>,
     ) -> Result<()> {
@@ -793,9 +799,9 @@ impl AstraService {
             .and_modify(|state| {
                 state.run_id = run_id.to_string();
                 state.task_id = task_id.to_string();
-                state.thread_stage_id = thread_stage_id.map(ToString::to_string);
-                state.attempt_count = attempt_count;
-                state.retry_limit_reached = retry_limit_reached;
+                state.thread_stage_id = attempt.thread_stage_id.map(ToString::to_string);
+                state.attempt_count = attempt.attempt_count;
+                state.retry_limit_reached = attempt.retry_limit_reached;
                 if stage_task_context.is_some() {
                     state.stage_task_context = stage_task_context.clone();
                 }
@@ -803,12 +809,12 @@ impl AstraService {
             .or_insert_with(|| DelegatedSessionState {
                 run_id: run_id.to_string(),
                 task_id: task_id.to_string(),
-                thread_stage_id: thread_stage_id.map(ToString::to_string),
+                thread_stage_id: attempt.thread_stage_id.map(ToString::to_string),
                 agent_session_id: None,
                 stage_task_context,
                 session_recorded: false,
-                attempt_count,
-                retry_limit_reached,
+                attempt_count: attempt.attempt_count,
+                retry_limit_reached: attempt.retry_limit_reached,
                 text: String::new(),
                 last_turn_id: None,
                 finished: false,
@@ -844,9 +850,11 @@ impl AstraService {
                     self.track_delegated_session(
                         run_id,
                         task_id,
-                        thread_stage_id,
-                        attempt_count,
-                        retry_limit_reached,
+                        DelegatedAttempt {
+                            thread_stage_id,
+                            attempt_count,
+                            retry_limit_reached,
+                        },
                         &sessio_runtime_session_id,
                         None,
                     )?;
@@ -2775,7 +2783,13 @@ mod tests {
             .create_project_stage(&project.id, None, "Build", None, None)
             .unwrap();
         store
-            .update_project_stage(&stage_option.id, None, None, None, None, None, Some(true))
+            .update_project_stage(
+                &stage_option.id,
+                crate::store::ProjectStagePatch {
+                    allow_empty_assistants: Some(true),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let thread = store
             .create_thread(&project.id, "Ship Astra stage task", None)
@@ -2880,7 +2894,13 @@ mod tests {
             )
             .unwrap();
         store
-            .update_project_stage(&stage_option.id, None, None, None, None, None, Some(true))
+            .update_project_stage(
+                &stage_option.id,
+                crate::store::ProjectStagePatch {
+                    allow_empty_assistants: Some(true),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let thread = store
             .create_thread(
@@ -2960,7 +2980,13 @@ mod tests {
             .create_project_stage(&project.id, None, "Research", None, None)
             .unwrap();
         store
-            .update_project_stage(&stage_option.id, None, None, None, None, None, Some(true))
+            .update_project_stage(
+                &stage_option.id,
+                crate::store::ProjectStagePatch {
+                    allow_empty_assistants: Some(true),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let thread = store
             .create_thread(&project.id, "Promote session", None)

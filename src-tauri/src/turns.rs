@@ -293,20 +293,34 @@ pub fn history_session_update_message(
     )
 }
 
+pub struct HistoryPermissionRequest {
+    pub request_id: Option<String>,
+    pub tool_name: String,
+    pub input: Value,
+    pub options: Vec<Value>,
+    pub selected_option_id: Option<String>,
+    pub cancelled: Option<bool>,
+    pub tool_call: Option<Value>,
+    pub raw: Value,
+    pub timestamp: Option<i64>,
+}
+
 pub fn history_permission_request_message(
-    request_id: Option<String>,
-    tool_name: impl Into<String>,
-    input: Value,
-    options: Vec<Value>,
-    selected_option_id: Option<String>,
-    cancelled: Option<bool>,
-    tool_call: Option<Value>,
-    raw: Value,
-    timestamp: Option<i64>,
+    request: HistoryPermissionRequest,
 ) -> Vec<AcpProtocolMessage> {
+    let HistoryPermissionRequest {
+        request_id,
+        tool_name,
+        input,
+        options,
+        selected_option_id,
+        cancelled,
+        tool_call,
+        raw,
+        timestamp,
+    } = request;
     let request_id =
         request_id.unwrap_or_else(|| history_synthetic_id("history-permission", timestamp));
-    let tool_name = tool_name.into();
     let tool_call = tool_call.unwrap_or_else(|| {
         json!({
             "toolCallId": request_id,
@@ -2744,23 +2758,23 @@ mod tests {
     fn history_builder_emits_structured_permission_requests() {
         let mut messages = vec![row(history_user_message("edit file", Some(10)), Some(10))];
         messages.extend(
-            history_permission_request_message(
-                Some("perm-1".to_string()),
-                "apply_patch",
-                json!({ "path": "src/lib.rs" }),
-                vec![json!({ "optionId": "allow", "name": "Allow", "kind": "allow" })],
-                Some("allow".to_string()),
-                Some(false),
-                Some(json!({
+            history_permission_request_message(HistoryPermissionRequest {
+                request_id: Some("perm-1".to_string()),
+                tool_name: "apply_patch".to_string(),
+                input: json!({ "path": "src/lib.rs" }),
+                options: vec![json!({ "optionId": "allow", "name": "Allow", "kind": "allow" })],
+                selected_option_id: Some("allow".to_string()),
+                cancelled: Some(false),
+                tool_call: Some(json!({
                     "toolCallId": "tool-1",
                     "fields": {
                         "title": "apply_patch",
                         "rawInput": { "path": "src/lib.rs" }
                     }
                 })),
-                json!({ "source": "history-permission" }),
-                Some(20),
-            )
+                raw: json!({ "source": "history-permission" }),
+                timestamp: Some(20),
+            })
             .into_iter()
             .map(|message| row(message, Some(20))),
         );
@@ -3122,17 +3136,17 @@ mod tests {
                 }),
                 Some(30),
             ),
-            history_permission_request_message(
-                Some("perm-1".to_string()),
-                "apply_patch",
-                json!({ "path": "src/lib.rs" }),
-                vec![json!({ "optionId": "allow", "name": "Allow", "kind": "allow" })],
-                None,
-                Some(false),
-                None,
-                json!({ "source": "permission" }),
-                Some(40),
-            )[0]
+            history_permission_request_message(HistoryPermissionRequest {
+                request_id: Some("perm-1".to_string()),
+                tool_name: "apply_patch".to_string(),
+                input: json!({ "path": "src/lib.rs" }),
+                options: vec![json!({ "optionId": "allow", "name": "Allow", "kind": "allow" })],
+                selected_option_id: None,
+                cancelled: Some(false),
+                tool_call: None,
+                raw: json!({ "source": "permission" }),
+                timestamp: Some(40),
+            })[0]
             .clone(),
             history_session_update_message(
                 "file_edit",

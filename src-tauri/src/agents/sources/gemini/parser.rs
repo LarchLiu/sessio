@@ -13,7 +13,7 @@ use crate::models::{normalize_preview, Agent, SessionInfo};
 use crate::turns::{
     history_assistant_message, history_permission_request_message, history_prompt_message,
     history_session_update_message, history_thought_message, history_tool_call_message,
-    history_tool_result_message, history_user_message,
+    history_tool_result_message, history_user_message, HistoryPermissionRequest,
 };
 use serde_json::json;
 use serde_json::Value;
@@ -744,15 +744,17 @@ fn gemini_permission_event(
                 .map(|value| value == "cancelled")
         });
     Some(history_permission_request_message(
-        request_id,
-        tool_name,
-        input,
-        options,
-        selected,
-        cancelled,
-        tool_call,
-        permission.clone(),
-        ts,
+        HistoryPermissionRequest {
+            request_id,
+            tool_name,
+            input,
+            options,
+            selected_option_id: selected,
+            cancelled,
+            tool_call,
+            raw: permission.clone(),
+            timestamp: ts,
+        },
     ))
 }
 

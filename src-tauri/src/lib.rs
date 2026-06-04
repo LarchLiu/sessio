@@ -38,7 +38,8 @@ use models::{
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::{
-    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
+    AgentPreferencesPatch, NewAssistant, ProjectStagePatch, SessionHistoryRecord,
+    SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -93,6 +94,41 @@ struct UpdateAgentPreferencesRequest {
     models: Option<Vec<RuntimeAgentOptionInput>>,
     efforts: Option<Vec<RuntimeAgentOptionInput>>,
     permission_modes: Option<Vec<RuntimeAgentOptionInput>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAssistantRequest {
+    name: String,
+    agent: AssistantAgentInfo,
+    system_prompt: Option<String>,
+    color: Option<String>,
+    assistant_type: AssistantType,
+    workflow_id: Option<String>,
+    project_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProjectStageRequest {
+    stage_id: String,
+    name: Option<String>,
+    description: Option<Option<String>>,
+    icon: Option<Option<String>>,
+    order: Option<i64>,
+    enabled: Option<bool>,
+    allow_empty_assistants: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAssistantRequest {
+    assistant_id: String,
+    name: Option<String>,
+    agent: Option<AssistantAgentInfo>,
+    system_prompt: Option<Option<String>>,
+    color: Option<Option<String>>,
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -337,17 +373,19 @@ fn update_agent_preferences(
     let updated = store
         .update_agent_preferences_by_id(
             &req.agent_id,
-            req.display_name.as_deref(),
-            req.enabled,
-            req.order,
-            req.ai_provider.as_deref(),
-            req.ai_providers.as_deref(),
-            req.model.as_deref(),
-            req.effort.as_deref(),
-            req.permission_mode.as_deref(),
-            models.as_deref(),
-            efforts.as_deref(),
-            permission_modes.as_deref(),
+            AgentPreferencesPatch {
+                display_name: req.display_name.as_deref(),
+                enabled: req.enabled,
+                order: req.order,
+                ai_provider: req.ai_provider.as_deref(),
+                ai_providers: req.ai_providers.as_deref(),
+                model: req.model.as_deref(),
+                effort: req.effort.as_deref(),
+                permission_mode: req.permission_mode.as_deref(),
+                models: models.as_deref(),
+                efforts: efforts.as_deref(),
+                permission_modes: permission_modes.as_deref(),
+            },
         )
         .map_err(|e| e.to_string())?;
     app.emit("runtime_agents_updated", ())
@@ -473,26 +511,29 @@ fn list_assistants(
 
 #[tauri::command]
 fn create_assistant(
-    name: String,
-    agent: AssistantAgentInfo,
-    system_prompt: Option<String>,
-    color: Option<String>,
-    assistant_type: AssistantType,
-    workflow_id: Option<String>,
-    project_id: Option<String>,
+    req: CreateAssistantRequest,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<AssistantInfo, String> {
+    let CreateAssistantRequest {
+        name,
+        agent,
+        system_prompt,
+        color,
+        assistant_type,
+        workflow_id,
+        project_id,
+    } = req;
     let assistant = store
-        .create_assistant(
-            &name,
+        .create_assistant(NewAssistant {
+            name: &name,
             agent,
-            system_prompt.as_deref(),
-            color.as_deref(),
+            system_prompt: system_prompt.as_deref(),
+            color: color.as_deref(),
             assistant_type,
             workflow_id,
-            project_id.as_deref(),
-        )
+            project_id: project_id.as_deref(),
+        })
         .map_err(|e| e.to_string())?;
     app.emit("assistants_updated", ())
         .map_err(|e| e.to_string())?;
@@ -501,15 +542,18 @@ fn create_assistant(
 
 #[tauri::command]
 fn update_assistant(
-    assistant_id: String,
-    name: Option<String>,
-    agent: Option<AssistantAgentInfo>,
-    system_prompt: Option<Option<String>>,
-    color: Option<Option<String>>,
-    enabled: Option<bool>,
+    req: UpdateAssistantRequest,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<AssistantInfo, String> {
+    let UpdateAssistantRequest {
+        assistant_id,
+        name,
+        agent,
+        system_prompt,
+        color,
+        enabled,
+    } = req;
     let system_prompt_ref = system_prompt.as_ref().map(|value| value.as_deref());
     let color_ref = color.as_ref().map(|value| value.as_deref());
     let assistant = store
@@ -647,27 +691,32 @@ fn create_project_stage(
 
 #[tauri::command]
 fn update_project_stage(
-    stage_id: String,
-    name: Option<String>,
-    description: Option<Option<String>>,
-    icon: Option<Option<String>>,
-    order: Option<i64>,
-    enabled: Option<bool>,
-    allow_empty_assistants: Option<bool>,
+    req: UpdateProjectStageRequest,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectStageInfo, String> {
+    let UpdateProjectStageRequest {
+        stage_id,
+        name,
+        description,
+        icon,
+        order,
+        enabled,
+        allow_empty_assistants,
+    } = req;
     let description_ref = description.as_ref().map(|value| value.as_deref());
     let icon_ref = icon.as_ref().map(|value| value.as_deref());
     let stage = store
         .update_project_stage(
             &stage_id,
-            name.as_deref(),
-            description_ref,
-            icon_ref,
-            order,
-            enabled,
-            allow_empty_assistants,
+            ProjectStagePatch {
+                name: name.as_deref(),
+                description: description_ref,
+                icon: icon_ref,
+                order,
+                enabled,
+                allow_empty_assistants,
+            },
         )
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
@@ -1331,8 +1380,10 @@ fn build_thread_work_snapshot_sources(
                         thread_stage_id,
                         &record.thread_id,
                         session_ref,
-                        current_thread,
-                        history_snapshots,
+                        &SessionSourceContext {
+                            current_thread,
+                            history_snapshots,
+                        },
                     );
                 }
             }
@@ -1351,8 +1402,10 @@ fn build_thread_work_snapshot_sources(
                 "",
                 &record.thread_id,
                 session_ref,
-                current_thread,
-                history_snapshots,
+                &SessionSourceContext {
+                    current_thread,
+                    history_snapshots,
+                },
             );
         }
     }
@@ -1393,6 +1446,11 @@ fn build_thread_work_snapshot_sources(
     sources
 }
 
+struct SessionSourceContext<'a> {
+    current_thread: Option<&'a ThreadInfo>,
+    history_snapshots: &'a [SessionHistorySnapshotRecord],
+}
+
 fn push_session_source(
     sources: &mut Vec<ThreadWorkSnapshotSourceRef>,
     seen: &mut HashSet<String>,
@@ -1400,9 +1458,12 @@ fn push_session_source(
     thread_stage_id: &str,
     thread_id: &str,
     session_ref: &serde_json::Value,
-    current_thread: Option<&ThreadInfo>,
-    history_snapshots: &[SessionHistorySnapshotRecord],
+    context: &SessionSourceContext<'_>,
 ) {
+    let SessionSourceContext {
+        current_thread,
+        history_snapshots,
+    } = *context;
     let Some(agent_raw) = session_ref.get("agent").and_then(|value| value.as_str()) else {
         return;
     };
@@ -2534,15 +2595,18 @@ fn update_runtime_agent_preferences(
     store
         .update_builtin_agent_preferences(
             req.agent,
-            req.display_name.as_deref(),
-            req.enabled,
-            req.order,
-            req.model.as_deref(),
-            req.effort.as_deref(),
-            req.permission_mode.as_deref(),
-            models.as_deref(),
-            efforts.as_deref(),
-            permission_modes.as_deref(),
+            AgentPreferencesPatch {
+                display_name: req.display_name.as_deref(),
+                enabled: req.enabled,
+                order: req.order,
+                model: req.model.as_deref(),
+                effort: req.effort.as_deref(),
+                permission_mode: req.permission_mode.as_deref(),
+                models: models.as_deref(),
+                efforts: efforts.as_deref(),
+                permission_modes: permission_modes.as_deref(),
+                ..Default::default()
+            },
         )
         .map_err(|e| e.to_string())?;
     let agents = db_runtime_agents(store.inner(), &cache.get())?;

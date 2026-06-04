@@ -10,7 +10,7 @@ use agent_client_protocol::schema::{ContentBlock, PromptRequest, SessionId, Text
 
 use super::acp::{
     acp_protocol_event, convert_session_notification, fake_session_notification,
-    AcpFakeSessionUpdate,
+    AcpFakeSessionUpdate, AcpProtocolEnvelope,
 };
 use super::manager::RuntimeManager;
 use super::types::{AgentInput, RuntimeError};
@@ -57,13 +57,15 @@ async fn stream_fake_response(
     );
     manager.emit(acp_protocol_event(
         sessio_runtime_session_id,
-        "client_to_agent",
-        "request",
-        "session/prompt",
-        Some(sessio_runtime_session_id.to_string()),
-        Some(turn_id.to_string()),
-        None,
-        None,
+        AcpProtocolEnvelope {
+            direction: "client_to_agent",
+            message_kind: "request",
+            method: "session/prompt",
+            acp_session_id: Some(sessio_runtime_session_id.to_string()),
+            turn_id: Some(turn_id.to_string()),
+            request_id: None,
+            update_type: None,
+        },
         &request,
     )?)?;
     sleep(2000);
@@ -179,13 +181,15 @@ fn emit_fake_acp(
     );
     if let Ok(event) = acp_protocol_event(
         sessio_runtime_session_id,
-        "agent_to_client",
-        "notification",
-        "session/update",
-        Some(notification.session_id.to_string()),
-        Some(turn_id.to_string()),
-        None,
-        Some(fake_session_update_type(&notification.update).to_string()),
+        AcpProtocolEnvelope {
+            direction: "agent_to_client",
+            message_kind: "notification",
+            method: "session/update",
+            acp_session_id: Some(notification.session_id.to_string()),
+            turn_id: Some(turn_id.to_string()),
+            request_id: None,
+            update_type: Some(fake_session_update_type(&notification.update).to_string()),
+        },
         &notification,
     )
     {

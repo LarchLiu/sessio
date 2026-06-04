@@ -12,6 +12,46 @@ use crate::models::{
     StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 
+/// Optional patch fields shared by the agent-preference update methods. Every
+/// field is `Some` only when that column should change; `None` leaves it as-is.
+#[derive(Default)]
+pub struct AgentPreferencesPatch<'a> {
+    pub display_name: Option<&'a str>,
+    pub enabled: Option<bool>,
+    pub order: Option<i64>,
+    pub ai_provider: Option<&'a str>,
+    pub ai_providers: Option<&'a [AgentAiProviderInfo]>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    pub permission_mode: Option<&'a str>,
+    pub models: Option<&'a [RuntimeAgentOptionMetadata]>,
+    pub efforts: Option<&'a [RuntimeAgentOptionMetadata]>,
+    pub permission_modes: Option<&'a [RuntimeAgentOptionMetadata]>,
+}
+
+/// The defining fields for a new assistant.
+pub struct NewAssistant<'a> {
+    pub name: &'a str,
+    pub agent: AssistantAgentInfo,
+    pub system_prompt: Option<&'a str>,
+    pub color: Option<&'a str>,
+    pub assistant_type: AssistantType,
+    pub workflow_id: Option<String>,
+    pub project_id: Option<&'a str>,
+}
+
+/// Optional patch fields for updating a project stage. `None` leaves the column
+/// unchanged; the doubly-wrapped fields distinguish "leave" from "set to null".
+#[derive(Default)]
+pub struct ProjectStagePatch<'a> {
+    pub name: Option<&'a str>,
+    pub description: Option<Option<&'a str>>,
+    pub icon: Option<Option<&'a str>>,
+    pub order: Option<i64>,
+    pub enabled: Option<bool>,
+    pub allow_empty_assistants: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AstraRunRecord {
     pub run_id: String,
@@ -164,30 +204,12 @@ pub trait SessionStore: Send + Sync {
     fn update_agent_preferences_by_id(
         &self,
         agent_id: &str,
-        display_name: Option<&str>,
-        enabled: Option<bool>,
-        order: Option<i64>,
-        ai_provider: Option<&str>,
-        ai_providers: Option<&[AgentAiProviderInfo]>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        permission_mode: Option<&str>,
-        models: Option<&[RuntimeAgentOptionMetadata]>,
-        efforts: Option<&[RuntimeAgentOptionMetadata]>,
-        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+        patch: AgentPreferencesPatch<'_>,
     ) -> Result<AgentInfo>;
     fn update_builtin_agent_preferences(
         &self,
         agent: Agent,
-        display_name: Option<&str>,
-        enabled: Option<bool>,
-        order: Option<i64>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        permission_mode: Option<&str>,
-        models: Option<&[RuntimeAgentOptionMetadata]>,
-        efforts: Option<&[RuntimeAgentOptionMetadata]>,
-        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+        patch: AgentPreferencesPatch<'_>,
     ) -> Result<AgentInfo>;
     fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>>;
     fn set_last_runtime_agent_selection(
@@ -198,16 +220,7 @@ pub trait SessionStore: Send + Sync {
         permission_mode: Option<&str>,
     ) -> Result<RuntimeAgentSelection>;
     fn list_assistants(&self, project_id: Option<&str>) -> Result<Vec<AssistantInfo>>;
-    fn create_assistant(
-        &self,
-        name: &str,
-        agent: AssistantAgentInfo,
-        system_prompt: Option<&str>,
-        color: Option<&str>,
-        assistant_type: AssistantType,
-        workflow_id: Option<String>,
-        project_id: Option<&str>,
-    ) -> Result<AssistantInfo>;
+    fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo>;
     fn update_assistant(
         &self,
         assistant_id: &str,
@@ -247,12 +260,7 @@ pub trait SessionStore: Send + Sync {
     fn update_project_stage(
         &self,
         stage_id: &str,
-        name: Option<&str>,
-        description: Option<Option<&str>>,
-        icon: Option<Option<&str>>,
-        order: Option<i64>,
-        enabled: Option<bool>,
-        allow_empty_assistants: Option<bool>,
+        patch: ProjectStagePatch<'_>,
     ) -> Result<ProjectStageInfo>;
     fn update_project_stage_assistants(
         &self,

@@ -18,9 +18,9 @@ use crate::models::{
     StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
-    AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
-    ThreadWorkSnapshotRecord,
+    AgentPreferencesPatch, AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord,
+    NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
+    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
 
 pub struct SqliteStore {
@@ -1152,20 +1152,35 @@ fn astra_default_ai_providers() -> Vec<AgentAiProviderInfo> {
     }]
 }
 
-fn seed_builtin_agent(
-    conn: &Connection,
-    agent: Agent,
-    model: Option<&str>,
+struct BuiltinAgentSeed {
+    model: Option<&'static str>,
     models: Vec<RuntimeAgentOptionMetadata>,
-    effort: Option<&str>,
+    effort: Option<&'static str>,
     efforts: Vec<RuntimeAgentOptionMetadata>,
-    permission_mode: Option<&str>,
+    permission_mode: Option<&'static str>,
     permission_modes: Vec<RuntimeAgentOptionMetadata>,
     enabled: bool,
     transport: RuntimeTransportKind,
     commands: AgentCommandsInfo,
+}
+
+fn seed_builtin_agent(
+    conn: &Connection,
+    agent: Agent,
+    seed: BuiltinAgentSeed,
     now: i64,
 ) -> Result<()> {
+    let BuiltinAgentSeed {
+        model,
+        models,
+        effort,
+        efforts,
+        permission_mode,
+        permission_modes,
+        enabled,
+        transport,
+        commands,
+    } = seed;
     let id = agent.as_str();
     conn.execute(
         "INSERT OR IGNORE INTO agents (
@@ -1252,83 +1267,91 @@ fn seed_builtin_agents(conn: &Connection) -> Result<()> {
     seed_builtin_agent(
         conn,
         Agent::Codex,
-        Some("gpt-5.5"),
-        runtime_options(vec![
-            runtime_option("gpt-5.5", "5.5"),
-            runtime_option("gpt-5.4", "5.4"),
-            runtime_option("gpt-5.3-codex", "5.3 Codex"),
-        ]),
-        Some("high"),
-        vec![
-            runtime_option("low", "Low"),
-            runtime_option("medium", "Medium"),
-            runtime_option("high", "High"),
-            runtime_option("xhigh", "Extra High"),
-        ],
-        Some("read-only"),
-        vec![
-            runtime_option("read-only", "Default permissions"),
-            runtime_option("auto", "Auto-review"),
-            runtime_option("full-access", "Full access"),
-        ],
-        true,
-        RuntimeTransportKind::Acp,
-        AgentCommandsInfo {
-            session: vec!["npx -y @zed-industries/codex-acp@latest".to_string()],
-            version: vec!["codex --version".to_string()],
+        BuiltinAgentSeed {
+            model: Some("gpt-5.5"),
+            models: runtime_options(vec![
+                runtime_option("gpt-5.5", "5.5"),
+                runtime_option("gpt-5.4", "5.4"),
+                runtime_option("gpt-5.3-codex", "5.3 Codex"),
+            ]),
+            effort: Some("high"),
+            efforts: vec![
+                runtime_option("low", "Low"),
+                runtime_option("medium", "Medium"),
+                runtime_option("high", "High"),
+                runtime_option("xhigh", "Extra High"),
+            ],
+            permission_mode: Some("read-only"),
+            permission_modes: vec![
+                runtime_option("read-only", "Default permissions"),
+                runtime_option("auto", "Auto-review"),
+                runtime_option("full-access", "Full access"),
+            ],
+            enabled: true,
+            transport: RuntimeTransportKind::Acp,
+            commands: AgentCommandsInfo {
+                session: vec!["npx -y @zed-industries/codex-acp@latest".to_string()],
+                version: vec!["codex --version".to_string()],
+            },
         },
         now,
     )?;
     seed_builtin_agent(
         conn,
         Agent::Claude,
-        Some("claude-opus-4-7"),
-        runtime_options(vec![
-            runtime_option("claude-opus-4-8", "Opus 4.8"),
-            runtime_option("claude-opus-4-7", "Opus 4.7"),
-            runtime_option("claude-opus-4-6", "Opus 4.6"),
-        ]),
-        Some("high"),
-        vec![
-            runtime_option("low", "Low"),
-            runtime_option("medium", "Medium"),
-            runtime_option("high", "High"),
-            runtime_option("xhigh", "Extra High"),
-            runtime_option("max", "Max"),
-        ],
-        Some("default"),
-        vec![
-            runtime_option("default", "Ask before edits"),
-            runtime_option("acceptEdits", "Edit automatically"),
-            runtime_option("plan", "Plan mode"),
-            runtime_option("dontAsk", "Don't Ask"),
-        ],
-        true,
-        RuntimeTransportKind::Acp,
-        AgentCommandsInfo {
-            session: vec!["npx -y @agentclientprotocol/claude-agent-acp@latest".to_string()],
-            version: vec!["claude --version".to_string()],
+        BuiltinAgentSeed {
+            model: Some("claude-opus-4-7"),
+            models: runtime_options(vec![
+                runtime_option("claude-opus-4-8", "Opus 4.8"),
+                runtime_option("claude-opus-4-7", "Opus 4.7"),
+                runtime_option("claude-opus-4-6", "Opus 4.6"),
+            ]),
+            effort: Some("high"),
+            efforts: vec![
+                runtime_option("low", "Low"),
+                runtime_option("medium", "Medium"),
+                runtime_option("high", "High"),
+                runtime_option("xhigh", "Extra High"),
+                runtime_option("max", "Max"),
+            ],
+            permission_mode: Some("default"),
+            permission_modes: vec![
+                runtime_option("default", "Ask before edits"),
+                runtime_option("acceptEdits", "Edit automatically"),
+                runtime_option("plan", "Plan mode"),
+                runtime_option("dontAsk", "Don't Ask"),
+            ],
+            enabled: true,
+            transport: RuntimeTransportKind::Acp,
+            commands: AgentCommandsInfo {
+                session: vec!["npx -y @agentclientprotocol/claude-agent-acp@latest".to_string()],
+                version: vec!["claude --version".to_string()],
+            },
         },
         now,
     )?;
     seed_builtin_agent(
         conn,
         Agent::Gemini,
-        None,
-        Vec::new(),
-        Some("high"),
-        vec![
-            runtime_option("low", "Low"),
-            runtime_option("medium", "Medium"),
-            runtime_option("high", "High"),
-        ],
-        None,
-        Vec::new(),
-        false,
-        RuntimeTransportKind::Acp,
-        AgentCommandsInfo {
-            session: vec!["npx -y -- @google/gemini-cli@latest --experimental-acp".to_string()],
-            version: vec!["gemini --version".to_string()],
+        BuiltinAgentSeed {
+            model: None,
+            models: Vec::new(),
+            effort: Some("high"),
+            efforts: vec![
+                runtime_option("low", "Low"),
+                runtime_option("medium", "Medium"),
+                runtime_option("high", "High"),
+            ],
+            permission_mode: None,
+            permission_modes: Vec::new(),
+            enabled: false,
+            transport: RuntimeTransportKind::Acp,
+            commands: AgentCommandsInfo {
+                session: vec![
+                    "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
+                ],
+                version: vec!["gemini --version".to_string()],
+            },
         },
         now,
     )?;
@@ -4417,18 +4440,21 @@ impl SessionStore for SqliteStore {
     fn update_agent_preferences_by_id(
         &self,
         agent_id: &str,
-        display_name: Option<&str>,
-        enabled: Option<bool>,
-        order: Option<i64>,
-        ai_provider: Option<&str>,
-        ai_providers: Option<&[AgentAiProviderInfo]>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        permission_mode: Option<&str>,
-        models: Option<&[RuntimeAgentOptionMetadata]>,
-        efforts: Option<&[RuntimeAgentOptionMetadata]>,
-        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+        patch: AgentPreferencesPatch<'_>,
     ) -> Result<AgentInfo> {
+        let AgentPreferencesPatch {
+            display_name,
+            enabled,
+            order,
+            ai_provider,
+            ai_providers,
+            model,
+            effort,
+            permission_mode,
+            models,
+            efforts,
+            permission_modes,
+        } = patch;
         let conn = self.conn.lock().unwrap();
         let id = agent_id.trim();
         if id.is_empty() {
@@ -4514,31 +4540,10 @@ impl SessionStore for SqliteStore {
     fn update_builtin_agent_preferences(
         &self,
         agent: Agent,
-        display_name: Option<&str>,
-        enabled: Option<bool>,
-        order: Option<i64>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        permission_mode: Option<&str>,
-        models: Option<&[RuntimeAgentOptionMetadata]>,
-        efforts: Option<&[RuntimeAgentOptionMetadata]>,
-        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+        patch: AgentPreferencesPatch<'_>,
     ) -> Result<AgentInfo> {
         let id = agent.as_str();
-        self.update_agent_preferences_by_id(
-            id,
-            display_name,
-            enabled,
-            order,
-            None,
-            None,
-            model,
-            effort,
-            permission_mode,
-            models,
-            efforts,
-            permission_modes,
-        )
+        self.update_agent_preferences_by_id(id, patch)
     }
 
     fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>> {
@@ -4620,16 +4625,16 @@ impl SessionStore for SqliteStore {
         Ok(assistants)
     }
 
-    fn create_assistant(
-        &self,
-        name: &str,
-        agent: AssistantAgentInfo,
-        system_prompt: Option<&str>,
-        color: Option<&str>,
-        assistant_type: AssistantType,
-        workflow_id: Option<String>,
-        project_id: Option<&str>,
-    ) -> Result<AssistantInfo> {
+    fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo> {
+        let NewAssistant {
+            name,
+            agent,
+            system_prompt,
+            color,
+            assistant_type,
+            workflow_id,
+            project_id,
+        } = assistant;
         let name = name.trim();
         if name.is_empty() {
             anyhow::bail!("assistant name cannot be empty");
@@ -5012,13 +5017,16 @@ impl SessionStore for SqliteStore {
     fn update_project_stage(
         &self,
         stage_id: &str,
-        name: Option<&str>,
-        description: Option<Option<&str>>,
-        icon: Option<Option<&str>>,
-        order: Option<i64>,
-        enabled: Option<bool>,
-        allow_empty_assistants: Option<bool>,
+        patch: ProjectStagePatch<'_>,
     ) -> Result<ProjectStageInfo> {
+        let ProjectStagePatch {
+            name,
+            description,
+            icon,
+            order,
+            enabled,
+            allow_empty_assistants,
+        } = patch;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let current = load_project_stage_by_id(&tx, stage_id)?;
@@ -8050,7 +8058,13 @@ mod migration_tests {
             .clone();
 
         let moved = store
-            .update_project_stage(&research.id, None, None, None, Some(plan.order), None, None)
+            .update_project_stage(
+                &research.id,
+                ProjectStagePatch {
+                    order: Some(plan.order),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert_eq!(moved.order, 1);
         assert_eq!(
@@ -8147,21 +8161,21 @@ mod migration_tests {
             .create_thread(&project.id, "Use stages", None)
             .unwrap();
         let assistant = store
-            .create_assistant(
-                "Researcher",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Researcher",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                None,
-                Some(&project.id),
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
             .unwrap();
         assert!(store
             .add_thread_stage(&thread.id, &research_template.id, &[assistant.id.clone()])
@@ -8408,55 +8422,55 @@ mod migration_tests {
             .find(|stage| stage.kind == Some(StageType::Research))
             .unwrap();
         let code_assistant = store
-            .create_assistant(
-                "Code reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Code reviewer",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                Some("code".to_string()),
-                None,
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: Some("code".to_string()),
+                project_id: None,
+            })
             .unwrap();
         let writing_assistant = store
-            .create_assistant(
-                "Writing reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Writing reviewer",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                Some("writing".to_string()),
-                None,
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: Some("writing".to_string()),
+                project_id: None,
+            })
             .unwrap();
         let shared_assistant = store
-            .create_assistant(
-                "Shared reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Shared reviewer",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                None,
-                None,
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: None,
+            })
             .unwrap();
 
         let updated = store
@@ -8485,21 +8499,21 @@ mod migration_tests {
         store.init().unwrap();
 
         let assistant = store
-            .create_assistant(
-                "Shared reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Shared reviewer",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                None,
-                None,
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: None,
+            })
             .unwrap();
         assert_eq!(assistant.workflow_id, None);
         assert_eq!(assistant.project_id, None);
@@ -8520,21 +8534,21 @@ mod migration_tests {
         std::fs::create_dir(&parent).unwrap();
 
         let shared_assistant = store
-            .create_assistant(
-                "Shared reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Shared reviewer",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                Some("Review from global context"),
-                None,
-                AssistantType::Custom,
-                None,
-                None,
-            )
+                system_prompt: Some("Review from global context"),
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: None,
+            })
             .unwrap();
         let research_template = store
             .list_workflow_stages("code")
@@ -8763,21 +8777,21 @@ mod migration_tests {
             )
             .unwrap();
         let assistant = store
-            .create_assistant(
-                "Builder",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Builder",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                Some("Build carefully"),
-                None,
-                AssistantType::Custom,
-                None,
-                Some(&project.id),
-            )
+                system_prompt: Some("Build carefully"),
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
             .unwrap();
         assert_eq!(assistant.project_id.as_deref(), Some(project.id.as_str()));
         assert_eq!(assistant.agent.id, "codex");
@@ -8801,21 +8815,21 @@ mod migration_tests {
             .iter()
             .any(|item| item.id == assistant.id));
         let reviewer = store
-            .create_assistant(
-                "Reviewer",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Reviewer",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                None,
-                Some(&project.id),
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
             .unwrap();
 
         let thread = store
@@ -8968,7 +8982,13 @@ mod migration_tests {
             .to_string()
             .contains("stage does not allow empty assistants"));
         let manual_build = store
-            .update_project_stage(&build_option.id, None, None, None, None, None, Some(true))
+            .update_project_stage(
+                &build_option.id,
+                ProjectStagePatch {
+                    allow_empty_assistants: Some(true),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(manual_build.allow_empty_assistants);
         let empty_build = store
@@ -9025,12 +9045,11 @@ mod migration_tests {
         let reviewed = store
             .update_project_stage(
                 &build_option.id,
-                Some("Review Pass"),
-                Some(None),
-                None,
-                None,
-                None,
-                None,
+                ProjectStagePatch {
+                    name: Some("Review Pass"),
+                    description: Some(None),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(reviewed.name.as_deref(), Some("Review Pass"));
@@ -9145,12 +9164,10 @@ mod migration_tests {
         let disabled_research = store
             .update_project_stage(
                 &research.stage_id,
-                None,
-                None,
-                None,
-                None,
-                Some(false),
-                None,
+                ProjectStagePatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert!(!disabled_research.enabled);
@@ -9168,7 +9185,13 @@ mod migration_tests {
             .add_thread_stage(&thread.id, &research.stage_id, &assistant_ids)
             .is_err());
         let enabled_research = store
-            .update_project_stage(&research.stage_id, None, None, None, None, Some(true), None)
+            .update_project_stage(
+                &research.stage_id,
+                ProjectStagePatch {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(enabled_research.enabled);
 
@@ -9335,21 +9358,21 @@ mod migration_tests {
             .is_err());
 
         let other_assistant = store
-            .create_assistant(
-                "Other Builder",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Other Builder",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                None,
-                Some(&other_project.id),
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&other_project.id),
+            })
             .unwrap();
         let other_thread = store
             .create_thread(&other_project.id, "Other thread", None)
@@ -9394,38 +9417,38 @@ mod migration_tests {
             .any(|item| item.id == builtin_research_assistant_id));
 
         assert!(store
-            .create_assistant(
-                "Invalid",
-                AssistantAgentInfo {
-                    id: "missing".to_string(),
-                    name: "Missing".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Invalid",
+                agent: AssistantAgentInfo {
+                id: "missing".to_string(),
+                name: "Missing".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Custom,
-                None,
-                Some(&project.id),
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
             .is_err());
         assert!(store
-            .create_assistant(
-                "Invalid builtin",
-                AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-only".to_string(),
-                    effort: "medium".to_string(),
+            .create_assistant(NewAssistant {
+                name: "Invalid builtin",
+                agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
                 },
-                None,
-                None,
-                AssistantType::Builtin,
-                None,
-                Some(&project.id),
-            )
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Builtin,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
             .is_err());
 
         let _ = std::fs::remove_file(&path);
@@ -9470,17 +9493,10 @@ mod migration_tests {
         let astra = store
             .update_agent_preferences_by_id(
                 "astra",
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(""),
-                None,
-                None,
-                None,
-                None,
-                None,
+                AgentPreferencesPatch {
+                    model: Some(""),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(astra.model, None);
@@ -9488,15 +9504,10 @@ mod migration_tests {
         let codex = store
             .update_builtin_agent_preferences(
                 Agent::Codex,
-                None,
-                None,
-                None,
-                Some(""),
-                None,
-                None,
-                None,
-                None,
-                None,
+                AgentPreferencesPatch {
+                    model: Some(""),
+                    ..Default::default()
+                },
             )
             .unwrap();
         assert_eq!(codex.model.as_deref(), Some("gpt-5.5"));
@@ -9533,17 +9544,12 @@ mod migration_tests {
         let astra = store
             .update_agent_preferences_by_id(
                 "astra",
-                None,
-                None,
-                None,
-                Some(""),
-                Some(&providers),
-                Some("gpt-5.5"),
-                None,
-                None,
-                None,
-                None,
-                None,
+                AgentPreferencesPatch {
+                    ai_provider: Some(""),
+                    ai_providers: Some(&providers),
+                    model: Some("gpt-5.5"),
+                    ..Default::default()
+                },
             )
             .unwrap();
         let generated = astra
@@ -9571,15 +9577,15 @@ mod migration_tests {
         store
             .update_builtin_agent_preferences(
                 Agent::Codex,
-                Some("Custom Codex"),
-                Some(false),
-                Some(99),
-                Some("custom-model"),
-                Some("medium"),
-                Some("auto"),
-                None,
-                None,
-                None,
+                AgentPreferencesPatch {
+                    display_name: Some("Custom Codex"),
+                    enabled: Some(false),
+                    order: Some(99),
+                    model: Some("custom-model"),
+                    effort: Some("medium"),
+                    permission_mode: Some("auto"),
+                    ..Default::default()
+                },
             )
             .unwrap();
 

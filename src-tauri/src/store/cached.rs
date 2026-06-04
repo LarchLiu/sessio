@@ -3,15 +3,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo,
-    RuntimeAgentOptionMetadata, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
-    ThreadInfo, WorkflowInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, IssueSeverity, IssueStatus, KanbanItem,
+    KanbanStatus, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo,
+    StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 use crate::store::{
-    AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
-    ThreadWorkSnapshotRecord,
+    AgentPreferencesPatch, AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord,
+    NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
+    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -217,59 +216,17 @@ impl SessionStore for CachedStore {
     fn update_agent_preferences_by_id(
         &self,
         agent_id: &str,
-        display_name: Option<&str>,
-        enabled: Option<bool>,
-        order: Option<i64>,
-        ai_provider: Option<&str>,
-        ai_providers: Option<&[AgentAiProviderInfo]>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        permission_mode: Option<&str>,
-        models: Option<&[RuntimeAgentOptionMetadata]>,
-        efforts: Option<&[RuntimeAgentOptionMetadata]>,
-        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+        patch: AgentPreferencesPatch<'_>,
     ) -> Result<AgentInfo> {
-        self.inner.update_agent_preferences_by_id(
-            agent_id,
-            display_name,
-            enabled,
-            order,
-            ai_provider,
-            ai_providers,
-            model,
-            effort,
-            permission_mode,
-            models,
-            efforts,
-            permission_modes,
-        )
+        self.inner.update_agent_preferences_by_id(agent_id, patch)
     }
 
     fn update_builtin_agent_preferences(
         &self,
         agent: Agent,
-        display_name: Option<&str>,
-        enabled: Option<bool>,
-        order: Option<i64>,
-        model: Option<&str>,
-        effort: Option<&str>,
-        permission_mode: Option<&str>,
-        models: Option<&[RuntimeAgentOptionMetadata]>,
-        efforts: Option<&[RuntimeAgentOptionMetadata]>,
-        permission_modes: Option<&[RuntimeAgentOptionMetadata]>,
+        patch: AgentPreferencesPatch<'_>,
     ) -> Result<AgentInfo> {
-        self.inner.update_builtin_agent_preferences(
-            agent,
-            display_name,
-            enabled,
-            order,
-            model,
-            effort,
-            permission_mode,
-            models,
-            efforts,
-            permission_modes,
-        )
+        self.inner.update_builtin_agent_preferences(agent, patch)
     }
 
     fn get_last_runtime_agent_selection(&self) -> Result<Option<RuntimeAgentSelection>> {
@@ -291,25 +248,8 @@ impl SessionStore for CachedStore {
         self.inner.list_assistants(project_id)
     }
 
-    fn create_assistant(
-        &self,
-        name: &str,
-        agent: AssistantAgentInfo,
-        system_prompt: Option<&str>,
-        color: Option<&str>,
-        assistant_type: AssistantType,
-        workflow_id: Option<String>,
-        project_id: Option<&str>,
-    ) -> Result<AssistantInfo> {
-        self.inner.create_assistant(
-            name,
-            agent,
-            system_prompt,
-            color,
-            assistant_type,
-            workflow_id,
-            project_id,
-        )
+    fn create_assistant(&self, assistant: NewAssistant<'_>) -> Result<AssistantInfo> {
+        self.inner.create_assistant(assistant)
     }
 
     fn update_assistant(
@@ -384,22 +324,9 @@ impl SessionStore for CachedStore {
     fn update_project_stage(
         &self,
         stage_id: &str,
-        name: Option<&str>,
-        description: Option<Option<&str>>,
-        icon: Option<Option<&str>>,
-        order: Option<i64>,
-        enabled: Option<bool>,
-        allow_empty_assistants: Option<bool>,
+        patch: ProjectStagePatch<'_>,
     ) -> Result<ProjectStageInfo> {
-        self.inner.update_project_stage(
-            stage_id,
-            name,
-            description,
-            icon,
-            order,
-            enabled,
-            allow_empty_assistants,
-        )
+        self.inner.update_project_stage(stage_id, patch)
     }
 
     fn update_project_stage_assistants(

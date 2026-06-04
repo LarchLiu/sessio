@@ -15,7 +15,7 @@ use crate::models::{normalize_preview, Agent, SessionInfo, SubagentInfo};
 use crate::turns::{
     history_content_update, history_permission_request_message, history_prompt_message,
     history_session_update_message, history_thought_message, history_tool_call_message,
-    history_tool_result_message,
+    history_tool_result_message, HistoryPermissionRequest,
 };
 use serde_json::Value;
 
@@ -1253,15 +1253,17 @@ fn codex_permission_event(payload: &Value, ts: Option<i64>) -> Option<Vec<AcpPro
                 .map(|value| value == "cancelled")
         });
     Some(history_permission_request_message(
-        request_id,
-        tool_name,
-        input,
-        options,
-        selected,
-        cancelled,
-        tool_call,
-        payload.clone(),
-        ts,
+        HistoryPermissionRequest {
+            request_id,
+            tool_name,
+            input,
+            options,
+            selected_option_id: selected,
+            cancelled,
+            tool_call,
+            raw: payload.clone(),
+            timestamp: ts,
+        },
     ))
 }
 

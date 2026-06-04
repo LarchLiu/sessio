@@ -862,13 +862,15 @@ export async function createAssistant(input: {
   projectId?: string | null;
 }): Promise<AssistantInfo> {
   return invoke<AssistantInfo>("create_assistant", {
-    name: input.name,
-    agent: input.agent,
-    systemPrompt: input.systemPrompt ?? null,
-    color: input.color ?? null,
-    assistantType: input.type,
-    workflowId: input.workflowId ?? null,
-    projectId: input.projectId ?? null,
+    req: {
+      name: input.name,
+      agent: input.agent,
+      systemPrompt: input.systemPrompt ?? null,
+      color: input.color ?? null,
+      assistantType: input.type,
+      workflowId: input.workflowId ?? null,
+      projectId: input.projectId ?? null,
+    },
   });
 }
 
@@ -883,22 +885,24 @@ export async function updateAssistant(
   },
 ): Promise<AssistantInfo> {
   return invoke<AssistantInfo>("update_assistant", {
-    assistantId,
-    name: patch.name ?? null,
-    agent: patch.agent ?? null,
-    enabled: patch.enabled ?? null,
-    color:
-      Object.prototype.hasOwnProperty.call(patch, "color")
-        ? patch.color === null
-          ? null
-          : patch.color
-        : undefined,
-    systemPrompt:
-      Object.prototype.hasOwnProperty.call(patch, "systemPrompt")
-        ? patch.systemPrompt === null
-          ? null
-          : patch.systemPrompt ?? ""
-        : null,
+    req: {
+      assistantId,
+      name: patch.name ?? null,
+      agent: patch.agent ?? null,
+      enabled: patch.enabled ?? null,
+      color:
+        Object.prototype.hasOwnProperty.call(patch, "color")
+          ? patch.color === null
+            ? null
+            : patch.color
+          : undefined,
+      systemPrompt:
+        Object.prototype.hasOwnProperty.call(patch, "systemPrompt")
+          ? patch.systemPrompt === null
+            ? null
+            : patch.systemPrompt ?? ""
+          : null,
+    },
   });
 }
 
@@ -1014,7 +1018,7 @@ export async function updateProjectStage(
   if ("order" in patch) payload.order = patch.order ?? null;
   if ("enabled" in patch) payload.enabled = patch.enabled ?? null;
   if ("allowEmptyAssistants" in patch) payload.allowEmptyAssistants = patch.allowEmptyAssistants ?? null;
-  return invoke<ProjectStageInfo>("update_project_stage", payload);
+  return invoke<ProjectStageInfo>("update_project_stage", { req: payload });
 }
 
 export async function updateProjectStageAssistants(

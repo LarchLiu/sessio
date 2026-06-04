@@ -15,6 +15,7 @@ use base64::Engine;
 
 use super::acp::{
     acp_protocol_event, convert_session_notification, permission_response_from_decision,
+    AcpProtocolEnvelope,
 };
 use super::manager::{RuntimeManager, RuntimePermissionDecision};
 use super::types::{
@@ -104,11 +105,13 @@ pub fn spawn_session(
             if let Err(error) = run_session(
                 manager.clone(),
                 sessio_runtime_session_id.clone(),
-                agent,
-                workspace_path,
-                command,
-                runtime_config,
-                start,
+                AcpSessionSpec {
+                    agent,
+                    workspace_path,
+                    command,
+                    runtime_config,
+                    start,
+                },
                 command_rx,
             )
             .await
@@ -197,16 +200,31 @@ pub fn runtime_capabilities_from_acp(
     }
 }
 
+/// The parameters that define which ACP session to run: agent identity,
+/// workspace, launch command, optional runtime config, and how the session
+/// starts (new/load/resume/fork). Grouped so the worker entry points stay
+/// under clippy's argument limit.
+pub struct AcpSessionSpec {
+    pub agent: Agent,
+    pub workspace_path: String,
+    pub command: String,
+    pub runtime_config: Option<AgentRuntimeSessionConfig>,
+    pub start: AcpSessionStart,
+}
+
 async fn run_session(
     manager: RuntimeManager,
     sessio_runtime_session_id: String,
-    agent: Agent,
-    workspace_path: String,
-    command: String,
-    runtime_config: Option<AgentRuntimeSessionConfig>,
-    start: AcpSessionStart,
+    spec: AcpSessionSpec,
     command_rx: tauri::async_runtime::Receiver<AcpWorkerCommand>,
 ) -> Result<()> {
+    let AcpSessionSpec {
+        agent,
+        workspace_path,
+        command,
+        runtime_config,
+        start,
+    } = spec;
     let acp_agent = AcpAgent::from_str(&command)
         .with_context(|| format!("failed to parse ACP command: {command}"))?;
     let current_turn_id = Arc::new(Mutex::new(None::<String>));
@@ -233,13 +251,15 @@ async fn run_session(
                         .emit(
                             acp_protocol_event(
                                 &notification_session_id,
-                                "agent_to_client",
-                                "notification",
-                                "session/update",
-                                Some(notification.session_id.to_string()),
-                                None,
-                                None,
-                                Some(update_type),
+                                AcpProtocolEnvelope {
+                                    direction: "agent_to_client",
+                                    message_kind: "notification",
+                                    method: "session/update",
+                                    acp_session_id: Some(notification.session_id.to_string()),
+                                    turn_id: None,
+                                    request_id: None,
+                                    update_type: Some(update_type),
+                                },
                                 &notification,
                             )
                             .map_err(acp_internal_error)?,
@@ -257,13 +277,15 @@ async fn run_session(
                     .emit(
                         acp_protocol_event(
                             &notification_session_id,
-                            "agent_to_client",
-                            "notification",
-                            "session/update",
-                            Some(notification.session_id.to_string()),
-                            Some(turn_id.clone()),
-                            None,
-                            Some(update_type),
+                            AcpProtocolEnvelope {
+                                direction: "agent_to_client",
+                                message_kind: "notification",
+                                method: "session/update",
+                                acp_session_id: Some(notification.session_id.to_string()),
+                                turn_id: Some(turn_id.clone()),
+                                request_id: None,
+                                update_type: Some(update_type),
+                            },
                             &notification,
                         )
                         .map_err(acp_internal_error)?,
@@ -299,13 +321,15 @@ async fn run_session(
                     .emit(
                         acp_protocol_event(
                             &permission_session_id,
-                            "agent_to_client",
-                            "request",
-                            "session/request_permission",
-                            Some(request.session_id.to_string()),
-                            Some(turn_id.clone()),
-                            Some(request_id.clone()),
-                            None,
+                            AcpProtocolEnvelope {
+                                direction: "agent_to_client",
+                                message_kind: "request",
+                                method: "session/request_permission",
+                                acp_session_id: Some(request.session_id.to_string()),
+                                turn_id: Some(turn_id.clone()),
+                                request_id: Some(request_id.clone()),
+                                update_type: None,
+                            },
                             &request,
                         )
                         .map_err(acp_internal_error)?,
@@ -345,13 +369,15 @@ async fn run_session(
                     .emit(
                         acp_protocol_event(
                             &permission_session_id,
-                            "client_to_agent",
-                            "response",
-                            "session/request_permission",
-                            Some(request.session_id.to_string()),
-                            Some(turn_id.clone()),
-                            Some(request_id),
-                            None,
+                            AcpProtocolEnvelope {
+                                direction: "client_to_agent",
+                                message_kind: "response",
+                                method: "session/request_permission",
+                                acp_session_id: Some(request.session_id.to_string()),
+                                turn_id: Some(turn_id.clone()),
+                                request_id: Some(request_id),
+                                update_type: None,
+                            },
                             &response,
                         )
                         .map_err(acp_internal_error)?,
@@ -378,13 +404,15 @@ async fn run_session(
                     .emit(
                         acp_protocol_event(
                             &sessio_runtime_session_id,
-                            "agent_to_client",
-                            "response",
-                            "initialize",
-                            None,
-                            None,
-                            None,
-                            None,
+                            AcpProtocolEnvelope {
+                                direction: "agent_to_client",
+                                message_kind: "response",
+                                method: "initialize",
+                                acp_session_id: None,
+                                turn_id: None,
+                                request_id: None,
+                                update_type: None,
+                            },
                             &init,
                         )
                         .map_err(acp_internal_error)?,
@@ -403,13 +431,15 @@ async fn run_session(
                             .emit(
                                 acp_protocol_event(
                                     &sessio_runtime_session_id,
-                                    "agent_to_client",
-                                    "response",
-                                    "session/new",
-                                    Some(session.session_id.to_string()),
-                                    None,
-                                    None,
-                                    None,
+                                    AcpProtocolEnvelope {
+                                        direction: "agent_to_client",
+                                        message_kind: "response",
+                                        method: "session/new",
+                                        acp_session_id: Some(session.session_id.to_string()),
+                                        turn_id: None,
+                                        request_id: None,
+                                        update_type: None,
+                                    },
                                     &session,
                                 )
                                 .map_err(acp_internal_error)?,
@@ -435,13 +465,15 @@ async fn run_session(
                             .emit(
                                 acp_protocol_event(
                                     &sessio_runtime_session_id,
-                                    "agent_to_client",
-                                    "response",
-                                    "session/load",
-                                    Some(acp_session_id.to_string()),
-                                    None,
-                                    None,
-                                    None,
+                                    AcpProtocolEnvelope {
+                                        direction: "agent_to_client",
+                                        message_kind: "response",
+                                        method: "session/load",
+                                        acp_session_id: Some(acp_session_id.to_string()),
+                                        turn_id: None,
+                                        request_id: None,
+                                        update_type: None,
+                                    },
                                     &session,
                                 )
                                 .map_err(acp_internal_error)?,
@@ -469,13 +501,15 @@ async fn run_session(
                                 .emit(
                                     acp_protocol_event(
                                         &sessio_runtime_session_id,
-                                        "agent_to_client",
-                                        "response",
-                                        "session/load",
-                                        Some(acp_session_id.to_string()),
-                                        None,
-                                        None,
-                                        None,
+                                        AcpProtocolEnvelope {
+                                            direction: "agent_to_client",
+                                            message_kind: "response",
+                                            method: "session/load",
+                                            acp_session_id: Some(acp_session_id.to_string()),
+                                            turn_id: None,
+                                            request_id: None,
+                                            update_type: None,
+                                        },
                                         &session,
                                     )
                                     .map_err(acp_internal_error)?,
@@ -499,13 +533,15 @@ async fn run_session(
                                 .emit(
                                     acp_protocol_event(
                                         &sessio_runtime_session_id,
-                                        "agent_to_client",
-                                        "response",
-                                        "session/resume",
-                                        Some(acp_session_id.to_string()),
-                                        None,
-                                        None,
-                                        None,
+                                        AcpProtocolEnvelope {
+                                            direction: "agent_to_client",
+                                            message_kind: "response",
+                                            method: "session/resume",
+                                            acp_session_id: Some(acp_session_id.to_string()),
+                                            turn_id: None,
+                                            request_id: None,
+                                            update_type: None,
+                                        },
                                         &session,
                                     )
                                     .map_err(acp_internal_error)?,
@@ -532,13 +568,15 @@ async fn run_session(
                             .emit(
                                 acp_protocol_event(
                                     &sessio_runtime_session_id,
-                                    "agent_to_client",
-                                    "response",
-                                    "session/fork",
-                                    Some(session.session_id.to_string()),
-                                    None,
-                                    None,
-                                    None,
+                                    AcpProtocolEnvelope {
+                                        direction: "agent_to_client",
+                                        message_kind: "response",
+                                        method: "session/fork",
+                                        acp_session_id: Some(session.session_id.to_string()),
+                                        turn_id: None,
+                                        request_id: None,
+                                        update_type: None,
+                                    },
                                     &session,
                                 )
                                 .map_err(acp_internal_error)?,
@@ -718,13 +756,15 @@ async fn send_session_config_request(
         .emit(
             acp_protocol_event(
                 sessio_runtime_session_id,
-                "client_to_agent",
-                "request",
-                method,
-                Some(acp_session_id.to_string()),
-                turn_id.clone(),
-                None,
-                None,
+                AcpProtocolEnvelope {
+                    direction: "client_to_agent",
+                    message_kind: "request",
+                    method,
+                    acp_session_id: Some(acp_session_id.to_string()),
+                    turn_id: turn_id.clone(),
+                    request_id: None,
+                    update_type: None,
+                },
                 &request,
             )
             .map_err(acp_internal_error)?,
@@ -738,13 +778,15 @@ async fn send_session_config_request(
         .emit(
             acp_protocol_event(
                 sessio_runtime_session_id,
-                "agent_to_client",
-                "response",
-                method,
-                Some(acp_session_id.to_string()),
-                turn_id,
-                None,
-                None,
+                AcpProtocolEnvelope {
+                    direction: "agent_to_client",
+                    message_kind: "response",
+                    method,
+                    acp_session_id: Some(acp_session_id.to_string()),
+                    turn_id,
+                    request_id: None,
+                    update_type: None,
+                },
                 &response,
             )
             .map_err(acp_internal_error)?,
@@ -815,13 +857,15 @@ async fn run_command_loop(
                 let notification = CancelNotification::new(acp_session_id.clone());
                 manager.emit(acp_protocol_event(
                     &sessio_runtime_session_id,
-                    "client_to_agent",
-                    "notification",
-                    "session/cancel",
-                    Some(acp_session_id.to_string()),
-                    Some(turn_id.clone()),
-                    None,
-                    None,
+                    AcpProtocolEnvelope {
+                        direction: "client_to_agent",
+                        message_kind: "notification",
+                        method: "session/cancel",
+                        acp_session_id: Some(acp_session_id.to_string()),
+                        turn_id: Some(turn_id.clone()),
+                        request_id: None,
+                        update_type: None,
+                    },
                     &notification,
                 )?)?;
                 connection
@@ -894,13 +938,15 @@ fn spawn_prompt_task(
         };
         match acp_protocol_event(
             &sessio_runtime_session_id,
-            "client_to_agent",
-            "request",
-            "session/prompt",
-            Some(acp_session_id.to_string()),
-            Some(turn_id.clone()),
-            None,
-            None,
+            AcpProtocolEnvelope {
+                direction: "client_to_agent",
+                message_kind: "request",
+                method: "session/prompt",
+                acp_session_id: Some(acp_session_id.to_string()),
+                turn_id: Some(turn_id.clone()),
+                request_id: None,
+                update_type: None,
+            },
             &request,
         ) {
             Ok(event) => {
@@ -916,13 +962,15 @@ fn spawn_prompt_task(
             Ok(response) if response.stop_reason == StopReason::Cancelled => {
                 match acp_protocol_event(
                     &sessio_runtime_session_id,
-                    "agent_to_client",
-                    "response",
-                    "session/prompt",
-                    Some(acp_session_id.to_string()),
-                    Some(turn_id.clone()),
-                    None,
-                    None,
+                    AcpProtocolEnvelope {
+                        direction: "agent_to_client",
+                        message_kind: "response",
+                        method: "session/prompt",
+                        acp_session_id: Some(acp_session_id.to_string()),
+                        turn_id: Some(turn_id.clone()),
+                        request_id: None,
+                        update_type: None,
+                    },
                     &response,
                 ) {
                     Ok(event) => {
@@ -944,13 +992,15 @@ fn spawn_prompt_task(
             Ok(response) => {
                 match acp_protocol_event(
                     &sessio_runtime_session_id,
-                    "agent_to_client",
-                    "response",
-                    "session/prompt",
-                    Some(acp_session_id.to_string()),
-                    Some(turn_id.clone()),
-                    None,
-                    None,
+                    AcpProtocolEnvelope {
+                        direction: "agent_to_client",
+                        message_kind: "response",
+                        method: "session/prompt",
+                        acp_session_id: Some(acp_session_id.to_string()),
+                        turn_id: Some(turn_id.clone()),
+                        request_id: None,
+                        update_type: None,
+                    },
                     &response,
                 ) {
                     Ok(event) => {
