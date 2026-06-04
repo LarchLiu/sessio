@@ -116,7 +116,11 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libssl-dev \
+            desktop-file-utils \
+            libfuse2 \
             patchelf \
+            squashfs-tools \
+            zsync \
             xdg-utils
       - uses: oven-sh/setup-bun@v2
       - name: Build Astra sidecar
@@ -127,7 +131,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build AppImage
-        run: pnpm tauri build --bundles appimage --ci
+        run: pnpm tauri build --verbose --bundles appimage --ci
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -177,7 +181,11 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             libssl-dev \
+            desktop-file-utils \
+            libfuse2 \
             patchelf \
+            squashfs-tools \
+            zsync \
             xdg-utils
       - uses: oven-sh/setup-bun@v2
       - name: Build Astra sidecar
@@ -188,7 +196,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build AppImage
-        run: pnpm tauri build --bundles appimage --ci
+        run: pnpm tauri build --verbose --bundles appimage --ci
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
