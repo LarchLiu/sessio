@@ -14,7 +14,7 @@ import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
 import HashtagChatLinearIcon from "@iconify-react/solar/hashtag-chat-linear";
 import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
 import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
-import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, setThreadStage, updateThread, updateThreadStage } from "../api";
+import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
@@ -27,7 +27,7 @@ import Tooltip from "../components/Tooltip";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";
-import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
+import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { sessionDisplayTitle } from "../appUtils";
 
 type ProjectView = "threads" | "stages" | "assistants";
@@ -389,16 +389,26 @@ function reorderThreadStages(stages: StageInfo[], movedStage: StageInfo): StageI
   return withoutMoved.map((stage, index) => ({ ...stage, order: index }));
 }
 
-function stageActivationBody(
-  fromIndex: number,
-  toIndex: number,
-  stageLabel: string,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): string {
-  if (fromIndex < 0) return t("thread.activate_stage_body", { stage: stageLabel });
-  if (toIndex < fromIndex) return t("thread.activate_stage_back_body", { stage: stageLabel });
-  if (toIndex > fromIndex + 1) return t("thread.activate_stage_skip_body", { stage: stageLabel });
-  return t("thread.activate_stage_forward_body", { stage: stageLabel });
+function canChangeThreadStageStructure(stage: StageInfo): boolean {
+  return stage.status !== "completed" && stage.status !== "skipped";
+}
+
+function threadStageChipStatusClass(stage: StageInfo): string {
+  switch (stage.status) {
+    case "completed":
+      return "border-[rgb(var(--color-emerald)/0.62)] bg-[rgb(var(--color-emerald)/0.14)] text-ink shadow-[inset_0_0_0_1px_rgb(var(--color-emerald)/0.16)] ";
+    case "in_progress":
+      return "border-[rgb(var(--color-emerald)/0.45)] bg-[rgb(var(--color-emerald)/0.10)] text-ink shadow-[inset_0_0_0_1px_rgb(var(--color-emerald)/0.10)] hover:bg-[rgb(var(--color-emerald)/0.14)] ";
+    case "needs_review":
+      return "border-sky-500/45 bg-sky-500/10 text-ink shadow-[inset_0_0_0_1px_rgb(14_165_233/0.10)] hover:bg-sky-500/[0.14] ";
+    case "blocked":
+      return "border-amber-500/55 bg-amber-500/10 text-ink shadow-[inset_0_0_0_1px_rgb(245_158_11/0.12)] hover:bg-amber-500/[0.14] ";
+    case "skipped":
+      return "border-ink/18 bg-ink/[0.045] text-ink/70 shadow-[inset_0_0_0_1px_rgb(var(--color-fg)/0.04)] ";
+    case "not_started":
+    default:
+      return "border-ink/10 bg-surface-panel text-ink hover:border-ink/18 hover:bg-ink/5 ";
+  }
 }
 
 function ThreadWorkflowPanel({
@@ -784,25 +794,19 @@ function CreateThreadStageChip({
 function ThreadStageChip({
   stage,
   index,
-  active,
   locked,
-  confirmationBody,
-  confirmLabel,
   removeBody,
-  onSelect,
   onRemove,
 }: {
   stage: StageInfo;
   index: number;
-  active: boolean;
   locked: boolean;
-  confirmationBody: string;
-  confirmLabel: string;
   removeBody: string;
-  onSelect: (stageId: string) => void | Promise<void>;
   onRemove: () => void;
 }) {
   const { t } = useI18n();
+  const statusVisual = stageStatusVisual(stage.status);
+  const StatusIcon = statusVisual.icon;
   const { handleRef, isDragSource, isDropTarget, ref } = useSortable({
     id: stage.id,
     index,
@@ -814,7 +818,8 @@ function ThreadStageChip({
     },
   });
   const label = projectStageLabel(stage, t);
-  const showActions = !locked && !active;
+  const chipStatusClass = threadStageChipStatusClass(stage);
+  const showActions = !locked;
 
   return (
     <ConfirmTooltip>
@@ -827,9 +832,8 @@ function ThreadStageChip({
               ? "z-20 cursor-grabbing border-ink/30 bg-surface-panel shadow-lg "
               : isDropTarget
                 ? "border-ink/35 bg-ink/12 shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.28)] "
-                : active
-                  ? "border-brand/45 bg-brand/15 text-ink shadow-[inset_0_0_0_1px_rgb(var(--color-brand)/0.12)] "
-                  : "border-ink/10 bg-surface-panel text-ink/50 hover:bg-ink/5 hover:text-ink/70 ") +
+                : chipStatusClass) +
+            (!locked ? "cursor-pointer " : "") +
             (locked ? "opacity-90 " : "")
           }
         >
@@ -844,24 +848,19 @@ function ThreadStageChip({
               </button>
             </Tooltip>
           )}
-          <Tooltip content={active ? t("thread.active") : confirmLabel} placement="top">
-            <button
-              type="button"
-              onClick={(event) => {
-                if (active) return;
-                confirm(event, {
-                  title: confirmLabel,
-                  body: confirmationBody,
-                  confirmLabel,
-                  placement: "top",
-                  onConfirm: () => onSelect(stage.id),
-                });
-              }}
-              className="inline-flex min-w-0 items-center gap-1.5 text-left"
-            >
+          <Tooltip content={t(`stage.status.${stage.status}`)} placement="top">
+            <div className="inline-flex min-w-0 items-center gap-1.5 text-left">
               {projectStageIcon(stage)}
               <span className="max-w-[140px] truncate">{label}</span>
-            </button>
+              <span
+                className={
+                  "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border " +
+                  statusVisual.markerClass
+                }
+              >
+                <StatusIcon className="h-2.5 w-2.5" />
+              </span>
+            </div>
           </Tooltip>
           {showActions && (
             <Tooltip content={t("thread.remove_stage")} placement="top">
@@ -977,23 +976,22 @@ function ThreadCard({
     }
   };
 
-  const currentStageId = thread.stageId ?? "";
   const orderedThreadStages = useMemo(
     () => [...thread.stages].sort((a, b) => a.order - b.order),
     [thread.stages],
   );
-  const activeStageIndex = orderedThreadStages.findIndex((stage) => stage.id === currentStageId);
-  const isStageLocked = (index: number) => activeStageIndex >= 0 && index <= activeStageIndex;
+  const isStageLocked = (stage: StageInfo) => !canChangeThreadStageStructure(stage);
   const handleThreadStageDragEnd = (event: DragEndEvent) => {
     if (event.canceled) return;
     const { source } = event.operation;
     if (!isSortable(source)) return;
     const from = source.initialIndex;
     const to = source.index;
-    if (from === to || isStageLocked(from) || isStageLocked(to)) return;
+    if (from === to) return;
     const stage = orderedThreadStages[from];
     const target = orderedThreadStages[to];
     if (!stage || !target) return;
+    if (isStageLocked(stage) || isStageLocked(target)) return;
     void (async () => {
       try {
         onStageUpdated(await updateThreadStage(stage.id, { order: target.order }));
@@ -1141,26 +1139,14 @@ function ThreadCard({
             <DragDropProvider onDragEnd={handleThreadStageDragEnd}>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {orderedThreadStages.map((stage, index) => {
-                  const locked = isStageLocked(index);
-                  const label = projectStageLabel(stage, t);
+                  const locked = isStageLocked(stage);
                   return (
                     <ThreadStageChip
                       key={stage.id}
                       stage={stage}
                       index={index}
-                      active={stage.id === currentStageId}
                       locked={locked}
-                      confirmationBody={stageActivationBody(activeStageIndex, index, label, t)}
-                      confirmLabel={t("thread.activate_stage")}
-                      removeBody={t("thread.delete_stage_body", { stage: label })}
-                      onSelect={async (stageId) => {
-                        if (stageId === currentStageId) return;
-                        try {
-                          onThreadUpdated(await setThreadStage(thread.id, stageId));
-                        } catch (err) {
-                          onError(String(err));
-                        }
-                      }}
+                      removeBody={t("thread.delete_stage_body", { stage: projectStageLabel(stage, t) })}
                       onRemove={() => void removeThreadStage(stage, locked)}
                     />
                   );
