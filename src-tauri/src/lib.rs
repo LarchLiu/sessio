@@ -450,6 +450,7 @@ fn runtime_transport_option(transport: agents::runtime::types::RuntimeTransportK
         agents::runtime::types::RuntimeTransportKind::Acp => "acp",
         agents::runtime::types::RuntimeTransportKind::CliStreamJson => "cliStreamJson",
         agents::runtime::types::RuntimeTransportKind::PlainCli => "plainCli",
+        agents::runtime::types::RuntimeTransportKind::Sidecar => "sidecar",
         agents::runtime::types::RuntimeTransportKind::Fake => "fake",
     }
     .to_string()

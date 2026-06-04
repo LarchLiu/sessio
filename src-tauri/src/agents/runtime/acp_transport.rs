@@ -1274,6 +1274,7 @@ fn transport_from_str(transport: &str) -> RuntimeTransportKind {
         "acp" => RuntimeTransportKind::Acp,
         "cliStreamJson" => RuntimeTransportKind::CliStreamJson,
         "plainCli" => RuntimeTransportKind::PlainCli,
+        "sidecar" => RuntimeTransportKind::Sidecar,
         "fake" => RuntimeTransportKind::Fake,
         _ => RuntimeTransportKind::Fake,
     }

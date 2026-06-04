@@ -13,6 +13,7 @@ pub enum RuntimeTransportKind {
     Acp,
     CliStreamJson,
     PlainCli,
+    Sidecar,
     Fake,
 }
 

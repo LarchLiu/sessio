@@ -557,21 +557,7 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE INDEX IF NOT EXISTS idx_agents_type_enabled
     ON agents(type, enabled, sort_order, display_name COLLATE NOCASE);
-"#;
 
-const SCHEMA_V6: &str = r#"
-CREATE TABLE IF NOT EXISTS thread_stage_states (
-    thread_stage_id TEXT PRIMARY KEY,
-    status          TEXT NOT NULL DEFAULT 'not_started',
-    summary         TEXT,
-    outcome         TEXT,
-    created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL,
-    FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE CASCADE
-);
-"#;
-
-const SCHEMA_V7: &str = r#"
 CREATE TABLE IF NOT EXISTS thread_work_snapshots (
     child_agent      TEXT NOT NULL,
     child_session_id TEXT NOT NULL,
@@ -585,9 +571,7 @@ CREATE TABLE IF NOT EXISTS thread_work_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_thread_work_snapshots_thread
     ON thread_work_snapshots(thread_id);
-"#;
 
-const SCHEMA_V8: &str = r#"
 CREATE TABLE IF NOT EXISTS thread_stage_issues (
     id               TEXT PRIMARY KEY,
     thread_stage_id  TEXT NOT NULL,
@@ -602,9 +586,7 @@ CREATE TABLE IF NOT EXISTS thread_stage_issues (
 
 CREATE INDEX IF NOT EXISTS idx_thread_stage_issues_stage
     ON thread_stage_issues(thread_stage_id);
-"#;
 
-const SCHEMA_V9: &str = r#"
 CREATE TABLE IF NOT EXISTS astra_runs (
     run_id                     TEXT PRIMARY KEY,
     thread_id                  TEXT NOT NULL,
@@ -614,6 +596,12 @@ CREATE TABLE IF NOT EXISTS astra_runs (
     proposed_tasks_json        TEXT NOT NULL DEFAULT '[]',
     approved_task_ids_json     TEXT NOT NULL DEFAULT '[]',
     delegated_session_ids_json TEXT NOT NULL DEFAULT '[]',
+    task_results_json          TEXT NOT NULL DEFAULT '[]',
+    mode                       TEXT NOT NULL DEFAULT 'auto',
+    current_stage_id           TEXT,
+    completed_task_ids_json    TEXT NOT NULL DEFAULT '[]',
+    stage_attempt_counts_json  TEXT NOT NULL DEFAULT '{}',
+    retry_limit                INTEGER NOT NULL DEFAULT 3,
     error                      TEXT,
     created_at                 INTEGER NOT NULL,
     updated_at                 INTEGER NOT NULL,
@@ -627,18 +615,9 @@ CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_active
     ON astra_runs(thread_id, status);
 "#;
 
-const SCHEMA_V10: &str = r#"
-ALTER TABLE astra_runs ADD COLUMN task_results_json TEXT NOT NULL DEFAULT '[]';
-"#;
-
-const SCHEMA_V11: &str = r#"
-ALTER TABLE astra_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'auto';
-ALTER TABLE astra_runs ADD COLUMN current_stage_id TEXT;
-ALTER TABLE astra_runs ADD COLUMN completed_task_ids_json TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE astra_runs ADD COLUMN stage_attempt_counts_json TEXT NOT NULL DEFAULT '{}';
-ALTER TABLE astra_runs ADD COLUMN retry_limit INTEGER NOT NULL DEFAULT 3;
-"#;
-
+// Backfill for pre-v1 (v0.3.2) databases whose sessions table predates the
+// rename_title column the v1 bootstrap schema now includes. Applied
+// fault-tolerantly inside the v5 migration; a no-op on any v1+ database.
 const SCHEMA_CURRENT_SESSION_RENAME_TITLE: &str = r#"
 ALTER TABLE sessions ADD COLUMN rename_title TEXT;
 "#;
@@ -708,78 +687,32 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     }
     if current < 5 {
         conn.execute_batch(SCHEMA_V5)?;
+        // v0.3.2 databases predate the rename_title column the v1 bootstrap
+        // schema now includes; backfill it fault-tolerantly (no-op on v1+).
+        let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_RENAME_TITLE);
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)",
             [],
         )?;
-    }
-    if current < 6 {
-        // The v5 bootstrap schema already includes thread_stage_states, so
-        // fresh installs can ignore the duplicate CREATE.
-        let _ = conn.execute_batch(SCHEMA_V6);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
-            [],
-        )?;
-    }
-    if current < 7 {
-        conn.execute_batch(SCHEMA_V7)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
-            [],
-        )?;
-    }
-    if current < 8 {
-        conn.execute_batch(SCHEMA_V8)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)",
-            [],
-        )?;
-    }
-    if current < 9 {
-        conn.execute_batch(SCHEMA_V9)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)",
-            [],
-        )?;
-    }
-    if current < 10 {
-        let _ = conn.execute_batch(SCHEMA_V10);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)",
-            [],
-        )?;
-    }
-    if current < 11 {
-        let _ = conn.execute_batch(SCHEMA_V11);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (11)",
-            [],
-        )?;
-    }
-    // Current unreleased schema shape: explicit user/Astra session titles live
-    // outside indexed parser titles. Keep this unversioned until release.
-    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_RENAME_TITLE);
-    for statement in [
-        "ALTER TABLE agents ADD COLUMN ai_provider TEXT",
-        "ALTER TABLE agents ADD COLUMN ai_providers_json TEXT NOT NULL DEFAULT '[]'",
-        "ALTER TABLE agents ADD COLUMN ai_api TEXT",
-        "ALTER TABLE agents ADD COLUMN api_base_url TEXT",
-        "ALTER TABLE agents ADD COLUMN api_key TEXT",
-    ] {
-        let _ = conn.execute(statement, []);
-    }
-    if current < 5 {
-        seed_builtin_workflows(conn)?;
-        seed_builtin_workflow_stages(conn)?;
-        seed_builtin_agents(conn)?;
-        seed_builtin_workflow_stage_assistants(conn, now_ms())?;
+        seed_builtins(conn)?;
     }
     Ok(())
 }
 
-fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
+/// Seed all builtin data in dependency order: workflows, their stages,
+/// runtime agents and assistants, then the workflow stage assistant
+/// bindings. Idempotent -- every insert uses INSERT OR IGNORE / ON CONFLICT
+/// DO NOTHING, so re-running never clobbers user edits.
+fn seed_builtins(conn: &Connection) -> Result<()> {
     let now = now_ms();
+    seed_builtin_workflows(conn, now)?;
+    seed_builtin_workflow_stages(conn, now)?;
+    seed_builtin_agents(conn, now)?;
+    seed_builtin_workflow_stage_assistants(conn, now)?;
+    Ok(())
+}
+
+fn seed_builtin_workflows(conn: &Connection, now: i64) -> Result<()> {
     for (id, name, description) in BUILTIN_WORKFLOW_SEEDS {
         conn.execute(
             "INSERT OR IGNORE INTO workflows (id, name, description, type, created_at, updated_at)
@@ -790,8 +723,7 @@ fn seed_builtin_workflows(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn seed_builtin_workflow_stages(conn: &Connection) -> Result<()> {
-    let now = now_ms();
+fn seed_builtin_workflow_stages(conn: &Connection, now: i64) -> Result<()> {
     for (workflow_id, _, _) in BUILTIN_WORKFLOW_SEEDS {
         for (index, (kind, description)) in builtin_workflow_stage_seeds(workflow_id)
             .iter()
@@ -1251,7 +1183,7 @@ fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
             "[]",
             AgentType::Builtin.as_str(),
             1_i64,
-            transport_kind_to_db(RuntimeTransportKind::PlainCli),
+            transport_kind_to_db(RuntimeTransportKind::Sidecar),
             serde_json::to_string(&AgentCommandsInfo::default())?,
             0_i64,
             now,
@@ -1261,8 +1193,7 @@ fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn seed_builtin_agents(conn: &Connection) -> Result<()> {
-    let now = now_ms();
+fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
     seed_astra_agent(conn, now)?;
     seed_builtin_agent(
         conn,
@@ -1364,6 +1295,7 @@ fn transport_kind_to_db(transport: RuntimeTransportKind) -> &'static str {
         RuntimeTransportKind::Acp => "acp",
         RuntimeTransportKind::CliStreamJson => "cliStreamJson",
         RuntimeTransportKind::PlainCli => "plainCli",
+        RuntimeTransportKind::Sidecar => "sidecar",
         RuntimeTransportKind::Fake => "fake",
     }
 }
@@ -1372,6 +1304,7 @@ fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
     match value {
         "cliStreamJson" => RuntimeTransportKind::CliStreamJson,
         "plainCli" => RuntimeTransportKind::PlainCli,
+        "sidecar" => RuntimeTransportKind::Sidecar,
         "fake" => RuntimeTransportKind::Fake,
         _ => RuntimeTransportKind::Acp,
     }
@@ -6999,7 +6932,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 11);
+        assert_eq!(latest_schema_version, 5);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -8729,6 +8662,7 @@ mod migration_tests {
             .iter()
             .any(|option| option.value == "xhigh"));
         let astra_agent = agents.iter().find(|agent| agent.id == "astra").unwrap();
+        assert_eq!(astra_agent.transport, RuntimeTransportKind::Sidecar);
         assert_eq!(astra_agent.ai_provider.as_deref(), Some("cc-switch"));
         assert_eq!(astra_agent.model.as_deref(), Some("gpt-5.5"));
         let astra_provider = astra_agent

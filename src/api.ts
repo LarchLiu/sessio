@@ -459,7 +459,7 @@ export interface ProjectMemorySearchResult {
   raw: unknown;
 }
 
-export type RuntimeTransportKind = "acp" | "cliStreamJson" | "plainCli" | "fake";
+export type RuntimeTransportKind = "acp" | "cliStreamJson" | "plainCli" | "sidecar" | "fake";
 
 export type RuntimeSessionStatus =
   | "starting"

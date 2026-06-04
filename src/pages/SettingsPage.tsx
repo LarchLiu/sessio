@@ -555,6 +555,7 @@ function AgentEditor({
   const [newModelDisplayName, setNewModelDisplayName] = useState("");
   const runtimeAgent = isRuntimeAgent(agent.id) ? agent.id : null;
   const isAstra = agent.id === "astra";
+  const transportLabel = isAstra ? "sidecar" : agent.transport;
   const [aiProvider, setAiProvider] = useState(agent.aiProvider ?? "");
   const [editingAiProvider, setEditingAiProvider] = useState(agent.aiProvider ?? "");
   const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);
@@ -878,7 +879,7 @@ function AgentEditor({
               </span>
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-card-muted/55">
-              <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{agent.transport}</span>
+              <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{transportLabel}</span>
               {sessionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{sessionCommand}</span>}
               {versionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{versionCommand}</span>}
             </div>

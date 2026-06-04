@@ -2431,6 +2431,7 @@ fn runtime_transport_option(
         crate::agents::runtime::types::RuntimeTransportKind::Acp => "acp",
         crate::agents::runtime::types::RuntimeTransportKind::CliStreamJson => "cliStreamJson",
         crate::agents::runtime::types::RuntimeTransportKind::PlainCli => "plainCli",
+        crate::agents::runtime::types::RuntimeTransportKind::Sidecar => "sidecar",
         crate::agents::runtime::types::RuntimeTransportKind::Fake => "fake",
     }
     .to_string()
