@@ -2897,7 +2897,7 @@ fn load_stage_assistants(
     thread_stage_id: &str,
 ) -> Result<Vec<StageAssistantInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT tsa.assistant_id, a.name, a.color, tsa.agent_json, tsa.sort_order
+        "SELECT tsa.assistant_id, a.name, a.color, tsa.agent_json, a.system_prompt, tsa.sort_order
          FROM thread_stage_assistants tsa
          INNER JOIN assistants a ON a.id = tsa.assistant_id
          WHERE tsa.thread_stage_id = ?
@@ -2918,7 +2918,8 @@ fn load_stage_assistants(
                     effort: String::new(),
                 }
             }),
-            order: row.get(4)?,
+            system_prompt: row.get(4)?,
+            order: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2929,7 +2930,7 @@ fn load_project_stage_assistants(
     stage_id: &str,
 ) -> Result<Vec<StageAssistantInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT sa.assistant_id, a.name, a.color, a.agent_json, sa.sort_order
+        "SELECT sa.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, sa.sort_order
          FROM stage_assistants sa
          INNER JOIN assistants a ON a.id = sa.assistant_id
          WHERE sa.stage_id = ?
@@ -2950,7 +2951,8 @@ fn load_project_stage_assistants(
                     effort: String::new(),
                 }
             }),
-            order: row.get(4)?,
+            system_prompt: row.get(4)?,
+            order: row.get(5)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2962,6 +2964,7 @@ fn stage_assistant_from_assistant(assistant: AssistantInfo, order: i64) -> Stage
         name: assistant.name,
         color: assistant.color,
         agent: assistant.agent,
+        system_prompt: assistant.system_prompt,
         order,
     }
 }

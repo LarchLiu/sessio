@@ -94,6 +94,7 @@ export interface StageAssistantInfo {
   name: string;
   color: string | null;
   agent: AssistantAgentInfo;
+  systemPrompt?: string | null;
   order: number;
 }
 

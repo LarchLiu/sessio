@@ -252,6 +252,8 @@ pub struct StageAssistantInfo {
     pub name: String,
     pub color: Option<String>,
     pub agent: AssistantAgentInfo,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
     pub order: i64,
 }
 

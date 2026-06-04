@@ -190,7 +190,7 @@ export default function ThreadChatPage({
     const sent = await composer.runStartSession(prompt, {
       workspacePath,
       projectName: projectGroup.label,
-      extraContext: renderThreadWorkContext(snapshotWithSources),
+      extraContext: renderThreadWorkContext(snapshotWithSources, composer.selectedAgent),
       pendingSession: {
         historySnapshots,
         workSnapshot: {

@@ -1,4 +1,5 @@
 import type {
+  Agent,
   StageInfo,
   StageStatus,
   ThreadInfo,
@@ -127,7 +128,7 @@ function statusLabel(status: StageStatus): string {
  * Render the agent-facing context markdown. Tells the agent where it is working
  * (threadStageId) and how to report progress back through the Sessio CLI.
  */
-export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot): string {
+export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot, targetAgent?: Agent | null): string {
   const lines: string[] = [];
   lines.push("# Thread work-state snapshot");
   lines.push(`Goal: ${snapshot.goal}`);
@@ -153,6 +154,18 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot): string {
       lines.push(`    [${ref.agent}:${ref.sessionId}] ${ref.title ?? ""}`.trimEnd());
     }
   }
+  const focusedStage = snapshot.stages.find((stage) => stage.threadStageId === snapshot.focusedStageId) ?? null;
+  const assistantInstructions = focusedStage
+    ? stageAssistantInstructions(focusedStage, targetAgent)
+    : [];
+  if (assistantInstructions.length > 0) {
+    lines.push("");
+    lines.push("## Stage assistant instructions");
+    for (const instruction of assistantInstructions) {
+      lines.push(`### ${instruction.name}`);
+      lines.push(instruction.prompt);
+    }
+  }
   const focusedId = snapshot.focusedStageId;
   if (focusedId) {
     lines.push("");
@@ -173,4 +186,18 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot): string {
     lines.push("(sessio resolves to ~/.sessio/bin/sessio)");
   }
   return lines.join("\n");
+}
+
+function stageAssistantInstructions(
+  stage: ThreadWorkSnapshotStage,
+  targetAgent?: Agent | null,
+): { name: string; prompt: string }[] {
+  if (!targetAgent) return [];
+  return (stage.assistants ?? [])
+    .filter((assistant) => assistant.agent.id === targetAgent)
+    .map((assistant) => ({
+      name: assistant.name,
+      prompt: assistant.systemPrompt?.trim() ?? "",
+    }))
+    .filter((instruction) => instruction.prompt.length > 0);
 }

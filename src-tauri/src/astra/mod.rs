@@ -2129,6 +2129,16 @@ fn render_stage_task_prompt(
     {
         lines.push(format!("Current stage outcome: {outcome}"));
     }
+    let assistant_instructions =
+        stage_assistant_system_prompts(focused_stage, task.target_agent.as_str());
+    if !assistant_instructions.is_empty() {
+        lines.push(String::new());
+        lines.push("## Stage assistant instructions".to_string());
+        for (name, prompt) in assistant_instructions {
+            lines.push(format!("### {name}"));
+            lines.push(prompt);
+        }
+    }
     let completed = snapshot
         .pointer("/rollup/completed")
         .and_then(Value::as_u64)
@@ -2238,6 +2248,25 @@ fn render_stage_task_prompt(
     lines.push("Return a concise final result for Astra. Astra will decide status, summary, and outcome, then ask Sessio to update thread_stage_states.".to_string());
     lines.push("Do not mark unrelated stages complete.".to_string());
     lines.join("\n")
+}
+
+fn stage_assistant_system_prompts(
+    stage: &crate::models::StageInfo,
+    agent_id: &str,
+) -> Vec<(String, String)> {
+    stage
+        .assistants
+        .iter()
+        .filter(|assistant| assistant.agent.id == agent_id)
+        .filter_map(|assistant| {
+            let prompt = assistant.system_prompt.as_deref()?.trim();
+            if prompt.is_empty() {
+                None
+            } else {
+                Some((assistant.name.clone(), prompt.to_string()))
+            }
+        })
+        .collect()
 }
 
 fn session_ref_json(session: &SessionInfo, source_kind: &str) -> Value {
@@ -2544,6 +2573,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{AssistantAgentInfo, StageAssistantInfo};
     use crate::store::sqlite::SqliteStore;
     use std::path::Path;
 
@@ -3045,8 +3075,37 @@ mod tests {
             thread_id: "thread-1".to_string(),
             stage_id: "project-stage-1".to_string(),
             project_id: "project-1".to_string(),
-            assistant_ids: Vec::new(),
-            assistants: Vec::new(),
+            assistant_ids: vec!["assistant-codex".to_string()],
+            assistants: vec![
+                StageAssistantInfo {
+                    assistant_id: "assistant-codex".to_string(),
+                    name: "Builder".to_string(),
+                    color: None,
+                    agent: AssistantAgentInfo {
+                        id: "codex".to_string(),
+                        name: "Codex".to_string(),
+                        model: "gpt-5.3-codex".to_string(),
+                        mode: "read-write".to_string(),
+                        effort: "medium".to_string(),
+                    },
+                    system_prompt: Some("Use the stage builder instructions.".to_string()),
+                    order: 0,
+                },
+                StageAssistantInfo {
+                    assistant_id: "assistant-claude".to_string(),
+                    name: "Reviewer".to_string(),
+                    color: None,
+                    agent: AssistantAgentInfo {
+                        id: "claude".to_string(),
+                        name: "Claude".to_string(),
+                        model: "claude-sonnet-4-5".to_string(),
+                        mode: "read-only".to_string(),
+                        effort: "medium".to_string(),
+                    },
+                    system_prompt: Some("Do not include these review instructions.".to_string()),
+                    order: 1,
+                },
+            ],
             stage_type: crate::models::ProjectStageType::Custom,
             workflow_id: None,
             kind: None,
@@ -3119,6 +3178,14 @@ mod tests {
         assert!(context
             .prompt
             .contains("Stage description: Implement the API surface."));
+        assert!(context.prompt.contains("## Stage assistant instructions"));
+        assert!(context.prompt.contains("### Builder"));
+        assert!(context
+            .prompt
+            .contains("Use the stage builder instructions."));
+        assert!(!context
+            .prompt
+            .contains("Do not include these review instructions."));
         assert!(context
             .prompt
             .contains("issue [high] Need persistence check"));

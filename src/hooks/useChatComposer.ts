@@ -73,6 +73,7 @@ export interface ChatComposerController {
   setComposerError: Dispatch<SetStateAction<string | null>>;
   canSend: boolean;
   canSendWithWorkspace: (workspacePath: string | null | undefined) => boolean;
+  selectedAgent: Agent | null;
   selectedRuntimeAgent: RuntimeAgentMetadata | null;
   selectedAgentModelValue: string;
   permissionMode: string;
@@ -371,6 +372,7 @@ export function useChatComposer({
     canSend: text.trim().length > 0 && agentModelOptions.length > 0 && !sending,
     canSendWithWorkspace: (workspacePath) =>
       text.trim().length > 0 && Boolean(workspacePath) && agentModelOptions.length > 0 && !sending,
+    selectedAgent: agent || null,
     selectedRuntimeAgent,
     selectedAgentModelValue,
     permissionMode,
