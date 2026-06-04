@@ -3166,7 +3166,7 @@ fn builtin_assistant_seed_for_kind(kind: StageType) -> BuiltinAssistantSeed {
             id: "assistant-builtin-writing",
             name: "Writer",
             color: "#ec4899",
-            system_prompt: "Draft the requested content in the selected voice, structure, and level of detail while preserving the goal, audience, and constraints.",
+            system_prompt: "Draft the requested content in the selected voice, structure, and level of detail while preserving the goal, audience, and constraints. Use the available file-editing tools to write the draft into the target file before finishing; do not only return the text in chat. If no target file is specified, inspect the project or thread context to find the appropriate document path, or create a clearly named draft file and report its path.",
         },
         StageType::Editing => BuiltinAssistantSeed {
             id: "assistant-builtin-editing",
