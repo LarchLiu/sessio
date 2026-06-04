@@ -3,17 +3,18 @@ import {
   type AstraTaskProposal,
   type AstraTaskResult,
   type StageSnapshot,
+  type StartParams,
   errorResponse,
   event,
   isRequest,
   PROTOCOL_VERSION,
   response,
   type CancelParams,
-  type ConfirmParams,
   type ProtocolRequest,
   type ProtocolResponse,
   type TaskResultParams,
   type ToolCallRequest,
+  type ThreadSnapshot,
 } from "./protocol";
 
 type Writer = (value: unknown) => Promise<void> | void;
@@ -22,6 +23,7 @@ type ToolCaller = (runId: string, name: string, args?: Record<string, unknown>) 
 const cancelledRuns = new Set<string>();
 const taskResultsByRun = new Map<string, TaskResultParams["result"][]>();
 const TERMINAL_STAGE_STATUSES = new Set(["completed", "skipped"]);
+const MAX_ORCHESTRATION_ROUNDS = 25;
 
 function redirectConsoleToStderr(): void {
   console.log = (...args: unknown[]) => console.error(...args);
@@ -49,26 +51,12 @@ export async function handleRequest(
       case "astra/start": {
         const params = assertStartParams(request);
         cancelledRuns.delete(params.runId);
-        await write(event(params.runId, "status", { status: "planning" }));
-        const plan = await createPlan(params);
-        if (cancelledRuns.has(params.runId)) {
-          await write(event(params.runId, "cancelled", { status: "cancelled" }));
-          await write(response(request.id, { status: "cancelled" }));
-          return;
-        }
-        await write(event(params.runId, "plan", plan));
-        await write(response(request.id, { status: "plan_ready", plan }));
-        return;
-      }
-      case "astra/confirm": {
-        const params = request.params as Partial<ConfirmParams> | undefined;
-        if (!params || typeof params.runId !== "string" || !Array.isArray(params.approvedTaskIds)) {
-          throw new Error("runId and approvedTaskIds are required");
-        }
-        await write(event(params.runId, "status", { status: "dispatching", approvedTaskIds: params.approvedTaskIds }));
-        const tasks = (Array.isArray(params.tasks) ? params.tasks : []).filter(isTaskProposal);
-        const results = await runConfirmedPlan(params.runId, params.approvedTaskIds, tasks, callTool, write);
-        await write(response(request.id, { status: "completed", results }));
+        taskResultsByRun.set(params.runId, []);
+        void orchestrateRun(params, callTool, write).catch(async (error) => {
+          const message = errorMessage(error);
+          await write(event(params.runId, "error", { status: "errored", message }));
+        });
+        await write(response(request.id, { status: "started" }));
         return;
       }
       case "astra/cancel": {
@@ -115,66 +103,69 @@ export async function handleRequest(
   }
 }
 
-async function runConfirmedPlan(
-  runId: string,
-  approvedTaskIds: string[],
-  tasks: AstraTaskProposal[],
+async function orchestrateRun(
+  params: StartParams,
   callTool: ToolCaller,
   write: Writer,
 ): Promise<AstraTaskResult[]> {
-  const approved = tasks.filter((task) => approvedTaskIds.includes(task.id));
+  const runId = params.runId;
   const results: AstraTaskResult[] = [];
-  const completedTaskIds = new Set<string>();
+  const plannedTaskIds = new Set<string>();
 
-  while (!cancelledRuns.has(runId)) {
+  for (let round = 1; round <= MAX_ORCHESTRATION_ROUNDS && !cancelledRuns.has(runId); round += 1) {
+    await write(event(runId, "status", { status: "planning", round }));
     const snapshot = await loadProjectSnapshot(runId, callTool);
-    if (allStagesTerminal(snapshot)) {
-      await write(event(runId, "complete", { status: "completed", reason: "all_stages_terminal", results }));
+    if (allActionableStagesTerminal(snapshot)) {
+      await write(event(runId, "complete", { status: "completed", reason: "all_stages_terminal", round, results }));
       return results;
     }
 
-    const task = nextApprovedTask(approved, completedTaskIds, snapshot);
-    if (!task) {
-      await write(event(runId, "complete", { status: "completed", reason: "approved_tasks_exhausted", results }));
+    const planParams = {
+      ...params,
+      thread: snapshotThread(snapshot, params.thread),
+      snapshot,
+    };
+    const plan = normalizePlanTaskIds(await createPlan(planParams), plannedTaskIds, round);
+    await write(event(runId, "plan", { ...plan, round }));
+    for (const candidate of plan.tasks) {
+      await callTool(runId, "sessio.agent.plan_task", { ...candidate });
+    }
+
+    const tasks = dispatchableTasks(plan.tasks, snapshot);
+    if (tasks.length === 0) {
+      if (allActionableStagesTerminal(snapshot)) {
+        await write(event(runId, "complete", { status: "completed", reason: "no_actionable_stages", round, results }));
+        return results;
+      }
+      await write(event(runId, "error", {
+        status: "errored",
+        reason: "no_dispatchable_tasks",
+        message: "Astra produced no dispatchable tasks for the remaining non-terminal stages.",
+        round,
+      }));
       return results;
     }
 
-    await write(event(runId, "status", { status: "running", taskId: task.id, threadStageId: task.targetStageId ?? null }));
-    const result = await dispatchTask(runId, task, callTool, write, results);
-    completedTaskIds.add(task.id);
-    if (result.retryLimitReached) {
-      const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
-        threadStageId: task.targetStageId,
-        title: `Retry limit reached for ${task.title}`,
-        description: result.error ?? "Sessio refused another direct dispatch for this stage.",
-        severity: "high",
-      });
-      await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
-      assertMutationOk(mutation, `retry-limit issue update failed for ${task.title}`);
-      continue;
-    }
-    if (result.status === "completed" && task.targetStageId) {
-      const mutation = await callTool(runId, "sessio.stage.update", {
-        threadStageId: task.targetStageId,
-        taskId: task.id,
-        status: "completed",
-        summary: summarizeResult(result.output),
-        outcome: result.output ?? "",
-      });
-      await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
-      assertMutationOk(mutation, `stage update failed for ${task.title}`);
-    } else if (task.targetStageId) {
-      const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
-        threadStageId: task.targetStageId,
-        title: `Astra task ${task.title} did not complete`,
-        description: result.error ?? result.output ?? "Delegated task failed without output.",
-        severity: result.status === "cancelled" ? "medium" : "high",
-      });
-      await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
-      assertMutationOk(mutation, `issue update failed for ${task.title}`);
+    await write(event(runId, "status", { status: "dispatching", round, taskIds: tasks.map((task) => task.id) }));
+    for (const task of tasks) {
+      if (cancelledRuns.has(runId)) break;
+      await write(event(runId, "status", { status: "running", round, taskId: task.id, threadStageId: task.targetStageId ?? null }));
+      const result = await dispatchTask(runId, task, callTool, write, results);
+      await applyTaskResult(runId, task, result, callTool, write);
     }
   }
-  await write(event(runId, "complete", { status: "cancelled", results }));
+
+  if (cancelledRuns.has(runId)) {
+    await write(event(runId, "complete", { status: "cancelled", results }));
+    return results;
+  }
+
+  await write(event(runId, "error", {
+    status: "errored",
+    reason: "round_limit_reached",
+    message: `Astra reached the orchestration round limit (${MAX_ORCHESTRATION_ROUNDS}).`,
+    results,
+  }));
   return results;
 }
 
@@ -191,31 +182,72 @@ async function dispatchTask(
   return result;
 }
 
+async function applyTaskResult(
+  runId: string,
+  task: AstraTaskProposal,
+  result: AstraTaskResult,
+  callTool: ToolCaller,
+  write: Writer,
+): Promise<void> {
+  if (result.retryLimitReached) {
+    const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
+      threadStageId: task.targetStageId,
+      title: `Retry limit reached for ${task.title}`,
+      description: result.error ?? "Sessio refused another direct dispatch for this stage.",
+      severity: "high",
+    });
+    await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+    assertMutationOk(mutation, `retry-limit issue update failed for ${task.title}`);
+    return;
+  }
+  if (result.status === "completed" && task.targetStageId) {
+    const mutation = await callTool(runId, "sessio.stage.update", {
+      threadStageId: task.targetStageId,
+      taskId: task.id,
+      status: "completed",
+      summary: summarizeResult(result.output),
+      outcome: result.output ?? "",
+    });
+    await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+    assertMutationOk(mutation, `stage update failed for ${task.title}`);
+  } else if (task.targetStageId) {
+    const mutation = await callTool(runId, "sessio.stage.issue.add_or_update", {
+      threadStageId: task.targetStageId,
+      title: `Astra task ${task.title} did not complete`,
+      description: result.error ?? result.output ?? "Delegated task failed without output.",
+      severity: result.status === "cancelled" ? "medium" : "high",
+    });
+    await write(event(runId, "stage_update_result", { taskId: task.id, result: mutation }));
+    assertMutationOk(mutation, `issue update failed for ${task.title}`);
+  }
+}
+
 async function loadProjectSnapshot(runId: string, callTool: ToolCaller): Promise<unknown> {
   return callTool(runId, "sessio.project.snapshot", {});
 }
 
-function allStagesTerminal(snapshot: unknown): boolean {
+function allActionableStagesTerminal(snapshot: unknown): boolean {
   const stages = snapshotStages(snapshot);
-  return stages.length > 0 && stages.every((stage) => TERMINAL_STAGE_STATUSES.has(stage.status ?? ""));
+  return stages.length > 0 && actionableStages(stages).length === 0;
 }
 
-function nextApprovedTask(
-  approved: AstraTaskProposal[],
-  completedTaskIds: Set<string>,
-  snapshot: unknown,
-): AstraTaskProposal | null {
+function dispatchableTasks(tasks: AstraTaskProposal[], snapshot: unknown): AstraTaskProposal[] {
   const openStageIds = new Set(
-    snapshotStages(snapshot)
-      .filter((stage) => !TERMINAL_STAGE_STATUSES.has(stage.status ?? ""))
+    actionableStages(snapshotStages(snapshot))
       .flatMap((stage) => [stage.id, stage.stageId].filter((id): id is string => typeof id === "string" && id.length > 0)),
   );
-  const task = approved.find((candidate) => {
-    if (completedTaskIds.has(candidate.id)) return false;
-    if (!candidate.targetStageId) return true;
-    return openStageIds.has(candidate.targetStageId);
+  return tasks.filter((candidate) => !candidate.targetStageId || openStageIds.has(candidate.targetStageId));
+}
+
+function actionableStages(stages: StageSnapshot[]): StageSnapshot[] {
+  return stages.filter((stage) => !TERMINAL_STAGE_STATUSES.has(stage.status ?? "") && stageHasAssignableAgent(stage));
+}
+
+function stageHasAssignableAgent(stage: StageSnapshot): boolean {
+  return (stage.assistants ?? []).some((assistant) => {
+    const id = assistant.agent?.id;
+    return id === "codex" || id === "claude" || id === "gemini";
   });
-  return task ?? null;
 }
 
 function snapshotStages(snapshot: unknown): StageSnapshot[] {
@@ -223,6 +255,38 @@ function snapshotStages(snapshot: unknown): StageSnapshot[] {
   const thread = root.thread && typeof root.thread === "object" ? root.thread as { stages?: unknown } : null;
   const stages = Array.isArray(thread?.stages) ? thread.stages : Array.isArray(root.stages) ? root.stages : [];
   return stages.filter(isStageSnapshot);
+}
+
+function snapshotThread(snapshot: unknown, fallback: ThreadSnapshot): ThreadSnapshot {
+  const root = snapshot && typeof snapshot === "object" ? snapshot as { thread?: unknown } : {};
+  if (!root.thread || typeof root.thread !== "object") return fallback;
+  const thread = root.thread as Partial<ThreadSnapshot>;
+  if (typeof thread.id !== "string" || typeof thread.projectId !== "string" || typeof thread.goal !== "string") {
+    return fallback;
+  }
+  return {
+    id: thread.id,
+    projectId: thread.projectId,
+    goal: thread.goal,
+    description: typeof thread.description === "string" ? thread.description : null,
+    stages: Array.isArray(thread.stages) ? thread.stages.filter(isStageSnapshot) : fallback.stages,
+    sessions: Array.isArray(thread.sessions) ? thread.sessions : fallback.sessions,
+  };
+}
+
+function normalizePlanTaskIds(plan: { summary: string; tasks: AstraTaskProposal[] }, seen: Set<string>, round: number): { summary: string; tasks: AstraTaskProposal[] } {
+  const tasks = plan.tasks.map((task, index) => {
+    let id = task.id.trim() || `astra-task-${round}-${index + 1}`;
+    if (seen.has(id)) {
+      const base = id;
+      let suffix = 2;
+      while (seen.has(`${base}-r${round}-${suffix}`)) suffix += 1;
+      id = `${base}-r${round}-${suffix}`;
+    }
+    seen.add(id);
+    return id === task.id ? task : { ...task, id };
+  });
+  return { summary: plan.summary, tasks };
 }
 
 function isStageSnapshot(value: unknown): value is StageSnapshot {
@@ -248,10 +312,8 @@ function summarizeResult(output: string | undefined): string {
   return text.length > 500 ? `${text.slice(0, 500)}...` : text;
 }
 
-function isTaskProposal(value: unknown): value is AstraTaskProposal {
-  if (!value || typeof value !== "object") return false;
-  const task = value as Partial<AstraTaskProposal>;
-  return typeof task.id === "string" && typeof task.prompt === "string" && typeof task.title === "string";
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isTaskResult(value: unknown): value is TaskResultParams["result"] {

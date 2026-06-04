@@ -6,7 +6,6 @@ import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal,
 import {
   AGENT_LABEL,
   cancelThreadAstra,
-  confirmThreadAstra,
   createThreadStageIssue,
   deleteThreadStageIssue,
   listThreadAstraRuns,
@@ -158,21 +157,15 @@ function ThreadAstraPanel({
   const { t } = useI18n();
   const [runs, setRuns] = useState<AstraHandle[]>([]);
   const [prompt, setPrompt] = useState("");
-  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState<"start" | "confirm" | "cancel" | null>(null);
+  const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
   const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
-  const tasks = activeRun?.proposedTasks ?? [];
-  const canConfirm = activeRun?.status === "awaiting_approval" && selectedTaskIds.size > 0;
+  const taskHistory = runs.flatMap((run) =>
+    run.proposedTasks.map((task) => ({ run, task })),
+  );
 
   const reloadRuns = useCallback(() => {
     return listThreadAstraRuns(thread.id)
-      .then((nextRuns) => {
-        setRuns(nextRuns);
-        const awaiting = nextRuns.find((run) => run.status === "awaiting_approval");
-        if (awaiting) {
-          setSelectedTaskIds(new Set(awaiting.proposedTasks.map((task) => task.id)));
-        }
-      })
+      .then(setRuns)
       .catch((err) => onError(String(err)));
   }, [onError, thread.id]);
 
@@ -196,33 +189,12 @@ function ThreadAstraPanel({
     };
   }, [onError, onReload, reloadRuns, thread.id]);
 
-  useEffect(() => {
-    if (!activeRun || activeRun.status !== "awaiting_approval") return;
-    if (selectedTaskIds.size > 0) return;
-    setSelectedTaskIds(new Set(activeRun.proposedTasks.map((task) => task.id)));
-  }, [activeRun?.runId, activeRun?.status, activeRun?.proposedTasks, selectedTaskIds.size]);
-
   const start = async () => {
     setBusy("start");
     try {
       const run = await startThreadAstra(thread.id, prompt.trim() || null);
       setRuns((prev) => upsertRun(prev, run));
       setPrompt("");
-      await reloadRuns();
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const confirm = async () => {
-    if (!activeRun) return;
-    setBusy("confirm");
-    try {
-      const run = await confirmThreadAstra(activeRun.runId, Array.from(selectedTaskIds));
-      setRuns((prev) => upsertRun(prev, run));
-      await onReload();
       await reloadRuns();
     } catch (err) {
       onError(String(err));
@@ -243,15 +215,6 @@ function ThreadAstraPanel({
     } finally {
       setBusy(null);
     }
-  };
-
-  const toggleTask = (taskId: string) => {
-    setSelectedTaskIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(taskId)) next.delete(taskId);
-      else next.add(taskId);
-      return next;
-    });
   };
 
   return (
@@ -285,7 +248,7 @@ function ThreadAstraPanel({
           )}
           <button
             type="button"
-            disabled={busy !== null || Boolean(activeRun && isAstraActive(activeRun.status) && activeRun.status !== "awaiting_approval")}
+            disabled={busy !== null || Boolean(activeRun && isAstraActive(activeRun.status))}
             onClick={() => void start()}
             title={t("astra.start")}
             className="flex h-8 items-center gap-1.5 rounded border border-ink/15 bg-surface-panel px-2 text-caption text-ink/55 hover:bg-ink/[0.05] hover:text-ink/80 disabled:opacity-40"
@@ -305,35 +268,17 @@ function ThreadAstraPanel({
           className="min-w-0 resize-none rounded-md border border-input-border/[0.16] bg-input px-3 py-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30"
         />
 
-        {tasks.length > 0 && (
+        {taskHistory.length > 0 && (
           <div className="grid gap-2">
-            {tasks.map((task) => (
+            {taskHistory.map(({ run, task }) => (
               <AstraTaskCard
-                key={task.id}
+                key={`${run.runId}:${task.id}`}
+                run={run}
                 task={task}
+                result={run.taskResults.find((result) => result.taskId === task.id) ?? null}
                 stage={stages.find((stage) => stage.id === task.targetStageId) ?? null}
-                checked={selectedTaskIds.has(task.id)}
-                disabled={activeRun?.status !== "awaiting_approval" || busy !== null}
-                onToggle={() => toggleTask(task.id)}
               />
             ))}
-          </div>
-        )}
-
-        {activeRun?.status === "awaiting_approval" && (
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="text-caption text-ink/38">
-              {t("astra.selected_count", { count: selectedTaskIds.size })}
-            </div>
-            <button
-              type="button"
-              disabled={!canConfirm || busy !== null}
-              onClick={() => void confirm()}
-              className="flex h-8 items-center gap-1.5 rounded border border-[rgb(var(--color-emerald)/0.35)] bg-[rgb(var(--color-emerald)/0.10)] px-2.5 text-caption font-medium text-[rgb(var(--color-emerald)/0.95)] hover:bg-[rgb(var(--color-emerald)/0.16)] disabled:opacity-40"
-            >
-              {busy === "confirm" && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
-              {t("astra.dispatch")}
-            </button>
           </div>
         )}
 
@@ -378,34 +323,29 @@ function AstraDelegatedSessions({ run }: { run: AstraHandle }) {
 }
 
 function AstraTaskCard({
+  run,
   task,
+  result,
   stage,
-  checked,
-  disabled,
-  onToggle,
 }: {
+  run: AstraHandle;
   task: AstraTaskProposal;
+  result: AstraTaskResult | null;
   stage: StageInfo | null;
-  checked: boolean;
-  disabled: boolean;
-  onToggle: () => void;
 }) {
   const { t } = useI18n();
+  const status = astraTaskDisplayStatus(run, task, result);
   return (
-    <label className={"grid cursor-pointer grid-cols-[auto_minmax(0,1fr)] gap-2 rounded-md border px-2.5 py-2 " + (checked ? "border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.06)]" : "border-card-border/[0.10] bg-card-panel")}>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={onToggle}
-        className="mt-1 h-4 w-4 accent-[rgb(var(--color-emerald))]"
-      />
+    <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="truncate text-body-sm font-medium text-ink/78">{task.title}</span>
           <AgentGlyph agent={task.targetAgent} className="h-3.5 w-3.5 shrink-0" />
           <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraRiskClass(task.risk)}>
             {t(`astra.risk.${task.risk}`)}
+          </span>
+          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraTaskStatusClass(status)}>
+            {status}
           </span>
           {stage && (
             <span className="truncate text-meta text-ink/35">
@@ -417,7 +357,7 @@ function AstraTaskCard({
           {task.expectedOutput}
         </div>
       </div>
-    </label>
+    </div>
   );
 }
 
@@ -930,6 +870,28 @@ function astraResultClass(status: AstraTaskResult["status"]): string {
     default:
       return "bg-ink/[0.08] text-ink/45";
   }
+}
+
+function astraTaskDisplayStatus(
+  run: AstraHandle,
+  task: AstraTaskProposal,
+  result: AstraTaskResult | null,
+): AstraTaskResult["status"] | "running" | "planned" {
+  if (result) return result.status;
+  if (isAstraActive(run.status) && task.targetStageId && run.currentStageId === task.targetStageId) {
+    return "running";
+  }
+  return "planned";
+}
+
+function astraTaskStatusClass(status: AstraTaskResult["status"] | "running" | "planned"): string {
+  if (status === "running") {
+    return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
+  }
+  if (status === "planned") {
+    return "bg-ink/[0.06] text-ink/45";
+  }
+  return astraResultClass(status);
 }
 
 function astraResultTitle(result: AstraTaskResult): string {

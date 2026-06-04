@@ -10,7 +10,7 @@ The intended shape is:
 - Sessio Rust remains the owner of runtime state, ACP sessions, permissions, thread/stage state, memory access, and historical indexing.
 - ACP agents remain the execution workers.
 - The first product entry point is a Thread-level "Astra" action.
-- Astra proposes a thread plan first; one user confirmation is required before Sessio enters automatic execution for that run.
+- Clicking Astra grants one run-level authorization immediately; Astra may then plan, dispatch, observe results, and continue until it decides to complete, cancel, or error.
 - Astra runs as a Node sidecar: source/dev mode during development and bundled binary mode for release.
 
 The core boundary is:
@@ -35,7 +35,7 @@ V1 must deliver one closed orchestration loop. Each goal maps to a concrete mech
 3. **Decide stage updates** — judge the result and submit an `AstraStageDecision` (a request, not an applied mutation).
 4. **Receive update results** — Sessio validates and applies the decision, then returns an `AstraStageMutationResult` (success or structured error).
 5. **Re-dispatch by stage state** — refresh the snapshot and choose the next task from updated stage state.
-6. **Close the loop** — repeat until every thread stage is terminal; Sessio marks the run `completed` and emits `complete`.
+6. **Close the loop** — repeat until Astra decides the run is complete; Astra emits `complete`, and Sessio records that terminal decision.
 7. **Retry the same stage** — when unsatisfied with a result, request another delegated task for the same stage.
 8. **Bounded retries** — Sessio counts per-stage attempts and enforces a configurable retry limit, returning `retryLimitReached` to force a new decision.
 
@@ -129,7 +129,7 @@ The service should:
 - spawn and monitor the sidecar
 - maintain JSONL request ids and pending responses
 - manage active orchestration runs by thread id
-- expose Tauri commands for starting, confirming, and cancelling orchestration
+- expose Tauri commands for starting, cancelling, and listing orchestration runs
 - route Astra tool calls to `SessionStore`, `MemoryService`, and `RuntimeManager`
 - emit frontend orchestration events
 
@@ -198,7 +198,6 @@ Add frontend-facing commands:
 
 ```text
 start_thread_astra(threadId, prompt?) -> AstraHandle
-confirm_thread_astra(runId, approvedTaskIds[]) -> void
 cancel_thread_astra(runId) -> void
 ```
 
@@ -241,7 +240,7 @@ Each run should include:
 - `createdAt`
 - `updatedAt`
 - proposed tasks
-- approved task ids
+- run-level authorization metadata retained for compatibility, not per-task approval
 - delegated `sessioRuntimeSessionId` values
 - `mode` such as `auto`
 - current loop position, such as `currentStageId`
@@ -402,7 +401,7 @@ Tool behavior:
 - `sessio.project.snapshot` returns thread, stage, linked session, issue, project path, and active stage state.
 - `sessio.memory.search` returns bounded project memory search results.
 - `sessio.agent.plan_task` records a proposed task but never starts an ACP agent.
-- `sessio.agent.dispatch_task` dispatches a planned task only after the run is confirmed, waits for the delegated ACP turn to reach a terminal state, and returns an `AstraTaskResult`.
+- `sessio.agent.dispatch_task` dispatches a task that Astra has planned for the active run, waits for the delegated ACP turn to reach a terminal state, and returns an `AstraTaskResult`.
 - `sessio.stage.update` accepts Astra's stage mutation decision/request; Sessio validates and applies status, summary, and outcome through existing store APIs, then returns the updated stage or a structured error.
 - `sessio.stage.issue.add_or_update` accepts Astra's issue mutation decision/request; Sessio validates and applies blocker or review finding changes through existing issue APIs, then returns the updated issue or a structured error.
 
@@ -415,17 +414,14 @@ These mutation tools are decision-submission interfaces, not CLI or shell execut
 3. Rust starts or reuses the Astra sidecar.
 4. Rust sends `astra/start` to Astra.
 5. Astra inspects the snapshot and calls read-only tools as needed.
-6. Astra emits a complete multi-stage task plan.
-7. UI displays task cards with target stage, target agent, prompt, expected output, and risk.
-8. User approves the full plan or a selected subset once.
-9. Rust calls `confirm_thread_astra`.
-10. Rust unlocks automatic dispatch for that run only.
-11. Astra dispatches the next approved stage task through Sessio.
-12. Sessio `RuntimeManager` owns the ACP session, handles normal permission UI, and returns an `AstraTaskResult` when the delegated turn reaches a terminal state.
-13. Astra judges the task result and submits a stage or issue mutation decision to Sessio.
-14. Sessio validates the decision, applies or rejects the mutation, and returns an `AstraStageMutationResult` to Astra.
-15. Astra refreshes the snapshot, chooses the next task, and repeats the loop until all thread stages reach terminal state.
-16. When the final stage is done, Sessio marks the Astra run `completed` and emits a `complete` orchestration event.
+6. Astra emits each plan round as an event and records planned tasks through Sessio.
+7. UI displays task cards with target stage, target agent, prompt, expected output, and risk as historical orchestration activity.
+8. Astra dispatches the planned task queue through Sessio.
+9. Sessio `RuntimeManager` owns the ACP session, handles normal permission UI, and returns an `AstraTaskResult` when the delegated turn reaches a terminal state.
+10. Astra judges the task result and submits a stage or issue mutation decision to Sessio.
+11. Sessio validates the decision, applies or rejects the mutation, and returns an `AstraStageMutationResult` to Astra.
+12. Astra refreshes the snapshot, plans again, chooses the next task, and repeats the loop until it decides to complete, cancel, or error.
+13. When Astra emits a terminal event, Sessio records and emits that orchestration state; Rust does not independently decide that the thread is complete.
 
 If Astra is dissatisfied with a result, it may request another delegated task for the same stage. Sessio, not Astra, tracks attempt counts by stage id and enforces the retry limit. When the limit is reached, Sessio refuses another direct dispatch for that stage and returns `retryLimitReached`, forcing Astra to choose a different strategy such as changing agent, changing prompt, splitting the task, marking the stage blocked, or ending the run.
 
@@ -446,9 +442,9 @@ If Astra is dissatisfied with a result, it may request another delegated task fo
 - Astra cannot call the `sessio` CLI or any shell path to mutate state.
 - Astra cannot write project files directly.
 - Astra cannot spawn Codex, Claude, Gemini, or future ACP agents directly.
-- All mutation decisions must go through the Rust `AstraService` tool bridge, where Sessio validates ids, run id, thread ownership, and approval state before applying any state change.
-- `sessio.agent.dispatch_task` must fail until the run is confirmed by the user.
-- After confirmation, automatic dispatch is limited to the approved plan, originating thread, and current run id.
+- All mutation decisions must go through the Rust `AstraService` tool bridge, where Sessio validates ids, active run state, and thread ownership before applying any state change.
+- `sessio.agent.dispatch_task` must only run for tasks Astra has registered on the active run.
+- Automatic dispatch is limited to the run-level authorization created by the user's Astra click, the originating thread, and the current run id.
 - Sessio owns stage attempt counting and retry-limit enforcement; Astra cannot reset or bypass those counters.
 - Existing ACP permission requests from delegated agents continue to use the current Sessio permission UI.
 
@@ -483,7 +479,7 @@ Persist minimal run metadata:
 - status
 - mode
 - proposed tasks
-- approved task ids
+- run-level authorization metadata retained for compatibility
 - delegated session ids
 - delegated task results
 - current stage id
@@ -511,20 +507,20 @@ Each phase is independently shippable and ends with an explicit exit check. Phas
 
 **Phase 1 — Read-only context, proposal & UI** (steps 6–8)
 - Read-only tools first: `sessio.project.snapshot`, thread/stage snapshot, `sessio.memory.search`, and `sessio.agent.plan_task` (proposal only, no ACP start).
-- Tauri commands + frontend API wrappers for start/confirm/cancel; Thread-level "Astra" UI with plan preview and full-plan/subset approval.
+- Tauri commands + frontend API wrappers for start/cancel/list; Thread-level "Astra" UI with run-level start authorization and historical plan/task display.
 - Exit: starting on a real thread returns a run handle and emits a `plan` event whose proposals carry valid thread/stage ids; memory failure degrades to a tool error without aborting the run.
 
-**Phase 2 — Single approval & blocking dispatch (Goals 1–2)** (step 9)
-- Confirmed-run task dispatch through existing `RuntimeManager`, blocking each Astra tool response until the delegated ACP turn reaches a terminal state and returning `AstraTaskResult`; timeout + cancel unblock it.
-- Exit: dispatch fails before confirmation and for tasks outside the confirmed plan; after confirmation a single task dispatches and returns a structured result at the turn's terminal state; a permission request mid-turn blocks then resumes; cancel kills only this run's sessions.
+**Phase 2 — Run-authorized blocking dispatch (Goals 1–2)** (step 9)
+- Active-run task dispatch through existing `RuntimeManager`, blocking each Astra tool response until the delegated ACP turn reaches a terminal state and returning `AstraTaskResult`; timeout + cancel unblock it.
+- Exit: dispatch fails for inactive runs and tasks not registered by Astra; an active run dispatches a task and returns a structured result at the turn's terminal state; a permission request mid-turn blocks then resumes; cancel kills only this run's sessions.
 
 **Phase 3 — Stage update & issue: decide → execute → report (Goals 3–4)** (step 11)
 - `sessio.stage.update` and `sessio.stage.issue.add_or_update` as decision-submission tools: strict Rust-side validation, Sessio-side execution (store APIs / `sessio` CLI stage entrypoint), and an `AstraStageMutationResult` (success or structured error) returned to Astra.
-- Exit: both success and failure of a stage mutation reach Astra; invalid ids / unconfirmed run are rejected in Rust; Astra cannot treat a failed mutation as a completed stage.
+- Exit: both success and failure of a stage mutation reach Astra; invalid ids / inactive run mutations are rejected in Rust; Astra cannot treat a failed mutation as a completed stage.
 
 **Phase 4 — Autonomous loop & termination (Goals 5–6)** (step 10)
-- The automatic orchestration loop: snapshot refresh after each task/mutation result, next-task selection, and the final-stage `completed` terminal condition that emits `complete`.
-- Exit: after a single whole-plan approval the loop advances all stages with no per-task prompts; the last stage reaching terminal state marks the run `completed`; loop progress (`currentStageId`, completed task ids) is visible in the UI.
+- The automatic orchestration loop: snapshot refresh after each plan queue is consumed, queued task dispatch, and the Astra terminal decision that emits `complete`.
+- Exit: after the initial run-level authorization the loop advances stages with no per-task prompts; Astra's terminal `complete` marks the run `completed`; loop progress (`currentStageId`, completed task ids) is visible in the UI.
 
 **Phase 5 — Retry & Sessio threshold circuit breaker (Goals 7–8)** (steps 10, 13)
 - Same-stage retry branch in the loop; Sessio-side retry-limit enforcement so repeated dispatches for the same stage are refused with `retryLimitReached`, forcing Astra to re-decide (switch agent / change prompt / split task / mark stage blocked / abort run).
@@ -545,7 +541,7 @@ Each phase is independently shippable and ends with an explicit exit check. Phas
 After this document is written:
 
 ```bash
-rg -n "Sessio Astra Plan|AstraService|confirm_thread_astra|externalBin" docs/sessio-astra-plan.md
+rg -n "Sessio Astra Plan|AstraService|start_thread_astra|externalBin" docs/sessio-astra-plan.md
 git status --short docs/sessio-astra-plan.md
 ```
 
@@ -554,7 +550,7 @@ git status --short docs/sessio-astra-plan.md
 - JSONL parser handles partial lines, invalid JSON, unknown methods, and duplicate ids.
 - Protocol decoding rejects missing `protocolVersion`.
 - Tool bridge rejects unknown tool names.
-- `sessio.agent.dispatch_task` rejects calls before run confirmation and rejects tasks outside the confirmed plan.
+- `sessio.agent.dispatch_task` rejects inactive runs and tasks not registered by Astra.
 - `sessio.agent.dispatch_task` returns an `AstraTaskResult` when a delegated ACP turn completes, fails, is cancelled, or errors.
 - Stage and issue mutation requests are validated and executed by Sessio, then return success/failure to Astra.
 - Astra cannot bypass Sessio validation by invoking CLI or shell-based state mutation paths.
@@ -565,13 +561,13 @@ git status --short docs/sessio-astra-plan.md
 
 - Starting orchestration on a thread returns a run handle and emits a plan event.
 - Plan proposals contain valid thread and stage ids.
-- Confirming a plan starts automatic dispatch only for approved tasks in that run.
-- Cancelling before confirmation starts no ACP sessions.
+- Starting a run grants automatic dispatch only for Astra-registered tasks in that run.
+- Cancelling before the first dispatch starts no ACP sessions.
 - Cancelling after dispatch cancels only sessions launched by that orchestration run.
 - The loop refreshes the snapshot after each task result and stage mutation result before choosing the next task.
 - Successful stage mutation decisions advance to the next stage.
 - Failed stage mutation decisions are reported to Astra and do not let Astra treat the stage as completed.
-- Final-stage completion marks the run `completed` and emits `complete`.
+- Astra terminal completion marks the run `completed` and emits `complete`; Rust does not independently infer completion from stage state or approved task counts.
 - Unsatisfactory task results can retry the same stage until Sessio's retry threshold is reached.
 - Retry-limit refusal forces Astra into a different decision branch instead of another direct dispatch.
 - Task failures create or update a stage issue and do not trigger unbounded retries.
@@ -590,7 +586,7 @@ git status --short docs/sessio-astra-plan.md
 ## Assumptions
 
 - V1 is triggered from a Thread-level "Astra" action.
-- V1 uses auto mode: user confirmation approves the run plan once, then Astra may continue dispatching approved work within that run.
+- V1 uses auto mode: clicking Astra authorizes one orchestration run, then Astra may continue planning and dispatching registered work within that run.
 - Astra uses stdio JSONL rather than localhost HTTP.
 - Astra is not added to the indexed historical `Agent` enum in V1.
 - Sessio Rust remains the owner of ACP runtime lifecycle and permission routing.

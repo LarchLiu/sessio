@@ -67,12 +67,6 @@ export interface AstraModelConfig {
   fauxPlanJson?: string | null;
 }
 
-export interface ConfirmParams {
-  runId: string;
-  approvedTaskIds: string[];
-  tasks?: AstraTaskProposal[];
-}
-
 export interface CancelParams {
   runId: string;
 }

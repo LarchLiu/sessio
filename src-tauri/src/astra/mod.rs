@@ -197,13 +197,6 @@ pub struct StartThreadAstraRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfirmThreadAstraRequest {
-    pub run_id: String,
-    pub approved_task_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CancelThreadAstraRequest {
     pub run_id: String,
 }
@@ -505,123 +498,11 @@ impl AstraService {
             }
             bail!("Astra start failed: {}", error.code);
         }
-
-        let result = response.result.unwrap_or_else(|| json!({}));
-        let summary = result
-            .get("plan")
-            .and_then(|plan| plan.get("summary"))
-            .cloned()
-            .unwrap_or(Value::Null);
-        let tasks = result
-            .get("plan")
-            .and_then(|plan| plan.get("tasks"))
-            .cloned()
-            .map(serde_json::from_value::<Vec<AstraTaskProposal>>)
-            .transpose()?
-            .unwrap_or_default();
-        let (next, applied) = self.mutate_run(run_id, move |next| {
-            if !next.status.active() {
-                return Ok(false);
-            }
-            next.status = AstraRunStatus::AwaitingApproval;
-            next.proposed_tasks = tasks;
-            next.error = None;
-            Ok(true)
-        })?;
-        if !applied {
-            return Ok(());
-        }
         log::info!(
-            "[sessio-astra:run:plan] runId={} threadId={} taskCount={}",
-            next.run_id,
-            next.thread_id,
-            next.proposed_tasks.len()
+            "[sessio-astra:run:orchestrator-started] runId={} response={:?}",
+            run_id,
+            response.result
         );
-        self.emit(
-            &next,
-            "plan",
-            json!({
-                "tasks": next.proposed_tasks,
-                "summary": summary,
-            }),
-        );
-        Ok(())
-    }
-
-    pub fn confirm_thread_astra(&self, req: ConfirmThreadAstraRequest) -> Result<AstraHandle> {
-        let requested_approved = req.approved_task_ids;
-        let (run, should_spawn) = self.mutate_run(&req.run_id, move |run| {
-            // Idempotent: a run that is already dispatching/running/completed has
-            // been confirmed once; return it without spawning a second worker.
-            if matches!(
-                run.status,
-                AstraRunStatus::Dispatching | AstraRunStatus::Running | AstraRunStatus::Completed
-            ) {
-                return Ok(false);
-            }
-            if !matches!(run.status, AstraRunStatus::AwaitingApproval) {
-                bail!("Astra run is not awaiting approval");
-            }
-            let approved: Vec<String> = requested_approved
-                .into_iter()
-                .filter(|id| run.proposed_tasks.iter().any(|task| task.id == *id))
-                .collect();
-            if approved.is_empty() {
-                bail!("at least one approved task id is required");
-            }
-
-            run.status = AstraRunStatus::Dispatching;
-            run.approved_task_ids = approved;
-            Ok(true)
-        })?;
-        if !should_spawn {
-            return Ok(run_to_handle(run));
-        }
-        log::info!(
-            "[sessio-astra:run:confirm] runId={} threadId={} approvedTaskIds={:?}",
-            run.run_id,
-            run.thread_id,
-            run.approved_task_ids
-        );
-        self.emit(
-            &run,
-            "status",
-            json!({ "status": run.status.as_str(), "approvedTaskIds": run.approved_task_ids }),
-        );
-
-        let service = self.clone();
-        let run_for_worker = run.clone();
-        let approved_for_worker = run.approved_task_ids.clone();
-        thread::spawn(move || {
-            if let Err(error) = service.run_confirmed_plan(run_for_worker, approved_for_worker) {
-                log::warn!("[sessio-astra:run:confirm-worker] {error}");
-            }
-        });
-
-        Ok(run_to_handle(run))
-    }
-
-    fn run_confirmed_plan(&self, run: AstraRun, approved: Vec<String>) -> Result<()> {
-        let response = self.request(
-            "astra/confirm",
-            json!({
-                "runId": run.run_id,
-                "approvedTaskIds": approved,
-                "tasks": run.proposed_tasks,
-            }),
-            Some(Duration::from_secs(60 * 60 * 6)),
-        )?;
-        if let Some(error) = response.error {
-            let (failed, changed) = self.update_active_status(
-                &run.run_id,
-                AstraRunStatus::Errored,
-                Some(error.message.clone()),
-            )?;
-            if changed {
-                self.emit(&failed, "error", json!({ "message": error.message }));
-            }
-            bail!("Astra confirmation failed: {}", error.code);
-        }
         Ok(())
     }
 
@@ -760,14 +641,8 @@ impl AstraService {
         let task_id = task.id.clone();
         let stage_id_for_run = stage_id.clone();
         let (next, decision) = self.mutate_run(&run.run_id, move |next| {
-            if !matches!(
-                next.status,
-                AstraRunStatus::Dispatching | AstraRunStatus::Running
-            ) {
-                bail!("Astra run is not confirmed: {}", next.run_id);
-            }
-            if !next.approved_task_ids.iter().any(|id| id == &task_id) {
-                bail!("task is not approved: {}", task_id);
+            if !next.status.active() {
+                bail!("Astra run is not active: {}", next.run_id);
             }
 
             next.status = AstraRunStatus::Running;
@@ -1581,7 +1456,6 @@ impl AstraService {
                         .any(|existing| existing.id == task.id)
                     {
                         next.proposed_tasks.push(task);
-                        next.status = AstraRunStatus::AwaitingApproval;
                     }
                     Ok(())
                 })?;
@@ -1595,9 +1469,7 @@ impl AstraService {
                     .get("taskId")
                     .and_then(Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("taskId is required"))?;
-                if !run.approved_task_ids.iter().any(|id| id == task_id) {
-                    bail!("task is not approved: {task_id}");
-                }
+                let run = self.load_run(&call.run_id)?;
                 let task = run
                     .proposed_tasks
                     .iter()
@@ -1761,33 +1633,53 @@ impl AstraService {
             let mut emit = Some((event_type.clone(), event_data.clone()));
             match event_type.as_str() {
                 "plan" => {
+                    if !run.status.active() {
+                        return Ok(None);
+                    }
                     if let Some(tasks) = event_data.get("tasks") {
-                        run.proposed_tasks =
-                            serde_json::from_value(tasks.clone()).unwrap_or_default();
-                        run.status = AstraRunStatus::AwaitingApproval;
+                        let tasks = serde_json::from_value::<Vec<AstraTaskProposal>>(tasks.clone())
+                            .unwrap_or_default();
+                        for task in tasks {
+                            if !run
+                                .proposed_tasks
+                                .iter()
+                                .any(|existing| existing.id == task.id)
+                            {
+                                run.proposed_tasks.push(task);
+                            }
+                        }
+                    }
+                }
+                "status" => {
+                    if !run.status.active() {
+                        return Ok(None);
+                    }
+                    if let Some(status) = event_data
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .and_then(AstraRunStatus::from_db_str)
+                    {
+                        run.status = status;
+                        if run.status.active() {
+                            run.error = None;
+                        }
                     }
                 }
                 "cancelled" => run.status = AstraRunStatus::Cancelled,
-                "error" => run.status = AstraRunStatus::Errored,
+                "error" => {
+                    run.status = AstraRunStatus::Errored;
+                    run.error = event_data
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string);
+                }
                 "complete" => {
                     let status = event_data.get("status").and_then(Value::as_str);
-                    let reason = event_data.get("reason").and_then(Value::as_str);
                     if status == Some("cancelled") {
                         run.status = AstraRunStatus::Cancelled;
-                    } else if astra_run_all_approved_tasks_finished(run)
-                        || reason == Some("all_stages_terminal")
-                    {
+                    } else {
                         run.status = AstraRunStatus::Completed;
                         run.error = None;
-                    } else {
-                        run.status = AstraRunStatus::Running;
-                        let message = "Astra reported complete before all approved tasks finished"
-                            .to_string();
-                        run.error = Some(message.clone());
-                        emit = Some((
-                            "error".to_string(),
-                            json!({ "message": message, "originalEvent": "complete" }),
-                        ));
                     }
                 }
                 _ => emit = None,
@@ -2626,15 +2518,6 @@ fn extract_result_text(value: &Value) -> Option<String> {
     }
 }
 
-fn astra_run_all_approved_tasks_finished(run: &AstraRun) -> bool {
-    !run.approved_task_ids.is_empty()
-        && run.approved_task_ids.iter().all(|task_id| {
-            run.task_results
-                .iter()
-                .any(|result| &result.task_id == task_id)
-        })
-}
-
 #[cfg(test)]
 fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
     !thread.stages.is_empty()
@@ -3243,55 +3126,6 @@ mod tests {
         assert!(context
             .prompt
             .contains("Implement and verify the missing API."));
-    }
-
-    #[test]
-    fn astra_run_completion_waits_for_all_approved_tasks() {
-        let run = AstraRun {
-            run_id: "run-1".to_string(),
-            thread_id: "thread-1".to_string(),
-            project_id: "project-1".to_string(),
-            project_path: "/tmp".to_string(),
-            status: AstraRunStatus::Running,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: vec!["task-1".to_string(), "task-2".to_string()],
-            delegated_session_ids: vec!["runtime-1".to_string()],
-            task_results: vec![AstraTaskResult {
-                task_id: "task-1".to_string(),
-                thread_stage_id: Some("stage-1".to_string()),
-                sessio_runtime_session_id: "runtime-1".to_string(),
-                turn_id: Some("turn-1".to_string()),
-                status: AstraTaskResultStatus::Completed,
-                output: "done".to_string(),
-                error: None,
-                attempt_count: 1,
-                retry_limit_reached: false,
-                completed_at: 1,
-            }],
-            mode: "auto".to_string(),
-            current_stage_id: Some("stage-1".to_string()),
-            completed_task_ids: vec!["task-1".to_string()],
-            stage_attempt_counts: HashMap::from([("stage-1".to_string(), 1)]),
-            retry_limit: 3,
-            error: None,
-            created_at: 1,
-            updated_at: 1,
-        };
-        assert!(!astra_run_all_approved_tasks_finished(&run));
-        let mut complete = run;
-        complete.task_results.push(AstraTaskResult {
-            task_id: "task-2".to_string(),
-            thread_stage_id: Some("stage-2".to_string()),
-            sessio_runtime_session_id: "runtime-2".to_string(),
-            turn_id: Some("turn-2".to_string()),
-            status: AstraTaskResultStatus::Completed,
-            output: "done".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            completed_at: 2,
-        });
-        assert!(astra_run_all_approved_tasks_finished(&complete));
     }
 
     #[test]

@@ -24,10 +24,7 @@ use agents::runtime::types::{
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
-use astra::{
-    AstraHandle, AstraService, CancelThreadAstraRequest, ConfirmThreadAstraRequest,
-    StartThreadAstraRequest,
-};
+use astra::{AstraHandle, AstraService, CancelThreadAstraRequest, StartThreadAstraRequest};
 use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
@@ -2688,14 +2685,6 @@ fn start_thread_astra(
 }
 
 #[tauri::command]
-fn confirm_thread_astra(
-    req: ConfirmThreadAstraRequest,
-    astra: State<'_, AstraService>,
-) -> Result<AstraHandle, String> {
-    astra.confirm_thread_astra(req).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn cancel_thread_astra(
     req: CancelThreadAstraRequest,
     astra: State<'_, AstraService>,
@@ -3211,7 +3200,6 @@ pub fn run() {
             set_agent_session_config_option,
             respond_agent_permission,
             start_thread_astra,
-            confirm_thread_astra,
             cancel_thread_astra,
             list_thread_astra_runs,
             remove_session_files,

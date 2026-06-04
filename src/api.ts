@@ -955,15 +955,6 @@ export async function startThreadAstra(
   });
 }
 
-export async function confirmThreadAstra(
-  runId: string,
-  approvedTaskIds: string[],
-): Promise<AstraHandle> {
-  return invoke<AstraHandle>("confirm_thread_astra", {
-    req: { runId, approvedTaskIds },
-  });
-}
-
 export async function cancelThreadAstra(runId: string): Promise<AstraHandle> {
   return invoke<AstraHandle>("cancel_thread_astra", { req: { runId } });
 }

@@ -451,8 +451,9 @@ function deterministicPlan(params: StartParams): AstraPlan {
   const stages = (params.thread.stages ?? []).slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const tasks: AstraTaskProposal[] = [];
   const pendingStages = stages.filter((stage) => stage.status !== "completed" && stage.status !== "skipped");
+  const actionableStages = pendingStages.filter((stage) => pickAgent(stage));
 
-  for (const stage of pendingStages) {
+  for (const stage of actionableStages) {
     const blocked = stage.status === "blocked";
     const targetAgent = pickAgent(stage);
     if (!targetAgent) continue;
