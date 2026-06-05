@@ -602,6 +602,13 @@ CREATE TABLE IF NOT EXISTS astra_runs (
     completed_task_ids_json    TEXT NOT NULL DEFAULT '[]',
     stage_attempt_counts_json  TEXT NOT NULL DEFAULT '{}',
     retry_limit                INTEGER NOT NULL DEFAULT 3,
+    planner_backend            TEXT,
+    decision_backend           TEXT,
+    round_index                INTEGER,
+    round_limit                INTEGER NOT NULL DEFAULT 3,
+    terminal_reason            TEXT,
+    last_error_code            TEXT,
+    last_error_message         TEXT,
     error                      TEXT,
     created_at                 INTEGER NOT NULL,
     updated_at                 INTEGER NOT NULL,
@@ -621,6 +628,12 @@ CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_active
 const SCHEMA_CURRENT_SESSION_RENAME_TITLE: &str = r#"
 ALTER TABLE sessions ADD COLUMN rename_title TEXT;
 "#;
+
+const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
+    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
+    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
+    planner_backend, decision_backend, round_index, round_limit, terminal_reason,
+    last_error_code, last_error_message, error, created_at, updated_at";
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -696,7 +709,53 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         seed_builtins(conn)?;
     }
+    ensure_v5_astra_columns(conn)?;
     Ok(())
+}
+
+fn ensure_v5_astra_columns(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn, "astra_runs")?;
+    for (name, ddl) in [
+        (
+            "planner_backend",
+            "ALTER TABLE astra_runs ADD COLUMN planner_backend TEXT",
+        ),
+        (
+            "decision_backend",
+            "ALTER TABLE astra_runs ADD COLUMN decision_backend TEXT",
+        ),
+        (
+            "round_index",
+            "ALTER TABLE astra_runs ADD COLUMN round_index INTEGER",
+        ),
+        (
+            "round_limit",
+            "ALTER TABLE astra_runs ADD COLUMN round_limit INTEGER NOT NULL DEFAULT 3",
+        ),
+        (
+            "terminal_reason",
+            "ALTER TABLE astra_runs ADD COLUMN terminal_reason TEXT",
+        ),
+        (
+            "last_error_code",
+            "ALTER TABLE astra_runs ADD COLUMN last_error_code TEXT",
+        ),
+        (
+            "last_error_message",
+            "ALTER TABLE astra_runs ADD COLUMN last_error_message TEXT",
+        ),
+    ] {
+        if !columns.contains(name) {
+            let _ = conn.execute_batch(ddl);
+        }
+    }
+    Ok(())
+}
+
+fn table_columns(conn: &Connection, table_name: &str) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
 }
 
 /// Seed all builtin data in dependency order: workflows, their stages,
@@ -1278,9 +1337,7 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
             enabled: false,
             transport: RuntimeTransportKind::Acp,
             commands: AgentCommandsInfo {
-                session: vec![
-                    "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
-                ],
+                session: vec!["npx -y -- @google/gemini-cli@latest --experimental-acp".to_string()],
                 version: vec!["gemini --version".to_string()],
             },
         },
@@ -1913,10 +1970,7 @@ fn stable_project_id(path: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
-    format!(
-        "project-{}",
-        &hex::encode(hasher.finalize())[..16]
-    )
+    format!("project-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
@@ -1925,10 +1979,7 @@ fn stable_kanban_id(project_id: &str, title: &str, now: i64) -> String {
     hasher.update(project_id.as_bytes());
     hasher.update(title.as_bytes());
     hasher.update(now.to_string().as_bytes());
-    format!(
-        "kanban-{}",
-        &hex::encode(hasher.finalize())[..16]
-    )
+    format!("kanban-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_issue_id(thread_stage_id: &str, title: &str, now: i64, nonce: &str) -> String {
@@ -1946,10 +1997,7 @@ fn stable_workflow_id(name: &str, now: i64) -> String {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     hasher.update(now.to_string().as_bytes());
-    format!(
-        "workflow-{}",
-        &hex::encode(hasher.finalize())[..16]
-    )
+    format!("workflow-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_assistant_id(
@@ -1968,10 +2016,7 @@ fn stable_assistant_id(
     hasher.update(name.as_bytes());
     hasher.update(model.as_bytes());
     hasher.update(now.to_string().as_bytes());
-    format!(
-        "assistant-{}",
-        &hex::encode(hasher.finalize())[..16]
-    )
+    format!("assistant-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_project_builtin_assistant_id(project_id: &str, template_assistant_id: &str) -> String {
@@ -1979,10 +2024,7 @@ fn stable_project_builtin_assistant_id(project_id: &str, template_assistant_id: 
     let mut hasher = Sha256::new();
     hasher.update(project_id.as_bytes());
     hasher.update(template_assistant_id.as_bytes());
-    format!(
-        "assistant-{}",
-        &hex::encode(hasher.finalize())[..16]
-    )
+    format!("assistant-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_project_assistant_id(project_id: &str, template_assistant_id: &str) -> String {
@@ -1999,10 +2041,7 @@ fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
     hasher.update(project_id.as_bytes());
     hasher.update(goal.as_bytes());
     hasher.update(now.to_string().as_bytes());
-    format!(
-        "thread-{}",
-        &hex::encode(hasher.finalize())[..16]
-    )
+    format!("thread-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_project_stage_id(
@@ -2042,10 +2081,7 @@ fn stable_thread_stage_id(
     hasher.update(stage_id.as_bytes());
     hasher.update(assistant_id.as_bytes());
     hasher.update(order.to_string().as_bytes());
-    format!(
-        "thread-stage-{}",
-        &hex::encode(hasher.finalize())[..16]
-    )
+    format!("thread-stage-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 #[cfg(test)]
@@ -2352,9 +2388,16 @@ fn astra_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunRecor
         completed_task_ids_json: row.get(11)?,
         stage_attempt_counts_json: row.get(12)?,
         retry_limit: row.get(13)?,
-        error: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        planner_backend: row.get(14)?,
+        decision_backend: row.get(15)?,
+        round_index: row.get(16)?,
+        round_limit: row.get(17)?,
+        terminal_reason: row.get(18)?,
+        last_error_code: row.get(19)?,
+        last_error_message: row.get(20)?,
+        error: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
     })
 }
 
@@ -4201,9 +4244,13 @@ impl SessionStore for SqliteStore {
             None => current.name,
         };
         let next_description = match description {
-            Some(Some(value)) => if value
-                .trim()
-                .is_empty() { None } else { Some(value.trim().to_string()) },
+            Some(Some(value)) => {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                }
+            }
             Some(None) => None,
             None => current.description,
         };
@@ -4691,16 +4738,24 @@ impl SessionStore for SqliteStore {
             None => current.name,
         };
         let next_system_prompt = match system_prompt {
-            Some(Some(value)) => if value
-                .trim()
-                .is_empty() { None } else { Some(value.trim().to_string()) },
+            Some(Some(value)) => {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                }
+            }
             Some(None) => None,
             None => current.system_prompt,
         };
         let next_color = match color {
-            Some(Some(value)) => if value
-                .trim()
-                .is_empty() { None } else { Some(value.trim().to_string()) },
+            Some(Some(value)) => {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                }
+            }
             Some(None) => None,
             None => current.color,
         };
@@ -4810,9 +4865,13 @@ impl SessionStore for SqliteStore {
             None => current.goal,
         };
         let next_description = match description {
-            Some(Some(value)) => if value
-                .trim()
-                .is_empty() { None } else { Some(value.trim().to_string()) },
+            Some(Some(value)) => {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                }
+            }
             Some(None) => None,
             None => current.description,
         };
@@ -4983,16 +5042,24 @@ impl SessionStore for SqliteStore {
             None => current.name.unwrap_or_default(),
         };
         let next_description = match description {
-            Some(Some(value)) => if value
-                .trim()
-                .is_empty() { None } else { Some(value.trim().to_string()) },
+            Some(Some(value)) => {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                }
+            }
             Some(None) => None,
             None => current.description,
         };
         let next_icon = match icon {
-            Some(Some(value)) => if value
-                .trim()
-                .is_empty() { None } else { Some(value.trim().to_string()) },
+            Some(Some(value)) => {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                }
+            }
             Some(None) => None,
             None => current.icon,
         };
@@ -5690,9 +5757,13 @@ impl SessionStore for SqliteStore {
             None => current.title,
         };
         let next_description = match description {
-            Some(Some(value)) => if value
-                .trim()
-                .is_empty() { None } else { Some(value.trim().to_string()) },
+            Some(Some(value)) => {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                }
+            }
             Some(None) => None,
             None => current.description,
         };
@@ -5926,8 +5997,9 @@ impl SessionStore for SqliteStore {
                 run_id, thread_id, project_id, project_path, status, mode,
                 proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
                 current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
-                error, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                planner_backend, decision_backend, round_index, round_limit, terminal_reason,
+                last_error_code, last_error_message, error, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(run_id) DO UPDATE SET
                 thread_id = excluded.thread_id,
                 project_id = excluded.project_id,
@@ -5942,6 +6014,13 @@ impl SessionStore for SqliteStore {
                 completed_task_ids_json = excluded.completed_task_ids_json,
                 stage_attempt_counts_json = excluded.stage_attempt_counts_json,
                 retry_limit = excluded.retry_limit,
+                planner_backend = excluded.planner_backend,
+                decision_backend = excluded.decision_backend,
+                round_index = excluded.round_index,
+                round_limit = excluded.round_limit,
+                terminal_reason = excluded.terminal_reason,
+                last_error_code = excluded.last_error_code,
+                last_error_message = excluded.last_error_message,
                 error = excluded.error,
                 updated_at = excluded.updated_at",
             params![
@@ -5959,6 +6038,13 @@ impl SessionStore for SqliteStore {
                 run.completed_task_ids_json,
                 run.stage_attempt_counts_json,
                 run.retry_limit,
+                run.planner_backend,
+                run.decision_backend,
+                run.round_index,
+                run.round_limit,
+                run.terminal_reason,
+                run.last_error_code,
+                run.last_error_message,
                 run.error,
                 run.created_at,
                 run.updated_at,
@@ -5969,50 +6055,36 @@ impl SessionStore for SqliteStore {
 
     fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT run_id, thread_id, project_id, project_path, status, mode,
-                    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
-                    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
-                    error, created_at, updated_at
-             FROM astra_runs
-             WHERE run_id = ?",
-            params![run_id],
-            astra_run_from_row,
-        )
-        .optional()
-        .map_err(Into::into)
+        let sql = format!("SELECT {ASTRA_RUN_SELECT} FROM astra_runs WHERE run_id = ?");
+        conn.query_row(&sql, params![run_id], astra_run_from_row)
+            .optional()
+            .map_err(Into::into)
     }
 
     fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT run_id, thread_id, project_id, project_path, status, mode,
-                    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
-                    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
-                    error, created_at, updated_at
+        let sql = format!(
+            "SELECT {ASTRA_RUN_SELECT}
              FROM astra_runs
              WHERE thread_id = ?
                AND status IN ('planning', 'awaiting_approval', 'dispatching', 'running')
              ORDER BY updated_at DESC
-             LIMIT 1",
-            params![thread_id],
-            astra_run_from_row,
-        )
-        .optional()
-        .map_err(Into::into)
+             LIMIT 1"
+        );
+        conn.query_row(&sql, params![thread_id], astra_run_from_row)
+            .optional()
+            .map_err(Into::into)
     }
 
     fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT run_id, thread_id, project_id, project_path, status, mode,
-                    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
-                    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
-                    error, created_at, updated_at
+        let sql = format!(
+            "SELECT {ASTRA_RUN_SELECT}
              FROM astra_runs
              WHERE thread_id = ?
-             ORDER BY updated_at DESC, created_at DESC",
-        )?;
+             ORDER BY updated_at DESC, created_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![thread_id], astra_run_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -6021,28 +6093,66 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let now = now_ms();
         let mut active: Vec<AstraRunRecord> = {
-            let mut stmt = conn.prepare(
-                "SELECT run_id, thread_id, project_id, project_path, status, mode,
-                        proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
-                        current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
-                        error, created_at, updated_at
+            let sql = format!(
+                "SELECT {ASTRA_RUN_SELECT}
                  FROM astra_runs
-                 WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')",
-            )?;
+                 WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')"
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map([], astra_run_from_row)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         conn.execute(
             "UPDATE astra_runs
-             SET status = 'interrupted', updated_at = ?
+             SET status = 'interrupted',
+                 terminal_reason = COALESCE(terminal_reason, 'process_recovered_active_run'),
+                 last_error_code = COALESCE(last_error_code, 'worker_interrupted'),
+                 last_error_message = COALESCE(last_error_message, 'Astra run was active during startup recovery'),
+                 error = COALESCE(error, 'Astra run was active during startup recovery'),
+                 updated_at = ?
              WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')",
             params![now],
         )?;
         for run in &mut active {
             run.status = "interrupted".to_string();
+            if run.terminal_reason.is_none() {
+                run.terminal_reason = Some("process_recovered_active_run".to_string());
+            }
+            if run.last_error_code.is_none() {
+                run.last_error_code = Some("worker_interrupted".to_string());
+            }
+            if run.last_error_message.is_none() {
+                run.last_error_message =
+                    Some("Astra run was active during startup recovery".to_string());
+            }
+            if run.error.is_none() {
+                run.error = Some("Astra run was active during startup recovery".to_string());
+            }
             run.updated_at = now;
         }
         Ok(active)
+    }
+
+    fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut changed = 0usize;
+        for session_id in session_ids {
+            changed += tx.execute(
+                "UPDATE sessions
+                 SET available = 0, archived = 1, last_indexed_at = ?
+                 WHERE session_id = ?
+                   AND partial = 1
+                   AND file_size = 0
+                   AND available = 1",
+                params![now_ms(), session_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
@@ -7013,6 +7123,13 @@ mod migration_tests {
         assert!(astra_columns.contains(&"completed_task_ids_json".to_string()));
         assert!(astra_columns.contains(&"stage_attempt_counts_json".to_string()));
         assert!(astra_columns.contains(&"retry_limit".to_string()));
+        assert!(astra_columns.contains(&"planner_backend".to_string()));
+        assert!(astra_columns.contains(&"decision_backend".to_string()));
+        assert!(astra_columns.contains(&"round_index".to_string()));
+        assert!(astra_columns.contains(&"round_limit".to_string()));
+        assert!(astra_columns.contains(&"terminal_reason".to_string()));
+        assert!(astra_columns.contains(&"last_error_code".to_string()));
+        assert!(astra_columns.contains(&"last_error_message".to_string()));
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
@@ -7152,6 +7269,13 @@ mod migration_tests {
             completed_task_ids_json: r#"["task-1"]"#.to_string(),
             stage_attempt_counts_json: r#"{"stage-1":1}"#.to_string(),
             retry_limit: 3,
+            planner_backend: Some("deterministic".to_string()),
+            decision_backend: Some("deterministic".to_string()),
+            round_index: Some(0),
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
             error: None,
             created_at: 10,
             updated_at: 20,
@@ -7165,15 +7289,112 @@ mod migration_tests {
         assert_eq!(interrupted_rows.len(), 1);
         assert_eq!(interrupted_rows[0].run_id, "astra-run-1");
         assert_eq!(interrupted_rows[0].status, "interrupted");
+        assert_eq!(
+            interrupted_rows[0].terminal_reason.as_deref(),
+            Some("process_recovered_active_run")
+        );
+        assert_eq!(
+            interrupted_rows[0].last_error_code.as_deref(),
+            Some("worker_interrupted")
+        );
         assert!(store.get_active_astra_run(&thread.id).unwrap().is_none());
         let interrupted = store.get_astra_run("astra-run-1").unwrap().unwrap();
         assert_eq!(interrupted.status, "interrupted");
+
+        let pending_review = AstraRunRecord {
+            run_id: "astra-run-pending-review".to_string(),
+            status: "completed".to_string(),
+            terminal_reason: Some("pending_human_review".to_string()),
+            error: None,
+            created_at: 30,
+            updated_at: 40,
+            ..run.clone()
+        };
+        store.upsert_astra_run(&pending_review).unwrap();
+        let persisted_review = store
+            .get_astra_run("astra-run-pending-review")
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted_review.status, "completed");
+        assert_eq!(
+            persisted_review.terminal_reason.as_deref(),
+            Some("pending_human_review")
+        );
+        let runs = store.list_astra_runs(&thread.id).unwrap();
+        assert!(runs.iter().any(|run| {
+            run.run_id == "astra-run-pending-review"
+                && run.terminal_reason.as_deref() == Some("pending_human_review")
+        }));
 
         // A second pass has nothing active left to interrupt.
         assert!(store.interrupt_active_astra_runs().unwrap().is_empty());
 
         let runs = store.list_astra_runs(&thread.id).unwrap();
-        assert_eq!(runs.len(), 1);
+        assert_eq!(runs.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_path);
+    }
+
+    #[test]
+    fn cleanup_partial_astra_sessions_only_archives_placeholders() {
+        let path = unique_db("sessio-astra-partial-cleanup");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_path = std::env::temp_dir().join(format!(
+            "sessio-astra-partial-cleanup-project-{}",
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let placeholder = SessionInfo {
+            agent: Agent::Codex,
+            id: "placeholder-session".to_string(),
+            project_path: Some(project_path.to_string_lossy().to_string()),
+            project_name: Some("Astra Partial Cleanup".to_string()),
+            started_at: Some(1),
+            updated_at: Some(1),
+            message_count: 0,
+            rename_title: Some("Astra placeholder".to_string()),
+            title: None,
+            first_user_message: Some("placeholder".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            forked_from_agent: None,
+            forked_from_id: None,
+            subagents: Vec::new(),
+        };
+        let mut real = placeholder.clone();
+        real.id = "real-session".to_string();
+        real.file_size = 42;
+        real.partial = false;
+        store.upsert_session("", &placeholder).unwrap();
+        store.upsert_session("", &real).unwrap();
+
+        let changed = store
+            .cleanup_partial_astra_sessions(&[
+                "placeholder-session".to_string(),
+                "real-session".to_string(),
+            ])
+            .unwrap();
+
+        assert_eq!(changed, 1);
+        let sessions = store.list_all_sessions().unwrap();
+        let placeholder = sessions
+            .iter()
+            .find(|session| session.id == "placeholder-session")
+            .unwrap();
+        let real = sessions
+            .iter()
+            .find(|session| session.id == "real-session")
+            .unwrap();
+        assert!(!placeholder.available);
+        assert!(placeholder.archived);
+        assert!(real.available);
+        assert!(!real.archived);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_path);
@@ -8097,11 +8318,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Researcher",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -8362,11 +8583,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Code reviewer",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -8379,11 +8600,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Writing reviewer",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -8396,11 +8617,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Shared reviewer",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -8439,11 +8660,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Shared reviewer",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -8474,11 +8695,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Shared reviewer",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: Some("Review from global context"),
                 color: None,
@@ -8721,11 +8942,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Builder",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: Some("Build carefully"),
                 color: None,
@@ -8759,11 +8980,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Reviewer",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -9305,11 +9526,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Other Builder",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -9364,11 +9585,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Invalid",
                 agent: AssistantAgentInfo {
-                id: "missing".to_string(),
-                name: "Missing".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "missing".to_string(),
+                    name: "Missing".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,
@@ -9381,11 +9602,11 @@ mod migration_tests {
             .create_assistant(NewAssistant {
                 name: "Invalid builtin",
                 agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
                 },
                 system_prompt: None,
                 color: None,

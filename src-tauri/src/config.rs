@@ -9,6 +9,7 @@ pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
     pub index: IndexConfig,
+    pub astra: AstraConfig,
     pub debug: DebugConfig,
 }
 
@@ -16,6 +17,13 @@ pub struct AppConfig {
 #[serde(rename_all = "camelCase")]
 pub struct IndexConfig {
     pub poll_interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AstraConfig {
+    pub round_limit: u32,
+    pub retry_limit: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -44,12 +52,19 @@ pub struct QmdBackendConfig {
 struct RawConfig {
     memory: Option<RawMemoryConfig>,
     index: RawIndexConfig,
+    astra: RawAstraConfig,
     debug: RawDebugConfig,
 }
 
 #[derive(Debug, Clone, Default)]
 struct RawIndexConfig {
     poll_interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RawAstraConfig {
+    round_limit: Option<u32>,
+    retry_limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -202,6 +217,11 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 }
                 other => bail!("unknown key in [index]: {other}"),
             },
+            Section::Astra => match key {
+                "round_limit" => raw.astra.round_limit = value.map(parse_u32).transpose()?,
+                "retry_limit" => raw.astra.retry_limit = value.map(parse_u32).transpose()?,
+                other => bail!("unknown key in [astra]: {other}"),
+            },
             Section::Debug => match key {
                 "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
                 "update_preview" => raw.debug.update_preview = value.map(parse_bool).transpose()?,
@@ -220,6 +240,7 @@ enum Section {
     Memory,
     MemoryBackendsQmd,
     Index,
+    Astra,
     Debug,
     Ignored,
 }
@@ -241,6 +262,7 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
     Ok(Some(match parts.as_slice() {
         [a] if a == "memory" => Section::Memory,
         [a] if a == "index" => Section::Index,
+        [a] if a == "astra" => Section::Astra,
         [a] if a == "debug" => Section::Debug,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
         _ => Section::Ignored,
@@ -272,6 +294,12 @@ fn parse_bool(value: String) -> Result<bool> {
 fn parse_u64(value: String) -> Result<u64> {
     value
         .parse::<u64>()
+        .with_context(|| format!("invalid unsigned integer value: {value}"))
+}
+
+fn parse_u32(value: String) -> Result<u32> {
+    value
+        .parse::<u32>()
         .with_context(|| format!("invalid unsigned integer value: {value}"))
 }
 
@@ -325,6 +353,7 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
     Ok(AppConfig {
         memory,
         index: resolve_index_config(raw.clone()),
+        astra: resolve_astra_config(raw.clone(), apply_env)?,
         debug: resolve_debug_config(raw),
     })
 }
@@ -333,6 +362,32 @@ fn resolve_index_config(raw: RawConfig) -> IndexConfig {
     IndexConfig {
         poll_interval_seconds: raw.index.poll_interval_seconds.unwrap_or(60),
     }
+}
+
+fn resolve_astra_config(raw: RawConfig, apply_env: bool) -> Result<AstraConfig> {
+    let mut config = AstraConfig {
+        round_limit: raw.astra.round_limit.unwrap_or(3),
+        retry_limit: raw.astra.retry_limit.unwrap_or(3),
+    };
+    if apply_env {
+        if let Ok(value) = std::env::var("SESSIO_ASTRA_ROUND_LIMIT") {
+            if !value.trim().is_empty() {
+                config.round_limit = parse_u32(value)?;
+            }
+        }
+        if let Ok(value) = std::env::var("SESSIO_ASTRA_RETRY_LIMIT") {
+            if !value.trim().is_empty() {
+                config.retry_limit = parse_u32(value)?;
+            }
+        }
+    }
+    if config.round_limit == 0 {
+        bail!("astra.round_limit must be greater than 0");
+    }
+    if config.retry_limit == 0 {
+        bail!("astra.retry_limit must be greater than 0");
+    }
+    Ok(config)
 }
 
 fn resolve_debug_config(raw: RawConfig) -> DebugConfig {
@@ -403,6 +458,16 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
         &mut changed,
     );
     merge_option(
+        &mut raw.astra.round_limit,
+        defaults.astra.round_limit,
+        &mut changed,
+    );
+    merge_option(
+        &mut raw.astra.retry_limit,
+        defaults.astra.retry_limit,
+        &mut changed,
+    );
+    merge_option(
         &mut raw.debug.acp_config,
         defaults.debug.acp_config,
         &mut changed,
@@ -443,6 +508,10 @@ fn default_app_config() -> Result<AppConfig> {
         memory: None,
         index: IndexConfig {
             poll_interval_seconds: 60,
+        },
+        astra: AstraConfig {
+            round_limit: 3,
+            retry_limit: 3,
         },
         debug: DebugConfig {
             acp_config: false,
@@ -493,6 +562,8 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     }
     out.push_str(&serialize_index_config(&config.index));
     out.push('\n');
+    out.push_str(&serialize_astra_config(&config.astra));
+    out.push('\n');
     out.push_str(&serialize_debug_config(&config.debug));
     out
 }
@@ -502,6 +573,18 @@ fn serialize_index_config(config: &IndexConfig) -> String {
     out.push_str("[index]\n");
     out.push_str("poll_interval_seconds = ");
     out.push_str(&config.poll_interval_seconds.to_string());
+    out.push('\n');
+    out
+}
+
+fn serialize_astra_config(config: &AstraConfig) -> String {
+    let mut out = String::new();
+    out.push_str("[astra]\n");
+    out.push_str("round_limit = ");
+    out.push_str(&config.round_limit.to_string());
+    out.push('\n');
+    out.push_str("retry_limit = ");
+    out.push_str(&config.retry_limit.to_string());
     out.push('\n');
     out
 }
@@ -627,6 +710,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_astra_limits() {
+        let raw = parse_raw_config(
+            r#"
+            [astra]
+            round_limit = 7
+            retry_limit = 4
+            "#,
+        )
+        .unwrap();
+        let config = super::resolve_app_config(raw, false).unwrap();
+
+        assert_eq!(config.astra.round_limit, 7);
+        assert_eq!(config.astra.retry_limit, 4);
+    }
+
+    #[test]
+    fn rejects_zero_astra_limits() {
+        let raw = parse_raw_config(
+            r#"
+            [astra]
+            round_limit = 0
+            retry_limit = 3
+            "#,
+        )
+        .unwrap();
+
+        assert!(super::resolve_app_config(raw, false).is_err());
+    }
+
+    #[test]
     fn ignores_unknown_sections() {
         let raw = parse_raw_config(
             r#"
@@ -673,10 +786,15 @@ mod tests {
         assert!(!serialized.contains("[memory]"));
         assert!(serialized.contains("[index]"));
         assert!(serialized.contains("poll_interval_seconds = 60"));
+        assert!(serialized.contains("[astra]"));
+        assert!(serialized.contains("round_limit = 3"));
+        assert!(serialized.contains("retry_limit = 3"));
         assert!(serialized.contains("[debug]"));
         assert!(!serialized.contains("[agents.runtime"));
         assert!(config.memory.is_none());
         assert_eq!(config.index.poll_interval_seconds, 60);
+        assert_eq!(config.astra.round_limit, 3);
+        assert_eq!(config.astra.retry_limit, 3);
     }
 
     #[test]
@@ -688,6 +806,8 @@ mod tests {
         assert!(changed);
         assert!(config.memory.is_none());
         assert_eq!(config.index.poll_interval_seconds, 60);
+        assert_eq!(config.astra.round_limit, 3);
+        assert_eq!(config.astra.retry_limit, 3);
         assert!(!config.debug.acp_config);
         assert!(!config.debug.update_preview);
     }

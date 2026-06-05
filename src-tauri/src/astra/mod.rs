@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +18,7 @@ use crate::agents::runtime::types::{
     StartAgentSession,
 };
 use crate::agents::runtime::RuntimeManager;
+use crate::config::AstraConfig;
 use crate::memory::service::MemoryService;
 use crate::memory::{MemorySearchOptions, MemoryStore};
 use crate::models::{
@@ -25,169 +27,26 @@ use crate::models::{
 };
 use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
 
+mod decision;
+mod orchestrator;
+mod planner;
+mod prompt;
+mod types;
+
+use orchestrator::RustNativeWorkerOutcome;
+use planner::next_dispatchable_tasks;
+use prompt::build_stage_task_context;
+use types::AstraDecision;
+pub use types::{
+    AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraStageMutationResult, AstraTaskProposal,
+    AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk,
+};
+
 pub const ASTRA_EVENT_NAME: &str = "thread-astra-event";
 const PROTOCOL_VERSION: u64 = 1;
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AstraRunStatus {
-    Planning,
-    AwaitingApproval,
-    Dispatching,
-    Running,
-    Completed,
-    Cancelled,
-    Errored,
-    Interrupted,
-}
-
-impl AstraRunStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Planning => "planning",
-            Self::AwaitingApproval => "awaiting_approval",
-            Self::Dispatching => "dispatching",
-            Self::Running => "running",
-            Self::Completed => "completed",
-            Self::Cancelled => "cancelled",
-            Self::Errored => "errored",
-            Self::Interrupted => "interrupted",
-        }
-    }
-
-    pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "planning" => Some(Self::Planning),
-            "awaiting_approval" => Some(Self::AwaitingApproval),
-            "dispatching" => Some(Self::Dispatching),
-            "running" => Some(Self::Running),
-            "completed" => Some(Self::Completed),
-            "cancelled" => Some(Self::Cancelled),
-            "errored" => Some(Self::Errored),
-            "interrupted" => Some(Self::Interrupted),
-            _ => None,
-        }
-    }
-
-    pub fn active(&self) -> bool {
-        matches!(
-            self,
-            Self::Planning | Self::AwaitingApproval | Self::Dispatching | Self::Running
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AstraTaskRisk {
-    Low,
-    Medium,
-    High,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraTaskProposal {
-    pub id: String,
-    pub title: String,
-    pub target_stage_id: Option<String>,
-    pub target_agent: Agent,
-    pub prompt: String,
-    pub expected_output: String,
-    pub risk: AstraTaskRisk,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraHandle {
-    pub run_id: String,
-    pub thread_id: String,
-    pub project_id: String,
-    pub status: AstraRunStatus,
-    pub proposed_tasks: Vec<AstraTaskProposal>,
-    pub approved_task_ids: Vec<String>,
-    pub delegated_session_ids: Vec<String>,
-    pub task_results: Vec<AstraTaskResult>,
-    pub mode: String,
-    pub current_stage_id: Option<String>,
-    pub current_task_id: Option<String>,
-    pub completed_task_ids: Vec<String>,
-    pub stage_attempt_counts: HashMap<String, u32>,
-    pub retry_limit: u32,
-    pub error: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraRun {
-    pub run_id: String,
-    pub thread_id: String,
-    pub project_id: String,
-    pub project_path: String,
-    pub status: AstraRunStatus,
-    pub proposed_tasks: Vec<AstraTaskProposal>,
-    pub approved_task_ids: Vec<String>,
-    pub delegated_session_ids: Vec<String>,
-    pub task_results: Vec<AstraTaskResult>,
-    pub mode: String,
-    pub current_stage_id: Option<String>,
-    pub completed_task_ids: Vec<String>,
-    pub stage_attempt_counts: HashMap<String, u32>,
-    pub retry_limit: u32,
-    pub error: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AstraTaskResultStatus {
-    Completed,
-    Failed,
-    Errored,
-    Cancelled,
-}
-
-impl AstraTaskResultStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Errored => "errored",
-            Self::Cancelled => "cancelled",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraTaskResult {
-    pub task_id: String,
-    pub thread_stage_id: Option<String>,
-    pub sessio_runtime_session_id: String,
-    pub turn_id: Option<String>,
-    pub status: AstraTaskResultStatus,
-    pub output: String,
-    pub error: Option<String>,
-    pub attempt_count: u32,
-    pub retry_limit_reached: bool,
-    pub completed_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraStageMutationResult {
-    pub ok: bool,
-    #[serde(default)]
-    pub stage: Option<Value>,
-    #[serde(default)]
-    pub issue: Option<Value>,
-    #[serde(default)]
-    pub error: Option<String>,
-    pub applied_at: i64,
-}
+const RUST_NATIVE_ROUND_LIMIT: u32 = 3;
+const ASTRA_DEFAULT_RETRY_LIMIT: u32 = 3;
+const LEGACY_SIDECAR_ENV: &str = "SESSIO_ASTRA_LEGACY_SIDECAR";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -287,10 +146,12 @@ struct AstraServiceInner {
     store: Arc<dyn SessionStore>,
     memory_store: Arc<dyn MemoryStore>,
     runtime: RuntimeManager,
+    config: AstraConfig,
     sequence: AtomicU64,
     sidecar: Mutex<Option<SidecarHandle>>,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
     task_waiters: Mutex<HashMap<String, mpsc::Sender<AstraTaskResult>>>,
+    orchestrator_workers: Mutex<HashMap<String, AstraWorkerState>>,
     // Serializes read-modify-write cycles on a single run row (see mutate_run).
     run_write_lock: Mutex<()>,
 }
@@ -308,6 +169,12 @@ struct DelegatedSessionState {
     text: String,
     last_turn_id: Option<String>,
     finished: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AstraWorkerState {
+    Pending,
+    Running,
 }
 
 enum DispatchTaskDecision {
@@ -347,6 +214,7 @@ impl AstraService {
         store: Arc<dyn SessionStore>,
         memory_store: Arc<dyn MemoryStore>,
         runtime: RuntimeManager,
+        config: AstraConfig,
     ) -> Self {
         Self {
             inner: Arc::new(AstraServiceInner {
@@ -354,10 +222,12 @@ impl AstraService {
                 store,
                 memory_store,
                 runtime,
+                config,
                 sequence: AtomicU64::new(1),
                 sidecar: Mutex::new(None),
                 delegated_sessions: Mutex::new(HashMap::new()),
                 task_waiters: Mutex::new(HashMap::new()),
+                orchestrator_workers: Mutex::new(HashMap::new()),
                 run_write_lock: Mutex::new(()),
             }),
         }
@@ -377,7 +247,23 @@ impl AstraService {
     }
 
     pub fn recover_interrupted_runs(&self) -> Result<()> {
-        self.inner.store.interrupt_active_astra_runs()?;
+        let interrupted = self.inner.store.interrupt_active_astra_runs()?;
+        for record in &interrupted {
+            let session_ids =
+                serde_json::from_str::<Vec<String>>(&record.delegated_session_ids_json)
+                    .unwrap_or_default();
+            let cleaned = self
+                .inner
+                .store
+                .cleanup_partial_astra_sessions(&session_ids)?;
+            if cleaned > 0 {
+                log::info!(
+                    "[sessio-astra:recover:cleanup-partial] runId={} cleanedSessions={}",
+                    record.run_id,
+                    cleaned
+                );
+            }
+        }
         Ok(())
     }
 
@@ -401,7 +287,30 @@ impl AstraService {
                 .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
             if let Some(active) = self.inner.store.get_active_astra_run(&req.thread_id)? {
                 let run = record_to_run(active)?;
-                return Ok(self.run_to_handle(run));
+                if self.is_worker_registered(&run.run_id) || should_request_legacy_cancel(&run) {
+                    return Ok(self.run_to_handle(run));
+                }
+                let mut interrupted = run.clone();
+                let message =
+                    "Astra run was active but no rust-native worker is registered".to_string();
+                interrupted.status = AstraRunStatus::Interrupted;
+                interrupted.terminal_reason = Some("zombie_active_run".to_string());
+                interrupted.last_error_code = Some("worker_missing".to_string());
+                interrupted.last_error_message = Some(message.clone());
+                interrupted.error = Some(message);
+                interrupted.updated_at = now_ms();
+                self.inner
+                    .store
+                    .upsert_astra_run(&run_to_record(&interrupted))?;
+                self.emit(
+                    &interrupted,
+                    "interrupted",
+                    json!({
+                        "reason": interrupted.terminal_reason,
+                        "errorCode": interrupted.last_error_code,
+                        "message": interrupted.last_error_message,
+                    }),
+                );
             }
 
             let now = now_ms();
@@ -415,16 +324,38 @@ impl AstraService {
                 approved_task_ids: Vec::new(),
                 delegated_session_ids: Vec::new(),
                 task_results: Vec::new(),
-                mode: "auto".to_string(),
+                mode: if legacy_sidecar_enabled() {
+                    "legacy_sidecar".to_string()
+                } else {
+                    "rust_native".to_string()
+                },
                 current_stage_id: None,
                 completed_task_ids: Vec::new(),
                 stage_attempt_counts: HashMap::new(),
-                retry_limit: 3,
+                retry_limit: self.inner.config.retry_limit,
+                planner_backend: if legacy_sidecar_enabled() {
+                    None
+                } else {
+                    Some("deterministic".to_string())
+                },
+                decision_backend: if legacy_sidecar_enabled() {
+                    None
+                } else {
+                    Some("deterministic".to_string())
+                },
+                round_index: None,
+                round_limit: self.inner.config.round_limit,
+                terminal_reason: None,
+                last_error_code: None,
+                last_error_message: None,
                 error: None,
                 created_at: now,
                 updated_at: now,
             };
             self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+            if run.mode == "rust_native" {
+                self.register_pending_worker(&run.run_id)?;
+            }
             run
         };
         log::info!(
@@ -435,51 +366,57 @@ impl AstraService {
         );
         self.emit(&run, "status", json!({ "status": run.status.as_str() }));
 
-        let astra_agent = self
-            .inner
-            .store
-            .list_agents()?
-            .into_iter()
-            .find(|agent| agent.id == "astra");
-        let model_config = astra_agent.and_then(|agent| {
-            let selected_provider_id = agent.ai_provider.as_deref().unwrap_or("");
-            let provider = agent
-                .ai_providers
-                .iter()
-                .find(|provider| provider.id == selected_provider_id && provider.enabled)
-                .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
-                .or_else(|| agent.ai_providers.first())?;
-            let model_id = provider.model.clone().or(agent.model).or_else(|| {
-                provider
-                    .models
-                    .iter()
-                    .find(|model| model.enabled)
-                    .map(|model| model.value.clone())
-            });
-            Some(json!({
-                "provider": provider.provider,
-                "api": provider.api,
-                "baseUrl": provider.base_url,
-                "apiKey": provider.api_key,
-                "modelId": model_id,
-                "thinkingLevel": agent.effort,
-            }))
-        });
-        let params = json!({
-            "runId": run.run_id,
-            "thread": thread,
-            "snapshot": project_snapshot(&project, &thread),
-            "prompt": req.prompt,
-            "modelConfig": model_config,
-        });
-
         let service = self.clone();
         let run_id = run.run_id.clone();
-        thread::spawn(move || {
-            if let Err(error) = service.run_start_planning(&run_id, params) {
-                log::warn!("[sessio-astra:run:start-worker] {error}");
-            }
-        });
+        let prompt = req.prompt.clone();
+        if legacy_sidecar_enabled() {
+            let astra_agent = self
+                .inner
+                .store
+                .list_agents()?
+                .into_iter()
+                .find(|agent| agent.id == "astra");
+            let model_config = astra_agent.and_then(|agent| {
+                let selected_provider_id = agent.ai_provider.as_deref().unwrap_or("");
+                let provider = agent
+                    .ai_providers
+                    .iter()
+                    .find(|provider| provider.id == selected_provider_id && provider.enabled)
+                    .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
+                    .or_else(|| agent.ai_providers.first())?;
+                let model_id = provider.model.clone().or(agent.model).or_else(|| {
+                    provider
+                        .models
+                        .iter()
+                        .find(|model| model.enabled)
+                        .map(|model| model.value.clone())
+                });
+                Some(json!({
+                    "provider": provider.provider,
+                    "api": provider.api,
+                    "baseUrl": provider.base_url,
+                    "apiKey": provider.api_key,
+                    "modelId": model_id,
+                    "thinkingLevel": agent.effort,
+                }))
+            });
+            let params = json!({
+                "runId": run.run_id,
+                "thread": thread,
+                "snapshot": project_snapshot(&project, &thread),
+                "prompt": prompt,
+                "modelConfig": model_config,
+            });
+            thread::spawn(move || {
+                if let Err(error) = service.run_start_planning(&run_id, params) {
+                    log::warn!("[sessio-astra:run:start-worker] {error}");
+                }
+            });
+        } else {
+            thread::spawn(move || {
+                service.run_rust_native_worker(&run_id, prompt);
+            });
+        }
 
         Ok(self.run_to_handle(run))
     }
@@ -488,25 +425,43 @@ impl AstraService {
         let response = match self.request("astra/start", params, Some(Duration::from_secs(20))) {
             Ok(response) => response,
             Err(error) => {
-                let (failed, changed) = self.update_active_status(
+                let (failed, changed) = self.mark_run_errored(
                     run_id,
-                    AstraRunStatus::Errored,
-                    Some(error.to_string()),
+                    "legacy_start_failed",
+                    "legacy_start_failed",
+                    error.to_string(),
                 )?;
                 if changed {
-                    self.emit(&failed, "error", json!({ "message": error.to_string() }));
+                    self.emit(
+                        &failed,
+                        "error",
+                        json!({
+                            "message": failed.last_error_message,
+                            "reason": failed.terminal_reason,
+                            "errorCode": failed.last_error_code,
+                        }),
+                    );
                 }
                 return Err(error);
             }
         };
         if let Some(error) = response.error {
-            let (failed, changed) = self.update_active_status(
+            let (failed, changed) = self.mark_run_errored(
                 run_id,
-                AstraRunStatus::Errored,
-                Some(error.message.clone()),
+                "legacy_start_failed",
+                &error.code,
+                error.message.clone(),
             )?;
             if changed {
-                self.emit(&failed, "error", json!({ "message": error.message }));
+                self.emit(
+                    &failed,
+                    "error",
+                    json!({
+                        "message": error.message,
+                        "reason": failed.terminal_reason,
+                        "errorCode": failed.last_error_code,
+                    }),
+                );
             }
             bail!("Astra start failed: {}", error.code);
         }
@@ -520,6 +475,14 @@ impl AstraService {
 
     pub fn cancel_thread_astra(&self, req: CancelThreadAstraRequest) -> Result<AstraHandle> {
         let run = self.load_run(&req.run_id)?;
+        let (run, changed) = self.mark_run_cancelled(&run.run_id, "user_cancelled")?;
+        if changed {
+            self.emit(
+                &run,
+                "cancelled",
+                json!({ "status": run.status.as_str(), "reason": run.terminal_reason }),
+            );
+        }
         // Abort every delegated session this run launched: interrupt the ACP
         // agents and release any blocked dispatch waiter. Sessions started by
         // other runs or by the user are left untouched.
@@ -534,19 +497,19 @@ impl AstraService {
         for session_id in &delegated_sessions {
             self.abort_delegated_session(session_id);
         }
-        let _ = self.request(
-            "astra/cancel",
-            json!({ "runId": run.run_id }),
-            Some(Duration::from_secs(3)),
-        );
-        let run = self.update_status(&run.run_id, AstraRunStatus::Cancelled, None)?;
+        if should_request_legacy_cancel(&run) {
+            let _ = self.request(
+                "astra/cancel",
+                json!({ "runId": run.run_id }),
+                Some(Duration::from_secs(3)),
+            );
+        }
         log::info!(
             "[sessio-astra:run:cancel] runId={} threadId={} delegatedSessions={}",
             run.run_id,
             run.thread_id,
             delegated_sessions.len()
         );
-        self.emit(&run, "cancelled", json!({ "status": run.status.as_str() }));
         Ok(self.run_to_handle(run))
     }
 
@@ -621,14 +584,17 @@ impl AstraService {
                 .insert(handle.sessio_runtime_session_id.clone(), waiter);
         }
         if !initial_prompt.trim().is_empty() {
-            self.inner.runtime.send_input(
+            if let Err(error) = self.inner.runtime.send_input(
                 &handle.sessio_runtime_session_id,
                 AgentInput {
                     text: initial_prompt,
                     attachments: Vec::new(),
                     options: RuntimeMetadata::default(),
                 },
-            )?;
+            ) {
+                self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                return Err(error);
+            }
         }
         Ok(handle)
     }
@@ -1021,7 +987,7 @@ impl AstraService {
         agent_session_id: &str,
         sessio_runtime_session_id: &str,
     ) -> Result<()> {
-        let (state_context, already_recorded) = {
+        let (state_context, already_recorded, already_finished) = {
             let delegated = self
                 .inner
                 .delegated_sessions
@@ -1035,38 +1001,47 @@ impl AstraService {
                         && state.agent_session_id.as_deref() == Some(agent_session_id)
                 })
                 .unwrap_or(false);
-            (context, recorded)
+            let finished = state.map(|state| state.finished).unwrap_or(true);
+            (context, recorded, finished)
         };
-        if already_recorded {
+        if already_recorded || already_finished {
             return Ok(());
         }
-        let run = self.load_run(run_id)?;
-        let task = run
-            .proposed_tasks
-            .iter()
-            .find(|task| task.id == task_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Astra task not found: {task_id}"))?;
-        let context = match (state_context, thread_stage_id) {
-            (Some(context), _) => Some(context),
-            (None, Some(stage_id)) => {
-                let thread = self.prepare_stage_for_delegated_task(&run.thread_id, stage_id)?;
-                Some(build_stage_task_context(&thread, stage_id, &task)?)
-            }
-            (None, None) => None,
-        };
-        record_and_link_ready_delegated_session(
-            self.inner.store.as_ref(),
-            &run,
-            agent,
-            agent_session_id,
-            &task,
-            thread_stage_id,
-            context.as_ref(),
-        )?;
         let sessio_runtime_session_id_for_run = sessio_runtime_session_id.to_string();
         let agent_session_id_for_run = agent_session_id.to_string();
-        let (run, _) = self.mutate_run(run_id, move |run| {
+        let (run, task) = {
+            let _guard = self
+                .inner
+                .run_write_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
+            let mut run = self.load_run(run_id)?;
+            if !run.status.active() {
+                return Ok(());
+            }
+            let task = run
+                .proposed_tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Astra task not found: {task_id}"))?;
+            let context = match (state_context, thread_stage_id) {
+                (Some(context), _) => Some(context),
+                (None, Some(stage_id)) => {
+                    let thread = self.prepare_stage_for_delegated_task(&run.thread_id, stage_id)?;
+                    Some(build_stage_task_context(&thread, stage_id, &task)?)
+                }
+                (None, None) => None,
+            };
+            record_and_link_ready_delegated_session(
+                self.inner.store.as_ref(),
+                &run,
+                agent,
+                agent_session_id,
+                &task,
+                thread_stage_id,
+                context.as_ref(),
+            )?;
             run.delegated_session_ids
                 .retain(|id| id != &sessio_runtime_session_id_for_run);
             if !run
@@ -1076,8 +1051,10 @@ impl AstraService {
             {
                 run.delegated_session_ids.push(agent_session_id_for_run);
             }
-            Ok(())
-        })?;
+            run.updated_at = now_ms();
+            self.inner.store.upsert_astra_run(&run_to_record(&run))?;
+            (run, task)
+        };
         self.update_delegated_state(sessio_runtime_session_id, |state| {
             state.agent_session_id = Some(agent_session_id.to_string());
             state.session_recorded = true;
@@ -1193,14 +1170,16 @@ impl AstraService {
             result.status.as_str()
         );
 
-        let service = self.clone();
-        let run_id = run.run_id.clone();
-        let result_for_notify = result.clone();
-        thread::spawn(move || {
-            if let Err(error) = service.notify_astra_task_result(&run_id, &result_for_notify) {
-                log::warn!("[sessio-astra:task:result:notify] runId={run_id} {error}");
-            }
-        });
+        if should_notify_legacy_sidecar(&run) {
+            let service = self.clone();
+            let run_id = run.run_id.clone();
+            let result_for_notify = result.clone();
+            thread::spawn(move || {
+                if let Err(error) = service.notify_astra_task_result(&run_id, &result_for_notify) {
+                    log::warn!("[sessio-astra:task:result:notify] runId={run_id} {error}");
+                }
+            });
+        }
         Ok(())
     }
 
@@ -1420,26 +1399,35 @@ impl AstraService {
                 *guard = None;
             }
         }
-        // Fail the runs this sidecar was orchestrating. The async loop has no
-        // blocked RPC to surface the crash, so the run would otherwise stay
-        // active forever.
-        match self.inner.store.interrupt_active_astra_runs() {
-            Ok(interrupted) => {
-                for record in interrupted {
-                    match record_to_run(record) {
-                        Ok(run) => self.emit(
-                            &run,
+        match legacy_active_astra_runs(self.inner.store.as_ref()) {
+            Ok(runs) => {
+                for run in runs {
+                    match self.mark_run_interrupted(
+                        &run.run_id,
+                        "legacy_sidecar_exited",
+                        "legacy_sidecar_exited",
+                        "Astra sidecar exited; run interrupted",
+                    ) {
+                        Ok((interrupted, changed)) if changed => self.emit(
+                            &interrupted,
                             "error",
-                            json!({ "message": "Astra sidecar exited; run interrupted" }),
+                            json!({
+                                "message": interrupted.last_error_message,
+                                "reason": interrupted.terminal_reason,
+                                "errorCode": interrupted.last_error_code,
+                            }),
                         ),
+                        Ok(_) => {}
                         Err(error) => {
-                            log::warn!("[sessio-astra:sidecar-disconnect] decode run: {error}")
+                            log::warn!(
+                                "[sessio-astra:sidecar-disconnect] interrupt legacy run: {error}"
+                            );
                         }
                     }
                 }
             }
             Err(error) => {
-                log::warn!("[sessio-astra:sidecar-disconnect] interrupt active runs: {error}")
+                log::warn!("[sessio-astra:sidecar-disconnect] list legacy active runs: {error}")
             }
         }
     }
@@ -1570,16 +1558,11 @@ impl AstraService {
         run: &AstraRun,
         args: &Value,
     ) -> Result<AstraStageMutationResult> {
-        if let Some(rejection) = inactive_run_mutation_error(run) {
-            return Ok(rejection);
-        }
         let stage_id = args
             .get("threadStageId")
             .or_else(|| args.get("stageId"))
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("threadStageId is required"))?;
-        let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-        let stage_id = resolve_thread_stage_id(&thread, stage_id)?;
         let status = args
             .get("status")
             .and_then(Value::as_str)
@@ -1587,47 +1570,66 @@ impl AstraService {
             .transpose()?;
         let summary = optional_string_patch(args, "summary");
         let outcome = optional_string_patch(args, "outcome");
-        match self
-            .inner
-            .store
-            .update_thread_stage_state(&stage_id, status, summary, outcome)
-        {
-            Ok(stage) => {
-                let task_id = args
-                    .get("taskId")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string);
-                let stage_id = stage.id.clone();
-                let stage_completed = stage.status == StageStatus::Completed;
-                let (next, _) = self.mutate_run(&run.run_id, move |next| {
-                    if stage_completed {
+
+        let result: Result<(AstraRun, AstraStageMutationResult)> = {
+            let _guard = self
+                .inner
+                .run_write_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
+            let mut latest = self.load_run(&run.run_id)?;
+            if !latest.status.active() {
+                return Ok(inactive_run_mutation_result(&latest));
+            }
+            let thread = self.inner.store.get_thread_work_state(&latest.thread_id)?;
+            let stage_id = resolve_thread_stage_id(&thread, stage_id)?;
+            match self
+                .inner
+                .store
+                .update_thread_stage_state(&stage_id, status, summary, outcome)
+            {
+                Ok(stage) => {
+                    let task_id = args
+                        .get("taskId")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string);
+                    let stage_id = stage.id.clone();
+                    if stage.status == StageStatus::Completed {
                         if let Some(task_id) = task_id.as_deref() {
-                            if !next.completed_task_ids.iter().any(|id| id == task_id) {
-                                next.completed_task_ids.push(task_id.to_string());
+                            if !latest.completed_task_ids.iter().any(|id| id == task_id) {
+                                latest.completed_task_ids.push(task_id.to_string());
                             }
                         }
                     }
-                    next.current_stage_id = Some(stage_id);
-                    Ok(())
-                })?;
-                let result = AstraStageMutationResult {
-                    ok: true,
-                    stage: Some(serde_json::to_value(stage)?),
-                    issue: None,
-                    error: None,
-                    applied_at: now_ms(),
-                };
-                self.emit(&next, "stage_update_result", serde_json::to_value(&result)?);
-                Ok(result)
+                    latest.current_stage_id = Some(stage_id);
+                    latest.updated_at = now_ms();
+                    self.inner.store.upsert_astra_run(&run_to_record(&latest))?;
+                    let result = AstraStageMutationResult {
+                        ok: true,
+                        stage: Some(serde_json::to_value(stage)?),
+                        issue: None,
+                        error: None,
+                        applied_at: now_ms(),
+                    };
+                    Ok((latest, result))
+                }
+                Err(error) => Ok((
+                    latest,
+                    AstraStageMutationResult {
+                        ok: false,
+                        stage: None,
+                        issue: None,
+                        error: Some(error.to_string()),
+                        applied_at: now_ms(),
+                    },
+                )),
             }
-            Err(error) => Ok(AstraStageMutationResult {
-                ok: false,
-                stage: None,
-                issue: None,
-                error: Some(error.to_string()),
-                applied_at: now_ms(),
-            }),
+        };
+        let (next, result) = result?;
+        if result.ok {
+            self.emit(&next, "stage_update_result", serde_json::to_value(&result)?);
         }
+        Ok(result)
     }
 
     fn apply_issue_decision(
@@ -1635,29 +1637,48 @@ impl AstraService {
         run: &AstraRun,
         args: &Value,
     ) -> Result<AstraStageMutationResult> {
-        if let Some(rejection) = inactive_run_mutation_error(run) {
-            return Ok(rejection);
-        }
-        match self.add_or_update_issue(run, args) {
-            Ok(issue) => {
-                let result = AstraStageMutationResult {
-                    ok: true,
-                    stage: None,
-                    issue: Some(serde_json::to_value(issue)?),
-                    error: None,
-                    applied_at: now_ms(),
-                };
-                self.emit(run, "stage_update_result", serde_json::to_value(&result)?);
-                Ok(result)
+        let result: Result<(AstraRun, AstraStageMutationResult)> = {
+            let _guard = self
+                .inner
+                .run_write_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
+            let latest = self.load_run(&run.run_id)?;
+            if !latest.status.active() {
+                return Ok(inactive_run_mutation_result(&latest));
             }
-            Err(error) => Ok(AstraStageMutationResult {
-                ok: false,
-                stage: None,
-                issue: None,
-                error: Some(error.to_string()),
-                applied_at: now_ms(),
-            }),
+            match self.add_or_update_issue(&latest, args) {
+                Ok(issue) => {
+                    let result = AstraStageMutationResult {
+                        ok: true,
+                        stage: None,
+                        issue: Some(serde_json::to_value(issue)?),
+                        error: None,
+                        applied_at: now_ms(),
+                    };
+                    Ok((latest, result))
+                }
+                Err(error) => Ok((
+                    latest,
+                    AstraStageMutationResult {
+                        ok: false,
+                        stage: None,
+                        issue: None,
+                        error: Some(error.to_string()),
+                        applied_at: now_ms(),
+                    },
+                )),
+            }
+        };
+        let (latest, result) = result?;
+        if result.ok {
+            self.emit(
+                &latest,
+                "issue_update_result",
+                serde_json::to_value(&result)?,
+            );
         }
+        Ok(result)
     }
 
     fn add_or_update_issue(&self, run: &AstraRun, args: &Value) -> Result<StageIssueInfo> {
@@ -1771,34 +1792,89 @@ impl AstraService {
         Ok(())
     }
 
-    fn update_status(
+    fn update_active_terminal_status(
         &self,
         run_id: &str,
         status: AstraRunStatus,
-        error: Option<String>,
-    ) -> Result<AstraRun> {
-        let (run, _) = self.mutate_run(run_id, move |run| {
-            run.status = status;
-            run.error = error;
-            Ok(())
-        })?;
-        Ok(run)
-    }
-
-    fn update_active_status(
-        &self,
-        run_id: &str,
-        status: AstraRunStatus,
+        terminal_reason: Option<String>,
+        last_error_code: Option<String>,
+        last_error_message: Option<String>,
         error: Option<String>,
     ) -> Result<(AstraRun, bool)> {
         self.mutate_run(run_id, move |run| {
-            if !run.status.active() {
-                return Ok(false);
-            }
-            run.status = status;
-            run.error = error;
-            Ok(true)
+            Ok(apply_active_status(
+                run,
+                status,
+                error,
+                terminal_reason,
+                last_error_code,
+                last_error_message,
+            ))
         })
+    }
+
+    pub(super) fn mark_run_completed(
+        &self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<(AstraRun, bool)> {
+        self.update_active_terminal_status(
+            run_id,
+            AstraRunStatus::Completed,
+            Some(reason.to_string()),
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub(super) fn mark_run_cancelled(
+        &self,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<(AstraRun, bool)> {
+        self.update_active_terminal_status(
+            run_id,
+            AstraRunStatus::Cancelled,
+            Some(reason.to_string()),
+            None,
+            None,
+            None,
+        )
+    }
+
+    pub(super) fn mark_run_errored(
+        &self,
+        run_id: &str,
+        reason: &str,
+        code: &str,
+        message: String,
+    ) -> Result<(AstraRun, bool)> {
+        self.update_active_terminal_status(
+            run_id,
+            AstraRunStatus::Errored,
+            Some(reason.to_string()),
+            Some(code.to_string()),
+            Some(message.clone()),
+            Some(message),
+        )
+    }
+
+    pub(super) fn mark_run_interrupted(
+        &self,
+        run_id: &str,
+        reason: &str,
+        code: &str,
+        message: &str,
+    ) -> Result<(AstraRun, bool)> {
+        self.update_active_terminal_status(
+            run_id,
+            AstraRunStatus::Interrupted,
+            Some(reason.to_string()),
+            Some(code.to_string()),
+            Some(message.to_string()),
+            Some(message.to_string()),
+        )
     }
 
     fn mutate_existing_run<F, T>(&self, run_id: &str, mutate: F) -> Result<Option<(AstraRun, T)>>
@@ -1868,6 +1944,13 @@ impl AstraService {
             completed_task_ids: run.completed_task_ids,
             stage_attempt_counts: run.stage_attempt_counts,
             retry_limit: run.retry_limit,
+            planner_backend: run.planner_backend,
+            decision_backend: run.decision_backend,
+            round_index: run.round_index,
+            round_limit: run.round_limit,
+            terminal_reason: run.terminal_reason,
+            last_error_code: run.last_error_code,
+            last_error_message: run.last_error_message,
             error: run.error,
             created_at: run.created_at,
             updated_at: run.updated_at,
@@ -1896,6 +1979,127 @@ impl AstraService {
                 timestamp: now_ms(),
             },
         );
+    }
+}
+
+impl AstraService {
+    fn run_rust_native_worker(&self, run_id: &str, prompt: Option<String>) {
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            self.run_rust_native_orchestrator(run_id, prompt)
+        }));
+        match outcome {
+            Ok(Ok(RustNativeWorkerOutcome::Duplicate)) => {}
+            Ok(Ok(RustNativeWorkerOutcome::Claimed)) => {
+                if let Ok(run) = self.load_run(run_id) {
+                    if run.status.active() {
+                        let message =
+                            "Astra rust-native worker stopped before reaching a terminal state";
+                        if let Ok((interrupted, changed)) = self.mark_run_interrupted(
+                            run_id,
+                            "worker_stopped_without_terminal_state",
+                            "worker_stopped",
+                            message,
+                        ) {
+                            if changed {
+                                self.emit(
+                                    &interrupted,
+                                    "interrupted",
+                                    json!({
+                                        "reason": interrupted.terminal_reason,
+                                        "errorCode": interrupted.last_error_code,
+                                        "message": interrupted.last_error_message,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                let message = error.to_string();
+                log::warn!("[sessio-astra:run:rust-native-worker] {message}");
+                let changed = self
+                    .mark_run_errored(
+                        run_id,
+                        "worker_top_level_error",
+                        "worker_error",
+                        message.clone(),
+                    )
+                    .map(|(_, changed)| changed)
+                    .unwrap_or(false);
+                if changed {
+                    if let Ok(run) = self.load_run(run_id) {
+                        self.emit(
+                            &run,
+                            "error",
+                            json!({
+                                "message": message,
+                                "reason": run.terminal_reason,
+                                "errorCode": run.last_error_code,
+                            }),
+                        );
+                    }
+                }
+            }
+            Err(payload) => {
+                let message = panic_payload_message(&payload);
+                log::warn!("[sessio-astra:run:rust-native-worker:panic] {message}");
+                let changed = self
+                    .mark_run_errored(run_id, "worker_panic", "worker_panic", message.clone())
+                    .map(|(_, changed)| changed)
+                    .unwrap_or(false);
+                if changed {
+                    if let Ok(run) = self.load_run(run_id) {
+                        self.emit(
+                            &run,
+                            "error",
+                            json!({
+                                "message": message,
+                                "reason": run.terminal_reason,
+                                "errorCode": run.last_error_code,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn is_worker_registered(&self, run_id: &str) -> bool {
+        self.inner
+            .orchestrator_workers
+            .lock()
+            .map(|workers| workers.contains_key(run_id))
+            .unwrap_or(false)
+    }
+
+    fn register_pending_worker(&self, run_id: &str) -> Result<()> {
+        let mut workers = self
+            .inner
+            .orchestrator_workers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Astra worker registry lock poisoned"))?;
+        workers.insert(run_id.to_string(), AstraWorkerState::Pending);
+        Ok(())
+    }
+
+    pub(super) fn claim_pending_worker(&self, run_id: &str) -> Result<bool> {
+        let mut workers = self
+            .inner
+            .orchestrator_workers
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Astra worker registry lock poisoned"))?;
+        match workers.get_mut(run_id) {
+            Some(state @ AstraWorkerState::Pending) => {
+                *state = AstraWorkerState::Running;
+                Ok(true)
+            }
+            Some(AstraWorkerState::Running) => Ok(false),
+            None => {
+                workers.insert(run_id.to_string(), AstraWorkerState::Running);
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -2019,29 +2223,6 @@ impl StageTaskContext {
     }
 }
 
-fn build_stage_task_context(
-    thread: &ThreadInfo,
-    thread_stage_id: &str,
-    task: &AstraTaskProposal,
-) -> Result<StageTaskContext> {
-    let stage = thread
-        .stages
-        .iter()
-        .find(|stage| stage.id == thread_stage_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("stage does not belong to Astra run thread: {thread_stage_id}")
-        })?;
-    let snapshot = build_stage_task_snapshot(thread, stage);
-    let prompt = render_stage_task_prompt(thread, stage, &snapshot, task);
-    Ok(StageTaskContext {
-        thread_id: thread.id.clone(),
-        thread_goal: thread.goal.clone(),
-        stage_name: stage_label(stage),
-        snapshot,
-        prompt,
-    })
-}
-
 fn save_stage_task_work_snapshot(
     store: &dyn SessionStore,
     agent: Agent,
@@ -2061,335 +2242,19 @@ fn save_stage_task_work_snapshot(
     })
 }
 
-/// Mutation tools may only change state while the run is actively orchestrating.
-/// A cancelled, completed, errored, or interrupted run must not have its stages
-/// or issues mutated by a late or stray sidecar tool call.
-fn inactive_run_mutation_error(run: &AstraRun) -> Option<AstraStageMutationResult> {
-    if matches!(
-        run.status,
-        AstraRunStatus::Dispatching | AstraRunStatus::Running
-    ) {
-        None
-    } else {
-        Some(AstraStageMutationResult {
-            ok: false,
-            stage: None,
-            issue: None,
-            error: Some(format!("Astra run is not active: {}", run.status.as_str())),
-            applied_at: now_ms(),
-        })
+fn inactive_run_mutation_result(run: &AstraRun) -> AstraStageMutationResult {
+    AstraStageMutationResult {
+        ok: false,
+        stage: None,
+        issue: None,
+        error: Some(format!("Astra run is not active: {}", run.status.as_str())),
+        applied_at: now_ms(),
     }
 }
 
 fn is_persistable_agent_session_id(agent_runtime_session_id: &str) -> bool {
     !agent_runtime_session_id.trim().is_empty()
         && !agent_runtime_session_id.starts_with("fake-agent-session")
-}
-
-fn build_stage_task_snapshot(
-    thread: &ThreadInfo,
-    focused_stage: &crate::models::StageInfo,
-) -> Value {
-    let mut stages = thread.stages.clone();
-    stages.sort_by_key(|stage| stage.order);
-    let current_stage_label = stages
-        .iter()
-        .find(|stage| stage.id == focused_stage.id)
-        .map(stage_label)
-        .unwrap_or_else(|| stage_label(focused_stage));
-    let completed = stages
-        .iter()
-        .filter(|stage| matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
-        .count();
-    let blocked = stages
-        .iter()
-        .filter(|stage| stage.status == StageStatus::Blocked)
-        .count();
-    let open_issues = stages
-        .iter()
-        .map(|stage| {
-            stage
-                .issues
-                .iter()
-                .filter(|issue| issue.status == IssueStatus::Open)
-                .count()
-        })
-        .sum::<usize>();
-    let thread_session_refs = thread
-        .sessions
-        .iter()
-        .map(|session| session_ref_json(session, "thread"))
-        .collect::<Vec<_>>();
-    let stage_values = stages
-        .iter()
-        .map(|stage| {
-            let session_refs = stage
-                .sessions
-                .iter()
-                .map(|session| session_ref_json(session, "stage"))
-                .collect::<Vec<_>>();
-            json!({
-                "threadStageId": stage.id,
-                "projectStageId": stage.stage_id,
-                "name": stage_label(stage),
-                "kind": stage.kind,
-                "icon": stage.icon,
-                "status": stage.status,
-                "summary": stage.summary,
-                "outcome": stage.outcome,
-                "assistants": stage.assistants,
-                "issues": stage.issues,
-                "sessionRefs": session_refs,
-            })
-        })
-        .collect::<Vec<_>>();
-    let stage_session_refs = stages
-        .iter()
-        .flat_map(|stage| {
-            stage
-                .sessions
-                .iter()
-                .map(|session| session_ref_json(session, "stage"))
-        })
-        .collect::<Vec<_>>();
-    let all_session_refs = dedupe_session_ref_values(
-        thread_session_refs
-            .iter()
-            .cloned()
-            .chain(stage_session_refs.iter().cloned())
-            .collect(),
-    );
-    json!({
-        "threadId": thread.id,
-        "projectId": thread.project_id,
-        "goal": thread.goal,
-        "description": thread.description,
-        "activeStageId": thread.stage_id,
-        "focusedStageId": focused_stage.id,
-        "stages": stage_values,
-        "threadSessionRefs": thread_session_refs,
-        "relatedContext": {
-            "sessionExcerptRefs": all_session_refs,
-        },
-        "detailRefs": {
-            "threadId": thread.id,
-            "focusedStageId": focused_stage.id,
-            "stageIds": stages.iter().map(|stage| stage.id.clone()).collect::<Vec<_>>(),
-            "issueIds": stages
-                .iter()
-                .flat_map(|stage| stage.issues.iter().map(|issue| issue.id.clone()))
-                .collect::<Vec<_>>(),
-            "sessionRefs": all_session_refs,
-        },
-        "rollup": {
-            "completed": completed,
-            "incomplete": stages.len().saturating_sub(completed),
-            "blocked": blocked,
-            "openIssues": open_issues,
-            "currentStage": current_stage_label,
-            "total": stages.len(),
-        },
-        "capturedAt": now_ms(),
-    })
-}
-
-fn render_stage_task_prompt(
-    thread: &ThreadInfo,
-    focused_stage: &crate::models::StageInfo,
-    snapshot: &Value,
-    task: &AstraTaskProposal,
-) -> String {
-    let mut lines = Vec::new();
-    lines.push("# Sessio stage task".to_string());
-    lines.push(String::new());
-    lines.push("You are working on a delegated stage task from Astra. Treat this as a Sessio stage chat, not a general thread chat.".to_string());
-    lines.push(format!("Thread goal: {}", thread.goal));
-    if let Some(description) = thread
-        .description
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!("Thread description: {description}"));
-    }
-    lines.push(format!("Target threadStageId: {}", focused_stage.id));
-    lines.push(format!("Target stage: {}", stage_label(focused_stage)));
-    if let Some(description) = focused_stage
-        .description
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!("Stage description: {description}"));
-    }
-    if let Some(summary) = focused_stage
-        .summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!("Current stage summary: {summary}"));
-    }
-    if let Some(outcome) = focused_stage
-        .outcome
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        lines.push(format!("Current stage outcome: {outcome}"));
-    }
-    let assistant_instructions =
-        stage_assistant_system_prompts(focused_stage, task.target_agent.as_str());
-    if !assistant_instructions.is_empty() {
-        lines.push(String::new());
-        lines.push("## Stage assistant instructions".to_string());
-        for (name, prompt) in assistant_instructions {
-            lines.push(format!("### {name}"));
-            lines.push(prompt);
-        }
-    }
-    let completed = snapshot
-        .pointer("/rollup/completed")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let total = snapshot
-        .pointer("/rollup/total")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let blocked = snapshot
-        .pointer("/rollup/blocked")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let open_issues = snapshot
-        .pointer("/rollup/openIssues")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    lines.push(format!(
-        "Thread progress: {completed}/{total} stages complete, {blocked} blocked, {open_issues} open issues"
-    ));
-    lines.push(String::new());
-    lines.push("## Stage work snapshot".to_string());
-    if let Some(stages) = snapshot.get("stages").and_then(Value::as_array) {
-        for stage in stages {
-            let id = stage
-                .get("threadStageId")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let name = stage.get("name").and_then(Value::as_str).unwrap_or(id);
-            let status = stage
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("not_started");
-            let focus = if id == focused_stage.id {
-                " <- you are here"
-            } else {
-                ""
-            };
-            lines.push(format!("- [{}] {name}{focus}", status_label(status)));
-            if let Some(summary) = stage
-                .get("summary")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                lines.push(format!("    summary: {summary}"));
-            }
-            if let Some(outcome) = stage
-                .get("outcome")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                lines.push(format!("    outcome: {outcome}"));
-            }
-            if let Some(issues) = stage.get("issues").and_then(Value::as_array) {
-                for issue in issues {
-                    if issue.get("status").and_then(Value::as_str) != Some("open") {
-                        continue;
-                    }
-                    let severity = issue
-                        .get("severity")
-                        .and_then(Value::as_str)
-                        .unwrap_or("medium");
-                    let title = issue
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("issue");
-                    lines.push(format!("    issue [{severity}] {title}"));
-                    if let Some(description) = issue
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                    {
-                        lines.push(format!("      {description}"));
-                    }
-                }
-            }
-            if let Some(session_refs) = stage.get("sessionRefs").and_then(Value::as_array) {
-                for reference in session_refs {
-                    let agent = reference
-                        .get("agent")
-                        .and_then(Value::as_str)
-                        .unwrap_or("agent");
-                    let session_id = reference
-                        .get("sessionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or("session");
-                    let title = reference.get("title").and_then(Value::as_str).unwrap_or("");
-                    lines.push(
-                        format!("    [{agent}:{session_id}] {title}")
-                            .trim_end()
-                            .to_string(),
-                    );
-                }
-            }
-        }
-    }
-    lines.push(String::new());
-    lines.push("## Astra task".to_string());
-    lines.push(format!("Task title: {}", task.title));
-    lines.push(format!("Expected output: {}", task.expected_output));
-    lines.push(String::new());
-    lines.push(task.prompt.clone());
-    lines.push(String::new());
-    lines.push("## Reporting".to_string());
-    lines.push("Return a concise final result for Astra. Astra will decide status, summary, and outcome, then ask Sessio to update thread_stage_states.".to_string());
-    lines.push("Do not mark unrelated stages complete.".to_string());
-    lines.join("\n")
-}
-
-fn stage_assistant_system_prompts(
-    stage: &crate::models::StageInfo,
-    agent_id: &str,
-) -> Vec<(String, String)> {
-    stage
-        .assistants
-        .iter()
-        .filter(|assistant| assistant.agent.id == agent_id)
-        .filter_map(|assistant| {
-            let prompt = assistant.system_prompt.as_deref()?.trim();
-            if prompt.is_empty() {
-                None
-            } else {
-                Some((assistant.name.clone(), prompt.to_string()))
-            }
-        })
-        .collect()
-}
-
-fn session_ref_json(session: &SessionInfo, source_kind: &str) -> Value {
-    json!({
-        "agent": session.agent,
-        "sessionId": session.id,
-        "title": session
-            .rename_title
-            .as_deref()
-            .or(session.title.as_deref())
-            .or(session.first_user_message.as_deref()),
-        "filePath": if session.file_path.is_empty() { None::<&str> } else { Some(session.file_path.as_str()) },
-        "sourceKind": source_kind,
-    })
 }
 
 fn dedupe_session_ref_values(values: Vec<Value>) -> Vec<Value> {
@@ -2409,7 +2274,7 @@ fn dedupe_session_ref_values(values: Vec<Value>) -> Vec<Value> {
     out
 }
 
-fn stage_label(stage: &crate::models::StageInfo) -> String {
+pub(crate) fn stage_label(stage: &crate::models::StageInfo) -> String {
     stage
         .name
         .as_deref()
@@ -2429,6 +2294,81 @@ fn status_label(status: &str) -> &'static str {
         "skipped" => "skipped",
         _ => "not started",
     }
+}
+
+fn legacy_sidecar_enabled() -> bool {
+    std::env::var(LEGACY_SIDECAR_ENV)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn should_request_legacy_cancel(run: &AstraRun) -> bool {
+    run.mode == "legacy_sidecar"
+}
+
+fn should_notify_legacy_sidecar(run: &AstraRun) -> bool {
+    run.mode == "legacy_sidecar"
+}
+
+fn apply_active_status(
+    run: &mut AstraRun,
+    status: AstraRunStatus,
+    error: Option<String>,
+    terminal_reason: Option<String>,
+    last_error_code: Option<String>,
+    last_error_message: Option<String>,
+) -> bool {
+    if !run.status.active() {
+        return false;
+    }
+    run.status = status;
+    run.terminal_reason = terminal_reason;
+    run.last_error_code = last_error_code;
+    run.last_error_message = last_error_message;
+    run.error = error;
+    true
+}
+
+fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "Astra rust-native worker panicked".to_string())
+}
+
+pub(crate) fn summarize_task_output(output: &str) -> String {
+    let text = output.trim();
+    if text.is_empty() {
+        return "Astra delegated task completed.".to_string();
+    }
+    if text.chars().count() <= 1000 {
+        text.to_string()
+    } else {
+        text.chars().take(997).collect::<String>() + "..."
+    }
+}
+
+pub(crate) fn pick_stage_agent(stage: &crate::models::StageInfo) -> Option<Agent> {
+    stage
+        .assistants
+        .iter()
+        .find_map(|assistant| Agent::from_db_str(&assistant.agent.id))
+}
+
+fn legacy_active_astra_runs(store: &dyn SessionStore) -> Result<Vec<AstraRun>> {
+    let mut runs = Vec::new();
+    for project in store.list_projects()? {
+        for thread in store.list_threads(&project.id)? {
+            if let Some(record) = store.get_active_astra_run(&thread.id)? {
+                let run = record_to_run(record)?;
+                if run.mode == "legacy_sidecar" {
+                    runs.push(run);
+                }
+            }
+        }
+    }
+    Ok(runs)
 }
 
 fn hydrate_start_request_for_astra(
@@ -2504,6 +2444,13 @@ fn run_to_record(run: &AstraRun) -> AstraRunRecord {
         stage_attempt_counts_json: serde_json::to_string(&run.stage_attempt_counts)
             .unwrap_or_else(|_| "{}".to_string()),
         retry_limit: i64::from(run.retry_limit),
+        planner_backend: run.planner_backend.clone(),
+        decision_backend: run.decision_backend.clone(),
+        round_index: run.round_index.map(i64::from),
+        round_limit: i64::from(run.round_limit),
+        terminal_reason: run.terminal_reason.clone(),
+        last_error_code: run.last_error_code.clone(),
+        last_error_message: run.last_error_message.clone(),
         error: run.error.clone(),
         created_at: run.created_at,
         updated_at: run.updated_at,
@@ -2531,7 +2478,19 @@ fn record_to_run(record: AstraRunRecord) -> Result<AstraRun> {
         retry_limit: u32::try_from(record.retry_limit)
             .ok()
             .filter(|value| *value > 0)
-            .unwrap_or(3),
+            .unwrap_or(ASTRA_DEFAULT_RETRY_LIMIT),
+        planner_backend: record.planner_backend,
+        decision_backend: record.decision_backend,
+        round_index: record
+            .round_index
+            .and_then(|value| u32::try_from(value).ok()),
+        round_limit: u32::try_from(record.round_limit)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(RUST_NATIVE_ROUND_LIMIT),
+        terminal_reason: record.terminal_reason,
+        last_error_code: record.last_error_code,
+        last_error_message: record.last_error_message,
         error: record.error,
         created_at: record.created_at,
         updated_at: record.updated_at,
@@ -2636,8 +2595,7 @@ fn extract_result_text(value: &Value) -> Option<String> {
     }
 }
 
-#[cfg(test)]
-fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
+pub(crate) fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
     !thread.stages.is_empty()
         && thread
             .stages
@@ -2645,7 +2603,21 @@ fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
             .all(|stage| matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
 }
 
-fn short_hash(input: &str) -> String {
+pub(crate) fn thread_waiting_for_review(thread: &ThreadInfo) -> bool {
+    !thread.stages.is_empty()
+        && thread
+            .stages
+            .iter()
+            .any(|stage| stage.status == StageStatus::NeedsReview)
+        && thread.stages.iter().all(|stage| {
+            matches!(
+                stage.status,
+                StageStatus::Completed | StageStatus::Skipped | StageStatus::NeedsReview
+            )
+        })
+}
+
+pub(crate) fn short_hash(input: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     input.hash(&mut hasher);
@@ -2661,6 +2633,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use super::decision::{AstraDecisionEngine, DeterministicDecisionEngine};
+    use super::planner::{AstraPlanner, DeterministicPlanner};
     use super::*;
     use crate::models::{AssistantAgentInfo, StageAssistantInfo};
     use crate::store::sqlite::SqliteStore;
@@ -2845,7 +2819,14 @@ mod tests {
             current_stage_id: Some(stage.id.clone()),
             completed_task_ids: Vec::new(),
             stage_attempt_counts: HashMap::new(),
-            retry_limit: 3,
+            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
+            planner_backend: Some("deterministic".to_string()),
+            decision_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
             error: None,
             created_at: 1,
             updated_at: 1,
@@ -3051,7 +3032,14 @@ mod tests {
             current_stage_id: Some(stage.id.clone()),
             completed_task_ids: Vec::new(),
             stage_attempt_counts: HashMap::new(),
-            retry_limit: 3,
+            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
+            planner_backend: Some("deterministic".to_string()),
+            decision_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
             error: None,
             created_at: 1,
             updated_at: 1,
@@ -3330,7 +3318,479 @@ mod tests {
         assert!(thread_all_stages_terminal(&thread));
     }
 
-    fn test_stage(id: &str, status: StageStatus) -> crate::models::StageInfo {
+    #[test]
+    fn needs_review_pauses_run_without_being_terminal() {
+        let thread = test_thread(vec![
+            test_stage("stage-1", StageStatus::Completed),
+            test_stage("stage-2", StageStatus::NeedsReview),
+        ]);
+
+        assert!(!thread_all_stages_terminal(&thread));
+        assert!(thread_waiting_for_review(&thread));
+
+        let mut active = thread.clone();
+        active
+            .stages
+            .push(test_stage("stage-3", StageStatus::InProgress));
+        assert!(!thread_waiting_for_review(&active));
+    }
+
+    #[test]
+    fn deterministic_plan_targets_incomplete_stage_agent() {
+        let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::NotStarted)]);
+        thread.stages[0].assistants = vec![StageAssistantInfo {
+            assistant_id: "assistant-claude".to_string(),
+            name: "Reviewer".to_string(),
+            color: None,
+            agent: AssistantAgentInfo {
+                id: "claude".to_string(),
+                name: "Claude".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                mode: "read-only".to_string(),
+                effort: "medium".to_string(),
+            },
+            system_prompt: None,
+            order: 0,
+        }];
+        let run = test_run("run-plan");
+
+        let plan = DeterministicPlanner.plan(&run, &thread, Some("Focus the API"), 0);
+
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
+        assert_eq!(plan.tasks[0].target_agent, Agent::Claude);
+        assert!(plan.tasks[0].prompt.contains("Focus the API"));
+    }
+
+    #[test]
+    fn deterministic_plan_skips_blocked_stage_after_retry_limit() {
+        let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::Blocked)]);
+        thread.stages[0].assistants = vec![StageAssistantInfo {
+            assistant_id: "assistant-codex".to_string(),
+            name: "Builder".to_string(),
+            color: None,
+            agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-write".to_string(),
+                effort: "medium".to_string(),
+            },
+            system_prompt: None,
+            order: 0,
+        }];
+        let mut run = test_run("run-plan-retry");
+        run.stage_attempt_counts
+            .insert("stage-1".to_string(), run.retry_limit);
+
+        let plan = DeterministicPlanner.plan(&run, &thread, None, 0);
+
+        assert!(plan.tasks.is_empty());
+    }
+
+    #[test]
+    fn deterministic_plan_skips_needs_review_stage() {
+        let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::NeedsReview)]);
+        thread.stages[0].assistants = vec![StageAssistantInfo {
+            assistant_id: "assistant-codex".to_string(),
+            name: "Builder".to_string(),
+            color: None,
+            agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-write".to_string(),
+                effort: "medium".to_string(),
+            },
+            system_prompt: None,
+            order: 0,
+        }];
+        let run = test_run("run-plan-review");
+
+        let plan = DeterministicPlanner.plan(&run, &thread, None, 0);
+
+        assert!(plan.tasks.is_empty());
+    }
+
+    #[test]
+    fn deterministic_decision_completed_stage_updates_stage() {
+        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
+        let task = test_task("task-1", "stage-1");
+        let result = test_task_result("task-1", "session-1", "Implemented and verified.");
+
+        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+
+        match decision {
+            AstraDecision::UpdateStage { args } => {
+                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
+                assert_eq!(args["status"], Value::String("completed".to_string()));
+                assert_eq!(
+                    args["summary"],
+                    Value::String("Implemented and verified.".to_string())
+                );
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deterministic_decision_completed_without_signal_needs_review() {
+        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
+        let task = test_task("task-1", "stage-1");
+        let result = test_task_result("task-1", "session-1", "I made some progress.");
+
+        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+
+        match decision {
+            AstraDecision::UpdateStage { args } => {
+                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
+                assert_eq!(args["status"], Value::String("needs_review".to_string()));
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deterministic_decision_negative_signal_wins_over_completion_substring() {
+        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
+        let task = test_task("task-1", "stage-1");
+        let result = test_task_result(
+            "task-1",
+            "session-1",
+            "Not completed successfully because more information is needed.",
+        );
+
+        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+
+        match decision {
+            AstraDecision::UpdateStage { args } => {
+                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
+                assert_eq!(args["status"], Value::String("blocked".to_string()));
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deterministic_retry_limit_blocks_stage_and_creates_issue() {
+        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
+        let task = test_task("task-1", "stage-1");
+        let mut result = test_task_result("task-1", "session-1", "");
+        result.status = AstraTaskResultStatus::Failed;
+        result.error = Some("retry limit reached".to_string());
+        result.retry_limit_reached = true;
+        result.attempt_count = 3;
+
+        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+
+        match decision {
+            AstraDecision::Composite { decisions } => {
+                assert_eq!(decisions.len(), 2);
+                assert!(matches!(
+                    decisions[0],
+                    AstraDecision::AddOrUpdateIssue { .. }
+                ));
+                match &decisions[1] {
+                    AstraDecision::UpdateStage { args } => {
+                        assert_eq!(args["status"], Value::String("blocked".to_string()));
+                    }
+                    other => panic!("unexpected second decision: {other:?}"),
+                }
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deterministic_decision_failed_stage_creates_issue() {
+        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
+        let task = test_task("task-1", "stage-1");
+        let mut result = test_task_result("task-1", "session-1", "failed output");
+        result.status = AstraTaskResultStatus::Errored;
+        result.error = Some("agent crashed".to_string());
+
+        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+
+        match decision {
+            AstraDecision::AddOrUpdateIssue { args } => {
+                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
+                assert_eq!(args["severity"], Value::String("high".to_string()));
+                assert_eq!(
+                    args["description"],
+                    Value::String("agent crashed".to_string())
+                );
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deterministic_decision_cancelled_task_cancels_run() {
+        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
+        let task = test_task("task-1", "stage-1");
+        let mut result = test_task_result("task-1", "session-1", "");
+        result.status = AstraTaskResultStatus::Cancelled;
+        result.error = Some("turn cancelled".to_string());
+
+        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+
+        match decision {
+            AstraDecision::CancelRun { reason } => {
+                assert_eq!(reason, "turn cancelled");
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_run_does_not_notify_legacy_sidecar() {
+        let mut run = test_run("native-run");
+        run.mode = "rust_native".to_string();
+
+        assert!(!should_request_legacy_cancel(&run));
+        assert!(!should_notify_legacy_sidecar(&run));
+
+        run.mode = "legacy_sidecar".to_string();
+        assert!(should_request_legacy_cancel(&run));
+        assert!(should_notify_legacy_sidecar(&run));
+    }
+
+    #[test]
+    fn dispatch_failure_marks_only_active_run_errored() {
+        let mut running = test_run("active-run");
+
+        assert!(apply_active_status(
+            &mut running,
+            AstraRunStatus::Errored,
+            Some("runtime start failed".to_string()),
+            Some("runtime_failure".to_string()),
+            Some("runtime_error".to_string()),
+            Some("runtime start failed".to_string()),
+        ));
+        assert_eq!(running.status, AstraRunStatus::Errored);
+        assert_eq!(running.error.as_deref(), Some("runtime start failed"));
+        assert_eq!(running.terminal_reason.as_deref(), Some("runtime_failure"));
+        assert_eq!(running.last_error_code.as_deref(), Some("runtime_error"));
+
+        let mut cancelled = test_run("cancelled-run");
+        cancelled.status = AstraRunStatus::Cancelled;
+
+        assert!(!apply_active_status(
+            &mut cancelled,
+            AstraRunStatus::Errored,
+            Some("waiter disconnected".to_string()),
+            Some("waiter_disconnected".to_string()),
+            Some("waiter_disconnected".to_string()),
+            Some("waiter disconnected".to_string()),
+        ));
+        assert_eq!(cancelled.status, AstraRunStatus::Cancelled);
+        assert_eq!(cancelled.error, None);
+    }
+
+    #[test]
+    fn terminal_run_status_is_not_overwritten() {
+        let mut completed = test_run("completed-run");
+        completed.status = AstraRunStatus::Completed;
+
+        assert!(!apply_active_status(
+            &mut completed,
+            AstraRunStatus::Cancelled,
+            None,
+            Some("late_cancel".to_string()),
+            None,
+            None,
+        ));
+        assert_eq!(completed.status, AstraRunStatus::Completed);
+
+        let mut interrupted = test_run("interrupted-run");
+        interrupted.status = AstraRunStatus::Interrupted;
+
+        assert!(!apply_active_status(
+            &mut interrupted,
+            AstraRunStatus::Errored,
+            Some("late error".to_string()),
+            Some("late_error".to_string()),
+            Some("late_error".to_string()),
+            Some("late error".to_string()),
+        ));
+        assert_eq!(interrupted.status, AstraRunStatus::Interrupted);
+        assert_eq!(interrupted.error, None);
+    }
+
+    #[test]
+    fn deterministic_stage_update_decision_mutates_store() {
+        let db_path = std::env::temp_dir().join(format!(
+            "sessio-astra-decision-store-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "sessio-astra-decision-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Decision Store",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let stage_option = store
+            .create_project_stage(&project.id, None, "Implement", None, None)
+            .unwrap();
+        store
+            .update_project_stage(
+                &stage_option.id,
+                crate::store::ProjectStagePatch {
+                    allow_empty_assistants: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Ship deterministic decision", None)
+            .unwrap();
+        let stage = store
+            .add_thread_stage(&thread.id, &stage_option.id, &[])
+            .unwrap();
+        let run = AstraRun {
+            run_id: "astra-run-decision-store".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: AstraRunStatus::Running,
+            proposed_tasks: Vec::new(),
+            approved_task_ids: Vec::new(),
+            delegated_session_ids: Vec::new(),
+            task_results: Vec::new(),
+            mode: "auto".to_string(),
+            current_stage_id: Some(stage.id.clone()),
+            completed_task_ids: Vec::new(),
+            stage_attempt_counts: HashMap::new(),
+            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
+            planner_backend: Some("deterministic".to_string()),
+            decision_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        let args = json!({
+            "taskId": "task-1",
+            "threadStageId": stage.id,
+            "status": "completed",
+            "summary": "Done",
+            "outcome": "Verified",
+        });
+        let status = args
+            .get("status")
+            .and_then(Value::as_str)
+            .map(parse_stage_status)
+            .transpose()
+            .unwrap();
+        let updated = store
+            .update_thread_stage_state(
+                args["threadStageId"].as_str().unwrap(),
+                status,
+                optional_string_patch(&args, "summary"),
+                optional_string_patch(&args, "outcome"),
+            )
+            .unwrap();
+        let mut next = run.clone();
+        if updated.status == StageStatus::Completed {
+            next.completed_task_ids.push("task-1".to_string());
+        }
+
+        assert_eq!(updated.status, StageStatus::Completed);
+        assert_eq!(updated.summary.as_deref(), Some("Done"));
+        assert_eq!(updated.outcome.as_deref(), Some("Verified"));
+        assert_eq!(next.completed_task_ids, vec!["task-1"]);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    #[test]
+    fn legacy_sidecar_is_disabled_by_default() {
+        std::env::remove_var(LEGACY_SIDECAR_ENV);
+        assert!(!legacy_sidecar_enabled());
+    }
+
+    #[test]
+    fn legacy_active_run_filter_excludes_rust_native_runs() {
+        let db_path = std::env::temp_dir().join(format!(
+            "sessio-astra-legacy-filter-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+        let parent = std::env::temp_dir().join(format!(
+            "sessio-astra-legacy-filter-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Legacy Filter",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Filter native runs", None)
+            .unwrap();
+        let mut native = test_run("native-run");
+        native.thread_id = thread.id.clone();
+        native.project_id = project.id.clone();
+        native.project_path = project.path.clone();
+        native.status = AstraRunStatus::Running;
+        native.mode = "rust_native".to_string();
+        store.upsert_astra_run(&run_to_record(&native)).unwrap();
+
+        assert!(legacy_active_astra_runs(&store).unwrap().is_empty());
+
+        native.status = AstraRunStatus::Interrupted;
+        store.upsert_astra_run(&run_to_record(&native)).unwrap();
+        let mut legacy = native.clone();
+        legacy.run_id = "legacy-run".to_string();
+        legacy.status = AstraRunStatus::Running;
+        legacy.mode = "legacy_sidecar".to_string();
+        store.upsert_astra_run(&run_to_record(&legacy)).unwrap();
+
+        let runs = legacy_active_astra_runs(&store).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run_id, "legacy-run");
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    pub(super) fn test_thread(stages: Vec<crate::models::StageInfo>) -> ThreadInfo {
+        ThreadInfo {
+            id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            goal: "Ship the thread".to_string(),
+            description: None,
+            stage_id: None,
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+            stages,
+            sessions: Vec::new(),
+        }
+    }
+
+    pub(super) fn test_stage(id: &str, status: StageStatus) -> crate::models::StageInfo {
         crate::models::StageInfo {
             id: id.to_string(),
             thread_id: "thread-1".to_string(),
@@ -3357,6 +3817,18 @@ mod tests {
         }
     }
 
+    fn test_task(task_id: &str, stage_id: &str) -> AstraTaskProposal {
+        AstraTaskProposal {
+            id: task_id.to_string(),
+            title: "Advance stage".to_string(),
+            target_stage_id: Some(stage_id.to_string()),
+            target_agent: Agent::Codex,
+            prompt: "Do the stage work.".to_string(),
+            expected_output: "Stage progress.".to_string(),
+            risk: AstraTaskRisk::Low,
+        }
+    }
+
     fn test_run(run_id: &str) -> AstraRun {
         AstraRun {
             run_id: run_id.to_string(),
@@ -3372,7 +3844,14 @@ mod tests {
             current_stage_id: None,
             completed_task_ids: Vec::new(),
             stage_attempt_counts: HashMap::new(),
-            retry_limit: 3,
+            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
+            planner_backend: Some("deterministic".to_string()),
+            decision_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
             error: None,
             created_at: 1,
             updated_at: 1,

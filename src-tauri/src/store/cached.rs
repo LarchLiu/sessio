@@ -587,6 +587,14 @@ impl SessionStore for CachedStore {
         self.inner.interrupt_active_astra_runs()
     }
 
+    fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize> {
+        let changed = self.inner.cleanup_partial_astra_sessions(session_ids)?;
+        if changed > 0 {
+            self.refresh_from_inner()?;
+        }
+        Ok(changed)
+    }
+
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         self.inner.upsert_session(scope, session)?;
         let new_rec = Self::to_indexed_session_only(scope, session);

@@ -41,13 +41,13 @@ use store::{
     AgentPreferencesPatch, NewAssistant, ProjectStagePatch, SessionHistoryRecord,
     SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
 };
-#[cfg(target_os = "macos")]
-use tauri::RunEvent;
 
 const HISTORY_CACHE_VERSION: i64 = 1;
 const THREAD_WORK_SNAPSHOT_VERSION: i64 = 2;
@@ -3114,6 +3114,7 @@ pub fn run() {
                 store.clone(),
                 memory_store.clone(),
                 runtime,
+                app_config.astra.clone(),
             );
             if let Err(error) = astra_service.recover_interrupted_runs() {
                 log::warn!("[sessio-astra:recover] {error}");

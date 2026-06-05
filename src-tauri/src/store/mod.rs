@@ -68,6 +68,13 @@ pub struct AstraRunRecord {
     pub completed_task_ids_json: String,
     pub stage_attempt_counts_json: String,
     pub retry_limit: i64,
+    pub planner_backend: Option<String>,
+    pub decision_backend: Option<String>,
+    pub round_index: Option<i64>,
+    pub round_limit: i64,
+    pub terminal_reason: Option<String>,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -400,6 +407,7 @@ pub trait SessionStore: Send + Sync {
     /// Transition every active run to `interrupted` and return the rows that
     /// changed (with their patched status), so callers can notify listeners.
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>>;
+    fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(
