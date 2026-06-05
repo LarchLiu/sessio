@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashSet};
 #[cfg(windows)]
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
@@ -80,7 +82,14 @@ fn load_windows_shell_env() -> Result<BTreeMap<String, String>> {
         );
     }
     let mut env = parse_env_lines(&output.stdout);
-    if let Some(path) = env.get_mut("PATH").or_else(|| env.get_mut("Path")) {
+    let path_key = if env.contains_key("PATH") {
+        Some("PATH")
+    } else if env.contains_key("Path") {
+        Some("Path")
+    } else {
+        None
+    };
+    if let Some(path) = path_key.and_then(|key| env.get_mut(key)) {
         append_windows_tool_dirs(path);
     } else {
         let mut path = String::new();
