@@ -5,7 +5,9 @@ pub mod config;
 pub mod indexer;
 pub mod memory;
 pub mod models;
+pub mod network;
 pub mod polling;
+pub mod shell_env;
 pub mod store;
 pub mod turns;
 pub mod watch;
@@ -368,6 +370,7 @@ fn update_agent_preferences(
     req: UpdateAgentPreferencesRequest,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
+    astra: State<'_, AstraService>,
 ) -> Result<AgentInfo, String> {
     let models = runtime_option_inputs_to_metadata(req.models);
     let efforts = runtime_option_inputs_to_metadata(req.efforts);
@@ -390,6 +393,9 @@ fn update_agent_preferences(
             },
         )
         .map_err(|e| e.to_string())?;
+    if updated.id == "astra" {
+        astra.update_astra_preferences_cache(updated.clone());
+    }
     app.emit("runtime_agents_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(updated)
@@ -2585,6 +2591,16 @@ fn get_debug_config() -> Result<config::DebugConfig, String> {
 }
 
 #[tauri::command]
+fn get_network_config() -> Result<config::NetworkConfig, String> {
+    network::load_network_config().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_network_config(config: config::NetworkConfig) -> Result<config::NetworkConfig, String> {
+    network::save_network_config(config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
@@ -3065,6 +3081,7 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            shell_env::import_login_shell_env();
 
             let sessio_home = dirs::home_dir()
                 .ok_or_else(|| anyhow::anyhow!("no home dir"))?
@@ -3079,6 +3096,7 @@ pub fn run() {
             let memory_store: Arc<dyn MemoryStore> = sqlite;
             let store: Arc<dyn SessionStore> = Arc::new(CachedStore::new(inner)?);
             let app_config = config::load_config()?;
+            network::apply_network_proxy_env(&app_config.network.proxy);
             let runtime = RuntimeManager::new(app.handle().clone());
             app.manage(runtime.clone());
             let indexer_handle = indexer::spawn(
@@ -3112,12 +3130,7 @@ pub fn run() {
             let initial_runtime_agents =
                 runtime_agents_from_db(store.clone(), &[]).unwrap_or_default();
             runtime_agents_cache.set(initial_runtime_agents);
-            let astra_service = AstraService::new(
-                app.handle().clone(),
-                store.clone(),
-                runtime,
-                app_config.astra.clone(),
-            );
+            let astra_service = AstraService::new(app.handle().clone(), store.clone(), runtime);
             if let Err(error) = astra_service.recover_interrupted_runs() {
                 log::warn!("[astra:recover] {error}");
             }
@@ -3253,6 +3266,8 @@ pub fn run() {
             get_last_runtime_agent_selection,
             set_last_runtime_agent_selection,
             get_debug_config,
+            get_network_config,
+            update_network_config,
             update_runtime_agent_preferences,
             start_agent_session,
             fork_agent_session,

@@ -65,6 +65,16 @@ export interface AgentCommandsInfo {
   version: string[];
 }
 
+export interface NetworkConfig {
+  proxy: NetworkProxyConfig;
+}
+
+export interface NetworkProxyConfig {
+  enabled: boolean;
+  url: string | null;
+  noProxy: string | null;
+}
+
 export type AssistantType = "builtin" | "custom";
 
 export interface AssistantAgentInfo {
@@ -1493,6 +1503,14 @@ export async function setLastRuntimeAgentSelection(
 
 export async function getDebugConfig(): Promise<DebugConfig> {
   return invoke<DebugConfig>("get_debug_config");
+}
+
+export async function getNetworkConfig(): Promise<NetworkConfig> {
+  return invoke<NetworkConfig>("get_network_config");
+}
+
+export async function updateNetworkConfig(config: NetworkConfig): Promise<NetworkConfig> {
+  return invoke<NetworkConfig>("update_network_config", { config });
 }
 
 export async function updateRuntimeAgentPreferences(

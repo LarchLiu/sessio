@@ -34,15 +34,17 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, Check, Circle, Download, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AssistantInfo, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
+import { ArrowLeft, Check, Circle, Download, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
 import {
   createWorkflow,
+  getNetworkConfig,
   listAgents,
   listAssistants,
   listWorkflowStages,
   listWorkflows,
   updateAgentPreferences,
+  updateNetworkConfig,
   updateRuntimeAgentPreferences,
 } from "../api";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
@@ -285,6 +287,56 @@ function GeneralSettings({
   onOpenUpdate: () => void;
 }) {
   const { t } = useI18n();
+  const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(null);
+  const [proxyEnabled, setProxyEnabled] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [noProxy, setNoProxy] = useState("");
+  const [savingProxy, setSavingProxy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getNetworkConfig()
+      .then((config) => {
+        if (cancelled) return;
+        setNetworkConfig(config);
+        setProxyEnabled(config.proxy.enabled);
+        setProxyUrl(config.proxy.url ?? "");
+        setNoProxy(config.proxy.noProxy ?? "");
+      })
+      .catch((err) => onError(String(err)));
+    return () => {
+      cancelled = true;
+    };
+  }, [onError]);
+
+  const saveProxyConfig = async () => {
+    if (savingProxy) return;
+    setSavingProxy(true);
+    try {
+      const next = await updateNetworkConfig({
+        proxy: {
+          enabled: proxyEnabled,
+          url: proxyUrl.trim() || null,
+          noProxy: noProxy.trim() || null,
+        },
+      });
+      setNetworkConfig(next);
+      setProxyEnabled(next.proxy.enabled);
+      setProxyUrl(next.proxy.url ?? "");
+      setNoProxy(next.proxy.noProxy ?? "");
+      onError(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setSavingProxy(false);
+    }
+  };
+
+  const proxyChanged = networkConfig
+    ? proxyEnabled !== networkConfig.proxy.enabled
+      || proxyUrl.trim() !== (networkConfig.proxy.url ?? "")
+      || noProxy.trim() !== (networkConfig.proxy.noProxy ?? "")
+    : false;
   return (
     <section className="min-w-0 max-w-full">
       <SettingsGroup title={t("settings.appearance")} flush>
@@ -300,6 +352,26 @@ function GeneralSettings({
         </SettingsRow>
         <SettingsRow icon={<Monitor className="h-4 w-4" />} label={t("sidebar.theme")} description={t("settings.theme_description")}>
           <ThemeSelector mode={themeMode} onChange={onThemeModeChange} />
+        </SettingsRow>
+      </SettingsGroup>
+      <SettingsGroup title={t("settings.network")} flush>
+        <SettingsRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.proxy")} description={t("settings.proxy_description")}>
+          <div className="flex items-center justify-end gap-3">
+            <span className="text-caption text-ink/45">{proxyEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
+            <SwitchControl checked={proxyEnabled} tooltip={t("settings.proxy")} onToggle={() => setProxyEnabled((value) => !value)} />
+          </div>
+        </SettingsRow>
+        <SettingsRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.proxy_url")} description={t("settings.proxy_url_description")}>
+          <input value={proxyUrl} onChange={(event) => setProxyUrl(event.target.value)} placeholder="http://127.0.0.1:7890" className={inputClassName + " w-[280px]"} />
+        </SettingsRow>
+        <SettingsRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.no_proxy")} description={t("settings.no_proxy_description")}>
+          <div className="flex items-center justify-end gap-2">
+            <input value={noProxy} onChange={(event) => setNoProxy(event.target.value)} placeholder="localhost,127.0.0.1" className={inputClassName + " w-[280px]"} />
+            <button type="button" disabled={savingProxy || !proxyChanged} onClick={() => void saveProxyConfig()} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+              {savingProxy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+              {t("project.save")}
+            </button>
+          </div>
         </SettingsRow>
       </SettingsGroup>
       <SettingsGroup title={t("settings.index")} flush>

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -14,9 +15,9 @@ use crate::agents::runtime::types::{
     StartAgentSession,
 };
 use crate::agents::runtime::RuntimeManager;
-use crate::config::AstraConfig;
 use crate::models::{
-    Agent, IssueSeverity, IssueStatus, SessionInfo, StageIssueInfo, StageStatus, ThreadInfo,
+    Agent, AgentInfo, IssueSeverity, IssueStatus, SessionInfo, StageIssueInfo, StageStatus,
+    ThreadInfo,
 };
 use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
 
@@ -28,6 +29,9 @@ mod prompt;
 mod types;
 
 use orchestrator::RustNativeWorkerOutcome;
+use pi_acp_adapter::{
+    prepare_pi_agent_config, AstraPiConfig, AstraPiProviderConfig, AstraPiPurposeConfig,
+};
 use planner::next_dispatchable_tasks;
 use prompt::build_stage_task_context;
 use types::AstraDecision;
@@ -39,6 +43,8 @@ pub use types::{
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 3;
 const ASTRA_DEFAULT_RETRY_LIMIT: u32 = 3;
+const ASTRA_PI_TIMEOUT_MS: u64 = 30_000;
+const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +79,8 @@ struct AstraServiceInner {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     runtime: RuntimeManager,
-    config: AstraConfig,
+    pi_config: Option<AstraPiConfig>,
+    astra_preferences: Mutex<AstraPiProviderConfig>,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
     task_waiters: Mutex<HashMap<String, mpsc::Sender<AstraTaskResult>>>,
     orchestrator_workers: Mutex<HashMap<String, AstraWorkerState>>,
@@ -121,24 +128,191 @@ struct DelegatedAttempt<'a> {
     retry_limit_reached: bool,
 }
 
+fn bundled_pi_config() -> Option<AstraPiConfig> {
+    let command = bundled_pi_command()?;
+    log::info!("[astra:pi-acp] using bundled Pi sidecar");
+    Some(AstraPiConfig {
+        command,
+        session_dir: astra_session_dir().to_string_lossy().to_string(),
+        agent_dir: astra_agent_dir().to_string_lossy().to_string(),
+        planner: AstraPiPurposeConfig {
+            timeout_ms: ASTRA_PI_TIMEOUT_MS,
+        },
+        decision: AstraPiPurposeConfig {
+            timeout_ms: ASTRA_PI_TIMEOUT_MS,
+        },
+    })
+}
+
+fn astra_session_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".sessio")
+        .join(ASTRA_SESSION_DIR_NAME)
+}
+
+fn astra_agent_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".sessio")
+        .join("astra-pi-agent")
+}
+
+fn bundled_pi_command() -> Option<String> {
+    let executable = bundled_pi_path()?;
+    if !executable.exists() {
+        return None;
+    }
+    let session_dir = astra_session_dir();
+    let agent_dir = astra_agent_dir();
+    if let Err(error) = std::fs::create_dir_all(&session_dir) {
+        log::warn!(
+            "[astra:pi-acp] failed to create session dir {}: {error}",
+            session_dir.display()
+        );
+        return None;
+    }
+    if let Err(error) = std::fs::create_dir_all(&agent_dir) {
+        log::warn!(
+            "[astra:pi-acp] failed to create agent dir {}: {error}",
+            agent_dir.display()
+        );
+        return None;
+    }
+    Some(pi_stdio_command_json(&executable, &session_dir, &agent_dir))
+}
+
+fn pi_stdio_command_json(
+    executable: &std::path::Path,
+    session_dir: &std::path::Path,
+    agent_dir: &std::path::Path,
+) -> String {
+    json!({
+        "type": "stdio",
+        "name": "astra",
+        "command": executable,
+        "args": [
+            "--session-dir",
+            session_dir,
+            "--session-durability",
+            "strict",
+            "--acp",
+        ],
+        "env": [
+            {
+                "name": "PI_CODING_AGENT_DIR",
+                "value": agent_dir,
+            },
+            {
+                "name": "PI_SESSIONS_DIR",
+                "value": session_dir,
+            },
+        ],
+    })
+    .to_string()
+}
+
+fn bundled_pi_path() -> Option<PathBuf> {
+    let exe_path = std::env::current_exe().ok()?;
+    let exe_dir = exe_path.parent()?;
+    let base_dir = if exe_dir.ends_with("deps") {
+        exe_dir.parent().unwrap_or(exe_dir)
+    } else {
+        exe_dir
+    };
+    let binary_name = astra_binary_name();
+    [
+        base_dir.join(binary_name),
+        base_dir.join("binaries").join(binary_name),
+        exe_dir.join(binary_name),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
+fn astra_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "astra.exe"
+    } else {
+        "astra"
+    }
+}
+
+fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraPiProviderConfig {
+    match store.list_agents() {
+        Ok(agents) => agents
+            .into_iter()
+            .find(|agent| agent.id == "astra")
+            .map(astra_provider_config_from_agent)
+            .unwrap_or_default(),
+        Err(error) => {
+            log::warn!("[astra:preferences] failed to load Astra preferences: {error}");
+            AstraPiProviderConfig::default()
+        }
+    }
+}
+
+fn astra_provider_config_from_agent(agent: AgentInfo) -> AstraPiProviderConfig {
+    let selected = agent
+        .ai_provider
+        .as_deref()
+        .and_then(|id| agent.ai_providers.iter().find(|provider| provider.id == id))
+        .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
+        .or_else(|| agent.ai_providers.first());
+    AstraPiProviderConfig {
+        provider: selected.map(|provider| provider.provider.clone()),
+        api: selected.and_then(|provider| provider.api.clone()),
+        base_url: selected.and_then(|provider| provider.base_url.clone()),
+        api_key: selected.and_then(|provider| provider.api_key.clone()),
+        model: selected
+            .and_then(|provider| provider.model.clone())
+            .or(agent.model),
+        thinking_level: agent.effort,
+    }
+}
+
+fn sync_pi_agent_config(config: &AstraPiConfig, preferences: &AstraPiProviderConfig) {
+    if let Err(error) = prepare_pi_agent_config(config, preferences) {
+        log::warn!(
+            "[astra:pi-acp:config] failed to write bundled Pi config code={} message={}",
+            error.code,
+            error.message
+        );
+    }
+}
+
 impl AstraService {
-    pub fn new(
-        app: AppHandle,
-        store: Arc<dyn SessionStore>,
-        runtime: RuntimeManager,
-        config: AstraConfig,
-    ) -> Self {
+    pub fn new(app: AppHandle, store: Arc<dyn SessionStore>, runtime: RuntimeManager) -> Self {
+        let astra_preferences = load_astra_agent_preferences(store.as_ref());
+        let pi_config = bundled_pi_config();
+        if let Some(config) = pi_config.as_ref() {
+            sync_pi_agent_config(config, &astra_preferences);
+        }
         Self {
             inner: Arc::new(AstraServiceInner {
                 app,
                 store,
                 runtime,
-                config,
+                pi_config,
+                astra_preferences: Mutex::new(astra_preferences),
                 delegated_sessions: Mutex::new(HashMap::new()),
                 task_waiters: Mutex::new(HashMap::new()),
                 orchestrator_workers: Mutex::new(HashMap::new()),
                 run_write_lock: Mutex::new(()),
             }),
+        }
+    }
+
+    pub fn update_astra_preferences_cache(&self, agent: AgentInfo) {
+        let next_preferences = astra_provider_config_from_agent(agent);
+        match self.inner.astra_preferences.lock() {
+            Ok(mut preferences) => {
+                *preferences = next_preferences.clone();
+            }
+            Err(_) => log::warn!("[astra:preferences] cache lock poisoned"),
+        }
+        if let Some(config) = self.inner.pi_config.as_ref() {
+            sync_pi_agent_config(config, &next_preferences);
         }
     }
 
@@ -237,11 +411,11 @@ impl AstraService {
                 current_stage_id: None,
                 completed_task_ids: Vec::new(),
                 stage_attempt_counts: HashMap::new(),
-                retry_limit: self.inner.config.retry_limit,
+                retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
                 planner_backend: Some("deterministic".to_string()),
                 decision_backend: Some("deterministic".to_string()),
                 round_index: None,
-                round_limit: self.inner.config.round_limit,
+                round_limit: RUST_NATIVE_ROUND_LIMIT,
                 terminal_reason: None,
                 last_error_code: None,
                 last_error_message: None,
@@ -395,6 +569,16 @@ impl AstraService {
             }
         }
         Ok(handle)
+    }
+
+    pub(super) fn astra_agent_preferences(&self) -> AstraPiProviderConfig {
+        match self.inner.astra_preferences.lock() {
+            Ok(preferences) => preferences.clone(),
+            Err(_) => {
+                log::warn!("[astra:preferences] cache lock poisoned");
+                AstraPiProviderConfig::default()
+            }
+        }
     }
 
     fn dispatch_task_and_wait(
@@ -1951,6 +2135,103 @@ mod tests {
         assert_eq!(
             extract_result_text(&json!({ "output": "done" })),
             Some("done".to_string())
+        );
+    }
+
+    #[test]
+    fn astra_provider_config_uses_selected_db_provider() {
+        let agent = AgentInfo {
+            id: "astra".to_string(),
+            name: "Astra".to_string(),
+            display_name: "Astra".to_string(),
+            icon: None,
+            ai_provider: Some("switch".to_string()),
+            ai_providers: vec![
+                crate::models::AgentAiProviderInfo {
+                    id: "fallback".to_string(),
+                    display_name: "Fallback".to_string(),
+                    provider: "openai".to_string(),
+                    api: Some("chat-completions".to_string()),
+                    base_url: Some("https://fallback.invalid/v1".to_string()),
+                    api_key: Some("fallback-key".to_string()),
+                    model: Some("fallback-model".to_string()),
+                    models: Vec::new(),
+                    enabled: true,
+                    order: 0,
+                },
+                crate::models::AgentAiProviderInfo {
+                    id: "switch".to_string(),
+                    display_name: "Switch".to_string(),
+                    provider: "custom-endpoint".to_string(),
+                    api: Some("openai-responses".to_string()),
+                    base_url: Some("http://127.0.0.1:15721/v1".to_string()),
+                    api_key: Some("ccw".to_string()),
+                    model: Some("gpt-5.5".to_string()),
+                    models: Vec::new(),
+                    enabled: true,
+                    order: 1,
+                },
+            ],
+            model: Some("agent-level-model".to_string()),
+            models: Vec::new(),
+            effort: Some("off".to_string()),
+            efforts: Vec::new(),
+            permission_mode: None,
+            permission_modes: Vec::new(),
+            agent_type: crate::models::AgentType::Builtin,
+            enabled: true,
+            transport: crate::agents::runtime::types::RuntimeTransportKind::Acp,
+            commands: crate::models::AgentCommandsInfo::default(),
+            order: 0,
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        let config = astra_provider_config_from_agent(agent);
+
+        assert_eq!(config.provider.as_deref(), Some("custom-endpoint"));
+        assert_eq!(config.api.as_deref(), Some("openai-responses"));
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("http://127.0.0.1:15721/v1")
+        );
+        assert_eq!(config.api_key.as_deref(), Some("ccw"));
+        assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(config.thinking_level.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn pi_stdio_command_sets_session_dir_env_and_strict_durability() {
+        let command = pi_stdio_command_json(
+            std::path::Path::new("/tmp/astra"),
+            std::path::Path::new("/tmp/sessions"),
+            std::path::Path::new("/tmp/agent"),
+        );
+        let value: Value = serde_json::from_str(&command).unwrap();
+
+        assert_eq!(value["command"], "/tmp/astra");
+        assert_eq!(
+            value["args"],
+            json!([
+                "--session-dir",
+                "/tmp/sessions",
+                "--session-durability",
+                "strict",
+                "--acp"
+            ])
+        );
+        assert_eq!(
+            value["env"],
+            json!([
+                {
+                    "name": "PI_CODING_AGENT_DIR",
+                    "value": "/tmp/agent",
+                },
+                {
+                    "name": "PI_SESSIONS_DIR",
+                    "value": "/tmp/sessions",
+                },
+            ])
         );
     }
 

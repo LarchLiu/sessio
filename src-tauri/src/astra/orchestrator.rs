@@ -278,9 +278,10 @@ impl AstraService {
         (super::AstraPlan, &'static str, Option<serde_json::Value>),
         PiAcpFailure,
     > {
-        if let Some(config) = self.inner.config.pi.clone() {
+        if let Some(config) = self.inner.pi_config.clone() {
+            let provider_config = self.astra_agent_preferences();
             let planner = PiAcpPlanner::new(config);
-            match planner.plan(run, thread, prompt, round_index) {
+            match planner.plan(run, thread, prompt, round_index, &provider_config) {
                 Ok(response) => {
                     if let Err(error) = self.record_internal_pi_session(
                         &run.run_id,
@@ -354,9 +355,17 @@ impl AstraService {
         task: &super::AstraTaskProposal,
     ) -> std::result::Result<(AstraDecision, &'static str, Option<serde_json::Value>), PiAcpFailure>
     {
-        if let Some(config) = self.inner.config.pi.clone() {
+        if let Some(config) = self.inner.pi_config.clone() {
+            let provider_config = self.astra_agent_preferences();
             let decision_engine = PiAcpDecisionEngine::new(config);
-            match decision_engine.decide(&run.run_id, &run.project_path, thread, result, task) {
+            match decision_engine.decide(
+                &run.run_id,
+                &run.project_path,
+                thread,
+                result,
+                task,
+                &provider_config,
+            ) {
                 Ok(response) => {
                     if let Err(error) = self.record_internal_pi_session(
                         &run.run_id,

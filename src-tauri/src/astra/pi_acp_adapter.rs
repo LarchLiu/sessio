@@ -18,8 +18,31 @@ use super::{
     pick_stage_agent, short_hash, stage_label, summarize_task_output, AstraDecision, AstraPlan,
     AstraRun, AstraTaskProposal, AstraTaskResult, AstraTaskRisk,
 };
-use crate::config::{AstraPiConfig, AstraPiPurposeConfig};
 use crate::models::{Agent, IssueSeverity, StageStatus, ThreadInfo};
+
+#[derive(Debug, Clone)]
+pub(super) struct AstraPiConfig {
+    pub command: String,
+    pub session_dir: String,
+    pub agent_dir: String,
+    pub planner: AstraPiPurposeConfig,
+    pub decision: AstraPiPurposeConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AstraPiProviderConfig {
+    pub provider: Option<String>,
+    pub api: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub thinking_level: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AstraPiPurposeConfig {
+    pub timeout_ms: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PiAcpPurpose {
@@ -92,6 +115,7 @@ impl PiAcpPlanner {
         thread: &ThreadInfo,
         user_prompt: Option<&str>,
         round_index: u32,
+        provider_config: &AstraPiProviderConfig,
     ) -> Result<PiAcpPlanResponse, PiAcpFailure> {
         let prompt = planning_prompt(run, thread, user_prompt, round_index);
         let response = run_internal_pi_acp(
@@ -100,6 +124,7 @@ impl PiAcpPlanner {
             &run.run_id,
             &run.project_path,
             &prompt,
+            provider_config,
         )?;
         Ok(PiAcpPlanResponse {
             plan: parse_pi_plan_response(&response.text, run, thread, round_index)?,
@@ -125,6 +150,7 @@ impl PiAcpDecisionEngine {
         thread: &ThreadInfo,
         result: &AstraTaskResult,
         task: &AstraTaskProposal,
+        provider_config: &AstraPiProviderConfig,
     ) -> Result<PiAcpDecisionResponse, PiAcpFailure> {
         let prompt = decision_prompt(thread, result, task);
         let response = run_internal_pi_acp(
@@ -133,6 +159,7 @@ impl PiAcpDecisionEngine {
             run_id,
             workspace_path,
             &prompt,
+            provider_config,
         )?;
         Ok(PiAcpDecisionResponse {
             decision: parse_pi_decision_response(&response.text, thread, result, task)?,
@@ -147,10 +174,11 @@ fn run_internal_pi_acp(
     run_id: &str,
     workspace_path: &str,
     prompt: &str,
+    provider_config: &AstraPiProviderConfig,
 ) -> Result<PiAcpTextResponse, PiAcpFailure> {
     let purpose_config = purpose_config(config, purpose);
-    let command = command_with_env_prefix(config, purpose_config);
-    let meta = internal_pi_meta(config, purpose_config, purpose);
+    let command = config.command.clone();
+    let meta = internal_pi_meta(config, provider_config, purpose);
     let timeout = Duration::from_millis(purpose_config.timeout_ms);
     let workspace = if workspace_path.trim().is_empty() {
         std::env::current_dir()
@@ -158,32 +186,98 @@ fn run_internal_pi_acp(
     } else {
         PathBuf::from(workspace_path)
     };
+    log::info!(
+        "[astra:pi-acp:call] purpose={} runId={} command={} workspace={} timeoutMs={} sessionDir={} model={:?} thinkingLevel={:?} meta={} promptChars={}",
+        purpose.as_str(),
+        run_id,
+        command,
+        workspace.display(),
+        timeout.as_millis(),
+        config.session_dir,
+        provider_config.model,
+        provider_config.thinking_level,
+        Value::Object(meta.clone()),
+        prompt.chars().count()
+    );
     let prompt = prompt.to_string();
     let purpose_name = purpose.as_str().to_string();
     let run_id = run_id.to_string();
     let (tx, rx) = std::sync::mpsc::channel();
+    let tracked_session_id = Arc::new(Mutex::new(None::<String>));
+    let tracked_session_id_for_worker = tracked_session_id.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let result =
-            run_internal_pi_acp_async(command, purpose_name, run_id, meta, workspace, prompt).await;
+            run_internal_pi_acp_async(
+                command,
+                purpose_name,
+                run_id,
+                meta,
+                workspace,
+                prompt,
+                tracked_session_id_for_worker,
+            )
+            .await;
         let _ = tx.send(result);
     });
     match rx.recv_timeout(timeout) {
-        Ok(result) => result,
+        Ok(Ok(response)) => {
+            log::info!(
+                "[astra:pi-acp:response] purpose={} sessionId={} textChars={}",
+                purpose.as_str(),
+                response.session_id,
+                response.text.chars().count()
+            );
+            Ok(response)
+        }
+        Ok(Err(failure)) => {
+            log::warn!(
+                "[astra:pi-acp:error] purpose={} code={} sessionId={:?} message={}",
+                purpose.as_str(),
+                failure.code,
+                failure.session_id,
+                failure.message
+            );
+            Err(failure)
+        }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             handle.abort();
-            Err(PiAcpFailure::new(
+            let failure = PiAcpFailure::new(
                 "timeout",
                 format!(
                     "Pi ACP {} timed out after {}ms",
                     purpose.as_str(),
                     timeout.as_millis()
                 ),
-            ))
+            )
+            .with_session_id(
+                tracked_session_id
+                    .lock()
+                    .ok()
+                    .and_then(|value| value.clone()),
+            );
+            log::warn!(
+                "[astra:pi-acp:error] purpose={} code={} sessionId={:?} message={}",
+                purpose.as_str(),
+                failure.code,
+                failure.session_id,
+                failure.message
+            );
+            Err(failure)
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(PiAcpFailure::new(
-            "transport_failure",
-            format!("Pi ACP {} worker disconnected", purpose.as_str()),
-        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            let failure = PiAcpFailure::new(
+                "transport_failure",
+                format!("Pi ACP {} worker disconnected", purpose.as_str()),
+            );
+            log::warn!(
+                "[astra:pi-acp:error] purpose={} code={} sessionId={:?} message={}",
+                purpose.as_str(),
+                failure.code,
+                failure.session_id,
+                failure.message
+            );
+            Err(failure)
+        }
     }
 }
 
@@ -194,12 +288,12 @@ async fn run_internal_pi_acp_async(
     meta: serde_json::Map<String, Value>,
     workspace: PathBuf,
     prompt: String,
+    internal_session_id: Arc<Mutex<Option<String>>>,
 ) -> Result<PiAcpTextResponse, PiAcpFailure> {
     let agent = AcpAgent::from_str(&command)
         .map_err(|error| PiAcpFailure::new("transport_failure", error.to_string()))?;
     let text = Arc::new(Mutex::new(String::new()));
     let policy_denied = Arc::new(AtomicBool::new(false));
-    let internal_session_id = Arc::new(Mutex::new(None::<String>));
     let notification_text = text.clone();
     let notification_purpose = purpose.clone();
     let permission_denied = policy_denied.clone();
@@ -235,10 +329,22 @@ async fn run_internal_pi_acp_async(
             let policy_denied = policy_denied.clone();
             let internal_session_id = internal_session_id.clone();
             async move {
-                connection
+                log::info!(
+                    "[astra:pi-acp:stage] purpose={} runId={} stage=initialize:start",
+                    purpose,
+                    run_id
+                );
+                let init = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
                     .await?;
+                log::info!(
+                    "[astra:pi-acp:stage] purpose={} runId={} stage=initialize:ok protocolVersion={:?} capabilities={:?}",
+                    purpose,
+                    run_id,
+                    init.protocol_version,
+                    init.agent_capabilities
+                );
                 let mut request = NewSessionRequest::new(workspace);
                 let backend_key = if purpose == "decision" {
                     "decisionBackend"
@@ -259,11 +365,30 @@ async fn run_internal_pi_acp_async(
                         .cloned()
                         .unwrap_or_default(),
                 );
+                log::info!(
+                    "[astra:pi-acp:stage] purpose={} runId={} stage=new_session:start meta={}",
+                    purpose,
+                    run_id,
+                    serde_json::to_string(&request.meta).unwrap_or_default()
+                );
                 let session = connection.send_request(request).block_task().await?;
                 let session_id = session.session_id.to_string();
                 if let Ok(mut tracked) = internal_session_id.lock() {
                     *tracked = Some(session_id.clone());
                 }
+                log::info!(
+                    "[astra:pi-acp:stage] purpose={} runId={} stage=new_session:ok sessionId={}",
+                    purpose,
+                    run_id,
+                    session_id
+                );
+                log::info!(
+                    "[astra:pi-acp:stage] purpose={} runId={} stage=prompt:start sessionId={} promptChars={}",
+                    purpose,
+                    run_id,
+                    session_id,
+                    prompt.chars().count()
+                );
                 let response = connection
                     .send_request(PromptRequest::new(
                         session.session_id,
@@ -280,6 +405,14 @@ async fn run_internal_pi_acp_async(
                         .data("Pi ACP internal session was cancelled"));
                 }
                 let output = text.lock().map(|value| value.clone()).unwrap_or_default();
+                log::info!(
+                    "[astra:pi-acp:stage] purpose={} runId={} stage=prompt:ok sessionId={} stopReason={:?} outputChars={}",
+                    purpose,
+                    run_id,
+                    session_id,
+                    response.stop_reason,
+                    output.chars().count()
+                );
                 Ok::<PiAcpTextResponse, agent_client_protocol::Error>(PiAcpTextResponse {
                     text: output,
                     session_id,
@@ -313,40 +446,96 @@ fn classify_pi_acp_error(
     }
 }
 
-fn command_with_env_prefix(
+pub(super) fn prepare_pi_agent_config(
     config: &AstraPiConfig,
-    purpose_config: &AstraPiPurposeConfig,
-) -> String {
-    let command = purpose_config
-        .command
+    provider: &AstraPiProviderConfig,
+) -> Result<(), PiAcpFailure> {
+    let agent_dir = PathBuf::from(&config.agent_dir);
+    std::fs::create_dir_all(&agent_dir)
+        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))?;
+    std::fs::create_dir_all(&config.session_dir)
+        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))?;
+
+    let provider_id = provider
+        .provider
         .as_deref()
-        .unwrap_or(config.command.as_str());
-    let mut env = config.env.clone();
-    env.extend(purpose_config.env.clone());
-    if env.is_empty() {
-        return command.to_string();
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("openai");
+    let model_id = provider
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("gpt-5.5");
+    let base_url = provider
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http://127.0.0.1:15721/v1");
+    let api = provider
+        .api
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("openai-responses");
+
+    let settings = json!({
+        "defaultProvider": provider_id,
+        "defaultModel": model_id,
+        "defaultThinkingLevel": provider.thinking_level.as_deref().unwrap_or("off"),
+        "sessionStore": "jsonl",
+        "sessionDurability": "strict",
+        "quietStartup": true,
+        "packages": [],
+    });
+    let mut provider_json = serde_json::Map::new();
+    provider_json.insert("baseUrl".to_string(), Value::String(base_url.to_string()));
+    provider_json.insert("api".to_string(), Value::String(api.to_string()));
+    if let Some(api_key) = provider
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        provider_json.insert("apiKey".to_string(), Value::String(api_key.to_string()));
     }
-    let mut parts = Vec::with_capacity(env.len() + 1);
-    for (name, value) in env {
-        parts.push(format!("{}={}", shell_quote(&name), shell_quote(&value)));
-    }
-    parts.push(command.to_string());
-    parts.join(" ")
+    provider_json.insert(
+        "models".to_string(),
+        Value::Array(vec![json!({ "id": model_id, "reasoning": true })]),
+    );
+    let models = json!({
+        "providers": {
+            provider_id: Value::Object(provider_json)
+        }
+    });
+
+    write_json_file(&agent_dir.join("settings.json"), &settings)?;
+    write_json_file(&agent_dir.join("models.json"), &models)?;
+    log::info!(
+        "[astra:pi-acp:config] agentDir={} provider={} api={} baseUrl={} model={} thinkingLevel={:?} apiKeySet={}",
+        agent_dir.display(),
+        provider_id,
+        api,
+        base_url,
+        model_id,
+        provider.thinking_level,
+        provider.api_key.as_deref().map(|value| !value.trim().is_empty()).unwrap_or(false)
+    );
+    Ok(())
 }
 
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', r#"'\''"#))
+fn write_json_file(path: &std::path::Path, value: &Value) -> Result<(), PiAcpFailure> {
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))?;
+    std::fs::write(path, text)
+        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))
 }
 
 fn internal_pi_meta(
     config: &AstraPiConfig,
-    purpose_config: &AstraPiPurposeConfig,
+    provider_config: &AstraPiProviderConfig,
     purpose: PiAcpPurpose,
 ) -> serde_json::Map<String, Value> {
     let mut meta = serde_json::Map::new();
@@ -354,29 +543,41 @@ fn internal_pi_meta(
         "purpose".to_string(),
         Value::String(purpose.as_str().to_string()),
     );
-    if let Some(model) = purpose_config.model.as_deref().or(config.model.as_deref()) {
+    if let Some(model) = provider_config
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         meta.insert("model".to_string(), Value::String(model.to_string()));
     }
-    if let Some(thinking_level) = purpose_config
+    if let Some(thinking_level) = provider_config
         .thinking_level
         .as_deref()
-        .or(config.thinking_level.as_deref())
+        .filter(|value| !value.trim().is_empty())
     {
         meta.insert(
             "thinkingLevel".to_string(),
             Value::String(thinking_level.to_string()),
         );
     }
-    if let Some(session_dir) = purpose_config
-        .session_dir
+    if let Some(provider) = provider_config
+        .provider
         .as_deref()
-        .or(config.session_dir.as_deref())
+        .filter(|value| !value.trim().is_empty())
     {
-        meta.insert(
-            "sessionDir".to_string(),
-            Value::String(session_dir.to_string()),
-        );
+        meta.insert("provider".to_string(), Value::String(provider.to_string()));
     }
+    if let Some(base_url) = provider_config
+        .base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        meta.insert("baseUrl".to_string(), Value::String(base_url.to_string()));
+    }
+    meta.insert(
+        "sessionDir".to_string(),
+        Value::String(config.session_dir.clone()),
+    );
     meta
 }
 
@@ -864,7 +1065,6 @@ fn extract_json_candidate(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::collections::HashMap;
 
     use super::*;
@@ -1004,36 +1204,62 @@ mod tests {
     }
 
     #[test]
-    fn pi_command_injects_common_and_purpose_env() {
-        let mut common_env = BTreeMap::new();
-        common_env.insert("COMMON".to_string(), "base".to_string());
-        common_env.insert("OVERRIDE".to_string(), "base".to_string());
-        let mut purpose_env = BTreeMap::new();
-        purpose_env.insert("OVERRIDE".to_string(), "purpose value".to_string());
-
+    fn writes_isolated_pi_agent_provider_config() {
+        let root = std::env::temp_dir().join(format!(
+            "sessio-astra-pi-config-{}",
+            super::super::short_hash(&format!(
+                "{:?}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+            ))
+        ));
+        let agent_dir = root.join("agent");
+        let session_dir = root.join("sessions");
         let config = AstraPiConfig {
-            command: "pi-agent --acp".to_string(),
-            model: None,
-            thinking_level: None,
-            session_dir: None,
-            env: common_env,
-            planner: AstraPiPurposeConfig {
-                command: None,
-                model: None,
-                thinking_level: None,
-                timeout_ms: 30_000,
-                session_dir: None,
-                env: purpose_env,
-            },
-            decision: AstraPiPurposeConfig::default(),
+            command: "astra --acp".to_string(),
+            session_dir: session_dir.to_string_lossy().to_string(),
+            agent_dir: agent_dir.to_string_lossy().to_string(),
+            planner: AstraPiPurposeConfig { timeout_ms: 30_000 },
+            decision: AstraPiPurposeConfig { timeout_ms: 30_000 },
+        };
+        let provider = AstraPiProviderConfig {
+            provider: Some("custom-endpoint".to_string()),
+            api: Some("openai-responses".to_string()),
+            base_url: Some("https://example.test/v1".to_string()),
+            api_key: Some("secret-key".to_string()),
+            model: Some("gpt-test".to_string()),
+            thinking_level: Some("high".to_string()),
         };
 
-        let command = command_with_env_prefix(&config, &config.planner);
+        prepare_pi_agent_config(&config, &provider).unwrap();
 
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(agent_dir.join("settings.json")).unwrap())
+                .unwrap();
+        let models: Value =
+            serde_json::from_str(&std::fs::read_to_string(agent_dir.join("models.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings["defaultProvider"], "custom-endpoint");
+        assert_eq!(settings["defaultModel"], "gpt-test");
+        assert_eq!(settings["defaultThinkingLevel"], "high");
+        assert_eq!(settings["sessionStore"], "jsonl");
+        assert_eq!(settings["sessionDurability"], "strict");
         assert_eq!(
-            command,
-            "COMMON=base OVERRIDE='purpose value' pi-agent --acp"
+            models["providers"]["custom-endpoint"]["baseUrl"],
+            "https://example.test/v1"
         );
+        assert_eq!(
+            models["providers"]["custom-endpoint"]["api"],
+            "openai-responses"
+        );
+        assert_eq!(models["providers"]["custom-endpoint"]["apiKey"], "secret-key");
+        assert_eq!(
+            models["providers"]["custom-endpoint"]["models"][0]["id"],
+            "gpt-test"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

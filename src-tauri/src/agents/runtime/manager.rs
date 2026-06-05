@@ -47,6 +47,7 @@ struct RuntimeSessionState {
     active_turn_id: Option<String>,
     turn_state: RuntimeTurnState,
     metadata: RuntimeMetadata,
+    startup_error: Option<String>,
     turn_cancellations: HashMap<String, Arc<AtomicBool>>,
     permission_waiters: HashMap<String, mpsc::Sender<RuntimePermissionDecision>>,
     acp_controller: Option<AcpSessionController>,
@@ -222,6 +223,7 @@ impl RuntimeManager {
                         handle.capabilities.clone(),
                     ),
                     metadata: req.options.clone(),
+                    startup_error: None,
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
@@ -358,6 +360,7 @@ impl RuntimeManager {
                         handle.capabilities.clone(),
                     ),
                     metadata: req.options.clone(),
+                    startup_error: None,
                     turn_cancellations: HashMap::new(),
                     permission_waiters: HashMap::new(),
                     acp_controller,
@@ -401,6 +404,24 @@ impl RuntimeManager {
             if let Some(active) = &state.active_turn_id {
                 bail!("runtime session already has active turn: {active}");
             }
+            if matches!(
+                state.handle.status,
+                RuntimeSessionStatus::Errored
+                    | RuntimeSessionStatus::Disconnected
+                    | RuntimeSessionStatus::Ended
+                    | RuntimeSessionStatus::Completed
+            ) {
+                let detail = state
+                    .startup_error
+                    .as_deref()
+                    .unwrap_or("runtime session is not active");
+                bail!(
+                    "runtime session {} cannot receive input while {:?}: {}",
+                    sessio_runtime_session_id,
+                    state.handle.status,
+                    detail
+                );
+            }
             state.active_turn_id = Some(turn_id.clone());
             apply_optimistic_user_message(
                 &mut state.turn_state,
@@ -423,12 +444,16 @@ impl RuntimeManager {
 
         if let Some(controller) = acp_controller {
             if let Err(error) = controller.send_prompt(turn_id.clone(), input) {
+                let (code, message) = self
+                    .session_startup_error(sessio_runtime_session_id)
+                    .map(|message| ("acp_runtime_error", message))
+                    .unwrap_or_else(|| ("acp_send_error", error.to_string()));
                 self.fail_turn(
                     sessio_runtime_session_id,
                     &turn_id,
-                    RuntimeError::new("acp_send_error", error.to_string()),
+                    RuntimeError::new(code, message.clone()),
                 )?;
-                return Err(error);
+                return Err(anyhow::anyhow!(message));
             }
         } else {
             fake::spawn_stream(
@@ -820,6 +845,8 @@ impl RuntimeManager {
                 return Ok(());
             };
             state.handle.status = RuntimeSessionStatus::Errored;
+            state.startup_error = Some(message.clone());
+            state.acp_controller = None;
             for (_, sender) in state.permission_waiters.drain() {
                 let _ = sender.send(RuntimePermissionDecision::Cancelled);
             }
@@ -843,7 +870,7 @@ impl RuntimeManager {
     }
 
     pub(crate) fn emit(&self, payload: AgentRuntimeEventPayload) -> Result<()> {
-        log::info!("[sessio-runtime:backend:event] {:?}", payload);
+        log_runtime_event(&payload);
         let timestamp = now_ms();
         let event = AgentRuntimeEvent {
             sequence: self.inner.sequence.fetch_add(1, Ordering::Relaxed),
@@ -863,6 +890,14 @@ impl RuntimeManager {
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         }
         Ok(())
+    }
+
+    fn session_startup_error(&self, sessio_runtime_session_id: &str) -> Option<String> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(sessio_runtime_session_id)
+                .and_then(|state| state.startup_error.clone())
+        })
     }
 
     fn notify_event_listeners(&self, event: &AgentRuntimeEvent) {
@@ -901,6 +936,28 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn log_runtime_event(payload: &AgentRuntimeEventPayload) {
+    if is_live_runtime_message(payload) {
+        log::debug!("[sessio-runtime:backend:event] {:?}", payload);
+    } else {
+        log::info!("[sessio-runtime:backend:event] {:?}", payload);
+    }
+}
+
+fn is_live_runtime_message(payload: &AgentRuntimeEventPayload) -> bool {
+    matches!(
+        payload,
+        AgentRuntimeEventPayload::TextDelta { .. }
+            | AgentRuntimeEventPayload::ReasoningDelta { .. }
+            | AgentRuntimeEventPayload::ToolStarted { .. }
+            | AgentRuntimeEventPayload::ToolInputDelta { .. }
+            | AgentRuntimeEventPayload::ToolOutputDelta { .. }
+            | AgentRuntimeEventPayload::ToolStatusChanged { .. }
+            | AgentRuntimeEventPayload::SessionUpdate { .. }
+            | AgentRuntimeEventPayload::AcpProtocolMessage { .. }
+    )
 }
 
 fn event_session_id(payload: &AgentRuntimeEventPayload) -> Option<&str> {

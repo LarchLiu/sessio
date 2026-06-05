@@ -267,7 +267,7 @@ async fn run_session(
                         .map_err(acp_internal_error)?;
                     return Ok(());
                 };
-                log::info!(
+                log::debug!(
                     "[sessio-runtime:acp:notification] session={} turn={} update={:?}",
                     notification_session_id,
                     turn_id,

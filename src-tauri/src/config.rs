@@ -1,16 +1,15 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryConfig>,
     pub index: IndexConfig,
-    pub astra: AstraConfig,
+    pub network: NetworkConfig,
     pub debug: DebugConfig,
 }
 
@@ -20,36 +19,18 @@ pub struct IndexConfig {
     pub poll_interval_seconds: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AstraConfig {
-    pub round_limit: u32,
-    pub retry_limit: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pi: Option<AstraPiConfig>,
+pub struct NetworkConfig {
+    pub proxy: NetworkProxyConfig,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AstraPiConfig {
-    pub command: String,
-    pub model: Option<String>,
-    pub thinking_level: Option<String>,
-    pub session_dir: Option<String>,
-    pub env: BTreeMap<String, String>,
-    pub planner: AstraPiPurposeConfig,
-    pub decision: AstraPiPurposeConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraPiPurposeConfig {
-    pub command: Option<String>,
-    pub model: Option<String>,
-    pub thinking_level: Option<String>,
-    pub timeout_ms: u64,
-    pub session_dir: Option<String>,
-    pub env: BTreeMap<String, String>,
+pub struct NetworkProxyConfig {
+    pub enabled: bool,
+    pub url: Option<String>,
+    pub no_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -78,7 +59,7 @@ pub struct QmdBackendConfig {
 struct RawConfig {
     memory: Option<RawMemoryConfig>,
     index: RawIndexConfig,
-    astra: RawAstraConfig,
+    network: RawNetworkConfig,
     debug: RawDebugConfig,
 }
 
@@ -88,31 +69,15 @@ struct RawIndexConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-struct RawAstraConfig {
-    round_limit: Option<u32>,
-    retry_limit: Option<u32>,
-    pi: RawAstraPiConfig,
+struct RawNetworkConfig {
+    proxy: RawNetworkProxyConfig,
 }
 
 #[derive(Debug, Clone, Default)]
-struct RawAstraPiConfig {
-    command: Option<String>,
-    model: Option<String>,
-    thinking_level: Option<String>,
-    session_dir: Option<String>,
-    env: BTreeMap<String, String>,
-    planner: RawAstraPiPurposeConfig,
-    decision: RawAstraPiPurposeConfig,
-}
-
-#[derive(Debug, Clone, Default)]
-struct RawAstraPiPurposeConfig {
-    command: Option<String>,
-    model: Option<String>,
-    thinking_level: Option<String>,
-    timeout_ms: Option<u64>,
-    session_dir: Option<String>,
-    env: BTreeMap<String, String>,
+struct RawNetworkProxyConfig {
+    enabled: Option<bool>,
+    url: Option<String>,
+    no_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -265,58 +230,12 @@ fn parse_raw_config(contents: &str) -> Result<RawConfig> {
                 }
                 other => bail!("unknown key in [index]: {other}"),
             },
-            Section::Astra => match key {
-                "round_limit" => raw.astra.round_limit = value.map(parse_u32).transpose()?,
-                "retry_limit" => raw.astra.retry_limit = value.map(parse_u32).transpose()?,
-                other => bail!("unknown key in [astra]: {other}"),
+            Section::NetworkProxy => match key {
+                "enabled" => raw.network.proxy.enabled = value.map(parse_bool).transpose()?,
+                "url" => raw.network.proxy.url = value,
+                "no_proxy" => raw.network.proxy.no_proxy = value,
+                other => bail!("unknown key in [network.proxy]: {other}"),
             },
-            Section::AstraPi => match key {
-                "command" => raw.astra.pi.command = value,
-                "model" => raw.astra.pi.model = value,
-                "thinking_level" => raw.astra.pi.thinking_level = value,
-                "session_dir" => raw.astra.pi.session_dir = value,
-                other => bail!("unknown key in [astra.pi]: {other}"),
-            },
-            Section::AstraPiEnv => {
-                raw.astra
-                    .pi
-                    .env
-                    .insert(key.to_string(), value.unwrap_or_default());
-            }
-            Section::AstraPiPlanner => match key {
-                "command" => raw.astra.pi.planner.command = value,
-                "model" => raw.astra.pi.planner.model = value,
-                "thinking_level" => raw.astra.pi.planner.thinking_level = value,
-                "timeout_ms" => {
-                    raw.astra.pi.planner.timeout_ms = value.map(parse_u64).transpose()?
-                }
-                "session_dir" => raw.astra.pi.planner.session_dir = value,
-                other => bail!("unknown key in [astra.pi.planner]: {other}"),
-            },
-            Section::AstraPiPlannerEnv => {
-                raw.astra
-                    .pi
-                    .planner
-                    .env
-                    .insert(key.to_string(), value.unwrap_or_default());
-            }
-            Section::AstraPiDecision => match key {
-                "command" => raw.astra.pi.decision.command = value,
-                "model" => raw.astra.pi.decision.model = value,
-                "thinking_level" => raw.astra.pi.decision.thinking_level = value,
-                "timeout_ms" => {
-                    raw.astra.pi.decision.timeout_ms = value.map(parse_u64).transpose()?
-                }
-                "session_dir" => raw.astra.pi.decision.session_dir = value,
-                other => bail!("unknown key in [astra.pi.decision]: {other}"),
-            },
-            Section::AstraPiDecisionEnv => {
-                raw.astra
-                    .pi
-                    .decision
-                    .env
-                    .insert(key.to_string(), value.unwrap_or_default());
-            }
             Section::Debug => match key {
                 "acp_config" => raw.debug.acp_config = value.map(parse_bool).transpose()?,
                 "update_preview" => raw.debug.update_preview = value.map(parse_bool).transpose()?,
@@ -335,13 +254,7 @@ enum Section {
     Memory,
     MemoryBackendsQmd,
     Index,
-    Astra,
-    AstraPi,
-    AstraPiEnv,
-    AstraPiPlanner,
-    AstraPiPlannerEnv,
-    AstraPiDecision,
-    AstraPiDecisionEnv,
+    NetworkProxy,
     Debug,
     Ignored,
 }
@@ -363,17 +276,8 @@ fn parse_section(line: &str) -> Result<Option<Section>> {
     Ok(Some(match parts.as_slice() {
         [a] if a == "memory" => Section::Memory,
         [a] if a == "index" => Section::Index,
-        [a] if a == "astra" => Section::Astra,
-        [a, b] if a == "astra" && b == "pi" => Section::AstraPi,
-        [a, b, c] if a == "astra" && b == "pi" && c == "env" => Section::AstraPiEnv,
-        [a, b, c] if a == "astra" && b == "pi" && c == "planner" => Section::AstraPiPlanner,
-        [a, b, c, d] if a == "astra" && b == "pi" && c == "planner" && d == "env" => {
-            Section::AstraPiPlannerEnv
-        }
-        [a, b, c] if a == "astra" && b == "pi" && c == "decision" => Section::AstraPiDecision,
-        [a, b, c, d] if a == "astra" && b == "pi" && c == "decision" && d == "env" => {
-            Section::AstraPiDecisionEnv
-        }
+        [a, b] if a == "network" && b == "proxy" => Section::NetworkProxy,
+        [a, ..] if a == "astra" => Section::Ignored,
         [a] if a == "debug" => Section::Debug,
         [a, b, c] if a == "memory" && b == "backends" && c == "qmd" => Section::MemoryBackendsQmd,
         _ => Section::Ignored,
@@ -405,12 +309,6 @@ fn parse_bool(value: String) -> Result<bool> {
 fn parse_u64(value: String) -> Result<u64> {
     value
         .parse::<u64>()
-        .with_context(|| format!("invalid unsigned integer value: {value}"))
-}
-
-fn parse_u32(value: String) -> Result<u32> {
-    value
-        .parse::<u32>()
         .with_context(|| format!("invalid unsigned integer value: {value}"))
 }
 
@@ -464,7 +362,7 @@ fn resolve_app_config(raw: RawConfig, apply_env: bool) -> Result<AppConfig> {
     Ok(AppConfig {
         memory,
         index: resolve_index_config(raw.clone()),
-        astra: resolve_astra_config(raw.clone(), apply_env)?,
+        network: resolve_network_config(raw.clone()),
         debug: resolve_debug_config(raw),
     })
 }
@@ -475,176 +373,15 @@ fn resolve_index_config(raw: RawConfig) -> IndexConfig {
     }
 }
 
-fn resolve_astra_config(raw: RawConfig, apply_env: bool) -> Result<AstraConfig> {
-    let mut config = AstraConfig {
-        round_limit: raw.astra.round_limit.unwrap_or(3),
-        retry_limit: raw.astra.retry_limit.unwrap_or(3),
-        pi: resolve_astra_pi_config(raw.astra.pi, apply_env)?,
-    };
-    if apply_env {
-        if let Ok(value) = std::env::var("SESSIO_ASTRA_ROUND_LIMIT") {
-            if !value.trim().is_empty() {
-                config.round_limit = parse_u32(value)?;
-            }
-        }
-        if let Ok(value) = std::env::var("SESSIO_ASTRA_RETRY_LIMIT") {
-            if !value.trim().is_empty() {
-                config.retry_limit = parse_u32(value)?;
-            }
-        }
+fn resolve_network_config(raw: RawConfig) -> NetworkConfig {
+    let proxy = raw.network.proxy;
+    NetworkConfig {
+        proxy: NetworkProxyConfig {
+            enabled: proxy.enabled.unwrap_or(false),
+            url: trimmed_string(proxy.url.as_deref()),
+            no_proxy: trimmed_string(proxy.no_proxy.as_deref()),
+        },
     }
-    if config.round_limit == 0 {
-        bail!("astra.round_limit must be greater than 0");
-    }
-    if config.retry_limit == 0 {
-        bail!("astra.retry_limit must be greater than 0");
-    }
-    Ok(config)
-}
-
-fn resolve_astra_pi_config(
-    mut raw: RawAstraPiConfig,
-    apply_env: bool,
-) -> Result<Option<AstraPiConfig>> {
-    if apply_env {
-        apply_string_env(&mut raw.command, "SESSIO_ASTRA_PI_COMMAND");
-        apply_string_env(&mut raw.model, "SESSIO_ASTRA_PI_MODEL");
-        apply_string_env(&mut raw.thinking_level, "SESSIO_ASTRA_PI_THINKING_LEVEL");
-        apply_string_env(&mut raw.session_dir, "SESSIO_ASTRA_PI_SESSION_DIR");
-        apply_env_map(&mut raw.env, "SESSIO_ASTRA_PI_ENV")?;
-        apply_string_env(&mut raw.planner.command, "SESSIO_ASTRA_PI_PLANNER_COMMAND");
-        apply_string_env(&mut raw.planner.model, "SESSIO_ASTRA_PI_PLANNER_MODEL");
-        apply_string_env(
-            &mut raw.planner.thinking_level,
-            "SESSIO_ASTRA_PI_PLANNER_THINKING_LEVEL",
-        );
-        apply_u64_env(
-            &mut raw.planner.timeout_ms,
-            "SESSIO_ASTRA_PI_PLANNER_TIMEOUT_MS",
-        )?;
-        apply_string_env(
-            &mut raw.planner.session_dir,
-            "SESSIO_ASTRA_PI_PLANNER_SESSION_DIR",
-        );
-        apply_env_map(&mut raw.planner.env, "SESSIO_ASTRA_PI_PLANNER_ENV")?;
-        apply_string_env(
-            &mut raw.decision.command,
-            "SESSIO_ASTRA_PI_DECISION_COMMAND",
-        );
-        apply_string_env(&mut raw.decision.model, "SESSIO_ASTRA_PI_DECISION_MODEL");
-        apply_string_env(
-            &mut raw.decision.thinking_level,
-            "SESSIO_ASTRA_PI_DECISION_THINKING_LEVEL",
-        );
-        apply_u64_env(
-            &mut raw.decision.timeout_ms,
-            "SESSIO_ASTRA_PI_DECISION_TIMEOUT_MS",
-        )?;
-        apply_string_env(
-            &mut raw.decision.session_dir,
-            "SESSIO_ASTRA_PI_DECISION_SESSION_DIR",
-        );
-        apply_env_map(&mut raw.decision.env, "SESSIO_ASTRA_PI_DECISION_ENV")?;
-    }
-
-    let Some(command) = raw.command.clone().filter(|value| !value.trim().is_empty()) else {
-        return Ok(None);
-    };
-    validate_env_keys("astra.pi.env", &raw.env)?;
-    validate_env_keys("astra.pi.planner.env", &raw.planner.env)?;
-    validate_env_keys("astra.pi.decision.env", &raw.decision.env)?;
-    let planner = resolve_astra_pi_purpose_config(&raw, raw.planner.clone(), 30_000, "planner")?;
-    let decision = resolve_astra_pi_purpose_config(&raw, raw.decision.clone(), 30_000, "decision")?;
-    Ok(Some(AstraPiConfig {
-        command,
-        model: raw.model.filter(|value| !value.trim().is_empty()),
-        thinking_level: raw.thinking_level.filter(|value| !value.trim().is_empty()),
-        session_dir: raw.session_dir.filter(|value| !value.trim().is_empty()),
-        env: raw.env,
-        planner,
-        decision,
-    }))
-}
-
-fn resolve_astra_pi_purpose_config(
-    common: &RawAstraPiConfig,
-    raw: RawAstraPiPurposeConfig,
-    default_timeout_ms: u64,
-    purpose: &str,
-) -> Result<AstraPiPurposeConfig> {
-    let timeout_ms = raw.timeout_ms.unwrap_or(default_timeout_ms);
-    if timeout_ms == 0 {
-        bail!("astra.pi.{purpose}.timeout_ms must be greater than 0");
-    }
-    let mut env = common.env.clone();
-    env.extend(raw.env);
-    Ok(AstraPiPurposeConfig {
-        command: raw.command.filter(|value| !value.trim().is_empty()),
-        model: raw
-            .model
-            .or_else(|| common.model.clone())
-            .filter(|value| !value.trim().is_empty()),
-        thinking_level: raw
-            .thinking_level
-            .or_else(|| common.thinking_level.clone())
-            .filter(|value| !value.trim().is_empty()),
-        timeout_ms,
-        session_dir: raw
-            .session_dir
-            .or_else(|| common.session_dir.clone())
-            .filter(|value| !value.trim().is_empty()),
-        env,
-    })
-}
-
-fn apply_string_env(target: &mut Option<String>, key: &str) {
-    if let Ok(value) = std::env::var(key) {
-        if !value.trim().is_empty() {
-            *target = Some(value);
-        }
-    }
-}
-
-fn apply_u64_env(target: &mut Option<u64>, key: &str) -> Result<()> {
-    if let Ok(value) = std::env::var(key) {
-        if !value.trim().is_empty() {
-            *target = Some(parse_u64(value)?);
-        }
-    }
-    Ok(())
-}
-
-fn apply_env_map(target: &mut BTreeMap<String, String>, key: &str) -> Result<()> {
-    let Ok(value) = std::env::var(key) else {
-        return Ok(());
-    };
-    if value.trim().is_empty() {
-        return Ok(());
-    }
-    let env: BTreeMap<String, String> =
-        serde_json::from_str(&value).with_context(|| format!("parse {key} JSON object"))?;
-    target.extend(env);
-    Ok(())
-}
-
-fn validate_env_keys(section: &str, env: &BTreeMap<String, String>) -> Result<()> {
-    for key in env.keys() {
-        if !valid_env_key(key) {
-            bail!("{section} contains invalid env key: {key}");
-        }
-    }
-    Ok(())
-}
-
-fn valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn resolve_debug_config(raw: RawConfig) -> DebugConfig {
@@ -715,13 +452,8 @@ fn raw_config_with_defaults(mut raw: RawConfig) -> Result<(RawConfig, bool)> {
         &mut changed,
     );
     merge_option(
-        &mut raw.astra.round_limit,
-        defaults.astra.round_limit,
-        &mut changed,
-    );
-    merge_option(
-        &mut raw.astra.retry_limit,
-        defaults.astra.retry_limit,
+        &mut raw.network.proxy.enabled,
+        defaults.network.proxy.enabled,
         &mut changed,
     );
     merge_option(
@@ -766,11 +498,7 @@ fn default_app_config() -> Result<AppConfig> {
         index: IndexConfig {
             poll_interval_seconds: 60,
         },
-        astra: AstraConfig {
-            round_limit: 3,
-            retry_limit: 3,
-            pi: None,
-        },
+        network: NetworkConfig::default(),
         debug: DebugConfig {
             acp_config: false,
             update_preview: false,
@@ -820,7 +548,7 @@ pub fn serialize_app_config(config: &AppConfig) -> String {
     }
     out.push_str(&serialize_index_config(&config.index));
     out.push('\n');
-    out.push_str(&serialize_astra_config(&config.astra));
+    out.push_str(&serialize_network_config(&config.network));
     out.push('\n');
     out.push_str(&serialize_debug_config(&config.debug));
     out
@@ -835,99 +563,27 @@ fn serialize_index_config(config: &IndexConfig) -> String {
     out
 }
 
-fn serialize_astra_config(config: &AstraConfig) -> String {
+fn serialize_network_config(config: &NetworkConfig) -> String {
     let mut out = String::new();
-    out.push_str("[astra]\n");
-    out.push_str("round_limit = ");
-    out.push_str(&config.round_limit.to_string());
+    out.push_str("[network.proxy]\n");
+    out.push_str("enabled = ");
+    out.push_str(if config.proxy.enabled { "true" } else { "false" });
     out.push('\n');
-    out.push_str("retry_limit = ");
-    out.push_str(&config.retry_limit.to_string());
-    out.push('\n');
-    if let Some(pi) = &config.pi {
+    if let Some(url) = &config.proxy.url {
+        out.push_str("url = ");
+        out.push_str(&toml_string(url));
         out.push('\n');
-        out.push_str("[astra.pi]\n");
-        out.push_str("command = ");
-        out.push_str(&toml_string(&pi.command));
+    }
+    if let Some(no_proxy) = &config.proxy.no_proxy {
+        out.push_str("no_proxy = ");
+        out.push_str(&toml_string(no_proxy));
         out.push('\n');
-        if let Some(model) = &pi.model {
-            out.push_str("model = ");
-            out.push_str(&toml_string(model));
-            out.push('\n');
-        }
-        if let Some(thinking_level) = &pi.thinking_level {
-            out.push_str("thinking_level = ");
-            out.push_str(&toml_string(thinking_level));
-            out.push('\n');
-        }
-        if let Some(session_dir) = &pi.session_dir {
-            out.push_str("session_dir = ");
-            out.push_str(&toml_string(session_dir));
-            out.push('\n');
-        }
-        serialize_env_section("astra.pi.env", &pi.env, &mut out);
-        serialize_astra_pi_purpose_config("planner", &pi.planner, &pi.env, &mut out);
-        serialize_astra_pi_purpose_config("decision", &pi.decision, &pi.env, &mut out);
     }
     out
 }
 
-fn serialize_astra_pi_purpose_config(
-    purpose: &str,
-    config: &AstraPiPurposeConfig,
-    common_env: &BTreeMap<String, String>,
-    out: &mut String,
-) {
-    out.push('\n');
-    out.push_str("[astra.pi.");
-    out.push_str(purpose);
-    out.push_str("]\n");
-    if let Some(command) = &config.command {
-        out.push_str("command = ");
-        out.push_str(&toml_string(command));
-        out.push('\n');
-    }
-    if let Some(model) = &config.model {
-        out.push_str("model = ");
-        out.push_str(&toml_string(model));
-        out.push('\n');
-    }
-    if let Some(thinking_level) = &config.thinking_level {
-        out.push_str("thinking_level = ");
-        out.push_str(&toml_string(thinking_level));
-        out.push('\n');
-    }
-    out.push_str("timeout_ms = ");
-    out.push_str(&config.timeout_ms.to_string());
-    out.push('\n');
-    if let Some(session_dir) = &config.session_dir {
-        out.push_str("session_dir = ");
-        out.push_str(&toml_string(session_dir));
-        out.push('\n');
-    }
-    let purpose_env = config
-        .env
-        .iter()
-        .filter(|(key, value)| common_env.get(*key) != Some(*value))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    serialize_env_section(&format!("astra.pi.{purpose}.env"), &purpose_env, out);
-}
-
-fn serialize_env_section(section: &str, env: &BTreeMap<String, String>, out: &mut String) {
-    if env.is_empty() {
-        return;
-    }
-    out.push('\n');
-    out.push('[');
-    out.push_str(section);
-    out.push_str("]\n");
-    for (key, value) in env {
-        out.push_str(key);
-        out.push_str(" = ");
-        out.push_str(&toml_string(value));
-        out.push('\n');
-    }
+fn trimmed_string(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
 }
 
 fn serialize_debug_config(config: &DebugConfig) -> String {
@@ -1051,23 +707,31 @@ mod tests {
     }
 
     #[test]
-    fn parses_astra_limits() {
+    fn parses_network_proxy_config() {
         let raw = parse_raw_config(
             r#"
-            [astra]
-            round_limit = 7
-            retry_limit = 4
+            [network.proxy]
+            enabled = true
+            url = "http://127.0.0.1:7890"
+            no_proxy = "localhost,127.0.0.1"
             "#,
         )
         .unwrap();
         let config = super::resolve_app_config(raw, false).unwrap();
 
-        assert_eq!(config.astra.round_limit, 7);
-        assert_eq!(config.astra.retry_limit, 4);
+        assert!(config.network.proxy.enabled);
+        assert_eq!(
+            config.network.proxy.url.as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            config.network.proxy.no_proxy.as_deref(),
+            Some("localhost,127.0.0.1")
+        );
     }
 
     #[test]
-    fn parses_astra_pi_config() {
+    fn ignores_legacy_astra_config_sections() {
         let raw = parse_raw_config(
             r#"
             [astra]
@@ -1098,111 +762,11 @@ mod tests {
         )
         .unwrap();
         let config = super::resolve_app_config(raw, false).unwrap();
-        let pi = config.astra.pi.unwrap();
-
-        assert_eq!(pi.command, "pi-agent --acp");
-        assert_eq!(pi.model.as_deref(), Some("pi-model"));
-        assert_eq!(pi.env.get("COMMON").map(String::as_str), Some("base"));
-        assert_eq!(pi.planner.model.as_deref(), Some("pi-model"));
-        assert_eq!(pi.planner.thinking_level.as_deref(), Some("medium"));
-        assert_eq!(pi.planner.timeout_ms, 1000);
-        assert_eq!(pi.planner.session_dir.as_deref(), Some("/tmp/pi-sessions"));
-        assert_eq!(
-            pi.planner.env.get("COMMON").map(String::as_str),
-            Some("base")
-        );
-        assert_eq!(
-            pi.planner.env.get("SHARED").map(String::as_str),
-            Some("planner")
-        );
-        assert_eq!(
-            pi.decision.command.as_deref(),
-            Some("pi-agent --acp --decision")
-        );
-        assert_eq!(pi.decision.model.as_deref(), Some("decision-model"));
-        assert_eq!(pi.decision.timeout_ms, 2000);
-        assert_eq!(
-            pi.decision.env.get("SHARED").map(String::as_str),
-            Some("common")
-        );
-    }
-
-    #[test]
-    fn rejects_zero_astra_pi_timeout() {
-        let raw = parse_raw_config(
-            r#"
-            [astra.pi]
-            command = "pi-agent --acp"
-
-            [astra.pi.planner]
-            timeout_ms = 0
-            "#,
-        )
-        .unwrap();
-
-        assert!(super::resolve_app_config(raw, false).is_err());
-    }
-
-    #[test]
-    fn serializes_astra_pi_env_sections() {
-        let raw = parse_raw_config(
-            r#"
-            [astra.pi]
-            command = "pi-agent --acp"
-
-            [astra.pi.env]
-            COMMON = "common"
-            TOKEN = "common"
-
-            [astra.pi.planner]
-            timeout_ms = 1000
-
-            [astra.pi.decision.env]
-            TOKEN = "decision"
-            "#,
-        )
-        .unwrap();
-        let config = super::resolve_app_config(raw, false).unwrap();
         let serialized = serialize_app_config(&config);
 
-        assert!(serialized.contains("[astra.pi.env]"));
-        assert!(serialized.contains("COMMON = \"common\""));
-        assert!(serialized.contains("TOKEN = \"common\""));
-        assert!(!serialized.contains("[astra.pi.planner.env]"));
-        assert!(serialized.contains("[astra.pi.decision.env]"));
-        assert!(serialized.contains("TOKEN = \"decision\""));
-        assert_eq!(serialized.matches("COMMON = \"common\"").count(), 1);
-    }
-
-    #[test]
-    fn rejects_invalid_astra_pi_env_key() {
-        let raw = parse_raw_config(
-            r#"
-            [astra.pi]
-            command = "pi-agent --acp"
-
-            [astra.pi.env]
-            API-KEY = "secret"
-            "#,
-        )
-        .unwrap();
-
-        let error = super::resolve_app_config(raw, false).unwrap_err();
-        assert!(error.to_string().contains("invalid env key: API-KEY"));
-    }
-
-    #[test]
-    fn rejects_zero_astra_limits() {
-        let raw = parse_raw_config(
-            r#"
-            [astra]
-            round_limit = 0
-            retry_limit = 3
-            "#,
-        )
-        .unwrap();
-
-        assert!(super::resolve_app_config(raw, false).is_err());
+        assert_eq!(config.index.poll_interval_seconds, 60);
+        assert!(!serialized.contains("[astra]"));
+        assert!(!serialized.contains("[astra.pi]"));
     }
 
     #[test]
@@ -1252,15 +816,14 @@ mod tests {
         assert!(!serialized.contains("[memory]"));
         assert!(serialized.contains("[index]"));
         assert!(serialized.contains("poll_interval_seconds = 60"));
-        assert!(serialized.contains("[astra]"));
-        assert!(serialized.contains("round_limit = 3"));
-        assert!(serialized.contains("retry_limit = 3"));
+        assert!(!serialized.contains("[astra]"));
         assert!(serialized.contains("[debug]"));
+        assert!(serialized.contains("[network.proxy]"));
+        assert!(serialized.contains("enabled = false"));
         assert!(!serialized.contains("[agents.runtime"));
         assert!(config.memory.is_none());
         assert_eq!(config.index.poll_interval_seconds, 60);
-        assert_eq!(config.astra.round_limit, 3);
-        assert_eq!(config.astra.retry_limit, 3);
+        assert!(!config.network.proxy.enabled);
     }
 
     #[test]
@@ -1272,8 +835,6 @@ mod tests {
         assert!(changed);
         assert!(config.memory.is_none());
         assert_eq!(config.index.poll_interval_seconds, 60);
-        assert_eq!(config.astra.round_limit, 3);
-        assert_eq!(config.astra.retry_limit, 3);
         assert!(!config.debug.acp_config);
         assert!(!config.debug.update_preview);
     }

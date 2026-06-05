@@ -23,6 +23,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  SESSIO_PI_AGENT_RUST_VERSION: v0.1.17
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -54,14 +57,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - uses: oven-sh/setup-bun@v2
-      - name: Build Astra sidecar
-        working-directory: sidecars/sessio-astra
-        run: |
-          bun install --frozen-lockfile
-          bun run compile:mac-arm64
-          bun run compile:mac-x64
-          bun run compile:mac-universal
+      - name: Prepare Astra sidecar
+        run: node scripts/prepare-pi-sidecar.mjs universal-apple-darwin
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build universal app and DMG
@@ -113,12 +110,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
-      - uses: oven-sh/setup-bun@v2
-      - name: Build Astra sidecar
-        working-directory: sidecars/sessio-astra
-        run: |
-          bun install --frozen-lockfile
-          bun run compile:linux-x64
+      - name: Prepare Astra sidecar
+        run: node scripts/prepare-pi-sidecar.mjs x86_64-unknown-linux-gnu
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build Linux packages
@@ -171,12 +164,8 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
-      - uses: oven-sh/setup-bun@v2
-      - name: Build Astra sidecar
-        working-directory: sidecars/sessio-astra
-        run: |
-          bun install --frozen-lockfile
-          bun run compile:linux-arm64
+      - name: Prepare Astra sidecar
+        run: node scripts/prepare-pi-sidecar.mjs aarch64-unknown-linux-gnu
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build Linux packages
@@ -216,13 +205,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - uses: oven-sh/setup-bun@v2
-      - name: Build Astra sidecar
-        working-directory: sidecars/sessio-astra
-        shell: bash
-        run: |
-          bun install --frozen-lockfile
-          bun run compile:win-x64
+      - name: Prepare Astra sidecar
+        run: node scripts/prepare-pi-sidecar.mjs x86_64-pc-windows-msvc
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Build NSIS installer
