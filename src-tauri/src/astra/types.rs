@@ -98,6 +98,9 @@ pub struct AstraHandle {
     pub terminal_reason: Option<String>,
     pub last_error_code: Option<String>,
     pub last_error_message: Option<String>,
+    pub internal_planner_session_ids: Vec<String>,
+    pub internal_decision_session_ids: Vec<String>,
+    pub run_diagnostics: Vec<Value>,
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -127,6 +130,9 @@ pub struct AstraRun {
     pub terminal_reason: Option<String>,
     pub last_error_code: Option<String>,
     pub last_error_message: Option<String>,
+    pub internal_planner_session_ids: Vec<String>,
+    pub internal_decision_session_ids: Vec<String>,
+    pub run_diagnostics: Vec<Value>,
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -164,6 +170,10 @@ pub struct AstraTaskResult {
     pub error: Option<String>,
     pub attempt_count: u32,
     pub retry_limit_reached: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_reason: Option<String>,
     pub completed_at: i64,
 }
 

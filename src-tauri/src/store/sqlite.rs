@@ -609,6 +609,9 @@ CREATE TABLE IF NOT EXISTS astra_runs (
     terminal_reason            TEXT,
     last_error_code            TEXT,
     last_error_message         TEXT,
+    internal_planner_session_ids_json  TEXT NOT NULL DEFAULT '[]',
+    internal_decision_session_ids_json TEXT NOT NULL DEFAULT '[]',
+    run_diagnostics_json               TEXT NOT NULL DEFAULT '[]',
     error                      TEXT,
     created_at                 INTEGER NOT NULL,
     updated_at                 INTEGER NOT NULL,
@@ -633,7 +636,8 @@ const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, sta
     proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
     current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
     planner_backend, decision_backend, round_index, round_limit, terminal_reason,
-    last_error_code, last_error_message, error, created_at, updated_at";
+    last_error_code, last_error_message, internal_planner_session_ids_json,
+    internal_decision_session_ids_json, run_diagnostics_json, error, created_at, updated_at";
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -743,6 +747,18 @@ fn ensure_v5_astra_columns(conn: &Connection) -> Result<()> {
         (
             "last_error_message",
             "ALTER TABLE astra_runs ADD COLUMN last_error_message TEXT",
+        ),
+        (
+            "internal_planner_session_ids_json",
+            "ALTER TABLE astra_runs ADD COLUMN internal_planner_session_ids_json TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "internal_decision_session_ids_json",
+            "ALTER TABLE astra_runs ADD COLUMN internal_decision_session_ids_json TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "run_diagnostics_json",
+            "ALTER TABLE astra_runs ADD COLUMN run_diagnostics_json TEXT NOT NULL DEFAULT '[]'",
         ),
     ] {
         if !columns.contains(name) {
@@ -2395,9 +2411,12 @@ fn astra_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunRecor
         terminal_reason: row.get(18)?,
         last_error_code: row.get(19)?,
         last_error_message: row.get(20)?,
-        error: row.get(21)?,
-        created_at: row.get(22)?,
-        updated_at: row.get(23)?,
+        internal_planner_session_ids_json: row.get(21)?,
+        internal_decision_session_ids_json: row.get(22)?,
+        run_diagnostics_json: row.get(23)?,
+        error: row.get(24)?,
+        created_at: row.get(25)?,
+        updated_at: row.get(26)?,
     })
 }
 
@@ -5998,8 +6017,9 @@ impl SessionStore for SqliteStore {
                 proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
                 current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
                 planner_backend, decision_backend, round_index, round_limit, terminal_reason,
-                last_error_code, last_error_message, error, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_error_code, last_error_message, internal_planner_session_ids_json,
+                internal_decision_session_ids_json, run_diagnostics_json, error, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(run_id) DO UPDATE SET
                 thread_id = excluded.thread_id,
                 project_id = excluded.project_id,
@@ -6021,6 +6041,9 @@ impl SessionStore for SqliteStore {
                 terminal_reason = excluded.terminal_reason,
                 last_error_code = excluded.last_error_code,
                 last_error_message = excluded.last_error_message,
+                internal_planner_session_ids_json = excluded.internal_planner_session_ids_json,
+                internal_decision_session_ids_json = excluded.internal_decision_session_ids_json,
+                run_diagnostics_json = excluded.run_diagnostics_json,
                 error = excluded.error,
                 updated_at = excluded.updated_at",
             params![
@@ -6045,6 +6068,9 @@ impl SessionStore for SqliteStore {
                 run.terminal_reason,
                 run.last_error_code,
                 run.last_error_message,
+                run.internal_planner_session_ids_json,
+                run.internal_decision_session_ids_json,
+                run.run_diagnostics_json,
                 run.error,
                 run.created_at,
                 run.updated_at,
@@ -7276,6 +7302,9 @@ mod migration_tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
+            internal_planner_session_ids_json: r#"["planner-session-1"]"#.to_string(),
+            internal_decision_session_ids_json: r#"["decision-session-1"]"#.to_string(),
+            run_diagnostics_json: r#"[{"kind":"planner_failure","code":"timeout"}]"#.to_string(),
             error: None,
             created_at: 10,
             updated_at: 20,
@@ -7284,6 +7313,18 @@ mod migration_tests {
         let active = store.get_active_astra_run(&thread.id).unwrap().unwrap();
         assert_eq!(active.run_id, "astra-run-1");
         assert_eq!(active.status, "running");
+        assert_eq!(
+            active.internal_planner_session_ids_json,
+            r#"["planner-session-1"]"#
+        );
+        assert_eq!(
+            active.internal_decision_session_ids_json,
+            r#"["decision-session-1"]"#
+        );
+        assert_eq!(
+            active.run_diagnostics_json,
+            r#"[{"kind":"planner_failure","code":"timeout"}]"#
+        );
 
         let interrupted_rows = store.interrupt_active_astra_runs().unwrap();
         assert_eq!(interrupted_rows.len(), 1);

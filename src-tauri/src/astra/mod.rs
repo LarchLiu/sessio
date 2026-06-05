@@ -29,6 +29,7 @@ use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
 
 mod decision;
 mod orchestrator;
+mod pi_acp_adapter;
 mod planner;
 mod prompt;
 mod types;
@@ -348,6 +349,9 @@ impl AstraService {
                 terminal_reason: None,
                 last_error_code: None,
                 last_error_message: None,
+                internal_planner_session_ids: Vec::new(),
+                internal_decision_session_ids: Vec::new(),
+                run_diagnostics: Vec::new(),
                 error: None,
                 created_at: now,
                 updated_at: now,
@@ -641,6 +645,8 @@ impl AstraService {
                     error: Some("retry limit reached".to_string()),
                     attempt_count: prior_attempt_count,
                     retry_limit_reached: true,
+                    decision_action: None,
+                    decision_reason: None,
                     completed_at: now_ms(),
                 };
                 upsert_task_result_in_run(next, result.clone());
@@ -1148,6 +1154,8 @@ impl AstraService {
             error,
             attempt_count: state.attempt_count,
             retry_limit_reached: state.retry_limit_reached,
+            decision_action: None,
+            decision_reason: None,
             completed_at: now_ms(),
         };
         let run = self.record_task_result(&state.run_id, result.clone())?;
@@ -1951,6 +1959,9 @@ impl AstraService {
             terminal_reason: run.terminal_reason,
             last_error_code: run.last_error_code,
             last_error_message: run.last_error_message,
+            internal_planner_session_ids: run.internal_planner_session_ids,
+            internal_decision_session_ids: run.internal_decision_session_ids,
+            run_diagnostics: run.run_diagnostics,
             error: run.error,
             created_at: run.created_at,
             updated_at: run.updated_at,
@@ -2451,6 +2462,14 @@ fn run_to_record(run: &AstraRun) -> AstraRunRecord {
         terminal_reason: run.terminal_reason.clone(),
         last_error_code: run.last_error_code.clone(),
         last_error_message: run.last_error_message.clone(),
+        internal_planner_session_ids_json: serde_json::to_string(&run.internal_planner_session_ids)
+            .unwrap_or_else(|_| "[]".to_string()),
+        internal_decision_session_ids_json: serde_json::to_string(
+            &run.internal_decision_session_ids,
+        )
+        .unwrap_or_else(|_| "[]".to_string()),
+        run_diagnostics_json: serde_json::to_string(&run.run_diagnostics)
+            .unwrap_or_else(|_| "[]".to_string()),
         error: run.error.clone(),
         created_at: run.created_at,
         updated_at: run.updated_at,
@@ -2491,6 +2510,15 @@ fn record_to_run(record: AstraRunRecord) -> Result<AstraRun> {
         terminal_reason: record.terminal_reason,
         last_error_code: record.last_error_code,
         last_error_message: record.last_error_message,
+        internal_planner_session_ids: serde_json::from_str(
+            &record.internal_planner_session_ids_json,
+        )
+        .unwrap_or_default(),
+        internal_decision_session_ids: serde_json::from_str(
+            &record.internal_decision_session_ids_json,
+        )
+        .unwrap_or_default(),
+        run_diagnostics: serde_json::from_str(&record.run_diagnostics_json).unwrap_or_default(),
         error: record.error,
         created_at: record.created_at,
         updated_at: record.updated_at,
@@ -2827,6 +2855,9 @@ mod tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            internal_decision_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
             updated_at: 1,
@@ -3040,6 +3071,9 @@ mod tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            internal_decision_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
             updated_at: 1,
@@ -3679,6 +3713,9 @@ mod tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            internal_decision_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
             updated_at: 1,
@@ -3852,6 +3889,9 @@ mod tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            internal_decision_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
             updated_at: 1,
@@ -3869,6 +3909,8 @@ mod tests {
             error: None,
             attempt_count: 1,
             retry_limit_reached: false,
+            decision_action: None,
+            decision_reason: None,
             completed_at: 1,
         }
     }
