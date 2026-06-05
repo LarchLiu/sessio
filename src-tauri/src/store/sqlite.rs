@@ -7262,11 +7262,10 @@ mod migration_tests {
 
     #[test]
     fn astra_run_persistence_and_recovery() {
-        let path = unique_db("sessio-astra-runs");
+        let path = unique_db("astra-runs");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
-        let project_path =
-            std::env::temp_dir().join(format!("sessio-astra-project-{}", unique_suffix()));
+        let project_path = std::env::temp_dir().join(format!("astra-project-{}", unique_suffix()));
         std::fs::create_dir_all(&project_path).unwrap();
         let project = store
             .add_project(
@@ -7379,13 +7378,11 @@ mod migration_tests {
 
     #[test]
     fn cleanup_partial_astra_sessions_only_archives_placeholders() {
-        let path = unique_db("sessio-astra-partial-cleanup");
+        let path = unique_db("astra-partial-cleanup");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
-        let project_path = std::env::temp_dir().join(format!(
-            "sessio-astra-partial-cleanup-project-{}",
-            unique_suffix()
-        ));
+        let project_path =
+            std::env::temp_dir().join(format!("astra-partial-cleanup-project-{}", unique_suffix()));
         std::fs::create_dir_all(&project_path).unwrap();
 
         let placeholder = SessionInfo {
@@ -7734,7 +7731,7 @@ mod migration_tests {
 
     #[test]
     fn astra_virtual_session_refs_stay_available_when_scopes_disappear() {
-        let path = unique_db("sessio-astra-virtual-scope-guard");
+        let path = unique_db("astra-virtual-scope-guard");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 
@@ -9692,7 +9689,7 @@ mod migration_tests {
 
     #[test]
     fn astra_preferences_can_clear_model_without_affecting_runtime_agents() {
-        let path = unique_db("sessio-astra-clear-model");
+        let path = unique_db("astra-clear-model");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 
@@ -9723,7 +9720,7 @@ mod migration_tests {
 
     #[test]
     fn astra_provider_ids_are_assigned_by_store() {
-        let path = unique_db("sessio-astra-provider-id");
+        let path = unique_db("astra-provider-id");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 

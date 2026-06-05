@@ -288,7 +288,7 @@ impl AstraService {
                         Some(response.session_id),
                     ) {
                         log::warn!(
-                            "[sessio-astra:pi-acp:diagnostic] run={} purpose=planning error={}",
+                            "[astra:pi-acp:diagnostic] run={} purpose=planning error={}",
                             run.run_id,
                             error
                         );
@@ -314,7 +314,7 @@ impl AstraService {
                         return Err(error);
                     }
                     log::warn!(
-                        "[sessio-astra:pi-acp:planner-fallback] run={} code={} message={}",
+                        "[astra:pi-acp:planner-fallback] run={} code={} message={}",
                         run.run_id,
                         error.code,
                         error.message
@@ -364,7 +364,7 @@ impl AstraService {
                         Some(response.session_id),
                     ) {
                         log::warn!(
-                            "[sessio-astra:pi-acp:diagnostic] run={} purpose=decision task={} error={}",
+                            "[astra:pi-acp:diagnostic] run={} purpose=decision task={} error={}",
                             run.run_id,
                             task.id,
                             error
@@ -391,7 +391,7 @@ impl AstraService {
                         return Err(error);
                     }
                     log::warn!(
-                        "[sessio-astra:pi-acp:decision-fallback] task={} code={} message={}",
+                        "[astra:pi-acp:decision-fallback] task={} code={} message={}",
                         task.id,
                         error.code,
                         error.message

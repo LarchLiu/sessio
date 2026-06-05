@@ -207,12 +207,12 @@ async fn run_internal_pi_acp_async(
     let failure_session_id = internal_session_id.clone();
     agent_client_protocol::Client
         .builder()
-        .name("sessio-astra-internal")
+        .name("astra-internal")
         .on_receive_notification(
             async move |notification: SessionNotification, _connection| {
                 if let Err(error) = collect_notification_text(&notification, &notification_text) {
                     log::warn!(
-                        "[sessio-astra:pi-acp:notification] purpose={} error={}",
+                        "[astra:pi-acp:notification] purpose={} error={}",
                         notification_purpose,
                         error
                     );

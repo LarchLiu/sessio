@@ -148,7 +148,7 @@ impl AstraService {
         thread::spawn(move || {
             for event in receiver {
                 if let Err(error) = service.handle_runtime_event(event) {
-                    log::warn!("[sessio-astra:runtime-event] {error}");
+                    log::warn!("[astra:runtime-event] {error}");
                 }
             }
         });
@@ -167,7 +167,7 @@ impl AstraService {
                 .cleanup_partial_astra_sessions(&session_ids)?;
             if cleaned > 0 {
                 log::info!(
-                    "[sessio-astra:recover:cleanup-partial] runId={} cleanedSessions={}",
+                    "[astra:recover:cleanup-partial] runId={} cleanedSessions={}",
                     record.run_id,
                     cleaned
                 );
@@ -257,7 +257,7 @@ impl AstraService {
             run
         };
         log::info!(
-            "[sessio-astra:run:start] runId={} threadId={} projectId={}",
+            "[astra:run:start] runId={} threadId={} projectId={}",
             run.run_id,
             run.thread_id,
             run.project_id
@@ -299,7 +299,7 @@ impl AstraService {
             self.abort_delegated_session(session_id);
         }
         log::info!(
-            "[sessio-astra:run:cancel] runId={} threadId={} delegatedSessions={}",
+            "[astra:run:cancel] runId={} threadId={} delegatedSessions={}",
             run.run_id,
             run.thread_id,
             delegated_sessions.len()
@@ -506,7 +506,7 @@ impl AstraService {
             }),
         );
         log::info!(
-            "[sessio-astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
+            "[astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
             next.run_id,
             next.thread_id,
             task.id,
@@ -873,7 +873,7 @@ impl AstraService {
             }),
         );
         log::info!(
-            "[sessio-astra:task:delegated] runId={} threadId={} taskId={} threadStageId={:?} agentSessionId={} runtimeSessionId={}",
+            "[astra:task:delegated] runId={} threadId={} taskId={} threadStageId={:?} agentSessionId={} runtimeSessionId={}",
             run.run_id,
             run.thread_id,
             task.id,
@@ -964,7 +964,7 @@ impl AstraService {
         }
         self.emit(&run, "task_result", serde_json::to_value(&result)?);
         log::info!(
-            "[sessio-astra:task:result] runId={} threadId={} taskId={} sessioRuntimeSessionId={} status={}",
+            "[astra:task:result] runId={} threadId={} taskId={} sessioRuntimeSessionId={} status={}",
             run.run_id,
             run.thread_id,
             result.task_id,
@@ -1361,7 +1361,7 @@ impl AstraService {
             }
             Ok(Err(error)) => {
                 let message = error.to_string();
-                log::warn!("[sessio-astra:run:rust-native-worker] {message}");
+                log::warn!("[astra:run:rust-native-worker] {message}");
                 let changed = self
                     .mark_run_errored(
                         run_id,
@@ -1387,7 +1387,7 @@ impl AstraService {
             }
             Err(payload) => {
                 let message = panic_payload_message(&payload);
-                log::warn!("[sessio-astra:run:rust-native-worker:panic] {message}");
+                log::warn!("[astra:run:rust-native-worker:panic] {message}");
                 let changed = self
                     .mark_run_errored(run_id, "worker_panic", "worker_panic", message.clone())
                     .map(|(_, changed)| changed)
@@ -2039,14 +2039,14 @@ mod tests {
     #[test]
     fn records_delegated_stage_session_under_stage() {
         let db_path = std::env::temp_dir().join(format!(
-            "sessio-astra-stage-link-{}.sqlite",
+            "astra-stage-link-{}.sqlite",
             short_hash(&now_ms().to_string())
         ));
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
         let parent = std::env::temp_dir().join(format!(
-            "sessio-astra-stage-project-{}",
+            "astra-stage-project-{}",
             short_hash(&db_path.to_string_lossy())
         ));
         std::fs::create_dir_all(&parent).unwrap();
@@ -2154,14 +2154,14 @@ mod tests {
     #[test]
     fn saves_stage_task_thread_work_snapshot_for_delegated_session() {
         let db_path = std::env::temp_dir().join(format!(
-            "sessio-astra-work-snapshot-{}.sqlite",
+            "astra-work-snapshot-{}.sqlite",
             short_hash(&now_ms().to_string())
         ));
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
         let parent = std::env::temp_dir().join(format!(
-            "sessio-astra-work-snapshot-project-{}",
+            "astra-work-snapshot-project-{}",
             short_hash(&db_path.to_string_lossy())
         ));
         std::fs::create_dir_all(&parent).unwrap();
@@ -2246,14 +2246,14 @@ mod tests {
     #[test]
     fn promotes_delegated_runtime_session_to_agent_session_identity() {
         let db_path = std::env::temp_dir().join(format!(
-            "sessio-astra-session-promote-{}.sqlite",
+            "astra-session-promote-{}.sqlite",
             short_hash(&now_ms().to_string())
         ));
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
         let parent = std::env::temp_dir().join(format!(
-            "sessio-astra-session-promote-project-{}",
+            "astra-session-promote-project-{}",
             short_hash(&db_path.to_string_lossy())
         ));
         std::fs::create_dir_all(&parent).unwrap();
@@ -2893,14 +2893,14 @@ mod tests {
     #[test]
     fn deterministic_stage_update_decision_mutates_store() {
         let db_path = std::env::temp_dir().join(format!(
-            "sessio-astra-decision-store-{}.sqlite",
+            "astra-decision-store-{}.sqlite",
             short_hash(&now_ms().to_string())
         ));
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
 
         let parent = std::env::temp_dir().join(format!(
-            "sessio-astra-decision-project-{}",
+            "astra-decision-project-{}",
             short_hash(&db_path.to_string_lossy())
         ));
         std::fs::create_dir_all(&parent).unwrap();

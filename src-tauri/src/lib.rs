@@ -3119,10 +3119,10 @@ pub fn run() {
                 app_config.astra.clone(),
             );
             if let Err(error) = astra_service.recover_interrupted_runs() {
-                log::warn!("[sessio-astra:recover] {error}");
+                log::warn!("[astra:recover] {error}");
             }
             if let Err(error) = astra_service.watch_runtime_events() {
-                log::warn!("[sessio-astra:runtime-watch] {error}");
+                log::warn!("[astra:runtime-watch] {error}");
             }
             app.manage(astra_service);
             app.manage(runtime_agents_cache);
