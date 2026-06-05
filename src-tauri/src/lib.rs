@@ -24,7 +24,7 @@ use agents::runtime::types::{
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
 };
 use agents::runtime::RuntimeManager;
-use astra::{AstraHandle, AstraService, CancelThreadAstraRequest, StartThreadAstraRequest};
+use astra::{AstraHandle, AstraService, CancelAstraRunRequest, CreateAstraRunRequest};
 use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
@@ -2741,29 +2741,32 @@ fn respond_agent_permission(
 }
 
 #[tauri::command]
-fn start_thread_astra(
-    req: StartThreadAstraRequest,
+fn create_astra_run(
+    req: CreateAstraRunRequest,
     astra: State<'_, AstraService>,
 ) -> Result<AstraHandle, String> {
-    astra.start_thread_astra(req).map_err(|e| e.to_string())
+    astra.create_astra_run(req).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn cancel_thread_astra(
-    req: CancelThreadAstraRequest,
+fn cancel_astra_run(
+    req: CancelAstraRunRequest,
     astra: State<'_, AstraService>,
 ) -> Result<AstraHandle, String> {
-    astra.cancel_thread_astra(req).map_err(|e| e.to_string())
+    astra.cancel_astra_run(req).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn list_thread_astra_runs(
+fn list_astra_runs(
     thread_id: String,
     astra: State<'_, AstraService>,
 ) -> Result<Vec<AstraHandle>, String> {
-    astra
-        .get_thread_astra_runs(&thread_id)
-        .map_err(|e| e.to_string())
+    astra.list_astra_runs(&thread_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_astra_run(run_id: String, astra: State<'_, AstraService>) -> Result<AstraHandle, String> {
+    astra.get_astra_run(&run_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3112,7 +3115,6 @@ pub fn run() {
             let astra_service = AstraService::new(
                 app.handle().clone(),
                 store.clone(),
-                memory_store.clone(),
                 runtime,
                 app_config.astra.clone(),
             );
@@ -3260,9 +3262,10 @@ pub fn run() {
             cancel_agent_turn,
             set_agent_session_config_option,
             respond_agent_permission,
-            start_thread_astra,
-            cancel_thread_astra,
-            list_thread_astra_runs,
+            create_astra_run,
+            cancel_astra_run,
+            list_astra_runs,
+            get_astra_run,
             remove_session_files,
             remove_sessions_by_scope
         ])

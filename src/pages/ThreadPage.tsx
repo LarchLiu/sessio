@@ -5,12 +5,12 @@ import HashIcon from "@iconify-react/mynaui/hash";
 import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal, AstraTaskResult, IssueSeverity, IssueStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo } from "../api";
 import {
   AGENT_LABEL,
-  cancelThreadAstra,
+  cancelAstraRun,
+  createAstraRun,
   createThreadStageIssue,
   deleteThreadStageIssue,
-  listThreadAstraRuns,
+  listAstraRuns,
   listThreads,
-  startThreadAstra,
   updateThreadStageIssue,
   updateThreadStageState,
 } from "../api";
@@ -166,7 +166,7 @@ function ThreadAstraPanel({
   );
 
   const reloadRuns = useCallback(() => {
-    return listThreadAstraRuns(thread.id)
+    return listAstraRuns(thread.id)
       .then(setRuns)
       .catch((err) => onError(String(err)));
   }, [onError, thread.id]);
@@ -177,7 +177,7 @@ function ThreadAstraPanel({
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    listen<AstraEvent>("thread-astra-event", (event) => {
+    listen<AstraEvent>("astra-run-event", (event) => {
       if (event.payload.threadId !== thread.id) return;
       const runId = event.payload.runId;
       const eventType = event.payload.eventType;
@@ -210,7 +210,7 @@ function ThreadAstraPanel({
   const start = async () => {
     setBusy("start");
     try {
-      const run = await startThreadAstra(thread.id, prompt.trim() || null);
+      const run = await createAstraRun(thread.id, prompt.trim() || null);
       setRuns((prev) => upsertRun(prev, run));
       setPrompt("");
       await reloadRuns();
@@ -225,7 +225,7 @@ function ThreadAstraPanel({
     if (!activeRun) return;
     setBusy("cancel");
     try {
-      const run = await cancelThreadAstra(activeRun.runId);
+      const run = await cancelAstraRun(activeRun.runId);
       setRuns((prev) => upsertRun(prev, run));
       await reloadRuns();
     } catch (err) {

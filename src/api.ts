@@ -230,6 +230,8 @@ export interface AstraTaskResult {
   error: string | null;
   attemptCount: number;
   retryLimitReached: boolean;
+  decisionAction?: string | null;
+  decisionReason?: string | null;
   completedAt: number;
 }
 
@@ -248,6 +250,16 @@ export interface AstraHandle {
   completedTaskIds: string[];
   stageAttemptCounts: Record<string, number>;
   retryLimit: number;
+  plannerBackend: string | null;
+  decisionBackend: string | null;
+  roundIndex: number | null;
+  roundLimit: number;
+  terminalReason: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  internalPlannerSessionIds: string[];
+  internalDecisionSessionIds: string[];
+  runDiagnostics: unknown[];
   error: string | null;
   createdAt: number;
   updatedAt: number;
@@ -952,21 +964,25 @@ export async function deleteThread(threadId: string): Promise<void> {
   return invoke<void>("delete_thread", { threadId });
 }
 
-export async function startThreadAstra(
+export async function createAstraRun(
   threadId: string,
   prompt?: string | null,
 ): Promise<AstraHandle> {
-  return invoke<AstraHandle>("start_thread_astra", {
+  return invoke<AstraHandle>("create_astra_run", {
     req: { threadId, prompt: prompt ?? null },
   });
 }
 
-export async function cancelThreadAstra(runId: string): Promise<AstraHandle> {
-  return invoke<AstraHandle>("cancel_thread_astra", { req: { runId } });
+export async function cancelAstraRun(runId: string): Promise<AstraHandle> {
+  return invoke<AstraHandle>("cancel_astra_run", { req: { runId } });
 }
 
-export async function listThreadAstraRuns(threadId: string): Promise<AstraHandle[]> {
-  return invoke<AstraHandle[]>("list_thread_astra_runs", { threadId });
+export async function listAstraRuns(threadId: string): Promise<AstraHandle[]> {
+  return invoke<AstraHandle[]>("list_astra_runs", { threadId });
+}
+
+export async function getAstraRun(runId: string): Promise<AstraHandle> {
+  return invoke<AstraHandle>("get_astra_run", { runId });
 }
 
 export async function listProjectStages(projectId: string): Promise<ProjectStageInfo[]> {

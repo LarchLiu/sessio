@@ -85,7 +85,7 @@ export function useAppData({
       void refreshProjects();
       void refreshSessions();
     });
-    const astraUnlisten = listen<AstraEvent>("thread-astra-event", (event) => {
+    const astraUnlisten = listen<AstraEvent>("astra-run-event", (event) => {
       if (event.payload.eventType !== "delegated") return;
       void refreshSessions();
       void refreshProjects();

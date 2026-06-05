@@ -555,7 +555,7 @@ function AgentEditor({
   const [newModelDisplayName, setNewModelDisplayName] = useState("");
   const runtimeAgent = isRuntimeAgent(agent.id) ? agent.id : null;
   const isAstra = agent.id === "astra";
-  const transportLabel = isAstra ? "sidecar" : agent.transport;
+  const transportLabel = isAstra ? "rust_native" : agent.transport;
   const [aiProvider, setAiProvider] = useState(agent.aiProvider ?? "");
   const [editingAiProvider, setEditingAiProvider] = useState(agent.aiProvider ?? "");
   const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);

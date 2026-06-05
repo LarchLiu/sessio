@@ -1,9 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -11,7 +7,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, RuntimeMetadata,
@@ -19,11 +15,8 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::runtime::RuntimeManager;
 use crate::config::AstraConfig;
-use crate::memory::service::MemoryService;
-use crate::memory::{MemorySearchOptions, MemoryStore};
 use crate::models::{
-    Agent, IssueSeverity, IssueStatus, ProjectInfo, SessionInfo, StageIssueInfo, StageStatus,
-    ThreadInfo,
+    Agent, IssueSeverity, IssueStatus, SessionInfo, StageIssueInfo, StageStatus, ThreadInfo,
 };
 use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
 
@@ -43,22 +36,20 @@ pub use types::{
     AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk,
 };
 
-pub const ASTRA_EVENT_NAME: &str = "thread-astra-event";
-const PROTOCOL_VERSION: u64 = 1;
+pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 3;
 const ASTRA_DEFAULT_RETRY_LIMIT: u32 = 3;
-const LEGACY_SIDECAR_ENV: &str = "SESSIO_ASTRA_LEGACY_SIDECAR";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StartThreadAstraRequest {
+pub struct CreateAstraRunRequest {
     pub thread_id: String,
     pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CancelThreadAstraRequest {
+pub struct CancelAstraRunRequest {
     pub run_id: String,
 }
 
@@ -73,70 +64,6 @@ pub struct AstraEvent {
     pub timestamp: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraProtocolRequest {
-    pub protocol_version: u64,
-    pub id: String,
-    pub method: String,
-    pub params: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraProtocolResponse {
-    pub protocol_version: u64,
-    pub id: String,
-    pub result: Option<Value>,
-    pub error: Option<AstraProtocolError>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraProtocolEvent {
-    pub protocol_version: u64,
-    pub method: String,
-    pub params: AstraProtocolEventParams,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraProtocolEventParams {
-    pub run_id: String,
-    #[serde(rename = "type")]
-    pub event_type: String,
-    #[serde(default)]
-    pub data: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraProtocolError {
-    pub code: String,
-    pub message: String,
-    #[serde(default)]
-    pub data: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraToolCall {
-    pub run_id: String,
-    pub name: String,
-    #[serde(default)]
-    pub args: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraToolResult {
-    pub ok: bool,
-    #[serde(default)]
-    pub result: Value,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct AstraService {
     inner: Arc<AstraServiceInner>,
@@ -145,11 +72,8 @@ pub struct AstraService {
 struct AstraServiceInner {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
-    memory_store: Arc<dyn MemoryStore>,
     runtime: RuntimeManager,
     config: AstraConfig,
-    sequence: AtomicU64,
-    sidecar: Mutex<Option<SidecarHandle>>,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
     task_waiters: Mutex<HashMap<String, mpsc::Sender<AstraTaskResult>>>,
     orchestrator_workers: Mutex<HashMap<String, AstraWorkerState>>,
@@ -197,23 +121,10 @@ struct DelegatedAttempt<'a> {
     retry_limit_reached: bool,
 }
 
-struct SidecarHandle {
-    child: Child,
-    stdin: Arc<Mutex<ChildStdin>>,
-    pending: Arc<Mutex<HashMap<String, mpsc::Sender<AstraProtocolResponse>>>>,
-}
-
-impl Drop for SidecarHandle {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-    }
-}
-
 impl AstraService {
     pub fn new(
         app: AppHandle,
         store: Arc<dyn SessionStore>,
-        memory_store: Arc<dyn MemoryStore>,
         runtime: RuntimeManager,
         config: AstraConfig,
     ) -> Self {
@@ -221,11 +132,8 @@ impl AstraService {
             inner: Arc::new(AstraServiceInner {
                 app,
                 store,
-                memory_store,
                 runtime,
                 config,
-                sequence: AtomicU64::new(1),
-                sidecar: Mutex::new(None),
                 delegated_sessions: Mutex::new(HashMap::new()),
                 task_waiters: Mutex::new(HashMap::new()),
                 orchestrator_workers: Mutex::new(HashMap::new()),
@@ -268,7 +176,7 @@ impl AstraService {
         Ok(())
     }
 
-    pub fn start_thread_astra(&self, req: StartThreadAstraRequest) -> Result<AstraHandle> {
+    pub fn create_astra_run(&self, req: CreateAstraRunRequest) -> Result<AstraHandle> {
         if req.thread_id.trim().is_empty() {
             bail!("threadId is required");
         }
@@ -288,7 +196,7 @@ impl AstraService {
                 .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
             if let Some(active) = self.inner.store.get_active_astra_run(&req.thread_id)? {
                 let run = record_to_run(active)?;
-                if self.is_worker_registered(&run.run_id) || should_request_legacy_cancel(&run) {
+                if self.is_worker_registered(&run.run_id) {
                     return Ok(self.run_to_handle(run));
                 }
                 let mut interrupted = run.clone();
@@ -325,25 +233,13 @@ impl AstraService {
                 approved_task_ids: Vec::new(),
                 delegated_session_ids: Vec::new(),
                 task_results: Vec::new(),
-                mode: if legacy_sidecar_enabled() {
-                    "legacy_sidecar".to_string()
-                } else {
-                    "rust_native".to_string()
-                },
+                mode: "rust_native".to_string(),
                 current_stage_id: None,
                 completed_task_ids: Vec::new(),
                 stage_attempt_counts: HashMap::new(),
                 retry_limit: self.inner.config.retry_limit,
-                planner_backend: if legacy_sidecar_enabled() {
-                    None
-                } else {
-                    Some("deterministic".to_string())
-                },
-                decision_backend: if legacy_sidecar_enabled() {
-                    None
-                } else {
-                    Some("deterministic".to_string())
-                },
+                planner_backend: Some("deterministic".to_string()),
+                decision_backend: Some("deterministic".to_string()),
                 round_index: None,
                 round_limit: self.inner.config.round_limit,
                 terminal_reason: None,
@@ -357,9 +253,7 @@ impl AstraService {
                 updated_at: now,
             };
             self.inner.store.upsert_astra_run(&run_to_record(&run))?;
-            if run.mode == "rust_native" {
-                self.register_pending_worker(&run.run_id)?;
-            }
+            self.register_pending_worker(&run.run_id)?;
             run
         };
         log::info!(
@@ -373,111 +267,14 @@ impl AstraService {
         let service = self.clone();
         let run_id = run.run_id.clone();
         let prompt = req.prompt.clone();
-        if legacy_sidecar_enabled() {
-            let astra_agent = self
-                .inner
-                .store
-                .list_agents()?
-                .into_iter()
-                .find(|agent| agent.id == "astra");
-            let model_config = astra_agent.and_then(|agent| {
-                let selected_provider_id = agent.ai_provider.as_deref().unwrap_or("");
-                let provider = agent
-                    .ai_providers
-                    .iter()
-                    .find(|provider| provider.id == selected_provider_id && provider.enabled)
-                    .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
-                    .or_else(|| agent.ai_providers.first())?;
-                let model_id = provider.model.clone().or(agent.model).or_else(|| {
-                    provider
-                        .models
-                        .iter()
-                        .find(|model| model.enabled)
-                        .map(|model| model.value.clone())
-                });
-                Some(json!({
-                    "provider": provider.provider,
-                    "api": provider.api,
-                    "baseUrl": provider.base_url,
-                    "apiKey": provider.api_key,
-                    "modelId": model_id,
-                    "thinkingLevel": agent.effort,
-                }))
-            });
-            let params = json!({
-                "runId": run.run_id,
-                "thread": thread,
-                "snapshot": project_snapshot(&project, &thread),
-                "prompt": prompt,
-                "modelConfig": model_config,
-            });
-            thread::spawn(move || {
-                if let Err(error) = service.run_start_planning(&run_id, params) {
-                    log::warn!("[sessio-astra:run:start-worker] {error}");
-                }
-            });
-        } else {
-            thread::spawn(move || {
-                service.run_rust_native_worker(&run_id, prompt);
-            });
-        }
+        thread::spawn(move || {
+            service.run_rust_native_worker(&run_id, prompt);
+        });
 
         Ok(self.run_to_handle(run))
     }
 
-    fn run_start_planning(&self, run_id: &str, params: Value) -> Result<()> {
-        let response = match self.request("astra/start", params, Some(Duration::from_secs(20))) {
-            Ok(response) => response,
-            Err(error) => {
-                let (failed, changed) = self.mark_run_errored(
-                    run_id,
-                    "legacy_start_failed",
-                    "legacy_start_failed",
-                    error.to_string(),
-                )?;
-                if changed {
-                    self.emit(
-                        &failed,
-                        "error",
-                        json!({
-                            "message": failed.last_error_message,
-                            "reason": failed.terminal_reason,
-                            "errorCode": failed.last_error_code,
-                        }),
-                    );
-                }
-                return Err(error);
-            }
-        };
-        if let Some(error) = response.error {
-            let (failed, changed) = self.mark_run_errored(
-                run_id,
-                "legacy_start_failed",
-                &error.code,
-                error.message.clone(),
-            )?;
-            if changed {
-                self.emit(
-                    &failed,
-                    "error",
-                    json!({
-                        "message": error.message,
-                        "reason": failed.terminal_reason,
-                        "errorCode": failed.last_error_code,
-                    }),
-                );
-            }
-            bail!("Astra start failed: {}", error.code);
-        }
-        log::info!(
-            "[sessio-astra:run:orchestrator-started] runId={} response={:?}",
-            run_id,
-            response.result
-        );
-        Ok(())
-    }
-
-    pub fn cancel_thread_astra(&self, req: CancelThreadAstraRequest) -> Result<AstraHandle> {
+    pub fn cancel_astra_run(&self, req: CancelAstraRunRequest) -> Result<AstraHandle> {
         let run = self.load_run(&req.run_id)?;
         let (run, changed) = self.mark_run_cancelled(&run.run_id, "user_cancelled")?;
         if changed {
@@ -501,13 +298,6 @@ impl AstraService {
         for session_id in &delegated_sessions {
             self.abort_delegated_session(session_id);
         }
-        if should_request_legacy_cancel(&run) {
-            let _ = self.request(
-                "astra/cancel",
-                json!({ "runId": run.run_id }),
-                Some(Duration::from_secs(3)),
-            );
-        }
         log::info!(
             "[sessio-astra:run:cancel] runId={} threadId={} delegatedSessions={}",
             run.run_id,
@@ -517,7 +307,7 @@ impl AstraService {
         Ok(self.run_to_handle(run))
     }
 
-    pub fn get_thread_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraHandle>> {
+    pub fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraHandle>> {
         self.inner
             .store
             .list_astra_runs(thread_id)?
@@ -525,6 +315,10 @@ impl AstraService {
             .map(record_to_run)
             .map(|result| result.map(|run| self.run_to_handle(run)))
             .collect()
+    }
+
+    pub fn get_astra_run(&self, run_id: &str) -> Result<AstraHandle> {
+        self.load_run(run_id).map(|run| self.run_to_handle(run))
     }
 
     fn dispatch_task(
@@ -1177,17 +971,6 @@ impl AstraService {
             result.sessio_runtime_session_id,
             result.status.as_str()
         );
-
-        if should_notify_legacy_sidecar(&run) {
-            let service = self.clone();
-            let run_id = run.run_id.clone();
-            let result_for_notify = result.clone();
-            thread::spawn(move || {
-                if let Err(error) = service.notify_astra_task_result(&run_id, &result_for_notify) {
-                    log::warn!("[sessio-astra:task:result:notify] runId={run_id} {error}");
-                }
-            });
-        }
         Ok(())
     }
 
@@ -1197,368 +980,6 @@ impl AstraService {
             Ok(())
         })?;
         Ok(run)
-    }
-
-    fn notify_astra_task_result(&self, run_id: &str, result: &AstraTaskResult) -> Result<()> {
-        let response = self.request(
-            "astra/task_result",
-            json!({ "runId": run_id, "result": result }),
-            Some(Duration::from_secs(5)),
-        )?;
-        if let Some(error) = response.error {
-            bail!("Astra task result rejected: {}", error.message);
-        }
-        Ok(())
-    }
-
-    fn request(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Option<Duration>,
-    ) -> Result<AstraProtocolResponse> {
-        let id = self
-            .inner
-            .sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .to_string();
-        let (receiver, pending, message) = {
-            let mut sidecar_guard = self
-                .inner
-                .sidecar
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Astra sidecar lock poisoned"))?;
-            if sidecar_guard.is_none() {
-                *sidecar_guard = Some(self.spawn_sidecar()?);
-            }
-            let sidecar = sidecar_guard
-                .as_mut()
-                .context("Astra sidecar unavailable")?;
-            let (sender, receiver) = mpsc::channel();
-            sidecar
-                .pending
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Astra pending lock poisoned"))?
-                .insert(id.clone(), sender);
-            let message = AstraProtocolRequest {
-                protocol_version: PROTOCOL_VERSION,
-                id: id.clone(),
-                method: method.to_string(),
-                params,
-            };
-            let line = serde_json::to_string(&message)?;
-            let write_result = {
-                let mut stdin = sidecar
-                    .stdin
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("Astra stdin lock poisoned"))?;
-                writeln!(stdin, "{line}").and_then(|_| stdin.flush())
-            };
-            if let Err(error) = write_result {
-                sidecar
-                    .pending
-                    .lock()
-                    .ok()
-                    .and_then(|mut pending| pending.remove(&id));
-                *sidecar_guard = None;
-                return Err(error).context("write Astra request");
-            }
-            (receiver, sidecar.pending.clone(), message)
-        };
-        let response = match timeout {
-            Some(timeout) => receiver
-                .recv_timeout(timeout)
-                .map_err(|_| anyhow::anyhow!("Astra request timed out: {}", message.method)),
-            None => receiver
-                .recv()
-                .map_err(|_| anyhow::anyhow!("Astra response channel closed")),
-        };
-        pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.remove(&id));
-        response
-    }
-
-    fn spawn_sidecar(&self) -> Result<SidecarHandle> {
-        let mut command = astra_command(&self.inner.app)?;
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().context("spawn Astra sidecar")?;
-        let stdin = Arc::new(Mutex::new(
-            child
-                .stdin
-                .take()
-                .context("Astra sidecar stdin unavailable")?,
-        ));
-        let stdout = child
-            .stdout
-            .take()
-            .context("Astra sidecar stdout unavailable")?;
-        if let Some(stderr) = child.stderr.take() {
-            thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    log::warn!("[sessio-astra:stderr] {line}");
-                }
-            });
-        }
-
-        let pending: Arc<Mutex<HashMap<String, mpsc::Sender<AstraProtocolResponse>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let pending_reader = pending.clone();
-        let stdin_reader = stdin.clone();
-        let service = self.clone();
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                match serde_json::from_str::<Value>(&line) {
-                    Ok(value) if value.get("method").and_then(Value::as_str) == Some("event") => {
-                        if let Ok(event) = serde_json::from_value::<AstraProtocolEvent>(value) {
-                            let _ = service.apply_protocol_event(event);
-                        }
-                    }
-                    Ok(value)
-                        if value.get("method").and_then(Value::as_str) == Some("tool/call") =>
-                    {
-                        let service = service.clone();
-                        let stdin_writer = stdin_reader.clone();
-                        thread::spawn(move || {
-                            let response =
-                                match serde_json::from_value::<AstraProtocolRequest>(value) {
-                                    Ok(request) => service.handle_tool_request(request),
-                                    Err(error) => AstraProtocolResponse {
-                                        protocol_version: PROTOCOL_VERSION,
-                                        id: "unknown".to_string(),
-                                        result: None,
-                                        error: Some(AstraProtocolError {
-                                            code: "invalid_request".to_string(),
-                                            message: error.to_string(),
-                                            data: None,
-                                        }),
-                                    },
-                                };
-                            if let Ok(line) = serde_json::to_string(&response) {
-                                if let Ok(mut stdin) = stdin_writer.lock() {
-                                    let _ = writeln!(stdin, "{line}");
-                                    let _ = stdin.flush();
-                                }
-                            }
-                        });
-                    }
-                    Ok(value) => match serde_json::from_value::<AstraProtocolResponse>(value) {
-                        Ok(response) => {
-                            let sender = pending_reader
-                                .lock()
-                                .ok()
-                                .and_then(|mut pending| pending.remove(&response.id));
-                            if let Some(sender) = sender {
-                                let _ = sender.send(response);
-                            }
-                        }
-                        Err(error) => {
-                            log::warn!("[sessio-astra:protocol] invalid response: {error}")
-                        }
-                    },
-                    Err(error) => {
-                        log::warn!("[sessio-astra:protocol] invalid json: {error}: {line}")
-                    }
-                }
-            }
-            // The loop only ends when the sidecar's stdout closes, i.e. the
-            // process exited. Planning and orchestration run async with no
-            // blocking Rust RPC, so without this a crash would strand active
-            // runs forever. Release blocked waiters, drop the dead handle, and
-            // interrupt the runs it was driving.
-            service.handle_sidecar_disconnected(&pending_reader);
-        });
-
-        Ok(SidecarHandle {
-            child,
-            stdin,
-            pending,
-        })
-    }
-
-    /// Cleanup when the sidecar process exits (reader thread observed stdout
-    /// EOF). `pending` is the dying reader's waiter map, used both to reject
-    /// blocked `request()` callers and to identify whether the cached handle is
-    /// still this sidecar (vs. one a concurrent `request()` already respawned).
-    fn handle_sidecar_disconnected(
-        &self,
-        pending: &Arc<Mutex<HashMap<String, mpsc::Sender<AstraProtocolResponse>>>>,
-    ) {
-        // Release every blocked waiter; dropping the senders makes their recv
-        // calls return Disconnected so callers fail instead of hanging.
-        if let Ok(mut waiters) = pending.lock() {
-            waiters.clear();
-        }
-        // Only clear the slot if it still holds this dead sidecar. A concurrent
-        // request() may have already spawned a replacement, whose handle must
-        // not be dropped here.
-        if let Ok(mut guard) = self.inner.sidecar.lock() {
-            let is_current = guard
-                .as_ref()
-                .map(|handle| Arc::ptr_eq(&handle.pending, pending))
-                .unwrap_or(false);
-            if is_current {
-                *guard = None;
-            }
-        }
-        match legacy_active_astra_runs(self.inner.store.as_ref()) {
-            Ok(runs) => {
-                for run in runs {
-                    match self.mark_run_interrupted(
-                        &run.run_id,
-                        "legacy_sidecar_exited",
-                        "legacy_sidecar_exited",
-                        "Astra sidecar exited; run interrupted",
-                    ) {
-                        Ok((interrupted, changed)) if changed => self.emit(
-                            &interrupted,
-                            "error",
-                            json!({
-                                "message": interrupted.last_error_message,
-                                "reason": interrupted.terminal_reason,
-                                "errorCode": interrupted.last_error_code,
-                            }),
-                        ),
-                        Ok(_) => {}
-                        Err(error) => {
-                            log::warn!(
-                                "[sessio-astra:sidecar-disconnect] interrupt legacy run: {error}"
-                            );
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                log::warn!("[sessio-astra:sidecar-disconnect] list legacy active runs: {error}")
-            }
-        }
-    }
-
-    fn handle_tool_request(&self, request: AstraProtocolRequest) -> AstraProtocolResponse {
-        let id = request.id.clone();
-        match self.execute_tool_request(request) {
-            Ok(result) => AstraProtocolResponse {
-                protocol_version: PROTOCOL_VERSION,
-                id,
-                result: Some(result),
-                error: None,
-            },
-            Err(error) => AstraProtocolResponse {
-                protocol_version: PROTOCOL_VERSION,
-                id,
-                result: None,
-                error: Some(AstraProtocolError {
-                    code: "tool_error".to_string(),
-                    message: error.to_string(),
-                    data: None,
-                }),
-            },
-        }
-    }
-
-    fn execute_tool_request(&self, request: AstraProtocolRequest) -> Result<Value> {
-        if request.protocol_version != PROTOCOL_VERSION {
-            bail!(
-                "unsupported Astra protocol version: {}",
-                request.protocol_version
-            );
-        }
-        if request.method != "tool/call" {
-            bail!("unsupported Astra request method: {}", request.method);
-        }
-        let call: AstraToolCall = serde_json::from_value(request.params)?;
-        let run = self.load_run(&call.run_id)?;
-        match call.name.as_str() {
-            "sessio.project.snapshot" => {
-                let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-                let project = self
-                    .inner
-                    .store
-                    .list_projects()?
-                    .into_iter()
-                    .find(|project| project.id == run.project_id)
-                    .ok_or_else(|| anyhow::anyhow!("project not found: {}", run.project_id))?;
-                Ok(project_snapshot(&project, &thread))
-            }
-            "sessio.memory.search" => {
-                let query = call
-                    .args
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("query is required"))?;
-                let project_key = call
-                    .args
-                    .get("projectKey")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&run.project_path);
-                let service = MemoryService::new(
-                    self.inner.memory_store.clone(),
-                    Arc::new(crate::agents::sources::builtin_agent_sources()),
-                )?;
-                let result = service.search_full(
-                    project_key,
-                    query,
-                    MemorySearchOptions { include_raw: false },
-                )?;
-                Ok(json!({
-                    "backend": result.backend,
-                    "hits": result.hits.into_iter().map(|hit| json!({
-                        "record": hit.record,
-                        "score": hit.score,
-                        "snippet": hit.snippet,
-                        "sources": hit.sources,
-                        "continuation": hit.continuation,
-                    })).collect::<Vec<_>>()
-                }))
-            }
-            "sessio.agent.plan_task" => {
-                let task: AstraTaskProposal = serde_json::from_value(call.args)?;
-                let (next, _) = self.mutate_run(&run.run_id, move |next| {
-                    if !next
-                        .proposed_tasks
-                        .iter()
-                        .any(|existing| existing.id == task.id)
-                    {
-                        next.proposed_tasks.push(task);
-                    }
-                    Ok(())
-                })?;
-                Ok(
-                    json!({ "taskIds": next.proposed_tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>() }),
-                )
-            }
-            "sessio.agent.dispatch_task" => {
-                let task_id = call
-                    .args
-                    .get("taskId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("taskId is required"))?;
-                let run = self.load_run(&call.run_id)?;
-                let task = run
-                    .proposed_tasks
-                    .iter()
-                    .find(|task| task.id == task_id)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("task not found: {task_id}"))?;
-                let result = self.dispatch_task_and_wait(&run, &task)?;
-                Ok(serde_json::to_value(result)?)
-            }
-            "sessio.stage.update" => Ok(serde_json::to_value(
-                self.apply_stage_update_decision(&run, &call.args)?,
-            )?),
-            "sessio.stage.issue.add_or_update" => Ok(serde_json::to_value(
-                self.apply_issue_decision(&run, &call.args)?,
-            )?),
-            other => bail!("unknown Astra tool: {other}"),
-        }
     }
 
     fn apply_stage_update_decision(
@@ -1731,75 +1152,6 @@ impl AstraService {
         }
     }
 
-    fn apply_protocol_event(&self, event: AstraProtocolEvent) -> Result<()> {
-        let event_type = event.params.event_type.clone();
-        let event_data = event.params.data.clone();
-        let Some((run, emit)) = self.mutate_existing_run(&event.params.run_id, move |run| {
-            let mut emit = Some((event_type.clone(), event_data.clone()));
-            match event_type.as_str() {
-                "plan" => {
-                    if !run.status.active() {
-                        return Ok(None);
-                    }
-                    if let Some(tasks) = event_data.get("tasks") {
-                        let tasks = serde_json::from_value::<Vec<AstraTaskProposal>>(tasks.clone())
-                            .unwrap_or_default();
-                        for task in tasks {
-                            if !run
-                                .proposed_tasks
-                                .iter()
-                                .any(|existing| existing.id == task.id)
-                            {
-                                run.proposed_tasks.push(task);
-                            }
-                        }
-                    }
-                }
-                "status" => {
-                    if !run.status.active() {
-                        return Ok(None);
-                    }
-                    if let Some(status) = event_data
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .and_then(AstraRunStatus::from_db_str)
-                    {
-                        run.status = status;
-                        if run.status.active() {
-                            run.error = None;
-                        }
-                    }
-                }
-                "cancelled" => run.status = AstraRunStatus::Cancelled,
-                "error" => {
-                    run.status = AstraRunStatus::Errored;
-                    run.error = event_data
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string);
-                }
-                "complete" => {
-                    let status = event_data.get("status").and_then(Value::as_str);
-                    if status == Some("cancelled") {
-                        run.status = AstraRunStatus::Cancelled;
-                    } else {
-                        run.status = AstraRunStatus::Completed;
-                        run.error = None;
-                    }
-                }
-                _ => emit = None,
-            }
-            Ok(emit)
-        })?
-        else {
-            return Ok(());
-        };
-        if let Some((emit_type, emit_data)) = emit {
-            self.emit(&run, &emit_type, emit_data);
-        }
-        Ok(())
-    }
-
     fn update_active_terminal_status(
         &self,
         run_id: &str,
@@ -1885,28 +1237,9 @@ impl AstraService {
         )
     }
 
-    fn mutate_existing_run<F, T>(&self, run_id: &str, mutate: F) -> Result<Option<(AstraRun, T)>>
-    where
-        F: FnOnce(&mut AstraRun) -> Result<T>,
-    {
-        let _guard = self
-            .inner
-            .run_write_lock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
-        let Some(record) = self.inner.store.get_astra_run(run_id)? else {
-            return Ok(None);
-        };
-        let mut run = record_to_run(record)?;
-        let value = mutate(&mut run)?;
-        run.updated_at = now_ms();
-        self.inner.store.upsert_astra_run(&run_to_record(&run))?;
-        Ok(Some((run, value)))
-    }
-
     /// Serialize a read-modify-write cycle on a single Astra run row. The
-    /// confirm worker thread, the sidecar tool thread, and the runtime-event
-    /// thread all mutate the same run; without this lock they each load, change
+    /// confirm worker thread and the runtime-event thread both mutate the same
+    /// run; without this lock they each load, change
     /// different fields, and clobber one another on the full-row upsert (losing
     /// attempt counts, delegated session ids, or task results). The closure runs
     /// against the freshly loaded run; updated_at and the upsert are handled here.
@@ -2114,36 +1447,6 @@ impl AstraService {
     }
 }
 
-fn astra_command(app: &AppHandle) -> Result<Command> {
-    if cfg!(debug_assertions) {
-        let sidecar = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("sidecars")
-            .join("sessio-astra");
-        let mut command = Command::new("bun");
-        command
-            .arg("run")
-            .arg("src/main.ts")
-            .arg("--stdio")
-            .current_dir(sidecar);
-        return Ok(command);
-    }
-
-    let sidecar_name = if cfg!(windows) {
-        "sessio-astra.exe"
-    } else {
-        "sessio-astra"
-    };
-    let exe = app
-        .path()
-        .resolve(sidecar_name, tauri::path::BaseDirectory::Resource)
-        .context("resolve Astra sidecar resource")?;
-    let mut command = Command::new(exe);
-    command.arg("--stdio");
-    Ok(command)
-}
-
 fn record_and_link_ready_delegated_session(
     store: &dyn SessionStore,
     run: &AstraRun,
@@ -2307,20 +1610,6 @@ fn status_label(status: &str) -> &'static str {
     }
 }
 
-fn legacy_sidecar_enabled() -> bool {
-    std::env::var(LEGACY_SIDECAR_ENV)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
-}
-
-fn should_request_legacy_cancel(run: &AstraRun) -> bool {
-    run.mode == "legacy_sidecar"
-}
-
-fn should_notify_legacy_sidecar(run: &AstraRun) -> bool {
-    run.mode == "legacy_sidecar"
-}
-
 fn apply_active_status(
     run: &mut AstraRun,
     status: AstraRunStatus,
@@ -2365,21 +1654,6 @@ pub(crate) fn pick_stage_agent(stage: &crate::models::StageInfo) -> Option<Agent
         .assistants
         .iter()
         .find_map(|assistant| Agent::from_db_str(&assistant.agent.id))
-}
-
-fn legacy_active_astra_runs(store: &dyn SessionStore) -> Result<Vec<AstraRun>> {
-    let mut runs = Vec::new();
-    for project in store.list_projects()? {
-        for thread in store.list_threads(&project.id)? {
-            if let Some(record) = store.get_active_astra_run(&thread.id)? {
-                let run = record_to_run(record)?;
-                if run.mode == "legacy_sidecar" {
-                    runs.push(run);
-                }
-            }
-        }
-    }
-    Ok(runs)
 }
 
 fn hydrate_start_request_for_astra(
@@ -2541,22 +1815,6 @@ fn upsert_task_result_in_run(run: &mut AstraRun, result: AstraTaskResult) {
     }
 }
 
-fn project_snapshot(project: &ProjectInfo, thread: &ThreadInfo) -> Value {
-    json!({
-        "project": project,
-        "thread": thread,
-        "activeStage": thread.stage_id.as_ref().and_then(|id| thread.stages.iter().find(|stage| stage.id == *id || stage.stage_id == *id)),
-        "tools": [
-            "sessio.project.snapshot",
-            "sessio.memory.search",
-            "sessio.agent.plan_task",
-            "sessio.agent.dispatch_task",
-            "sessio.stage.update",
-            "sessio.stage.issue.add_or_update"
-        ]
-    })
-}
-
 fn resolve_thread_stage_id(thread: &ThreadInfo, stage_id: &str) -> Result<String> {
     thread
         .stages
@@ -2682,12 +1940,6 @@ mod tests {
         ] {
             assert_eq!(AstraRunStatus::from_db_str(status.as_str()), Some(status));
         }
-    }
-
-    #[test]
-    fn protocol_decoding_rejects_missing_version() {
-        let value = json!({ "id": "1", "method": "astra/start", "params": {} });
-        assert!(serde_json::from_value::<AstraProtocolRequest>(value).is_err());
     }
 
     #[test]
@@ -3577,19 +2829,6 @@ mod tests {
     }
 
     #[test]
-    fn native_run_does_not_notify_legacy_sidecar() {
-        let mut run = test_run("native-run");
-        run.mode = "rust_native".to_string();
-
-        assert!(!should_request_legacy_cancel(&run));
-        assert!(!should_notify_legacy_sidecar(&run));
-
-        run.mode = "legacy_sidecar".to_string();
-        assert!(should_request_legacy_cancel(&run));
-        assert!(should_notify_legacy_sidecar(&run));
-    }
-
-    #[test]
     fn dispatch_failure_marks_only_active_run_errored() {
         let mut running = test_run("active-run");
 
@@ -3751,62 +2990,6 @@ mod tests {
         assert_eq!(updated.summary.as_deref(), Some("Done"));
         assert_eq!(updated.outcome.as_deref(), Some("Verified"));
         assert_eq!(next.completed_task_ids, vec!["task-1"]);
-
-        let _ = std::fs::remove_file(&db_path);
-        let _ = std::fs::remove_dir_all(Path::new(&project.path));
-    }
-
-    #[test]
-    fn legacy_sidecar_is_disabled_by_default() {
-        std::env::remove_var(LEGACY_SIDECAR_ENV);
-        assert!(!legacy_sidecar_enabled());
-    }
-
-    #[test]
-    fn legacy_active_run_filter_excludes_rust_native_runs() {
-        let db_path = std::env::temp_dir().join(format!(
-            "sessio-astra-legacy-filter-{}.sqlite",
-            short_hash(&now_ms().to_string())
-        ));
-        let store = SqliteStore::open(&db_path).unwrap();
-        store.init().unwrap();
-        let parent = std::env::temp_dir().join(format!(
-            "sessio-astra-legacy-filter-project-{}",
-            short_hash(&db_path.to_string_lossy())
-        ));
-        std::fs::create_dir_all(&parent).unwrap();
-        let project = store
-            .create_project(
-                &parent.to_string_lossy(),
-                "Astra Legacy Filter",
-                "general".to_string(),
-                None,
-            )
-            .unwrap();
-        let thread = store
-            .create_thread(&project.id, "Filter native runs", None)
-            .unwrap();
-        let mut native = test_run("native-run");
-        native.thread_id = thread.id.clone();
-        native.project_id = project.id.clone();
-        native.project_path = project.path.clone();
-        native.status = AstraRunStatus::Running;
-        native.mode = "rust_native".to_string();
-        store.upsert_astra_run(&run_to_record(&native)).unwrap();
-
-        assert!(legacy_active_astra_runs(&store).unwrap().is_empty());
-
-        native.status = AstraRunStatus::Interrupted;
-        store.upsert_astra_run(&run_to_record(&native)).unwrap();
-        let mut legacy = native.clone();
-        legacy.run_id = "legacy-run".to_string();
-        legacy.status = AstraRunStatus::Running;
-        legacy.mode = "legacy_sidecar".to_string();
-        store.upsert_astra_run(&run_to_record(&legacy)).unwrap();
-
-        let runs = legacy_active_astra_runs(&store).unwrap();
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].run_id, "legacy-run");
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));
