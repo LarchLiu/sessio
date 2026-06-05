@@ -132,7 +132,18 @@ fn append_existing_path_dirs(path: &mut String, dirs: Vec<String>) {
     }
 }
 
+/// Serializes process-wide environment mutations. `std::env::set_var`/`remove_var`
+/// are not safe to run while other threads read the environment, so every writer in
+/// this crate holds this lock for the duration of its mutations.
+pub(crate) fn env_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ENV_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn apply_shell_env(env: BTreeMap<String, String>) -> usize {
+    let _env_guard = env_write_guard();
     let allowed = shell_env_allowlist();
     let mut changed = 0;
     for (key, value) in env {
