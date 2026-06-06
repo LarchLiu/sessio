@@ -11,13 +11,14 @@ use agent_client_protocol::schema::{
 };
 use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo};
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
     pick_stage_agent, short_hash, stage_label, summarize_task_output, AstraDecision, AstraPlan,
     AstraRun, AstraTaskProposal, AstraTaskResult, AstraTaskRisk,
 };
+use crate::astra::backend::{BackendFailure, BackendResponse, DecisionBackend, PlannerBackend};
 use crate::models::{Agent, IssueSeverity, StageStatus, ThreadInfo};
 
 #[derive(Debug, Clone)]
@@ -29,7 +30,7 @@ pub(super) struct AstraPiConfig {
     pub decision: AstraPiPurposeConfig,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct AstraPiProviderConfig {
     pub provider: Option<String>,
     pub api: Option<String>,
@@ -104,19 +105,23 @@ pub(super) struct PiAcpPlanner {
     config: AstraPiConfig,
 }
 
-impl PiAcpPlanner {
-    pub(super) fn new(config: AstraPiConfig) -> Self {
-        Self { config }
-    }
+#[derive(Debug, Clone)]
+pub(super) struct PiAcpDecisionEngine {
+    config: AstraPiConfig,
+}
 
-    pub(super) fn plan(
+impl PlannerBackend for PiAcpPlanner {
+    fn plan(
         &self,
         run: &AstraRun,
         thread: &ThreadInfo,
         user_prompt: Option<&str>,
         round_index: u32,
-        provider_config: &AstraPiProviderConfig,
-    ) -> Result<PiAcpPlanResponse, PiAcpFailure> {
+        config: &Value,
+    ) -> Result<BackendResponse<AstraPlan>, BackendFailure> {
+        let provider_config: AstraPiProviderConfig = serde_json::from_value(config.clone())
+            .unwrap_or_default();
+
         let prompt = planning_prompt(run, thread, user_prompt, round_index);
         let response = run_internal_pi_acp(
             &self.config,
@@ -124,47 +129,84 @@ impl PiAcpPlanner {
             &run.run_id,
             &run.project_path,
             &prompt,
-            provider_config,
-        )?;
-        Ok(PiAcpPlanResponse {
-            plan: parse_pi_plan_response(&response.text, run, thread, round_index)?,
+            &provider_config,
+        )
+        .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
+            .with_session_id(failure.session_id))?;
+
+        let plan = parse_pi_plan_response(&response.text, run, thread, round_index)
+            .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
+                .with_session_id(Some(response.session_id.clone())))?;
+
+        Ok(BackendResponse {
+            data: plan,
             session_id: response.session_id,
+            backend_type: "pi_acp".to_string(),
         })
+    }
+
+    fn backend_type(&self) -> &'static str {
+        "pi_acp"
+    }
+
+    fn supports_fallback(&self) -> bool {
+        true
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct PiAcpDecisionEngine {
-    config: AstraPiConfig,
+impl DecisionBackend for PiAcpDecisionEngine {
+    fn decide(
+        &self,
+        run: &AstraRun,
+        thread: &ThreadInfo,
+        result: &AstraTaskResult,
+        task: &AstraTaskProposal,
+        config: &Value,
+    ) -> Result<BackendResponse<AstraDecision>, BackendFailure> {
+        let provider_config: AstraPiProviderConfig = serde_json::from_value(config.clone())
+            .unwrap_or_default();
+
+        let prompt = decision_prompt(thread, result, task);
+        let response = run_internal_pi_acp(
+            &self.config,
+            PiAcpPurpose::Decision,
+            &run.run_id,
+            &run.project_path,
+            &prompt,
+            &provider_config,
+        )
+        .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
+            .with_session_id(failure.session_id))?;
+
+        let decision = parse_pi_decision_response(&response.text, thread, result, task)
+            .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
+                .with_session_id(Some(response.session_id.clone())))?;
+
+        Ok(BackendResponse {
+            data: decision,
+            session_id: response.session_id,
+            backend_type: "pi_acp".to_string(),
+        })
+    }
+
+    fn backend_type(&self) -> &'static str {
+        "pi_acp"
+    }
+
+    fn supports_fallback(&self) -> bool {
+        true
+    }
+}
+
+impl PiAcpPlanner {
+    pub(super) fn new(config: AstraPiConfig) -> Self {
+        Self { config }
+    }
 }
 
 impl PiAcpDecisionEngine {
     pub(super) fn new(config: AstraPiConfig) -> Self {
         Self { config }
-    }
-
-    pub(super) fn decide(
-        &self,
-        run_id: &str,
-        workspace_path: &str,
-        thread: &ThreadInfo,
-        result: &AstraTaskResult,
-        task: &AstraTaskProposal,
-        provider_config: &AstraPiProviderConfig,
-    ) -> Result<PiAcpDecisionResponse, PiAcpFailure> {
-        let prompt = decision_prompt(thread, result, task);
-        let response = run_internal_pi_acp(
-            &self.config,
-            PiAcpPurpose::Decision,
-            run_id,
-            workspace_path,
-            &prompt,
-            provider_config,
-        )?;
-        Ok(PiAcpDecisionResponse {
-            decision: parse_pi_decision_response(&response.text, thread, result, task)?,
-            session_id: response.session_id,
-        })
     }
 }
 

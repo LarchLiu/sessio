@@ -5,11 +5,14 @@ use serde_json::json;
 
 use super::{
     next_dispatchable_tasks, thread_all_stages_terminal, thread_waiting_for_review, AstraDecision,
-    AstraRun, AstraRunStatus, AstraService,
+    AstraRun, AstraRunStatus, AstraService, AstraBackendConfig, ASTRA_PI_TIMEOUT_MS,
 };
-use crate::astra::decision::{AstraDecisionEngine, DeterministicDecisionEngine};
-use crate::astra::pi_acp_adapter::{PiAcpDecisionEngine, PiAcpFailure, PiAcpPlanner, PiAcpPurpose};
-use crate::astra::planner::{AstraPlanner, DeterministicPlanner};
+use crate::astra::backend::{BackendFailure, DecisionBackend, PlannerBackend};
+use crate::astra::deterministic_backend::{DeterministicDecisionBackend, DeterministicPlannerBackend};
+use crate::astra::pi_acp_adapter::{PiAcpDecisionEngine, PiAcpPlanner};
+use crate::astra::runtime_agent_backend::{
+    RuntimeAgentBackendConfig, RuntimeAgentDecisionEngine, RuntimeAgentPlanner,
+};
 use crate::models::StageStatus;
 
 const MAX_INTERNAL_PI_SESSION_IDS: usize = 50;
@@ -22,11 +25,12 @@ enum DecisionOutcome {
     Terminal,
 }
 
-fn pi_failure_json(kind: &'static str, failure: PiAcpFailure) -> serde_json::Value {
+fn pi_failure_json(kind: &'static str, failure: BackendFailure) -> serde_json::Value {
     let mut diagnostic = json!({
         "kind": kind,
         "code": failure.code,
         "message": failure.message,
+        "backendType": failure.backend_type,
     });
     if let Some(session_id) = failure.session_id {
         diagnostic["sessionId"] = json!(session_id);
@@ -34,17 +38,15 @@ fn pi_failure_json(kind: &'static str, failure: PiAcpFailure) -> serde_json::Val
     diagnostic
 }
 
-fn internal_pi_diagnostic(
-    purpose: PiAcpPurpose,
+fn internal_failure_diagnostic(
     kind: &'static str,
-    backend: &'static str,
-    failure: &PiAcpFailure,
+    backend_type: &str,
+    failure: &BackendFailure,
     extra: serde_json::Value,
 ) -> serde_json::Value {
     let mut diagnostic = json!({
         "kind": kind,
-        "purpose": purpose.as_str(),
-        "backend": backend,
+        "backendType": backend_type,
         "code": failure.code,
         "message": redact_diagnostic_message(&failure.message),
     });
@@ -275,76 +277,84 @@ impl AstraService {
         prompt: Option<&str>,
         round_index: u32,
     ) -> std::result::Result<
-        (super::AstraPlan, &'static str, Option<serde_json::Value>),
-        PiAcpFailure,
+        (super::AstraPlan, String, Option<serde_json::Value>),
+        BackendFailure,
     > {
-        if let Some(config) = self.inner.pi_config.clone() {
-            let provider_config = self.astra_agent_preferences();
-            let planner = PiAcpPlanner::new(config);
-            match planner.plan(run, thread, prompt, round_index, &provider_config) {
-                Ok(response) => {
-                    if let Err(error) = self.record_internal_pi_session(
-                        &run.run_id,
-                        PiAcpPurpose::Planning,
-                        Some(response.session_id),
-                    ) {
-                        log::warn!(
-                            "[astra:pi-acp:diagnostic] run={} purpose=planning error={}",
-                            run.run_id,
-                            error
-                        );
-                    }
-                    return Ok((response.plan, "pi_acp", None));
-                }
-                Err(error) => {
-                    if error.code == "policy_denied" {
-                        let session_id = error.session_id.clone();
-                        let _ = self.record_internal_pi_failure(
-                            &run.run_id,
-                            PiAcpPurpose::Planning,
-                            "planner_policy_denied",
-                            "pi_acp",
-                            &error,
-                            json!({ "roundIndex": round_index }),
-                        );
-                        let _ = self.record_internal_pi_session(
-                            &run.run_id,
-                            PiAcpPurpose::Planning,
-                            session_id,
-                        );
-                        return Err(error);
-                    }
+        let backend_config = self.astra_backend_config();
+        let planner_backend: Box<dyn PlannerBackend> = self.create_planner_backend(&backend_config);
+        let config_value = json!(backend_config.provider_config);
+
+        match planner_backend.plan(run, thread, prompt, round_index, &config_value) {
+            Ok(response) => {
+                log::info!(
+                    "[astra:planner:success] run={} backend={} sessionId={}",
+                    run.run_id,
+                    response.backend_type,
+                    response.session_id
+                );
+                Ok((response.data, response.backend_type, None))
+            }
+            Err(failure) => {
+                if failure.code == "policy_denied" {
                     log::warn!(
-                        "[astra:pi-acp:planner-fallback] run={} code={} message={}",
+                        "[astra:planner:policy-denied] run={} backend={} code={}",
                         run.run_id,
-                        error.code,
-                        error.message
+                        failure.backend_type,
+                        failure.code
                     );
-                    let fallback = self
-                        .record_internal_pi_failure(
-                            &run.run_id,
-                            PiAcpPurpose::Planning,
-                            "planner_failure",
-                            "deterministic",
-                            &error,
-                            json!({ "roundIndex": round_index }),
-                        )
-                        .unwrap_or_else(|_| pi_failure_json("planner_failure", error.clone()));
-                    let planner = DeterministicPlanner;
-                    return Ok((
-                        planner.plan(run, thread, prompt, round_index),
-                        "deterministic",
-                        Some(fallback),
-                    ));
+                    return Err(failure);
+                }
+
+                log::warn!(
+                    "[astra:planner:fallback] run={} backend={} code={} message={}",
+                    run.run_id,
+                    failure.backend_type,
+                    failure.code,
+                    failure.message
+                );
+
+                let fallback_diagnostic = internal_failure_diagnostic(
+                    "planner_failure",
+                    &failure.backend_type,
+                    &failure,
+                    json!({ "roundIndex": round_index }),
+                );
+
+                // Fallback to deterministic
+                let deterministic = DeterministicPlannerBackend;
+                match deterministic.plan(run, thread, prompt, round_index, &json!({})) {
+                    Ok(response) => Ok((response.data, response.backend_type, Some(fallback_diagnostic))),
+                    Err(err) => Err(err), // Should never happen for deterministic
                 }
             }
         }
-        let planner = DeterministicPlanner;
-        Ok((
-            planner.plan(run, thread, prompt, round_index),
-            "deterministic",
-            None,
-        ))
+    }
+
+    fn create_planner_backend(&self, config: &AstraBackendConfig) -> Box<dyn PlannerBackend> {
+        // If a specific planner agent is configured, use RuntimeAgentPlanner
+        if let Some(agent) = config.planner_agent {
+            log::info!("[astra:planner:backend] using runtime_agent backend with agent={}", agent.as_str());
+            let runtime_config = RuntimeAgentBackendConfig {
+                agent,
+                timeout_ms: ASTRA_PI_TIMEOUT_MS,
+                model: config.provider_config.model.clone(),
+                effort: config.provider_config.thinking_level.clone(),
+            };
+            return Box::new(RuntimeAgentPlanner::new(
+                self.inner.runtime.clone(),
+                runtime_config,
+            ));
+        }
+
+        // Try Pi ACP if available
+        if let Some(pi_config) = self.inner.pi_config.clone() {
+            log::info!("[astra:planner:backend] using pi_acp backend");
+            return Box::new(PiAcpPlanner::new(pi_config));
+        }
+
+        // Default to deterministic
+        log::info!("[astra:planner:backend] using deterministic backend");
+        Box::new(DeterministicPlannerBackend)
     }
 
     fn decide_astra_task(
@@ -353,128 +363,86 @@ impl AstraService {
         thread: &crate::models::ThreadInfo,
         result: &super::AstraTaskResult,
         task: &super::AstraTaskProposal,
-    ) -> std::result::Result<(AstraDecision, &'static str, Option<serde_json::Value>), PiAcpFailure>
+    ) -> std::result::Result<(AstraDecision, String, Option<serde_json::Value>), BackendFailure>
     {
-        if let Some(config) = self.inner.pi_config.clone() {
-            let provider_config = self.astra_agent_preferences();
-            let decision_engine = PiAcpDecisionEngine::new(config);
-            match decision_engine.decide(
-                &run.run_id,
-                &run.project_path,
-                thread,
-                result,
-                task,
-                &provider_config,
-            ) {
-                Ok(response) => {
-                    if let Err(error) = self.record_internal_pi_session(
-                        &run.run_id,
-                        PiAcpPurpose::Decision,
-                        Some(response.session_id),
-                    ) {
-                        log::warn!(
-                            "[astra:pi-acp:diagnostic] run={} purpose=decision task={} error={}",
-                            run.run_id,
-                            task.id,
-                            error
-                        );
-                    }
-                    return Ok((response.decision, "pi_acp", None));
-                }
-                Err(error) => {
-                    if error.code == "policy_denied" {
-                        let session_id = error.session_id.clone();
-                        let _ = self.record_internal_pi_failure(
-                            &run.run_id,
-                            PiAcpPurpose::Decision,
-                            "decision_policy_denied",
-                            "pi_acp",
-                            &error,
-                            json!({ "taskId": task.id }),
-                        );
-                        let _ = self.record_internal_pi_session(
-                            &run.run_id,
-                            PiAcpPurpose::Decision,
-                            session_id,
-                        );
-                        return Err(error);
-                    }
+        let backend_config = self.astra_backend_config();
+        let decision_backend: Box<dyn DecisionBackend> = self.create_decision_backend(&backend_config);
+        let config_value = json!(backend_config.provider_config);
+
+        match decision_backend.decide(run, thread, result, task, &config_value) {
+            Ok(response) => {
+                log::info!(
+                    "[astra:decision:success] run={} task={} backend={} sessionId={}",
+                    run.run_id,
+                    task.id,
+                    response.backend_type,
+                    response.session_id
+                );
+                Ok((response.data, response.backend_type, None))
+            }
+            Err(failure) => {
+                if failure.code == "policy_denied" {
                     log::warn!(
-                        "[astra:pi-acp:decision-fallback] task={} code={} message={}",
+                        "[astra:decision:policy-denied] run={} task={} backend={} code={}",
+                        run.run_id,
                         task.id,
-                        error.code,
-                        error.message
+                        failure.backend_type,
+                        failure.code
                     );
-                    let fallback = self
-                        .record_internal_pi_failure(
-                            &run.run_id,
-                            PiAcpPurpose::Decision,
-                            "decision_failure",
-                            "deterministic",
-                            &error,
-                            json!({ "taskId": task.id }),
-                        )
-                        .unwrap_or_else(|_| pi_failure_json("decision_failure", error.clone()));
-                    let decision_engine = DeterministicDecisionEngine;
-                    return Ok((
-                        decision_engine.decide(thread, result, task),
-                        "deterministic",
-                        Some(fallback),
-                    ));
+                    return Err(failure);
+                }
+
+                log::warn!(
+                    "[astra:decision:fallback] run={} task={} backend={} code={} message={}",
+                    run.run_id,
+                    task.id,
+                    failure.backend_type,
+                    failure.code,
+                    failure.message
+                );
+
+                let fallback_diagnostic = internal_failure_diagnostic(
+                    "decision_failure",
+                    &failure.backend_type,
+                    &failure,
+                    json!({ "taskId": task.id }),
+                );
+
+                // Fallback to deterministic
+                let deterministic = DeterministicDecisionBackend;
+                match deterministic.decide(run, thread, result, task, &json!({})) {
+                    Ok(response) => Ok((response.data, response.backend_type, Some(fallback_diagnostic))),
+                    Err(err) => Err(err), // Should never happen for deterministic
                 }
             }
         }
-        let decision_engine = DeterministicDecisionEngine;
-        Ok((
-            decision_engine.decide(thread, result, task),
-            "deterministic",
-            None,
-        ))
     }
 
-    fn record_internal_pi_session(
-        &self,
-        run_id: &str,
-        purpose: PiAcpPurpose,
-        session_id: Option<String>,
-    ) -> Result<()> {
-        let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) else {
-            return Ok(());
-        };
-        let _ = self.mutate_run(run_id, |next| {
-            let sessions = match purpose {
-                PiAcpPurpose::Planning => &mut next.internal_planner_session_ids,
-                PiAcpPurpose::Decision => &mut next.internal_decision_session_ids,
+    fn create_decision_backend(&self, config: &AstraBackendConfig) -> Box<dyn DecisionBackend> {
+        // If a specific decision agent is configured, use RuntimeAgentDecisionEngine
+        if let Some(agent) = config.decision_agent {
+            log::info!("[astra:decision:backend] using runtime_agent backend with agent={}", agent.as_str());
+            let runtime_config = RuntimeAgentBackendConfig {
+                agent,
+                timeout_ms: ASTRA_PI_TIMEOUT_MS,
+                model: config.provider_config.model.clone(),
+                effort: config.provider_config.thinking_level.clone(),
             };
-            if !sessions.iter().any(|existing| existing == &session_id) {
-                sessions.push(session_id);
-                trim_vec_front(sessions, MAX_INTERNAL_PI_SESSION_IDS);
-            }
-            Ok(())
-        })?;
-        Ok(())
-    }
+            return Box::new(RuntimeAgentDecisionEngine::new(
+                self.inner.runtime.clone(),
+                runtime_config,
+            ));
+        }
 
-    fn record_internal_pi_failure(
-        &self,
-        run_id: &str,
-        purpose: PiAcpPurpose,
-        kind: &'static str,
-        backend: &'static str,
-        failure: &PiAcpFailure,
-        extra: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        self.record_internal_pi_session(run_id, purpose, failure.session_id.clone())?;
-        let diagnostic = internal_pi_diagnostic(purpose, kind, backend, failure, extra);
-        let _ = self.mutate_run(run_id, {
-            let diagnostic = diagnostic.clone();
-            move |next| {
-                next.run_diagnostics.push(diagnostic);
-                trim_vec_front(&mut next.run_diagnostics, MAX_RUN_DIAGNOSTICS);
-                Ok(())
-            }
-        })?;
-        Ok(diagnostic)
+        // Try Pi ACP if available
+        if let Some(pi_config) = self.inner.pi_config.clone() {
+            log::info!("[astra:decision:backend] using pi_acp backend");
+            return Box::new(PiAcpDecisionEngine::new(pi_config));
+        }
+
+        // Default to deterministic
+        log::info!("[astra:decision:backend] using deterministic backend");
+        Box::new(DeterministicDecisionBackend)
     }
 
     fn decide_and_apply_task_result(

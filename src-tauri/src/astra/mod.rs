@@ -21,11 +21,14 @@ use crate::models::{
 };
 use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
 
+mod backend;
 mod decision;
+mod deterministic_backend;
 mod orchestrator;
 mod pi_acp_adapter;
 mod planner;
 mod prompt;
+mod runtime_agent_backend;
 mod types;
 
 use orchestrator::RustNativeWorkerOutcome;
@@ -80,12 +83,19 @@ struct AstraServiceInner {
     store: Arc<dyn SessionStore>,
     runtime: RuntimeManager,
     pi_config: Option<AstraPiConfig>,
-    astra_preferences: Mutex<AstraPiProviderConfig>,
+    astra_preferences: Mutex<AstraBackendConfig>,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
     task_waiters: Mutex<HashMap<String, mpsc::Sender<AstraTaskResult>>>,
     orchestrator_workers: Mutex<HashMap<String, AstraWorkerState>>,
     // Serializes read-modify-write cycles on a single run row (see mutate_run).
     run_write_lock: Mutex<()>,
+}
+
+#[derive(Debug, Clone)]
+struct AstraBackendConfig {
+    pub planner_agent: Option<Agent>,
+    pub decision_agent: Option<Agent>,
+    pub provider_config: AstraPiProviderConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -238,18 +248,41 @@ fn astra_binary_name() -> &'static str {
     }
 }
 
-fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraPiProviderConfig {
+fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraBackendConfig {
     match store.list_agents() {
-        Ok(agents) => agents
-            .into_iter()
-            .find(|agent| agent.id == "astra")
-            .map(astra_provider_config_from_agent)
-            .unwrap_or_default(),
+        Ok(agents) => {
+            let astra_agent = agents.iter().find(|agent| agent.id == "astra");
+            let provider_config = astra_agent
+                .map(|agent| astra_provider_config_from_agent(agent.clone()))
+                .unwrap_or_default();
+
+            // Check for planner_agent and decision_agent metadata
+            let planner_agent = astra_agent
+                .and_then(|agent| extract_agent_from_metadata(&agent, "plannerAgent"));
+            let decision_agent = astra_agent
+                .and_then(|agent| extract_agent_from_metadata(&agent, "decisionAgent"));
+
+            AstraBackendConfig {
+                planner_agent,
+                decision_agent,
+                provider_config,
+            }
+        }
         Err(error) => {
             log::warn!("[astra:preferences] failed to load Astra preferences: {error}");
-            AstraPiProviderConfig::default()
+            AstraBackendConfig {
+                planner_agent: None,
+                decision_agent: None,
+                provider_config: AstraPiProviderConfig::default(),
+            }
         }
     }
+}
+
+fn extract_agent_from_metadata(_agent: &AgentInfo, _key: &str) -> Option<Agent> {
+    // This would extract agent selection from metadata/settings
+    // For now, return None to use default behavior
+    None
 }
 
 fn astra_provider_config_from_agent(agent: AgentInfo) -> AstraPiProviderConfig {
@@ -286,7 +319,7 @@ impl AstraService {
         let astra_preferences = load_astra_agent_preferences(store.as_ref());
         let pi_config = bundled_pi_config();
         if let Some(config) = pi_config.as_ref() {
-            sync_pi_agent_config(config, &astra_preferences);
+            sync_pi_agent_config(config, &astra_preferences.provider_config);
         }
         Self {
             inner: Arc::new(AstraServiceInner {
@@ -304,15 +337,24 @@ impl AstraService {
     }
 
     pub fn update_astra_preferences_cache(&self, agent: AgentInfo) {
-        let next_preferences = astra_provider_config_from_agent(agent);
+        let provider_config = astra_provider_config_from_agent(agent.clone());
+        let planner_agent = extract_agent_from_metadata(&agent, "plannerAgent");
+        let decision_agent = extract_agent_from_metadata(&agent, "decisionAgent");
+
+        let next_preferences = AstraBackendConfig {
+            planner_agent,
+            decision_agent,
+            provider_config: provider_config.clone(),
+        };
+
         match self.inner.astra_preferences.lock() {
             Ok(mut preferences) => {
-                *preferences = next_preferences.clone();
+                *preferences = next_preferences;
             }
             Err(_) => log::warn!("[astra:preferences] cache lock poisoned"),
         }
         if let Some(config) = self.inner.pi_config.as_ref() {
-            sync_pi_agent_config(config, &next_preferences);
+            sync_pi_agent_config(config, &provider_config);
         }
     }
 
@@ -571,12 +613,16 @@ impl AstraService {
         Ok(handle)
     }
 
-    pub(super) fn astra_agent_preferences(&self) -> AstraPiProviderConfig {
+    pub(super) fn astra_backend_config(&self) -> AstraBackendConfig {
         match self.inner.astra_preferences.lock() {
             Ok(preferences) => preferences.clone(),
             Err(_) => {
                 log::warn!("[astra:preferences] cache lock poisoned");
-                AstraPiProviderConfig::default()
+                AstraBackendConfig {
+                    planner_agent: None,
+                    decision_agent: None,
+                    provider_config: AstraPiProviderConfig::default(),
+                }
             }
         }
     }
