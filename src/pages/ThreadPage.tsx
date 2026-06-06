@@ -22,7 +22,7 @@ import { sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result"]);
-const ASTRA_TASK_TERMINAL_EVENTS = new Set(["task_result", "retry_limit", "complete", "cancelled", "error"]);
+const ASTRA_TASK_TERMINAL_EVENTS = new Set(["task_result", "retry_limit", "completed", "cancelled", "error"]);
 
 export default function ThreadPage({
   project,
@@ -834,7 +834,7 @@ function groupSessionsByAgent(sessions: SessionInfo[]): Array<{ agent: Agent; se
 }
 
 function isAstraActive(status: AstraRunStatus): boolean {
-  return status === "planning" || status === "awaiting_approval" || status === "dispatching" || status === "running";
+  return status === "planning" || status === "thinking" || status === "awaiting_approval" || status === "dispatching" || status === "running";
 }
 
 function upsertRun(runs: AstraHandle[], run: AstraHandle): AstraHandle[] {
@@ -852,6 +852,8 @@ function astraStatusClass(status: AstraRunStatus): string {
   switch (status) {
     case "awaiting_approval":
       return "bg-sky-500/[0.10] text-sky-500";
+    case "thinking":
+      return "bg-violet-500/[0.10] text-violet-500";
     case "dispatching":
     case "running":
       return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";

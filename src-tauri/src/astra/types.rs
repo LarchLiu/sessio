@@ -9,6 +9,7 @@ use crate::models::Agent;
 #[serde(rename_all = "snake_case")]
 pub enum AstraRunStatus {
     Planning,
+    Thinking,
     AwaitingApproval,
     Dispatching,
     Running,
@@ -22,6 +23,7 @@ impl AstraRunStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Planning => "planning",
+            Self::Thinking => "thinking",
             Self::AwaitingApproval => "awaiting_approval",
             Self::Dispatching => "dispatching",
             Self::Running => "running",
@@ -35,6 +37,7 @@ impl AstraRunStatus {
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
             "planning" => Some(Self::Planning),
+            "thinking" => Some(Self::Thinking),
             "awaiting_approval" => Some(Self::AwaitingApproval),
             "dispatching" => Some(Self::Dispatching),
             "running" => Some(Self::Running),
@@ -49,7 +52,11 @@ impl AstraRunStatus {
     pub fn active(&self) -> bool {
         matches!(
             self,
-            Self::Planning | Self::AwaitingApproval | Self::Dispatching | Self::Running
+            Self::Planning
+                | Self::Thinking
+                | Self::AwaitingApproval
+                | Self::Dispatching
+                | Self::Running
         )
     }
 }

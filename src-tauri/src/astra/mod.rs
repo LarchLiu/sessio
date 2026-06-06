@@ -2169,6 +2169,7 @@ mod tests {
     fn astra_status_roundtrip() {
         for status in [
             AstraRunStatus::Planning,
+            AstraRunStatus::Thinking,
             AstraRunStatus::AwaitingApproval,
             AstraRunStatus::Dispatching,
             AstraRunStatus::Running,

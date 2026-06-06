@@ -217,6 +217,7 @@ export interface ThreadWorkState extends ThreadInfo {}
 
 export type AstraRunStatus =
   | "planning"
+  | "thinking"
   | "awaiting_approval"
   | "dispatching"
   | "running"

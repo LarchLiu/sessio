@@ -4,9 +4,9 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    next_dispatchable_tasks, thread_all_stages_terminal, thread_waiting_for_review,
+    next_dispatchable_tasks, now_ms, thread_all_stages_terminal, thread_waiting_for_review,
     AstraBackendConfig, AstraDecision, AstraRun, AstraRunStatus, AstraService,
-    ASTRA_PI_ACP_TIMEOUT_MS,
+    AstraStageMutationResult, ASTRA_PI_ACP_TIMEOUT_MS,
 };
 use crate::astra::astra_pi_acp_adapter::{AstraPiAcpDecisionEngine, AstraPiAcpPlanner};
 use crate::astra::backend::{BackendFailure, DecisionBackend, PlannerBackend};
@@ -16,7 +16,7 @@ use crate::astra::deterministic_backend::{
 use crate::astra::runtime_agent_backend::{
     RuntimeAgentBackendConfig, RuntimeAgentDecisionEngine, RuntimeAgentPlanner,
 };
-use crate::models::StageStatus;
+use crate::models::{IssueStatus, StageStatus, StageType, ThreadInfo};
 
 #[cfg(test)]
 const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
@@ -96,6 +96,15 @@ impl AstraService {
                 return Ok(RustNativeWorkerOutcome::Claimed);
             }
 
+            run = self.mark_run_status(
+                &run.run_id,
+                AstraRunStatus::Planning,
+                None,
+                "planning_round",
+            )?;
+            if !run.status.active() {
+                return Ok(RustNativeWorkerOutcome::Claimed);
+            }
             let (plan, planner_backend, planner_fallback) =
                 match self.plan_astra_round(&run, &thread, prompt.as_deref(), round_index) {
                     Ok(plan) => plan,
@@ -145,7 +154,10 @@ impl AstraService {
 
             let dispatchable = next_dispatchable_tasks(&planned);
             if dispatchable.is_empty() {
-                let latest = self.inner.store.get_thread_work_state(&planned.thread_id)?;
+                let mut latest = self.inner.store.get_thread_work_state(&planned.thread_id)?;
+                if self.auto_complete_empty_done_stages(&planned, &latest)? {
+                    latest = self.inner.store.get_thread_work_state(&planned.thread_id)?;
+                }
                 if thread_all_stages_terminal(&latest) {
                     let _ = self.complete_run(
                         &planned.run_id,
@@ -185,7 +197,13 @@ impl AstraService {
                         return Ok(RustNativeWorkerOutcome::Claimed);
                     }
                 };
-                if !self.load_run(run_id)?.status.active() {
+                run = self.mark_run_status(
+                    run_id,
+                    AstraRunStatus::Thinking,
+                    result.thread_stage_id.clone(),
+                    "task_result_received",
+                )?;
+                if !run.status.active() {
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
                 match self.decide_and_apply_task_result(&run, &result, &task)? {
@@ -539,7 +557,12 @@ impl AstraService {
                     return self.fail_run(&run.run_id, error.to_string());
                 }
             };
-            let run = self.load_run(run_id)?;
+            let run = self.mark_run_status(
+                run_id,
+                AstraRunStatus::Thinking,
+                retry_result.thread_stage_id.clone(),
+                "task_result_received",
+            )?;
             if !run.status.active() {
                 return Ok(DecisionOutcome::Terminal);
             }
@@ -694,6 +717,86 @@ impl AstraService {
             message,
         )
     }
+
+    fn mark_run_status(
+        &self,
+        run_id: &str,
+        status: AstraRunStatus,
+        thread_stage_id: Option<String>,
+        reason: &'static str,
+    ) -> Result<AstraRun> {
+        let (run, changed) = self.mutate_run(run_id, move |next| {
+            if !next.status.active() {
+                return Ok(false);
+            }
+            next.status = status;
+            if let Some(stage_id) = thread_stage_id {
+                next.current_stage_id = Some(stage_id);
+            }
+            Ok(true)
+        })?;
+        if changed {
+            self.emit(
+                &run,
+                "status",
+                json!({ "status": run.status.as_str(), "reason": reason }),
+            );
+        }
+        Ok(run)
+    }
+
+    fn auto_complete_empty_done_stages(&self, run: &AstraRun, thread: &ThreadInfo) -> Result<bool> {
+        let stages = thread
+            .stages
+            .iter()
+            .filter(|stage| auto_completable_empty_done_stage(stage))
+            .map(|stage| {
+                (
+                    stage.id.clone(),
+                    stage.summary.is_none(),
+                    stage.outcome.is_none(),
+                )
+            })
+            .collect::<Vec<_>>();
+        if stages.is_empty() {
+            return Ok(false);
+        }
+
+        for (stage_id, needs_summary, needs_outcome) in stages {
+            let stage = self.inner.store.update_thread_stage_state(
+                &stage_id,
+                Some(StageStatus::Completed),
+                needs_summary
+                    .then(|| Some("Astra auto-completed this empty final stage.".to_string())),
+                needs_outcome.then(|| {
+                    Some("No delegated work was required for this final stage.".to_string())
+                }),
+            )?;
+            let stage_id_for_run = stage.id.clone();
+            let (next, ()) = self.mutate_run(&run.run_id, move |next| {
+                if next.status.active() {
+                    next.current_stage_id = Some(stage_id_for_run);
+                }
+                Ok(())
+            })?;
+            let result = AstraStageMutationResult {
+                ok: true,
+                stage: Some(serde_json::to_value(stage)?),
+                issue: None,
+                error: None,
+                applied_at: now_ms(),
+            };
+            self.emit(&next, "stage_update_result", serde_json::to_value(&result)?);
+            log::info!(
+                "[astra:stage:auto-complete-empty-done] runId={} threadId={} stageId={}",
+                next.run_id,
+                next.thread_id,
+                stage_id
+            );
+        }
+
+        Ok(true)
+    }
 }
 
 fn remaining_dispatchable_task_ids(
@@ -713,6 +816,21 @@ fn thread_level_retry_limit_reached(
     retry_limit: u32,
 ) -> bool {
     task.target_stage_id.is_none() && retry_count >= retry_limit
+}
+
+fn auto_completable_empty_done_stage(stage: &crate::models::StageInfo) -> bool {
+    matches!(stage.kind, Some(StageType::Done))
+        && stage.allow_empty_assistants
+        && stage.assistant_ids.is_empty()
+        && stage.assistants.is_empty()
+        && matches!(
+            stage.status,
+            StageStatus::NotStarted | StageStatus::InProgress
+        )
+        && !stage
+            .issues
+            .iter()
+            .any(|issue| issue.status == IssueStatus::Open)
 }
 
 struct AstraWorkerGuard {
@@ -778,7 +896,7 @@ fn classify_no_dispatchable_tasks(thread: &crate::models::ThreadInfo) -> NoDispa
 mod tests {
     use super::*;
     use crate::astra::tests::{test_stage, test_thread};
-    use crate::models::{Agent, StageStatus};
+    use crate::models::{Agent, IssueSeverity, StageIssueInfo, StageStatus, StageType};
 
     #[test]
     fn no_dispatchable_empty_stages_completes() {
@@ -834,6 +952,31 @@ mod tests {
         let mut stage_task = task;
         stage_task.target_stage_id = Some("stage-1".to_string());
         assert!(!thread_level_retry_limit_reached(&stage_task, 3, 3));
+    }
+
+    #[test]
+    fn empty_done_stage_without_assistant_is_auto_completable() {
+        let mut stage = test_stage("done-stage", StageStatus::NotStarted);
+        stage.kind = Some(StageType::Done);
+        stage.allow_empty_assistants = true;
+
+        assert!(auto_completable_empty_done_stage(&stage));
+
+        stage.kind = Some(StageType::Human);
+        assert!(!auto_completable_empty_done_stage(&stage));
+
+        stage.kind = Some(StageType::Done);
+        stage.issues.push(StageIssueInfo {
+            id: "issue-1".to_string(),
+            thread_stage_id: stage.id.clone(),
+            title: "Needs final approval".to_string(),
+            description: None,
+            status: crate::models::IssueStatus::Open,
+            severity: IssueSeverity::Medium,
+            created_at: 1,
+            updated_at: 1,
+        });
+        assert!(!auto_completable_empty_done_stage(&stage));
     }
 
     #[test]
