@@ -379,17 +379,10 @@ fn update_astra_config(
     astra: State<'_, AstraService>,
 ) -> Result<AstraConfig, String> {
     let patch = AstraConfigPatch {
-        planner_agent: config.get("plannerAgent").map(|v| v.as_str()),
-        planner_model: config.get("plannerModel").map(|v| v.as_str()),
-        planner_effort: config.get("plannerEffort").map(|v| v.as_str()),
-        planner_permission_mode: config.get("plannerPermissionMode").map(|v| v.as_str()),
-        decision_agent: config.get("decisionAgent").map(|v| v.as_str()),
-        decision_model: config.get("decisionModel").map(|v| v.as_str()),
-        decision_effort: config.get("decisionEffort").map(|v| v.as_str()),
-        decision_permission_mode: config.get("decisionPermissionMode").map(|v| v.as_str()),
-        default_model: config.get("defaultModel").map(|v| v.as_str()),
-        default_effort: config.get("defaultEffort").map(|v| v.as_str()),
-        default_permission_mode: config.get("defaultPermissionMode").map(|v| v.as_str()),
+        agent: config.get("agent").map(|v| v.as_str()),
+        model: config.get("model").map(|v| v.as_str()),
+        effort: config.get("effort").map(|v| v.as_str()),
+        permission_mode: config.get("permissionMode").map(|v| v.as_str()),
     };
 
     let updated = store

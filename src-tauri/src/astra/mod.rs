@@ -21,20 +21,21 @@ use crate::models::{
 };
 use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
 
+mod astra_pi_acp_adapter;
 mod backend;
 mod decision;
 mod deterministic_backend;
 mod orchestrator;
-mod pi_acp_adapter;
 mod planner;
 mod prompt;
 mod runtime_agent_backend;
 mod types;
 
-use orchestrator::RustNativeWorkerOutcome;
-use pi_acp_adapter::{
-    prepare_pi_agent_config, AstraPiConfig, AstraPiProviderConfig, AstraPiPurposeConfig,
+use astra_pi_acp_adapter::{
+    prepare_astra_pi_agent_config, AstraPiAcpConfig, AstraPiAcpProviderConfig,
+    AstraPiAcpPurposeConfig,
 };
+use orchestrator::RustNativeWorkerOutcome;
 use planner::next_dispatchable_tasks;
 use prompt::build_stage_task_context;
 use types::AstraDecision;
@@ -46,7 +47,7 @@ pub use types::{
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 3;
 const ASTRA_DEFAULT_RETRY_LIMIT: u32 = 3;
-const ASTRA_PI_TIMEOUT_MS: u64 = 30_000;
+const ASTRA_PI_ACP_TIMEOUT_MS: u64 = 30_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +83,7 @@ struct AstraServiceInner {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     runtime: RuntimeManager,
-    pi_config: Option<AstraPiConfig>,
+    astra_pi_acp_config: Option<AstraPiAcpConfig>,
     astra_preferences: Mutex<AstraBackendConfig>,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
     task_waiters: Mutex<HashMap<String, mpsc::Sender<AstraTaskResult>>>,
@@ -93,9 +94,11 @@ struct AstraServiceInner {
 
 #[derive(Debug, Clone)]
 pub(super) struct AstraBackendConfig {
-    pub planner_agent: Option<Agent>,
-    pub decision_agent: Option<Agent>,
-    pub provider_config: AstraPiProviderConfig,
+    pub agent: Option<Agent>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
+    pub provider_config: AstraPiAcpProviderConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -138,24 +141,20 @@ struct DelegatedAttempt<'a> {
     retry_limit_reached: bool,
 }
 
-fn bundled_pi_config() -> Option<AstraPiConfig> {
-    let command = bundled_pi_command()?;
-    log::info!("[astra:pi-acp] using bundled Pi sidecar");
-    Some(AstraPiConfig {
+fn bundled_astra_pi_acp_config() -> Option<AstraPiAcpConfig> {
+    let command = bundled_astra_pi_acp_command()?;
+    log::info!("[astra:astra-pi-acp] using bundled Astra Pi ACP sidecar");
+    Some(AstraPiAcpConfig {
         command,
         session_dir: astra_session_dir().to_string_lossy().to_string(),
         agent_dir: astra_agent_dir().to_string_lossy().to_string(),
-        planner: AstraPiPurposeConfig {
-            timeout_ms: ASTRA_PI_TIMEOUT_MS,
+        planner: AstraPiAcpPurposeConfig {
+            timeout_ms: ASTRA_PI_ACP_TIMEOUT_MS,
         },
-        decision: AstraPiPurposeConfig {
-            timeout_ms: ASTRA_PI_TIMEOUT_MS,
+        decision: AstraPiAcpPurposeConfig {
+            timeout_ms: ASTRA_PI_ACP_TIMEOUT_MS,
         },
     })
-}
-
-pub fn bundled_pi_acp_command() -> Option<String> {
-    bundled_pi_command()
 }
 
 fn astra_session_dir() -> PathBuf {
@@ -172,8 +171,8 @@ fn astra_agent_dir() -> PathBuf {
         .join("astra-pi-agent")
 }
 
-fn bundled_pi_command() -> Option<String> {
-    let executable = bundled_pi_path()?;
+pub fn bundled_astra_pi_acp_command() -> Option<String> {
+    let executable = bundled_astra_pi_binary_path()?;
     if !executable.exists() {
         return None;
     }
@@ -181,22 +180,26 @@ fn bundled_pi_command() -> Option<String> {
     let agent_dir = astra_agent_dir();
     if let Err(error) = std::fs::create_dir_all(&session_dir) {
         log::warn!(
-            "[astra:pi-acp] failed to create session dir {}: {error}",
+            "[astra:astra-pi-acp] failed to create session dir {}: {error}",
             session_dir.display()
         );
         return None;
     }
     if let Err(error) = std::fs::create_dir_all(&agent_dir) {
         log::warn!(
-            "[astra:pi-acp] failed to create agent dir {}: {error}",
+            "[astra:astra-pi-acp] failed to create agent dir {}: {error}",
             agent_dir.display()
         );
         return None;
     }
-    Some(pi_stdio_command_json(&executable, &session_dir, &agent_dir))
+    Some(astra_pi_acp_stdio_command_json(
+        &executable,
+        &session_dir,
+        &agent_dir,
+    ))
 }
 
-fn pi_stdio_command_json(
+fn astra_pi_acp_stdio_command_json(
     executable: &std::path::Path,
     session_dir: &std::path::Path,
     agent_dir: &std::path::Path,
@@ -226,7 +229,7 @@ fn pi_stdio_command_json(
     .to_string()
 }
 
-fn bundled_pi_path() -> Option<PathBuf> {
+fn bundled_astra_pi_binary_path() -> Option<PathBuf> {
     let exe_path = std::env::current_exe().ok()?;
     let exe_dir = exe_path.parent()?;
     let base_dir = if exe_dir.ends_with("deps") {
@@ -253,37 +256,36 @@ fn astra_pi_binary_name() -> &'static str {
 }
 
 fn load_astra_backend_config(store: &dyn SessionStore) -> AstraBackendConfig {
-    // Load from astra_config table
     match store.get_astra_config() {
         Ok(config) => {
-            let planner_agent = config.planner_agent.as_deref().and_then(Agent::from_db_str);
-            let decision_agent = config
-                .decision_agent
-                .as_deref()
-                .and_then(Agent::from_db_str);
-
-            // Astra Pi is the runtime agent backing the bundled Pi provider config.
+            let agent = config.agent.as_deref().and_then(Agent::from_db_str);
             let provider_config = match store.list_agents() {
                 Ok(agents) => agents
                     .iter()
                     .find(|agent| agent.id == Agent::AstraPi.as_str())
                     .map(|agent| astra_provider_config_from_agent(agent.clone()))
                     .unwrap_or_default(),
-                Err(_) => AstraPiProviderConfig::default(),
+                Err(_) => AstraPiAcpProviderConfig::default(),
             };
+            let provider_config =
+                provider_config.with_runtime_overrides(config.model.clone(), config.effort.clone());
 
             AstraBackendConfig {
-                planner_agent,
-                decision_agent,
+                agent,
+                model: config.model,
+                effort: config.effort,
+                permission_mode: config.permission_mode,
                 provider_config,
             }
         }
         Err(error) => {
             log::warn!("[astra:config] failed to load Astra config: {error}");
             AstraBackendConfig {
-                planner_agent: None,
-                decision_agent: None,
-                provider_config: AstraPiProviderConfig::default(),
+                agent: None,
+                model: None,
+                effort: None,
+                permission_mode: None,
+                provider_config: AstraPiAcpProviderConfig::default(),
             }
         }
     }
@@ -293,14 +295,14 @@ fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraBackendConfig 
     load_astra_backend_config(store)
 }
 
-fn astra_provider_config_from_agent(agent: AgentInfo) -> AstraPiProviderConfig {
+fn astra_provider_config_from_agent(agent: AgentInfo) -> AstraPiAcpProviderConfig {
     let selected = agent
         .ai_provider
         .as_deref()
         .and_then(|id| agent.ai_providers.iter().find(|provider| provider.id == id))
         .or_else(|| agent.ai_providers.iter().find(|provider| provider.enabled))
         .or_else(|| agent.ai_providers.first());
-    AstraPiProviderConfig {
+    AstraPiAcpProviderConfig {
         provider: selected.map(|provider| provider.provider.clone()),
         api: selected.and_then(|provider| provider.api.clone()),
         base_url: selected.and_then(|provider| provider.base_url.clone()),
@@ -312,10 +314,10 @@ fn astra_provider_config_from_agent(agent: AgentInfo) -> AstraPiProviderConfig {
     }
 }
 
-fn sync_pi_agent_config(config: &AstraPiConfig, preferences: &AstraPiProviderConfig) {
-    if let Err(error) = prepare_pi_agent_config(config, preferences) {
+fn sync_astra_pi_agent_config(config: &AstraPiAcpConfig, preferences: &AstraPiAcpProviderConfig) {
+    if let Err(error) = prepare_astra_pi_agent_config(config, preferences) {
         log::warn!(
-            "[astra:pi-acp:config] failed to write bundled Pi config code={} message={}",
+            "[astra:astra-pi-acp:config] failed to write bundled Astra Pi config code={} message={}",
             error.code,
             error.message
         );
@@ -325,16 +327,16 @@ fn sync_pi_agent_config(config: &AstraPiConfig, preferences: &AstraPiProviderCon
 impl AstraService {
     pub fn new(app: AppHandle, store: Arc<dyn SessionStore>, runtime: RuntimeManager) -> Self {
         let astra_preferences = load_astra_agent_preferences(store.as_ref());
-        let pi_config = bundled_pi_config();
-        if let Some(config) = pi_config.as_ref() {
-            sync_pi_agent_config(config, &astra_preferences.provider_config);
+        let astra_pi_acp_config = bundled_astra_pi_acp_config();
+        if let Some(config) = astra_pi_acp_config.as_ref() {
+            sync_astra_pi_agent_config(config, &astra_preferences.provider_config);
         }
         Self {
             inner: Arc::new(AstraServiceInner {
                 app,
                 store,
                 runtime,
-                pi_config,
+                astra_pi_acp_config,
                 astra_preferences: Mutex::new(astra_preferences),
                 delegated_sessions: Mutex::new(HashMap::new()),
                 task_waiters: Mutex::new(HashMap::new()),
@@ -345,22 +347,16 @@ impl AstraService {
     }
 
     pub fn update_astra_preferences_cache(&self, agent: AgentInfo) {
-        // Only update provider config from agent, planner/decision come from astra_config table
-        let provider_config = astra_provider_config_from_agent(agent.clone());
-
-        match self.inner.astra_preferences.lock() {
-            Ok(mut preferences) => {
-                preferences.provider_config = provider_config.clone();
-            }
-            Err(_) => log::warn!("[astra:preferences] cache lock poisoned"),
-        }
-        if let Some(config) = self.inner.pi_config.as_ref() {
-            sync_pi_agent_config(config, &provider_config);
+        if agent.id == Agent::AstraPi.as_str() {
+            self.reload_config();
         }
     }
 
     pub fn reload_config(&self) {
         let config = load_astra_backend_config(self.inner.store.as_ref());
+        if let Some(astra_pi_acp_config) = self.inner.astra_pi_acp_config.as_ref() {
+            sync_astra_pi_agent_config(astra_pi_acp_config, &config.provider_config);
+        }
         match self.inner.astra_preferences.lock() {
             Ok(mut preferences) => {
                 *preferences = config;
@@ -630,9 +626,11 @@ impl AstraService {
             Err(_) => {
                 log::warn!("[astra:preferences] cache lock poisoned");
                 AstraBackendConfig {
-                    planner_agent: None,
-                    decision_agent: None,
-                    provider_config: AstraPiProviderConfig::default(),
+                    agent: None,
+                    model: None,
+                    effort: None,
+                    permission_mode: None,
+                    provider_config: AstraPiAcpProviderConfig::default(),
                 }
             }
         }
@@ -2160,8 +2158,8 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::decision::{AstraDecisionEngine, DeterministicDecisionEngine};
-    use super::planner::{AstraPlanner, DeterministicPlanner};
+    use super::decision::deterministic_decision;
+    use super::planner::deterministic_plan;
     use super::*;
     use crate::models::{AssistantAgentInfo, StageAssistantInfo};
     use crate::store::sqlite::SqliteStore;
@@ -2258,8 +2256,8 @@ mod tests {
     }
 
     #[test]
-    fn pi_stdio_command_sets_session_dir_env_and_strict_durability() {
-        let command = pi_stdio_command_json(
+    fn astra_pi_acp_stdio_command_sets_session_dir_env_and_strict_durability() {
+        let command = astra_pi_acp_stdio_command_json(
             std::path::Path::new("/tmp/astra-pi"),
             std::path::Path::new("/tmp/sessions"),
             std::path::Path::new("/tmp/agent"),
@@ -2979,7 +2977,7 @@ mod tests {
         }];
         let run = test_run("run-plan");
 
-        let plan = DeterministicPlanner.plan(&run, &thread, Some("Focus the API"), 0);
+        let plan = deterministic_plan(&run, &thread, Some("Focus the API"), 0);
 
         assert_eq!(plan.tasks.len(), 1);
         assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
@@ -3008,7 +3006,7 @@ mod tests {
         run.stage_attempt_counts
             .insert("stage-1".to_string(), run.retry_limit);
 
-        let plan = DeterministicPlanner.plan(&run, &thread, None, 0);
+        let plan = deterministic_plan(&run, &thread, None, 0);
 
         assert!(plan.tasks.is_empty());
     }
@@ -3032,7 +3030,7 @@ mod tests {
         }];
         let run = test_run("run-plan-review");
 
-        let plan = DeterministicPlanner.plan(&run, &thread, None, 0);
+        let plan = deterministic_plan(&run, &thread, None, 0);
 
         assert!(plan.tasks.is_empty());
     }
@@ -3043,7 +3041,7 @@ mod tests {
         let task = test_task("task-1", "stage-1");
         let result = test_task_result("task-1", "session-1", "Implemented and verified.");
 
-        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+        let decision = deterministic_decision(&thread, &result, &task);
 
         match decision {
             AstraDecision::UpdateStage { args } => {
@@ -3064,7 +3062,7 @@ mod tests {
         let task = test_task("task-1", "stage-1");
         let result = test_task_result("task-1", "session-1", "I made some progress.");
 
-        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+        let decision = deterministic_decision(&thread, &result, &task);
 
         match decision {
             AstraDecision::UpdateStage { args } => {
@@ -3085,7 +3083,7 @@ mod tests {
             "Not completed successfully because more information is needed.",
         );
 
-        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+        let decision = deterministic_decision(&thread, &result, &task);
 
         match decision {
             AstraDecision::UpdateStage { args } => {
@@ -3106,7 +3104,7 @@ mod tests {
         result.retry_limit_reached = true;
         result.attempt_count = 3;
 
-        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+        let decision = deterministic_decision(&thread, &result, &task);
 
         match decision {
             AstraDecision::Composite { decisions } => {
@@ -3134,7 +3132,7 @@ mod tests {
         result.status = AstraTaskResultStatus::Errored;
         result.error = Some("agent crashed".to_string());
 
-        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+        let decision = deterministic_decision(&thread, &result, &task);
 
         match decision {
             AstraDecision::AddOrUpdateIssue { args } => {
@@ -3157,7 +3155,7 @@ mod tests {
         result.status = AstraTaskResultStatus::Cancelled;
         result.error = Some("turn cancelled".to_string());
 
-        let decision = DeterministicDecisionEngine.decide(&thread, &result, &task);
+        let decision = deterministic_decision(&thread, &result, &task);
 
         match decision {
             AstraDecision::CancelRun { reason } => {

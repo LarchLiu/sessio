@@ -5,19 +5,22 @@ use serde_json::json;
 
 use super::{
     next_dispatchable_tasks, thread_all_stages_terminal, thread_waiting_for_review,
-    AstraBackendConfig, AstraDecision, AstraRun, AstraRunStatus, AstraService, ASTRA_PI_TIMEOUT_MS,
+    AstraBackendConfig, AstraDecision, AstraRun, AstraRunStatus, AstraService,
+    ASTRA_PI_ACP_TIMEOUT_MS,
 };
+use crate::astra::astra_pi_acp_adapter::{AstraPiAcpDecisionEngine, AstraPiAcpPlanner};
 use crate::astra::backend::{BackendFailure, DecisionBackend, PlannerBackend};
 use crate::astra::deterministic_backend::{
     DeterministicDecisionBackend, DeterministicPlannerBackend,
 };
-use crate::astra::pi_acp_adapter::{PiAcpDecisionEngine, PiAcpPlanner};
 use crate::astra::runtime_agent_backend::{
     RuntimeAgentBackendConfig, RuntimeAgentDecisionEngine, RuntimeAgentPlanner,
 };
 use crate::models::StageStatus;
 
-const MAX_INTERNAL_PI_SESSION_IDS: usize = 50;
+#[cfg(test)]
+const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
+#[cfg(test)]
 const MAX_RUN_DIAGNOSTICS: usize = 100;
 
 enum DecisionOutcome {
@@ -59,6 +62,7 @@ fn redact_diagnostic_message(message: &str) -> String {
     redacted
 }
 
+#[cfg(test)]
 fn trim_vec_front<T>(values: &mut Vec<T>, max_len: usize) {
     if values.len() > max_len {
         values.drain(0..values.len() - max_len);
@@ -325,17 +329,18 @@ impl AstraService {
     }
 
     fn create_planner_backend(&self, config: &AstraBackendConfig) -> Box<dyn PlannerBackend> {
-        // If a specific planner agent is configured, use RuntimeAgentPlanner
-        if let Some(agent) = config.planner_agent {
+        // If an Astra agent is configured, use it for planning.
+        if let Some(agent) = config.agent {
             log::info!(
                 "[astra:planner:backend] using runtime_agent backend with agent={}",
                 agent.as_str()
             );
             let runtime_config = RuntimeAgentBackendConfig {
                 agent,
-                timeout_ms: ASTRA_PI_TIMEOUT_MS,
-                model: config.provider_config.model.clone(),
-                effort: config.provider_config.thinking_level.clone(),
+                timeout_ms: ASTRA_PI_ACP_TIMEOUT_MS,
+                model: config.model.clone(),
+                effort: config.effort.clone(),
+                permission_mode: config.permission_mode.clone(),
             };
             return Box::new(RuntimeAgentPlanner::new(
                 self.inner.runtime.clone(),
@@ -343,10 +348,10 @@ impl AstraService {
             ));
         }
 
-        // Try Pi ACP if available
-        if let Some(pi_config) = self.inner.pi_config.clone() {
-            log::info!("[astra:planner:backend] using pi_acp backend");
-            return Box::new(PiAcpPlanner::new(pi_config));
+        // Try Astra Pi ACP if available
+        if let Some(astra_pi_acp_config) = self.inner.astra_pi_acp_config.clone() {
+            log::info!("[astra:planner:backend] using astra_pi_acp backend");
+            return Box::new(AstraPiAcpPlanner::new(astra_pi_acp_config));
         }
 
         // Default to deterministic
@@ -424,17 +429,18 @@ impl AstraService {
     }
 
     fn create_decision_backend(&self, config: &AstraBackendConfig) -> Box<dyn DecisionBackend> {
-        // If a specific decision agent is configured, use RuntimeAgentDecisionEngine
-        if let Some(agent) = config.decision_agent {
+        // If an Astra agent is configured, use it for decisions.
+        if let Some(agent) = config.agent {
             log::info!(
                 "[astra:decision:backend] using runtime_agent backend with agent={}",
                 agent.as_str()
             );
             let runtime_config = RuntimeAgentBackendConfig {
                 agent,
-                timeout_ms: ASTRA_PI_TIMEOUT_MS,
-                model: config.provider_config.model.clone(),
-                effort: config.provider_config.thinking_level.clone(),
+                timeout_ms: ASTRA_PI_ACP_TIMEOUT_MS,
+                model: config.model.clone(),
+                effort: config.effort.clone(),
+                permission_mode: config.permission_mode.clone(),
             };
             return Box::new(RuntimeAgentDecisionEngine::new(
                 self.inner.runtime.clone(),
@@ -442,10 +448,10 @@ impl AstraService {
             ));
         }
 
-        // Try Pi ACP if available
-        if let Some(pi_config) = self.inner.pi_config.clone() {
-            log::info!("[astra:decision:backend] using pi_acp backend");
-            return Box::new(PiAcpDecisionEngine::new(pi_config));
+        // Try Astra Pi ACP if available
+        if let Some(astra_pi_acp_config) = self.inner.astra_pi_acp_config.clone() {
+            log::info!("[astra:decision:backend] using astra_pi_acp backend");
+            return Box::new(AstraPiAcpDecisionEngine::new(astra_pi_acp_config));
         }
 
         // Default to deterministic
@@ -847,9 +853,9 @@ mod tests {
             .map(|idx| format!("session-{idx}"))
             .collect::<Vec<_>>();
 
-        trim_vec_front(&mut values, MAX_INTERNAL_PI_SESSION_IDS);
+        trim_vec_front(&mut values, MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS);
 
-        assert_eq!(values.len(), MAX_INTERNAL_PI_SESSION_IDS);
+        assert_eq!(values.len(), MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS);
         assert_eq!(values[0], "session-5");
         assert_eq!(values[49], "session-54");
     }

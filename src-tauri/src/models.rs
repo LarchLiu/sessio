@@ -178,17 +178,10 @@ pub struct AgentInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AstraConfig {
-    pub planner_agent: Option<String>,
-    pub planner_model: Option<String>,
-    pub planner_effort: Option<String>,
-    pub planner_permission_mode: Option<String>,
-    pub decision_agent: Option<String>,
-    pub decision_model: Option<String>,
-    pub decision_effort: Option<String>,
-    pub decision_permission_mode: Option<String>,
-    pub default_model: Option<String>,
-    pub default_effort: Option<String>,
-    pub default_permission_mode: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

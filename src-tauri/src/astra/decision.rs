@@ -6,28 +6,6 @@ use super::{
 };
 use crate::models::ThreadInfo;
 
-pub(super) trait AstraDecisionEngine {
-    fn decide(
-        &self,
-        thread: &ThreadInfo,
-        result: &AstraTaskResult,
-        task: &AstraTaskProposal,
-    ) -> AstraDecision;
-}
-
-pub(super) struct DeterministicDecisionEngine;
-
-impl AstraDecisionEngine for DeterministicDecisionEngine {
-    fn decide(
-        &self,
-        thread: &ThreadInfo,
-        result: &AstraTaskResult,
-        task: &AstraTaskProposal,
-    ) -> AstraDecision {
-        deterministic_decision(thread, result, task)
-    }
-}
-
 pub(super) fn deterministic_decision(
     thread: &ThreadInfo,
     result: &AstraTaskResult,

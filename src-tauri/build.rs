@@ -1,10 +1,10 @@
 fn main() {
-    prepare_pi_sidecar();
+    prepare_astra_pi_sidecar();
     tauri_build::build()
 }
 
-fn prepare_pi_sidecar() {
-    println!("cargo:rerun-if-changed=../scripts/prepare-pi-sidecar.mjs");
+fn prepare_astra_pi_sidecar() {
+    println!("cargo:rerun-if-changed=../scripts/prepare-astra-pi-sidecar.mjs");
     println!("cargo:rerun-if-changed=binaries/pi-darwin-amd64.tar.xz");
     println!("cargo:rerun-if-changed=binaries/pi-darwin-arm64.tar.xz");
     println!("cargo:rerun-if-changed=binaries/pi-linux-amd64.tar.xz");
@@ -28,12 +28,12 @@ fn prepare_pi_sidecar() {
     }
 
     let status = std::process::Command::new("node")
-        .arg("../scripts/prepare-pi-sidecar.mjs")
+        .arg("../scripts/prepare-astra-pi-sidecar.mjs")
         .arg(&target)
         .status();
     match status {
         Ok(status) if status.success() => {}
-        Ok(status) => panic!("prepare-pi-sidecar failed with status {status}"),
-        Err(error) => panic!("prepare-pi-sidecar failed: {error}"),
+        Ok(status) => panic!("prepare-astra-pi-sidecar failed with status {status}"),
+        Err(error) => panic!("prepare-astra-pi-sidecar failed: {error}"),
     }
 }

@@ -78,8 +78,6 @@ type AgentPreferencePatch = {
   effort?: string | null;
   permissionMode?: string | null;
   models?: RuntimeAgentOptionMetadata[];
-  plannerAgent?: string | null;
-  decisionAgent?: string | null;
 };
 
 export default function SettingsPage({
@@ -484,64 +482,34 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
     <section>
       {astraConfig && (
         <SettingsGroup title={t("astra.config_title")}>
-          <div className="grid gap-6">
-            <AstraRoleSettings
-              title={t("astra.planner_agent")}
-              agentValue={astraConfig.plannerAgent ?? ""}
-              modelValue={astraConfig.plannerModel ?? ""}
-              effortValue={astraConfig.plannerEffort ?? ""}
-              permissionValue={astraConfig.plannerPermissionMode ?? ""}
-              agents={agents}
-              onAgentChange={(value) => {
-                updateAstraConfig({ plannerAgent: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-              onModelChange={(value) => {
-                updateAstraConfig({ plannerModel: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-              onEffortChange={(value) => {
-                updateAstraConfig({ plannerEffort: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-              onPermissionChange={(value) => {
-                updateAstraConfig({ plannerPermissionMode: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-            />
-            <AstraRoleSettings
-              title={t("astra.decision_agent")}
-              agentValue={astraConfig.decisionAgent ?? ""}
-              modelValue={astraConfig.decisionModel ?? ""}
-              effortValue={astraConfig.decisionEffort ?? ""}
-              permissionValue={astraConfig.decisionPermissionMode ?? ""}
-              agents={agents}
-              onAgentChange={(value) => {
-                updateAstraConfig({ decisionAgent: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-              onModelChange={(value) => {
-                updateAstraConfig({ decisionModel: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-              onEffortChange={(value) => {
-                updateAstraConfig({ decisionEffort: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-              onPermissionChange={(value) => {
-                updateAstraConfig({ decisionPermissionMode: value || null })
-                  .then(setAstraConfig)
-                  .catch((err) => onError(String(err)));
-              }}
-            />
-          </div>
+          <AstraAgentSettings
+            title={t("astra.agent")}
+            agentValue={astraConfig.agent ?? ""}
+            modelValue={astraConfig.model ?? ""}
+            effortValue={astraConfig.effort ?? ""}
+            permissionValue={astraConfig.permissionMode ?? ""}
+            agents={agents}
+            onAgentChange={(value) => {
+              updateAstraConfig({ agent: value || null })
+                .then(setAstraConfig)
+                .catch((err) => onError(String(err)));
+            }}
+            onModelChange={(value) => {
+              updateAstraConfig({ model: value || null })
+                .then(setAstraConfig)
+                .catch((err) => onError(String(err)));
+            }}
+            onEffortChange={(value) => {
+              updateAstraConfig({ effort: value || null })
+                .then(setAstraConfig)
+                .catch((err) => onError(String(err)));
+            }}
+            onPermissionChange={(value) => {
+              updateAstraConfig({ permissionMode: value || null })
+                .then(setAstraConfig)
+                .catch((err) => onError(String(err)));
+            }}
+          />
         </SettingsGroup>
       )}
       <div className="grid grid-cols-[240px_minmax(0,1fr)] gap-5">
@@ -593,7 +561,7 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
   );
 }
 
-function AstraRoleSettings({
+function AstraAgentSettings({
   title,
   agentValue,
   modelValue,
@@ -635,10 +603,7 @@ function AstraRoleSettings({
     () => selectableAgents.find((agent) => agent.id === effectiveAgentValue) ?? null,
     [effectiveAgentValue, selectableAgents],
   );
-  const modelOptions = optionRows(
-    astraPreferenceSource(selectedAgent?.models ?? [], selectedAgent?.model),
-    modelValue,
-  );
+  const modelOptions = optionRows(astraAgentModelOptions(selectedAgent), modelValue);
   const effectiveModelValue = modelValue || (modelOptions[0]?.value ?? "");
   const effortOptions = optionRows(
     astraPreferenceSource(selectedAgent?.efforts ?? [], selectedAgent?.effort),
@@ -729,6 +694,18 @@ function astraPreferenceSource(
   if (options.length > 0) return options;
   if (!fallbackValue) return [];
   return [{ value: fallbackValue, label: fallbackValue, displayName: fallbackValue, enabled: true, order: 0 }];
+}
+
+function astraAgentModelOptions(agent: AgentInfo | null): RuntimeAgentOptionMetadata[] {
+  if (!agent) return [];
+  if (agent.id !== "astra-pi") {
+    return astraPreferenceSource(agent.models, agent.model);
+  }
+  const provider =
+    agent.aiProviders.find((item) => item.id === agent.aiProvider)
+    ?? agent.aiProviders.find((item) => item.enabled)
+    ?? agent.aiProviders[0];
+  return astraPreferenceSource(provider?.models ?? agent.models, provider?.model ?? agent.model);
 }
 
 function astraSelectableAgents(agents: AgentInfo[], selectedAgentId: string): AgentInfo[] {

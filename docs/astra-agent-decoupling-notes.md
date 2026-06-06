@@ -2,18 +2,17 @@
 
 ## 🎯 核心改进
 
-### Astra 不再硬绑定 Pi Agent
+### Astra 不再硬绑定 Astra Pi Agent
 
-Astra 编排系统已重构，从硬绑定内置 Pi agent 升级为支持任意 enabled agent 的灵活架构。
+Astra 编排系统已重构，从硬绑定内置 Astra Pi agent 升级为支持任意 enabled agent 的灵活架构。
 
 ## ✨ 新特性
 
-### 1. 可配置的 Planner 和 Decision Agent
+### 1. 可配置的 Astra Agent
 
-现在可以为 Astra 的 planning 和 decision making 分别选择不同的 agent：
+现在可以为 Astra 的 planning 和 decision making 选择统一的 agent：
 
-- **Planner Agent**：负责生成执行计划和任务分解
-- **Decision Agent**：负责评估任务结果并做出决策
+- **Astra Agent**：负责生成执行计划、评估任务结果并做出决策
 
 支持的 agent 包括：
 - Codex
@@ -26,7 +25,7 @@ Astra 编排系统已重构，从硬绑定内置 Pi agent 升级为支持任意 
 引入了统一的 backend trait 系统：
 
 - **RuntimeAgentBackend**：通过 RuntimeManager 调用任意 enabled agent
-- **Pi ACP Backend**：保留原有的 Pi ACP 子进程方式（向后兼容）
+- **Astra Pi ACP Backend**：保留原有的 Astra Pi ACP 子进程方式（向后兼容）
 - **Deterministic Backend**：规则驱动的确定性 backend（作为 fallback）
 
 ### 3. 智能 Fallback 机制
@@ -56,13 +55,13 @@ pub trait DecisionBackend: Send + Sync {
 ### Backend 选择优先级
 
 #### Planner
-1. 配置的 `planner_agent` → RuntimeAgentPlanner
-2. Bundled Pi config → PiAcpPlanner
+1. 配置的 `agent` → RuntimeAgentPlanner
+2. Bundled Astra Pi ACP config → AstraPiAcpPlanner
 3. Fallback → DeterministicPlannerBackend
 
 #### Decision Engine
-1. 配置的 `decision_agent` → RuntimeAgentDecisionEngine
-2. Bundled Pi config → PiAcpDecisionEngine
+1. 配置的 `agent` → RuntimeAgentDecisionEngine
+2. Bundled Astra Pi ACP config → AstraPiAcpDecisionEngine
 3. Fallback → DeterministicDecisionBackend
 
 ## 🔄 向后兼容性
@@ -81,8 +80,7 @@ pub trait DecisionBackend: Send + Sync {
 ```json
 {
   "astra": {
-    "plannerAgent": "claude",
-    "decisionAgent": "codex",
+    "agent": "claude",
     "provider": {
       "model": "claude-opus-4",
       "effort": "high"
@@ -93,9 +91,9 @@ pub trait DecisionBackend: Send + Sync {
 
 ### 典型场景
 
-1. **使用 Claude 进行 planning**：利用其强大的推理能力分解复杂任务
-2. **使用 Codex 进行 decision**：利用其代码理解能力评估实现质量
-3. **混合使用**：根据项目特点选择最合适的 agent 组合
+1. **使用 Claude 作为 Astra agent**：利用其强大的推理能力分解复杂任务并评估结果
+2. **使用 Codex 作为 Astra agent**：利用其代码理解能力评估实现质量
+3. **灵活切换**：根据项目特点选择最合适的 agent
 
 ## 🔧 技术细节
 
@@ -109,7 +107,7 @@ pub trait DecisionBackend: Send + Sync {
 ### 重构模块
 
 - `orchestrator.rs` - 使用 trait-based backend 选择
-- `pi_acp_adapter.rs` - 实现 PlannerBackend 和 DecisionBackend trait
+- `astra_pi_acp_adapter.rs` - 实现 PlannerBackend 和 DecisionBackend trait
 - `mod.rs` - 配置结构改为 AstraBackendConfig
 
 ## 🚀 未来规划

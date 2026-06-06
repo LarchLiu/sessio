@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { get } from "node:https";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_PI_VERSION = "v0.1.17";
+const DEFAULT_ASTRA_PI_AGENT_RUST_VERSION = "v0.1.17";
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const BIN_DIR = join(ROOT, "src-tauri", "binaries");
 
@@ -45,7 +45,7 @@ const TARGETS = {
 
 function usage() {
   const targets = Object.keys(TARGETS).join(", ");
-  console.error(`usage: node scripts/prepare-pi-sidecar.mjs <target-triple|all>\nknown targets: ${targets}`);
+  console.error(`usage: node scripts/prepare-astra-pi-sidecar.mjs <target-triple|all>\nknown targets: ${targets}`);
 }
 
 function run(command, args, options = {}) {
@@ -88,9 +88,11 @@ async function ensureArchive(target) {
     return archivePath;
   }
 
-  const version = process.env.SESSIO_PI_AGENT_RUST_VERSION || DEFAULT_PI_VERSION;
+  const version =
+    process.env.SESSIO_ASTRA_PI_AGENT_RUST_VERSION ||
+    DEFAULT_ASTRA_PI_AGENT_RUST_VERSION;
   const baseUrl =
-    process.env.SESSIO_PI_AGENT_RUST_RELEASE_BASE_URL ||
+    process.env.SESSIO_ASTRA_PI_AGENT_RUST_RELEASE_BASE_URL ||
     `https://github.com/Dicklesworthstone/pi_agent_rust/releases/download/${version}`;
   await download(`${baseUrl}/${target.archive}`, archivePath);
   return archivePath;

@@ -2,13 +2,13 @@
 
 ## 概述
 
-本文档描述了 Astra 编排系统从硬绑定 Pi agent 到支持任意 enabled agent 的解耦重构。
+本文档描述了 Astra 编排系统从硬绑定 Astra Pi agent 到支持任意 enabled agent 的解耦重构。
 
 ## 背景
 
-在重构前，Astra 的 planner 和 decision engine 硬编码绑定到内置的 Pi agent：
+在重构前，Astra 的 planner 和 decision engine 硬编码绑定到内置的 Astra Pi agent：
 
-- `PiAcpPlanner` 和 `PiAcpDecisionEngine` 通过 ACP 子进程调用 bundled Pi agent
+- `AstraPiAcpPlanner` 和 `AstraPiAcpDecisionEngine` 通过 ACP 子进程调用 bundled Astra Pi agent
 - 配置通过写入 Pi 的 `settings.json` / `models.json` 文件传递
 - 无法选择其他 agent（如 Codex, Claude, Gemini）用于 planning 或 decision
 
@@ -19,10 +19,10 @@
 
 ## 设计目标
 
-1. **解耦 Astra 与 Pi agent**：Pi agent 应该是一个可选的 backend，而不是唯一选择
+1. **解耦 Astra 与 Astra Pi agent**：Astra Pi agent 应该是一个可选的 backend，而不是唯一选择
 2. **支持任意 enabled agent**：用户可以选择 Codex、Claude、Gemini 或任何其他支持的 agent
 3. **统一 backend 接口**：所有 planner 和 decision backends 实现相同的 trait
-4. **保留现有功能**：deterministic planner 作为 fallback，Pi ACP 作为可选 backend
+4. **保留现有功能**：deterministic planner 作为 fallback，Astra Pi ACP 作为可选 backend
 5. **向后兼容**：现有配置继续工作，默认行为不变
 
 ## 架构设计
@@ -84,12 +84,12 @@ pub struct RuntimeAgentBackendConfig {
 }
 ```
 
-#### 2. Pi ACP Backend
+#### 2. Astra Pi ACP Backend
 
-保留原有的 Pi ACP 实现，作为一个 backend 选项：
+保留原有的 Astra Pi ACP 实现，作为一个 backend 选项：
 
-- **PiAcpPlanner**：通过 ACP 子进程调用 bundled Pi agent
-- **PiAcpDecisionEngine**：同上
+- **AstraPiAcpPlanner**：通过 ACP 子进程调用 bundled Astra Pi agent
+- **AstraPiAcpDecisionEngine**：同上
 
 现在实现了 `PlannerBackend` 和 `DecisionBackend` trait。
 
@@ -106,9 +106,11 @@ pub struct RuntimeAgentBackendConfig {
 
 ```rust
 struct AstraBackendConfig {
-    pub planner_agent: Option<Agent>,      // 用于 planning 的 agent
-    pub decision_agent: Option<Agent>,     // 用于 decision 的 agent
-    pub provider_config: AstraPiProviderConfig,
+    pub agent: Option<Agent>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
+    pub provider_config: AstraPiAcpProviderConfig,
 }
 ```
 
@@ -117,13 +119,13 @@ struct AstraBackendConfig {
 在 orchestrator 中，backend 按以下优先级选择：
 
 #### Planner Backend
-1. 如果配置了 `planner_agent`，使用 `RuntimeAgentPlanner`
-2. 如果有 `pi_config`，使用 `PiAcpPlanner`
+1. 如果配置了 `agent`，使用 `RuntimeAgentPlanner`
+2. 如果有 `astra_pi_acp_config`，使用 `AstraPiAcpPlanner`
 3. 否则使用 `DeterministicPlannerBackend`
 
 #### Decision Backend
-1. 如果配置了 `decision_agent`，使用 `RuntimeAgentDecisionEngine`
-2. 如果有 `pi_config`，使用 `PiAcpDecisionEngine`
+1. 如果配置了 `agent`，使用 `RuntimeAgentDecisionEngine`
+2. 如果有 `astra_pi_acp_config`，使用 `AstraPiAcpDecisionEngine`
 3. 否则使用 `DeterministicDecisionBackend`
 
 ### Fallback 机制
@@ -143,15 +145,15 @@ AstraService 加载 backend 配置
 Orchestrator 选择 planner backend
     ↓
 ┌─────────────────────────────────────┐
-│ RuntimeAgentPlanner                 │ ← 如果配置了 planner_agent
+│ RuntimeAgentPlanner                 │ ← 如果配置了 agent
 │   → RuntimeManager                  │
 │   → 调用指定的 agent                │
 └─────────────────────────────────────┘
          或
 ┌─────────────────────────────────────┐
-│ PiAcpPlanner                        │ ← 如果有 bundled Pi
+│ AstraPiAcpPlanner                        │ ← 如果有 bundled Astra Pi
 │   → ACP 子进程                      │
-│   → 调用 Pi agent                   │
+│   → 调用 Astra Pi agent                   │
 └─────────────────────────────────────┘
          或
 ┌─────────────────────────────────────┐
@@ -178,7 +180,7 @@ Orchestrator 选择 decision backend
 src-tauri/src/astra/
 ├── backend.rs                    # Backend trait 定义
 ├── runtime_agent_backend.rs      # RuntimeAgent 实现
-├── pi_acp_adapter.rs            # Pi ACP 实现
+├── astra_pi_acp_adapter.rs            # Astra Pi ACP 实现
 ├── deterministic_backend.rs     # Deterministic 实现
 ├── orchestrator.rs              # 编排器（选择 backend）
 ├── mod.rs                       # AstraService（配置管理）
@@ -188,8 +190,8 @@ src-tauri/src/astra/
 ### 关键改动
 
 1. **mod.rs**
-   - 将 `astra_preferences: Mutex<AstraPiProviderConfig>` 改为 `Mutex<AstraBackendConfig>`
-   - 添加 `planner_agent` 和 `decision_agent` 配置
+   - 将 `astra_preferences: Mutex<AstraPiAcpProviderConfig>` 改为 `Mutex<AstraBackendConfig>`
+   - 添加统一 `agent` 配置
    - 实现 `astra_backend_config()` 方法
 
 2. **orchestrator.rs**
@@ -197,19 +199,18 @@ src-tauri/src/astra/
    - 重构 `decide_astra_task()` 使用 trait-based backend
    - 添加 `create_planner_backend()` 和 `create_decision_backend()` 工厂方法
 
-3. **pi_acp_adapter.rs**
-   - 为 `PiAcpPlanner` 实现 `PlannerBackend` trait
-   - 为 `PiAcpDecisionEngine` 实现 `DecisionBackend` trait
+3. **astra_pi_acp_adapter.rs**
+   - 为 `AstraPiAcpPlanner` 实现 `PlannerBackend` trait
+   - 为 `AstraPiAcpDecisionEngine` 实现 `DecisionBackend` trait
 
 ## 使用场景
 
-### 场景 1：使用 Claude 作为 planner，Codex 作为 decision engine
+### 场景 1：使用 Claude 作为 Astra agent
 
 ```json
 {
   "astra": {
-    "plannerAgent": "claude",
-    "decisionAgent": "codex",
+    "agent": "claude",
     "provider": {
       "model": "claude-opus-4",
       "effort": "high"
@@ -218,23 +219,21 @@ src-tauri/src/astra/
 }
 ```
 
-### 场景 2：继续使用 Pi agent（向后兼容）
+### 场景 2：继续使用 Astra Pi agent（向后兼容）
 
-如果不配置 `plannerAgent` 和 `decisionAgent`，行为与之前相同：
-- 如果有 bundled Pi，使用 Pi ACP backend
+如果不配置 `agent`，行为与之前相同：
+- 如果有 bundled Astra Pi，使用 Astra Pi ACP backend
 - 否则使用 deterministic backend
 
 ### 场景 3：纯 deterministic 模式
 
-移除 bundled Pi binary，不配置任何 agent，完全使用规则驱动的编排。
+移除 bundled Astra Pi binary，不配置任何 agent，完全使用规则驱动的编排。
 
 ## 未来扩展
 
 ### 1. 前端 UI 集成
 
-在 Astra 设置页面添加：
-- Planner Agent 下拉选择框（列出所有 enabled agents）
-- Decision Agent 下拉选择框
+- Agent 下拉选择框（列出所有 enabled agents）
 - 每个 agent 的专属配置（model, effort 等）
 
 ### 2. 混合策略
@@ -265,7 +264,7 @@ src-tauri/src/astra/
 ✅ **完全向后兼容**
 
 - 现有配置无需修改
-- 默认行为不变（Pi ACP → Deterministic fallback）
+- 默认行为不变（Astra Pi ACP → Deterministic fallback）
 - 所有现有 API 保持不变
 
 ### 迁移路径
@@ -273,7 +272,7 @@ src-tauri/src/astra/
 对于想要使用新特性的用户：
 
 1. **第一步**：确保目标 agent 已启用并配置
-2. **第二步**：在 Astra 配置中指定 `plannerAgent` 和/或 `decisionAgent`
+2. **第二步**：在 Astra 配置中指定 `agent`
 3. **第三步**：测试并调整配置
 
 ## 测试策略
@@ -285,7 +284,7 @@ src-tauri/src/astra/
 
 ### 集成测试
 - RuntimeAgentBackend 与 RuntimeManager 的集成
-- Pi ACP backend 的兼容性
+- Astra Pi ACP backend 的兼容性
 - End-to-end 编排流程
 
 ### 手动测试
@@ -302,7 +301,7 @@ src-tauri/src/astra/
 
 ## 总结
 
-这次重构实现了 Astra 与 Pi agent 的解耦，提供了灵活的 backend 系统：
+这次重构实现了 Astra 与 Astra Pi agent 的解耦，提供了灵活的 backend 系统：
 
 - ✅ 支持任意 enabled agent
 - ✅ 统一的 backend 接口
@@ -310,4 +309,4 @@ src-tauri/src/astra/
 - ✅ 清晰的 fallback 机制
 - ✅ 为未来扩展奠定基础
 
-用户现在可以根据具体需求选择最合适的 agent 组合，不再受限于单一的 Pi agent 实现。
+用户现在可以根据具体需求选择最合适的 agent 组合，不再受限于单一的 Astra Pi agent 实现。

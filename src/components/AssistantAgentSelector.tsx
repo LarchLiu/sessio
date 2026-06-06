@@ -21,11 +21,11 @@ function optionValue(options: RuntimeAgentOptionMetadata[], fallback: string) {
 
 export function dbAgentsAsRuntimeAgents(agents: AgentInfo[]): RuntimeAgentMetadata[] {
   return agents
-    .filter((agent) => agent.enabled && (agent.id === "codex" || agent.id === "claude" || agent.id === "gemini"))
+    .filter((agent) => agent.enabled && (agent.id === "astra-pi" || agent.id === "codex" || agent.id === "claude" || agent.id === "gemini"))
     .map((agent) => ({
       agent: agent.id as Agent,
       enabled: agent.enabled,
-      configured: agent.commands.session.length > 0,
+      configured: agent.enabled,
       order: agent.order,
       transport: agent.transport,
       model: agent.model,

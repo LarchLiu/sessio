@@ -1252,8 +1252,9 @@ fn json_id_to_string(value: serde_json::Value) -> String {
 pub(crate) fn default_acp_command(agent: Agent) -> String {
     match agent {
         Agent::AstraPi => {
-            // Use bundled pi agent if available
-            crate::astra::bundled_pi_acp_command().unwrap_or_else(|| "astra-pi --acp".to_string())
+            // Use bundled Astra Pi ACP if available.
+            crate::astra::bundled_astra_pi_acp_command()
+                .unwrap_or_else(|| "astra-pi --acp".to_string())
         }
         Agent::Codex => "npx -y @zed-industries/codex-acp@latest".to_string(),
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest".to_string(),

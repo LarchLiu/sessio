@@ -48,17 +48,10 @@ export interface AgentInfo {
 }
 
 export interface AstraConfig {
-  plannerAgent: string | null;
-  plannerModel: string | null;
-  plannerEffort: string | null;
-  plannerPermissionMode: string | null;
-  decisionAgent: string | null;
-  decisionModel: string | null;
-  decisionEffort: string | null;
-  decisionPermissionMode: string | null;
-  defaultModel: string | null;
-  defaultEffort: string | null;
-  defaultPermissionMode: string | null;
+  agent: string | null;
+  model: string | null;
+  effort: string | null;
+  permissionMode: string | null;
   createdAt: number;
   updatedAt: number;
 }

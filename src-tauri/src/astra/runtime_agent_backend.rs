@@ -4,8 +4,10 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{json, Value};
 
+use super::astra_pi_acp_adapter::{
+    parse_astra_pi_acp_decision_response, parse_astra_pi_acp_plan_response,
+};
 use super::backend::{BackendFailure, BackendResponse, DecisionBackend, PlannerBackend};
-use super::pi_acp_adapter::{parse_pi_decision_response, parse_pi_plan_response};
 use super::{AstraDecision, AstraPlan, AstraRun, AstraTaskProposal, AstraTaskResult};
 use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEventPayload, RuntimeMetadata, StartAgentSession,
@@ -21,6 +23,7 @@ pub struct RuntimeAgentBackendConfig {
     pub timeout_ms: u64,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub permission_mode: Option<String>,
 }
 
 impl Default for RuntimeAgentBackendConfig {
@@ -30,6 +33,7 @@ impl Default for RuntimeAgentBackendConfig {
             timeout_ms: DEFAULT_TIMEOUT_MS,
             model: None,
             effort: None,
+            permission_mode: None,
         }
     }
 }
@@ -64,7 +68,7 @@ impl PlannerBackend for RuntimeAgentPlanner {
             "planning",
         ) {
             Ok((text, session_id)) => {
-                match parse_pi_plan_response(&text, run, thread, round_index) {
+                match parse_astra_pi_acp_plan_response(&text, run, thread, round_index) {
                     Ok(plan) => Ok(BackendResponse {
                         data: plan,
                         session_id,
@@ -97,7 +101,7 @@ impl RuntimeAgentDecisionEngine {
 impl DecisionBackend for RuntimeAgentDecisionEngine {
     fn decide(
         &self,
-        _run: &AstraRun,
+        run: &AstraRun,
         thread: &ThreadInfo,
         result: &AstraTaskResult,
         task: &AstraTaskProposal,
@@ -105,9 +109,15 @@ impl DecisionBackend for RuntimeAgentDecisionEngine {
     ) -> Result<BackendResponse<AstraDecision>, BackendFailure> {
         let prompt = build_decision_prompt(thread, result, task);
 
-        match execute_agent_session(&self.runtime, &self.config, "", &prompt, "decision") {
+        match execute_agent_session(
+            &self.runtime,
+            &self.config,
+            &run.project_path,
+            &prompt,
+            "decision",
+        ) {
             Ok((text, session_id)) => {
-                match parse_pi_decision_response(&text, thread, result, task) {
+                match parse_astra_pi_acp_decision_response(&text, thread, result, task) {
                     Ok(decision) => Ok(BackendResponse {
                         data: decision,
                         session_id,
@@ -145,6 +155,12 @@ fn execute_agent_session(
     }
     if let Some(effort) = &config.effort {
         options.insert("effort".to_string(), Value::String(effort.clone()));
+    }
+    if let Some(permission_mode) = &config.permission_mode {
+        options.insert(
+            "permissionMode".to_string(),
+            Value::String(permission_mode.clone()),
+        );
     }
 
     let req = StartAgentSession {

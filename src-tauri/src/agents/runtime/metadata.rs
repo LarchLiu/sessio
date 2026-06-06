@@ -84,12 +84,13 @@ pub fn startup_probe_runtime_agents(
         let Some(runtime_agent) = Agent::from_db_str(&agent.id) else {
             continue;
         };
-        let session_command = agent
+        let configured_session_command = agent
             .commands
             .session
             .first()
             .cloned()
             .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent));
+        let probe_command = startup_probe_command(runtime_agent, &agent);
         let version_command = agent.commands.version.first().cloned();
         let cached = store.get_runtime_agent_capability(runtime_agent)?;
 
@@ -100,7 +101,7 @@ pub fn startup_probe_runtime_agents(
                 runtime_agent,
                 &workspace_path,
                 agent.transport,
-                session_command.clone(),
+                probe_command,
             ) {
                 Ok(probe) => {
                     let record = RuntimeAgentCapabilityRecord {
@@ -139,7 +140,7 @@ pub fn startup_probe_runtime_agents(
             efforts: agent.efforts,
             permission_mode: agent.permission_mode,
             permission_modes: agent.permission_modes,
-            session_command: Some(session_command),
+            session_command: Some(configured_session_command),
             version_command,
             detected_version: capability_record
                 .as_ref()
@@ -152,6 +153,18 @@ pub fn startup_probe_runtime_agents(
     }
 
     Ok(out)
+}
+
+fn startup_probe_command(runtime_agent: Agent, agent: &AgentInfo) -> String {
+    match runtime_agent {
+        Agent::AstraPi => acp_transport::default_acp_command(runtime_agent),
+        _ => agent
+            .commands
+            .session
+            .first()
+            .cloned()
+            .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent)),
+    }
 }
 
 fn detect_capabilities_with_initialize_only(

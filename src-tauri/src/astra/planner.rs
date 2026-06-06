@@ -6,30 +6,6 @@ use super::{
 };
 use crate::models::{IssueStatus, StageStatus, ThreadInfo};
 
-pub(super) trait AstraPlanner {
-    fn plan(
-        &self,
-        run: &AstraRun,
-        thread: &ThreadInfo,
-        user_prompt: Option<&str>,
-        round_index: u32,
-    ) -> AstraPlan;
-}
-
-pub(super) struct DeterministicPlanner;
-
-impl AstraPlanner for DeterministicPlanner {
-    fn plan(
-        &self,
-        run: &AstraRun,
-        thread: &ThreadInfo,
-        user_prompt: Option<&str>,
-        round_index: u32,
-    ) -> AstraPlan {
-        deterministic_plan(run, thread, user_prompt, round_index)
-    }
-}
-
 pub(super) fn deterministic_plan(
     run: &AstraRun,
     thread: &ThreadInfo,

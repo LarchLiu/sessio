@@ -22,16 +22,16 @@ use crate::astra::backend::{BackendFailure, BackendResponse, DecisionBackend, Pl
 use crate::models::{Agent, IssueSeverity, StageStatus, ThreadInfo};
 
 #[derive(Debug, Clone)]
-pub(super) struct AstraPiConfig {
+pub(super) struct AstraPiAcpConfig {
     pub command: String,
     pub session_dir: String,
     pub agent_dir: String,
-    pub planner: AstraPiPurposeConfig,
-    pub decision: AstraPiPurposeConfig,
+    pub planner: AstraPiAcpPurposeConfig,
+    pub decision: AstraPiAcpPurposeConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct AstraPiProviderConfig {
+pub(crate) struct AstraPiAcpProviderConfig {
     pub provider: Option<String>,
     pub api: Option<String>,
     pub base_url: Option<String>,
@@ -40,18 +40,40 @@ pub(crate) struct AstraPiProviderConfig {
     pub thinking_level: Option<String>,
 }
 
+impl AstraPiAcpProviderConfig {
+    pub(crate) fn with_runtime_overrides(
+        mut self,
+        model: Option<String>,
+        thinking_level: Option<String>,
+    ) -> Self {
+        if model
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            self.model = model;
+        }
+        if thinking_level
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            self.thinking_level = thinking_level;
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
-pub(super) struct AstraPiPurposeConfig {
+pub(super) struct AstraPiAcpPurposeConfig {
     pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PiAcpPurpose {
+pub(super) enum AstraPiAcpPurpose {
     Planning,
     Decision,
 }
 
-impl PiAcpPurpose {
+impl AstraPiAcpPurpose {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Planning => "planning",
@@ -61,13 +83,13 @@ impl PiAcpPurpose {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PiAcpFailure {
+pub(super) struct AstraPiAcpFailure {
     pub code: &'static str,
     pub message: String,
     pub session_id: Option<String>,
 }
 
-impl PiAcpFailure {
+impl AstraPiAcpFailure {
     pub(super) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -83,22 +105,22 @@ impl PiAcpFailure {
 }
 
 #[derive(Debug, Clone)]
-struct PiAcpTextResponse {
+struct AstraPiAcpTextResponse {
     text: String,
     session_id: String,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PiAcpPlanner {
-    config: AstraPiConfig,
+pub(super) struct AstraPiAcpPlanner {
+    config: AstraPiAcpConfig,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PiAcpDecisionEngine {
-    config: AstraPiConfig,
+pub(super) struct AstraPiAcpDecisionEngine {
+    config: AstraPiAcpConfig,
 }
 
-impl PlannerBackend for PiAcpPlanner {
+impl PlannerBackend for AstraPiAcpPlanner {
     fn plan(
         &self,
         run: &AstraRun,
@@ -107,39 +129,38 @@ impl PlannerBackend for PiAcpPlanner {
         round_index: u32,
         config: &Value,
     ) -> Result<BackendResponse<AstraPlan>, BackendFailure> {
-        let provider_config: AstraPiProviderConfig =
+        let provider_config: AstraPiAcpProviderConfig =
             serde_json::from_value(config.clone()).unwrap_or_default();
 
         let prompt = planning_prompt(run, thread, user_prompt, round_index);
-        let response = run_internal_pi_acp(
+        let response = run_internal_astra_pi_acp(
             &self.config,
-            PiAcpPurpose::Planning,
+            AstraPiAcpPurpose::Planning,
             &run.run_id,
             &run.project_path,
             &prompt,
             &provider_config,
         )
         .map_err(|failure| {
-            BackendFailure::new("pi_acp", failure.code, failure.message)
+            BackendFailure::new("astra_pi_acp", failure.code, failure.message)
                 .with_session_id(failure.session_id)
         })?;
 
-        let plan = parse_pi_plan_response(&response.text, run, thread, round_index).map_err(
-            |failure| {
-                BackendFailure::new("pi_acp", failure.code, failure.message)
+        let plan = parse_astra_pi_acp_plan_response(&response.text, run, thread, round_index)
+            .map_err(|failure| {
+                BackendFailure::new("astra_pi_acp", failure.code, failure.message)
                     .with_session_id(Some(response.session_id.clone()))
-            },
-        )?;
+            })?;
 
         Ok(BackendResponse {
             data: plan,
             session_id: response.session_id,
-            backend_type: "pi_acp".to_string(),
+            backend_type: "astra_pi_acp".to_string(),
         })
     }
 }
 
-impl DecisionBackend for PiAcpDecisionEngine {
+impl DecisionBackend for AstraPiAcpDecisionEngine {
     fn decide(
         &self,
         run: &AstraRun,
@@ -148,70 +169,69 @@ impl DecisionBackend for PiAcpDecisionEngine {
         task: &AstraTaskProposal,
         config: &Value,
     ) -> Result<BackendResponse<AstraDecision>, BackendFailure> {
-        let provider_config: AstraPiProviderConfig =
+        let provider_config: AstraPiAcpProviderConfig =
             serde_json::from_value(config.clone()).unwrap_or_default();
 
         let prompt = decision_prompt(thread, result, task);
-        let response = run_internal_pi_acp(
+        let response = run_internal_astra_pi_acp(
             &self.config,
-            PiAcpPurpose::Decision,
+            AstraPiAcpPurpose::Decision,
             &run.run_id,
             &run.project_path,
             &prompt,
             &provider_config,
         )
         .map_err(|failure| {
-            BackendFailure::new("pi_acp", failure.code, failure.message)
+            BackendFailure::new("astra_pi_acp", failure.code, failure.message)
                 .with_session_id(failure.session_id)
         })?;
 
-        let decision = parse_pi_decision_response(&response.text, thread, result, task).map_err(
-            |failure| {
-                BackendFailure::new("pi_acp", failure.code, failure.message)
-                    .with_session_id(Some(response.session_id.clone()))
-            },
-        )?;
+        let decision = parse_astra_pi_acp_decision_response(&response.text, thread, result, task)
+            .map_err(|failure| {
+            BackendFailure::new("astra_pi_acp", failure.code, failure.message)
+                .with_session_id(Some(response.session_id.clone()))
+        })?;
 
         Ok(BackendResponse {
             data: decision,
             session_id: response.session_id,
-            backend_type: "pi_acp".to_string(),
+            backend_type: "astra_pi_acp".to_string(),
         })
     }
 }
 
-impl PiAcpPlanner {
-    pub(super) fn new(config: AstraPiConfig) -> Self {
+impl AstraPiAcpPlanner {
+    pub(super) fn new(config: AstraPiAcpConfig) -> Self {
         Self { config }
     }
 }
 
-impl PiAcpDecisionEngine {
-    pub(super) fn new(config: AstraPiConfig) -> Self {
+impl AstraPiAcpDecisionEngine {
+    pub(super) fn new(config: AstraPiAcpConfig) -> Self {
         Self { config }
     }
 }
 
-fn run_internal_pi_acp(
-    config: &AstraPiConfig,
-    purpose: PiAcpPurpose,
+fn run_internal_astra_pi_acp(
+    config: &AstraPiAcpConfig,
+    purpose: AstraPiAcpPurpose,
     run_id: &str,
     workspace_path: &str,
     prompt: &str,
-    provider_config: &AstraPiProviderConfig,
-) -> Result<PiAcpTextResponse, PiAcpFailure> {
+    provider_config: &AstraPiAcpProviderConfig,
+) -> Result<AstraPiAcpTextResponse, AstraPiAcpFailure> {
     let purpose_config = purpose_config(config, purpose);
     let command = config.command.clone();
-    let meta = internal_pi_meta(config, provider_config, purpose);
+    let meta = internal_astra_pi_acp_meta(config, provider_config, purpose);
     let timeout = Duration::from_millis(purpose_config.timeout_ms);
     let workspace = if workspace_path.trim().is_empty() {
         std::env::current_dir()
-            .map_err(|error| PiAcpFailure::new("transport_failure", error.to_string()))?
+            .map_err(|error| AstraPiAcpFailure::new("transport_failure", error.to_string()))?
     } else {
         PathBuf::from(workspace_path)
     };
     log::info!(
-        "[astra:pi-acp:call] purpose={} runId={} command={} workspace={} timeoutMs={} sessionDir={} model={:?} thinkingLevel={:?} meta={} promptChars={}",
+        "[astra:astra-pi-acp:call] purpose={} runId={} command={} workspace={} timeoutMs={} sessionDir={} model={:?} thinkingLevel={:?} meta={} promptChars={}",
         purpose.as_str(),
         run_id,
         command,
@@ -230,7 +250,7 @@ fn run_internal_pi_acp(
     let tracked_session_id = Arc::new(Mutex::new(None::<String>));
     let tracked_session_id_for_worker = tracked_session_id.clone();
     let handle = tauri::async_runtime::spawn(async move {
-        let result = run_internal_pi_acp_async(
+        let result = run_internal_astra_pi_acp_async(
             command,
             purpose_name,
             run_id,
@@ -245,7 +265,7 @@ fn run_internal_pi_acp(
     match rx.recv_timeout(timeout) {
         Ok(Ok(response)) => {
             log::info!(
-                "[astra:pi-acp:response] purpose={} sessionId={} textChars={}",
+                "[astra:astra-pi-acp:response] purpose={} sessionId={} textChars={}",
                 purpose.as_str(),
                 response.session_id,
                 response.text.chars().count()
@@ -254,7 +274,7 @@ fn run_internal_pi_acp(
         }
         Ok(Err(failure)) => {
             log::warn!(
-                "[astra:pi-acp:error] purpose={} code={} sessionId={:?} message={}",
+                "[astra:astra-pi-acp:error] purpose={} code={} sessionId={:?} message={}",
                 purpose.as_str(),
                 failure.code,
                 failure.session_id,
@@ -264,10 +284,10 @@ fn run_internal_pi_acp(
         }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
             handle.abort();
-            let failure = PiAcpFailure::new(
+            let failure = AstraPiAcpFailure::new(
                 "timeout",
                 format!(
-                    "Pi ACP {} timed out after {}ms",
+                    "Astra Pi ACP {} timed out after {}ms",
                     purpose.as_str(),
                     timeout.as_millis()
                 ),
@@ -279,7 +299,7 @@ fn run_internal_pi_acp(
                     .and_then(|value| value.clone()),
             );
             log::warn!(
-                "[astra:pi-acp:error] purpose={} code={} sessionId={:?} message={}",
+                "[astra:astra-pi-acp:error] purpose={} code={} sessionId={:?} message={}",
                 purpose.as_str(),
                 failure.code,
                 failure.session_id,
@@ -288,12 +308,12 @@ fn run_internal_pi_acp(
             Err(failure)
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            let failure = PiAcpFailure::new(
+            let failure = AstraPiAcpFailure::new(
                 "transport_failure",
-                format!("Pi ACP {} worker disconnected", purpose.as_str()),
+                format!("Astra Pi ACP {} worker disconnected", purpose.as_str()),
             );
             log::warn!(
-                "[astra:pi-acp:error] purpose={} code={} sessionId={:?} message={}",
+                "[astra:astra-pi-acp:error] purpose={} code={} sessionId={:?} message={}",
                 purpose.as_str(),
                 failure.code,
                 failure.session_id,
@@ -304,7 +324,7 @@ fn run_internal_pi_acp(
     }
 }
 
-async fn run_internal_pi_acp_async(
+async fn run_internal_astra_pi_acp_async(
     command: String,
     purpose: String,
     run_id: String,
@@ -312,9 +332,9 @@ async fn run_internal_pi_acp_async(
     workspace: PathBuf,
     prompt: String,
     internal_session_id: Arc<Mutex<Option<String>>>,
-) -> Result<PiAcpTextResponse, PiAcpFailure> {
+) -> Result<AstraPiAcpTextResponse, AstraPiAcpFailure> {
     let agent = AcpAgent::from_str(&command)
-        .map_err(|error| PiAcpFailure::new("transport_failure", error.to_string()))?;
+        .map_err(|error| AstraPiAcpFailure::new("transport_failure", error.to_string()))?;
     let text = Arc::new(Mutex::new(String::new()));
     let policy_denied = Arc::new(AtomicBool::new(false));
     let notification_text = text.clone();
@@ -329,7 +349,7 @@ async fn run_internal_pi_acp_async(
             async move |notification: SessionNotification, _connection| {
                 if let Err(error) = collect_notification_text(&notification, &notification_text) {
                     log::warn!(
-                        "[astra:pi-acp:notification] purpose={} error={}",
+                        "[astra:astra-pi-acp:notification] purpose={} error={}",
                         notification_purpose,
                         error
                     );
@@ -353,7 +373,7 @@ async fn run_internal_pi_acp_async(
             let internal_session_id = internal_session_id.clone();
             async move {
                 log::info!(
-                    "[astra:pi-acp:stage] purpose={} runId={} stage=initialize:start",
+                    "[astra:astra-pi-acp:stage] purpose={} runId={} stage=initialize:start",
                     purpose,
                     run_id
                 );
@@ -362,7 +382,7 @@ async fn run_internal_pi_acp_async(
                     .block_task()
                     .await?;
                 log::info!(
-                    "[astra:pi-acp:stage] purpose={} runId={} stage=initialize:ok protocolVersion={:?} capabilities={:?}",
+                    "[astra:astra-pi-acp:stage] purpose={} runId={} stage=initialize:ok protocolVersion={:?} capabilities={:?}",
                     purpose,
                     run_id,
                     init.protocol_version,
@@ -380,8 +400,8 @@ async fn run_internal_pi_acp_async(
                     "astraInternalPurpose".to_string(),
                     Value::String(purpose.clone()),
                 );
-                sessio_meta.insert(backend_key.to_string(), Value::String("pi_acp".to_string()));
-                sessio_meta.insert("pi".to_string(), Value::Object(meta));
+                sessio_meta.insert(backend_key.to_string(), Value::String("astra_pi_acp".to_string()));
+                sessio_meta.insert("astraPiAcp".to_string(), Value::Object(meta));
                 request.meta = Some(
                     json!({ "sessio": Value::Object(sessio_meta) })
                         .as_object()
@@ -389,7 +409,7 @@ async fn run_internal_pi_acp_async(
                         .unwrap_or_default(),
                 );
                 log::info!(
-                    "[astra:pi-acp:stage] purpose={} runId={} stage=new_session:start meta={}",
+                    "[astra:astra-pi-acp:stage] purpose={} runId={} stage=new_session:start meta={}",
                     purpose,
                     run_id,
                     serde_json::to_string(&request.meta).unwrap_or_default()
@@ -400,13 +420,13 @@ async fn run_internal_pi_acp_async(
                     *tracked = Some(session_id.clone());
                 }
                 log::info!(
-                    "[astra:pi-acp:stage] purpose={} runId={} stage=new_session:ok sessionId={}",
+                    "[astra:astra-pi-acp:stage] purpose={} runId={} stage=new_session:ok sessionId={}",
                     purpose,
                     run_id,
                     session_id
                 );
                 log::info!(
-                    "[astra:pi-acp:stage] purpose={} runId={} stage=prompt:start sessionId={} promptChars={}",
+                    "[astra:astra-pi-acp:stage] purpose={} runId={} stage=prompt:start sessionId={} promptChars={}",
                     purpose,
                     run_id,
                     session_id,
@@ -421,22 +441,22 @@ async fn run_internal_pi_acp_async(
                     .await?;
                 if policy_denied.load(Ordering::SeqCst) {
                     return Err(agent_client_protocol::Error::internal_error()
-                        .data("Pi ACP internal session requested a denied permission"));
+                        .data("Astra Pi ACP internal session requested a denied permission"));
                 }
                 if response.stop_reason == StopReason::Cancelled {
                     return Err(agent_client_protocol::Error::internal_error()
-                        .data("Pi ACP internal session was cancelled"));
+                        .data("Astra Pi ACP internal session was cancelled"));
                 }
                 let output = text.lock().map(|value| value.clone()).unwrap_or_default();
                 log::info!(
-                    "[astra:pi-acp:stage] purpose={} runId={} stage=prompt:ok sessionId={} stopReason={:?} outputChars={}",
+                    "[astra:astra-pi-acp:stage] purpose={} runId={} stage=prompt:ok sessionId={} stopReason={:?} outputChars={}",
                     purpose,
                     run_id,
                     session_id,
                     response.stop_reason,
                     output.chars().count()
                 );
-                Ok::<PiAcpTextResponse, agent_client_protocol::Error>(PiAcpTextResponse {
+                Ok::<AstraPiAcpTextResponse, agent_client_protocol::Error>(AstraPiAcpTextResponse {
                     text: output,
                     session_id,
                 })
@@ -449,7 +469,7 @@ async fn run_internal_pi_acp_async(
                 .lock()
                 .ok()
                 .and_then(|value| value.clone());
-            classify_pi_acp_error(
+            classify_astra_pi_acp_error(
                 message,
                 failure_policy_denied.load(Ordering::SeqCst),
                 session_id,
@@ -457,27 +477,27 @@ async fn run_internal_pi_acp_async(
         })
 }
 
-fn classify_pi_acp_error(
+fn classify_astra_pi_acp_error(
     message: String,
     policy_denied: bool,
     session_id: Option<String>,
-) -> PiAcpFailure {
+) -> AstraPiAcpFailure {
     if policy_denied || message.contains("denied permission") {
-        PiAcpFailure::new("policy_denied", message).with_session_id(session_id)
+        AstraPiAcpFailure::new("policy_denied", message).with_session_id(session_id)
     } else {
-        PiAcpFailure::new("transport_failure", message).with_session_id(session_id)
+        AstraPiAcpFailure::new("transport_failure", message).with_session_id(session_id)
     }
 }
 
-pub(super) fn prepare_pi_agent_config(
-    config: &AstraPiConfig,
-    provider: &AstraPiProviderConfig,
-) -> Result<(), PiAcpFailure> {
+pub(super) fn prepare_astra_pi_agent_config(
+    config: &AstraPiAcpConfig,
+    provider: &AstraPiAcpProviderConfig,
+) -> Result<(), AstraPiAcpFailure> {
     let agent_dir = PathBuf::from(&config.agent_dir);
     std::fs::create_dir_all(&agent_dir)
-        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))?;
+        .map_err(|error| AstraPiAcpFailure::new("config_write_failed", error.to_string()))?;
     std::fs::create_dir_all(&config.session_dir)
-        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))?;
+        .map_err(|error| AstraPiAcpFailure::new("config_write_failed", error.to_string()))?;
 
     let provider_id = provider
         .provider
@@ -537,7 +557,7 @@ pub(super) fn prepare_pi_agent_config(
     write_json_file(&agent_dir.join("settings.json"), &settings)?;
     write_json_file(&agent_dir.join("models.json"), &models)?;
     log::info!(
-        "[astra:pi-acp:config] agentDir={} provider={} api={} baseUrl={} model={} thinkingLevel={:?} apiKeySet={}",
+        "[astra:astra-pi-acp:config] agentDir={} provider={} api={} baseUrl={} model={} thinkingLevel={:?} apiKeySet={}",
         agent_dir.display(),
         provider_id,
         api,
@@ -549,17 +569,17 @@ pub(super) fn prepare_pi_agent_config(
     Ok(())
 }
 
-fn write_json_file(path: &std::path::Path, value: &Value) -> Result<(), PiAcpFailure> {
+fn write_json_file(path: &std::path::Path, value: &Value) -> Result<(), AstraPiAcpFailure> {
     let text = serde_json::to_string_pretty(value)
-        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))?;
+        .map_err(|error| AstraPiAcpFailure::new("config_write_failed", error.to_string()))?;
     std::fs::write(path, text)
-        .map_err(|error| PiAcpFailure::new("config_write_failed", error.to_string()))
+        .map_err(|error| AstraPiAcpFailure::new("config_write_failed", error.to_string()))
 }
 
-fn internal_pi_meta(
-    config: &AstraPiConfig,
-    provider_config: &AstraPiProviderConfig,
-    purpose: PiAcpPurpose,
+fn internal_astra_pi_acp_meta(
+    config: &AstraPiAcpConfig,
+    provider_config: &AstraPiAcpProviderConfig,
+    purpose: AstraPiAcpPurpose,
 ) -> serde_json::Map<String, Value> {
     let mut meta = serde_json::Map::new();
     meta.insert(
@@ -604,10 +624,13 @@ fn internal_pi_meta(
     meta
 }
 
-fn purpose_config(config: &AstraPiConfig, purpose: PiAcpPurpose) -> &AstraPiPurposeConfig {
+fn purpose_config(
+    config: &AstraPiAcpConfig,
+    purpose: AstraPiAcpPurpose,
+) -> &AstraPiAcpPurposeConfig {
     match purpose {
-        PiAcpPurpose::Planning => &config.planner,
-        PiAcpPurpose::Decision => &config.decision,
+        AstraPiAcpPurpose::Planning => &config.planner,
+        AstraPiAcpPurpose::Decision => &config.decision,
     }
 }
 
@@ -617,7 +640,7 @@ fn collect_notification_text(
 ) -> Result<()> {
     if let SessionUpdate::AgentMessageChunk(chunk) = &notification.update {
         text.lock()
-            .map_err(|_| anyhow::anyhow!("Pi ACP text buffer lock poisoned"))?
+            .map_err(|_| anyhow::anyhow!("Astra Pi ACP text buffer lock poisoned"))?
             .push_str(&content_chunk_text(chunk)?);
     }
     Ok(())
@@ -695,15 +718,15 @@ fn decision_prompt(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawPiPlan {
+struct RawAstraPiAcpPlan {
     summary: Option<String>,
     #[serde(default)]
-    tasks: Vec<RawPiTask>,
+    tasks: Vec<RawAstraPiAcpTask>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawPiTask {
+struct RawAstraPiAcpTask {
     #[serde(rename = "id")]
     id: Option<String>,
     title: Option<String>,
@@ -714,28 +737,28 @@ struct RawPiTask {
     risk: Option<String>,
 }
 
-pub(super) fn parse_pi_plan_response(
+pub(super) fn parse_astra_pi_acp_plan_response(
     response: &str,
     run: &AstraRun,
     thread: &ThreadInfo,
     round_index: u32,
-) -> Result<AstraPlan, PiAcpFailure> {
+) -> Result<AstraPlan, AstraPiAcpFailure> {
     let value = parse_json_object(response)?;
-    let raw: RawPiPlan = serde_json::from_value(value)
-        .map_err(|error| PiAcpFailure::new("invalid_json", error.to_string()))?;
+    let raw: RawAstraPiAcpPlan = serde_json::from_value(value)
+        .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
     let mut tasks = Vec::new();
     let mut invalid_messages = Vec::new();
     for (idx, task) in raw.tasks.into_iter().enumerate() {
-        match sanitize_pi_task(task, run, thread, round_index, idx) {
+        match sanitize_astra_pi_acp_task(task, run, thread, round_index, idx) {
             Ok(task) => tasks.push(task),
             Err(error) => invalid_messages.push(error.message),
         }
     }
     if !invalid_messages.is_empty() {
-        return Err(PiAcpFailure::new(
+        return Err(AstraPiAcpFailure::new(
             "validation_failed",
             format!(
-                "invalid Pi planner task(s): {}",
+                "invalid Astra Pi ACP planner task(s): {}",
                 invalid_messages.join("; ")
             ),
         ));
@@ -745,23 +768,23 @@ pub(super) fn parse_pi_plan_response(
         summary: raw
             .summary
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| format!("Pi ACP planned {} task(s).", tasks.len())),
+            .unwrap_or_else(|| format!("Astra Pi ACP planned {} task(s).", tasks.len())),
         tasks,
     })
 }
 
-fn sanitize_pi_task(
-    raw: RawPiTask,
+fn sanitize_astra_pi_acp_task(
+    raw: RawAstraPiAcpTask,
     run: &AstraRun,
     thread: &ThreadInfo,
     round_index: u32,
     idx: usize,
-) -> Result<AstraTaskProposal, PiAcpFailure> {
+) -> Result<AstraTaskProposal, AstraPiAcpFailure> {
     let _raw_id = raw.id;
     let prompt = raw
         .prompt
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| PiAcpFailure::new("validation_failed", "task missing prompt"))?;
+        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "task missing prompt"))?;
     let stage_id = raw.target_stage_id.filter(|value| !value.trim().is_empty());
     let stage = stage_id
         .as_deref()
@@ -770,7 +793,7 @@ fn sanitize_pi_task(
                 .stages
                 .iter()
                 .find(|stage| stage.id == stage_id)
-                .ok_or_else(|| PiAcpFailure::new("validation_failed", "unknown targetStageId"))
+                .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "unknown targetStageId"))
         })
         .transpose()?;
     let (target_stage_id, target_agent, fallback_title, id_scope) = if let Some(stage) = stage {
@@ -778,13 +801,13 @@ fn sanitize_pi_task(
             stage.status,
             StageStatus::Completed | StageStatus::Skipped | StageStatus::NeedsReview
         ) {
-            return Err(PiAcpFailure::new(
+            return Err(AstraPiAcpFailure::new(
                 "validation_failed",
                 "task targets terminal stage",
             ));
         }
         let assignable_agent = pick_stage_agent(stage).ok_or_else(|| {
-            PiAcpFailure::new("validation_failed", "stage has no assignable agent")
+            AstraPiAcpFailure::new("validation_failed", "stage has no assignable agent")
         })?;
         let target_agent = raw
             .target_agent
@@ -792,7 +815,7 @@ fn sanitize_pi_task(
             .and_then(Agent::from_db_str)
             .unwrap_or(assignable_agent);
         if target_agent != assignable_agent {
-            return Err(PiAcpFailure::new(
+            return Err(AstraPiAcpFailure::new(
                 "validation_failed",
                 "task targetAgent is not assignable for targetStageId",
             ));
@@ -809,7 +832,7 @@ fn sanitize_pi_task(
             .as_deref()
             .and_then(Agent::from_db_str)
             .ok_or_else(|| {
-                PiAcpFailure::new(
+                AstraPiAcpFailure::new(
                     "validation_failed",
                     "thread-level task missing valid targetAgent",
                 )
@@ -856,7 +879,7 @@ fn parse_task_risk(value: Option<&str>) -> AstraTaskRisk {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawPiDecision {
+struct RawAstraPiAcpDecision {
     action: String,
     #[serde(default)]
     stage: Option<Value>,
@@ -869,15 +892,15 @@ struct RawPiDecision {
     reason: Option<String>,
 }
 
-pub(super) fn parse_pi_decision_response(
+pub(super) fn parse_astra_pi_acp_decision_response(
     response: &str,
     thread: &ThreadInfo,
     result: &AstraTaskResult,
     task: &AstraTaskProposal,
-) -> Result<AstraDecision, PiAcpFailure> {
+) -> Result<AstraDecision, AstraPiAcpFailure> {
     let value = parse_json_object(response)?;
-    let raw: RawPiDecision = serde_json::from_value(value)
-        .map_err(|error| PiAcpFailure::new("invalid_json", error.to_string()))?;
+    let raw: RawAstraPiAcpDecision = serde_json::from_value(value)
+        .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
     let reason = raw
         .reason
         .or(raw.summary)
@@ -911,7 +934,7 @@ pub(super) fn parse_pi_decision_response(
         "plan_next_round" => Ok(AstraDecision::PlanNextRound { reason }),
         "complete_run" => Ok(AstraDecision::CompleteRun { reason }),
         "error_run" => Ok(AstraDecision::ErrorRun { reason }),
-        other => Err(PiAcpFailure::new(
+        other => Err(AstraPiAcpFailure::new(
             "validation_failed",
             format!("unknown decision action: {other}"),
         )),
@@ -924,11 +947,11 @@ fn stage_decision_args(
     result: &AstraTaskResult,
     task: &AstraTaskProposal,
     fallback_summary: &str,
-) -> Result<Value, PiAcpFailure> {
+) -> Result<Value, AstraPiAcpFailure> {
     let mut value = stage.unwrap_or_else(|| json!({}));
     let object = value
         .as_object_mut()
-        .ok_or_else(|| PiAcpFailure::new("validation_failed", "stage must be an object"))?;
+        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "stage must be an object"))?;
     let stage_id = object
         .get("threadStageId")
         .or_else(|| object.get("id"))
@@ -936,9 +959,11 @@ fn stage_decision_args(
         .map(ToString::to_string)
         .or_else(|| result.thread_stage_id.clone())
         .or_else(|| task.target_stage_id.clone())
-        .ok_or_else(|| PiAcpFailure::new("validation_failed", "stage decision missing stage id"))?;
+        .ok_or_else(|| {
+            AstraPiAcpFailure::new("validation_failed", "stage decision missing stage id")
+        })?;
     if !thread.stages.iter().any(|stage| stage.id == stage_id) {
-        return Err(PiAcpFailure::new(
+        return Err(AstraPiAcpFailure::new(
             "validation_failed",
             "stage decision references unknown stage",
         ));
@@ -955,10 +980,10 @@ fn stage_decision_args(
             .get("status")
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                PiAcpFailure::new("validation_failed", "stage status must be a string")
+                AstraPiAcpFailure::new("validation_failed", "stage status must be a string")
             })?;
         if StageStatus::from_db_str(status).is_none() {
-            return Err(PiAcpFailure::new(
+            return Err(AstraPiAcpFailure::new(
                 "validation_failed",
                 format!("unknown stage status: {status}"),
             ));
@@ -985,20 +1010,22 @@ fn issue_decision_args(
     result: &AstraTaskResult,
     task: &AstraTaskProposal,
     fallback_summary: &str,
-) -> Result<Value, PiAcpFailure> {
+) -> Result<Value, AstraPiAcpFailure> {
     let mut value = issue.unwrap_or_else(|| json!({}));
     let object = value
         .as_object_mut()
-        .ok_or_else(|| PiAcpFailure::new("validation_failed", "issue must be an object"))?;
+        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "issue must be an object"))?;
     let stage_id = object
         .get("threadStageId")
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .or_else(|| result.thread_stage_id.clone())
         .or_else(|| task.target_stage_id.clone())
-        .ok_or_else(|| PiAcpFailure::new("validation_failed", "issue decision missing stage id"))?;
+        .ok_or_else(|| {
+            AstraPiAcpFailure::new("validation_failed", "issue decision missing stage id")
+        })?;
     if !thread.stages.iter().any(|stage| stage.id == stage_id) {
-        return Err(PiAcpFailure::new(
+        return Err(AstraPiAcpFailure::new(
             "validation_failed",
             "issue decision references unknown stage",
         ));
@@ -1027,10 +1054,10 @@ fn issue_decision_args(
             .get("severity")
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                PiAcpFailure::new("validation_failed", "issue severity must be a string")
+                AstraPiAcpFailure::new("validation_failed", "issue severity must be a string")
             })?;
         if IssueSeverity::from_db_str(severity).is_none() {
-            return Err(PiAcpFailure::new(
+            return Err(AstraPiAcpFailure::new(
                 "validation_failed",
                 format!("unknown issue severity: {severity}"),
             ));
@@ -1039,26 +1066,26 @@ fn issue_decision_args(
     Ok(value)
 }
 
-fn parse_json_object(response: &str) -> Result<Value, PiAcpFailure> {
+fn parse_json_object(response: &str) -> Result<Value, AstraPiAcpFailure> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
-        return Err(PiAcpFailure::new(
+        return Err(AstraPiAcpFailure::new(
             "empty_response",
-            "Pi ACP returned an empty response",
+            "Astra Pi ACP returned an empty response",
         ));
     }
     let candidate = extract_json_candidate(trimmed).ok_or_else(|| {
-        PiAcpFailure::new(
+        AstraPiAcpFailure::new(
             "invalid_json",
-            "Pi ACP response did not contain a JSON object",
+            "Astra Pi ACP response did not contain a JSON object",
         )
     })?;
     let value: Value = serde_json::from_str(candidate)
-        .map_err(|error| PiAcpFailure::new("invalid_json", error.to_string()))?;
+        .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
     if !value.is_object() {
-        return Err(PiAcpFailure::new(
+        return Err(AstraPiAcpFailure::new(
             "invalid_json",
-            "Pi ACP response JSON must be an object",
+            "Astra Pi ACP response JSON must be an object",
         ));
     }
     Ok(value)
@@ -1145,7 +1172,7 @@ mod tests {
 
     #[test]
     fn parses_fenced_pi_plan_and_sanitizes_task() {
-        let plan = parse_pi_plan_response(
+        let plan = parse_astra_pi_acp_plan_response(
             r#"```json
             {"summary":"ok","tasks":[{"id":"bad id!","title":"Do it","targetStageId":"stage-1","targetAgent":"codex","prompt":"Work","expectedOutput":"Notes","risk":"medium"}]}
             ```"#,
@@ -1163,7 +1190,7 @@ mod tests {
 
     #[test]
     fn invalid_pi_plan_task_fails_whole_plan() {
-        let error = parse_pi_plan_response(
+        let error = parse_astra_pi_acp_plan_response(
             r#"{"summary":"bad","tasks":[{"targetStageId":"missing","targetAgent":"codex","prompt":"Work"}]}"#,
             &run(),
             &thread(),
@@ -1177,7 +1204,7 @@ mod tests {
 
     #[test]
     fn parses_thread_level_pi_plan_task() {
-        let plan = parse_pi_plan_response(
+        let plan = parse_astra_pi_acp_plan_response(
             r#"{"summary":"thread","tasks":[{"title":"Thread task","targetAgent":"codex","prompt":"Work thread"}]}"#,
             &run(),
             &thread(),
@@ -1204,19 +1231,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let response = json!({ "summary": "many", "tasks": tasks }).to_string();
-        let plan = parse_pi_plan_response(&response, &run(), &thread(), 0).unwrap();
+        let plan = parse_astra_pi_acp_plan_response(&response, &run(), &thread(), 0).unwrap();
 
         assert_eq!(plan.tasks.len(), 20);
     }
 
     #[test]
     fn rejects_plan_without_json_object() {
-        assert!(parse_pi_plan_response("no json here", &run(), &thread(), 0).is_err());
+        assert!(parse_astra_pi_acp_plan_response("no json here", &run(), &thread(), 0).is_err());
     }
 
     #[test]
     fn policy_denied_flag_wins_over_transport_message() {
-        let failure = classify_pi_acp_error(
+        let failure = classify_astra_pi_acp_error(
             "transport disconnected".to_string(),
             true,
             Some("session-1".to_string()),
@@ -1239,14 +1266,14 @@ mod tests {
         ));
         let agent_dir = root.join("agent");
         let session_dir = root.join("sessions");
-        let config = AstraPiConfig {
+        let config = AstraPiAcpConfig {
             command: "astra-pi --acp".to_string(),
             session_dir: session_dir.to_string_lossy().to_string(),
             agent_dir: agent_dir.to_string_lossy().to_string(),
-            planner: AstraPiPurposeConfig { timeout_ms: 30_000 },
-            decision: AstraPiPurposeConfig { timeout_ms: 30_000 },
+            planner: AstraPiAcpPurposeConfig { timeout_ms: 30_000 },
+            decision: AstraPiAcpPurposeConfig { timeout_ms: 30_000 },
         };
-        let provider = AstraPiProviderConfig {
+        let provider = AstraPiAcpProviderConfig {
             provider: Some("custom-endpoint".to_string()),
             api: Some("openai-responses".to_string()),
             base_url: Some("https://example.test/v1".to_string()),
@@ -1255,7 +1282,7 @@ mod tests {
             thinking_level: Some("high".to_string()),
         };
 
-        prepare_pi_agent_config(&config, &provider).unwrap();
+        prepare_astra_pi_agent_config(&config, &provider).unwrap();
 
         let settings: Value = serde_json::from_str(
             &std::fs::read_to_string(agent_dir.join("settings.json")).unwrap(),
@@ -1315,7 +1342,7 @@ mod tests {
             completed_at: 1,
         };
 
-        let decision = parse_pi_decision_response(
+        let decision = parse_astra_pi_acp_decision_response(
             r#"{"action":"update_stage","stage":{"status":"completed"},"reason":"done"}"#,
             &thread(),
             &result,

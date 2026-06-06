@@ -1,4 +1,4 @@
-# Rust Native Astra + Pi ACP 重构实施方案 (v2)
+# Rust Native Astra + Astra Pi ACP 重构实施方案 (v2)
 
 ## 修订说明 (v2 相对 v1)
 
@@ -7,7 +7,7 @@
 1. 新增「当前实现状态」小节，明确 Phase 1 主体已在 Rust 落地，避免把已实现部分误读为待实施。
 2. 补强 worker 顶层错误必须落地为 terminal status，并增加运行期僵尸 run 检测（不只是启动时 interrupt）。
 3. 定义 `needs_review` 的收敛终态，避免空耗 round limit 后被误判 errored。
-4. 明确 `retry_stage` 与 `plan_next_round` 在 orchestrator 的差异化处理（为 Pi 接入预留语义）。
+4. 明确 `retry_stage` 与 `plan_next_round` 在 orchestrator 的差异化处理（为 Astra Pi ACP 接入预留语义）。
 5. 补充「无可委派 agent 的 stage」「空 stages thread」的可诊断终态。
 6. 补充 interrupted run 残留 partial 占位 session 的清理策略。
 7. 把持久化 schema 扩展显式排进阶段计划（Phase 1 与 Phase 2 之间）。
@@ -37,7 +37,7 @@
   - 可配置 round limit / retry limit（当前 `RUST_NATIVE_ROUND_LIMIT` 为硬编码常量）。
   - 本版新增的异常终态保证与边界收敛（见对应小节，标注「v2 新增」）。
 - **后续 Phase（未开始）**：
-  - Phase 2 `PiAcpPlanner` / `PiAcpDecisionEngine` 与 internal ACP backend。
+  - Phase 2 `AstraPiAcpPlanner` / `AstraPiAcpDecisionEngine` 与 internal ACP backend。
   - Phase 3 前端/Tauri API 收敛与私有 RPC 删除。
   - Phase 4 sidecar 与打包残留删除。
 
@@ -49,10 +49,10 @@ Frontend
 Rust Astra Orchestrator
   -> AstraPlanner trait
     -> DeterministicPlanner
-    -> PiAcpPlanner
+    -> AstraPiAcpPlanner
   -> AstraDecisionEngine trait
     -> DeterministicDecisionEngine
-    -> PiAcpDecisionEngine
+    -> AstraPiAcpDecisionEngine
   -> RuntimeManager / AcpTransport
     -> pi_agent_rust (internal planning/decision session)
     -> codex / claude / gemini (delegated task sessions)
@@ -65,13 +65,13 @@ Store / Memory / Thread state
 - 新增 Rust 内部 `AstraPlanner` trait，planner 只负责根据 thread/stage snapshot 生成 `AstraPlan`，不负责 task dispatch 或直接 mutation。
 - 新增 Rust 内部 `AstraDecisionEngine` trait，decision engine 负责根据 delegated task result、最新 snapshot、retry 状态生成 `AstraStageDecision` / `AstraIssueDecision` / retry / complete 等“请求型决策”，不直接写 store。
 - 新增 Rust 内部 `AstraOrchestrator`，统一负责 run lifecycle、planning rounds、cancel、retry、task dispatch、result recording、决策校验与 stage/issue mutation 执行。
-- Rust store 仍是 run、stage、issue、session linking 的唯一 durable owner；Pi 与 delegated agent 只能返回计划或决策请求。
+- Rust store 仍是 run、stage、issue、session linking 的唯一 durable owner；Astra Pi ACP 与 delegated agent 只能返回计划或决策请求。
 - 规划器后端分为两种：
-  - `DeterministicPlanner`：无 Pi 时的稳定 fallback。
-  - `PiAcpPlanner`：通过内部 ACP backend 向 `pi_agent_rust` 发起短生命周期 planning session。
+  - `DeterministicPlanner`：无 Astra Pi ACP 时的稳定 fallback。
+  - `AstraPiAcpPlanner`：通过内部 ACP backend 向 `pi_agent_rust` 发起短生命周期 planning session。
 - 决策后端分为两种：
   - `DeterministicDecisionEngine`：保守更新，只在明确成功/失败信号下推进 stage 或创建 issue。
-  - `PiAcpDecisionEngine`：通过内部 ACP backend 向 `pi_agent_rust` 发起短生命周期 decision session。
+  - `AstraPiAcpDecisionEngine`：通过内部 ACP backend 向 `pi_agent_rust` 发起短生命周期 decision session。
 - `pi_agent_rust` 必须被建模为内部 ACP backend，而不是 Codex/Claude/Gemini 同类用户 agent；它不进入历史 agent enum，不出现在普通 chat runtime 列表，不参与 indexed session 语义。
 - 前端/public API 允许收敛为更清晰的形状：
   - 保留“启动 run / 取消 run / 读取 runs / 订阅事件”四类能力。
@@ -130,7 +130,7 @@ Rust-native Astra 必须把“生成任务”“判断结果”“执行状态�
 设计理由：
 
 - 现有 sidecar 通过 `sessio.stage.update` / `sessio.stage.issue.add_or_update` 承担结果判断。如果迁移后只有 planner 产出 tasks，Rust orchestrator 会缺少“结果是否足以完成 stage”的语义来源。
-- 因此 Phase 1 必须同时落地 deterministic decision engine，Phase 2 再把 Pi ACP decision engine 接入同一契约。
+- 因此 Phase 1 必须同时落地 deterministic decision engine，Phase 2 再把 Astra Pi ACP decision engine 接入同一契约。
 
 `needs_review` 收敛终态（v2 新增）：
 
@@ -143,7 +143,7 @@ Rust-native Astra 必须把“生成任务”“判断结果”“执行状态�
 `RetryStage` vs `PlanNextRound` 语义区分（v2 新增）：
 
 - 当前 deterministic 实现把两者都映射为「继续下一轮」，在 deterministic planner 下无害（下一轮全量重扫 stage）。
-- 但二者语义不同，Phase 2 Pi decision engine 接入后必须区分：
+- 但二者语义不同，Phase 2 Astra Pi ACP decision engine 接入后必须区分：
   - `RetryStage`：对**同一 stage / 同一 task** 立即重试（在 retry limit 内），不等下一轮重新规划。
   - `PlanNextRound`：丢弃本轮剩余、触发 planner 重新生成整轮 tasks。
 - orchestrator 必须为这两个 action 提供不同的控制流分支，并在持久化层记录区分（便于诊断 Pi 的重试行为）。
@@ -233,8 +233,8 @@ InternalAcpBackendSessionSpec {
   - cancelled 后 late event 必须被忽略或只记录诊断，不能重新推进 run。
   - **cancel 与阻塞 worker 的过程态（v2 新增）**：cancel 当前先 abort delegated sessions（drop waiter 会让阻塞中的 worker `recv` 返回 `Disconnected` 进而尝试 `fail_run`），再 `update_status(Cancelled)`。最终态始终是 `Cancelled`（`fail_run` 用 `update_active_status`，不覆盖已 terminal 的 run），但中间窗口 worker 可能在 run 仍 active 时抢先 emit 一个 `error` 事件，导致前端出现 error→cancelled 抖动。要求：先把 run 置为 `Cancelled`（占位 terminal），再 abort delegated sessions，使 worker 醒来时 run 已是 terminal，从而不 emit 多余 error；或让 worker 在 `Disconnected` 时先判定 run 是否正在被 cancel，再决定是否 emit。
 - timeout 必须分层（**目标态**，按 Phase 落地）：
-  - planner timeout —— 随 Phase 2 Pi planner 接入才需要（deterministic planner 同步执行，无需 timeout）。
-  - decision timeout —— 随 Phase 2 Pi decision engine 接入才需要。
+  - planner timeout —— 随 Phase 2 Astra Pi ACP planner 接入才需要（deterministic planner 同步执行，无需 timeout）。
+  - decision timeout —— 随 Phase 2 Astra Pi ACP decision engine 接入才需要。
   - delegated task timeout —— **Phase 1 现状**：单一 delegated task timeout（当前硬编码 1 小时）。应改为可配置。
   - whole-run timeout 或 round limit —— **Phase 1 现状**：由 round limit 兜底（当前 `RUST_NATIVE_ROUND_LIMIT` 硬编码常量），应改为可配置 round limit，必要时叠加 whole-run wall-clock timeout。
 - terminal 状态只允许一次写入；`completed`、`cancelled`、`errored`、`interrupted` 互斥。
@@ -255,10 +255,10 @@ InternalAcpBackendSessionSpec {
 
 ## 持久化与事件模型
 
-为 `AstraRunRecord` 或其 JSON payload 补充以下字段。**这些字段在 v1 中已列出但代码尚未落地**；本版要求把 schema 扩展显式排进 Phase 1 与 Phase 2 之间（见「阶段实施」），避免 Phase 2 Pi 接入时再被迫改表：
+为 `AstraRunRecord` 或其 JSON payload 补充以下字段。**这些字段在 v1 中已列出但代码尚未落地**；本版要求把 schema 扩展显式排进 Phase 1 与 Phase 2 之间（见「阶段实施」），避免 Phase 2 Astra Pi ACP 接入时再被迫改表：
 
-- `plannerBackend`：`deterministic` / `pi_acp` / `sidecar_legacy`
-- `decisionBackend`：`deterministic` / `pi_acp` / `sidecar_legacy`
+- `plannerBackend`：`deterministic` / `astra_pi_acp` / `sidecar_legacy`
+- `decisionBackend`：`deterministic` / `astra_pi_acp` / `sidecar_legacy`
 - `roundIndex`
 - `roundLimit`（取代硬编码 `RUST_NATIVE_ROUND_LIMIT`，支持配置）
 - `terminalReason`（覆盖：`all_stages_terminal` / `no_stages_to_orchestrate` / `pending_human_review` / `no_more_work` / `round_limit_reached` / `cancelled` / `interrupted` 等）
@@ -299,7 +299,7 @@ InternalAcpBackendSessionSpec {
 
 ### Phase 1：领域收口与 Rust Orchestrator 雏形
 
-目标：把 Astra 的业务边界从 sidecar 收回 Rust，但先不依赖 Pi，并补齐 deterministic planning + deterministic decision 的闭环。
+目标：把 Astra 的业务边界从 sidecar 收回 Rust，但先不依赖 Astra Pi ACP，并补齐 deterministic planning + deterministic decision 的闭环。
 
 > 说明：Phase 1 主体已落地（见「当前实现状态」）。本节其余条目区分为「已完成」与「v2 补强项」。
 
@@ -330,7 +330,7 @@ v2 补强项（Phase 1 退出前必须完成）：
 
 交付标准：
 
-- 新 orchestrator 可以在“不启用 Pi”的情况下完整跑完 planning -> dispatch -> decision -> mutation/complete。
+- 新 orchestrator 可以在“不启用 Astra Pi ACP”的情况下完整跑完 planning -> dispatch -> decision -> mutation/complete。
 - task dispatch、stage update、issue update、delegated session linking 与当前语义一致。
 - delegated session linking 必须在 delegated task session start / agent session id 可持久化时完成，不能等 task terminal result 才 link。
 - 旧 sidecar 路径仍可通过 feature flag 或 config 开关回退。
@@ -345,15 +345,15 @@ v2 补强项（Phase 1 退出前必须完成）：
 - 不存在「status active 但 worker 已死」无法恢复的 run。
 - 不再依赖 `astra/start` 才能推进默认 run。
 
-### Phase 2：接入 `PiAcpPlanner`
+### Phase 2：接入 `AstraPiAcpPlanner`
 
 目标：用 `pi_agent_rust` ACP 替代 sidecar 中的 TS Pi SDK planner 和结果决策能力。
 
 实施内容：
 
 - 新增内部 ACP backend 抽象，复用 ACP protocol/transport，但不创建普通 user agent session。
-- 新增 `PiAcpPlanner`，通过内部 ACP backend 创建独立 planning session。
-- 新增 `PiAcpDecisionEngine`，通过内部 ACP backend 创建独立 decision session。
+- 新增 `AstraPiAcpPlanner`，通过内部 ACP backend 创建独立 planning session。
+- 新增 `AstraPiAcpDecisionEngine`，通过内部 ACP backend 创建独立 decision session。
 - planning/decision session 使用短生命周期策略：
   - 每次 planning/decision 新建 session
   - 结果返回后立即结束/释放
@@ -381,19 +381,19 @@ v2 补强项（Phase 1 退出前必须完成）：
   - stage/issue id 校验
   - retry limit guard
   - decision 失败时 fallback 到 deterministic decision engine
-- 为 Pi planner 增加配置入口：
+- 为 Astra Pi ACP planner 增加配置入口：
   - planner command / ACP command
   - model
   - thinking level
   - timeout（落地「目标态」中的 planner timeout）
   - session dir/env injection
-- 为 Pi decision engine 增加同源配置入口（落地 decision timeout），可与 planner 共用 command/model，也可独立覆盖。
+- 为 Astra Pi ACP decision engine 增加同源配置入口（落地 decision timeout），可与 planner 共用 command/model，也可独立覆盖。
 - 增加 redacted diagnostics，区分 planner failure、decision failure、policy denial、transport failure。
 
 交付标准：
 
 - 配置 `pi_agent_rust` 后，planning 与 decision 都可通过 ACP 完成。
-- Pi 返回空结果、非 JSON、超时、取消、中断时，run 不崩溃，自动回退 deterministic planner/decision engine。
+- Astra Pi ACP 返回空结果、非 JSON、超时、取消、中断时，run 不崩溃，自动回退 deterministic planner/decision engine。
 - planner 与 delegated task runtime 在日志和状态上能明确区分。
 - internal ACP sessions 不出现在普通 chat UI 和 indexed historical sessions。
 - 安全拒绝不会被误当作模型失败静默 fallback。
@@ -401,7 +401,7 @@ v2 补强项（Phase 1 退出前必须完成）：
 
 退出标准：
 
-- 默认路径已经是 Rust orchestrator + Pi ACP planner/decision engine（当 Pi 已配置）。
+- 默认路径已经是 Rust orchestrator + Astra Pi ACP planner/decision engine（当 Astra Pi ACP 已配置）。
 - sidecar 只作为临时 fallback，不再承担主路径功能。
 
 ### Phase 3：替换前端/Tauri API 并移除 Astra 私有 RPC
@@ -474,7 +474,7 @@ v2 补强项（Phase 1 退出前必须完成）：
   - Phase 1-2 期间保留旧 sidecar fallback。
   - fallback 通过显式 config/feature flag 开关，不自动隐式切换。
 - 切换优先级：
-  1. Rust orchestrator + Pi ACP planner/decision engine（当 Pi 配置完整且 policy 允许）
+  1. Rust orchestrator + Astra Pi ACP planner/decision engine（当 Astra Pi ACP 配置完整且 policy 允许）
   2. Rust orchestrator + deterministic planner/decision engine（默认稳定 fallback）
   3. legacy sidecar fallback（仅迁移期，且必须显式开启）
 - 当 Phase 3 完成时，关闭 fallback 并开始删除 sidecar 路径。
@@ -490,21 +490,21 @@ v2 补强项（Phase 1 退出前必须完成）：
 
 - deterministic planner 生成合法空/单任务/多任务计划
 - deterministic planner 对「无 assistant 的非终态 stage」「空 stages thread」产出空计划（由 orchestrator 分类收敛）
-- Pi planner 正常返回合法 JSON 计划
-- Pi planner 返回非 JSON / 缺字段 / 非法 agent / 非法 targetStageId
-- Pi planner 超时、取消、ACP 中断
-- Pi planner fallback deterministic planner
+- Astra Pi ACP planner 正常返回合法 JSON 计划
+- Astra Pi ACP planner 返回非 JSON / 缺字段 / 非法 agent / 非法 targetStageId
+- Astra Pi ACP planner 超时、取消、ACP 中断
+- Astra Pi ACP planner fallback deterministic planner
 
 ### Decision 层
 
 - deterministic decision 对 completed/failed/errored/cancelled result 生成保守合法 decision
 - deterministic decision 对「completed 无明确信号」产出 `needs_review`，且 `needs_review` 收敛规则（方案 A/B）生效，不撞 round limit
-- Pi decision 正常返回合法 JSON decision
-- Pi decision 返回非 JSON / 非法 action / 非法 stage id / 非法 issue payload
-- Pi decision 请求 retry 但 retry limit 已达时被 Rust 拒绝
-- Pi decision 请求 mutation inactive run 时被 Rust 拒绝
-- Pi decision 的 `retry_stage` 走「同一 task 立即重试」、`plan_next_round` 走「重新规划」，二者控制流可区分
-- Pi decision 超时、取消、ACP 中断时 fallback deterministic decision
+- Astra Pi ACP decision 正常返回合法 JSON decision
+- Astra Pi ACP decision 返回非 JSON / 非法 action / 非法 stage id / 非法 issue payload
+- Astra Pi ACP decision 请求 retry 但 retry limit 已达时被 Rust 拒绝
+- Astra Pi ACP decision 请求 mutation inactive run 时被 Rust 拒绝
+- Astra Pi ACP decision 的 `retry_stage` 走「同一 task 立即重试」、`plan_next_round` 走「重新规划」，二者控制流可区分
+- Astra Pi ACP decision 超时、取消、ACP 中断时 fallback deterministic decision
 
 ### Orchestrator 层
 
@@ -553,7 +553,7 @@ v2 补强项（Phase 1 退出前必须完成）：
 ## 里程碑与验收
 
 - M1：Rust deterministic orchestrator 上线（含 v2 补强项：worker 终态保证、僵尸检测、边界分类收敛、needs_review 收敛、持久化 schema 扩展），旧 sidecar 可回退
-- M2：`PiAcpPlanner` + `PiAcpDecisionEngine` 上线，并在 Pi 配置完整时作为默认智能 backend
+- M2：`AstraPiAcpPlanner` + `AstraPiAcpDecisionEngine` 上线，并在 Astra Pi ACP 配置完整时作为默认智能 backend
 - M3：前端切到新 Astra API / event model
 - M4：sidecar、私有 RPC、打包残留全部删除
 
@@ -572,7 +572,7 @@ v2 补强项（Phase 1 退出前必须完成）：
 - 允许重构前端/Tauri API，不要求保留旧命令和事件名。
 - `pi_agent_rust` 仅作为 planner/decision backend，不承担 Astra orchestrator 语义。
 - planner/decision session 采用短生命周期策略，不做长期复用。
-- deterministic planner/decision engine 始终保留，作为 Pi backend 失败时的稳定 fallback。
+- deterministic planner/decision engine 始终保留，作为 Astra Pi ACP backend 失败时的稳定 fallback。
 - Astra run 的持久化与 stage/session linking 继续保留在 Rust store 层，不迁移到 agent 侧。
 - `pi_agent_rust` 不加入普通 user agent enum，不进入 historical indexing。
 - 自动恢复 interrupted run 不属于本迁移范围；本迁移只保证中断可见、可诊断、无 orphan。

@@ -35,17 +35,10 @@ pub struct AgentPreferencesPatch<'a> {
 /// - Some(Some(v)): set to v
 #[derive(Debug, Default)]
 pub struct AstraConfigPatch<'a> {
-    pub planner_agent: Option<Option<&'a str>>,
-    pub planner_model: Option<Option<&'a str>>,
-    pub planner_effort: Option<Option<&'a str>>,
-    pub planner_permission_mode: Option<Option<&'a str>>,
-    pub decision_agent: Option<Option<&'a str>>,
-    pub decision_model: Option<Option<&'a str>>,
-    pub decision_effort: Option<Option<&'a str>>,
-    pub decision_permission_mode: Option<Option<&'a str>>,
-    pub default_model: Option<Option<&'a str>>,
-    pub default_effort: Option<Option<&'a str>>,
-    pub default_permission_mode: Option<Option<&'a str>>,
+    pub agent: Option<Option<&'a str>>,
+    pub model: Option<Option<&'a str>>,
+    pub effort: Option<Option<&'a str>>,
+    pub permission_mode: Option<Option<&'a str>>,
 }
 
 /// The defining fields for a new assistant.
