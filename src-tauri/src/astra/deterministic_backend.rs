@@ -26,12 +26,8 @@ impl PlannerBackend for DeterministicPlannerBackend {
         })
     }
 
-    fn backend_type(&self) -> &'static str {
-        "deterministic"
-    }
-
     fn supports_fallback(&self) -> bool {
-        false // Deterministic is the ultimate fallback
+        false
     }
 }
 
@@ -55,11 +51,7 @@ impl DecisionBackend for DeterministicDecisionBackend {
         })
     }
 
-    fn backend_type(&self) -> &'static str {
-        "deterministic"
-    }
-
     fn supports_fallback(&self) -> bool {
-        false // Deterministic is the ultimate fallback
+        false
     }
 }

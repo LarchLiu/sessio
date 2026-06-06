@@ -92,7 +92,7 @@ struct AstraServiceInner {
 }
 
 #[derive(Debug, Clone)]
-struct AstraBackendConfig {
+pub(super) struct AstraBackendConfig {
     pub planner_agent: Option<Agent>,
     pub decision_agent: Option<Agent>,
     pub provider_config: AstraPiProviderConfig,

@@ -83,18 +83,6 @@ impl PiAcpFailure {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PiAcpPlanResponse {
-    pub plan: AstraPlan,
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct PiAcpDecisionResponse {
-    pub decision: AstraDecision,
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone)]
 struct PiAcpTextResponse {
     text: String,
     session_id: String,
@@ -149,14 +137,6 @@ impl PlannerBackend for PiAcpPlanner {
             backend_type: "pi_acp".to_string(),
         })
     }
-
-    fn backend_type(&self) -> &'static str {
-        "pi_acp"
-    }
-
-    fn supports_fallback(&self) -> bool {
-        true
-    }
 }
 
 impl DecisionBackend for PiAcpDecisionEngine {
@@ -197,14 +177,6 @@ impl DecisionBackend for PiAcpDecisionEngine {
             session_id: response.session_id,
             backend_type: "pi_acp".to_string(),
         })
-    }
-
-    fn backend_type(&self) -> &'static str {
-        "pi_acp"
-    }
-
-    fn supports_fallback(&self) -> bool {
-        true
     }
 }
 

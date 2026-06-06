@@ -81,14 +81,6 @@ impl PlannerBackend for RuntimeAgentPlanner {
             Err(failure) => Err(failure),
         }
     }
-
-    fn backend_type(&self) -> &'static str {
-        "runtime_agent"
-    }
-
-    fn supports_fallback(&self) -> bool {
-        true
-    }
 }
 
 pub struct RuntimeAgentDecisionEngine {
@@ -131,14 +123,6 @@ impl DecisionBackend for RuntimeAgentDecisionEngine {
             }
             Err(failure) => Err(failure),
         }
-    }
-
-    fn backend_type(&self) -> &'static str {
-        "runtime_agent"
-    }
-
-    fn supports_fallback(&self) -> bool {
-        true
     }
 }
 

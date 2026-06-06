@@ -27,19 +27,6 @@ enum DecisionOutcome {
     Terminal,
 }
 
-fn pi_failure_json(kind: &'static str, failure: BackendFailure) -> serde_json::Value {
-    let mut diagnostic = json!({
-        "kind": kind,
-        "code": failure.code,
-        "message": failure.message,
-        "backendType": failure.backend_type,
-    });
-    if let Some(session_id) = failure.session_id {
-        diagnostic["sessionId"] = json!(session_id);
-    }
-    diagnostic
-}
-
 fn internal_failure_diagnostic(
     kind: &'static str,
     backend_type: &str,
@@ -304,6 +291,9 @@ impl AstraService {
                     );
                     return Err(failure);
                 }
+                if !planner_backend.supports_fallback() {
+                    return Err(failure);
+                }
 
                 log::warn!(
                     "[astra:planner:fallback] run={} backend={} code={} message={}",
@@ -397,6 +387,9 @@ impl AstraService {
                         failure.backend_type,
                         failure.code
                     );
+                    return Err(failure);
+                }
+                if !decision_backend.supports_fallback() {
                     return Err(failure);
                 }
 

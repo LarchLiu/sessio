@@ -51,10 +51,7 @@ pub trait PlannerBackend: Send + Sync {
         config: &Value,
     ) -> Result<BackendResponse<AstraPlan>, BackendFailure>;
 
-    /// Returns the backend type identifier (e.g., "pi_acp", "runtime_agent", "deterministic")
-    fn backend_type(&self) -> &'static str;
-
-    /// Returns true if this backend can fail and should have a fallback
+    /// Returns true if this backend can fail over to the deterministic planner.
     fn supports_fallback(&self) -> bool {
         true
     }
@@ -72,10 +69,7 @@ pub trait DecisionBackend: Send + Sync {
         config: &Value,
     ) -> Result<BackendResponse<AstraDecision>, BackendFailure>;
 
-    /// Returns the backend type identifier
-    fn backend_type(&self) -> &'static str;
-
-    /// Returns true if this backend can fail and should have a fallback
+    /// Returns true if this backend can fail over to the deterministic decision engine.
     fn supports_fallback(&self) -> bool {
         true
     }
