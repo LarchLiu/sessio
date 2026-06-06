@@ -537,6 +537,11 @@ impl AstraService {
     }
 
     fn complete_run(&self, run_id: &str, reason: &str) -> Result<DecisionOutcome> {
+        let run = self.load_run(run_id)?;
+        if run.status.active() {
+            let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+            self.auto_complete_empty_done_stages(&run, &thread)?;
+        }
         let (completed, changed) = self.mark_run_completed(run_id, reason)?;
         if changed {
             self.emit(&completed, "completed", json!({ "reason": reason }));
@@ -818,6 +823,17 @@ mod tests {
                 panic!("unexpected completed outcome: {reason}")
             }
         }
+    }
+
+    #[test]
+    fn empty_done_stage_auto_completes_after_other_stages_terminal() {
+        let completed = test_stage("writing", StageStatus::Completed);
+        let mut done = test_stage("done-stage", StageStatus::NotStarted);
+        done.kind = Some(StageType::Done);
+        done.allow_empty_assistants = true;
+        let thread = test_thread(vec![completed, done.clone()]);
+
+        assert!(auto_completable_empty_done_stage(&thread, &done));
     }
 
     #[test]
