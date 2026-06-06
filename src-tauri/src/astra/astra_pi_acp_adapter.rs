@@ -15,10 +15,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    pick_stage_agent, short_hash, stage_label, summarize_task_output, AstraDecision, AstraPlan,
-    AstraRun, AstraTaskProposal, AstraTaskResult, AstraTaskRisk,
+    pick_stage_agent, rolling_stage_task_batch, short_hash, stage_label, summarize_task_output,
+    task_blocked_by_thread_exception, AstraDecision, AstraOrchestration, AstraRun,
+    AstraTaskCompletion, AstraTaskDecision, AstraTaskProposal, AstraTaskResult, AstraTaskRisk,
 };
-use crate::astra::backend::{BackendFailure, BackendResponse, DecisionBackend, PlannerBackend};
+use crate::astra::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
+use crate::astra::prompt::build_astra_orchestration_prompt;
 use crate::models::{Agent, IssueSeverity, StageStatus, ThreadInfo};
 
 #[derive(Debug, Clone)]
@@ -26,8 +28,7 @@ pub(super) struct AstraPiAcpConfig {
     pub command: String,
     pub session_dir: String,
     pub agent_dir: String,
-    pub planner: AstraPiAcpPurposeConfig,
-    pub decision: AstraPiAcpPurposeConfig,
+    pub orchestrator: AstraPiAcpPurposeConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -69,15 +70,13 @@ pub(super) struct AstraPiAcpPurposeConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AstraPiAcpPurpose {
-    Planning,
-    Decision,
+    Orchestration,
 }
 
 impl AstraPiAcpPurpose {
     pub(super) fn as_str(self) -> &'static str {
         match self {
-            Self::Planning => "planning",
-            Self::Decision => "decision",
+            Self::Orchestration => "orchestration",
         }
     }
 }
@@ -111,31 +110,28 @@ struct AstraPiAcpTextResponse {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct AstraPiAcpPlanner {
+pub(super) struct AstraPiAcpOrchestrator {
     config: AstraPiAcpConfig,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct AstraPiAcpDecisionEngine {
-    config: AstraPiAcpConfig,
-}
-
-impl PlannerBackend for AstraPiAcpPlanner {
-    fn plan(
+impl OrchestratorBackend for AstraPiAcpOrchestrator {
+    fn orchestrate(
         &self,
         run: &AstraRun,
         thread: &ThreadInfo,
         user_prompt: Option<&str>,
         round_index: u32,
+        completions: &[AstraTaskCompletion],
         config: &Value,
-    ) -> Result<BackendResponse<AstraPlan>, BackendFailure> {
+    ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
         let provider_config: AstraPiAcpProviderConfig =
             serde_json::from_value(config.clone()).unwrap_or_default();
 
-        let prompt = planning_prompt(run, thread, user_prompt, round_index);
+        let prompt =
+            build_astra_orchestration_prompt(run, thread, user_prompt, round_index, completions);
         let response = run_internal_astra_pi_acp(
             &self.config,
-            AstraPiAcpPurpose::Planning,
+            AstraPiAcpPurpose::Orchestration,
             &run.run_id,
             &run.project_path,
             &prompt,
@@ -146,67 +142,27 @@ impl PlannerBackend for AstraPiAcpPlanner {
                 .with_session_id(failure.session_id)
         })?;
 
-        let plan = parse_astra_pi_acp_plan_response(&response.text, run, thread, round_index)
-            .map_err(|failure| {
-                BackendFailure::new("astra_pi_acp", failure.code, failure.message)
-                    .with_session_id(Some(response.session_id.clone()))
-            })?;
-
-        Ok(BackendResponse {
-            data: plan,
-            session_id: response.session_id,
-            backend_type: "astra_pi_acp".to_string(),
-        })
-    }
-}
-
-impl DecisionBackend for AstraPiAcpDecisionEngine {
-    fn decide(
-        &self,
-        run: &AstraRun,
-        thread: &ThreadInfo,
-        result: &AstraTaskResult,
-        task: &AstraTaskProposal,
-        config: &Value,
-    ) -> Result<BackendResponse<AstraDecision>, BackendFailure> {
-        let provider_config: AstraPiAcpProviderConfig =
-            serde_json::from_value(config.clone()).unwrap_or_default();
-
-        let prompt = decision_prompt(thread, result, task);
-        let response = run_internal_astra_pi_acp(
-            &self.config,
-            AstraPiAcpPurpose::Decision,
-            &run.run_id,
-            &run.project_path,
-            &prompt,
-            &provider_config,
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            &response.text,
+            run,
+            thread,
+            round_index,
+            completions,
         )
         .map_err(|failure| {
-            BackendFailure::new("astra_pi_acp", failure.code, failure.message)
-                .with_session_id(failure.session_id)
-        })?;
-
-        let decision = parse_astra_pi_acp_decision_response(&response.text, thread, result, task)
-            .map_err(|failure| {
             BackendFailure::new("astra_pi_acp", failure.code, failure.message)
                 .with_session_id(Some(response.session_id.clone()))
         })?;
 
         Ok(BackendResponse {
-            data: decision,
+            data: orchestration,
             session_id: response.session_id,
             backend_type: "astra_pi_acp".to_string(),
         })
     }
 }
 
-impl AstraPiAcpPlanner {
-    pub(super) fn new(config: AstraPiAcpConfig) -> Self {
-        Self { config }
-    }
-}
-
-impl AstraPiAcpDecisionEngine {
+impl AstraPiAcpOrchestrator {
     pub(super) fn new(config: AstraPiAcpConfig) -> Self {
         Self { config }
     }
@@ -629,8 +585,7 @@ fn purpose_config(
     purpose: AstraPiAcpPurpose,
 ) -> &AstraPiAcpPurposeConfig {
     match purpose {
-        AstraPiAcpPurpose::Planning => &config.planner,
-        AstraPiAcpPurpose::Decision => &config.decision,
+        AstraPiAcpPurpose::Orchestration => &config.orchestrator,
     }
 }
 
@@ -653,75 +608,68 @@ fn content_chunk_text(chunk: &ContentChunk) -> Result<String> {
     }
 }
 
-fn planning_prompt(
-    run: &AstraRun,
-    thread: &ThreadInfo,
-    user_prompt: Option<&str>,
-    round_index: u32,
-) -> String {
-    let stages = thread
-        .stages
-        .iter()
-        .map(|stage| {
-            let agent = pick_stage_agent(stage).map(|agent| agent.as_str().to_string());
-            json!({
-                "id": stage.id,
-                "title": stage_label(stage),
-                "order": stage.order,
-                "status": stage.status,
-                "assignableAgent": agent,
-                "summary": stage.summary,
-                "issues": stage.issues,
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "instruction": "Return only a JSON object with shape {\"summary\": string, \"tasks\": array}. Each task must include title, targetStageId, targetAgent, prompt, expectedOutput, risk.",
-        "thread": {
-            "id": thread.id,
-            "goal": thread.goal,
-            "stages": stages,
-        },
-        "run": {
-            "id": run.run_id,
-            "roundIndex": round_index,
-            "retryLimit": run.retry_limit,
-            "completedTaskIds": run.completed_task_ids,
-            "stageAttemptCounts": run.stage_attempt_counts,
-        },
-        "userPrompt": user_prompt.unwrap_or(""),
-    })
-    .to_string()
-}
-
-fn decision_prompt(
-    thread: &ThreadInfo,
-    result: &AstraTaskResult,
-    task: &AstraTaskProposal,
-) -> String {
-    json!({
-        "instruction": "Return only a JSON object with shape {\"action\": string, \"stage\": object?, \"issue\": object?, \"retry\": object?, \"summary\": string?, \"reason\": string}. action must be one of update_stage, add_or_update_issue, retry_stage, plan_next_round, complete_run, error_run.",
-        "thread": thread,
-        "task": task,
-        "result": {
-            "taskId": result.task_id,
-            "threadStageId": result.thread_stage_id,
-            "status": result.status,
-            "output": result.output,
-            "error": result.error,
-            "attemptCount": result.attempt_count,
-            "retryLimitReached": result.retry_limit_reached,
-        },
-    })
-    .to_string()
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawAstraPiAcpOrchestration {
+    summary: Option<String>,
+    #[serde(default)]
+    decisions: Vec<RawAstraPiAcpTaskDecision>,
+    #[serde(default)]
+    tasks: Vec<RawAstraPiAcpTask>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawAstraPiAcpPlan {
-    summary: Option<String>,
+struct RawAstraPiAcpTaskDecision {
+    task_id: String,
     #[serde(default)]
-    tasks: Vec<RawAstraPiAcpTask>,
+    decision: Option<RawAstraPiAcpDecision>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    stage: Option<Value>,
+    #[serde(default)]
+    issue: Option<Value>,
+    #[serde(default)]
+    retry: Option<Value>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default, alias = "threadStageId")]
+    stage_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+impl RawAstraPiAcpTaskDecision {
+    fn into_decision(self) -> Result<RawAstraPiAcpDecision, AstraPiAcpFailure> {
+        if let Some(decision) = self.decision {
+            return Ok(decision);
+        }
+        let action = self.action.ok_or_else(|| {
+            AstraPiAcpFailure::new(
+                "validation_failed",
+                format!(
+                    "decision missing action for completed task: {}",
+                    self.task_id
+                ),
+            )
+        })?;
+        Ok(RawAstraPiAcpDecision {
+            action,
+            stage: self.stage,
+            issue: self.issue,
+            retry: self.retry,
+            summary: self.summary,
+            stage_id: self.stage_id,
+            status: self.status,
+            outcome: self.outcome,
+            reason: self.reason,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -737,19 +685,65 @@ struct RawAstraPiAcpTask {
     risk: Option<String>,
 }
 
-pub(super) fn parse_astra_pi_acp_plan_response(
+pub(super) fn parse_astra_pi_acp_orchestration_response(
     response: &str,
     run: &AstraRun,
     thread: &ThreadInfo,
     round_index: u32,
-) -> Result<AstraPlan, AstraPiAcpFailure> {
+    completions: &[AstraTaskCompletion],
+) -> Result<AstraOrchestration, AstraPiAcpFailure> {
     let value = parse_json_object(response)?;
-    let raw: RawAstraPiAcpPlan = serde_json::from_value(value)
+    let raw: RawAstraPiAcpOrchestration = serde_json::from_value(value)
         .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
+    let RawAstraPiAcpOrchestration {
+        summary,
+        decisions: raw_decisions,
+        tasks: raw_tasks,
+    } = raw;
+
+    let mut decisions = Vec::new();
+    for raw_decision in raw_decisions {
+        let task_id = raw_decision.task_id.clone();
+        let completion = completions
+            .iter()
+            .find(|completion| completion.task.id == task_id)
+            .ok_or_else(|| {
+                AstraPiAcpFailure::new(
+                    "validation_failed",
+                    format!("decision references unknown completed task: {}", task_id),
+                )
+            })?;
+        let decision = sanitize_astra_pi_acp_decision(
+            raw_decision.into_decision()?,
+            thread,
+            &completion.result,
+            &completion.task,
+        )?;
+        decisions.push(AstraTaskDecision {
+            task_id: completion.task.id.clone(),
+            decision,
+        });
+    }
+    for completion in completions {
+        if !decisions
+            .iter()
+            .any(|decision| decision.task_id == completion.task.id)
+        {
+            return Err(AstraPiAcpFailure::new(
+                "validation_failed",
+                format!(
+                    "missing decision for completed task: {}",
+                    completion.task.id
+                ),
+            ));
+        }
+    }
+
+    let planning_thread = thread_after_decisions(thread, &decisions);
     let mut tasks = Vec::new();
     let mut invalid_messages = Vec::new();
-    for (idx, task) in raw.tasks.into_iter().enumerate() {
-        match sanitize_astra_pi_acp_task(task, run, thread, round_index, idx) {
+    for (idx, task) in raw_tasks.into_iter().enumerate() {
+        match sanitize_astra_pi_acp_task(task, run, &planning_thread, round_index, idx) {
             Ok(task) => tasks.push(task),
             Err(error) => invalid_messages.push(error.message),
         }
@@ -758,19 +752,81 @@ pub(super) fn parse_astra_pi_acp_plan_response(
         return Err(AstraPiAcpFailure::new(
             "validation_failed",
             format!(
-                "invalid Astra Pi ACP planner task(s): {}",
+                "invalid Astra Pi ACP orchestrator task(s): {}",
                 invalid_messages.join("; ")
             ),
         ));
     }
-    tasks.truncate(20);
-    Ok(AstraPlan {
-        summary: raw
-            .summary
+    tasks = rolling_stage_task_batch(tasks);
+
+    Ok(AstraOrchestration {
+        summary: summary
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| format!("Astra Pi ACP planned {} task(s).", tasks.len())),
+            .unwrap_or_else(|| {
+                format!(
+                "Astra Pi Orchestrator handled {} completion(s) and selected {} rolling task(s).",
+                completions.len(),
+                tasks.len()
+            )
+            }),
+        decisions,
         tasks,
     })
+}
+
+fn thread_after_decisions(thread: &ThreadInfo, decisions: &[AstraTaskDecision]) -> ThreadInfo {
+    let mut projected = thread.clone();
+    for task_decision in decisions {
+        apply_decision_to_projected_thread(&mut projected, &task_decision.decision);
+    }
+    projected
+}
+
+fn apply_decision_to_projected_thread(thread: &mut ThreadInfo, decision: &AstraDecision) {
+    match decision {
+        AstraDecision::UpdateStage { args } => {
+            let Some(stage_id) = args
+                .get("threadStageId")
+                .or_else(|| args.get("stageId"))
+                .or_else(|| args.get("id"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let Some(stage) = thread.stages.iter_mut().find(|stage| stage.id == stage_id) else {
+                return;
+            };
+            if let Some(status) = args
+                .get("status")
+                .and_then(Value::as_str)
+                .and_then(StageStatus::from_db_str)
+            {
+                stage.status = status;
+            }
+            if let Some(summary) = args
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                stage.summary = Some(summary.to_string());
+            }
+            if let Some(outcome) = args
+                .get("outcome")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                stage.outcome = Some(outcome.to_string());
+            }
+        }
+        AstraDecision::Composite { decisions } => {
+            for decision in decisions {
+                apply_decision_to_projected_thread(thread, decision);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn sanitize_astra_pi_acp_task(
@@ -797,14 +853,14 @@ fn sanitize_astra_pi_acp_task(
         })
         .transpose()?;
     let (target_stage_id, target_agent, fallback_title, id_scope) = if let Some(stage) = stage {
-        if matches!(
-            stage.status,
-            StageStatus::Completed | StageStatus::Skipped | StageStatus::NeedsReview
-        ) {
+        if matches!(stage.status, StageStatus::Completed | StageStatus::Skipped) {
             return Err(AstraPiAcpFailure::new(
                 "validation_failed",
                 "task targets terminal stage",
             ));
+        }
+        if let Some(reason) = task_blocked_by_thread_exception(run, thread, Some(&stage.id)) {
+            return Err(AstraPiAcpFailure::new("validation_failed", reason));
         }
         let assignable_agent = pick_stage_agent(stage).ok_or_else(|| {
             AstraPiAcpFailure::new("validation_failed", "stage has no assignable agent")
@@ -823,10 +879,21 @@ fn sanitize_astra_pi_acp_task(
         (
             Some(stage.id.clone()),
             target_agent,
-            format!("Advance {}", stage_label(stage)),
+            format!(
+                "{} {}",
+                if super::stage_needs_agent_review(stage) {
+                    "Review"
+                } else {
+                    "Advance"
+                },
+                stage_label(stage)
+            ),
             stage.id.clone(),
         )
     } else {
+        if let Some(reason) = task_blocked_by_thread_exception(run, thread, None) {
+            return Err(AstraPiAcpFailure::new("validation_failed", reason));
+        }
         let target_agent = raw
             .target_agent
             .as_deref()
@@ -889,26 +956,113 @@ struct RawAstraPiAcpDecision {
     retry: Option<Value>,
     #[serde(default)]
     summary: Option<String>,
+    #[serde(default, alias = "threadStageId")]
+    stage_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
     reason: Option<String>,
 }
 
-pub(super) fn parse_astra_pi_acp_decision_response(
-    response: &str,
+fn stage_payload_from_decision(
+    raw: &RawAstraPiAcpDecision,
+) -> Result<Option<Value>, AstraPiAcpFailure> {
+    let has_flat_stage_payload = raw
+        .stage_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || raw
+            .status
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || raw
+            .summary
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || raw
+            .outcome
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+    if !has_flat_stage_payload {
+        return Ok(raw.stage.clone());
+    }
+
+    let mut value = raw.stage.clone().unwrap_or_else(|| json!({}));
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "stage must be an object"))?;
+    if !object.contains_key("threadStageId")
+        && !object.contains_key("stageId")
+        && !object.contains_key("id")
+    {
+        if let Some(stage_id) = raw
+            .stage_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            object.insert(
+                "threadStageId".to_string(),
+                Value::String(stage_id.to_string()),
+            );
+        }
+    }
+    if !object.contains_key("status") {
+        if let Some(status) = raw
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            object.insert("status".to_string(), Value::String(status.to_string()));
+        }
+    }
+    if !object.contains_key("summary") {
+        if let Some(summary) = raw
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            object.insert("summary".to_string(), Value::String(summary.to_string()));
+        }
+    }
+    if !object.contains_key("outcome") {
+        if let Some(outcome) = raw
+            .outcome
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            object.insert("outcome".to_string(), Value::String(outcome.to_string()));
+        }
+    }
+    Ok(Some(value))
+}
+
+fn sanitize_astra_pi_acp_decision(
+    raw: RawAstraPiAcpDecision,
     thread: &ThreadInfo,
     result: &AstraTaskResult,
     task: &AstraTaskProposal,
 ) -> Result<AstraDecision, AstraPiAcpFailure> {
-    let value = parse_json_object(response)?;
-    let raw: RawAstraPiAcpDecision = serde_json::from_value(value)
-        .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
     let reason = raw
         .reason
-        .or(raw.summary)
+        .as_deref()
+        .or(raw.summary.as_deref())
         .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
         .unwrap_or_else(|| summarize_task_output(&result.output));
     match raw.action.as_str() {
         "update_stage" => Ok(AstraDecision::UpdateStage {
-            args: stage_decision_args(raw.stage, thread, result, task, &reason)?,
+            args: stage_decision_args(
+                stage_payload_from_decision(&raw)?,
+                thread,
+                result,
+                task,
+                &reason,
+            )?,
         }),
         "add_or_update_issue" => Ok(AstraDecision::AddOrUpdateIssue {
             args: issue_decision_args(raw.issue, thread, result, task, &reason)?,
@@ -954,6 +1108,7 @@ fn stage_decision_args(
         .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "stage must be an object"))?;
     let stage_id = object
         .get("threadStageId")
+        .or_else(|| object.get("stageId"))
         .or_else(|| object.get("id"))
         .and_then(Value::as_str)
         .map(ToString::to_string)
@@ -1152,8 +1307,7 @@ mod tests {
     }
 
     fn thread() -> ThreadInfo {
-        let mut stage = super::super::tests::test_stage("stage-1", StageStatus::InProgress);
-        stage.assistants.push(crate::models::StageAssistantInfo {
+        let assistant = crate::models::StageAssistantInfo {
             assistant_id: "assistant-1".to_string(),
             name: "Codex".to_string(),
             color: None,
@@ -1166,35 +1320,41 @@ mod tests {
             },
             system_prompt: None,
             order: 0,
-        });
-        super::super::tests::test_thread(vec![stage])
+        };
+        let mut stage = super::super::tests::test_stage("stage-1", StageStatus::InProgress);
+        stage.assistants.push(assistant.clone());
+        let mut next_stage = super::super::tests::test_stage("stage-2", StageStatus::InProgress);
+        next_stage.assistants.push(assistant);
+        super::super::tests::test_thread(vec![stage, next_stage])
     }
 
     #[test]
-    fn parses_fenced_pi_plan_and_sanitizes_task() {
-        let plan = parse_astra_pi_acp_plan_response(
+    fn parses_fenced_orchestration_and_sanitizes_task() {
+        let orchestration = parse_astra_pi_acp_orchestration_response(
             r#"```json
             {"summary":"ok","tasks":[{"id":"bad id!","title":"Do it","targetStageId":"stage-1","targetAgent":"codex","prompt":"Work","expectedOutput":"Notes","risk":"medium"}]}
             ```"#,
             &run(),
             &thread(),
             0,
+            &[],
         )
         .unwrap();
 
-        assert_eq!(plan.summary, "ok");
-        assert_eq!(plan.tasks.len(), 1);
-        assert!(plan.tasks[0].id.starts_with("task-"));
-        assert_eq!(plan.tasks[0].risk, AstraTaskRisk::Medium);
+        assert_eq!(orchestration.summary, "ok");
+        assert_eq!(orchestration.tasks.len(), 1);
+        assert!(orchestration.tasks[0].id.starts_with("task-"));
+        assert_eq!(orchestration.tasks[0].risk, AstraTaskRisk::Medium);
     }
 
     #[test]
-    fn invalid_pi_plan_task_fails_whole_plan() {
-        let error = parse_astra_pi_acp_plan_response(
+    fn invalid_orchestration_task_fails_whole_response() {
+        let error = parse_astra_pi_acp_orchestration_response(
             r#"{"summary":"bad","tasks":[{"targetStageId":"missing","targetAgent":"codex","prompt":"Work"}]}"#,
             &run(),
             &thread(),
             0,
+            &[],
         )
         .unwrap_err();
 
@@ -1203,23 +1363,100 @@ mod tests {
     }
 
     #[test]
-    fn parses_thread_level_pi_plan_task() {
-        let plan = parse_astra_pi_acp_plan_response(
+    fn rejects_ordinary_task_when_any_stage_needs_review() {
+        let mut thread = thread();
+        thread.stages[0].status = StageStatus::NeedsReview;
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","tasks":[{"targetStageId":"stage-2","targetAgent":"codex","prompt":"Work"}]}"#,
+            &run(),
+            &thread,
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("needing review"));
+    }
+
+    #[test]
+    fn accepts_review_task_for_agent_stage_needing_review() {
+        let mut thread = thread();
+        thread.stages[0].status = StageStatus::NeedsReview;
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"review","tasks":[{"targetStageId":"stage-1","targetAgent":"codex","prompt":"Review the stage result"}]}"#,
+            &run(),
+            &thread,
+            0,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(orchestration.tasks.len(), 1);
+        assert_eq!(
+            orchestration.tasks[0].target_stage_id.as_deref(),
+            Some("stage-1")
+        );
+    }
+
+    #[test]
+    fn rejects_agent_task_for_human_stage_needing_review() {
+        let mut thread = thread();
+        thread.stages[0].status = StageStatus::NeedsReview;
+        thread.stages[0].kind = Some(crate::models::StageType::Human);
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","tasks":[{"targetStageId":"stage-1","targetAgent":"codex","prompt":"Review"}]}"#,
+            &run(),
+            &thread,
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("human review"));
+    }
+
+    #[test]
+    fn rejects_ordinary_task_when_blocked_stage_exists() {
+        let mut thread = thread();
+        thread.stages[0].status = StageStatus::Blocked;
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","tasks":[{"targetStageId":"stage-2","targetAgent":"codex","prompt":"Work"}]}"#,
+            &run(),
+            &thread,
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("blocked stage"));
+    }
+
+    #[test]
+    fn parses_thread_level_orchestration_task() {
+        let orchestration = parse_astra_pi_acp_orchestration_response(
             r#"{"summary":"thread","tasks":[{"title":"Thread task","targetAgent":"codex","prompt":"Work thread"}]}"#,
             &run(),
             &thread(),
             0,
+            &[],
         )
         .unwrap();
 
-        assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].target_stage_id, None);
-        assert_eq!(plan.tasks[0].target_agent, Agent::Codex);
+        assert_eq!(orchestration.tasks.len(), 1);
+        assert_eq!(orchestration.tasks[0].target_stage_id, None);
+        assert_eq!(orchestration.tasks[0].target_agent, Agent::Codex);
     }
 
     #[test]
-    fn pi_plan_truncates_to_twenty_tasks() {
-        let tasks = (0..25)
+    fn orchestration_keeps_first_stage_parallel_batch_only() {
+        let mut tasks = (0..5)
             .map(|idx| {
                 json!({
                     "id": format!("task-{idx}"),
@@ -1230,15 +1467,44 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
+        tasks.push(json!({
+            "id": "task-next-stage",
+            "title": "Next stage task",
+            "targetStageId": "stage-2",
+            "targetAgent": "codex",
+            "prompt": "Work later"
+        }));
         let response = json!({ "summary": "many", "tasks": tasks }).to_string();
-        let plan = parse_astra_pi_acp_plan_response(&response, &run(), &thread(), 0).unwrap();
+        let orchestration =
+            parse_astra_pi_acp_orchestration_response(&response, &run(), &thread(), 0, &[])
+                .unwrap();
 
-        assert_eq!(plan.tasks.len(), 20);
+        assert_eq!(orchestration.tasks.len(), 4);
+        assert_eq!(orchestration.tasks[0].title, "Task 0");
+        assert!(orchestration
+            .tasks
+            .iter()
+            .all(|task| task.target_stage_id.as_deref() == Some("stage-1")));
+        assert!(!orchestration
+            .tasks
+            .iter()
+            .any(|task| task.title == "Task 4"));
+        assert!(!orchestration
+            .tasks
+            .iter()
+            .any(|task| task.title == "Next stage task"));
     }
 
     #[test]
-    fn rejects_plan_without_json_object() {
-        assert!(parse_astra_pi_acp_plan_response("no json here", &run(), &thread(), 0).is_err());
+    fn rejects_orchestration_without_json_object() {
+        assert!(parse_astra_pi_acp_orchestration_response(
+            "no json here",
+            &run(),
+            &thread(),
+            0,
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -1270,8 +1536,9 @@ mod tests {
             command: "astra-pi --acp".to_string(),
             session_dir: session_dir.to_string_lossy().to_string(),
             agent_dir: agent_dir.to_string_lossy().to_string(),
-            planner: AstraPiAcpPurposeConfig { timeout_ms: 30_000 },
-            decision: AstraPiAcpPurposeConfig { timeout_ms: 30_000 },
+            orchestrator: AstraPiAcpPurposeConfig {
+                timeout_ms: super::super::ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+            },
         };
         let provider = AstraPiAcpProviderConfig {
             provider: Some("custom-endpoint".to_string()),
@@ -1317,7 +1584,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_update_stage_decision() {
+    fn maps_nested_update_stage_decision() {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             title: "Task".to_string(),
@@ -1342,20 +1609,255 @@ mod tests {
             completed_at: 1,
         };
 
-        let decision = parse_astra_pi_acp_decision_response(
-            r#"{"action":"update_stage","stage":{"status":"completed"},"reason":"done"}"#,
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"done","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stage":{"status":"completed"},"reason":"done"}}],"tasks":[{"title":"Review","targetStageId":"stage-2","targetAgent":"codex","prompt":"Review work"}]}"#,
+            &run(),
             &thread(),
-            &result,
-            &task,
+            1,
+            &[AstraTaskCompletion { task, result }],
         )
         .unwrap();
 
-        match decision {
+        assert_eq!(orchestration.decisions.len(), 1);
+        assert_eq!(orchestration.tasks.len(), 1);
+        assert_eq!(
+            orchestration.tasks[0].target_stage_id.as_deref(),
+            Some("stage-2")
+        );
+        match &orchestration.decisions[0].decision {
             AstraDecision::UpdateStage { args } => {
                 assert_eq!(args["threadStageId"], "stage-1");
                 assert_eq!(args["status"], "completed");
             }
             other => panic!("unexpected decision: {other:?}"),
         }
+    }
+
+    #[test]
+    fn maps_legacy_flat_update_stage_decision() {
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Task".to_string(),
+            target_stage_id: Some("stage-1".to_string()),
+            target_agent: Agent::Codex,
+            prompt: "Work".to_string(),
+            expected_output: "Notes".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
+        let result = AstraTaskResult {
+            task_id: "task-1".to_string(),
+            thread_stage_id: Some("stage-1".to_string()),
+            sessio_runtime_session_id: "runtime-1".to_string(),
+            turn_id: None,
+            status: super::super::AstraTaskResultStatus::Completed,
+            output: "done".to_string(),
+            error: None,
+            attempt_count: 1,
+            retry_limit_reached: false,
+            decision_action: None,
+            decision_reason: None,
+            completed_at: 1,
+        };
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"done","decisions":[{"taskId":"task-1","action":"update_stage","stage":{"status":"completed"},"reason":"done"}],"tasks":[]}"#,
+            &run(),
+            &thread(),
+            1,
+            &[AstraTaskCompletion { task, result }],
+        )
+        .unwrap();
+
+        assert_eq!(orchestration.decisions.len(), 1);
+        match &orchestration.decisions[0].decision {
+            AstraDecision::UpdateStage { args } => {
+                assert_eq!(args["threadStageId"], "stage-1");
+                assert_eq!(args["status"], "completed");
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_runtime_agent_flat_update_stage_decision() {
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Task".to_string(),
+            target_stage_id: None,
+            target_agent: Agent::Codex,
+            prompt: "Work".to_string(),
+            expected_output: "Notes".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
+        let result = AstraTaskResult {
+            task_id: "task-1".to_string(),
+            thread_stage_id: None,
+            sessio_runtime_session_id: "runtime-1".to_string(),
+            turn_id: None,
+            status: super::super::AstraTaskResultStatus::Completed,
+            output: "done".to_string(),
+            error: None,
+            attempt_count: 1,
+            retry_limit_reached: false,
+            decision_action: None,
+            decision_reason: None,
+            completed_at: 1,
+        };
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"ok","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stageId":"stage-1","status":"completed","summary":"done"}}],"tasks":[{"title":"Plan next","targetStageId":"stage-2","targetAgent":"codex","prompt":"Plan"}]}"#,
+            &run(),
+            &thread(),
+            1,
+            &[AstraTaskCompletion { task, result }],
+        )
+        .unwrap();
+
+        assert_eq!(orchestration.decisions.len(), 1);
+        assert_eq!(orchestration.tasks.len(), 1);
+        assert_eq!(
+            orchestration.tasks[0].target_stage_id.as_deref(),
+            Some("stage-2")
+        );
+        match &orchestration.decisions[0].decision {
+            AstraDecision::UpdateStage { args } => {
+                assert_eq!(args["threadStageId"], "stage-1");
+                assert_eq!(args["status"], "completed");
+                assert_eq!(args["summary"], "done");
+                assert_eq!(args["outcome"], "done");
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validates_tasks_after_projecting_stage_decisions() {
+        let mut thread = thread();
+        thread.stages[0].status = StageStatus::NeedsReview;
+
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Review research".to_string(),
+            target_stage_id: Some("stage-1".to_string()),
+            target_agent: Agent::Codex,
+            prompt: "Review".to_string(),
+            expected_output: "Review notes".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
+        let result = AstraTaskResult {
+            task_id: "task-1".to_string(),
+            thread_stage_id: Some("stage-1".to_string()),
+            sessio_runtime_session_id: "runtime-1".to_string(),
+            turn_id: None,
+            status: super::super::AstraTaskResultStatus::Completed,
+            output: "approved-with-corrections".to_string(),
+            error: None,
+            attempt_count: 1,
+            retry_limit_reached: false,
+            decision_action: None,
+            decision_reason: None,
+            completed_at: 1,
+        };
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"reviewed","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stageId":"stage-1","status":"completed","summary":"approved"}}],"tasks":[{"title":"Plan answer","targetStageId":"stage-2","targetAgent":"codex","prompt":"Plan the answer"}]}"#,
+            &run(),
+            &thread,
+            1,
+            &[AstraTaskCompletion { task, result }],
+        )
+        .unwrap();
+
+        assert_eq!(orchestration.decisions.len(), 1);
+        assert_eq!(orchestration.tasks.len(), 1);
+        assert_eq!(
+            orchestration.tasks[0].target_stage_id.as_deref(),
+            Some("stage-2")
+        );
+    }
+
+    #[test]
+    fn validates_tasks_after_projecting_non_review_stage_decisions() {
+        let mut thread = thread();
+        thread.stages[0].status = StageStatus::Blocked;
+
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Recover research".to_string(),
+            target_stage_id: Some("stage-1".to_string()),
+            target_agent: Agent::Codex,
+            prompt: "Recover".to_string(),
+            expected_output: "Recovery notes".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
+        let result = AstraTaskResult {
+            task_id: "task-1".to_string(),
+            thread_stage_id: Some("stage-1".to_string()),
+            sessio_runtime_session_id: "runtime-1".to_string(),
+            turn_id: None,
+            status: super::super::AstraTaskResultStatus::Completed,
+            output: "recovered".to_string(),
+            error: None,
+            attempt_count: 1,
+            retry_limit_reached: false,
+            decision_action: None,
+            decision_reason: None,
+            completed_at: 1,
+        };
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"recovered","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stageId":"stage-1","status":"completed","summary":"recovered"}}],"tasks":[{"title":"Plan answer","targetStageId":"stage-2","targetAgent":"codex","prompt":"Plan the answer"}]}"#,
+            &run(),
+            &thread,
+            1,
+            &[AstraTaskCompletion { task, result }],
+        )
+        .unwrap();
+
+        assert_eq!(orchestration.decisions.len(), 1);
+        assert_eq!(orchestration.tasks.len(), 1);
+        assert_eq!(
+            orchestration.tasks[0].target_stage_id.as_deref(),
+            Some("stage-2")
+        );
+    }
+
+    #[test]
+    fn orchestration_requires_decision_for_each_completion() {
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Task".to_string(),
+            target_stage_id: Some("stage-1".to_string()),
+            target_agent: Agent::Codex,
+            prompt: "Work".to_string(),
+            expected_output: "Notes".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
+        let result = AstraTaskResult {
+            task_id: "task-1".to_string(),
+            thread_stage_id: Some("stage-1".to_string()),
+            sessio_runtime_session_id: "runtime-1".to_string(),
+            turn_id: None,
+            status: super::super::AstraTaskResultStatus::Completed,
+            output: "done".to_string(),
+            error: None,
+            attempt_count: 1,
+            retry_limit_reached: false,
+            decision_action: None,
+            decision_reason: None,
+            completed_at: 1,
+        };
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"missing decision","tasks":[]}"#,
+            &run(),
+            &thread(),
+            1,
+            &[AstraTaskCompletion { task, result }],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("missing decision"));
     }
 }

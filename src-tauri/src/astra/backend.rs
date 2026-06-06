@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use super::{AstraDecision, AstraPlan, AstraRun, AstraTaskProposal, AstraTaskResult};
+use super::{AstraOrchestration, AstraRun, AstraTaskCompletion};
 use crate::models::ThreadInfo;
 
 #[derive(Debug, Clone)]
@@ -39,38 +39,16 @@ impl BackendFailure {
     }
 }
 
-/// Trait for Astra planner backends that can generate execution plans
-pub trait PlannerBackend: Send + Sync {
-    /// Generate a plan for the given Astra run
-    fn plan(
+/// Trait for Astra Orchestrator backends that can do both initial rolling
+/// planning and post-result planning in a single model call.
+pub trait OrchestratorBackend: Send + Sync {
+    fn orchestrate(
         &self,
         run: &AstraRun,
         thread: &ThreadInfo,
         user_prompt: Option<&str>,
         round_index: u32,
+        completions: &[AstraTaskCompletion],
         config: &Value,
-    ) -> Result<BackendResponse<AstraPlan>, BackendFailure>;
-
-    /// Returns true if this backend can fail over to the deterministic planner.
-    fn supports_fallback(&self) -> bool {
-        true
-    }
-}
-
-/// Trait for Astra decision engine backends that evaluate task results
-pub trait DecisionBackend: Send + Sync {
-    /// Make a decision based on task result
-    fn decide(
-        &self,
-        run: &AstraRun,
-        thread: &ThreadInfo,
-        result: &AstraTaskResult,
-        task: &AstraTaskProposal,
-        config: &Value,
-    ) -> Result<BackendResponse<AstraDecision>, BackendFailure>;
-
-    /// Returns true if this backend can fail over to the deterministic decision engine.
-    fn supports_fallback(&self) -> bool {
-        true
-    }
+    ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure>;
 }

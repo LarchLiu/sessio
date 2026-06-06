@@ -1,21 +1,17 @@
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-use super::astra_pi_acp_adapter::{
-    parse_astra_pi_acp_decision_response, parse_astra_pi_acp_plan_response,
-};
-use super::backend::{BackendFailure, BackendResponse, DecisionBackend, PlannerBackend};
-use super::{AstraDecision, AstraPlan, AstraRun, AstraTaskProposal, AstraTaskResult};
+use super::astra_pi_acp_adapter::parse_astra_pi_acp_orchestration_response;
+use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
+use super::prompt::build_astra_orchestration_prompt;
+use super::{AstraOrchestration, AstraRun, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS};
 use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEventPayload, RuntimeMetadata, StartAgentSession,
 };
 use crate::agents::runtime::RuntimeManager;
 use crate::models::{Agent, ThreadInfo};
-
-const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeAgentBackendConfig {
@@ -30,7 +26,7 @@ impl Default for RuntimeAgentBackendConfig {
     fn default() -> Self {
         Self {
             agent: Agent::Claude,
-            timeout_ms: DEFAULT_TIMEOUT_MS,
+            timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
             model: None,
             effort: None,
             permission_mode: None,
@@ -38,88 +34,47 @@ impl Default for RuntimeAgentBackendConfig {
     }
 }
 
-pub struct RuntimeAgentPlanner {
+pub struct RuntimeAgentOrchestrator {
     runtime: RuntimeManager,
     config: RuntimeAgentBackendConfig,
 }
 
-impl RuntimeAgentPlanner {
+impl RuntimeAgentOrchestrator {
     pub fn new(runtime: RuntimeManager, config: RuntimeAgentBackendConfig) -> Self {
         Self { runtime, config }
     }
 }
 
-impl PlannerBackend for RuntimeAgentPlanner {
-    fn plan(
+impl OrchestratorBackend for RuntimeAgentOrchestrator {
+    fn orchestrate(
         &self,
         run: &AstraRun,
         thread: &ThreadInfo,
         user_prompt: Option<&str>,
         round_index: u32,
+        completions: &[AstraTaskCompletion],
         _backend_config: &Value,
-    ) -> Result<BackendResponse<AstraPlan>, BackendFailure> {
-        let prompt = build_planning_prompt(run, thread, user_prompt, round_index);
+    ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
+        let prompt =
+            build_astra_orchestration_prompt(run, thread, user_prompt, round_index, completions);
 
         match execute_agent_session(
             &self.runtime,
             &self.config,
             &run.project_path,
             &prompt,
-            "planning",
+            "orchestration",
         ) {
             Ok((text, session_id)) => {
-                match parse_astra_pi_acp_plan_response(&text, run, thread, round_index) {
-                    Ok(plan) => Ok(BackendResponse {
-                        data: plan,
-                        session_id,
-                        backend_type: format!("runtime_agent_{}", self.config.agent.as_str()),
-                    }),
-                    Err(pi_error) => Err(BackendFailure::new(
-                        format!("runtime_agent_{}", self.config.agent.as_str()),
-                        pi_error.code,
-                        pi_error.message,
-                    )
-                    .with_session_id(Some(session_id))),
-                }
-            }
-            Err(failure) => Err(failure),
-        }
-    }
-}
-
-pub struct RuntimeAgentDecisionEngine {
-    runtime: RuntimeManager,
-    config: RuntimeAgentBackendConfig,
-}
-
-impl RuntimeAgentDecisionEngine {
-    pub fn new(runtime: RuntimeManager, config: RuntimeAgentBackendConfig) -> Self {
-        Self { runtime, config }
-    }
-}
-
-impl DecisionBackend for RuntimeAgentDecisionEngine {
-    fn decide(
-        &self,
-        run: &AstraRun,
-        thread: &ThreadInfo,
-        result: &AstraTaskResult,
-        task: &AstraTaskProposal,
-        _backend_config: &Value,
-    ) -> Result<BackendResponse<AstraDecision>, BackendFailure> {
-        let prompt = build_decision_prompt(thread, result, task);
-
-        match execute_agent_session(
-            &self.runtime,
-            &self.config,
-            &run.project_path,
-            &prompt,
-            "decision",
-        ) {
-            Ok((text, session_id)) => {
-                match parse_astra_pi_acp_decision_response(&text, thread, result, task) {
-                    Ok(decision) => Ok(BackendResponse {
-                        data: decision,
+                match parse_astra_pi_acp_orchestration_response(
+                    &text,
+                    run,
+                    thread,
+                    round_index,
+                    completions,
+                ) {
+                    Ok(orchestration) => Ok(BackendResponse {
+                        data: orchestration,
                         session_id,
                         backend_type: format!("runtime_agent_{}", self.config.agent.as_str()),
                     }),
@@ -181,10 +136,7 @@ fn execute_agent_session(
     })?;
 
     let session_id = handle.sessio_runtime_session_id.clone();
-    let text = Arc::new(Mutex::new(String::new()));
-    let text_for_events = text.clone();
 
-    // Subscribe to events to collect text
     let receiver = runtime.subscribe_events().map_err(|error| {
         BackendFailure::new(
             format!("runtime_agent_{}", config.agent.as_str()),
@@ -192,24 +144,6 @@ fn execute_agent_session(
             error.to_string(),
         )
     })?;
-
-    let session_id_for_filter = session_id.clone();
-    std::thread::spawn(move || {
-        for event in receiver {
-            if let AgentRuntimeEventPayload::TextDelta {
-                sessio_runtime_session_id,
-                text: delta,
-                ..
-            } = event.payload
-            {
-                if sessio_runtime_session_id == session_id_for_filter {
-                    if let Ok(mut buffer) = text_for_events.lock() {
-                        buffer.push_str(&delta);
-                    }
-                }
-            }
-        }
-    });
 
     // Send prompt
     runtime
@@ -229,13 +163,17 @@ fn execute_agent_session(
             )
         })?;
 
-    // Wait for completion with timeout
-    std::thread::sleep(Duration::from_millis(config.timeout_ms));
-
-    let output = text.lock().map(|buffer| buffer.clone()).unwrap_or_default();
+    let output = wait_for_agent_output(
+        receiver,
+        &session_id,
+        config.timeout_ms,
+        &format!("runtime_agent_{}", config.agent.as_str()),
+    );
 
     // Clean up session
     let _ = runtime.dispose_session_silent(&session_id);
+
+    let output = output?.trim().to_string();
 
     if output.is_empty() {
         return Err(BackendFailure::new(
@@ -249,66 +187,141 @@ fn execute_agent_session(
     Ok((output, session_id))
 }
 
-fn build_planning_prompt(
-    run: &AstraRun,
-    thread: &ThreadInfo,
-    user_prompt: Option<&str>,
-    round_index: u32,
-) -> String {
-    let stages = thread
-        .stages
-        .iter()
-        .map(|stage| {
-            let agent = super::pick_stage_agent(stage).map(|agent| agent.as_str().to_string());
-            json!({
-                "id": stage.id,
-                "title": super::stage_label(stage),
-                "order": stage.order,
-                "status": stage.status,
-                "assignableAgent": agent,
-                "summary": stage.summary,
-                "issues": stage.issues,
-            })
-        })
-        .collect::<Vec<_>>();
+fn wait_for_agent_output(
+    receiver: std::sync::mpsc::Receiver<crate::agents::runtime::types::AgentRuntimeEvent>,
+    session_id: &str,
+    timeout_ms: u64,
+    backend_type: &str,
+) -> Result<String, BackendFailure> {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut output = String::new();
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(BackendFailure::new(
+                backend_type.to_string(),
+                "timeout",
+                format!("Agent session timed out after {timeout_ms}ms"),
+            )
+            .with_session_id(Some(session_id.to_string())));
+        }
 
-    json!({
-        "instruction": "Return only a JSON object with shape {\"summary\": string, \"tasks\": array}. Each task must include title, targetStageId, targetAgent, prompt, expectedOutput, risk.",
-        "thread": {
-            "id": thread.id,
-            "goal": thread.goal,
-            "stages": stages,
-        },
-        "run": {
-            "id": run.run_id,
-            "roundIndex": round_index,
-            "retryLimit": run.retry_limit,
-            "completedTaskIds": run.completed_task_ids,
-            "stageAttemptCounts": run.stage_attempt_counts,
-        },
-        "userPrompt": user_prompt.unwrap_or(""),
-    })
-    .to_string()
+        let remaining = deadline.saturating_duration_since(now);
+        let wait = remaining.min(Duration::from_millis(250));
+        let event = match receiver.recv_timeout(wait) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(BackendFailure::new(
+                    backend_type.to_string(),
+                    "transport_failure",
+                    "runtime event stream disconnected",
+                )
+                .with_session_id(Some(session_id.to_string())));
+            }
+        };
+
+        match event.payload {
+            AgentRuntimeEventPayload::TextDelta {
+                sessio_runtime_session_id,
+                text,
+                ..
+            } if sessio_runtime_session_id == session_id => {
+                output.push_str(&text);
+            }
+            AgentRuntimeEventPayload::TurnCompleted {
+                sessio_runtime_session_id,
+                ..
+            } if sessio_runtime_session_id == session_id => return Ok(output),
+            AgentRuntimeEventPayload::TurnError {
+                sessio_runtime_session_id,
+                error,
+                ..
+            } if sessio_runtime_session_id == session_id => {
+                return Err(BackendFailure::new(
+                    backend_type.to_string(),
+                    "turn_error",
+                    format!("{}: {}", error.code, error.message),
+                )
+                .with_session_id(Some(session_id.to_string())));
+            }
+            AgentRuntimeEventPayload::TurnCancelled {
+                sessio_runtime_session_id,
+                ..
+            } if sessio_runtime_session_id == session_id => {
+                return Err(BackendFailure::new(
+                    backend_type.to_string(),
+                    "cancelled",
+                    "Agent session turn was cancelled",
+                )
+                .with_session_id(Some(session_id.to_string())));
+            }
+            AgentRuntimeEventPayload::SessionEnded {
+                sessio_runtime_session_id,
+            } if sessio_runtime_session_id == session_id => return Ok(output),
+            _ => {}
+        }
+    }
 }
 
-fn build_decision_prompt(
-    thread: &ThreadInfo,
-    result: &AstraTaskResult,
-    task: &AstraTaskProposal,
-) -> String {
-    json!({
-        "instruction": "Return only a JSON object with shape {\"action\": string, \"stage\": object?, \"issue\": object?, \"retry\": object?, \"summary\": string?, \"reason\": string}. action must be one of update_stage, add_or_update_issue, retry_stage, plan_next_round, complete_run, error_run.",
-        "thread": thread,
-        "task": task,
-        "result": {
-            "taskId": result.task_id,
-            "threadStageId": result.thread_stage_id,
-            "status": result.status,
-            "output": result.output,
-            "error": result.error,
-            "attemptCount": result.attempt_count,
-            "retryLimitReached": result.retry_limit_reached,
-        },
-    })
-    .to_string()
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+    use crate::agents::runtime::types::{AgentRuntimeEvent, AgentRuntimeEventPayload};
+
+    fn event(payload: AgentRuntimeEventPayload) -> AgentRuntimeEvent {
+        AgentRuntimeEvent {
+            sequence: 1,
+            timestamp: 1,
+            payload,
+        }
+    }
+
+    #[test]
+    fn wait_for_agent_output_filters_interleaved_sessions() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(event(AgentRuntimeEventPayload::TextDelta {
+                sessio_runtime_session_id: "other-session".to_string(),
+                turn_id: "turn-other".to_string(),
+                text: "wrong".to_string(),
+            }))
+            .unwrap();
+        sender
+            .send(event(AgentRuntimeEventPayload::TextDelta {
+                sessio_runtime_session_id: "target-session".to_string(),
+                turn_id: "turn-target".to_string(),
+                text: "{\"summary\":\"ok\"".to_string(),
+            }))
+            .unwrap();
+        sender
+            .send(event(AgentRuntimeEventPayload::TurnCompleted {
+                sessio_runtime_session_id: "other-session".to_string(),
+                turn_id: "turn-other".to_string(),
+                result: None,
+            }))
+            .unwrap();
+        sender
+            .send(event(AgentRuntimeEventPayload::TextDelta {
+                sessio_runtime_session_id: "target-session".to_string(),
+                turn_id: "turn-target".to_string(),
+                text: "}".to_string(),
+            }))
+            .unwrap();
+        sender
+            .send(event(AgentRuntimeEventPayload::TurnCompleted {
+                sessio_runtime_session_id: "target-session".to_string(),
+                turn_id: "turn-target".to_string(),
+                result: None,
+            }))
+            .unwrap();
+
+        let output =
+            wait_for_agent_output(receiver, "target-session", 1_000, "runtime_agent_codex")
+                .unwrap();
+
+        assert_eq!(output, r#"{"summary":"ok"}"#);
+    }
 }

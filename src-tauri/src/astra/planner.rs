@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use super::{
-    pick_stage_agent, short_hash, stage_label, AstraPlan, AstraRun, AstraTaskProposal,
+    pick_stage_agent, rolling_stage_task_batch, short_hash, stage_label,
+    task_blocked_by_thread_exception, AstraPlan, AstraRun, AstraTaskProposal,
     AstraTaskResultStatus, AstraTaskRisk,
 };
 use crate::models::{IssueStatus, StageStatus, ThreadInfo};
@@ -15,14 +16,15 @@ pub(super) fn deterministic_plan(
     let mut stages = thread.stages.clone();
     stages.sort_by_key(|stage| stage.order);
     let completed: HashSet<&str> = run.completed_task_ids.iter().map(String::as_str).collect();
-    let tasks = stages
+    let tasks = rolling_stage_task_batch(stages
         .iter()
         .filter(|stage| {
             !matches!(
                 stage.status,
-                StageStatus::Completed | StageStatus::Skipped | StageStatus::NeedsReview
+                StageStatus::Completed | StageStatus::Skipped
             )
         })
+        .filter(|stage| task_blocked_by_thread_exception(run, thread, Some(&stage.id)).is_none())
         .filter(|stage| {
             let attempts = run.stage_attempt_counts.get(&stage.id).copied().unwrap_or(0);
             !(stage.status == StageStatus::Blocked && attempts >= run.retry_limit)
@@ -30,7 +32,14 @@ pub(super) fn deterministic_plan(
         .filter_map(|stage| {
             let target_agent = pick_stage_agent(stage)?;
             let blocked = stage.status == StageStatus::Blocked;
-            let kind = if blocked { "unblock" } else { "advance" };
+            let needs_review = stage.status == StageStatus::NeedsReview;
+            let kind = if needs_review {
+                "review"
+            } else if blocked {
+                "unblock"
+            } else {
+                "advance"
+            };
             let task_id = format!(
                 "task-{}",
                 short_hash(&format!(
@@ -46,7 +55,9 @@ pub(super) fn deterministic_plan(
             {
                 return None;
             }
-            let instruction = if blocked {
+            let instruction = if needs_review {
+                "Review this stage's latest result, identify gaps or regressions, and either provide concrete corrections or verification notes."
+            } else if blocked {
                 "Identify the blocker, propose the smallest recovery step, and perform safe progress if possible."
             } else {
                 "Work on this stage goal and return concrete progress with verification notes."
@@ -66,13 +77,21 @@ pub(super) fn deterministic_plan(
                 id: task_id,
                 title: format!(
                     "{} {}",
-                    if blocked { "Unblock" } else { "Advance" },
+                    if needs_review {
+                        "Review"
+                    } else if blocked {
+                        "Unblock"
+                    } else {
+                        "Advance"
+                    },
                     stage_label(stage)
                 ),
                 target_stage_id: Some(stage.id.clone()),
                 target_agent,
                 prompt,
-                expected_output: if blocked {
+                expected_output: if needs_review {
+                    "Review findings, corrections if needed, and verification notes.".to_string()
+                } else if blocked {
                     "Blocker diagnosis, recovery action, and verification notes.".to_string()
                 } else {
                     "Stage progress summary, files or decisions changed, and verification notes."
@@ -80,6 +99,8 @@ pub(super) fn deterministic_plan(
                 },
                 risk: if blocked {
                     AstraTaskRisk::High
+                } else if needs_review {
+                    AstraTaskRisk::Medium
                 } else if stage.issues.iter().any(|issue| issue.status == IssueStatus::Open) {
                     AstraTaskRisk::Medium
                 } else {
@@ -87,11 +108,10 @@ pub(super) fn deterministic_plan(
                 },
             })
         })
-        .take(20)
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>());
     AstraPlan {
         summary: format!(
-            "Deterministic Astra found {} task{} for \"{}\".",
+            "Deterministic Astra Orchestrator selected {} rolling task{} for \"{}\".",
             tasks.len(),
             if tasks.len() == 1 { "" } else { "s" },
             thread.goal
@@ -100,9 +120,23 @@ pub(super) fn deterministic_plan(
     }
 }
 
-pub(super) fn next_dispatchable_tasks(run: &AstraRun) -> Vec<AstraTaskProposal> {
+pub(super) fn next_dispatchable_tasks(
+    run: &AstraRun,
+    thread: &ThreadInfo,
+) -> Vec<AstraTaskProposal> {
     run.proposed_tasks
         .iter()
+        .filter(|task| {
+            task_blocked_by_thread_exception(run, thread, task.target_stage_id.as_deref()).is_none()
+        })
+        .filter(|task| {
+            task.target_stage_id.as_deref().is_none_or(|stage_id| {
+                thread.stages.iter().any(|stage| {
+                    stage.id == stage_id
+                        && !matches!(stage.status, StageStatus::Completed | StageStatus::Skipped)
+                })
+            })
+        })
         .filter(|task| {
             !run.task_results.iter().any(|result| {
                 result.task_id == task.id

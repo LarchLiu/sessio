@@ -3,7 +3,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use crate::agents::runtime::types::{
 use crate::agents::runtime::RuntimeManager;
 use crate::models::{
     Agent, AgentInfo, IssueSeverity, IssueStatus, SessionInfo, StageIssueInfo, StageStatus,
-    ThreadInfo,
+    StageType, ThreadInfo,
 };
 use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
 
@@ -43,12 +43,136 @@ pub use types::{
     AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraStageMutationResult, AstraTaskProposal,
     AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk,
 };
+pub(crate) use types::{AstraOrchestration, AstraTaskCompletion, AstraTaskDecision};
 
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
-const RUST_NATIVE_ROUND_LIMIT: u32 = 3;
+const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
 const ASTRA_DEFAULT_RETRY_LIMIT: u32 = 3;
-const ASTRA_PI_ACP_TIMEOUT_MS: u64 = 30_000;
+const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
+const ASTRA_ROLLING_TASK_BATCH_LIMIT: usize = 4;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
+
+fn rolling_stage_task_batch(tasks: Vec<AstraTaskProposal>) -> Vec<AstraTaskProposal> {
+    let Some(first) = tasks.first() else {
+        return Vec::new();
+    };
+    let target_stage_id = first.target_stage_id.clone();
+    tasks
+        .into_iter()
+        .filter(|task| task.target_stage_id == target_stage_id)
+        .take(ASTRA_ROLLING_TASK_BATCH_LIMIT)
+        .collect()
+}
+
+pub(crate) fn stage_waiting_for_human_review(stage: &crate::models::StageInfo) -> bool {
+    stage.status == StageStatus::NeedsReview && matches!(stage.kind, Some(StageType::Human))
+}
+
+pub(crate) fn stage_needs_agent_review(stage: &crate::models::StageInfo) -> bool {
+    stage.status == StageStatus::NeedsReview && !stage_waiting_for_human_review(stage)
+}
+
+pub(crate) fn thread_has_agent_review_stage(thread: &ThreadInfo) -> bool {
+    thread.stages.iter().any(stage_needs_agent_review)
+}
+
+pub(crate) fn thread_waiting_for_review(thread: &ThreadInfo) -> bool {
+    thread.stages.iter().any(stage_waiting_for_human_review)
+        && !thread_has_agent_review_stage(thread)
+}
+
+pub(crate) fn thread_has_blocked_stage(thread: &ThreadInfo) -> bool {
+    thread
+        .stages
+        .iter()
+        .any(|stage| stage.status == StageStatus::Blocked)
+}
+
+pub(crate) fn blocked_stage_retry_limit_reached(
+    run: &AstraRun,
+    stage: &crate::models::StageInfo,
+) -> bool {
+    stage.status == StageStatus::Blocked
+        && run
+            .stage_attempt_counts
+            .get(&stage.id)
+            .copied()
+            .unwrap_or(0)
+            >= run.retry_limit
+}
+
+pub(crate) fn task_blocked_by_thread_exception(
+    run: &AstraRun,
+    thread: &ThreadInfo,
+    target_stage_id: Option<&str>,
+) -> Option<&'static str> {
+    if thread_has_agent_review_stage(thread) {
+        let Some(target_stage_id) = target_stage_id else {
+            return Some(
+                "thread has an agent stage needing review; task must target a needs_review agent stage",
+            );
+        };
+        let Some(stage) = thread
+            .stages
+            .iter()
+            .find(|stage| stage.id == target_stage_id)
+        else {
+            return None;
+        };
+        if !stage_needs_agent_review(stage) {
+            return Some(
+                "thread has an agent stage needing review; task must target a needs_review agent stage",
+            );
+        }
+        return None;
+    }
+    if thread_waiting_for_review(thread) {
+        return Some("thread is waiting for human review");
+    }
+    if !thread_has_blocked_stage(thread) {
+        return None;
+    }
+    let Some(target_stage_id) = target_stage_id else {
+        return Some("thread has a blocked stage; task must target a blocked stage");
+    };
+    let Some(stage) = thread
+        .stages
+        .iter()
+        .find(|stage| stage.id == target_stage_id)
+    else {
+        return None;
+    };
+    if stage.status != StageStatus::Blocked {
+        return Some("thread has a blocked stage; task must target a blocked stage");
+    }
+    if blocked_stage_retry_limit_reached(run, stage) {
+        return Some("blocked stage retry limit reached");
+    }
+    None
+}
+
+fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
+    json!({
+        "task": {
+            "id": completion.task.id,
+            "title": completion.task.title,
+            "targetStageId": completion.task.target_stage_id,
+            "targetAgent": completion.task.target_agent,
+            "expectedOutput": completion.task.expected_output,
+            "risk": completion.task.risk,
+        },
+        "result": {
+            "taskId": completion.result.task_id,
+            "threadStageId": completion.result.thread_stage_id,
+            "status": completion.result.status,
+            "finalOutput": summarize_task_output(&final_task_output(&completion.result.output)),
+            "error": completion.result.error,
+            "attemptCount": completion.result.attempt_count,
+            "retryLimitReached": completion.result.retry_limit_reached,
+            "completedAt": completion.result.completed_at,
+        },
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,9 +246,9 @@ enum AstraWorkerState {
     Running,
 }
 
-enum DispatchTaskDecision {
+enum DispatchTaskBatchDecision {
     RetryLimit {
-        result: AstraTaskResult,
+        results: Vec<AstraTaskResult>,
         retry_limit: u32,
     },
     Dispatch {
@@ -148,11 +272,8 @@ fn bundled_astra_pi_acp_config() -> Option<AstraPiAcpConfig> {
         command,
         session_dir: astra_session_dir().to_string_lossy().to_string(),
         agent_dir: astra_agent_dir().to_string_lossy().to_string(),
-        planner: AstraPiAcpPurposeConfig {
-            timeout_ms: ASTRA_PI_ACP_TIMEOUT_MS,
-        },
-        decision: AstraPiAcpPurposeConfig {
-            timeout_ms: ASTRA_PI_ACP_TIMEOUT_MS,
+        orchestrator: AstraPiAcpPurposeConfig {
+            timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
         },
     })
 }
@@ -636,21 +757,31 @@ impl AstraService {
         }
     }
 
-    fn dispatch_task_and_wait(
+    fn dispatch_task_batch_and_wait(
         &self,
         run: &AstraRun,
-        task: &AstraTaskProposal,
-    ) -> Result<AstraTaskResult> {
+        tasks: &[AstraTaskProposal],
+    ) -> Result<Vec<AstraTaskResult>> {
+        if tasks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first_target_stage_id = tasks[0].target_stage_id.as_deref();
+        if tasks
+            .iter()
+            .any(|task| task.target_stage_id.as_deref() != first_target_stage_id)
+        {
+            bail!("Astra rolling task batch must target a single stage");
+        }
+
         let mut thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-        let stage_id = task
-            .target_stage_id
-            .as_deref()
+        let stage_id = first_target_stage_id
             .map(|id| resolve_thread_stage_id(&thread, id))
             .transpose()?;
         if let Some(stage_id) = stage_id.as_deref() {
             thread = self.prepare_stage_for_delegated_task(&run.thread_id, stage_id)?;
         }
-        let task_id = task.id.clone();
+
+        let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
         let stage_id_for_run = stage_id.clone();
         let (next, decision) = self.mutate_run(&run.run_id, move |next| {
             if !next.status.active() {
@@ -668,23 +799,29 @@ impl AstraService {
                 .map(|_| prior_attempt_count >= next.retry_limit)
                 .unwrap_or(false);
             if retry_limit_reached {
-                let result = AstraTaskResult {
-                    task_id: task_id.clone(),
-                    thread_stage_id: stage_id_for_run.clone(),
-                    sessio_runtime_session_id: String::new(),
-                    turn_id: None,
-                    status: AstraTaskResultStatus::Failed,
-                    output: String::new(),
-                    error: Some("retry limit reached".to_string()),
-                    attempt_count: prior_attempt_count,
-                    retry_limit_reached: true,
-                    decision_action: None,
-                    decision_reason: None,
-                    completed_at: now_ms(),
-                };
-                upsert_task_result_in_run(next, result.clone());
-                return Ok(DispatchTaskDecision::RetryLimit {
-                    result,
+                let results = task_ids
+                    .iter()
+                    .map(|task_id| {
+                        let result = AstraTaskResult {
+                            task_id: task_id.clone(),
+                            thread_stage_id: stage_id_for_run.clone(),
+                            sessio_runtime_session_id: String::new(),
+                            turn_id: None,
+                            status: AstraTaskResultStatus::Failed,
+                            output: String::new(),
+                            error: Some("retry limit reached".to_string()),
+                            attempt_count: prior_attempt_count,
+                            retry_limit_reached: true,
+                            decision_action: None,
+                            decision_reason: None,
+                            completed_at: now_ms(),
+                        };
+                        upsert_task_result_in_run(next, result.clone());
+                        result
+                    })
+                    .collect::<Vec<_>>();
+                return Ok(DispatchTaskBatchDecision::RetryLimit {
+                    results,
                     retry_limit: next.retry_limit,
                 });
             }
@@ -696,82 +833,108 @@ impl AstraService {
                     *count
                 })
                 .unwrap_or(1);
-            Ok(DispatchTaskDecision::Dispatch { attempt_count })
+            Ok(DispatchTaskBatchDecision::Dispatch { attempt_count })
         })?;
 
         let attempt_count = match decision {
-            DispatchTaskDecision::RetryLimit {
-                result,
+            DispatchTaskBatchDecision::RetryLimit {
+                results,
                 retry_limit,
             } => {
-                self.emit(
-                    &next,
-                    "retry_limit",
-                    json!({
-                        "taskId": task.id,
-                        "threadStageId": stage_id,
-                        "attemptCount": result.attempt_count,
-                        "retryLimit": retry_limit,
-                    }),
-                );
-                return Ok(result);
+                for result in &results {
+                    self.emit(
+                        &next,
+                        "retry_limit",
+                        json!({
+                            "taskId": result.task_id,
+                            "threadStageId": stage_id,
+                            "attemptCount": result.attempt_count,
+                            "retryLimit": retry_limit,
+                        }),
+                    );
+                }
+                return Ok(results);
             }
-            DispatchTaskDecision::Dispatch { attempt_count } => attempt_count,
+            DispatchTaskBatchDecision::Dispatch { attempt_count } => attempt_count,
         };
 
-        // Create the waiter channel up front and hand the sender to dispatch_task
-        // so it is registered before the prompt is sent (avoids the lost-wakeup
-        // race where a synchronous turn finishes before we start waiting).
-        let (sender, receiver) = mpsc::channel();
-        let handle = self.dispatch_task(
-            &next,
-            &thread,
-            task,
-            DelegatedAttempt {
-                thread_stage_id: stage_id.as_deref(),
-                attempt_count,
-                retry_limit_reached: false,
-            },
-            Some(sender),
-        )?;
-        self.emit(
-            &next,
-            "task_dispatch",
-            json!({
-                "taskId": task.id,
-                "threadStageId": stage_id,
-                "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
-                "attemptCount": attempt_count,
-            }),
-        );
-        log::info!(
-            "[astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
-            next.run_id,
-            next.thread_id,
-            task.id,
-            stage_id,
-            handle.sessio_runtime_session_id,
-            attempt_count
-        );
+        let mut receivers = Vec::with_capacity(tasks.len());
+        let mut handles: Vec<AgentSessionHandle> = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let (sender, receiver) = mpsc::channel();
+            let handle = match self.dispatch_task(
+                &next,
+                &thread,
+                task,
+                DelegatedAttempt {
+                    thread_stage_id: stage_id.as_deref(),
+                    attempt_count,
+                    retry_limit_reached: false,
+                },
+                Some(sender),
+            ) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    for handle in &handles {
+                        self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                    }
+                    return Err(error);
+                }
+            };
+            self.emit(
+                &next,
+                "task_dispatch",
+                json!({
+                    "taskId": task.id,
+                    "threadStageId": stage_id,
+                    "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
+                    "attemptCount": attempt_count,
+                }),
+            );
+            log::info!(
+                "[astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
+                next.run_id,
+                next.thread_id,
+                task.id,
+                stage_id,
+                handle.sessio_runtime_session_id,
+                attempt_count
+            );
+            receivers.push((task.id.clone(), receiver));
+            handles.push(handle);
+        }
 
-        match receiver.recv_timeout(Duration::from_secs(60 * 60)) {
-            Ok(result) => Ok(result),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.abort_delegated_session(&handle.sessio_runtime_session_id);
-                bail!("delegated task timed out: {}", task.id)
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.abort_delegated_session(&handle.sessio_runtime_session_id);
-                bail!("delegated task waiter disconnected: {}", task.id)
+        let deadline = Instant::now() + Duration::from_secs(60 * 60);
+        let mut results = Vec::with_capacity(tasks.len());
+        for (task_id, receiver) in receivers {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| Duration::from_secs(0));
+            match receiver.recv_timeout(remaining) {
+                Ok(result) => results.push(result),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    for handle in &handles {
+                        self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                    }
+                    bail!("delegated task timed out: {}", task_id)
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    for handle in &handles {
+                        self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                    }
+                    bail!("delegated task waiter disconnected: {}", task_id)
+                }
             }
         }
+
+        Ok(results)
     }
 
     /// Best-effort termination of a delegated runtime session. Marks the
     /// delegated state finished so a late runtime event cannot double-record a
     /// result, cancels any active turn (which also interrupts the real ACP
     /// agent), disposes the runtime session, and drops the task waiter so a
-    /// blocked `dispatch_task_and_wait` is released.
+    /// blocked batch dispatch wait is released.
     fn abort_delegated_session(&self, sessio_runtime_session_id: &str) {
         let turn_id = match self.inner.delegated_sessions.lock() {
             Ok(mut delegated) => match delegated.get_mut(sessio_runtime_session_id) {
@@ -1888,6 +2051,73 @@ pub(crate) fn summarize_task_output(output: &str) -> String {
     }
 }
 
+fn final_task_output(output: &str) -> String {
+    let text = output.trim();
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let lines = text.lines().collect::<Vec<_>>();
+    for index in (0..lines.len()).rev() {
+        let Some(payload) = final_output_marker_payload(lines[index]) else {
+            continue;
+        };
+        let tail = lines[index + 1..].join("\n");
+        let mut parts = Vec::new();
+        let payload = payload.trim();
+        if !payload.is_empty() {
+            parts.push(payload.to_string());
+        }
+        let tail = tail.trim();
+        if !tail.is_empty() {
+            parts.push(tail.to_string());
+        }
+        let final_text = parts.join("\n").trim().to_string();
+        if !final_text.is_empty() {
+            return final_text;
+        }
+    }
+
+    text.to_string()
+}
+
+fn final_output_marker_payload(line: &str) -> Option<&str> {
+    let line = line
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .trim_start_matches(['-', '*'])
+        .trim();
+    const MARKERS: [&str; 9] = [
+        "final result",
+        "final answer",
+        "final output",
+        "actual result",
+        "task result",
+        "最终结果",
+        "最后结果",
+        "实际结果",
+        "任务结果",
+    ];
+    MARKERS
+        .iter()
+        .find_map(|marker| marker_suffix(line, marker))
+}
+
+fn marker_suffix<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let prefix = line.get(..marker.len())?;
+    if !prefix.eq_ignore_ascii_case(marker) {
+        return None;
+    }
+    let rest = line[marker.len()..].trim_start();
+    if rest.is_empty() {
+        return Some("");
+    }
+    [":", "：", "-", "—"]
+        .iter()
+        .find_map(|separator| rest.strip_prefix(separator).map(str::trim_start))
+}
+
 pub(crate) fn pick_stage_agent(stage: &crate::models::StageInfo) -> Option<Agent> {
     stage
         .assistants
@@ -2128,20 +2358,6 @@ pub(crate) fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
             .all(|stage| matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
 }
 
-pub(crate) fn thread_waiting_for_review(thread: &ThreadInfo) -> bool {
-    !thread.stages.is_empty()
-        && thread
-            .stages
-            .iter()
-            .any(|stage| stage.status == StageStatus::NeedsReview)
-        && thread.stages.iter().all(|stage| {
-            matches!(
-                stage.status,
-                StageStatus::Completed | StageStatus::Skipped | StageStatus::NeedsReview
-            )
-        })
-}
-
 pub(crate) fn short_hash(input: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2192,6 +2408,19 @@ mod tests {
             extract_result_text(&json!({ "output": "done" })),
             Some("done".to_string())
         );
+    }
+
+    #[test]
+    fn filtered_completion_uses_final_marked_result_only() {
+        let task = test_task("task-1", "stage-1");
+        let result = test_task_result(
+            "task-1",
+            "session-1",
+            "thinking aloud\ncalled tools\nFinal result: implemented and verified",
+        );
+        let value = filtered_task_completion_value(&AstraTaskCompletion { task, result });
+
+        assert_eq!(value["result"]["finalOutput"], "implemented and verified");
     }
 
     #[test]
@@ -2851,6 +3080,18 @@ mod tests {
                 updated_at: 1,
             }],
         };
+        let mut prior_stage = stage.clone();
+        prior_stage.id = "thread-stage-0".to_string();
+        prior_stage.stage_id = "project-stage-0".to_string();
+        prior_stage.name = Some("Research".to_string());
+        prior_stage.description = None;
+        prior_stage.order = -1;
+        prior_stage.status = StageStatus::Completed;
+        prior_stage.summary = Some("Previous stage result should not be included.".to_string());
+        prior_stage.outcome = Some("Previous stage outcome should not be included.".to_string());
+        prior_stage.assistants = Vec::new();
+        prior_stage.issues = Vec::new();
+
         let thread = ThreadInfo {
             id: "thread-1".to_string(),
             project_id: "project-1".to_string(),
@@ -2860,7 +3101,7 @@ mod tests {
             enabled: true,
             created_at: 1,
             updated_at: 1,
-            stages: vec![stage],
+            stages: vec![prior_stage, stage],
             sessions: Vec::new(),
         };
         let task = AstraTaskProposal {
@@ -2897,6 +3138,13 @@ mod tests {
         assert!(context
             .prompt
             .contains("Stage description: Implement the API surface."));
+        assert!(context
+            .prompt
+            .contains("Current stage summary: Routes are scaffolded."));
+        assert_eq!(context.prompt.matches("Routes are scaffolded.").count(), 1);
+        assert!(!context
+            .prompt
+            .contains("    summary: Routes are scaffolded."));
         assert!(context.prompt.contains("## Stage assistant instructions"));
         assert!(context.prompt.contains("### Builder"));
         assert!(context
@@ -2912,6 +3160,12 @@ mod tests {
         assert!(context
             .prompt
             .contains("Implement and verify the missing API."));
+        assert!(!context
+            .prompt
+            .contains("Previous stage result should not be included."));
+        assert!(!context
+            .prompt
+            .contains("Previous stage outcome should not be included."));
     }
 
     #[test]
@@ -2943,10 +3197,12 @@ mod tests {
     }
 
     #[test]
-    fn needs_review_pauses_run_without_being_terminal() {
+    fn human_needs_review_pauses_run_without_being_terminal() {
+        let mut human_review = test_stage("stage-2", StageStatus::NeedsReview);
+        human_review.kind = Some(crate::models::StageType::Human);
         let thread = test_thread(vec![
             test_stage("stage-1", StageStatus::Completed),
-            test_stage("stage-2", StageStatus::NeedsReview),
+            human_review,
         ]);
 
         assert!(!thread_all_stages_terminal(&thread));
@@ -2956,6 +3212,24 @@ mod tests {
         active
             .stages
             .push(test_stage("stage-3", StageStatus::InProgress));
+        assert!(thread_waiting_for_review(&active));
+
+        let mut agent_review = test_stage("stage-4", StageStatus::NeedsReview);
+        agent_review.assistants = vec![StageAssistantInfo {
+            assistant_id: "assistant-codex".to_string(),
+            name: "Reviewer".to_string(),
+            color: None,
+            agent: AssistantAgentInfo {
+                id: "codex".to_string(),
+                name: "Codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                mode: "read-write".to_string(),
+                effort: "medium".to_string(),
+            },
+            system_prompt: None,
+            order: 0,
+        }];
+        active.stages.push(agent_review);
         assert!(!thread_waiting_for_review(&active));
     }
 
@@ -2987,6 +3261,36 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_plan_uses_rolling_next_task_only() {
+        let mut thread = test_thread(vec![
+            test_stage("stage-1", StageStatus::NotStarted),
+            test_stage("stage-2", StageStatus::NotStarted),
+        ]);
+        for stage in &mut thread.stages {
+            stage.assistants = vec![StageAssistantInfo {
+                assistant_id: "assistant-codex".to_string(),
+                name: "Builder".to_string(),
+                color: None,
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: None,
+                order: 0,
+            }];
+        }
+        let run = test_run("run-plan-rolling");
+
+        let plan = deterministic_plan(&run, &thread, None, 0);
+
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
+    }
+
+    #[test]
     fn deterministic_plan_skips_blocked_stage_after_retry_limit() {
         let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::Blocked)]);
         thread.stages[0].assistants = vec![StageAssistantInfo {
@@ -3013,7 +3317,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_plan_skips_needs_review_stage() {
+    fn deterministic_plan_targets_agent_review_stage() {
         let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::NeedsReview)]);
         thread.stages[0].assistants = vec![StageAssistantInfo {
             assistant_id: "assistant-codex".to_string(),
@@ -3033,7 +3337,71 @@ mod tests {
 
         let plan = deterministic_plan(&run, &thread, None, 0);
 
-        assert!(plan.tasks.is_empty());
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
+        assert_eq!(plan.tasks[0].title, "Review stage-1");
+        assert!(plan.tasks[0].prompt.contains("Review this stage"));
+    }
+
+    #[test]
+    fn deterministic_plan_prioritizes_agent_review_over_ordinary_stage() {
+        let mut thread = test_thread(vec![
+            test_stage("stage-1", StageStatus::NeedsReview),
+            test_stage("stage-2", StageStatus::NotStarted),
+        ]);
+        for stage in &mut thread.stages {
+            stage.assistants = vec![StageAssistantInfo {
+                assistant_id: "assistant-codex".to_string(),
+                name: "Builder".to_string(),
+                color: None,
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: None,
+                order: 0,
+            }];
+        }
+        let run = test_run("run-plan-after-review");
+
+        let plan = deterministic_plan(&run, &thread, None, 1);
+
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
+        assert_eq!(plan.tasks[0].title, "Review stage-1");
+    }
+
+    #[test]
+    fn deterministic_plan_prioritizes_blocked_stage_over_ordinary_stage() {
+        let mut thread = test_thread(vec![
+            test_stage("stage-1", StageStatus::Blocked),
+            test_stage("stage-2", StageStatus::NotStarted),
+        ]);
+        for stage in &mut thread.stages {
+            stage.assistants = vec![StageAssistantInfo {
+                assistant_id: "assistant-codex".to_string(),
+                name: "Builder".to_string(),
+                color: None,
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: None,
+                order: 0,
+            }];
+        }
+        let run = test_run("run-plan-blocked-first");
+
+        let plan = deterministic_plan(&run, &thread, None, 1);
+
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
     }
 
     #[test]

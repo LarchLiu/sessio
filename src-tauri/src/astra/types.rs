@@ -205,6 +205,30 @@ pub struct AstraPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AstraTaskCompletion {
+    pub task: AstraTaskProposal,
+    pub result: AstraTaskResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AstraTaskDecision {
+    pub task_id: String,
+    pub decision: AstraDecision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AstraOrchestration {
+    pub summary: String,
+    #[serde(default)]
+    pub decisions: Vec<AstraTaskDecision>,
+    #[serde(default)]
+    pub tasks: Vec<AstraTaskProposal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "action")]
 pub(crate) enum AstraDecision {
     UpdateStage { args: Value },
