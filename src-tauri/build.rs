@@ -15,12 +15,12 @@ fn prepare_pi_sidecar() {
         return;
     };
     let output_name = match target.as_str() {
-        "aarch64-apple-darwin" => "astra-aarch64-apple-darwin",
-        "x86_64-apple-darwin" => "astra-x86_64-apple-darwin",
-        "universal-apple-darwin" => "astra-universal-apple-darwin",
-        "x86_64-unknown-linux-gnu" => "astra-x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu" => "astra-aarch64-unknown-linux-gnu",
-        "x86_64-pc-windows-msvc" => "astra-x86_64-pc-windows-msvc.exe",
+        "aarch64-apple-darwin" => "astra-pi-aarch64-apple-darwin",
+        "x86_64-apple-darwin" => "astra-pi-x86_64-apple-darwin",
+        "universal-apple-darwin" => "astra-pi-universal-apple-darwin",
+        "x86_64-unknown-linux-gnu" => "astra-pi-x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu" => "astra-pi-aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc" => "astra-pi-x86_64-pc-windows-msvc.exe",
         _ => return,
     };
     if std::path::Path::new("binaries").join(output_name).exists() {

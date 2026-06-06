@@ -1268,7 +1268,7 @@ mod tests {
         let agent_dir = root.join("agent");
         let session_dir = root.join("sessions");
         let config = AstraPiConfig {
-            command: "astra --acp".to_string(),
+            command: "astra-pi --acp".to_string(),
             session_dir: session_dir.to_string_lossy().to_string(),
             agent_dir: agent_dir.to_string_lossy().to_string(),
             planner: AstraPiPurposeConfig { timeout_ms: 30_000 },

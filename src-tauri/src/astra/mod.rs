@@ -203,7 +203,7 @@ fn pi_stdio_command_json(
 ) -> String {
     json!({
         "type": "stdio",
-        "name": "astra",
+        "name": "astra-pi",
         "command": executable,
         "args": [
             "--session-dir",
@@ -234,7 +234,7 @@ fn bundled_pi_path() -> Option<PathBuf> {
     } else {
         exe_dir
     };
-    let binary_name = astra_binary_name();
+    let binary_name = astra_pi_binary_name();
     [
         base_dir.join(binary_name),
         base_dir.join("binaries").join(binary_name),
@@ -244,11 +244,11 @@ fn bundled_pi_path() -> Option<PathBuf> {
     .find(|path| path.exists())
 }
 
-fn astra_binary_name() -> &'static str {
+fn astra_pi_binary_name() -> &'static str {
     if cfg!(windows) {
-        "astra.exe"
+        "astra-pi.exe"
     } else {
-        "astra"
+        "astra-pi"
     }
 }
 
@@ -2260,13 +2260,14 @@ mod tests {
     #[test]
     fn pi_stdio_command_sets_session_dir_env_and_strict_durability() {
         let command = pi_stdio_command_json(
-            std::path::Path::new("/tmp/astra"),
+            std::path::Path::new("/tmp/astra-pi"),
             std::path::Path::new("/tmp/sessions"),
             std::path::Path::new("/tmp/agent"),
         );
         let value: Value = serde_json::from_str(&command).unwrap();
 
-        assert_eq!(value["command"], "/tmp/astra");
+        assert_eq!(value["command"], "/tmp/astra-pi");
+        assert_eq!(value["name"], "astra-pi");
         assert_eq!(
             value["args"],
             json!([

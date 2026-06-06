@@ -15,31 +15,31 @@ const TARGETS = {
   "aarch64-apple-darwin": {
     archive: "pi-darwin-arm64.tar.xz",
     executable: "pi",
-    output: "astra-aarch64-apple-darwin",
+    output: "astra-pi-aarch64-apple-darwin",
   },
   "x86_64-apple-darwin": {
     archive: "pi-darwin-amd64.tar.xz",
     executable: "pi",
-    output: "astra-x86_64-apple-darwin",
+    output: "astra-pi-x86_64-apple-darwin",
   },
   "universal-apple-darwin": {
-    output: "astra-universal-apple-darwin",
+    output: "astra-pi-universal-apple-darwin",
     universal: ["aarch64-apple-darwin", "x86_64-apple-darwin"],
   },
   "x86_64-unknown-linux-gnu": {
     archive: "pi-linux-amd64.tar.xz",
     executable: "pi",
-    output: "astra-x86_64-unknown-linux-gnu",
+    output: "astra-pi-x86_64-unknown-linux-gnu",
   },
   "aarch64-unknown-linux-gnu": {
     archive: "pi-linux-arm64.tar.xz",
     executable: "pi",
-    output: "astra-aarch64-unknown-linux-gnu",
+    output: "astra-pi-aarch64-unknown-linux-gnu",
   },
   "x86_64-pc-windows-msvc": {
     archive: "pi-windows-amd64.zip",
     executable: "pi.exe",
-    output: "astra-x86_64-pc-windows-msvc.exe",
+    output: "astra-pi-x86_64-pc-windows-msvc.exe",
   },
 };
 
@@ -131,7 +131,7 @@ async function prepareTarget(targetTriple) {
   }
 
   const archivePath = await ensureArchive(target);
-  const tempDir = join(BIN_DIR, `.astra-extract-${targetTriple}`);
+  const tempDir = join(BIN_DIR, `.astra-pi-extract-${targetTriple}`);
   const outputPath = join(BIN_DIR, target.output);
   rmSync(tempDir, { recursive: true, force: true });
   mkdirSync(tempDir, { recursive: true });

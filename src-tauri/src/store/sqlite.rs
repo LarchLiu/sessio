@@ -1281,8 +1281,8 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
             enabled: true,
             transport: RuntimeTransportKind::Acp,
             commands: AgentCommandsInfo {
-                session: vec!["astra --acp".to_string()],
-                version: vec!["astra --version".to_string()],
+                session: vec!["astra-pi --acp".to_string()],
+                version: vec!["astra-pi --version".to_string()],
             },
             ai_providers: vec![AgentAiProviderInfo {
                 id: "cc-switch".to_string(),
@@ -9070,6 +9070,14 @@ mod migration_tests {
         let astra_agent = agents.iter().find(|agent| agent.id == "astra-pi").unwrap();
         assert_eq!(astra_agent.display_name, "Astra Pi");
         assert_eq!(astra_agent.transport, RuntimeTransportKind::Acp);
+        assert_eq!(
+            astra_agent.commands.session.first().map(String::as_str),
+            Some("astra-pi --acp")
+        );
+        assert_eq!(
+            astra_agent.commands.version.first().map(String::as_str),
+            Some("astra-pi --version")
+        );
         assert_eq!(astra_agent.ai_provider.as_deref(), Some("cc-switch"));
         assert_eq!(astra_agent.model.as_deref(), Some("gpt-5.5"));
         let astra_provider = astra_agent

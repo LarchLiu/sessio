@@ -33,7 +33,7 @@
     "targets": "all",
     "createUpdaterArtifacts": true,
     "externalBin": [
-      "binaries/astra"
+      "binaries/astra-pi"
     ],
     "icon": [
       "icons/32x32.png",
