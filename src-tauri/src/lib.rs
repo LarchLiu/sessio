@@ -33,14 +33,14 @@ use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo,
-    RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus,
-    ThreadInfo, WorkflowInfo,
+    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
+    ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
+    StageIssueInfo, StageStatus, ThreadInfo, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::{
-    AgentPreferencesPatch, NewAssistant, ProjectStagePatch, SessionHistoryRecord,
+    AgentPreferencesPatch, AstraConfigPatch, NewAssistant, ProjectStagePatch, SessionHistoryRecord,
     SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
 #[cfg(target_os = "macos")]
@@ -75,6 +75,8 @@ struct UpdateRuntimeAgentPreferencesRequest {
     display_name: Option<String>,
     enabled: Option<bool>,
     order: Option<i64>,
+    ai_provider: Option<String>,
+    ai_providers: Option<Vec<AgentAiProviderInfo>>,
     model: Option<String>,
     effort: Option<String>,
     permission_mode: Option<String>,
@@ -366,6 +368,40 @@ fn list_agents(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<AgentInfo>
 }
 
 #[tauri::command]
+fn get_astra_config(store: State<'_, Arc<dyn SessionStore>>) -> Result<AstraConfig, String> {
+    store.get_astra_config().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_astra_config(
+    config: serde_json::Value,
+    store: State<'_, Arc<dyn SessionStore>>,
+    astra: State<'_, AstraService>,
+) -> Result<AstraConfig, String> {
+    let patch = AstraConfigPatch {
+        planner_agent: config.get("plannerAgent").map(|v| v.as_str()),
+        planner_model: config.get("plannerModel").map(|v| v.as_str()),
+        planner_effort: config.get("plannerEffort").map(|v| v.as_str()),
+        planner_permission_mode: config.get("plannerPermissionMode").map(|v| v.as_str()),
+        decision_agent: config.get("decisionAgent").map(|v| v.as_str()),
+        decision_model: config.get("decisionModel").map(|v| v.as_str()),
+        decision_effort: config.get("decisionEffort").map(|v| v.as_str()),
+        decision_permission_mode: config.get("decisionPermissionMode").map(|v| v.as_str()),
+        default_model: config.get("defaultModel").map(|v| v.as_str()),
+        default_effort: config.get("defaultEffort").map(|v| v.as_str()),
+        default_permission_mode: config.get("defaultPermissionMode").map(|v| v.as_str()),
+    };
+
+    let updated = store
+        .update_astra_config(patch)
+        .map_err(|e| e.to_string())?;
+
+    astra.reload_config();
+
+    Ok(updated)
+}
+
+#[tauri::command]
 fn update_agent_preferences(
     req: UpdateAgentPreferencesRequest,
     app: AppHandle,
@@ -393,7 +429,7 @@ fn update_agent_preferences(
             },
         )
         .map_err(|e| e.to_string())?;
-    if updated.id == "astra" {
+    if updated.id == Agent::AstraPi.as_str() {
         astra.update_astra_preferences_cache(updated.clone());
     }
     app.emit("runtime_agents_updated", ())
@@ -2318,6 +2354,7 @@ fn read_session_history_result_from_source(
         anyhow::bail!(
             "Session file no longer exists (likely cleaned by {}): {}",
             match agent {
+                Agent::AstraPi => "Astra Pi",
                 Agent::Codex => "Codex",
                 Agent::Claude => "Claude Code",
                 Agent::Gemini => "Gemini",
@@ -2330,6 +2367,15 @@ fn read_session_history_result_from_source(
         );
     }
     let (messages, message_count) = match agent {
+        Agent::AstraPi => {
+            // Pi uses the same format as Claude (ACP)
+            let rows =
+                crate::agents::sources::claude::parser::read_history_acp_messages_with_locations(
+                    &path,
+                )?;
+            let count = count_source_lines(&rows);
+            (rows, count)
+        }
         Agent::Codex => {
             let rows =
                 crate::agents::sources::codex::parser::read_history_acp_messages_with_locations(
@@ -2618,6 +2664,8 @@ fn update_runtime_agent_preferences(
                 display_name: req.display_name.as_deref(),
                 enabled: req.enabled,
                 order: req.order,
+                ai_provider: req.ai_provider.as_deref(),
+                ai_providers: req.ai_providers.as_deref(),
                 model: req.model.as_deref(),
                 effort: req.effort.as_deref(),
                 permission_mode: req.permission_mode.as_deref(),
@@ -3204,6 +3252,8 @@ pub fn run() {
             update_project,
             archive_project,
             list_agents,
+            get_astra_config,
+            update_astra_config,
             update_agent_preferences,
             list_assistants,
             create_assistant,

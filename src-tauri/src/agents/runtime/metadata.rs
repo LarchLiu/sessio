@@ -89,7 +89,7 @@ pub fn startup_probe_runtime_agents(
             .session
             .first()
             .cloned()
-            .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent).to_string());
+            .unwrap_or_else(|| acp_transport::default_acp_command(runtime_agent));
         let version_command = agent.commands.version.first().cloned();
         let cached = store.get_runtime_agent_capability(runtime_agent)?;
 

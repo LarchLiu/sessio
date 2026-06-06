@@ -191,8 +191,7 @@ fn emit_fake_acp(
             update_type: Some(fake_session_update_type(&notification.update).to_string()),
         },
         &notification,
-    )
-    {
+    ) {
         manager.emit(event)?;
     }
     if let Some(event) =

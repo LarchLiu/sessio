@@ -7,9 +7,9 @@ use std::collections::HashSet;
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo,
-    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo,
-    StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
+    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
+    ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 
 /// Optional patch fields shared by the agent-preference update methods. Every
@@ -27,6 +27,25 @@ pub struct AgentPreferencesPatch<'a> {
     pub models: Option<&'a [RuntimeAgentOptionMetadata]>,
     pub efforts: Option<&'a [RuntimeAgentOptionMetadata]>,
     pub permission_modes: Option<&'a [RuntimeAgentOptionMetadata]>,
+}
+
+/// Patch for updating Astra configuration. Each field is Option<Option<T>>:
+/// - None: don't change this field
+/// - Some(None): set to NULL
+/// - Some(Some(v)): set to v
+#[derive(Debug, Default)]
+pub struct AstraConfigPatch<'a> {
+    pub planner_agent: Option<Option<&'a str>>,
+    pub planner_model: Option<Option<&'a str>>,
+    pub planner_effort: Option<Option<&'a str>>,
+    pub planner_permission_mode: Option<Option<&'a str>>,
+    pub decision_agent: Option<Option<&'a str>>,
+    pub decision_model: Option<Option<&'a str>>,
+    pub decision_effort: Option<Option<&'a str>>,
+    pub decision_permission_mode: Option<Option<&'a str>>,
+    pub default_model: Option<Option<&'a str>>,
+    pub default_effort: Option<Option<&'a str>>,
+    pub default_permission_mode: Option<Option<&'a str>>,
 }
 
 /// The defining fields for a new assistant.
@@ -211,6 +230,8 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<ProjectInfo>;
     fn archive_project(&self, project_id: &str) -> Result<()>;
     fn list_agents(&self) -> Result<Vec<AgentInfo>>;
+    fn get_astra_config(&self) -> Result<AstraConfig>;
+    fn update_astra_config(&self, patch: AstraConfigPatch<'_>) -> Result<AstraConfig>;
     fn update_agent_preferences_by_id(
         &self,
         agent_id: &str,

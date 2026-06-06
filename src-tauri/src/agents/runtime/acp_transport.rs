@@ -85,7 +85,7 @@ pub fn command_from_options(agent: Agent, options: &RuntimeMetadata) -> String {
         .or_else(|| options.get("command"))
         .and_then(|value| value.as_str())
         .map(ToString::to_string)
-        .unwrap_or_else(|| default_acp_command(agent).to_string())
+        .unwrap_or_else(|| default_acp_command(agent))
 }
 
 pub fn spawn_session(
@@ -738,7 +738,7 @@ async fn apply_initial_session_config(
 fn effort_config_id(agent: Agent) -> &'static str {
     match agent {
         Agent::Codex => "reasoning_effort",
-        Agent::Claude | Agent::Gemini => "effort",
+        Agent::AstraPi | Agent::Claude | Agent::Gemini => "effort",
     }
 }
 
@@ -1249,11 +1249,15 @@ fn json_id_to_string(value: serde_json::Value) -> String {
     }
 }
 
-pub(crate) fn default_acp_command(agent: Agent) -> &'static str {
+pub(crate) fn default_acp_command(agent: Agent) -> String {
     match agent {
-        Agent::Codex => "npx -y @zed-industries/codex-acp@latest",
-        Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest",
-        Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp",
+        Agent::AstraPi => {
+            // Use bundled pi agent if available
+            crate::astra::bundled_pi_acp_command().unwrap_or_else(|| "astra --acp".to_string())
+        }
+        Agent::Codex => "npx -y @zed-industries/codex-acp@latest".to_string(),
+        Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest".to_string(),
+        Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
     }
 }
 

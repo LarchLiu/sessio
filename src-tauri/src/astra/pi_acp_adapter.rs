@@ -119,8 +119,8 @@ impl PlannerBackend for PiAcpPlanner {
         round_index: u32,
         config: &Value,
     ) -> Result<BackendResponse<AstraPlan>, BackendFailure> {
-        let provider_config: AstraPiProviderConfig = serde_json::from_value(config.clone())
-            .unwrap_or_default();
+        let provider_config: AstraPiProviderConfig =
+            serde_json::from_value(config.clone()).unwrap_or_default();
 
         let prompt = planning_prompt(run, thread, user_prompt, round_index);
         let response = run_internal_pi_acp(
@@ -131,12 +131,17 @@ impl PlannerBackend for PiAcpPlanner {
             &prompt,
             &provider_config,
         )
-        .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
-            .with_session_id(failure.session_id))?;
+        .map_err(|failure| {
+            BackendFailure::new("pi_acp", failure.code, failure.message)
+                .with_session_id(failure.session_id)
+        })?;
 
-        let plan = parse_pi_plan_response(&response.text, run, thread, round_index)
-            .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
-                .with_session_id(Some(response.session_id.clone())))?;
+        let plan = parse_pi_plan_response(&response.text, run, thread, round_index).map_err(
+            |failure| {
+                BackendFailure::new("pi_acp", failure.code, failure.message)
+                    .with_session_id(Some(response.session_id.clone()))
+            },
+        )?;
 
         Ok(BackendResponse {
             data: plan,
@@ -163,8 +168,8 @@ impl DecisionBackend for PiAcpDecisionEngine {
         task: &AstraTaskProposal,
         config: &Value,
     ) -> Result<BackendResponse<AstraDecision>, BackendFailure> {
-        let provider_config: AstraPiProviderConfig = serde_json::from_value(config.clone())
-            .unwrap_or_default();
+        let provider_config: AstraPiProviderConfig =
+            serde_json::from_value(config.clone()).unwrap_or_default();
 
         let prompt = decision_prompt(thread, result, task);
         let response = run_internal_pi_acp(
@@ -175,12 +180,17 @@ impl DecisionBackend for PiAcpDecisionEngine {
             &prompt,
             &provider_config,
         )
-        .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
-            .with_session_id(failure.session_id))?;
+        .map_err(|failure| {
+            BackendFailure::new("pi_acp", failure.code, failure.message)
+                .with_session_id(failure.session_id)
+        })?;
 
-        let decision = parse_pi_decision_response(&response.text, thread, result, task)
-            .map_err(|failure| BackendFailure::new("pi_acp", failure.code, failure.message)
-                .with_session_id(Some(response.session_id.clone())))?;
+        let decision = parse_pi_decision_response(&response.text, thread, result, task).map_err(
+            |failure| {
+                BackendFailure::new("pi_acp", failure.code, failure.message)
+                    .with_session_id(Some(response.session_id.clone()))
+            },
+        )?;
 
         Ok(BackendResponse {
             data: decision,
@@ -248,17 +258,16 @@ fn run_internal_pi_acp(
     let tracked_session_id = Arc::new(Mutex::new(None::<String>));
     let tracked_session_id_for_worker = tracked_session_id.clone();
     let handle = tauri::async_runtime::spawn(async move {
-        let result =
-            run_internal_pi_acp_async(
-                command,
-                purpose_name,
-                run_id,
-                meta,
-                workspace,
-                prompt,
-                tracked_session_id_for_worker,
-            )
-            .await;
+        let result = run_internal_pi_acp_async(
+            command,
+            purpose_name,
+            run_id,
+            meta,
+            workspace,
+            prompt,
+            tracked_session_id_for_worker,
+        )
+        .await;
         let _ = tx.send(result);
     });
     match rx.recv_timeout(timeout) {
@@ -1276,9 +1285,10 @@ mod tests {
 
         prepare_pi_agent_config(&config, &provider).unwrap();
 
-        let settings: Value =
-            serde_json::from_str(&std::fs::read_to_string(agent_dir.join("settings.json")).unwrap())
-                .unwrap();
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(agent_dir.join("settings.json")).unwrap(),
+        )
+        .unwrap();
         let models: Value =
             serde_json::from_str(&std::fs::read_to_string(agent_dir.join("models.json")).unwrap())
                 .unwrap();
@@ -1295,7 +1305,10 @@ mod tests {
             models["providers"]["custom-endpoint"]["api"],
             "openai-responses"
         );
-        assert_eq!(models["providers"]["custom-endpoint"]["apiKey"], "secret-key");
+        assert_eq!(
+            models["providers"]["custom-endpoint"]["apiKey"],
+            "secret-key"
+        );
         assert_eq!(
             models["providers"]["custom-endpoint"]["models"][0]["id"],
             "gpt-test"

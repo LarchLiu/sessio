@@ -20,7 +20,11 @@ pub struct BackendFailure {
 }
 
 impl BackendFailure {
-    pub fn new(backend_type: impl Into<String>, code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(
+        backend_type: impl Into<String>,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             code,
             message: message.into(),

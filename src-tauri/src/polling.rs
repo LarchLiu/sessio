@@ -436,7 +436,8 @@ mod tests {
             .modified()
             .ok()
             .and_then(crate::agents::sources::system_time_to_millis);
-        let indexed = [IndexedSessionRecord {
+        let indexed = [
+            IndexedSessionRecord {
                 agent: Agent::Gemini,
                 session_id: "live".to_string(),
                 scope: path.to_string_lossy().to_string(),
@@ -463,7 +464,8 @@ mod tests {
                 available: false,
                 archived: false,
                 subagents: Vec::new(),
-            }];
+            },
+        ];
 
         let mut by_scope: HashMap<String, Vec<&IndexedSessionRecord>> = HashMap::new();
         for row in indexed.iter() {

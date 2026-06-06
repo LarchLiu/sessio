@@ -43,6 +43,7 @@ export const IS_WIN =
   typeof navigator !== "undefined" && /Win/i.test(navigator.platform);
 
 export const RESUME_CMD: Record<Agent, (id: string) => string> = {
+  "astra-pi": (id) => `astra --resume ${id}`,
   codex: (id) => `codex resume ${id}`,
   claude: (id) => `claude --resume ${id}`,
   gemini: (id) => `gemini --resume ${id}`,

@@ -50,7 +50,7 @@ export function parseAgentModelSelectValue(
 ): { agent: Agent; model: string } | null {
   try {
     const parsed = JSON.parse(value) as { agent?: unknown; model?: unknown };
-    if (parsed.agent !== "codex" && parsed.agent !== "claude" && parsed.agent !== "gemini") {
+    if (parsed.agent !== "astra-pi" && parsed.agent !== "codex" && parsed.agent !== "claude" && parsed.agent !== "gemini") {
       return null;
     }
     return {
@@ -58,7 +58,7 @@ export function parseAgentModelSelectValue(
       model: typeof parsed.model === "string" ? parsed.model : "",
     };
   } catch {
-    if (value === "codex" || value === "claude" || value === "gemini") {
+    if (value === "astra-pi" || value === "codex" || value === "claude" || value === "gemini") {
       return { agent: value, model: "" };
     }
     return null;
@@ -85,7 +85,9 @@ function effortLabel(agent: RuntimeAgentMetadata, selectedEffort: string | undef
 }
 
 function agentLabel(agent: Agent): string {
+  if (agent === "astra-pi") return "Astra Pi";
   if (agent === "codex") return "Codex";
   if (agent === "claude") return "Claude";
-  return "Gemini";
+  if (agent === "gemini") return "Gemini";
+  return agent;
 }

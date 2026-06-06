@@ -35,15 +35,17 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, Check, Circle, Download, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
 import {
   createWorkflow,
+  getAstraConfig,
   getNetworkConfig,
   listAgents,
   listAssistants,
   listWorkflowStages,
   listWorkflows,
   updateAgentPreferences,
+  updateAstraConfig,
   updateNetworkConfig,
   updateRuntimeAgentPreferences,
 } from "../api";
@@ -76,6 +78,8 @@ type AgentPreferencePatch = {
   effort?: string | null;
   permissionMode?: string | null;
   models?: RuntimeAgentOptionMetadata[];
+  plannerAgent?: string | null;
+  decisionAgent?: string | null;
 };
 
 export default function SettingsPage({
@@ -410,6 +414,7 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [astraConfig, setAstraConfig] = useState<AstraConfig | null>(null);
   const builtinAgents = useMemo(
     () => agents.filter((agent) => agent.type === "builtin" && isSettingsAgent(agent.id)),
     [agents],
@@ -427,11 +432,15 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
   const reload = async () => {
     setLoading(true);
     try {
-      const rows = await listAgents();
-      setAgents(rows);
+      const [agentsData, configData] = await Promise.all([
+        listAgents(),
+        getAstraConfig(),
+      ]);
+      setAgents(agentsData);
+      setAstraConfig(configData);
       setSelectedAgentId((current) => {
-        const currentExists = rows.some((agent) => agent.id === current && isSettingsAgent(agent.id));
-        return currentExists ? current : rows.find((agent) => isSettingsAgent(agent.id))?.id ?? current;
+        const currentExists = agentsData.some((agent) => agent.id === current && isSettingsAgent(agent.id));
+        return currentExists ? current : agentsData.find((agent) => isSettingsAgent(agent.id))?.id ?? current;
       });
     } catch (err) {
       onError(String(err));
@@ -473,6 +482,68 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
 
   return (
     <section>
+      {astraConfig && (
+        <SettingsGroup title={t("astra.config_title")}>
+          <div className="grid gap-6">
+            <AstraRoleSettings
+              title={t("astra.planner_agent")}
+              agentValue={astraConfig.plannerAgent ?? ""}
+              modelValue={astraConfig.plannerModel ?? ""}
+              effortValue={astraConfig.plannerEffort ?? ""}
+              permissionValue={astraConfig.plannerPermissionMode ?? ""}
+              agents={agents}
+              onAgentChange={(value) => {
+                updateAstraConfig({ plannerAgent: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+              onModelChange={(value) => {
+                updateAstraConfig({ plannerModel: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+              onEffortChange={(value) => {
+                updateAstraConfig({ plannerEffort: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+              onPermissionChange={(value) => {
+                updateAstraConfig({ plannerPermissionMode: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+            />
+            <AstraRoleSettings
+              title={t("astra.decision_agent")}
+              agentValue={astraConfig.decisionAgent ?? ""}
+              modelValue={astraConfig.decisionModel ?? ""}
+              effortValue={astraConfig.decisionEffort ?? ""}
+              permissionValue={astraConfig.decisionPermissionMode ?? ""}
+              agents={agents}
+              onAgentChange={(value) => {
+                updateAstraConfig({ decisionAgent: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+              onModelChange={(value) => {
+                updateAstraConfig({ decisionModel: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+              onEffortChange={(value) => {
+                updateAstraConfig({ decisionEffort: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+              onPermissionChange={(value) => {
+                updateAstraConfig({ decisionPermissionMode: value || null })
+                  .then(setAstraConfig)
+                  .catch((err) => onError(String(err)));
+              }}
+            />
+          </div>
+        </SettingsGroup>
+      )}
       <div className="grid grid-cols-[240px_minmax(0,1fr)] gap-5">
         <div className="min-w-0">
           <div className="mb-8">
@@ -520,6 +591,154 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
       </div>
     </section>
   );
+}
+
+function AstraRoleSettings({
+  title,
+  agentValue,
+  modelValue,
+  effortValue,
+  permissionValue,
+  agents,
+  onAgentChange,
+  onModelChange,
+  onEffortChange,
+  onPermissionChange,
+}: {
+  title: string;
+  agentValue: string;
+  modelValue: string;
+  effortValue: string;
+  permissionValue: string;
+  agents: AgentInfo[];
+  onAgentChange: (value: string) => void;
+  onModelChange: (value: string) => void;
+  onEffortChange: (value: string) => void;
+  onPermissionChange: (value: string) => void;
+}) {
+  const { t } = useI18n();
+  const selectableAgents = useMemo(
+    () => astraSelectableAgents(agents, agentValue),
+    [agentValue, agents],
+  );
+  const agentOptions = useMemo(
+    () => selectableAgents.map((agent) => ({
+      value: agent.id,
+      label: agent.displayName,
+    })),
+    [selectableAgents],
+  );
+  const effectiveAgentValue = agentOptions.some((option) => option.value === agentValue)
+    ? agentValue
+    : agentOptions[0]?.value ?? "";
+  const selectedAgent = useMemo(
+    () => selectableAgents.find((agent) => agent.id === effectiveAgentValue) ?? null,
+    [effectiveAgentValue, selectableAgents],
+  );
+  const modelOptions = optionRows(
+    astraPreferenceSource(selectedAgent?.models ?? [], selectedAgent?.model),
+    modelValue,
+  );
+  const effectiveModelValue = modelValue || (modelOptions[0]?.value ?? "");
+  const effortOptions = optionRows(
+    astraPreferenceSource(selectedAgent?.efforts ?? [], selectedAgent?.effort),
+    effortValue,
+  );
+  const effectiveEffortValue = effortValue || (effortOptions[0]?.value ?? "");
+  const permissionRows = optionRows(
+    astraPreferenceSource(selectedAgent?.permissionModes ?? [], selectedAgent?.permissionMode),
+    permissionValue,
+  );
+  const permissionOptions = selectedAgent && isRuntimeAgent(selectedAgent.id)
+    ? runtimePermissionModeOptions(permissionRows, permissionValue, selectedAgent.id)
+    : permissionRows;
+  const effectivePermissionValue = permissionValue || (permissionOptions[0]?.value ?? "");
+  const showPermissionMode = selectedAgent?.id !== "astra-pi" && permissionOptions.length > 0;
+
+  return (
+    <section className="grid grid-cols-[132px_minmax(0,1fr)] gap-x-4 gap-y-2">
+      <h3 className="flex min-h-8 items-center text-caption font-medium text-ink/60">{title}</h3>
+      <div className="min-w-0 self-center">
+        <AgentInlineSelect
+          value={effectiveAgentValue}
+          options={agentOptions}
+          placeholder={title}
+          onChange={onAgentChange}
+        />
+      </div>
+      <div />
+      <div className="min-w-0 pt-3">
+        <div className="grid gap-2 rounded-lg border border-card-border/[0.12] p-3">
+          <AgentPreferenceRow label={t("assistant.model")}>
+            <AstraPreferenceSelect
+              value={effectiveModelValue}
+              options={modelOptions}
+              placeholder={t("agent.no_model")}
+              onChange={onModelChange}
+            />
+          </AgentPreferenceRow>
+          <AgentPreferenceRow label={t("assistant.effort")}>
+            <AstraPreferenceSelect
+              value={effectiveEffortValue}
+              options={effortOptions}
+              placeholder={t("assistant.effort")}
+              onChange={onEffortChange}
+            />
+          </AgentPreferenceRow>
+          {showPermissionMode && (
+            <AgentPreferenceRow label={t("assistant.permission_mode")}>
+              <AstraPreferenceSelect
+                value={effectivePermissionValue}
+                options={permissionOptions}
+                placeholder={t("assistant.permission_mode")}
+                onChange={onPermissionChange}
+              />
+            </AgentPreferenceRow>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AstraPreferenceSelect({
+  value,
+  options,
+  placeholder,
+  onChange,
+}: {
+  value: string;
+  options: Array<{ value: string; label: string; icon?: ReactNode }>;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <AgentInlineSelect
+      value={value}
+      options={options}
+      placeholder={placeholder}
+      onChange={onChange}
+    />
+  );
+}
+
+function astraPreferenceSource(
+  options: RuntimeAgentOptionMetadata[],
+  fallbackValue: string | null | undefined,
+): RuntimeAgentOptionMetadata[] {
+  if (options.length > 0) return options;
+  if (!fallbackValue) return [];
+  return [{ value: fallbackValue, label: fallbackValue, displayName: fallbackValue, enabled: true, order: 0 }];
+}
+
+function astraSelectableAgents(agents: AgentInfo[], selectedAgentId: string): AgentInfo[] {
+  const supported = agents.filter((agent) => isRuntimeAgent(agent.id));
+  const enabled = supported.filter((agent) => agent.enabled);
+  if (!selectedAgentId || enabled.some((agent) => agent.id === selectedAgentId)) {
+    return enabled;
+  }
+  const selected = supported.find((agent) => agent.id === selectedAgentId);
+  return selected ? [selected, ...enabled] : enabled;
 }
 
 function AgentListRow({
@@ -626,8 +845,7 @@ function AgentEditor({
   const [newModelValue, setNewModelValue] = useState("");
   const [newModelDisplayName, setNewModelDisplayName] = useState("");
   const runtimeAgent = isRuntimeAgent(agent.id) ? agent.id : null;
-  const isAstra = agent.id === "astra";
-  const transportLabel = isAstra ? "rust_native" : agent.transport;
+  const isAstra = agent.id === "astra-pi";
   const [aiProvider, setAiProvider] = useState(agent.aiProvider ?? "");
   const [editingAiProvider, setEditingAiProvider] = useState(agent.aiProvider ?? "");
   const [aiProviders, setAiProviders] = useState<AgentAiProviderInfo[]>(agent.aiProviders);
@@ -637,7 +855,7 @@ function AgentEditor({
 
   useEffect(() => {
     const selectedProvider =
-      agent.id === "astra"
+      agent.id === "astra-pi"
         ? agent.aiProviders.find((provider) => provider.id === editingAiProvider)
           ?? agent.aiProviders.find((provider) => provider.id === agent.aiProvider)
           ?? agent.aiProviders.find((provider) => provider.enabled)
@@ -652,7 +870,7 @@ function AgentEditor({
     setAiProvider(agent.aiProvider ?? "");
     setEditingAiProvider((current) => {
       const defaultProviderId = agent.aiProvider ?? agent.aiProviders.find((provider) => provider.enabled)?.id ?? agent.aiProviders[0]?.id ?? "";
-      return agent.id === "astra" && agent.aiProviders.some((provider) => provider.id === current) ? current : defaultProviderId;
+      return isAstra && agent.aiProviders.some((provider) => provider.id === current) ? current : defaultProviderId;
     });
     setAiProviders(agent.aiProviders);
     setProviderDialog(null);
@@ -670,6 +888,8 @@ function AgentEditor({
           effort: patch.effort,
           permissionMode: patch.permissionMode,
           models: patch.models,
+          aiProvider: patch.aiProvider,
+          aiProviders: patch.aiProviders,
         };
         await updateRuntimeAgentPreferences({
           agent: runtimeAgent,
@@ -951,24 +1171,16 @@ function AgentEditor({
               </span>
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-card-muted/55">
-              <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{transportLabel}</span>
+              <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{agent.transport}</span>
               {sessionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{sessionCommand}</span>}
               {versionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{versionCommand}</span>}
             </div>
           </div>
-          {isAstra ? (
-            <SwitchControl
-              checked
-              tooltip={t("agent.always_enabled")}
-              onToggle={() => undefined}
-            />
-          ) : (
-            <SwitchControl
-              checked={agent.enabled}
-              tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
-              onToggle={() => void persist({ enabled: !agent.enabled })}
-            />
-          )}
+          <SwitchControl
+            checked={agent.enabled}
+            tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
+            onToggle={() => void persist({ enabled: !agent.enabled })}
+          />
         </div>
       </SettingsGroup>
       {isAstra && (
@@ -1719,11 +1931,11 @@ function SettingsAgentGlyph({
 }
 
 function isRuntimeAgent(id: string): id is Agent {
-  return id === "codex" || id === "claude" || id === "gemini";
+  return id === "astra-pi" || id === "codex" || id === "claude" || id === "gemini";
 }
 
 function isSettingsAgent(id: string): boolean {
-  return isRuntimeAgent(id) || id === "astra";
+  return isRuntimeAgent(id);
 }
 
 function AssistantsSettings({ onError }: { onError: (error: string | null) => void }) {

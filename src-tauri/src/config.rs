@@ -567,7 +567,11 @@ fn serialize_network_config(config: &NetworkConfig) -> String {
     let mut out = String::new();
     out.push_str("[network.proxy]\n");
     out.push_str("enabled = ");
-    out.push_str(if config.proxy.enabled { "true" } else { "false" });
+    out.push_str(if config.proxy.enabled {
+        "true"
+    } else {
+        "false"
+    });
     out.push('\n');
     if let Some(url) = &config.proxy.url {
         out.push_str("url = ");
@@ -583,7 +587,10 @@ fn serialize_network_config(config: &NetworkConfig) -> String {
 }
 
 fn trimmed_string(value: Option<&str>) -> Option<String> {
-    value.map(str::trim).filter(|value| !value.is_empty()).map(ToString::to_string)
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn serialize_debug_config(config: &DebugConfig) -> String {

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Agent = "codex" | "claude" | "gemini";
+export type Agent = "astra-pi" | "codex" | "claude" | "gemini";
 
 export type WorkflowType = "builtin" | "custom";
 
@@ -43,6 +43,22 @@ export interface AgentInfo {
   transport: RuntimeTransportKind;
   commands: AgentCommandsInfo;
   order: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AstraConfig {
+  plannerAgent: string | null;
+  plannerModel: string | null;
+  plannerEffort: string | null;
+  plannerPermissionMode: string | null;
+  decisionAgent: string | null;
+  decisionModel: string | null;
+  decisionEffort: string | null;
+  decisionPermissionMode: string | null;
+  defaultModel: string | null;
+  defaultEffort: string | null;
+  defaultPermissionMode: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -563,6 +579,8 @@ export interface UpdateRuntimeAgentPreferencesRequest {
   displayName?: string | null;
   enabled?: boolean | null;
   order?: number | null;
+  aiProvider?: string | null;
+  aiProviders?: AgentAiProviderInfo[];
   model?: string | null;
   effort?: string | null;
   permissionMode?: string | null;
@@ -869,6 +887,14 @@ export async function archiveProject(projectId: string): Promise<void> {
 
 export async function listAgents(): Promise<AgentInfo[]> {
   return invoke<AgentInfo[]>("list_agents");
+}
+
+export async function getAstraConfig(): Promise<AstraConfig> {
+  return invoke<AstraConfig>("get_astra_config");
+}
+
+export async function updateAstraConfig(config: Partial<AstraConfig>): Promise<AstraConfig> {
+  return invoke<AstraConfig>("update_astra_config", { config });
 }
 
 export async function listAssistants(projectId?: string | null): Promise<AssistantInfo[]> {
@@ -1608,18 +1634,21 @@ export async function respondAgentPermission(
 }
 
 export const AGENT_LABEL: Record<Agent, string> = {
+  "astra-pi": "Astra Pi",
   codex: "Codex",
   claude: "Claude Code",
   gemini: "Gemini",
 };
 
 const AGENT_COLOR_VAR: Record<Agent, string> = {
+  "astra-pi": "--color-purple",
   codex: "--color-fg",
   claude: "--color-orange",
   gemini: "--color-blue",
 };
 
 export const AGENT_ACCENT: Record<Agent, string> = {
+  "astra-pi": `rgb(var(${AGENT_COLOR_VAR["astra-pi"]}))`,
   codex: `rgb(var(${AGENT_COLOR_VAR.codex}))`,
   claude: `rgb(var(${AGENT_COLOR_VAR.claude}))`,
   gemini: `rgb(var(${AGENT_COLOR_VAR.gemini}))`,

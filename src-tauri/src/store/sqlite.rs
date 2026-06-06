@@ -12,15 +12,16 @@ use crate::memory::{
 };
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo,
-    AssistantInfo, AssistantType, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
-    ProjectInfo, ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata,
+    AssistantInfo, AssistantType, AstraConfig, IssueSeverity, IssueStatus, KanbanItem,
+    KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata,
     SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus,
     StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
-    AgentPreferencesPatch, AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord,
-    NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
-    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
+    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
+    IndexedSubagentRecord, NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord,
+    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
+    ThreadWorkSnapshotRecord,
 };
 
 pub struct SqliteStore {
@@ -529,6 +530,23 @@ CREATE INDEX IF NOT EXISTS idx_stage_sessions_stage
 CREATE INDEX IF NOT EXISTS idx_stage_sessions_session
     ON stage_sessions(agent, session_id);
 
+CREATE TABLE IF NOT EXISTS astra_config (
+    id               INTEGER PRIMARY KEY CHECK (id = 1),
+    planner_agent    TEXT,
+    planner_model    TEXT,
+    planner_effort   TEXT,
+    planner_permission_mode TEXT,
+    decision_agent   TEXT,
+    decision_model   TEXT,
+    decision_effort  TEXT,
+    decision_permission_mode TEXT,
+    default_model    TEXT,
+    default_effort   TEXT,
+    default_permission_mode TEXT,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agents (
     id               TEXT PRIMARY KEY,
     name             TEXT NOT NULL,
@@ -783,6 +801,7 @@ fn seed_builtins(conn: &Connection) -> Result<()> {
     seed_builtin_workflows(conn, now)?;
     seed_builtin_workflow_stages(conn, now)?;
     seed_builtin_agents(conn, now)?;
+    seed_astra_config(conn, now)?;
     seed_builtin_workflow_stage_assistants(conn, now)?;
     Ok(())
 }
@@ -1140,25 +1159,6 @@ fn selected_ai_provider_id(
         .filter(|id| !id.is_empty())
 }
 
-fn astra_default_ai_providers() -> Vec<AgentAiProviderInfo> {
-    vec![AgentAiProviderInfo {
-        id: "cc-switch".to_string(),
-        display_name: "CC Switch".to_string(),
-        provider: "openai".to_string(),
-        api: Some("openai-responses".to_string()),
-        base_url: Some("http://127.0.0.1:15721/v1".to_string()),
-        api_key: Some("ccw".to_string()),
-        model: Some("gpt-5.5".to_string()),
-        models: runtime_options(vec![
-            runtime_option("gpt-5.5", "GPT 5.5"),
-            runtime_option("gpt-5.4", "GPT 5.4"),
-            runtime_option("gpt-5.3-codex", "GPT 5.3 Codex"),
-        ]),
-        enabled: true,
-        order: 0,
-    }]
-}
-
 struct BuiltinAgentSeed {
     model: Option<&'static str>,
     models: Vec<RuntimeAgentOptionMetadata>,
@@ -1169,6 +1169,7 @@ struct BuiltinAgentSeed {
     enabled: bool,
     transport: RuntimeTransportKind,
     commands: AgentCommandsInfo,
+    ai_providers: Vec<AgentAiProviderInfo>,
 }
 
 fn seed_builtin_agent(
@@ -1187,8 +1188,11 @@ fn seed_builtin_agent(
         enabled,
         transport,
         commands,
+        ai_providers,
     } = seed;
     let id = agent.as_str();
+    let ai_provider = selected_ai_provider_id(&ai_providers, None);
+    let ai_providers_json = serde_json::to_string(&ai_providers)?;
     conn.execute(
         "INSERT OR IGNORE INTO agents (
             id, name, display_name, icon, ai_provider, ai_providers_json, ai_api, api_base_url, api_key,
@@ -1201,8 +1205,8 @@ fn seed_builtin_agent(
             runtime_agent_name(agent),
             runtime_agent_display_name(agent),
             id,
-            Option::<&str>::None,
-            "[]",
+            ai_provider.as_deref(),
+            ai_providers_json,
             Option::<&str>::None,
             Option::<&str>::None,
             Option::<&str>::None,
@@ -1224,43 +1228,27 @@ fn seed_builtin_agent(
     Ok(())
 }
 
-fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
-    let ai_providers = astra_default_ai_providers();
+fn seed_astra_config(conn: &Connection, now: i64) -> Result<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO agents (
-            id, name, display_name, icon, ai_provider, ai_providers_json, ai_api, api_base_url, api_key,
-            model, models_json, effort, efforts_json,
-            permission_mode, permission_modes_json, type, enabled, transport,
-            commands_json, sort_order, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO astra_config (
+            id, planner_agent, planner_model, planner_effort, planner_permission_mode,
+            decision_agent, decision_model, decision_effort, decision_permission_mode,
+            default_model, default_effort, default_permission_mode,
+            created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
-            "astra",
-            "Astra",
-            "Astra",
-            "astra",
-            "cc-switch",
-            serde_json::to_string(&ai_providers)?,
-            "openai-responses",
-            "http://127.0.0.1:15721/v1",
-            "ccw",
-            "gpt-5.5",
-            runtime_options_json(&ai_providers[0].models)?,
-            "off",
-            serde_json::to_string(&vec![
-                runtime_option("off", "Off"),
-                runtime_option("minimal", "Minimal"),
-                runtime_option("low", "Low"),
-                runtime_option("medium", "Medium"),
-                runtime_option("high", "High"),
-                runtime_option("xhigh", "Extra High"),
-            ])?,
-            Option::<&str>::None,
-            "[]",
-            AgentType::Builtin.as_str(),
-            1_i64,
-            transport_kind_to_db(RuntimeTransportKind::Sidecar),
-            serde_json::to_string(&AgentCommandsInfo::default())?,
-            0_i64,
+            1,
+            Option::<&str>::None, // planner_agent: Use default (Pi or Deterministic)
+            Option::<&str>::None, // planner_model
+            Option::<&str>::None, // planner_effort
+            Option::<&str>::None, // planner_permission_mode
+            Option::<&str>::None, // decision_agent: Use default (Pi or Deterministic)
+            Option::<&str>::None, // decision_model
+            Option::<&str>::None, // decision_effort
+            Option::<&str>::None, // decision_permission_mode
+            Option::<&str>::None, // default_model
+            Option::<&str>::None, // default_effort
+            Option::<&str>::None, // default_permission_mode
             now,
             now,
         ],
@@ -1269,7 +1257,51 @@ fn seed_astra_agent(conn: &Connection, now: i64) -> Result<()> {
 }
 
 fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
-    seed_astra_agent(conn, now)?;
+    // Pi agent - for Astra orchestration or direct chat
+    seed_builtin_agent(
+        conn,
+        Agent::AstraPi,
+        BuiltinAgentSeed {
+            model: Some("gpt-5.5"),
+            models: runtime_options(vec![
+                runtime_option("gpt-5.5", "GPT 5.5"),
+                runtime_option("gpt-5.4", "GPT 5.4"),
+            ]),
+            effort: Some("off"),
+            efforts: vec![
+                runtime_option("off", "Off"),
+                runtime_option("minimal", "Minimal"),
+                runtime_option("low", "Low"),
+                runtime_option("medium", "Medium"),
+                runtime_option("high", "High"),
+                runtime_option("xhigh", "Extra High"),
+            ],
+            permission_mode: None,
+            permission_modes: [].to_vec(),
+            enabled: true,
+            transport: RuntimeTransportKind::Acp,
+            commands: AgentCommandsInfo {
+                session: vec!["astra --acp".to_string()],
+                version: vec!["astra --version".to_string()],
+            },
+            ai_providers: vec![AgentAiProviderInfo {
+                id: "cc-switch".to_string(),
+                display_name: "CC Switch".to_string(),
+                provider: "openai".to_string(),
+                api: Some("openai-responses".to_string()),
+                base_url: Some("http://127.0.0.1:15721/v1".to_string()),
+                api_key: Some("ccs".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                models: vec![
+                    runtime_option("gpt-5.5", "GPT-5.5"),
+                    runtime_option("gpt-5.4", "GPT 5.4"),
+                ],
+                enabled: true,
+                order: 0,
+            }],
+        },
+        now,
+    )?;
     seed_builtin_agent(
         conn,
         Agent::Codex,
@@ -1299,6 +1331,7 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
                 session: vec!["npx -y @zed-industries/codex-acp@latest".to_string()],
                 version: vec!["codex --version".to_string()],
             },
+            ai_providers: vec![],
         },
         now,
     )?;
@@ -1333,6 +1366,7 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
                 session: vec!["npx -y @agentclientprotocol/claude-agent-acp@latest".to_string()],
                 version: vec!["claude --version".to_string()],
             },
+            ai_providers: vec![],
         },
         now,
     )?;
@@ -1356,8 +1390,22 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
                 session: vec!["npx -y -- @google/gemini-cli@latest --experimental-acp".to_string()],
                 version: vec!["gemini --version".to_string()],
             },
+            ai_providers: vec![],
         },
         now,
+    )?;
+    conn.execute(
+        "UPDATE agents SET display_name = ?, updated_at = ? WHERE id = ? AND display_name = ?",
+        params!["Astra Pi", now, Agent::AstraPi.as_str(), "Pi"],
+    )?;
+    conn.execute(
+        "UPDATE agents SET name = ?, updated_at = ? WHERE id = ? AND name = ?",
+        params!["Astra Pi", now, Agent::AstraPi.as_str(), "Pi"],
+    )?;
+    conn.execute(
+        "UPDATE agents SET ai_provider = ?, updated_at = ?
+         WHERE id = ? AND (ai_provider IS NULL OR trim(ai_provider) = '')",
+        params!["cc-switch", now, Agent::AstraPi.as_str()],
     )?;
     seed_builtin_assistants(conn, now)?;
     Ok(())
@@ -1385,6 +1433,7 @@ fn transport_kind_from_db(value: &str) -> RuntimeTransportKind {
 
 fn runtime_agent_name(agent: Agent) -> &'static str {
     match agent {
+        Agent::AstraPi => "Astra Pi",
         Agent::Codex => "Codex",
         Agent::Claude => "Claude",
         Agent::Gemini => "Gemini",
@@ -1393,6 +1442,7 @@ fn runtime_agent_name(agent: Agent) -> &'static str {
 
 fn runtime_agent_display_name(agent: Agent) -> &'static str {
     match agent {
+        Agent::AstraPi => "Astra Pi",
         Agent::Codex => "Codex CLI",
         Agent::Claude => "Claude Code",
         Agent::Gemini => "Gemini CLI",
@@ -1401,6 +1451,7 @@ fn runtime_agent_display_name(agent: Agent) -> &'static str {
 
 fn runtime_agent_order(agent: Agent) -> i64 {
     match agent {
+        Agent::AstraPi => 0,
         Agent::Codex => 1,
         Agent::Claude => 2,
         Agent::Gemini => 3,
@@ -4436,6 +4487,105 @@ impl SessionStore for SqliteStore {
         load_agents(&conn)
     }
 
+    fn get_astra_config(&self) -> Result<AstraConfig> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT planner_agent, planner_model, planner_effort, planner_permission_mode,
+                    decision_agent, decision_model, decision_effort, decision_permission_mode,
+                    default_model, default_effort, default_permission_mode,
+                    created_at, updated_at
+             FROM astra_config WHERE id = 1",
+        )?;
+        let config = stmt.query_row([], |row| {
+            Ok(AstraConfig {
+                planner_agent: row.get(0)?,
+                planner_model: row.get(1)?,
+                planner_effort: row.get(2)?,
+                planner_permission_mode: row.get(3)?,
+                decision_agent: row.get(4)?,
+                decision_model: row.get(5)?,
+                decision_effort: row.get(6)?,
+                decision_permission_mode: row.get(7)?,
+                default_model: row.get(8)?,
+                default_effort: row.get(9)?,
+                default_permission_mode: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })?;
+        Ok(config)
+    }
+
+    fn update_astra_config(&self, patch: AstraConfigPatch<'_>) -> Result<AstraConfig> {
+        let now = now_ms();
+
+        let mut updates = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(value) = patch.planner_agent {
+            updates.push("planner_agent = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.planner_model {
+            updates.push("planner_model = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.planner_effort {
+            updates.push("planner_effort = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.planner_permission_mode {
+            updates.push("planner_permission_mode = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.decision_agent {
+            updates.push("decision_agent = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.decision_model {
+            updates.push("decision_model = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.decision_effort {
+            updates.push("decision_effort = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.decision_permission_mode {
+            updates.push("decision_permission_mode = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.default_model {
+            updates.push("default_model = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.default_effort {
+            updates.push("default_effort = ?");
+            params.push(Box::new(value));
+        }
+        if let Some(value) = patch.default_permission_mode {
+            updates.push("default_permission_mode = ?");
+            params.push(Box::new(value));
+        }
+
+        if updates.is_empty() {
+            return self.get_astra_config();
+        }
+
+        updates.push("updated_at = ?");
+        params.push(Box::new(now));
+
+        let sql = format!(
+            "UPDATE astra_config SET {} WHERE id = 1",
+            updates.join(", ")
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(&sql, param_refs.as_slice())?;
+        drop(conn);
+
+        self.get_astra_config()
+    }
+
     fn update_agent_preferences_by_id(
         &self,
         agent_id: &str,
@@ -4481,7 +4631,6 @@ impl SessionStore for SqliteStore {
             None => serde_json::to_string(&current.ai_providers)?,
         };
         let trimmed_model = model.map(str::trim);
-        let clear_model = id == "astra" && matches!(trimmed_model, Some(""));
         let next_model = trimmed_model.filter(|value| !value.is_empty());
         let next_effort = effort.map(str::trim).filter(|value| !value.is_empty());
         let next_permission_mode = permission_mode
@@ -4499,14 +4648,13 @@ impl SessionStore for SqliteStore {
             Some(values) => serde_json::to_string(values)?,
             None => serde_json::to_string(&current.permission_modes)?,
         };
-        let next_enabled = if id == "astra" { Some(true) } else { enabled };
         let now = now_ms();
         conn.execute(
             "UPDATE agents
              SET display_name = COALESCE(?, display_name),
                  ai_provider = COALESCE(?, ai_provider),
                  ai_providers_json = ?,
-                 model = CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, model) END,
+                 model = COALESCE(?, model),
                  models_json = ?,
                  effort = COALESCE(?, effort),
                  efforts_json = ?,
@@ -4520,14 +4668,13 @@ impl SessionStore for SqliteStore {
                 next_display_name,
                 next_ai_provider.as_deref(),
                 next_ai_providers,
-                if clear_model { 1_i64 } else { 0_i64 },
                 next_model,
                 next_models,
                 next_effort,
                 next_efforts,
                 next_permission_mode,
                 next_permission_modes,
-                next_enabled.map(|value| if value { 1_i64 } else { 0_i64 }),
+                enabled.map(|value| if value { 1_i64 } else { 0_i64 }),
                 order,
                 now,
                 id,
@@ -8905,7 +9052,7 @@ mod migration_tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["astra", "codex", "claude", "gemini"]
+            vec!["astra-pi", "codex", "claude", "gemini"]
         );
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));
@@ -8920,8 +9067,9 @@ mod migration_tests {
             .efforts
             .iter()
             .any(|option| option.value == "xhigh"));
-        let astra_agent = agents.iter().find(|agent| agent.id == "astra").unwrap();
-        assert_eq!(astra_agent.transport, RuntimeTransportKind::Sidecar);
+        let astra_agent = agents.iter().find(|agent| agent.id == "astra-pi").unwrap();
+        assert_eq!(astra_agent.display_name, "Astra Pi");
+        assert_eq!(astra_agent.transport, RuntimeTransportKind::Acp);
         assert_eq!(astra_agent.ai_provider.as_deref(), Some("cc-switch"));
         assert_eq!(astra_agent.model.as_deref(), Some("gpt-5.5"));
         let astra_provider = astra_agent
@@ -8934,7 +9082,7 @@ mod migration_tests {
             astra_provider.base_url.as_deref(),
             Some("http://127.0.0.1:15721/v1")
         );
-        assert_eq!(astra_provider.api_key.as_deref(), Some("ccw"));
+        assert_eq!(astra_provider.api_key.as_deref(), Some("ccs"));
         assert_eq!(astra_provider.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
             astra_provider
@@ -8942,11 +9090,7 @@ mod migration_tests {
                 .iter()
                 .map(|option| (option.value.as_str(), option.display_name.as_str()))
                 .collect::<Vec<_>>(),
-            vec![
-                ("gpt-5.5", "GPT 5.5"),
-                ("gpt-5.4", "GPT 5.4"),
-                ("gpt-5.3-codex", "GPT 5.3 Codex"),
-            ]
+            vec![("gpt-5.5", "GPT-5.5"), ("gpt-5.4", "GPT 5.4"),]
         );
         let claude_agent = agents.iter().find(|agent| agent.id == "claude").unwrap();
         assert_eq!(
@@ -9688,21 +9832,66 @@ mod migration_tests {
     }
 
     #[test]
-    fn astra_preferences_can_clear_model_without_affecting_runtime_agents() {
-        let path = unique_db("astra-clear-model");
+    fn astra_config_update_returns_after_write() {
+        let path = unique_db("sessio-astra-config-update");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 
-        let astra = store
+        let cleanup_path = path.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = store.update_astra_config(AstraConfigPatch {
+                planner_agent: Some(Some("codex")),
+                planner_model: Some(Some("gpt-5.5")),
+                ..Default::default()
+            });
+            let _ = tx.send(result);
+        });
+
+        let updated = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("update_astra_config should not deadlock")
+            .unwrap();
+        assert_eq!(updated.planner_agent.as_deref(), Some("codex"));
+        assert_eq!(updated.planner_model.as_deref(), Some("gpt-5.5"));
+
+        let _ = std::fs::remove_file(&cleanup_path);
+    }
+
+    #[test]
+    fn astra_pi_agent_display_name_is_explicit() {
+        let path = unique_db("sessio-astra-pi-display-name");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let astra_pi = store
+            .list_agents()
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.id == Agent::AstraPi.as_str())
+            .unwrap();
+        assert_eq!(astra_pi.name, "Astra Pi");
+        assert_eq!(astra_pi.display_name, "Astra Pi");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn runtime_agent_empty_model_patch_keeps_current_model() {
+        let path = unique_db("runtime-empty-model");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let astra_pi = store
             .update_agent_preferences_by_id(
-                "astra",
+                Agent::AstraPi.as_str(),
                 AgentPreferencesPatch {
                     model: Some(""),
                     ..Default::default()
                 },
             )
             .unwrap();
-        assert_eq!(astra.model, None);
+        assert_eq!(astra_pi.model.as_deref(), Some("gpt-5.5"));
 
         let codex = store
             .update_builtin_agent_preferences(
@@ -9728,7 +9917,7 @@ mod migration_tests {
             .list_agents()
             .unwrap()
             .into_iter()
-            .find(|agent| agent.id == "astra")
+            .find(|agent| agent.id == Agent::AstraPi.as_str())
             .unwrap()
             .ai_providers;
         providers.push(AgentAiProviderInfo {
@@ -9746,7 +9935,7 @@ mod migration_tests {
 
         let astra = store
             .update_agent_preferences_by_id(
-                "astra",
+                Agent::AstraPi.as_str(),
                 AgentPreferencesPatch {
                     ai_provider: Some(""),
                     ai_providers: Some(&providers),

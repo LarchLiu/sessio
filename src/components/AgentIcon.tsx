@@ -3,6 +3,7 @@ import { Claude, Gemini, OpenAI } from "@lobehub/icons";
 import { AGENT_ACCENT, type Agent } from "../api";
 
 const AGENT_ICON: Record<Agent, ComponentType<{ className?: string; style?: CSSProperties }>> = {
+  "astra-pi": OpenAI,
   codex: OpenAI,
   claude: Claude.Color,
   gemini: Gemini.Color,

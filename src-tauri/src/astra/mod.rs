@@ -154,6 +154,10 @@ fn bundled_pi_config() -> Option<AstraPiConfig> {
     })
 }
 
+pub fn bundled_pi_acp_command() -> Option<String> {
+    bundled_pi_command()
+}
+
 fn astra_session_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -248,19 +252,25 @@ fn astra_binary_name() -> &'static str {
     }
 }
 
-fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraBackendConfig {
-    match store.list_agents() {
-        Ok(agents) => {
-            let astra_agent = agents.iter().find(|agent| agent.id == "astra");
-            let provider_config = astra_agent
-                .map(|agent| astra_provider_config_from_agent(agent.clone()))
-                .unwrap_or_default();
+fn load_astra_backend_config(store: &dyn SessionStore) -> AstraBackendConfig {
+    // Load from astra_config table
+    match store.get_astra_config() {
+        Ok(config) => {
+            let planner_agent = config.planner_agent.as_deref().and_then(Agent::from_db_str);
+            let decision_agent = config
+                .decision_agent
+                .as_deref()
+                .and_then(Agent::from_db_str);
 
-            // Check for planner_agent and decision_agent metadata
-            let planner_agent = astra_agent
-                .and_then(|agent| extract_agent_from_metadata(&agent, "plannerAgent"));
-            let decision_agent = astra_agent
-                .and_then(|agent| extract_agent_from_metadata(&agent, "decisionAgent"));
+            // Astra Pi is the runtime agent backing the bundled Pi provider config.
+            let provider_config = match store.list_agents() {
+                Ok(agents) => agents
+                    .iter()
+                    .find(|agent| agent.id == Agent::AstraPi.as_str())
+                    .map(|agent| astra_provider_config_from_agent(agent.clone()))
+                    .unwrap_or_default(),
+                Err(_) => AstraPiProviderConfig::default(),
+            };
 
             AstraBackendConfig {
                 planner_agent,
@@ -269,7 +279,7 @@ fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraBackendConfig 
             }
         }
         Err(error) => {
-            log::warn!("[astra:preferences] failed to load Astra preferences: {error}");
+            log::warn!("[astra:config] failed to load Astra config: {error}");
             AstraBackendConfig {
                 planner_agent: None,
                 decision_agent: None,
@@ -279,10 +289,8 @@ fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraBackendConfig 
     }
 }
 
-fn extract_agent_from_metadata(_agent: &AgentInfo, _key: &str) -> Option<Agent> {
-    // This would extract agent selection from metadata/settings
-    // For now, return None to use default behavior
-    None
+fn load_astra_agent_preferences(store: &dyn SessionStore) -> AstraBackendConfig {
+    load_astra_backend_config(store)
 }
 
 fn astra_provider_config_from_agent(agent: AgentInfo) -> AstraPiProviderConfig {
@@ -337,24 +345,27 @@ impl AstraService {
     }
 
     pub fn update_astra_preferences_cache(&self, agent: AgentInfo) {
+        // Only update provider config from agent, planner/decision come from astra_config table
         let provider_config = astra_provider_config_from_agent(agent.clone());
-        let planner_agent = extract_agent_from_metadata(&agent, "plannerAgent");
-        let decision_agent = extract_agent_from_metadata(&agent, "decisionAgent");
-
-        let next_preferences = AstraBackendConfig {
-            planner_agent,
-            decision_agent,
-            provider_config: provider_config.clone(),
-        };
 
         match self.inner.astra_preferences.lock() {
             Ok(mut preferences) => {
-                *preferences = next_preferences;
+                preferences.provider_config = provider_config.clone();
             }
             Err(_) => log::warn!("[astra:preferences] cache lock poisoned"),
         }
         if let Some(config) = self.inner.pi_config.as_ref() {
             sync_pi_agent_config(config, &provider_config);
+        }
+    }
+
+    pub fn reload_config(&self) {
+        let config = load_astra_backend_config(self.inner.store.as_ref());
+        match self.inner.astra_preferences.lock() {
+            Ok(mut preferences) => {
+                *preferences = config;
+            }
+            Err(_) => log::warn!("[astra:preferences] reload config lock poisoned"),
         }
     }
 
@@ -2187,9 +2198,9 @@ mod tests {
     #[test]
     fn astra_provider_config_uses_selected_db_provider() {
         let agent = AgentInfo {
-            id: "astra".to_string(),
-            name: "Astra".to_string(),
-            display_name: "Astra".to_string(),
+            id: Agent::AstraPi.as_str().to_string(),
+            name: "Astra Pi".to_string(),
+            display_name: "Astra Pi".to_string(),
             icon: None,
             ai_provider: Some("switch".to_string()),
             ai_providers: vec![

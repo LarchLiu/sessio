@@ -27,7 +27,6 @@ pub struct AcpCanonicalSessionState {
     pub session_info: Option<AcpSessionInfo>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpPlan {
@@ -2572,7 +2571,8 @@ fn basename_from_uri(uri: &str) -> Option<String> {
         return None;
     }
     let path = uri.strip_prefix("file://").unwrap_or(uri);
-    path.split(['/', '\\']).rfind(|part| !part.is_empty())
+    path.split(['/', '\\'])
+        .rfind(|part| !part.is_empty())
         .map(ToString::to_string)
 }
 
@@ -3147,7 +3147,7 @@ mod tests {
                 raw: json!({ "source": "permission" }),
                 timestamp: Some(40),
             })[0]
-            .clone(),
+                .clone(),
             history_session_update_message(
                 "file_edit",
                 json!({

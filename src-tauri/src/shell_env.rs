@@ -104,7 +104,12 @@ fn load_windows_shell_env() -> Result<BTreeMap<String, String>> {
 #[cfg(windows)]
 fn append_windows_tool_dirs(path: &mut String) {
     let mut dirs = Vec::new();
-    for key in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "APPDATA"] {
+    for key in [
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+        "APPDATA",
+    ] {
         if let Ok(root) = std::env::var(key) {
             match key {
                 "ProgramFiles" | "ProgramFiles(x86)" => {
@@ -188,7 +193,11 @@ fn merge_path_from_shell(shell_path: &str) -> bool {
 }
 
 fn merged_path(shell_path: &str, current_path: Option<&str>) -> Option<String> {
-    merged_path_with_separator(shell_path, current_path, if cfg!(windows) { ';' } else { ':' })
+    merged_path_with_separator(
+        shell_path,
+        current_path,
+        if cfg!(windows) { ';' } else { ':' },
+    )
 }
 
 fn merged_path_with_separator(

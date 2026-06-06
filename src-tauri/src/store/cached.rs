@@ -3,14 +3,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, IssueSeverity, IssueStatus, KanbanItem,
-    KanbanStatus, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo,
-    StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
+    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
 };
 use crate::store::{
-    AgentPreferencesPatch, AstraRunRecord, IndexedSessionRecord, IndexedSubagentRecord,
-    NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
-    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
+    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
+    IndexedSubagentRecord, NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord,
+    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
+    ThreadWorkSnapshotRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -211,6 +212,14 @@ impl SessionStore for CachedStore {
 
     fn list_agents(&self) -> Result<Vec<AgentInfo>> {
         self.inner.list_agents()
+    }
+
+    fn get_astra_config(&self) -> Result<AstraConfig> {
+        self.inner.get_astra_config()
+    }
+
+    fn update_astra_config(&self, patch: AstraConfigPatch<'_>) -> Result<AstraConfig> {
+        self.inner.update_astra_config(patch)
     }
 
     fn update_agent_preferences_by_id(

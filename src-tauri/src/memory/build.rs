@@ -924,7 +924,8 @@ mod tests {
             location: SourceLocation::file(source.file_path.clone()),
             metadata: Metadata::default(),
         };
-        let replay = [(
+        let replay = [
+            (
                 MessageRole::User,
                 "Explain turn fingerprints in this project",
             ),
@@ -944,7 +945,8 @@ mod tests {
             (
                 MessageRole::Assistant,
                 "It should compare ordered event sequences",
-            )];
+            ),
+        ];
         let existing_events = replay
             .iter()
             .enumerate()
@@ -1192,13 +1194,15 @@ mod tests {
             metadata: Metadata::default(),
         };
 
-        let replay = [(MessageRole::User, "shared opening request".to_string()),
+        let replay = [
+            (MessageRole::User, "shared opening request".to_string()),
             (MessageRole::Assistant, "shared opening answer".to_string()),
             (MessageRole::User, "shared follow-up".to_string()),
             (
                 MessageRole::Assistant,
                 "shared follow-up answer".to_string(),
-            )];
+            ),
+        ];
 
         let mut later_events = replay
             .iter()
@@ -1473,10 +1477,12 @@ mod tests {
         // Existing session: 4 turns. Continuation session: same 4 turns
         // + a trailing assistant turn (no further user block). All "new"
         // content is just an assistant tail with no follow-up question.
-        let replay = [(MessageRole::User, "shared opening request"),
+        let replay = [
+            (MessageRole::User, "shared opening request"),
             (MessageRole::Assistant, "shared opening answer"),
             (MessageRole::User, "shared follow-up"),
-            (MessageRole::Assistant, "shared follow-up answer")];
+            (MessageRole::Assistant, "shared follow-up answer"),
+        ];
         let existing_events = replay
             .iter()
             .enumerate()
@@ -1643,10 +1649,12 @@ mod tests {
             metadata: Metadata::default(),
         };
 
-        let replay = [(MessageRole::User, "shared codex opening request"),
+        let replay = [
+            (MessageRole::User, "shared codex opening request"),
             (MessageRole::Assistant, "shared codex opening answer"),
             (MessageRole::User, "shared codex follow-up"),
-            (MessageRole::Assistant, "shared codex follow-up answer")];
+            (MessageRole::Assistant, "shared codex follow-up answer"),
+        ];
         let earlier_events = replay
             .iter()
             .enumerate()
@@ -1746,7 +1754,8 @@ mod tests {
             metadata: Metadata::default(),
         };
 
-        let replay = [(MessageRole::User, "shared opening request for base reindex"),
+        let replay = [
+            (MessageRole::User, "shared opening request for base reindex"),
             (
                 MessageRole::Assistant,
                 "shared opening answer for base reindex",
@@ -1760,7 +1769,8 @@ mod tests {
             (
                 MessageRole::Assistant,
                 "shared third answer for base reindex",
-            )];
+            ),
+        ];
         let base_events = replay
             .iter()
             .enumerate()
@@ -1902,12 +1912,14 @@ mod tests {
             metadata: Metadata::default(),
         };
 
-        let a_turns = [(MessageRole::User, "chain shared opening request"),
+        let a_turns = [
+            (MessageRole::User, "chain shared opening request"),
             (MessageRole::Assistant, "chain shared opening answer"),
             (MessageRole::User, "chain shared follow-up"),
             (MessageRole::Assistant, "chain shared follow-up answer"),
             (MessageRole::User, "chain third shared request"),
-            (MessageRole::Assistant, "chain third shared answer")];
+            (MessageRole::Assistant, "chain third shared answer"),
+        ];
         let a_events = a_turns
             .iter()
             .enumerate()

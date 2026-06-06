@@ -28,7 +28,8 @@ pub fn file_name_from_uri(uri: &str) -> Option<String> {
     let raw = uri.strip_prefix("file://").unwrap_or(uri);
     let decoded = percent_decode(raw);
     decoded
-        .split(['/', '\\']).rfind(|part| !part.is_empty())
+        .split(['/', '\\'])
+        .rfind(|part| !part.is_empty())
         .map(String::from)
 }
 

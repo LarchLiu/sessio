@@ -8,6 +8,8 @@ const SESSIO_ATTACHMENT_MARKER: &str = "__sessio_attachment__:";
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
+    #[serde(rename = "astra-pi")]
+    AstraPi,
     Codex,
     Claude,
     Gemini,
@@ -16,6 +18,7 @@ pub enum Agent {
 impl Agent {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Agent::AstraPi => "astra-pi",
             Agent::Codex => "codex",
             Agent::Claude => "claude",
             Agent::Gemini => "gemini",
@@ -24,6 +27,7 @@ impl Agent {
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
+            "astra-pi" => Some(Agent::AstraPi),
             "codex" => Some(Agent::Codex),
             "claude" => Some(Agent::Claude),
             "gemini" => Some(Agent::Gemini),
@@ -167,6 +171,24 @@ pub struct AgentInfo {
     pub transport: RuntimeTransportKind,
     pub commands: AgentCommandsInfo,
     pub order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AstraConfig {
+    pub planner_agent: Option<String>,
+    pub planner_model: Option<String>,
+    pub planner_effort: Option<String>,
+    pub planner_permission_mode: Option<String>,
+    pub decision_agent: Option<String>,
+    pub decision_model: Option<String>,
+    pub decision_effort: Option<String>,
+    pub decision_permission_mode: Option<String>,
+    pub default_model: Option<String>,
+    pub default_effort: Option<String>,
+    pub default_permission_mode: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

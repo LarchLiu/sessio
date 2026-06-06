@@ -4,11 +4,13 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    next_dispatchable_tasks, thread_all_stages_terminal, thread_waiting_for_review, AstraDecision,
-    AstraRun, AstraRunStatus, AstraService, AstraBackendConfig, ASTRA_PI_TIMEOUT_MS,
+    next_dispatchable_tasks, thread_all_stages_terminal, thread_waiting_for_review,
+    AstraBackendConfig, AstraDecision, AstraRun, AstraRunStatus, AstraService, ASTRA_PI_TIMEOUT_MS,
 };
 use crate::astra::backend::{BackendFailure, DecisionBackend, PlannerBackend};
-use crate::astra::deterministic_backend::{DeterministicDecisionBackend, DeterministicPlannerBackend};
+use crate::astra::deterministic_backend::{
+    DeterministicDecisionBackend, DeterministicPlannerBackend,
+};
 use crate::astra::pi_acp_adapter::{PiAcpDecisionEngine, PiAcpPlanner};
 use crate::astra::runtime_agent_backend::{
     RuntimeAgentBackendConfig, RuntimeAgentDecisionEngine, RuntimeAgentPlanner,
@@ -276,10 +278,8 @@ impl AstraService {
         thread: &crate::models::ThreadInfo,
         prompt: Option<&str>,
         round_index: u32,
-    ) -> std::result::Result<
-        (super::AstraPlan, String, Option<serde_json::Value>),
-        BackendFailure,
-    > {
+    ) -> std::result::Result<(super::AstraPlan, String, Option<serde_json::Value>), BackendFailure>
+    {
         let backend_config = self.astra_backend_config();
         let planner_backend: Box<dyn PlannerBackend> = self.create_planner_backend(&backend_config);
         let config_value = json!(backend_config.provider_config);
@@ -323,7 +323,11 @@ impl AstraService {
                 // Fallback to deterministic
                 let deterministic = DeterministicPlannerBackend;
                 match deterministic.plan(run, thread, prompt, round_index, &json!({})) {
-                    Ok(response) => Ok((response.data, response.backend_type, Some(fallback_diagnostic))),
+                    Ok(response) => Ok((
+                        response.data,
+                        response.backend_type,
+                        Some(fallback_diagnostic),
+                    )),
                     Err(err) => Err(err), // Should never happen for deterministic
                 }
             }
@@ -333,7 +337,10 @@ impl AstraService {
     fn create_planner_backend(&self, config: &AstraBackendConfig) -> Box<dyn PlannerBackend> {
         // If a specific planner agent is configured, use RuntimeAgentPlanner
         if let Some(agent) = config.planner_agent {
-            log::info!("[astra:planner:backend] using runtime_agent backend with agent={}", agent.as_str());
+            log::info!(
+                "[astra:planner:backend] using runtime_agent backend with agent={}",
+                agent.as_str()
+            );
             let runtime_config = RuntimeAgentBackendConfig {
                 agent,
                 timeout_ms: ASTRA_PI_TIMEOUT_MS,
@@ -366,7 +373,8 @@ impl AstraService {
     ) -> std::result::Result<(AstraDecision, String, Option<serde_json::Value>), BackendFailure>
     {
         let backend_config = self.astra_backend_config();
-        let decision_backend: Box<dyn DecisionBackend> = self.create_decision_backend(&backend_config);
+        let decision_backend: Box<dyn DecisionBackend> =
+            self.create_decision_backend(&backend_config);
         let config_value = json!(backend_config.provider_config);
 
         match decision_backend.decide(run, thread, result, task, &config_value) {
@@ -411,7 +419,11 @@ impl AstraService {
                 // Fallback to deterministic
                 let deterministic = DeterministicDecisionBackend;
                 match deterministic.decide(run, thread, result, task, &json!({})) {
-                    Ok(response) => Ok((response.data, response.backend_type, Some(fallback_diagnostic))),
+                    Ok(response) => Ok((
+                        response.data,
+                        response.backend_type,
+                        Some(fallback_diagnostic),
+                    )),
                     Err(err) => Err(err), // Should never happen for deterministic
                 }
             }
@@ -421,7 +433,10 @@ impl AstraService {
     fn create_decision_backend(&self, config: &AstraBackendConfig) -> Box<dyn DecisionBackend> {
         // If a specific decision agent is configured, use RuntimeAgentDecisionEngine
         if let Some(agent) = config.decision_agent {
-            log::info!("[astra:decision:backend] using runtime_agent backend with agent={}", agent.as_str());
+            log::info!(
+                "[astra:decision:backend] using runtime_agent backend with agent={}",
+                agent.as_str()
+            );
             let runtime_config = RuntimeAgentBackendConfig {
                 agent,
                 timeout_ms: ASTRA_PI_TIMEOUT_MS,

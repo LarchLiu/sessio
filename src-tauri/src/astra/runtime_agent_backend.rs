@@ -113,13 +113,7 @@ impl DecisionBackend for RuntimeAgentDecisionEngine {
     ) -> Result<BackendResponse<AstraDecision>, BackendFailure> {
         let prompt = build_decision_prompt(thread, result, task);
 
-        match execute_agent_session(
-            &self.runtime,
-            &self.config,
-            "",
-            &prompt,
-            "decision",
-        ) {
+        match execute_agent_session(&self.runtime, &self.config, "", &prompt, "decision") {
             Ok((text, session_id)) => {
                 match parse_pi_decision_response(&text, thread, result, task) {
                     Ok(decision) => Ok(BackendResponse {
@@ -157,7 +151,10 @@ fn execute_agent_session(
 ) -> Result<(String, String), BackendFailure> {
     let mut options = RuntimeMetadata::default();
     options.insert("astraInternal".to_string(), Value::Bool(true));
-    options.insert("astraPurpose".to_string(), Value::String(purpose.to_string()));
+    options.insert(
+        "astraPurpose".to_string(),
+        Value::String(purpose.to_string()),
+    );
 
     if let Some(model) = &config.model {
         options.insert("model".to_string(), Value::String(model.clone()));
@@ -175,30 +172,26 @@ fn execute_agent_session(
         options,
     };
 
-    let handle = runtime
-        .start_session(req)
-        .map_err(|error| {
-            BackendFailure::new(
-                format!("runtime_agent_{}", config.agent.as_str()),
-                "transport_failure",
-                error.to_string(),
-            )
-        })?;
+    let handle = runtime.start_session(req).map_err(|error| {
+        BackendFailure::new(
+            format!("runtime_agent_{}", config.agent.as_str()),
+            "transport_failure",
+            error.to_string(),
+        )
+    })?;
 
     let session_id = handle.sessio_runtime_session_id.clone();
     let text = Arc::new(Mutex::new(String::new()));
     let text_for_events = text.clone();
 
     // Subscribe to events to collect text
-    let receiver = runtime
-        .subscribe_events()
-        .map_err(|error| {
-            BackendFailure::new(
-                format!("runtime_agent_{}", config.agent.as_str()),
-                "transport_failure",
-                error.to_string(),
-            )
-        })?;
+    let receiver = runtime.subscribe_events().map_err(|error| {
+        BackendFailure::new(
+            format!("runtime_agent_{}", config.agent.as_str()),
+            "transport_failure",
+            error.to_string(),
+        )
+    })?;
 
     let session_id_for_filter = session_id.clone();
     std::thread::spawn(move || {
@@ -239,10 +232,7 @@ fn execute_agent_session(
     // Wait for completion with timeout
     std::thread::sleep(Duration::from_millis(config.timeout_ms));
 
-    let output = text
-        .lock()
-        .map(|buffer| buffer.clone())
-        .unwrap_or_default();
+    let output = text.lock().map(|buffer| buffer.clone()).unwrap_or_default();
 
     // Clean up session
     let _ = runtime.dispose_session_silent(&session_id);
