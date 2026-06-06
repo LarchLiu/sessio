@@ -21,7 +21,7 @@ use super::{
 };
 use crate::astra::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
 use crate::astra::prompt::build_astra_orchestration_prompt;
-use crate::models::{Agent, IssueSeverity, StageStatus, ThreadInfo};
+use crate::models::{Agent, IssueSeverity, IssueStatus, StageStatus, ThreadInfo};
 
 #[derive(Debug, Clone)]
 pub(super) struct AstraPiAcpConfig {
@@ -825,6 +825,53 @@ fn apply_decision_to_projected_thread(thread: &mut ThreadInfo, decision: &AstraD
                 apply_decision_to_projected_thread(thread, decision);
             }
         }
+        AstraDecision::AddOrUpdateIssue { args } => {
+            let Some(stage_id) = args
+                .get("threadStageId")
+                .or_else(|| args.get("stageId"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let Some(stage) = thread.stages.iter_mut().find(|stage| stage.id == stage_id) else {
+                return;
+            };
+            let issue_id = args
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let title = args
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let status = args
+                .get("status")
+                .and_then(Value::as_str)
+                .and_then(IssueStatus::from_db_str)
+                .unwrap_or(IssueStatus::Open);
+            let Some(issue) = stage.issues.iter_mut().find(|issue| {
+                issue_id.is_some_and(|id| issue.id == id)
+                    || title.is_some_and(|title| issue.title.eq_ignore_ascii_case(title))
+            }) else {
+                return;
+            };
+            issue.status = status;
+            if let Some(severity) = args
+                .get("severity")
+                .and_then(Value::as_str)
+                .and_then(IssueSeverity::from_db_str)
+            {
+                issue.severity = severity;
+            }
+            if let Some(title) = title {
+                issue.title = title.to_string();
+            }
+            if let Some(description) = args.get("description").and_then(Value::as_str) {
+                issue.description = Some(description.to_string());
+            }
+        }
         _ => {}
     }
 }
@@ -1187,24 +1234,29 @@ fn issue_decision_args(
     }
     object.insert("taskId".to_string(), Value::String(task.id.clone()));
     object.insert("threadStageId".to_string(), Value::String(stage_id));
-    if !object.contains_key("title") {
+    let has_issue_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !object.contains_key("title") && !has_issue_id {
         object.insert(
             "title".to_string(),
             Value::String(format!("Astra follow-up: {}", task.title)),
         );
     }
-    if !object.contains_key("description") {
+    if !object.contains_key("description") && !has_issue_id {
         object.insert(
             "description".to_string(),
             Value::String(fallback_summary.to_string()),
         );
     }
-    if !object.contains_key("severity") {
+    if !object.contains_key("severity") && !has_issue_id {
         object.insert(
             "severity".to_string(),
             Value::String(IssueSeverity::High.as_str().to_string()),
         );
-    } else {
+    } else if object.contains_key("severity") {
         let severity = object
             .get("severity")
             .and_then(Value::as_str)
@@ -1215,6 +1267,25 @@ fn issue_decision_args(
             return Err(AstraPiAcpFailure::new(
                 "validation_failed",
                 format!("unknown issue severity: {severity}"),
+            ));
+        }
+    }
+    if !object.contains_key("status") {
+        object.insert(
+            "status".to_string(),
+            Value::String(IssueStatus::Open.as_str().to_string()),
+        );
+    } else {
+        let status = object
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AstraPiAcpFailure::new("validation_failed", "issue status must be a string")
+            })?;
+        if IssueStatus::from_db_str(status).is_none() {
+            return Err(AstraPiAcpFailure::new(
+                "validation_failed",
+                format!("unknown issue status: {status}"),
             ));
         }
     }
@@ -1625,6 +1696,61 @@ mod tests {
             Some("stage-2")
         );
         match &orchestration.decisions[0].decision {
+            AstraDecision::UpdateStage { args } => {
+                assert_eq!(args["threadStageId"], "stage-1");
+                assert_eq!(args["status"], "completed");
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_issue_status_decision_for_existing_issue() {
+        let task = AstraTaskProposal {
+            id: "task-1".to_string(),
+            title: "Task".to_string(),
+            target_stage_id: Some("stage-1".to_string()),
+            target_agent: Agent::Codex,
+            prompt: "Work".to_string(),
+            expected_output: "Notes".to_string(),
+            risk: AstraTaskRisk::Low,
+        };
+        let result = AstraTaskResult {
+            task_id: "task-1".to_string(),
+            thread_stage_id: Some("stage-1".to_string()),
+            sessio_runtime_session_id: "runtime-1".to_string(),
+            turn_id: None,
+            status: super::super::AstraTaskResultStatus::Completed,
+            output: "resolved".to_string(),
+            error: None,
+            attempt_count: 1,
+            retry_limit_reached: false,
+            decision_action: None,
+            decision_reason: None,
+            completed_at: 1,
+        };
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"resolved","decisions":[{"taskId":"task-1","decision":{"action":"add_or_update_issue","issue":{"id":"issue-1","threadStageId":"stage-1","status":"resolved"},"reason":"fixed"}},{"taskId":"task-1","decision":{"action":"update_stage","stage":{"status":"completed"},"reason":"done"}}],"tasks":[]}"#,
+            &run(),
+            &thread(),
+            1,
+            &[AstraTaskCompletion { task, result }],
+        )
+        .unwrap();
+
+        assert_eq!(orchestration.decisions.len(), 2);
+        match &orchestration.decisions[0].decision {
+            AstraDecision::AddOrUpdateIssue { args } => {
+                assert_eq!(args["id"], "issue-1");
+                assert_eq!(args["threadStageId"], "stage-1");
+                assert_eq!(args["status"], "resolved");
+                assert!(args.get("title").is_none());
+                assert!(args.get("severity").is_none());
+            }
+            other => panic!("unexpected decision: {other:?}"),
+        }
+        match &orchestration.decisions[1].decision {
             AstraDecision::UpdateStage { args } => {
                 assert_eq!(args["threadStageId"], "stage-1");
                 assert_eq!(args["status"], "completed");

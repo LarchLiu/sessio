@@ -302,16 +302,19 @@ function ThreadAstraPanel({
 
         {taskHistory.length > 0 && (
           <div className="grid gap-2">
-            {taskHistory.map(({ run, task }) => (
-              <AstraTaskCard
-                key={`${run.runId}:${task.id}`}
-                run={run}
-                task={task}
-                runningTaskIds={runningTaskIds[run.runId] ?? (run.currentTaskId ? [run.currentTaskId] : [])}
-                result={run.taskResults.find((result) => result.taskId === task.id) ?? null}
-                stage={stages.find((stage) => stage.id === task.targetStageId) ?? null}
-              />
-            ))}
+            {taskHistory.map(({ run, task }) => {
+              const taskRunningIds = astraRunningTaskIds(run, runningTaskIds[run.runId] ?? []);
+              return (
+                <AstraTaskCard
+                  key={`${run.runId}:${task.id}`}
+                  run={run}
+                  task={task}
+                  runningTaskIds={taskRunningIds}
+                  result={run.taskResults.find((result) => result.taskId === task.id) ?? null}
+                  stage={stages.find((stage) => stage.id === task.targetStageId) ?? null}
+                />
+              );
+            })}
           </div>
         )}
 
@@ -856,6 +859,17 @@ function upsertRun(runs: AstraHandle[], run: AstraHandle): AstraHandle[] {
     ? runs.map((item) => item.runId === run.runId ? run : item)
     : [run, ...runs];
   return next.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function astraRunningTaskIds(run: AstraHandle, liveRunningTaskIds: string[]): string[] {
+  if (!isAstraActive(run.status)) return [];
+  const finishedTaskIds = new Set(run.taskResults.map((result) => result.taskId));
+  const ids = new Set(liveRunningTaskIds);
+  if (run.currentTaskId) ids.add(run.currentTaskId);
+  for (const taskId of run.approvedTaskIds) {
+    if (!finishedTaskIds.has(taskId)) ids.add(taskId);
+  }
+  return Array.from(ids).filter((taskId) => !finishedTaskIds.has(taskId));
 }
 
 function formatAstraStatus(status: AstraRunStatus): string {

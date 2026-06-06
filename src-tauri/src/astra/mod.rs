@@ -782,6 +782,7 @@ impl AstraService {
         }
 
         let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
+        let approved_task_ids = task_ids.clone();
         let stage_id_for_run = stage_id.clone();
         let (next, decision) = self.mutate_run(&run.run_id, move |next| {
             if !next.status.active() {
@@ -790,6 +791,11 @@ impl AstraService {
 
             next.status = AstraRunStatus::Running;
             next.current_stage_id = stage_id_for_run.clone();
+            for task_id in &approved_task_ids {
+                if !next.approved_task_ids.iter().any(|id| id == task_id) {
+                    next.approved_task_ids.push(task_id.clone());
+                }
+            }
             let prior_attempt_count = stage_id_for_run
                 .as_ref()
                 .map(|id| *next.stage_attempt_counts.entry(id.clone()).or_insert(0))
@@ -1513,45 +1519,7 @@ impl AstraService {
     }
 
     fn add_or_update_issue(&self, run: &AstraRun, args: &Value) -> Result<StageIssueInfo> {
-        let stage_id = args
-            .get("threadStageId")
-            .or_else(|| args.get("stageId"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("threadStageId is required"))?;
-        let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-        let stage_id = resolve_thread_stage_id(&thread, stage_id)?;
-        let title = args
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("issue title is required"))?;
-        let description = args.get("description").and_then(Value::as_str);
-        let severity = args
-            .get("severity")
-            .and_then(Value::as_str)
-            .map(parse_issue_severity)
-            .transpose()?
-            .unwrap_or(IssueSeverity::Medium);
-        let existing = self
-            .inner
-            .store
-            .list_thread_stage_issues(&stage_id)?
-            .into_iter()
-            .find(|issue| issue.title.eq_ignore_ascii_case(title));
-        if let Some(existing) = existing {
-            self.inner.store.update_thread_stage_issue(
-                &existing.id,
-                Some(title),
-                Some(description),
-                Some(IssueStatus::Open),
-                Some(severity),
-            )
-        } else {
-            self.inner
-                .store
-                .create_thread_stage_issue(&stage_id, title, description, severity)
-        }
+        add_or_update_issue_in_store(self.inner.store.as_ref(), &run.thread_id, args)
     }
 
     fn update_active_terminal_status(
@@ -2317,6 +2285,79 @@ fn parse_stage_status(value: &str) -> Result<StageStatus> {
 fn parse_issue_severity(value: &str) -> Result<IssueSeverity> {
     IssueSeverity::from_db_str(value)
         .ok_or_else(|| anyhow::anyhow!("unknown issue severity: {value}"))
+}
+
+fn parse_issue_status(value: &str) -> Result<IssueStatus> {
+    IssueStatus::from_db_str(value).ok_or_else(|| anyhow::anyhow!("unknown issue status: {value}"))
+}
+
+fn add_or_update_issue_in_store(
+    store: &dyn SessionStore,
+    thread_id: &str,
+    args: &Value,
+) -> Result<StageIssueInfo> {
+    let stage_id = args
+        .get("threadStageId")
+        .or_else(|| args.get("stageId"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("threadStageId is required"))?;
+    let thread = store.get_thread_work_state(thread_id)?;
+    let stage_id = resolve_thread_stage_id(&thread, stage_id)?;
+    let issue_id = args
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let title = args
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if title.is_none() && issue_id.is_none() {
+        bail!("issue title or id is required");
+    }
+    let description = args.get("description").and_then(Value::as_str);
+    let has_description = args.get("description").is_some();
+    let severity = args
+        .get("severity")
+        .and_then(Value::as_str)
+        .map(parse_issue_severity)
+        .transpose()?;
+    let status = args
+        .get("status")
+        .and_then(Value::as_str)
+        .map(parse_issue_status)
+        .transpose()?
+        .unwrap_or(IssueStatus::Open);
+    let existing = store
+        .list_thread_stage_issues(&stage_id)?
+        .into_iter()
+        .find(|issue| {
+            issue_id.is_some_and(|id| issue.id == id)
+                || title.is_some_and(|title| issue.title.eq_ignore_ascii_case(title))
+        });
+    if let Some(existing) = existing {
+        store.update_thread_stage_issue(
+            &existing.id,
+            title,
+            has_description.then_some(description),
+            Some(status),
+            severity,
+        )
+    } else {
+        let title = title.ok_or_else(|| anyhow::anyhow!("issue title is required"))?;
+        let created = store.create_thread_stage_issue(
+            &stage_id,
+            title,
+            description,
+            severity.unwrap_or(IssueSeverity::Medium),
+        )?;
+        if status == IssueStatus::Open {
+            Ok(created)
+        } else {
+            store.update_thread_stage_issue(&created.id, None, None, Some(status), None)
+        }
+    }
 }
 
 fn stable_run_id(thread_id: &str, now: i64) -> String {
@@ -3696,6 +3737,83 @@ mod tests {
         assert_eq!(updated.summary.as_deref(), Some("Done"));
         assert_eq!(updated.outcome.as_deref(), Some("Verified"));
         assert_eq!(next.completed_task_ids, vec!["task-1"]);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    #[test]
+    fn issue_status_decision_resolves_existing_issue() {
+        let db_path = std::env::temp_dir().join(format!(
+            "astra-issue-decision-store-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "astra-issue-decision-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Issue Decision Store",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let stage_option = store
+            .create_project_stage(&project.id, None, "Research", None, None)
+            .unwrap();
+        store
+            .update_project_stage(
+                &stage_option.id,
+                crate::store::ProjectStagePatch {
+                    allow_empty_assistants: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Resolve Astra issue", None)
+            .unwrap();
+        let stage = store
+            .add_thread_stage(&thread.id, &stage_option.id, &[])
+            .unwrap();
+        let issue = store
+            .create_thread_stage_issue(
+                &stage.id,
+                "Need source verification",
+                Some("Search missed citations."),
+                IssueSeverity::High,
+            )
+            .unwrap();
+
+        let updated = add_or_update_issue_in_store(
+            &store,
+            &thread.id,
+            &json!({
+                "taskId": "task-1",
+                "id": issue.id,
+                "threadStageId": stage.id,
+                "status": "resolved",
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(updated.status, IssueStatus::Resolved);
+        assert_eq!(updated.title, "Need source verification");
+        assert_eq!(
+            updated.description.as_deref(),
+            Some("Search missed citations.")
+        );
+        assert_eq!(updated.severity, IssueSeverity::High);
+
+        let issues = store.list_thread_stage_issues(&stage.id).unwrap();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].status, IssueStatus::Resolved);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));

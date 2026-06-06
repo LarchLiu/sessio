@@ -17,11 +17,12 @@ Required top-level response:
   "tasks": []
 }
 
-For each completedTasks item, include exactly one decisions item:
+For each completedTasks item, include at least one decisions item:
 {
   "taskId": "completedTasks[n].task.id",
   "decision": { "action": "update_stage|add_or_update_issue|retry_stage|plan_next_round|complete_run|error_run", "...": "..." }
 }
+If one task result needs multiple state changes, return multiple decisions with the same taskId. For example, when a retry resolves an existing open issue and completes the stage, return one add_or_update_issue decision with issue.status "resolved" plus one update_stage decision.
 
 Use these exact decision shapes.
 
@@ -47,14 +48,17 @@ add_or_update_issue:
   "decision": {
     "action": "add_or_update_issue",
     "issue": {
+      "id": "optional-existing-issue-id",
       "threadStageId": "thread-stage-id",
       "title": "string",
       "description": "string",
+      "status": "open|resolved|dismissed",
       "severity": "low|medium|high|critical"
     },
     "reason": "string"
   }
 }
+Use add_or_update_issue for issue lifecycle decisions, not only for new failures. When a task output resolves an existing open issue, return add_or_update_issue with the existing issue id if known, the same title, status "resolved", and a short resolution description. Use status "dismissed" only when the issue is invalid or no longer relevant. Use status "open" for unresolved findings that still need follow-up.
 
 retry_stage:
 {
@@ -632,6 +636,11 @@ mod tests {
         assert!(instruction.contains(r#""tasks": []"#));
         assert!(instruction.contains(r#""stage": {"#));
         assert!(instruction.contains(r#""threadStageId": "thread-stage-id""#));
+        assert!(instruction.contains("include at least one decisions item"));
+        assert!(instruction.contains("return multiple decisions with the same taskId"));
+        assert!(instruction.contains(r#""status": "open|resolved|dismissed""#));
+        assert!(instruction.contains("Use add_or_update_issue for issue lifecycle decisions"));
+        assert!(instruction.contains(r#"status "resolved""#));
         assert!(instruction.contains(
             "Do not put stageId, threadStageId, status, summary, or outcome directly on decision",
         ));
