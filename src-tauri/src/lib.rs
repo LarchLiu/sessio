@@ -33,14 +33,17 @@ use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
 use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
-    ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, ThreadInfo, ThreadKind, WorkflowInfo,
+    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
+    PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
+    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
+    RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus,
+    ThreadInfo, ThreadKind, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::{
-    AgentPreferencesPatch, AstraConfigPatch, NewAssistant, ProjectStagePatch, SessionHistoryRecord,
+    AgentPreferencesPatch, AstraConfigPatch, NewAssistant, NewPlanRound, NewPlanTask,
+    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, SessionHistoryRecord,
     SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
 #[cfg(target_os = "macos")]
@@ -135,6 +138,54 @@ struct UpdateAssistantRequest {
     system_prompt: Option<Option<String>>,
     color: Option<Option<String>>,
     enabled: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatePlanTaskRequest {
+    thread_stage_id: Option<String>,
+    assistant_id: Option<String>,
+    target_agent: Agent,
+    stage_snapshot_json: Option<String>,
+    assistant_snapshot_json: Option<String>,
+    agent_snapshot_json: String,
+    title: String,
+    prompt: String,
+    expected_output: Option<String>,
+    risk: PlanTaskRisk,
+    sort_order: i64,
+    status: PlanTaskStatus,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatePlanRoundRequest {
+    thread_id: String,
+    astra_run_id: Option<String>,
+    round_index: Option<i64>,
+    summary: Option<String>,
+    mode: PlanRoundMode,
+    source: PlanRoundSource,
+    status: PlanRoundStatus,
+    tasks: Vec<CreatePlanTaskRequest>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatePlanTaskStatusRequest {
+    task_id: String,
+    status: PlanTaskStatus,
+    result_summary: Option<Option<String>>,
+    error: Option<Option<String>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkPlanTaskSessionRequest {
+    task_id: String,
+    agent: Agent,
+    session_id: String,
+    role: PlanTaskSessionRole,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -699,6 +750,136 @@ fn delete_thread(
     store.delete_thread(&thread_id).map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn create_plan_round(
+    req: CreatePlanRoundRequest,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<PlanRoundInfo, String> {
+    let tasks = req
+        .tasks
+        .iter()
+        .map(|task| NewPlanTask {
+            thread_stage_id: task.thread_stage_id.as_deref(),
+            assistant_id: task.assistant_id.as_deref(),
+            target_agent: task.target_agent,
+            stage_snapshot_json: task.stage_snapshot_json.as_deref(),
+            assistant_snapshot_json: task.assistant_snapshot_json.as_deref(),
+            agent_snapshot_json: &task.agent_snapshot_json,
+            title: &task.title,
+            prompt: &task.prompt,
+            expected_output: task.expected_output.as_deref(),
+            risk: task.risk,
+            sort_order: task.sort_order,
+            status: task.status,
+        })
+        .collect();
+    let round = store
+        .create_plan_round(NewPlanRound {
+            thread_id: &req.thread_id,
+            astra_run_id: req.astra_run_id.as_deref(),
+            round_index: req.round_index,
+            summary: req.summary.as_deref(),
+            mode: req.mode,
+            source: req.source,
+            status: req.status,
+            tasks,
+        })
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(round)
+}
+
+#[tauri::command]
+fn get_plan_round(
+    round_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Option<PlanRoundInfo>, String> {
+    store.get_plan_round(&round_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_plan_rounds(
+    thread_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<PlanRoundInfo>, String> {
+    store
+        .list_plan_rounds(&thread_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_plan_task_status(
+    req: UpdatePlanTaskStatusRequest,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<PlanTaskInfo, String> {
+    let result_summary = req.result_summary.as_ref().map(|value| value.as_deref());
+    let error = req.error.as_ref().map(|value| value.as_deref());
+    let task = store
+        .update_plan_task_status(
+            &req.task_id,
+            PlanTaskStatusPatch {
+                status: req.status,
+                result_summary,
+                error,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(task)
+}
+
+#[tauri::command]
+fn complete_plan_task_and_start_next(
+    req: UpdatePlanTaskStatusRequest,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<PlanRoundInfo, String> {
+    let result_summary = req.result_summary.as_ref().map(|value| value.as_deref());
+    let error = req.error.as_ref().map(|value| value.as_deref());
+    let round = store
+        .complete_plan_task_and_start_next(
+            &req.task_id,
+            PlanTaskStatusPatch {
+                status: req.status,
+                result_summary,
+                error,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(round)
+}
+
+#[tauri::command]
+fn link_plan_task_session(
+    req: LinkPlanTaskSessionRequest,
+    app: AppHandle,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<PlanTaskSessionInfo, String> {
+    let session = store
+        .link_plan_task_session(NewPlanTaskSession {
+            task_id: &req.task_id,
+            agent: req.agent,
+            session_id: &req.session_id,
+            role: req.role,
+        })
+        .map_err(|e| e.to_string())?;
+    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+#[tauri::command]
+fn list_plan_task_sessions(
+    task_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<PlanTaskSessionInfo>, String> {
+    store
+        .list_plan_task_sessions(&task_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3274,6 +3455,13 @@ pub fn run() {
             create_thread,
             update_thread,
             delete_thread,
+            create_plan_round,
+            get_plan_round,
+            list_plan_rounds,
+            update_plan_task_status,
+            complete_plan_task_and_start_next,
+            link_plan_task_session,
+            list_plan_task_sessions,
             list_project_stages,
             list_workflow_stages,
             create_project_stage,

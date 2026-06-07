@@ -7,9 +7,11 @@ use std::collections::HashSet;
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
-    ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
+    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
+    PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
+    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
+    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo,
+    StageStatus, SubagentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
 };
 
 /// Optional patch fields shared by the agent-preference update methods. Every
@@ -62,6 +64,45 @@ pub struct ProjectStagePatch<'a> {
     pub order: Option<i64>,
     pub enabled: Option<bool>,
     pub allow_empty_assistants: Option<bool>,
+}
+
+pub struct NewPlanTask<'a> {
+    pub thread_stage_id: Option<&'a str>,
+    pub assistant_id: Option<&'a str>,
+    pub target_agent: Agent,
+    pub stage_snapshot_json: Option<&'a str>,
+    pub assistant_snapshot_json: Option<&'a str>,
+    pub agent_snapshot_json: &'a str,
+    pub title: &'a str,
+    pub prompt: &'a str,
+    pub expected_output: Option<&'a str>,
+    pub risk: PlanTaskRisk,
+    pub sort_order: i64,
+    pub status: PlanTaskStatus,
+}
+
+pub struct NewPlanRound<'a> {
+    pub thread_id: &'a str,
+    pub astra_run_id: Option<&'a str>,
+    pub round_index: Option<i64>,
+    pub summary: Option<&'a str>,
+    pub mode: PlanRoundMode,
+    pub source: PlanRoundSource,
+    pub status: PlanRoundStatus,
+    pub tasks: Vec<NewPlanTask<'a>>,
+}
+
+pub struct PlanTaskStatusPatch<'a> {
+    pub status: PlanTaskStatus,
+    pub result_summary: Option<Option<&'a str>>,
+    pub error: Option<Option<&'a str>>,
+}
+
+pub struct NewPlanTaskSession<'a> {
+    pub task_id: &'a str,
+    pub agent: Agent,
+    pub session_id: &'a str,
+    pub role: PlanTaskSessionRole,
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +335,24 @@ pub trait SessionStore: Send + Sync {
         self.update_thread(thread_id, goal, description, enabled)
     }
     fn delete_thread(&self, thread_id: &str) -> Result<()>;
+    fn create_plan_round(&self, round: NewPlanRound<'_>) -> Result<PlanRoundInfo>;
+    fn get_plan_round(&self, round_id: &str) -> Result<Option<PlanRoundInfo>>;
+    fn list_plan_rounds(&self, thread_id: &str) -> Result<Vec<PlanRoundInfo>>;
+    fn update_plan_task_status(
+        &self,
+        task_id: &str,
+        patch: PlanTaskStatusPatch<'_>,
+    ) -> Result<PlanTaskInfo>;
+    fn complete_plan_task_and_start_next(
+        &self,
+        task_id: &str,
+        patch: PlanTaskStatusPatch<'_>,
+    ) -> Result<PlanRoundInfo>;
+    fn link_plan_task_session(
+        &self,
+        session: NewPlanTaskSession<'_>,
+    ) -> Result<PlanTaskSessionInfo>;
+    fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>>;
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>>;
     fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>>;
     fn create_project_stage(

@@ -579,6 +579,257 @@ pub struct ThreadInfo {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanRoundMode {
+    Parallel,
+    Sequential,
+}
+
+impl PlanRoundMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanRoundMode::Parallel => "parallel",
+            PlanRoundMode::Sequential => "sequential",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "parallel" => Some(PlanRoundMode::Parallel),
+            "sequential" => Some(PlanRoundMode::Sequential),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanRoundSource {
+    Astra,
+    Manual,
+    Agent,
+}
+
+impl PlanRoundSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanRoundSource::Astra => "astra",
+            PlanRoundSource::Manual => "manual",
+            PlanRoundSource::Agent => "agent",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "astra" => Some(PlanRoundSource::Astra),
+            "manual" => Some(PlanRoundSource::Manual),
+            "agent" => Some(PlanRoundSource::Agent),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanRoundStatus {
+    Planned,
+    Running,
+    Completed,
+    Cancelled,
+    Errored,
+}
+
+impl PlanRoundStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanRoundStatus::Planned => "planned",
+            PlanRoundStatus::Running => "running",
+            PlanRoundStatus::Completed => "completed",
+            PlanRoundStatus::Cancelled => "cancelled",
+            PlanRoundStatus::Errored => "errored",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "planned" => Some(PlanRoundStatus::Planned),
+            "running" => Some(PlanRoundStatus::Running),
+            "completed" => Some(PlanRoundStatus::Completed),
+            "cancelled" => Some(PlanRoundStatus::Cancelled),
+            "errored" => Some(PlanRoundStatus::Errored),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanTaskStatus {
+    Planned,
+    Running,
+    Completed,
+    Failed,
+    Errored,
+    Cancelled,
+}
+
+impl PlanTaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanTaskStatus::Planned => "planned",
+            PlanTaskStatus::Running => "running",
+            PlanTaskStatus::Completed => "completed",
+            PlanTaskStatus::Failed => "failed",
+            PlanTaskStatus::Errored => "errored",
+            PlanTaskStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "planned" => Some(PlanTaskStatus::Planned),
+            "running" => Some(PlanTaskStatus::Running),
+            "completed" => Some(PlanTaskStatus::Completed),
+            "failed" => Some(PlanTaskStatus::Failed),
+            "errored" => Some(PlanTaskStatus::Errored),
+            "cancelled" => Some(PlanTaskStatus::Cancelled),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            PlanTaskStatus::Completed
+                | PlanTaskStatus::Failed
+                | PlanTaskStatus::Errored
+                | PlanTaskStatus::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanTaskRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl PlanTaskRisk {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanTaskRisk::Low => "low",
+            PlanTaskRisk::Medium => "medium",
+            PlanTaskRisk::High => "high",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(PlanTaskRisk::Low),
+            "medium" => Some(PlanTaskRisk::Medium),
+            "high" => Some(PlanTaskRisk::High),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanTaskSessionRole {
+    Primary,
+    Delegated,
+    Runtime,
+    Planner,
+    Synthesis,
+    CrossCheck,
+    Diagnostic,
+}
+
+impl PlanTaskSessionRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PlanTaskSessionRole::Primary => "primary",
+            PlanTaskSessionRole::Delegated => "delegated",
+            PlanTaskSessionRole::Runtime => "runtime",
+            PlanTaskSessionRole::Planner => "planner",
+            PlanTaskSessionRole::Synthesis => "synthesis",
+            PlanTaskSessionRole::CrossCheck => "cross_check",
+            PlanTaskSessionRole::Diagnostic => "diagnostic",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "primary" => Some(PlanTaskSessionRole::Primary),
+            "delegated" => Some(PlanTaskSessionRole::Delegated),
+            "runtime" => Some(PlanTaskSessionRole::Runtime),
+            "planner" => Some(PlanTaskSessionRole::Planner),
+            "synthesis" => Some(PlanTaskSessionRole::Synthesis),
+            "cross_check" => Some(PlanTaskSessionRole::CrossCheck),
+            "diagnostic" => Some(PlanTaskSessionRole::Diagnostic),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanTaskSessionInfo {
+    pub task_id: String,
+    pub agent: Agent,
+    pub session_id: String,
+    pub role: PlanTaskSessionRole,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanTaskInfo {
+    pub id: String,
+    pub round_id: String,
+    pub thread_stage_id: Option<String>,
+    pub assistant_id: Option<String>,
+    pub target_agent: Agent,
+    pub stage_snapshot_json: Option<String>,
+    pub assistant_snapshot_json: Option<String>,
+    pub agent_snapshot_json: String,
+    pub title: String,
+    pub prompt: String,
+    pub expected_output: Option<String>,
+    pub risk: PlanTaskRisk,
+    pub sort_order: i64,
+    pub status: PlanTaskStatus,
+    pub result_summary: Option<String>,
+    pub error: Option<String>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub sessions: Vec<PlanTaskSessionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRoundInfo {
+    pub id: String,
+    pub thread_id: String,
+    pub astra_run_id: Option<String>,
+    pub round_index: i64,
+    pub summary: Option<String>,
+    pub mode: PlanRoundMode,
+    pub source: PlanRoundSource,
+    pub status: PlanRoundStatus,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub tasks: Vec<PlanTaskInfo>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum KanbanStatus {
     Todo,

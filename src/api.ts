@@ -228,6 +228,99 @@ export interface ThreadInfo {
 
 export interface ThreadWorkState extends ThreadInfo {}
 
+export type PlanRoundMode = "parallel" | "sequential";
+export type PlanRoundSource = "astra" | "manual" | "agent";
+export type PlanRoundStatus = "planned" | "running" | "completed" | "cancelled" | "errored";
+export type PlanTaskStatus =
+  | "planned"
+  | "running"
+  | "completed"
+  | "failed"
+  | "errored"
+  | "cancelled";
+export type PlanTaskRisk = "low" | "medium" | "high";
+export type PlanTaskSessionRole =
+  | "primary"
+  | "delegated"
+  | "runtime"
+  | "planner"
+  | "synthesis"
+  | "cross_check"
+  | "diagnostic";
+
+export interface PlanTaskSessionInfo {
+  taskId: string;
+  agent: Agent;
+  sessionId: string;
+  role: PlanTaskSessionRole;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PlanTaskInfo {
+  id: string;
+  roundId: string;
+  threadStageId: string | null;
+  assistantId: string | null;
+  targetAgent: Agent;
+  stageSnapshotJson: string | null;
+  assistantSnapshotJson: string | null;
+  agentSnapshotJson: string;
+  title: string;
+  prompt: string;
+  expectedOutput: string | null;
+  risk: PlanTaskRisk;
+  sortOrder: number;
+  status: PlanTaskStatus;
+  resultSummary: string | null;
+  error: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  sessions: PlanTaskSessionInfo[];
+}
+
+export interface PlanRoundInfo {
+  id: string;
+  threadId: string;
+  astraRunId: string | null;
+  roundIndex: number;
+  summary: string | null;
+  mode: PlanRoundMode;
+  source: PlanRoundSource;
+  status: PlanRoundStatus;
+  createdAt: number;
+  updatedAt: number;
+  tasks: PlanTaskInfo[];
+}
+
+export interface CreatePlanTaskInput {
+  threadStageId?: string | null;
+  assistantId?: string | null;
+  targetAgent: Agent;
+  stageSnapshotJson?: string | null;
+  assistantSnapshotJson?: string | null;
+  agentSnapshotJson: string;
+  title: string;
+  prompt: string;
+  expectedOutput?: string | null;
+  risk: PlanTaskRisk;
+  sortOrder: number;
+  status: PlanTaskStatus;
+}
+
+export interface CreatePlanRoundInput {
+  threadId: string;
+  astraRunId?: string | null;
+  roundIndex?: number | null;
+  summary?: string | null;
+  mode: PlanRoundMode;
+  source: PlanRoundSource;
+  status: PlanRoundStatus;
+  tasks: CreatePlanTaskInput[];
+}
+
 export type AstraRunStatus =
   | "planning"
   | "thinking"
@@ -1020,6 +1113,101 @@ export async function updateThread(
 
 export async function deleteThread(threadId: string): Promise<void> {
   return invoke<void>("delete_thread", { threadId });
+}
+
+export async function createPlanRound(input: CreatePlanRoundInput): Promise<PlanRoundInfo> {
+  return invoke<PlanRoundInfo>("create_plan_round", {
+    req: {
+      threadId: input.threadId,
+      astraRunId: input.astraRunId ?? null,
+      roundIndex: input.roundIndex ?? null,
+      summary: input.summary ?? null,
+      mode: input.mode,
+      source: input.source,
+      status: input.status,
+      tasks: input.tasks.map((task) => ({
+        threadStageId: task.threadStageId ?? null,
+        assistantId: task.assistantId ?? null,
+        targetAgent: task.targetAgent,
+        stageSnapshotJson: task.stageSnapshotJson ?? null,
+        assistantSnapshotJson: task.assistantSnapshotJson ?? null,
+        agentSnapshotJson: task.agentSnapshotJson,
+        title: task.title,
+        prompt: task.prompt,
+        expectedOutput: task.expectedOutput ?? null,
+        risk: task.risk,
+        sortOrder: task.sortOrder,
+        status: task.status,
+      })),
+    },
+  });
+}
+
+export async function getPlanRound(roundId: string): Promise<PlanRoundInfo | null> {
+  return invoke<PlanRoundInfo | null>("get_plan_round", { roundId });
+}
+
+export async function listPlanRounds(threadId: string): Promise<PlanRoundInfo[]> {
+  return invoke<PlanRoundInfo[]>("list_plan_rounds", { threadId });
+}
+
+export async function updatePlanTaskStatus(
+  taskId: string,
+  patch: {
+    status: PlanTaskStatus;
+    resultSummary?: string | null;
+    error?: string | null;
+  },
+): Promise<PlanTaskInfo> {
+  return invoke<PlanTaskInfo>("update_plan_task_status", {
+    req: {
+      taskId,
+      status: patch.status,
+      resultSummary: Object.prototype.hasOwnProperty.call(patch, "resultSummary")
+        ? patch.resultSummary ?? null
+        : undefined,
+      error: Object.prototype.hasOwnProperty.call(patch, "error")
+        ? patch.error ?? null
+        : undefined,
+    },
+  });
+}
+
+export async function completePlanTaskAndStartNext(
+  taskId: string,
+  patch: {
+    status: PlanTaskStatus;
+    resultSummary?: string | null;
+    error?: string | null;
+  },
+): Promise<PlanRoundInfo> {
+  return invoke<PlanRoundInfo>("complete_plan_task_and_start_next", {
+    req: {
+      taskId,
+      status: patch.status,
+      resultSummary: Object.prototype.hasOwnProperty.call(patch, "resultSummary")
+        ? patch.resultSummary ?? null
+        : undefined,
+      error: Object.prototype.hasOwnProperty.call(patch, "error")
+        ? patch.error ?? null
+        : undefined,
+    },
+  });
+}
+
+export async function linkPlanTaskSession(input: {
+  taskId: string;
+  agent: Agent;
+  sessionId: string;
+  role: PlanTaskSessionRole;
+}): Promise<PlanTaskSessionInfo> {
+  return invoke<PlanTaskSessionInfo>("link_plan_task_session", {
+    req: input,
+  });
+}
+
+export async function listPlanTaskSessions(taskId: string): Promise<PlanTaskSessionInfo[]> {
+  return invoke<PlanTaskSessionInfo[]>("list_plan_task_sessions", { taskId });
 }
 
 export async function createAstraRun(

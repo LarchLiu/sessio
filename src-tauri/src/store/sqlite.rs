@@ -13,16 +13,17 @@ use crate::memory::{
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo,
     AssistantInfo, AssistantType, AstraConfig, IssueSeverity, IssueStatus, KanbanItem,
-    KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata,
-    SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus,
-    StageType, SubagentInfo, ThreadAssistantInfo, ThreadInfo, ThreadKind, WorkflowInfo,
-    WorkflowType,
+    KanbanStatus, PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo,
+    PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo,
+    ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
+    SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus, StageType,
+    SubagentInfo, ThreadAssistantInfo, ThreadInfo, ThreadKind, WorkflowInfo, WorkflowType,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
-    IndexedSubagentRecord, NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
-    ThreadWorkSnapshotRecord,
+    IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTask, NewPlanTaskSession,
+    PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
+    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
 
 pub struct SqliteStore {
@@ -668,6 +669,88 @@ CREATE INDEX IF NOT EXISTS idx_thread_assistants_assistant
     ON thread_assistants(assistant_id);
 "#;
 
+const SCHEMA_V7_PLAN_TABLES: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_plan_rounds (
+    id           TEXT PRIMARY KEY,
+    thread_id    TEXT NOT NULL,
+    astra_run_id TEXT,
+    round_index  INTEGER NOT NULL,
+    summary      TEXT,
+    mode         TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    UNIQUE(thread_id, round_index),
+    CHECK(mode IN ('parallel', 'sequential')),
+    CHECK(source IN ('astra', 'manual', 'agent')),
+    CHECK(status IN ('planned', 'running', 'completed', 'cancelled', 'errored')),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+    FOREIGN KEY(astra_run_id) REFERENCES astra_runs(run_id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_plan_rounds_thread_index
+    ON thread_plan_rounds(thread_id, round_index);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_rounds_thread_status
+    ON thread_plan_rounds(thread_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_rounds_astra_run
+    ON thread_plan_rounds(astra_run_id);
+
+CREATE TABLE IF NOT EXISTS thread_plan_tasks (
+    id                      TEXT PRIMARY KEY,
+    round_id                TEXT NOT NULL,
+    thread_stage_id         TEXT,
+    assistant_id            TEXT,
+    target_agent            TEXT NOT NULL,
+    stage_snapshot_json     TEXT,
+    assistant_snapshot_json TEXT,
+    agent_snapshot_json     TEXT NOT NULL,
+    title                   TEXT NOT NULL,
+    prompt                  TEXT NOT NULL,
+    expected_output         TEXT,
+    risk                    TEXT NOT NULL,
+    sort_order              INTEGER NOT NULL,
+    status                  TEXT NOT NULL,
+    result_summary          TEXT,
+    error                   TEXT,
+    started_at              INTEGER,
+    completed_at            INTEGER,
+    created_at              INTEGER NOT NULL,
+    updated_at              INTEGER NOT NULL,
+    CHECK(risk IN ('low', 'medium', 'high')),
+    CHECK(status IN ('planned', 'running', 'completed', 'failed', 'errored', 'cancelled')),
+    FOREIGN KEY(round_id) REFERENCES thread_plan_rounds(id) ON DELETE CASCADE,
+    FOREIGN KEY(thread_stage_id) REFERENCES thread_stages(id) ON DELETE SET NULL,
+    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_round_order
+    ON thread_plan_tasks(round_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_round_status
+    ON thread_plan_tasks(round_id, status, sort_order);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_stage
+    ON thread_plan_tasks(thread_stage_id);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_assistant
+    ON thread_plan_tasks(assistant_id);
+
+CREATE TABLE IF NOT EXISTS thread_plan_task_sessions (
+    task_id    TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(task_id, agent, session_id, role),
+    CHECK(role IN ('primary', 'delegated', 'runtime', 'planner', 'synthesis', 'cross_check', 'diagnostic')),
+    FOREIGN KEY(task_id) REFERENCES thread_plan_tasks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_plan_task_sessions_task
+    ON thread_plan_task_sessions(task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_task_sessions_session
+    ON thread_plan_task_sessions(agent, session_id);
+"#;
+
 // Backfill for pre-v1 (v0.3.2) databases whose sessions table predates the
 // rename_title column the v1 bootstrap schema now includes. Applied
 // fault-tolerantly inside the v5 migration; a no-op on any v1+ database.
@@ -763,8 +846,16 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    if current < 7 {
+        ensure_v7_plan_tables_schema(conn)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
+            [],
+        )?;
+    }
     ensure_v5_astra_columns(conn)?;
     ensure_v6_thread_kind_schema(conn)?;
+    ensure_v7_plan_tables_schema(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
 }
@@ -828,6 +919,11 @@ fn ensure_v6_thread_kind_schema(conn: &Connection) -> Result<()> {
         )?;
     }
     conn.execute_batch(SCHEMA_V6_THREAD_KIND)?;
+    Ok(())
+}
+
+fn ensure_v7_plan_tables_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA_V7_PLAN_TABLES)?;
     Ok(())
 }
 
@@ -2201,6 +2297,33 @@ fn stable_thread_stage_id(
     format!("thread-stage-{}", &hex::encode(hasher.finalize())[..16])
 }
 
+fn stable_plan_round_id(thread_id: &str, round_index: i64, now: i64, nonce: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(thread_id.as_bytes());
+    hasher.update(round_index.to_string().as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    hasher.update(nonce.as_bytes());
+    format!("plan-round-{}", &hex::encode(hasher.finalize())[..16])
+}
+
+fn stable_plan_task_id(
+    round_id: &str,
+    title: &str,
+    sort_order: i64,
+    now: i64,
+    nonce: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(round_id.as_bytes());
+    hasher.update(title.as_bytes());
+    hasher.update(sort_order.to_string().as_bytes());
+    hasher.update(now.to_string().as_bytes());
+    hasher.update(nonce.as_bytes());
+    format!("plan-task-{}", &hex::encode(hasher.finalize())[..16])
+}
+
 #[cfg(test)]
 fn temp_child_path(parent: &Path, name: &str) -> std::path::PathBuf {
     parent.join(format!("{name}-{}", unique_suffix()))
@@ -2409,6 +2532,67 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
     })
 }
 
+fn plan_round_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanRoundInfo> {
+    let mode_raw: String = row.get(5)?;
+    let source_raw: String = row.get(6)?;
+    let status_raw: String = row.get(7)?;
+    Ok(PlanRoundInfo {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        astra_run_id: row.get(2)?,
+        round_index: row.get(3)?,
+        summary: row.get(4)?,
+        mode: PlanRoundMode::from_db_str(&mode_raw).unwrap_or(PlanRoundMode::Parallel),
+        source: PlanRoundSource::from_db_str(&source_raw).unwrap_or(PlanRoundSource::Manual),
+        status: PlanRoundStatus::from_db_str(&status_raw).unwrap_or(PlanRoundStatus::Planned),
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        tasks: Vec::new(),
+    })
+}
+
+fn plan_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanTaskInfo> {
+    let target_agent_raw: String = row.get(4)?;
+    let risk_raw: String = row.get(11)?;
+    let status_raw: String = row.get(13)?;
+    Ok(PlanTaskInfo {
+        id: row.get(0)?,
+        round_id: row.get(1)?,
+        thread_stage_id: row.get(2)?,
+        assistant_id: row.get(3)?,
+        target_agent: Agent::from_db_str(&target_agent_raw).unwrap_or(Agent::Codex),
+        stage_snapshot_json: row.get(5)?,
+        assistant_snapshot_json: row.get(6)?,
+        agent_snapshot_json: row.get(7)?,
+        title: row.get(8)?,
+        prompt: row.get(9)?,
+        expected_output: row.get(10)?,
+        risk: PlanTaskRisk::from_db_str(&risk_raw).unwrap_or(PlanTaskRisk::Medium),
+        sort_order: row.get(12)?,
+        status: PlanTaskStatus::from_db_str(&status_raw).unwrap_or(PlanTaskStatus::Planned),
+        result_summary: row.get(14)?,
+        error: row.get(15)?,
+        started_at: row.get(16)?,
+        completed_at: row.get(17)?,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
+        sessions: Vec::new(),
+    })
+}
+
+fn plan_task_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanTaskSessionInfo> {
+    let agent_raw: String = row.get(1)?;
+    let role_raw: String = row.get(3)?;
+    Ok(PlanTaskSessionInfo {
+        task_id: row.get(0)?,
+        agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::Codex),
+        session_id: row.get(2)?,
+        role: PlanTaskSessionRole::from_db_str(&role_raw).unwrap_or(PlanTaskSessionRole::Runtime),
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
 fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo> {
     conn.query_row(
         "SELECT p.id, p.path, p.name, p.workflow_id, p.created_at, p.updated_at,
@@ -2551,6 +2735,352 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
     thread.stages = load_thread_stages(conn, &thread.id)?;
     thread.sessions = load_thread_sessions(conn, &thread.id)?;
     Ok(thread)
+}
+
+fn load_plan_round_by_id(conn: &Connection, round_id: &str) -> Result<PlanRoundInfo> {
+    let mut round = conn
+        .query_row(
+            "SELECT id, thread_id, astra_run_id, round_index, summary, mode, source, status, created_at, updated_at
+             FROM thread_plan_rounds
+             WHERE id = ?",
+            params![round_id],
+            plan_round_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("plan round not found: {round_id}"))?;
+    round.tasks = load_plan_tasks(conn, &round.id)?;
+    Ok(round)
+}
+
+fn load_plan_task_by_id(conn: &Connection, task_id: &str) -> Result<PlanTaskInfo> {
+    let mut task = conn
+        .query_row(
+            "SELECT id, round_id, thread_stage_id, assistant_id, target_agent,
+                    stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
+                    title, prompt, expected_output, risk, sort_order, status,
+                    result_summary, error, started_at, completed_at, created_at, updated_at
+             FROM thread_plan_tasks
+             WHERE id = ?",
+            params![task_id],
+            plan_task_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("plan task not found: {task_id}"))?;
+    task.sessions = load_plan_task_sessions(conn, &task.id)?;
+    Ok(task)
+}
+
+fn load_plan_tasks(conn: &Connection, round_id: &str) -> Result<Vec<PlanTaskInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, round_id, thread_stage_id, assistant_id, target_agent,
+                stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
+                title, prompt, expected_output, risk, sort_order, status,
+                result_summary, error, started_at, completed_at, created_at, updated_at
+         FROM thread_plan_tasks
+         WHERE round_id = ?
+         ORDER BY sort_order ASC, created_at ASC",
+    )?;
+    let mut tasks = stmt
+        .query_map(params![round_id], plan_task_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for task in tasks.iter_mut() {
+        task.sessions = load_plan_task_sessions(conn, &task.id)?;
+    }
+    Ok(tasks)
+}
+
+fn load_plan_task_sessions(conn: &Connection, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, agent, session_id, role, created_at, updated_at
+         FROM thread_plan_task_sessions
+         WHERE task_id = ?
+         ORDER BY created_at ASC, role ASC, agent ASC, session_id ASC",
+    )?;
+    let rows = stmt.query_map(params![task_id], plan_task_session_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn clean_required(value: &str, field: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("{field} cannot be empty");
+    }
+    Ok(value.to_string())
+}
+
+fn clean_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn aggregate_round_status(statuses: &[PlanTaskStatus]) -> PlanRoundStatus {
+    if statuses
+        .iter()
+        .any(|status| *status == PlanTaskStatus::Running)
+    {
+        return PlanRoundStatus::Running;
+    }
+    if statuses
+        .iter()
+        .any(|status| *status == PlanTaskStatus::Planned)
+    {
+        return PlanRoundStatus::Planned;
+    }
+    if statuses
+        .iter()
+        .any(|status| matches!(status, PlanTaskStatus::Failed | PlanTaskStatus::Errored))
+    {
+        return PlanRoundStatus::Errored;
+    }
+    if statuses
+        .iter()
+        .all(|status| *status == PlanTaskStatus::Cancelled)
+    {
+        return PlanRoundStatus::Cancelled;
+    }
+    PlanRoundStatus::Completed
+}
+
+fn validate_new_plan_round_invariants(round: &NewPlanRound<'_>) -> Result<()> {
+    if round.mode != PlanRoundMode::Sequential {
+        return Ok(());
+    }
+    let running_tasks = round
+        .tasks
+        .iter()
+        .filter(|task| task.status == PlanTaskStatus::Running)
+        .collect::<Vec<_>>();
+    if running_tasks.len() > 1 {
+        anyhow::bail!("sequential plan round cannot start multiple running tasks");
+    }
+    if let Some(running_task) = running_tasks.first() {
+        let lower_planned_count = round
+            .tasks
+            .iter()
+            .filter(|task| task.status == PlanTaskStatus::Planned)
+            .filter(|task| task.sort_order < running_task.sort_order)
+            .count();
+        if lower_planned_count > 0 {
+            anyhow::bail!("sequential plan round must start the lowest-order planned task");
+        }
+    }
+    Ok(())
+}
+
+fn plan_task_statuses(conn: &Connection, round_id: &str) -> Result<Vec<PlanTaskStatus>> {
+    let mut stmt = conn.prepare(
+        "SELECT status
+         FROM thread_plan_tasks
+         WHERE round_id = ?
+         ORDER BY sort_order ASC, created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![round_id], |row| {
+        let status_raw: String = row.get(0)?;
+        Ok(PlanTaskStatus::from_db_str(&status_raw).unwrap_or(PlanTaskStatus::Planned))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn update_plan_round_status_from_tasks(
+    conn: &Connection,
+    round_id: &str,
+    now: i64,
+) -> Result<PlanRoundStatus> {
+    let statuses = plan_task_statuses(conn, round_id)?;
+    let status = aggregate_round_status(&statuses);
+    conn.execute(
+        "UPDATE thread_plan_rounds
+         SET status = ?, updated_at = ?
+         WHERE id = ?",
+        params![status.as_str(), now, round_id],
+    )?;
+    Ok(status)
+}
+
+fn ensure_no_other_running_task(
+    conn: &Connection,
+    round_id: &str,
+    task_id: Option<&str>,
+) -> Result<()> {
+    let count: i64 = match task_id {
+        Some(task_id) => conn.query_row(
+            "SELECT count(*)
+             FROM thread_plan_tasks
+             WHERE round_id = ? AND status = 'running' AND id != ?",
+            params![round_id, task_id],
+            |row| row.get(0),
+        )?,
+        None => conn.query_row(
+            "SELECT count(*)
+             FROM thread_plan_tasks
+             WHERE round_id = ? AND status = 'running'",
+            params![round_id],
+            |row| row.get(0),
+        )?,
+    };
+    if count > 0 {
+        anyhow::bail!("sequential plan round already has a running task");
+    }
+    Ok(())
+}
+
+fn ensure_sequential_running_candidate(
+    conn: &Connection,
+    round_id: &str,
+    task_id: &str,
+) -> Result<()> {
+    ensure_no_other_running_task(conn, round_id, Some(task_id))?;
+    let candidate_order: i64 = conn.query_row(
+        "SELECT sort_order
+         FROM thread_plan_tasks
+         WHERE id = ? AND round_id = ?",
+        params![task_id, round_id],
+        |row| row.get(0),
+    )?;
+    let lower_planned_count: i64 = conn.query_row(
+        "SELECT count(*)
+         FROM thread_plan_tasks
+         WHERE round_id = ? AND status = 'planned' AND sort_order < ?",
+        params![round_id, candidate_order],
+        |row| row.get(0),
+    )?;
+    if lower_planned_count > 0 {
+        anyhow::bail!("sequential plan round must start the lowest-order planned task");
+    }
+    Ok(())
+}
+
+fn ensure_plan_task_refs(conn: &Connection, thread_id: &str, task: &NewPlanTask<'_>) -> Result<()> {
+    if let Some(thread_stage_id) = task.thread_stage_id {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM thread_stages WHERE id = ? AND thread_id = ? LIMIT 1",
+                params![thread_stage_id, thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            anyhow::bail!("thread stage does not belong to thread: {thread_stage_id}");
+        }
+    }
+    if let Some(assistant_id) = task.assistant_id {
+        load_assistant_by_id(conn, assistant_id)?;
+    }
+    Ok(())
+}
+
+fn insert_plan_task(
+    conn: &Connection,
+    round_id: &str,
+    thread_id: &str,
+    task: &NewPlanTask<'_>,
+    now: i64,
+    nonce: &str,
+) -> Result<()> {
+    ensure_plan_task_refs(conn, thread_id, task)?;
+    let title = clean_required(task.title, "plan task title")?;
+    let prompt = clean_required(task.prompt, "plan task prompt")?;
+    let agent_snapshot_json =
+        clean_required(task.agent_snapshot_json, "plan task agent snapshot json")?;
+    let expected_output = clean_optional(task.expected_output);
+    let stage_snapshot_json = clean_optional(task.stage_snapshot_json);
+    let assistant_snapshot_json = clean_optional(task.assistant_snapshot_json);
+    let started_at = if matches!(task.status, PlanTaskStatus::Running) || task.status.is_terminal()
+    {
+        Some(now)
+    } else {
+        None
+    };
+    let completed_at = if task.status.is_terminal() {
+        Some(now)
+    } else {
+        None
+    };
+    let id = stable_plan_task_id(round_id, &title, task.sort_order, now, nonce);
+    conn.execute(
+        "INSERT INTO thread_plan_tasks (
+            id, round_id, thread_stage_id, assistant_id, target_agent,
+            stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
+            title, prompt, expected_output, risk, sort_order, status,
+            result_summary, error, started_at, completed_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
+        params![
+            id,
+            round_id,
+            task.thread_stage_id,
+            task.assistant_id,
+            task.target_agent.as_str(),
+            stage_snapshot_json,
+            assistant_snapshot_json,
+            agent_snapshot_json,
+            title,
+            prompt,
+            expected_output,
+            task.risk.as_str(),
+            task.sort_order,
+            task.status.as_str(),
+            started_at,
+            completed_at,
+            now,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_plan_task_status_patch(
+    conn: &Connection,
+    task_id: &str,
+    patch: PlanTaskStatusPatch<'_>,
+    now: i64,
+) -> Result<PlanTaskInfo> {
+    let current = load_plan_task_by_id(conn, task_id)?;
+    let round = load_plan_round_by_id(conn, &current.round_id)?;
+    if round.mode == PlanRoundMode::Sequential && patch.status == PlanTaskStatus::Running {
+        ensure_sequential_running_candidate(conn, &current.round_id, task_id)?;
+    }
+    let result_summary = match patch.result_summary {
+        Some(value) => clean_optional(value),
+        None => current.result_summary,
+    };
+    let error = match patch.error {
+        Some(value) => clean_optional(value),
+        None => current.error,
+    };
+    let started_at = match patch.status {
+        PlanTaskStatus::Planned => None,
+        PlanTaskStatus::Running => current.started_at.or(Some(now)),
+        status if status.is_terminal() => current.started_at.or(Some(now)),
+        _ => current.started_at,
+    };
+    let completed_at = if patch.status.is_terminal() {
+        current.completed_at.or(Some(now))
+    } else {
+        None
+    };
+    conn.execute(
+        "UPDATE thread_plan_tasks
+         SET status = ?,
+             result_summary = ?,
+             error = ?,
+             started_at = ?,
+             completed_at = ?,
+             updated_at = ?
+         WHERE id = ?",
+        params![
+            patch.status.as_str(),
+            result_summary,
+            error,
+            started_at,
+            completed_at,
+            now,
+            task_id,
+        ],
+    )?;
+    update_plan_round_status_from_tasks(conn, &current.round_id, now)?;
+    load_plan_task_by_id(conn, task_id)
 }
 
 fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
@@ -5203,6 +5733,205 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
+    fn create_plan_round(&self, round: NewPlanRound<'_>) -> Result<PlanRoundInfo> {
+        validate_new_plan_round_invariants(&round)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        load_thread_by_id(&tx, round.thread_id)?;
+        if let Some(astra_run_id) = round.astra_run_id {
+            let exists: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM astra_runs WHERE run_id = ? LIMIT 1",
+                    params![astra_run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if exists.is_none() {
+                anyhow::bail!("Astra run not found: {astra_run_id}");
+            }
+        }
+        let round_index = match round.round_index {
+            Some(value) if value < 0 => anyhow::bail!("round index cannot be negative"),
+            Some(value) => value,
+            None => tx.query_row(
+                "SELECT COALESCE(MAX(round_index), -1) + 1
+                 FROM thread_plan_rounds
+                 WHERE thread_id = ?",
+                params![round.thread_id],
+                |row| row.get(0),
+            )?,
+        };
+        let now = now_ms();
+        let id = stable_plan_round_id(round.thread_id, round_index, now, &unique_nonce());
+        let summary = clean_optional(round.summary);
+        tx.execute(
+            "INSERT INTO thread_plan_rounds (
+                id, thread_id, astra_run_id, round_index, summary, mode, source, status, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                id,
+                round.thread_id,
+                round.astra_run_id,
+                round_index,
+                summary,
+                round.mode.as_str(),
+                round.source.as_str(),
+                round.status.as_str(),
+                now,
+                now,
+            ],
+        )?;
+        for task in &round.tasks {
+            insert_plan_task(&tx, &id, round.thread_id, task, now, &unique_nonce())?;
+        }
+        if !round.tasks.is_empty() {
+            update_plan_round_status_from_tasks(&tx, &id, now)?;
+        }
+        let loaded = load_plan_round_by_id(&tx, &id)?;
+        tx.commit()?;
+        Ok(loaded)
+    }
+
+    fn get_plan_round(&self, round_id: &str) -> Result<Option<PlanRoundInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let round = conn
+            .query_row(
+                "SELECT id, thread_id, astra_run_id, round_index, summary, mode, source, status, created_at, updated_at
+                 FROM thread_plan_rounds
+                 WHERE id = ?",
+                params![round_id],
+                plan_round_from_row,
+            )
+            .optional()?;
+        match round {
+            Some(mut round) => {
+                round.tasks = load_plan_tasks(&conn, &round.id)?;
+                Ok(Some(round))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn list_plan_rounds(&self, thread_id: &str) -> Result<Vec<PlanRoundInfo>> {
+        let conn = self.conn.lock().unwrap();
+        load_thread_by_id(&conn, thread_id)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, thread_id, astra_run_id, round_index, summary, mode, source, status, created_at, updated_at
+             FROM thread_plan_rounds
+             WHERE thread_id = ?
+             ORDER BY round_index ASC, created_at ASC",
+        )?;
+        let mut rounds = stmt
+            .query_map(params![thread_id], plan_round_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for round in rounds.iter_mut() {
+            round.tasks = load_plan_tasks(&conn, &round.id)?;
+        }
+        Ok(rounds)
+    }
+
+    fn update_plan_task_status(
+        &self,
+        task_id: &str,
+        patch: PlanTaskStatusPatch<'_>,
+    ) -> Result<PlanTaskInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let task = apply_plan_task_status_patch(&tx, task_id, patch, now_ms())?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    fn complete_plan_task_and_start_next(
+        &self,
+        task_id: &str,
+        patch: PlanTaskStatusPatch<'_>,
+    ) -> Result<PlanRoundInfo> {
+        if !patch.status.is_terminal() {
+            anyhow::bail!("sequential transition requires a terminal task status");
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let current = load_plan_task_by_id(&tx, task_id)?;
+        let round = load_plan_round_by_id(&tx, &current.round_id)?;
+        if round.mode != PlanRoundMode::Sequential {
+            anyhow::bail!("plan round is not sequential");
+        }
+        let now = now_ms();
+        apply_plan_task_status_patch(&tx, task_id, patch, now)?;
+        ensure_no_other_running_task(&tx, &current.round_id, None)?;
+        let next_task_id: Option<String> = tx
+            .query_row(
+                "SELECT id
+                 FROM thread_plan_tasks
+                 WHERE round_id = ? AND status = 'planned'
+                 ORDER BY sort_order ASC, created_at ASC
+                 LIMIT 1",
+                params![current.round_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(next_task_id) = next_task_id {
+            apply_plan_task_status_patch(
+                &tx,
+                &next_task_id,
+                PlanTaskStatusPatch {
+                    status: PlanTaskStatus::Running,
+                    result_summary: None,
+                    error: None,
+                },
+                now,
+            )?;
+        } else {
+            update_plan_round_status_from_tasks(&tx, &current.round_id, now)?;
+        }
+        let loaded = load_plan_round_by_id(&tx, &current.round_id)?;
+        tx.commit()?;
+        Ok(loaded)
+    }
+
+    fn link_plan_task_session(
+        &self,
+        session: NewPlanTaskSession<'_>,
+    ) -> Result<PlanTaskSessionInfo> {
+        let conn = self.conn.lock().unwrap();
+        load_plan_task_by_id(&conn, session.task_id)?;
+        let now = now_ms();
+        conn.execute(
+            "INSERT INTO thread_plan_task_sessions (task_id, agent, session_id, role, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(task_id, agent, session_id, role) DO UPDATE SET
+                updated_at = excluded.updated_at",
+            params![
+                session.task_id,
+                session.agent.as_str(),
+                session.session_id,
+                session.role.as_str(),
+                now,
+                now,
+            ],
+        )?;
+        conn.query_row(
+            "SELECT task_id, agent, session_id, role, created_at, updated_at
+             FROM thread_plan_task_sessions
+             WHERE task_id = ? AND agent = ? AND session_id = ? AND role = ?",
+            params![
+                session.task_id,
+                session.agent.as_str(),
+                session.session_id,
+                session.role.as_str(),
+            ],
+            plan_task_session_from_row,
+        )
+        .map_err(Into::into)
+    }
+
+    fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>> {
+        let conn = self.conn.lock().unwrap();
+        load_plan_task_by_id(&conn, task_id)?;
+        load_plan_task_sessions(&conn, task_id)
+    }
+
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>> {
         let conn = self.conn.lock().unwrap();
         load_project_by_id(&conn, project_id)?;
@@ -7352,7 +8081,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 6);
+        assert_eq!(latest_schema_version, 7);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -7457,6 +8186,21 @@ mod migration_tests {
             .unwrap();
         assert_eq!(thread_assistants_table, 1);
 
+        for table in [
+            "thread_plan_rounds",
+            "thread_plan_tasks",
+            "thread_plan_task_sessions",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{table} table should exist");
+        }
+
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }
@@ -7550,6 +8294,9 @@ mod migration_tests {
             "stages",
             "thread_stages",
             "thread_assistants",
+            "thread_plan_rounds",
+            "thread_plan_tasks",
+            "thread_plan_task_sessions",
             "stage_sessions",
             "thread_stage_issues",
             "astra_runs",
@@ -7562,6 +8309,27 @@ mod migration_tests {
                 )
                 .unwrap();
             assert_eq!(exists, 1, "{table} table should exist");
+        }
+
+        for index in [
+            "idx_thread_plan_rounds_thread_index",
+            "idx_thread_plan_rounds_thread_status",
+            "idx_thread_plan_rounds_astra_run",
+            "idx_thread_plan_tasks_round_order",
+            "idx_thread_plan_tasks_round_status",
+            "idx_thread_plan_tasks_stage",
+            "idx_thread_plan_tasks_assistant",
+            "idx_thread_plan_task_sessions_task",
+            "idx_thread_plan_task_sessions_session",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{index} index should exist");
         }
 
         drop(conn);
@@ -9200,6 +9968,323 @@ mod migration_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
         let _ = std::fs::remove_dir_all(&other_parent);
+    }
+
+    #[test]
+    fn plan_round_tasks_sessions_and_sequential_invariants_roundtrip() {
+        let path = unique_db("sessio-plan-rounds");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-plan-round-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "plan-rounds",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let assistant = store
+            .create_assistant(NewAssistant {
+                name: "Planner",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Plan carefully"),
+                color: Some("#22c55e"),
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let thread = store
+            .create_thread_with_options(
+                &project.id,
+                "Coordinate plan tasks",
+                None,
+                ThreadKind::Teamwork,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+        let stage_template = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        let thread_stage = store
+            .add_thread_stage(
+                &thread.id,
+                &stage_template.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+
+        let parallel = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: None,
+                round_index: None,
+                summary: Some("parallel summary"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Manual,
+                status: PlanRoundStatus::Planned,
+                tasks: vec![
+                    NewPlanTask {
+                        thread_stage_id: Some(&thread_stage.id),
+                        assistant_id: Some(&assistant.id),
+                        target_agent: Agent::Codex,
+                        stage_snapshot_json: Some(r#"{"stage":"research-v1"}"#),
+                        assistant_snapshot_json: Some(r#"{"assistant":"planner-v1"}"#),
+                        agent_snapshot_json: r#"{"agent":"codex-v1"}"#,
+                        title: "Research",
+                        prompt: "Research prompt",
+                        expected_output: Some("Notes"),
+                        risk: PlanTaskRisk::Medium,
+                        sort_order: 0,
+                        status: PlanTaskStatus::Running,
+                    },
+                    NewPlanTask {
+                        thread_stage_id: None,
+                        assistant_id: Some(&assistant.id),
+                        target_agent: Agent::Claude,
+                        stage_snapshot_json: None,
+                        assistant_snapshot_json: Some(r#"{"assistant":"planner-v1"}"#),
+                        agent_snapshot_json: r#"{"agent":"claude-v1"}"#,
+                        title: "Review",
+                        prompt: "Review prompt",
+                        expected_output: Some("Review notes"),
+                        risk: PlanTaskRisk::High,
+                        sort_order: 1,
+                        status: PlanTaskStatus::Running,
+                    },
+                ],
+            })
+            .unwrap();
+        assert_eq!(parallel.round_index, 0);
+        assert_eq!(parallel.status, PlanRoundStatus::Running);
+        assert_eq!(parallel.tasks.len(), 2);
+        assert!(parallel
+            .tasks
+            .iter()
+            .all(|task| task.status == PlanTaskStatus::Running));
+        assert_eq!(
+            parallel.tasks[0].stage_snapshot_json.as_deref(),
+            Some(r#"{"stage":"research-v1"}"#)
+        );
+
+        let session_ref = store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &parallel.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: "runtime-session-1",
+                role: PlanTaskSessionRole::Runtime,
+            })
+            .unwrap();
+        assert_eq!(session_ref.role, PlanTaskSessionRole::Runtime);
+        let parallel = store.get_plan_round(&parallel.id).unwrap().unwrap();
+        assert_eq!(parallel.tasks[0].sessions.len(), 1);
+        assert_eq!(
+            parallel.tasks[0].sessions[0].session_id,
+            "runtime-session-1"
+        );
+
+        store
+            .update_assistant(
+                &assistant.id,
+                Some("Planner Renamed"),
+                None,
+                Some(Some("New prompt")),
+                None,
+                None,
+            )
+            .unwrap();
+        let reloaded = store.get_plan_round(&parallel.id).unwrap().unwrap();
+        assert_eq!(
+            reloaded.tasks[0].assistant_snapshot_json.as_deref(),
+            Some(r#"{"assistant":"planner-v1"}"#)
+        );
+
+        let lower_task_skip_error = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: None,
+                round_index: None,
+                summary: Some("bad sequential"),
+                mode: PlanRoundMode::Sequential,
+                source: PlanRoundSource::Manual,
+                status: PlanRoundStatus::Planned,
+                tasks: vec![
+                    NewPlanTask {
+                        thread_stage_id: None,
+                        assistant_id: None,
+                        target_agent: Agent::Codex,
+                        stage_snapshot_json: None,
+                        assistant_snapshot_json: None,
+                        agent_snapshot_json: r#"{"agent":"codex"}"#,
+                        title: "First planned",
+                        prompt: "First prompt",
+                        expected_output: None,
+                        risk: PlanTaskRisk::Low,
+                        sort_order: 0,
+                        status: PlanTaskStatus::Planned,
+                    },
+                    NewPlanTask {
+                        thread_stage_id: None,
+                        assistant_id: None,
+                        target_agent: Agent::Codex,
+                        stage_snapshot_json: None,
+                        assistant_snapshot_json: None,
+                        agent_snapshot_json: r#"{"agent":"codex"}"#,
+                        title: "Second running",
+                        prompt: "Second prompt",
+                        expected_output: None,
+                        risk: PlanTaskRisk::Low,
+                        sort_order: 1,
+                        status: PlanTaskStatus::Running,
+                    },
+                ],
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(lower_task_skip_error.contains("lowest-order planned task"));
+
+        let sequential = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: None,
+                round_index: None,
+                summary: Some("sequential summary"),
+                mode: PlanRoundMode::Sequential,
+                source: PlanRoundSource::Agent,
+                status: PlanRoundStatus::Planned,
+                tasks: vec![
+                    NewPlanTask {
+                        thread_stage_id: None,
+                        assistant_id: Some(&assistant.id),
+                        target_agent: Agent::Codex,
+                        stage_snapshot_json: None,
+                        assistant_snapshot_json: Some(r#"{"assistant":"planner-v2"}"#),
+                        agent_snapshot_json: r#"{"agent":"codex-v2"}"#,
+                        title: "Step 1",
+                        prompt: "Step one",
+                        expected_output: None,
+                        risk: PlanTaskRisk::Low,
+                        sort_order: 0,
+                        status: PlanTaskStatus::Running,
+                    },
+                    NewPlanTask {
+                        thread_stage_id: None,
+                        assistant_id: Some(&assistant.id),
+                        target_agent: Agent::Codex,
+                        stage_snapshot_json: None,
+                        assistant_snapshot_json: Some(r#"{"assistant":"planner-v2"}"#),
+                        agent_snapshot_json: r#"{"agent":"codex-v2"}"#,
+                        title: "Step 2",
+                        prompt: "Step two",
+                        expected_output: None,
+                        risk: PlanTaskRisk::Low,
+                        sort_order: 1,
+                        status: PlanTaskStatus::Planned,
+                    },
+                ],
+            })
+            .unwrap();
+        assert_eq!(sequential.round_index, 1);
+        assert_eq!(sequential.mode, PlanRoundMode::Sequential);
+        assert_eq!(sequential.status, PlanRoundStatus::Running);
+        assert_eq!(sequential.tasks[0].status, PlanTaskStatus::Running);
+        assert_eq!(sequential.tasks[1].status, PlanTaskStatus::Planned);
+
+        let concurrent_start_error = store
+            .update_plan_task_status(
+                &sequential.tasks[1].id,
+                PlanTaskStatusPatch {
+                    status: PlanTaskStatus::Running,
+                    result_summary: None,
+                    error: None,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(concurrent_start_error.contains("running task"));
+
+        let sequential = store
+            .complete_plan_task_and_start_next(
+                &sequential.tasks[0].id,
+                PlanTaskStatusPatch {
+                    status: PlanTaskStatus::Completed,
+                    result_summary: Some(Some("step one done")),
+                    error: Some(None),
+                },
+            )
+            .unwrap();
+        assert_eq!(sequential.status, PlanRoundStatus::Running);
+        assert_eq!(sequential.tasks[0].status, PlanTaskStatus::Completed);
+        assert_eq!(
+            sequential.tasks[0].result_summary.as_deref(),
+            Some("step one done")
+        );
+        assert_eq!(sequential.tasks[1].status, PlanTaskStatus::Running);
+
+        let sequential = store
+            .complete_plan_task_and_start_next(
+                &sequential.tasks[1].id,
+                PlanTaskStatusPatch {
+                    status: PlanTaskStatus::Completed,
+                    result_summary: Some(Some("step two done")),
+                    error: Some(None),
+                },
+            )
+            .unwrap();
+        assert_eq!(sequential.status, PlanRoundStatus::Completed);
+        assert!(sequential
+            .tasks
+            .iter()
+            .all(|task| task.status == PlanTaskStatus::Completed));
+
+        let listed = store.list_plan_rounds(&thread.id).unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|round| round.round_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        store.delete_thread(&thread.id).unwrap();
+        let conn = store.conn.lock().unwrap();
+        for (table, id) in [
+            ("thread_plan_rounds", parallel.id.as_str()),
+            ("thread_plan_tasks", parallel.tasks[0].id.as_str()),
+            ("thread_plan_task_sessions", parallel.tasks[0].id.as_str()),
+        ] {
+            let count: i64 = if table == "thread_plan_task_sessions" {
+                conn.query_row(
+                    "SELECT count(*) FROM thread_plan_task_sessions WHERE task_id = ?",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            } else {
+                conn.query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE id = ?"),
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+            };
+            assert_eq!(count, 0, "{table} should cascade");
+        }
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]

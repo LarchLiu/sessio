@@ -4,14 +4,15 @@ use std::sync::{Arc, RwLock};
 
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
-    KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
+    KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, ProjectInfo,
+    ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
+    ThreadInfo, ThreadKind, WorkflowInfo,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
-    IndexedSubagentRecord, NewAssistant, ProjectStagePatch, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore,
-    ThreadWorkSnapshotRecord,
+    IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTaskSession, PlanTaskStatusPatch,
+    ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection, SessionHistoryRecord,
+    SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -339,6 +340,45 @@ impl SessionStore for CachedStore {
 
     fn delete_thread(&self, thread_id: &str) -> Result<()> {
         self.inner.delete_thread(thread_id)
+    }
+
+    fn create_plan_round(&self, round: NewPlanRound<'_>) -> Result<PlanRoundInfo> {
+        self.inner.create_plan_round(round)
+    }
+
+    fn get_plan_round(&self, round_id: &str) -> Result<Option<PlanRoundInfo>> {
+        self.inner.get_plan_round(round_id)
+    }
+
+    fn list_plan_rounds(&self, thread_id: &str) -> Result<Vec<PlanRoundInfo>> {
+        self.inner.list_plan_rounds(thread_id)
+    }
+
+    fn update_plan_task_status(
+        &self,
+        task_id: &str,
+        patch: PlanTaskStatusPatch<'_>,
+    ) -> Result<PlanTaskInfo> {
+        self.inner.update_plan_task_status(task_id, patch)
+    }
+
+    fn complete_plan_task_and_start_next(
+        &self,
+        task_id: &str,
+        patch: PlanTaskStatusPatch<'_>,
+    ) -> Result<PlanRoundInfo> {
+        self.inner.complete_plan_task_and_start_next(task_id, patch)
+    }
+
+    fn link_plan_task_session(
+        &self,
+        session: NewPlanTaskSession<'_>,
+    ) -> Result<PlanTaskSessionInfo> {
+        self.inner.link_plan_task_session(session)
+    }
+
+    fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>> {
+        self.inner.list_plan_task_sessions(task_id)
     }
 
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>> {
