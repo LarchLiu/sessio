@@ -105,6 +105,7 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，
 - plan mode 可以是 `parallel` 或 `sequential`。
 - 适合持续多轮推进。
 - 复用 `docs/astra-task-centric-refactor-plan.md` 的 task-centric 编排模型。
+- `docs/astra-task-centric-refactor-plan.md` 是 teamwork 的编排标准；它不是 workflow 的 Astra 调度方案，而是把现有 Astra task routing 从 stages 迁移为 thread-level assistants。
 - Astra task-centric 的标准路由对象是 `assistantId` 或 thread-level assistant。
 - teamwork 不读取 stage status，也不需要 stage/issue mutation。
 
@@ -186,6 +187,8 @@ assistant = 路由 / 上下文 / agent 配置 / session 归档
 task      = 执行事实 / 生命周期状态 / 结果记录
 run       = 编排进度 / cursor / 终态
 ```
+
+这个迁移不是把 workflow 变成自动调度器，而是把当前 Astra stage-routed task-centric 流程改成 assistant-routed task-centric 流程：旧实现里的 stage route、stage status 和 stage issue mutation 被 `assistant_id`、plan task lifecycle 和 task result 取代。
 
 执行方式：
 

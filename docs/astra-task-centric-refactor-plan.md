@@ -4,7 +4,9 @@
 
 本文档定义 Astra task-centric 编排的目标形态：**assistant 负责路由和上下文，task 负责执行事实，run 负责整体编排进度**。
 
-它是 `teamwork` thread kind 的标准编排模型，不是 `workflow` 的自动调度模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它迁移为 assistant-routed teamwork：用户配置 thread-level assistants，Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
+它是 `teamwork` thread kind 的标准编排模型，不是 `workflow` 的自动调度模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它迁移为 assistant-routed teamwork：也就是把当前 Astra task 路由里的 stages 改为 thread-level assistants，由 Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
+
+因此本文档的“重构”含义非常窄：保留 Astra task-centric 编排能力，但把 routing/control plane 从 `targetStageId`、stage status 和 stage issue mutation，迁移到 `assistantId`、plan round/task lifecycle 和 task result。它不是把 `workflow` 变成 Astra-scheduled workflow，也不是给人为 stage 流程增加默认自动调度。
 
 持久化模型以 `docs/thread-types-plan-rounds.md` 为准。Astra run 负责编排进度、backend、diagnostics 和终态原因；`thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions` 负责每轮计划、task lifecycle、session 关联和 reload 恢复。本文档不再定义长期 `task_states_json` 或另一套 task state 事实源。
 
@@ -16,11 +18,11 @@
 workflow   = human-defined stages, no Astra scheduling
 teamwork   = shared context + Astra task orchestration
 brainstorm = shared context + parallel opinions + synthesis
-debate     = isolated contexts + cross-verification + convergence
+PK/debate  = isolated contexts + cross-verification + convergence
 ```
 
 - `workflow` 使用人为定义的 stages 和顺序。系统可以把人工 stage task 记录到 plan round/task，便于统一历史回看，但 workflow 不默认由 Astra 自动调度。
-- `teamwork` 是本文档的范围：所有 assistants 共享 thread context，Astra 生成 plan round/tasks，并把 tasks 分派给 `assistantId` 或 `targetAgent`。
+- `teamwork` 是本文档的范围：所有 assistants 共享 thread context，Astra 生成 plan round/tasks，并把 tasks 分派给 `assistantId` 或 `targetAgent`。它可以理解为“当前 Astra stages 改为 assistants”后的标准形态。
 - `brainstorm` 不是普通 teamwork 的同义词。它需要 shared-board 生成、下一轮注入和 synthesis 策略。
 - `debate` / PK 不是普通 teamwork 的同义词。它需要 isolated lanes、artifact 可见范围、cross-check 和 convergence 判断。
 
