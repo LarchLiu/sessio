@@ -2,7 +2,7 @@ pub mod cached;
 pub mod sqlite;
 
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
@@ -11,7 +11,8 @@ use crate::models::{
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
     RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo,
-    StageStatus, SubagentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
+    StageStatus, SubagentInfo, ThreadInfo, ThreadKind, ThreadReplayInfo, ThreadReplaySessionInfo,
+    ThreadReplaySessionSourceInfo, ThreadReplaySessionSourceKind, WorkflowInfo,
 };
 
 /// Optional patch fields shared by the agent-preference update methods. Every
@@ -298,6 +299,161 @@ pub trait SessionStore: Send + Sync {
     fn delete_assistant(&self, assistant_id: &str) -> Result<()>;
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>>;
     fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo>;
+    fn get_thread_replay(&self, thread_id: &str) -> Result<ThreadReplayInfo> {
+        let thread = self.get_thread_work_state(thread_id)?;
+        let plan_rounds = self.list_plan_rounds(thread_id)?;
+        let astra_runs = self.list_astra_runs(thread_id)?;
+        let session_lookup = self
+            .list_all_sessions()?
+            .into_iter()
+            .map(|session| ((session.agent, session.id.clone()), session))
+            .collect::<HashMap<_, _>>();
+        let mut sessions = HashMap::<(Agent, String), ThreadReplaySessionInfo>::new();
+
+        for session in &thread.sessions {
+            add_replay_session_source(
+                &mut sessions,
+                session.agent,
+                &session.id,
+                Some(session.clone()),
+                ThreadReplaySessionSourceInfo {
+                    kind: ThreadReplaySessionSourceKind::Thread,
+                    thread_id: Some(thread.id.clone()),
+                    stage_id: None,
+                    plan_round_id: None,
+                    plan_task_id: None,
+                    astra_run_id: None,
+                    role: None,
+                    label: Some("thread".to_string()),
+                    created_at: session.started_at.or(session.updated_at),
+                },
+            );
+        }
+
+        for stage in &thread.stages {
+            for session in &stage.sessions {
+                add_replay_session_source(
+                    &mut sessions,
+                    session.agent,
+                    &session.id,
+                    Some(session.clone()),
+                    ThreadReplaySessionSourceInfo {
+                        kind: ThreadReplaySessionSourceKind::Stage,
+                        thread_id: Some(thread.id.clone()),
+                        stage_id: Some(stage.id.clone()),
+                        plan_round_id: None,
+                        plan_task_id: None,
+                        astra_run_id: None,
+                        role: None,
+                        label: stage.name.clone().or_else(|| Some(stage.stage_id.clone())),
+                        created_at: session.started_at.or(session.updated_at),
+                    },
+                );
+            }
+        }
+
+        for round in &plan_rounds {
+            for task in &round.tasks {
+                for task_session in &task.sessions {
+                    let session = session_lookup
+                        .get(&(task_session.agent, task_session.session_id.clone()))
+                        .cloned();
+                    add_replay_session_source(
+                        &mut sessions,
+                        task_session.agent,
+                        &task_session.session_id,
+                        session,
+                        ThreadReplaySessionSourceInfo {
+                            kind: ThreadReplaySessionSourceKind::PlanTask,
+                            thread_id: Some(thread.id.clone()),
+                            stage_id: task.thread_stage_id.clone(),
+                            plan_round_id: Some(round.id.clone()),
+                            plan_task_id: Some(task.id.clone()),
+                            astra_run_id: round.astra_run_id.clone(),
+                            role: Some(task_session.role),
+                            label: Some(task.title.clone()),
+                            created_at: Some(task_session.created_at),
+                        },
+                    );
+                }
+            }
+        }
+
+        for run in &astra_runs {
+            let planner_agent =
+                replay_agent_for_backend(run.planner_backend.as_deref()).unwrap_or(Agent::AstraPi);
+            for session_id in parse_session_id_vec(&run.internal_planner_session_ids_json) {
+                let session = session_lookup
+                    .get(&(planner_agent, session_id.clone()))
+                    .cloned();
+                add_replay_session_source(
+                    &mut sessions,
+                    planner_agent,
+                    &session_id,
+                    session,
+                    ThreadReplaySessionSourceInfo {
+                        kind: ThreadReplaySessionSourceKind::AstraInternal,
+                        thread_id: Some(thread.id.clone()),
+                        stage_id: None,
+                        plan_round_id: None,
+                        plan_task_id: None,
+                        astra_run_id: Some(run.run_id.clone()),
+                        role: Some(PlanTaskSessionRole::Planner),
+                        label: run
+                            .planner_backend
+                            .as_ref()
+                            .map(|backend| format!("Astra planner: {backend}"))
+                            .or_else(|| Some("Astra planner".to_string())),
+                        created_at: Some(run.updated_at),
+                    },
+                );
+            }
+
+            let decision_agent =
+                replay_agent_for_backend(run.decision_backend.as_deref()).unwrap_or(Agent::AstraPi);
+            for session_id in parse_session_id_vec(&run.internal_decision_session_ids_json) {
+                let session = session_lookup
+                    .get(&(decision_agent, session_id.clone()))
+                    .cloned();
+                add_replay_session_source(
+                    &mut sessions,
+                    decision_agent,
+                    &session_id,
+                    session,
+                    ThreadReplaySessionSourceInfo {
+                        kind: ThreadReplaySessionSourceKind::AstraInternal,
+                        thread_id: Some(thread.id.clone()),
+                        stage_id: None,
+                        plan_round_id: None,
+                        plan_task_id: None,
+                        astra_run_id: Some(run.run_id.clone()),
+                        role: Some(PlanTaskSessionRole::Diagnostic),
+                        label: run
+                            .decision_backend
+                            .as_ref()
+                            .map(|backend| format!("Astra internal: {backend}"))
+                            .or_else(|| Some("Astra internal".to_string())),
+                        created_at: Some(run.updated_at),
+                    },
+                );
+            }
+        }
+
+        let mut sessions = sessions.into_values().collect::<Vec<_>>();
+        sessions.sort_by(|a, b| {
+            a.first_seen_at
+                .unwrap_or(i64::MAX)
+                .cmp(&b.first_seen_at.unwrap_or(i64::MAX))
+                .then_with(|| a.agent.as_str().cmp(b.agent.as_str()))
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+
+        Ok(ThreadReplayInfo {
+            thread_id: thread.id,
+            kind: thread.kind,
+            sessions,
+        })
+    }
     fn create_thread(
         &self,
         project_id: &str,
@@ -531,4 +687,71 @@ pub trait SessionStore: Send + Sync {
         agent: Agent,
         present: &HashSet<String>,
     ) -> Result<()>;
+}
+
+fn add_replay_session_source(
+    sessions: &mut HashMap<(Agent, String), ThreadReplaySessionInfo>,
+    agent: Agent,
+    session_id: &str,
+    session: Option<SessionInfo>,
+    source: ThreadReplaySessionSourceInfo,
+) {
+    let key = (agent, session_id.to_string());
+    let source_time = source.created_at;
+    let entry = sessions
+        .entry(key)
+        .or_insert_with(|| ThreadReplaySessionInfo {
+            agent,
+            session_id: session_id.to_string(),
+            session: None,
+            sources: Vec::new(),
+            first_seen_at: source_time,
+            last_seen_at: source_time,
+        });
+
+    if entry.session.is_none() {
+        entry.session = session;
+    }
+    if let Some(source_time) = source_time {
+        entry.first_seen_at = Some(
+            entry
+                .first_seen_at
+                .map(|value| value.min(source_time))
+                .unwrap_or(source_time),
+        );
+        entry.last_seen_at = Some(
+            entry
+                .last_seen_at
+                .map(|value| value.max(source_time))
+                .unwrap_or(source_time),
+        );
+    }
+    if !entry.sources.iter().any(|existing| {
+        existing.kind == source.kind
+            && existing.stage_id == source.stage_id
+            && existing.plan_round_id == source.plan_round_id
+            && existing.plan_task_id == source.plan_task_id
+            && existing.astra_run_id == source.astra_run_id
+            && existing.role == source.role
+    }) {
+        entry.sources.push(source);
+    }
+}
+
+fn parse_session_id_vec(value: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
+}
+
+fn replay_agent_for_backend(backend: Option<&str>) -> Option<Agent> {
+    let backend = backend?.trim();
+    if backend.is_empty() {
+        return None;
+    }
+    if backend == "astra_pi_acp" || backend == Agent::AstraPi.as_str() {
+        return Some(Agent::AstraPi);
+    }
+    if let Some(agent) = backend.strip_prefix("runtime_agent_") {
+        return Agent::from_db_str(agent);
+    }
+    Agent::from_db_str(backend)
 }

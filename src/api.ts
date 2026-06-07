@@ -228,6 +228,35 @@ export interface ThreadInfo {
 
 export interface ThreadWorkState extends ThreadInfo {}
 
+export type ThreadReplaySessionSourceKind = "thread" | "stage" | "plan_task" | "astra_internal";
+
+export interface ThreadReplaySessionSourceInfo {
+  kind: ThreadReplaySessionSourceKind;
+  threadId: string | null;
+  stageId: string | null;
+  planRoundId: string | null;
+  planTaskId: string | null;
+  astraRunId: string | null;
+  role: PlanTaskSessionRole | null;
+  label: string | null;
+  createdAt: number | null;
+}
+
+export interface ThreadReplaySessionInfo {
+  agent: Agent;
+  sessionId: string;
+  session: SessionInfo | null;
+  sources: ThreadReplaySessionSourceInfo[];
+  firstSeenAt: number | null;
+  lastSeenAt: number | null;
+}
+
+export interface ThreadReplayInfo {
+  threadId: string;
+  kind: ThreadKind;
+  sessions: ThreadReplaySessionInfo[];
+}
+
 export type PlanRoundMode = "parallel" | "sequential";
 export type PlanRoundSource = "astra" | "manual" | "agent";
 export type PlanRoundStatus = "planned" | "running" | "completed" | "cancelled" | "errored";
@@ -1067,6 +1096,10 @@ export async function listThreads(projectId: string): Promise<ThreadInfo[]> {
 
 export async function getThreadWorkState(threadId: string): Promise<ThreadWorkState> {
   return invoke<ThreadWorkState>("get_thread_work_state", { threadId });
+}
+
+export async function getThreadReplay(threadId: string): Promise<ThreadReplayInfo> {
+  return invoke<ThreadReplayInfo>("get_thread_replay", { threadId });
 }
 
 export async function createThread(

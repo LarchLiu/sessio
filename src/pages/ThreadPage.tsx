@@ -2,13 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
-import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal, AstraTaskResult, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo } from "../api";
+import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal, AstraTaskResult, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo } from "../api";
 import {
   AGENT_LABEL,
   cancelAstraRun,
   createAstraRun,
   createThreadStageIssue,
   deleteThreadStageIssue,
+  getThreadReplay,
   listAstraRuns,
   listPlanRounds,
   listThreads,
@@ -40,20 +41,35 @@ export default function ThreadPage({
 }) {
   const { t, lang } = useI18n();
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
+  const [replay, setReplay] = useState<ThreadReplayInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const loadThreadData = useCallback(async () => {
+    const rows = await listThreads(project.id);
+    const nextReplay = rows.some((row) => row.id === threadId)
+      ? await getThreadReplay(threadId)
+      : null;
+    return { rows, nextReplay };
+  }, [project.id, threadId]);
+
   const reload = useCallback(() => {
-    return listThreads(project.id)
-      .then((rows) => setThreads(rows))
+    return loadThreadData()
+      .then(({ rows, nextReplay }) => {
+        setThreads(rows);
+        setReplay(nextReplay);
+      })
       .catch((err) => onError(String(err)));
-  }, [onError, project.id]);
+  }, [loadThreadData, onError]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    listThreads(project.id)
-      .then((rows) => {
-        if (!cancelled) setThreads(rows);
+    loadThreadData()
+      .then(({ rows, nextReplay }) => {
+        if (!cancelled) {
+          setThreads(rows);
+          setReplay(nextReplay);
+        }
       })
       .catch((err) => {
         if (!cancelled) onError(String(err));
@@ -64,7 +80,7 @@ export default function ThreadPage({
     return () => {
       cancelled = true;
     };
-  }, [onError, project.id]);
+  }, [loadThreadData, onError]);
 
   const thread = threads.find((row) => row.id === threadId) ?? null;
   const sortedStages = useMemo(
@@ -88,7 +104,7 @@ export default function ThreadPage({
             <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
               <ThreadStat label={t("stage.project_stages")} value={String(sortedStages.length)} />
               <ThreadStat label={t("assistant.title")} value={String(uniqueAssistantCount(sortedStages))} />
-              <ThreadStat label={t("thread.chats")} value={String(thread.sessions.length)} />
+              <ThreadStat label={t("thread.sessions")} value={String(replay?.sessions.length ?? thread.sessions.length)} />
               <ThreadStat label={t("meta.updated")} value={formatDate(thread.updatedAt, lang) ?? "-"} />
             </div>
 
@@ -105,8 +121,8 @@ export default function ThreadPage({
               onReload={reload}
             />
 
-            {thread.sessions.length > 0 && (
-              <ThreadLinkedSessions sessions={thread.sessions} onSelectSession={onSelectSession} />
+            {replay && replay.sessions.length > 0 && (
+              <ThreadReplaySessions replay={replay} onSelectSession={onSelectSession} />
             )}
 
             {sortedStages.length === 0 ? (
@@ -822,24 +838,24 @@ function StageIssueSection({
   );
 }
 
-function ThreadLinkedSessions({
-  sessions,
+function ThreadReplaySessions({
+  replay,
   onSelectSession,
 }: {
-  sessions: SessionInfo[];
+  replay: ThreadReplayInfo;
   onSelectSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
-  const groups = groupSessionsByAgent(sessions);
+  const groups = groupReplaySessionsByAgent(replay.sessions);
   return (
     <section className="rounded-lg border border-card-border/[0.12] bg-card p-3">
       <div className="mb-3 flex items-center gap-2 text-body-sm font-medium text-ink/75">
         <HashIcon className="h-4 w-4 text-ink/40" />
-        {t("thread.linked_sessions")}
+        {t("thread.replay_sessions")}
       </div>
       <div className="grid gap-2">
         {groups.map(({ agent, sessions: agentSessions }) => (
-          <AssistantSessionLane
+          <ThreadReplaySessionLane
             key={agent}
             label={AGENT_LABEL[agent]}
             agent={agent}
@@ -849,6 +865,87 @@ function ThreadLinkedSessions({
         ))}
       </div>
     </section>
+  );
+}
+
+function ThreadReplaySessionLane({
+  label,
+  agent,
+  sessions,
+  onSelectSession,
+}: {
+  label: string;
+  agent: Agent;
+  sessions: ThreadReplaySessionInfo[];
+  onSelectSession: (session: SessionInfo) => void;
+}) {
+  const { t, lang } = useI18n();
+  return (
+    <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <AgentGlyph agent={agent} className="h-4 w-4 shrink-0" />
+        <div className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink/75">{label}</div>
+        <span className="shrink-0 text-meta text-ink/35">
+          {t("astra.task_sessions", { count: sessions.length })}
+        </span>
+      </div>
+      <div className="mt-2 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
+        {sessions.slice().sort(compareReplaySessionTime).map((replaySession) => {
+          const content = (
+            <>
+              <div className="truncate text-body-sm text-ink/75">
+                {replaySession.session
+                  ? sessionDisplayTitle(replaySession.session) ?? t("list.no_user_message")
+                  : replaySession.sessionId}
+              </div>
+              <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1">
+                {replaySession.session ? (
+                  <span className="text-meta text-ink/35">
+                    {t("list.msgs", { count: replaySession.session.messageCount })}
+                  </span>
+                ) : (
+                  <span className="text-meta text-ink/35">{t("thread.replay_reference")}</span>
+                )}
+                {replaySession.lastSeenAt && (
+                  <span className="text-meta text-ink/25">
+                    {formatDate(replaySession.lastSeenAt, lang)}
+                  </span>
+                )}
+              </div>
+              <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
+                {replaySession.sources.map((source) => (
+                  <span
+                    key={replaySourceKey(source)}
+                    title={replaySourceTitle(source)}
+                    className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/40"
+                  >
+                    {source.label ?? t(`thread.replay_source.${source.kind}`)}
+                  </span>
+                ))}
+              </div>
+            </>
+          );
+
+          return replaySession.session ? (
+            <button
+              key={`${replaySession.agent}:${replaySession.sessionId}`}
+              type="button"
+              onClick={() => onSelectSession(replaySession.session!)}
+              className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5 text-left transition hover:bg-card-hover"
+            >
+              {content}
+            </button>
+          ) : (
+            <div
+              key={`${replaySession.agent}:${replaySession.sessionId}`}
+              className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5"
+            >
+              {content}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -955,8 +1052,14 @@ function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
   return right - left;
 }
 
-function groupSessionsByAgent(sessions: SessionInfo[]): Array<{ agent: Agent; sessions: SessionInfo[] }> {
-  const byAgent = new Map<Agent, SessionInfo[]>();
+function compareReplaySessionTime(a: ThreadReplaySessionInfo, b: ThreadReplaySessionInfo): number {
+  const left = a.lastSeenAt ?? a.firstSeenAt ?? a.session?.updatedAt ?? a.session?.startedAt ?? 0;
+  const right = b.lastSeenAt ?? b.firstSeenAt ?? b.session?.updatedAt ?? b.session?.startedAt ?? 0;
+  return right - left;
+}
+
+function groupReplaySessionsByAgent(sessions: ThreadReplaySessionInfo[]): Array<{ agent: Agent; sessions: ThreadReplaySessionInfo[] }> {
+  const byAgent = new Map<Agent, ThreadReplaySessionInfo[]>();
   for (const session of sessions) {
     const group = byAgent.get(session.agent) ?? [];
     group.push(session);
@@ -964,8 +1067,32 @@ function groupSessionsByAgent(sessions: SessionInfo[]): Array<{ agent: Agent; se
   }
   return Array.from(byAgent, ([agent, rows]) => ({
     agent,
-    sessions: rows.slice().sort(compareSessionTime),
+    sessions: rows.slice().sort(compareReplaySessionTime),
   }));
+}
+
+function replaySourceKey(source: ThreadReplaySessionSourceInfo): string {
+  return [
+    source.kind,
+    source.stageId,
+    source.planRoundId,
+    source.planTaskId,
+    source.astraRunId,
+    source.role,
+    source.createdAt,
+  ].filter(Boolean).join(":");
+}
+
+function replaySourceTitle(source: ThreadReplaySessionSourceInfo): string {
+  return [
+    source.label,
+    source.kind,
+    source.role,
+    source.planTaskId,
+    source.planRoundId,
+    source.stageId,
+    source.astraRunId,
+  ].filter(Boolean).join("\n");
 }
 
 function isAstraActive(status: AstraRunStatus): boolean {

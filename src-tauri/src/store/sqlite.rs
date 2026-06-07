@@ -8030,6 +8030,7 @@ fn record_continuation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rec
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+    use crate::models::ThreadReplaySessionSourceKind;
 
     fn unique_db(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("{prefix}-{}.db", unique_suffix()))
@@ -10283,6 +10284,247 @@ mod migration_tests {
             assert_eq!(count, 0, "{table} should cascade");
         }
         drop(conn);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn thread_replay_aggregates_and_dedupes_session_sources() {
+        let path = unique_db("sessio-thread-replay");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-replay-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "thread-replay",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let assistant = store
+            .create_assistant(NewAssistant {
+                name: "Replay Assistant",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "workspace-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Keep traceable notes"),
+                color: Some("#22c55e"),
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let thread = store
+            .create_thread_with_options(
+                &project.id,
+                "Replay everything",
+                None,
+                ThreadKind::Teamwork,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+        let stage_template = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.kind == Some(StageType::Research))
+            .unwrap();
+        let thread_stage = store
+            .add_thread_stage(
+                &thread.id,
+                &stage_template.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+
+        let direct_session = SessionInfo {
+            id: "direct-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 2,
+            rename_title: None,
+            title: Some("Direct thread chat".to_string()),
+            first_user_message: Some("Thread-level note".to_string()),
+            file_path: Path::new(&project.path)
+                .join("direct-session.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        let stage_task_session = SessionInfo {
+            id: "stage-task-session".to_string(),
+            started_at: Some(30),
+            updated_at: Some(40),
+            message_count: 4,
+            title: Some("Stage and task work".to_string()),
+            first_user_message: Some("Do stage work".to_string()),
+            file_path: Path::new(&project.path)
+                .join("stage-task-session.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            ..direct_session.clone()
+        };
+        let internal_session = SessionInfo {
+            id: "planner-session".to_string(),
+            agent: Agent::AstraPi,
+            started_at: Some(50),
+            updated_at: Some(60),
+            message_count: 1,
+            title: Some("Planner trace".to_string()),
+            first_user_message: Some("Plan next round".to_string()),
+            file_path: Path::new(&project.path)
+                .join("planner-session.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            ..direct_session.clone()
+        };
+        for session in [&direct_session, &stage_task_session, &internal_session] {
+            store.upsert_session(&session.file_path, session).unwrap();
+        }
+        store
+            .link_thread_session(&thread.id, Agent::Codex, &direct_session.id)
+            .unwrap();
+        store
+            .link_stage_session(&thread_stage.id, Agent::Codex, &stage_task_session.id)
+            .unwrap();
+
+        let round = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: None,
+                round_index: None,
+                summary: Some("Replay round"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Astra,
+                status: PlanRoundStatus::Planned,
+                tasks: vec![NewPlanTask {
+                    thread_stage_id: Some(&thread_stage.id),
+                    assistant_id: Some(&assistant.id),
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: Some(r#"{"stage":"research"}"#),
+                    assistant_snapshot_json: Some(r#"{"assistant":"replay"}"#),
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Replay task",
+                    prompt: "Do traceable work",
+                    expected_output: Some("Trace"),
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Running,
+                }],
+            })
+            .unwrap();
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: &stage_task_session.id,
+                role: PlanTaskSessionRole::Runtime,
+            })
+            .unwrap();
+
+        store
+            .upsert_astra_run(&AstraRunRecord {
+                run_id: "replay-run".to_string(),
+                thread_id: thread.id.clone(),
+                project_id: project.id.clone(),
+                project_path: project.path.clone(),
+                status: "completed".to_string(),
+                mode: "auto".to_string(),
+                proposed_tasks_json: "[]".to_string(),
+                approved_task_ids_json: "[]".to_string(),
+                delegated_session_ids_json: "[]".to_string(),
+                task_results_json: "[]".to_string(),
+                current_stage_id: None,
+                completed_task_ids_json: "[]".to_string(),
+                stage_attempt_counts_json: "{}".to_string(),
+                retry_limit: 3,
+                planner_backend: Some("astra_pi_acp".to_string()),
+                decision_backend: None,
+                round_index: Some(0),
+                round_limit: 3,
+                terminal_reason: None,
+                last_error_code: None,
+                last_error_message: None,
+                internal_planner_session_ids_json: r#"["planner-session"]"#.to_string(),
+                internal_decision_session_ids_json: "[]".to_string(),
+                run_diagnostics_json: "[]".to_string(),
+                error: None,
+                created_at: 70,
+                updated_at: 80,
+            })
+            .unwrap();
+
+        let replay = store.get_thread_replay(&thread.id).unwrap();
+        assert_eq!(replay.thread_id, thread.id);
+        assert_eq!(replay.kind, ThreadKind::Teamwork);
+        assert_eq!(replay.sessions.len(), 3);
+
+        let direct = replay
+            .sessions
+            .iter()
+            .find(|session| session.session_id == direct_session.id)
+            .unwrap();
+        assert_eq!(direct.agent, Agent::Codex);
+        assert_eq!(direct.sources.len(), 1);
+        assert_eq!(
+            direct.sources[0].kind,
+            ThreadReplaySessionSourceKind::Thread
+        );
+        assert_eq!(
+            direct.session.as_ref().unwrap().title.as_deref(),
+            Some("Direct thread chat")
+        );
+
+        let stage_task = replay
+            .sessions
+            .iter()
+            .find(|session| session.session_id == stage_task_session.id)
+            .unwrap();
+        assert_eq!(stage_task.agent, Agent::Codex);
+        assert_eq!(stage_task.sources.len(), 2);
+        assert!(stage_task
+            .sources
+            .iter()
+            .any(|source| source.kind == ThreadReplaySessionSourceKind::Stage
+                && source.stage_id.as_deref() == Some(thread_stage.id.as_str())));
+        assert!(stage_task.sources.iter().any(|source| source.kind
+            == ThreadReplaySessionSourceKind::PlanTask
+            && source.plan_task_id.as_deref() == Some(round.tasks[0].id.as_str())
+            && source.role == Some(PlanTaskSessionRole::Runtime)));
+
+        let internal = replay
+            .sessions
+            .iter()
+            .find(|session| session.session_id == internal_session.id)
+            .unwrap();
+        assert_eq!(internal.agent, Agent::AstraPi);
+        assert_eq!(internal.sources.len(), 1);
+        assert_eq!(
+            internal.sources[0].kind,
+            ThreadReplaySessionSourceKind::AstraInternal
+        );
+        assert_eq!(
+            internal.sources[0].astra_run_id.as_deref(),
+            Some("replay-run")
+        );
+        assert_eq!(internal.sources[0].role, Some(PlanTaskSessionRole::Planner));
+
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
     }

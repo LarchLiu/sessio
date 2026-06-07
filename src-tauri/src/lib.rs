@@ -37,7 +37,7 @@ use models::{
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
     RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus,
-    ThreadInfo, ThreadKind, WorkflowInfo,
+    ThreadInfo, ThreadKind, ThreadReplayInfo, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -689,6 +689,16 @@ fn get_thread_work_state(
 ) -> Result<ThreadInfo, String> {
     store
         .get_thread_work_state(&thread_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_thread_replay(
+    thread_id: String,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<ThreadReplayInfo, String> {
+    store
+        .get_thread_replay(&thread_id)
         .map_err(|e| e.to_string())
 }
 
@@ -3452,6 +3462,7 @@ pub fn run() {
             delete_assistant,
             list_threads,
             get_thread_work_state,
+            get_thread_replay,
             create_thread,
             update_thread,
             delete_thread,

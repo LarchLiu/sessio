@@ -578,6 +578,49 @@ pub struct ThreadInfo {
     pub sessions: Vec<SessionInfo>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadReplayInfo {
+    pub thread_id: String,
+    pub kind: ThreadKind,
+    pub sessions: Vec<ThreadReplaySessionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadReplaySessionInfo {
+    pub agent: Agent,
+    pub session_id: String,
+    pub session: Option<SessionInfo>,
+    #[serde(default)]
+    pub sources: Vec<ThreadReplaySessionSourceInfo>,
+    pub first_seen_at: Option<i64>,
+    pub last_seen_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadReplaySessionSourceInfo {
+    pub kind: ThreadReplaySessionSourceKind,
+    pub thread_id: Option<String>,
+    pub stage_id: Option<String>,
+    pub plan_round_id: Option<String>,
+    pub plan_task_id: Option<String>,
+    pub astra_run_id: Option<String>,
+    pub role: Option<PlanTaskSessionRole>,
+    pub label: Option<String>,
+    pub created_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadReplaySessionSourceKind {
+    Thread,
+    Stage,
+    PlanTask,
+    AstraInternal,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum PlanRoundMode {
