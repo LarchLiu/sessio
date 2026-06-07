@@ -335,6 +335,9 @@ function ThreadAstraPanel({
         {activeRun && activeRun.delegatedSessionIds.length > 0 && (
           <AstraDelegatedSessions run={activeRun} />
         )}
+        {activeRun && (
+          <AstraRunDiagnostics run={activeRun} />
+        )}
         {activeRun?.error && (
           <div
             title={activeRun.error}
@@ -478,6 +481,57 @@ function AstraDelegatedSessions({ run }: { run: AstraHandle }) {
           </span>
         );
       })}
+    </div>
+  );
+}
+
+function AstraRunDiagnostics({ run }: { run: AstraHandle }) {
+  const { t } = useI18n();
+  const diagnostics = run.runDiagnostics.slice(-3).reverse().map((diagnostic, index) => {
+    return describeAstraDiagnostic(diagnostic, index);
+  });
+  const hasSummary = Boolean(run.terminalReason || run.lastErrorCode || run.lastErrorMessage || diagnostics.length > 0);
+  if (!hasSummary) return null;
+
+  return (
+    <div className="rounded-md border border-dashed border-card-border/[0.12] px-2.5 py-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <span className="text-caption font-medium text-ink/55">{t("astra.diagnostics")}</span>
+        {run.terminalReason && (
+          <span title={run.terminalReason} className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/45">
+            {t("astra.terminal_reason", { value: run.terminalReason })}
+          </span>
+        )}
+        {run.lastErrorCode && (
+          <span title={run.lastErrorCode} className="max-w-full truncate rounded bg-red-500/[0.10] px-1.5 py-0.5 text-meta text-red-500">
+            {t("astra.error_code", { value: run.lastErrorCode })}
+          </span>
+        )}
+      </div>
+      {run.lastErrorMessage && (
+        <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-status-error">
+          {run.lastErrorMessage}
+        </div>
+      )}
+      {diagnostics.length > 0 && (
+        <div className="mt-1.5 grid gap-1">
+          {diagnostics.map((diagnostic) => (
+            <div key={diagnostic.key} title={diagnostic.raw} className="min-w-0 rounded bg-ink/[0.035] px-2 py-1 text-caption text-ink/42">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="truncate font-medium text-ink/55">{diagnostic.label}</span>
+                {diagnostic.code && (
+                  <span className="truncate rounded bg-ink/[0.06] px-1 py-0.5 text-meta text-ink/38">
+                    {diagnostic.code}
+                  </span>
+                )}
+              </div>
+              {diagnostic.detail && (
+                <div className="mt-0.5 line-clamp-2 leading-relaxed">{diagnostic.detail}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1226,6 +1280,44 @@ function objectField(value: Record<string, unknown> | null, key: string): Record
 function stringField(value: Record<string, unknown> | null, key: string): string | null {
   const field = value?.[key];
   return typeof field === "string" && field.trim() ? field : null;
+}
+
+function describeAstraDiagnostic(value: unknown, index: number): { key: string; label: string; code: string | null; detail: string | null; raw: string } {
+  const record = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const kind = diagnosticString(record, "kind") ?? "diagnostic";
+  const backend = diagnosticString(record, "backend");
+  const code = diagnosticString(record, "code");
+  const message = diagnosticString(record, "message")
+    ?? diagnosticString(record, "rawResponseSnippet")
+    ?? diagnosticString(record, "sessionId");
+  const raw = safeJsonPreview(value, 1200);
+  return {
+    key: `${kind}:${code ?? ""}:${index}`,
+    label: backend ? `${kind} / ${backend}` : kind,
+    code,
+    detail: message,
+    raw,
+  };
+}
+
+function diagnosticString(record: Record<string, unknown> | null, key: string): string | null {
+  const value = record?.[key];
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return null;
+}
+
+function safeJsonPreview(value: unknown, maxLength: number): string {
+  let text: string;
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  } catch {
+    text = String(value);
+  }
+  if (!text) return "";
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
 }
 
 function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
