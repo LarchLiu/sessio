@@ -1398,21 +1398,16 @@ impl AstraService {
     }
 
     fn run_to_handle(&self, run: AstraRun) -> AstraHandle {
-        let current_task_id = self.current_task_id_for_run(&run.run_id);
         AstraHandle {
             run_id: run.run_id,
             thread_id: run.thread_id,
             project_id: run.project_id,
             status: run.status,
             proposed_tasks: run.proposed_tasks,
-            approved_task_ids: run.approved_task_ids,
             delegated_session_ids: run.delegated_session_ids,
             task_results: run.task_results,
             mode: run.mode,
-            current_stage_id: run.current_stage_id,
-            current_task_id,
             completed_task_ids: run.completed_task_ids,
-            stage_attempt_counts: run.stage_attempt_counts,
             retry_limit: run.retry_limit,
             planner_backend: run.planner_backend,
             decision_backend: run.decision_backend,
@@ -1428,16 +1423,6 @@ impl AstraService {
             created_at: run.created_at,
             updated_at: run.updated_at,
         }
-    }
-
-    fn current_task_id_for_run(&self, run_id: &str) -> Option<String> {
-        self.inner
-            .delegated_sessions
-            .lock()
-            .ok()?
-            .values()
-            .find(|state| state.run_id == run_id && !state.finished)
-            .map(|state| state.task_id.clone())
     }
 
     fn emit(&self, run: &AstraRun, event_type: &str, data: Value) {
