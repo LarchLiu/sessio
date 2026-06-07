@@ -493,7 +493,7 @@ function AstraPlanTaskSessions({ sessions }: { sessions: PlanTaskSessionInfo[] }
 function AstraRunDiagnostics({ run }: { run: AstraHandle }) {
   const { t } = useI18n();
   const diagnostics = run.runDiagnostics.slice(-3).reverse().map((diagnostic, index) => {
-    return describeAstraDiagnostic(diagnostic, index);
+    return describeAstraDiagnostic(diagnostic, index, t);
   });
   const hasSummary = Boolean(run.terminalReason || run.lastErrorCode || run.lastErrorMessage || diagnostics.length > 0);
   if (!hasSummary) return null;
@@ -1090,7 +1090,9 @@ function groupReplaySessionsByThreadKind(
 ): ReplaySessionGroup[] {
   const keyForSession = replay.kind === "workflow"
     ? (session: ThreadReplaySessionInfo) => workflowReplayGroupKey(session, t)
-    : (session: ThreadReplaySessionInfo) => roundReplayGroupKey(session, t);
+    : replay.kind === "debate"
+      ? (session: ThreadReplaySessionInfo) => debateReplayGroupKey(session, t)
+      : (session: ThreadReplaySessionInfo) => roundReplayGroupKey(session, t);
   const groups = new Map<string, ReplaySessionGroup>();
   for (const session of replay.sessions) {
     const seed = keyForSession(session);
@@ -1140,6 +1142,36 @@ function roundReplayGroupKey(
     };
   }
   return fallbackReplayGroupKey(session, t);
+}
+
+function debateReplayGroupKey(
+  session: ThreadReplaySessionInfo,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): ReplaySessionGroup {
+  const roundSource = session.sources.find((source) => source.planRoundId || source.kind === "plan_task");
+  if (roundSource) {
+    const round = roundSource.planRoundId
+      ? shortSessionId(roundSource.planRoundId)
+      : t("thread.replay_source.plan_task");
+    const lane = debateLaneLabel(roundSource)
+      ?? (roundSource.planTaskId ? shortSessionId(roundSource.planTaskId) : roundSource.label)
+      ?? AGENT_LABEL[session.agent];
+    return {
+      key: `debate:${roundSource.planRoundId ?? "round"}:${roundSource.planTaskId ?? lane}`,
+      label: t("thread.replay_group.round_lane", { round, lane }),
+      agent: session.agent,
+      sessions: [],
+    };
+  }
+  return fallbackReplayGroupKey(session, t);
+}
+
+function debateLaneLabel(source: ThreadReplaySessionSourceInfo): string | null {
+  const label = source.label?.trim();
+  if (!label) return null;
+  return label
+    .replace(/\s+debate\s+(lane|cross-check)$/i, "")
+    .trim() || label;
 }
 
 function fallbackReplayGroupKey(
@@ -1355,17 +1387,28 @@ function stringField(value: Record<string, unknown> | null, key: string): string
   return typeof field === "string" && field.trim() ? field : null;
 }
 
-function describeAstraDiagnostic(value: unknown, index: number): { key: string; label: string; code: string | null; detail: string | null; raw: string } {
+type AstraDiagnosticView = {
+  key: string;
+  label: string;
+  code: string | null;
+  detail: string | null;
+  raw: string;
+};
+
+function describeAstraDiagnostic(value: unknown, index: number, t?: (key: string, vars?: Record<string, string | number>) => string): AstraDiagnosticView {
   const record = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
   const kind = diagnosticString(record, "kind") ?? "diagnostic";
+  const raw = safeJsonPreview(value, 1200);
+  const domainView = t ? describeDomainAstraDiagnostic(record, kind, raw, index, t) : null;
+  if (domainView) return domainView;
+
   const backend = diagnosticString(record, "backend");
   const code = diagnosticString(record, "code");
   const message = diagnosticString(record, "message")
     ?? diagnosticString(record, "rawResponseSnippet")
     ?? diagnosticString(record, "sessionId");
-  const raw = safeJsonPreview(value, 1200);
   return {
     key: `${kind}:${code ?? ""}:${index}`,
     label: backend ? `${kind} / ${backend}` : kind,
@@ -1375,11 +1418,101 @@ function describeAstraDiagnostic(value: unknown, index: number): { key: string; 
   };
 }
 
+function describeDomainAstraDiagnostic(
+  record: Record<string, unknown> | null,
+  kind: string,
+  raw: string,
+  index: number,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): AstraDiagnosticView | null {
+  if (!record) return null;
+  if (kind === "brainstorm_shared_board") {
+    const opinions = arrayField(record, "opinions");
+    const highlights = stringArrayField(record, "highlights");
+    const questions = stringArrayField(record, "openQuestions");
+    const sourceRound = diagnosticString(record, "sourceRoundIndex");
+    return {
+      key: `${kind}:${sourceRound ?? ""}:${index}`,
+      label: t("astra.diagnostic.brainstorm_board"),
+      code: t("astra.diagnostic.opinions", { count: opinions.length }),
+      detail: firstNonEmpty([
+        highlights[0],
+        questions[0] ? t("astra.diagnostic.question", { value: questions[0] }) : null,
+      ]),
+      raw,
+    };
+  }
+  if (kind === "brainstorm_synthesis") {
+    const count = numberField(record, "sharedBoardOpinionCount") ?? 0;
+    return {
+      key: `${kind}:${count}:${index}`,
+      label: t("astra.diagnostic.brainstorm_synthesis"),
+      code: t("astra.diagnostic.opinions", { count }),
+      detail: null,
+      raw,
+    };
+  }
+  if (kind === "debate_lane_artifacts") {
+    const artifacts = arrayField(record, "artifacts");
+    const sample = artifacts
+      .map((artifact) => objectValue(artifact))
+      .find(Boolean) ?? null;
+    const sourceRound = diagnosticString(record, "sourceRoundIndex");
+    return {
+      key: `${kind}:${sourceRound ?? ""}:${index}`,
+      label: t("astra.diagnostic.debate_lanes"),
+      code: t("astra.diagnostic.lanes", { count: artifacts.length }),
+      detail: firstNonEmpty([
+        stringField(sample, "stageArtifact"),
+        t("astra.diagnostic.visibility", { value: diagnosticString(objectField(record, "isolationPolicy"), "crossCheckVisibility") ?? "stage_artifact_only" }),
+      ]),
+      raw,
+    };
+  }
+  if (kind === "debate_convergence") {
+    const status = diagnosticString(record, "status") ?? "needs_review";
+    const count = numberField(record, "artifactCount") ?? 0;
+    return {
+      key: `${kind}:${status}:${index}`,
+      label: t("astra.diagnostic.debate_convergence"),
+      code: `${status} / ${t("astra.diagnostic.artifacts", { count })}`,
+      detail: diagnosticString(record, "decision"),
+      raw,
+    };
+  }
+  return null;
+}
+
 function diagnosticString(record: Record<string, unknown> | null, key: string): string | null {
   const value = record?.[key];
   if (typeof value === "string" && value.trim()) return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   return null;
+}
+
+function numberField(value: Record<string, unknown> | null, key: string): number | null {
+  const field = value?.[key];
+  return typeof field === "number" && Number.isFinite(field) ? field : null;
+}
+
+function arrayField(value: Record<string, unknown> | null, key: string): unknown[] {
+  const field = value?.[key];
+  return Array.isArray(field) ? field : [];
+}
+
+function stringArrayField(value: Record<string, unknown> | null, key: string): string[] {
+  return arrayField(value, key)
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function firstNonEmpty(values: Array<string | null | undefined>): string | null {
+  return values.find((value) => typeof value === "string" && value.trim().length > 0) ?? null;
 }
 
 function safeJsonPreview(value: unknown, maxLength: number): string {
