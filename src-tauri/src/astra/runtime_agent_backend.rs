@@ -83,7 +83,8 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
                         pi_error.code,
                         pi_error.message,
                     )
-                    .with_session_id(Some(session_id))),
+                    .with_session_id(Some(session_id))
+                    .with_raw_response(&text)),
                 }
             }
             Err(failure) => Err(failure),

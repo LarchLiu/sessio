@@ -2,9 +2,9 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    next_dispatchable_tasks, rolling_stage_task_batch, AstraBackendConfig, AstraOrchestration,
-    AstraRun, AstraRunIntent, AstraRunStatus, AstraService, AstraTaskCompletion,
-    ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+    next_dispatchable_tasks, now_ms, rolling_stage_task_batch, AstraBackendConfig,
+    AstraOrchestration, AstraRun, AstraRunIntent, AstraRunStatus, AstraService,
+    AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
 use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
@@ -12,12 +12,9 @@ use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
 use crate::models::{PlanRoundMode, PlanTaskStatus, ThreadKind};
 
-#[cfg(test)]
 const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
-#[cfg(test)]
 const MAX_RUN_DIAGNOSTICS: usize = 100;
 
-#[cfg(test)]
 fn trim_vec_front<T>(values: &mut Vec<T>, max_len: usize) {
     if values.len() > max_len {
         values.drain(0..values.len() - max_len);
@@ -94,7 +91,7 @@ impl AstraService {
                     Err(error) => {
                         let _ = self.error_run(
                             &current_run.run_id,
-                            "orchestrator_policy_denied",
+                            "orchestrator_backend_failure",
                             error.code,
                             error.message,
                         )?;
@@ -186,6 +183,16 @@ impl AstraService {
             &config_value,
         ) {
             Ok(response) => {
+                if let Err(error) =
+                    self.record_orchestrator_backend_session(&run.run_id, &response.session_id)
+                {
+                    return Err(BackendFailure::new(
+                        response.backend_type,
+                        "diagnostic_write_failed",
+                        error.to_string(),
+                    )
+                    .with_session_id(Some(response.session_id)));
+                }
                 log::info!(
                     "[astra:orchestrator:success] run={} backend={} sessionId={} completions={}",
                     run.run_id,
@@ -203,6 +210,20 @@ impl AstraService {
                     failure.code,
                     failure.message
                 );
+                if let Err(error) = self.record_orchestrator_backend_failure(
+                    &run.run_id,
+                    round_index,
+                    completions.len(),
+                    &failure,
+                ) {
+                    log::warn!(
+                        "[astra:orchestrator:diagnostic-failure] run={} backend={} code={} message={}",
+                        run.run_id,
+                        failure.backend_type,
+                        failure.code,
+                        error
+                    );
+                }
                 Err(failure)
             }
         }
@@ -418,6 +439,53 @@ impl AstraService {
         )
     }
 
+    fn record_orchestrator_backend_session(&self, run_id: &str, session_id: &str) -> Result<()> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Ok(());
+        }
+        let session_id = session_id.to_string();
+        self.mutate_run(run_id, move |next| {
+            push_unique_bounded(
+                &mut next.internal_planner_session_ids,
+                session_id,
+                MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    fn record_orchestrator_backend_failure(
+        &self,
+        run_id: &str,
+        round_index: u32,
+        completion_count: usize,
+        failure: &BackendFailure,
+    ) -> Result<()> {
+        let diagnostic =
+            orchestrator_backend_failure_diagnostic(failure, round_index, completion_count);
+        let session_id = failure
+            .session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        self.mutate_run(run_id, move |next| {
+            if let Some(session_id) = session_id {
+                push_unique_bounded(
+                    &mut next.internal_planner_session_ids,
+                    session_id,
+                    MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
+                );
+            }
+            next.run_diagnostics.push(diagnostic);
+            trim_vec_front(&mut next.run_diagnostics, MAX_RUN_DIAGNOSTICS);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     fn mark_run_status(
         &self,
         run_id: &str,
@@ -444,6 +512,32 @@ impl AstraService {
         }
         Ok(run)
     }
+}
+
+fn push_unique_bounded(values: &mut Vec<String>, value: String, max_len: usize) {
+    if values.iter().any(|existing| existing == &value) {
+        return;
+    }
+    values.push(value);
+    trim_vec_front(values, max_len);
+}
+
+fn orchestrator_backend_failure_diagnostic(
+    failure: &BackendFailure,
+    round_index: u32,
+    completion_count: usize,
+) -> serde_json::Value {
+    json!({
+        "kind": "orchestrator_backend_failure",
+        "backend": failure.backend_type,
+        "code": failure.code,
+        "message": failure.message,
+        "sessionId": failure.session_id,
+        "roundIndex": round_index,
+        "completionCount": completion_count,
+        "rawResponseSnippet": failure.raw_response_snippet,
+        "recordedAt": now_ms(),
+    })
 }
 
 struct AstraWorkerGuard {
@@ -552,6 +646,57 @@ mod tests {
         assert!(!remaining.contains("task-1"));
         assert!(!remaining.contains("task-2"));
         assert!(remaining.contains("task-3"));
+    }
+
+    #[test]
+    fn backend_failure_diagnostic_records_backend_session_and_raw_snippet() {
+        let failure = BackendFailure::new("astra_pi_acp", "invalid_yaml", "not valid YAML")
+            .with_session_id(Some("planner-session-1".to_string()))
+            .with_raw_response("  summary: bad\n```yaml\nnope\n```  ");
+
+        let diagnostic = orchestrator_backend_failure_diagnostic(&failure, 3, 2);
+
+        assert_eq!(diagnostic["kind"], "orchestrator_backend_failure");
+        assert_eq!(diagnostic["backend"], "astra_pi_acp");
+        assert_eq!(diagnostic["code"], "invalid_yaml");
+        assert_eq!(diagnostic["message"], "not valid YAML");
+        assert_eq!(diagnostic["sessionId"], "planner-session-1");
+        assert_eq!(diagnostic["roundIndex"], 3);
+        assert_eq!(diagnostic["completionCount"], 2);
+        assert_eq!(
+            diagnostic["rawResponseSnippet"],
+            "summary: bad\n```yaml\nnope\n```"
+        );
+        assert!(diagnostic["recordedAt"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn bounded_internal_sessions_are_unique_and_keep_recent_entries() {
+        let mut values = (0..55)
+            .map(|idx| format!("session-{idx}"))
+            .collect::<Vec<_>>();
+
+        push_unique_bounded(
+            &mut values,
+            "session-54".to_string(),
+            MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
+        );
+        push_unique_bounded(
+            &mut values,
+            "session-55".to_string(),
+            MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
+        );
+
+        assert_eq!(values.len(), MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS);
+        assert_eq!(values[0], "session-6");
+        assert_eq!(values[49], "session-55");
+        assert_eq!(
+            values
+                .iter()
+                .filter(|value| value.as_str() == "session-54")
+                .count(),
+            1
+        );
     }
 
     #[test]

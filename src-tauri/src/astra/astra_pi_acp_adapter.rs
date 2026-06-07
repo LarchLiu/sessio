@@ -152,6 +152,7 @@ impl OrchestratorBackend for AstraPiAcpOrchestrator {
         .map_err(|failure| {
             BackendFailure::new("astra_pi_acp", failure.code, failure.message)
                 .with_session_id(Some(response.session_id.clone()))
+                .with_raw_response(&response.text)
         })?;
 
         Ok(BackendResponse {

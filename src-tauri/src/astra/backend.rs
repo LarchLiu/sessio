@@ -17,6 +17,7 @@ pub struct BackendFailure {
     pub message: String,
     pub session_id: Option<String>,
     pub backend_type: String,
+    pub raw_response_snippet: Option<String>,
 }
 
 impl BackendFailure {
@@ -30,6 +31,7 @@ impl BackendFailure {
             message: message.into(),
             session_id: None,
             backend_type: backend_type.into(),
+            raw_response_snippet: None,
         }
     }
 
@@ -37,6 +39,23 @@ impl BackendFailure {
         self.session_id = session_id;
         self
     }
+
+    pub fn with_raw_response(mut self, response: &str) -> Self {
+        self.raw_response_snippet = raw_response_snippet(response);
+        self
+    }
+}
+
+pub fn raw_response_snippet(response: &str) -> Option<String> {
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut snippet = trimmed.chars().take(800).collect::<String>();
+    if trimmed.chars().count() > snippet.chars().count() {
+        snippet.push_str("...");
+    }
+    Some(snippet)
 }
 
 /// Trait for Astra Orchestrator backends that can do both initial rolling
