@@ -239,6 +239,9 @@ export interface ThreadReplaySessionSourceInfo {
   astraRunId: string | null;
   role: PlanTaskSessionRole | null;
   label: string | null;
+  stageSnapshotJson: string | null;
+  assistantSnapshotJson: string | null;
+  agentSnapshotJson: string | null;
   createdAt: number | null;
 }
 

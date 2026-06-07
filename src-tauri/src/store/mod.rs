@@ -315,6 +315,9 @@ pub trait SessionStore: Send + Sync {
                     astra_run_id: None,
                     role: None,
                     label: Some("thread".to_string()),
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: None,
                     created_at: session.started_at.or(session.updated_at),
                 },
             );
@@ -336,6 +339,9 @@ pub trait SessionStore: Send + Sync {
                         astra_run_id: None,
                         role: None,
                         label: stage.name.clone().or_else(|| Some(stage.stage_id.clone())),
+                        stage_snapshot_json: None,
+                        assistant_snapshot_json: None,
+                        agent_snapshot_json: None,
                         created_at: session.started_at.or(session.updated_at),
                     },
                 );
@@ -362,6 +368,9 @@ pub trait SessionStore: Send + Sync {
                             astra_run_id: round.astra_run_id.clone(),
                             role: Some(task_session.role),
                             label: Some(task.title.clone()),
+                            stage_snapshot_json: task.stage_snapshot_json.clone(),
+                            assistant_snapshot_json: task.assistant_snapshot_json.clone(),
+                            agent_snapshot_json: Some(task.agent_snapshot_json.clone()),
                             created_at: Some(task_session.created_at),
                         },
                     );
@@ -394,6 +403,9 @@ pub trait SessionStore: Send + Sync {
                             .as_ref()
                             .map(|backend| format!("Astra planner: {backend}"))
                             .or_else(|| Some("Astra planner".to_string())),
+                        stage_snapshot_json: None,
+                        assistant_snapshot_json: None,
+                        agent_snapshot_json: None,
                         created_at: Some(run.updated_at),
                     },
                 );

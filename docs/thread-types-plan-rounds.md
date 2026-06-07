@@ -188,7 +188,7 @@ task      = 执行事实 / 生命周期状态 / 结果记录
 run       = 编排进度 / cursor / 终态
 ```
 
-这个迁移不是把 workflow 变成自动调度器，而是把当前 Astra stage-routed task-centric 流程改成 assistant-routed task-centric 流程：旧实现里的 stage route、stage status 和 stage issue mutation 被 `assistant_id`、plan task lifecycle 和 task result 取代。
+这次重构不是把 workflow 变成自动调度器，而是把当前 Astra stage-routed task-centric 流程改成 assistant-routed task-centric 流程：旧实现里的 stage route、stage status 和 stage issue mutation 被 `assistant_id`、plan task lifecycle 和 task result 取代。
 
 执行方式：
 
@@ -377,7 +377,7 @@ kind TEXT NOT NULL DEFAULT 'workflow'
 workflow | teamwork | brainstorm | debate
 ```
 
-旧 thread 数据迁移后默认读取为 `workflow`。这只是保证历史数据可读，不表示旧 Astra stage-decision 自动调度路径需要继续兼容。
+当前 schema 直接把未指定 kind 的 thread 默认定义为 `workflow`。这只是产品语义默认值，不表示旧 Astra stage-decision 自动调度路径需要继续兼容，也不要求为未发布的旧 SQLite 表形状写兼容迁移。
 
 ### `thread_assistants`
 
@@ -565,7 +565,7 @@ thread_plan_task_sessions(
 - `kind = workflow`
 - `assistantIds = []`
 
-如果 `kind != workflow`，UI 应鼓励选择至少一个 assistant，但后端 v1 可以只做宽松校验，避免阻塞数据迁移和测试。
+如果 `kind != workflow`，UI 应鼓励选择至少一个 assistant，但后端 v1 可以只做宽松校验，避免阻塞创建、编辑和测试。
 
 ### 更新 thread
 
@@ -688,7 +688,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 验收：
 
-- 旧 thread 读取为 `workflow`。
+- 未指定 kind 的 thread 按当前 schema 默认读取为 `workflow`。
 - 新建四种 thread 类型后 reload 仍正确。
 - teamwork/brainstorm/debate 可绑定 thread assistants。
 - workflow 现有 stage 行为不变。
@@ -861,9 +861,10 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 ## 测试矩阵
 
-### Migration
+### Schema
 
-- 旧 DB 中 threads 自动获得 `kind = workflow`。
+- 当前 DDL 中 `threads.kind` 默认值为 `workflow`。
+- 当前 DDL 不包含旧 Astra run lifecycle 列。
 - 新表创建幂等。
 - 删除 thread cascade 删除 thread assistants、plan rounds、plan tasks、plan task sessions。
 
@@ -937,7 +938,7 @@ Astra 旧字段 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 如果
 
 ### 风险 4: non-workflow thread 是否允许无 assistants
 
-产品上非 workflow thread 最好至少有一个 assistant。但 v1 后端建议宽松允许，UI 做提示，避免迁移和测试复杂化。
+产品上非 workflow thread 最好至少有一个 assistant。但 v1 后端建议宽松允许，UI 做提示，避免创建流程和测试复杂化。
 
 ### 风险 5: session replay 来源过多导致重复或遗漏
 

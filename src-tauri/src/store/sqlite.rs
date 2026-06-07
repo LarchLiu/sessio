@@ -10352,7 +10352,10 @@ mod migration_tests {
         assert!(stage_task.sources.iter().any(|source| source.kind
             == ThreadReplaySessionSourceKind::PlanTask
             && source.plan_task_id.as_deref() == Some(round.tasks[0].id.as_str())
-            && source.role == Some(PlanTaskSessionRole::Runtime)));
+            && source.role == Some(PlanTaskSessionRole::Runtime)
+            && source.stage_snapshot_json.as_deref() == Some(r#"{"stage":"research"}"#)
+            && source.assistant_snapshot_json.as_deref() == Some(r#"{"assistant":"replay"}"#)
+            && source.agent_snapshot_json.as_deref() == Some(r#"{"agent":"codex"}"#)));
 
         let internal = replay
             .sessions

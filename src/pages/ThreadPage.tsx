@@ -1237,7 +1237,34 @@ function replaySourceTitle(source: ThreadReplaySessionSourceInfo): string {
     source.planRoundId,
     source.stageId,
     source.astraRunId,
+    ...replaySourceSnapshotTitles(source),
   ].filter(Boolean).join("\n");
+}
+
+function replaySourceSnapshotTitles(source: ThreadReplaySessionSourceInfo): string[] {
+  const titles: string[] = [];
+  const stage = parseJsonObject(source.stageSnapshotJson);
+  const stageName = stringField(stage, "name") ?? stringField(stage, "stageId") ?? stringField(stage, "id");
+  if (stageName) titles.push(`Stage snapshot: ${stageName}`);
+
+  const assistant = parseJsonObject(source.assistantSnapshotJson);
+  const assistantName = stringField(assistant, "name") ?? stringField(assistant, "assistantId") ?? stringField(assistant, "id");
+  if (assistantName) {
+    const agentInfo = objectField(assistant, "agent");
+    const model = stringField(agentInfo, "model");
+    titles.push(`Assistant snapshot: ${model ? `${assistantName} / ${model}` : assistantName}`);
+  }
+
+  const agent = parseJsonObject(source.agentSnapshotJson);
+  const agentInfo = objectField(agent, "agentInfo");
+  const agentLabel = stringField(agentInfo, "displayName")
+    ?? stringField(agentInfo, "name")
+    ?? stringField(agent, "agent");
+  if (agentLabel) {
+    const model = stringField(agentInfo, "model");
+    titles.push(`Agent snapshot: ${model ? `${agentLabel} / ${model}` : agentLabel}`);
+  }
+  return titles;
 }
 
 function isAstraActive(status: AstraRunStatus): boolean {

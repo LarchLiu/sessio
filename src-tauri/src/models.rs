@@ -609,6 +609,9 @@ pub struct ThreadReplaySessionSourceInfo {
     pub astra_run_id: Option<String>,
     pub role: Option<PlanTaskSessionRole>,
     pub label: Option<String>,
+    pub stage_snapshot_json: Option<String>,
+    pub assistant_snapshot_json: Option<String>,
+    pub agent_snapshot_json: Option<String>,
     pub created_at: Option<i64>,
 }
 

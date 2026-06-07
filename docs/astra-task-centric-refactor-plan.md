@@ -4,11 +4,11 @@
 
 本文档定义 Astra task-centric 编排的目标形态：**assistant 负责路由和上下文，task 负责执行事实，run 负责整体编排进度**。
 
-它是 `teamwork` thread kind 的标准编排模型，不是 `workflow` 的自动调度模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它迁移为 assistant-routed teamwork：也就是把当前 Astra task 路由里的 stages 改为 thread-level assistants，由 Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
+它是 `teamwork` thread kind 的标准编排模型，不是 `workflow` 的自动调度模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它直接替换为 assistant-routed teamwork：也就是把当前 Astra task 路由里的 stages 改为 thread-level assistants，由 Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
 
 一句话边界：**`astra-task-centric-refactor-plan` 是 teamwork 的标准；它只把当前 Astra task-centric 流程里的 stages 改为 assistants，不把 workflow 改造成 Astra-scheduled workflow。**
 
-因此本文档的“重构”含义非常窄：保留 Astra task-centric 编排能力，但把 routing/control plane 从 `targetStageId`、stage status 和 stage issue mutation，迁移到 `assistantId`、plan round/task lifecycle 和 task result。它不是把 `workflow` 变成 Astra-scheduled workflow，也不是给人为 stage 流程增加默认自动调度。
+因此本文档的“重构”含义非常窄：保留 Astra task-centric 编排能力，但把 routing/control plane 从 `targetStageId`、stage status 和 stage issue mutation，直接改成 `assistantId`、plan round/task lifecycle 和 task result。它不是把 `workflow` 变成 Astra-scheduled workflow，也不是给人为 stage 流程增加默认自动调度。
 
 持久化模型以 `docs/thread-types-plan-rounds.md` 为准。在 teamwork 自动编排路径中，Astra run 负责编排进度、backend、diagnostics 和终态原因；`thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions` 负责每轮计划、task lifecycle、session 关联和 reload 恢复。本文档不再定义长期 `task_states_json` 或另一套 task state 事实源。
 
@@ -28,7 +28,7 @@ PK/debate  = isolated contexts + cross-verification + convergence
 - `brainstorm` 不是普通 teamwork 的同义词。它需要 shared-board 生成、下一轮注入和 synthesis 策略。
 - `debate` / PK 不是普通 teamwork 的同义词。它需要 isolated lanes、artifact 可见范围、cross-check 和 convergence 判断。
 
-换句话说，旧的 stage-routed Astra 不是要沉淀为新的 workflow 调度器，而是要迁移为 teamwork 的 assistant-routed Astra。workflow 保留人工 stage 流程；teamwork 才拥有 Astra task orchestration。
+换句话说，旧的 stage-routed Astra 不是要沉淀为新的 workflow 调度器，而是要被 teamwork 的 assistant-routed Astra 取代。workflow 保留人工 stage 流程；teamwork 才拥有 Astra task orchestration。
 
 ## 当前问题
 
@@ -211,7 +211,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 执行内容：
 
-- Rust 新增 `ThreadKind`，旧 thread 默认 `workflow`。
+- Rust 新增 `ThreadKind`，当前 schema 对未指定 kind 的 thread 默认使用 `workflow`。
 - `threads` / `ThreadInfo` / Tauri command / TS API 支持 thread kind。
 - 新增 `thread_assistants`，用于绑定 teamwork/brainstorm/debate 的 thread-level assistants。
 - ProjectPage 创建/编辑 thread 时可选择 kind 和 assistants。
@@ -219,7 +219,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 验收：
 
-- 旧 thread 读取为 `workflow`，只表示历史数据可读，不表示保留旧 Astra stage-decision 自动调度兼容路径。
+- 未指定 kind 的 thread 按当前 schema 默认读取为 `workflow`，只表示产品语义默认值，不表示保留旧 Astra stage-decision 自动调度兼容路径，也不要求为未发布旧表形状写兼容迁移。
 - 新建四种 thread kind 后 reload 仍正确。
 - teamwork thread 可绑定多个 assistants。
 - workflow 现有 stage 行为不变，且不因为 kind 落地而获得 Astra 默认调度。
@@ -380,9 +380,9 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ## 风险与取舍
 
-### 风险 1: 旧 stage-based Astra 迁移面大
+### 风险 1: 旧 stage-based Astra 替换面大
 
-这次不是 parser hotfix，而是控制面重构。需要按实施顺序拆分：先落 `ThreadKind` / `thread_assistants`，再落 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，再改 Astra contract 写这些表，最后接入 teamwork/brainstorm/debate。
+这次不是 parser hotfix，而是控制面重构。需要按实施顺序拆分：先落 `ThreadKind` / `thread_assistants`，再落 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，再改 Astra contract 写这些表，最后接入 teamwork/brainstorm/debate。SQLite 侧对这批未发布表形状直接改当前 DDL，不写旧 Astra/plan 表兼容迁移。
 
 ### 风险 2: 旧 run lifecycle 双轨风险
 
