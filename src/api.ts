@@ -1589,13 +1589,13 @@ export interface ThreadWorkSnapshot {
   projectId: string;
   goal: string;
   description: string | null;
-  activeStageId: string | null;
-  focusedStageId: string | null;
-  stages: ThreadWorkSnapshotStage[];
+  activeStageId?: string | null;
+  focusedStageId?: string | null;
+  stages?: ThreadWorkSnapshotStage[];
   threadSessionRefs?: ThreadWorkSnapshotSessionRef[];
   relatedContext?: ThreadWorkSnapshotRelatedContext;
   detailRefs?: ThreadWorkSnapshotDetailRefs;
-  rollup: {
+  rollup?: {
     completed: number;
     incomplete: number;
     blocked: number;

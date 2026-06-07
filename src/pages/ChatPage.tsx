@@ -482,8 +482,20 @@ function ThreadWorkSnapshotPanel({
 }) {
   const { t } = useI18n();
   const work = snapshot.snapshot;
+  const workRecord = asRecord(work);
+  const rollup = snapshotRollup(workRecord.rollup);
+  if (!rollup) {
+    return (
+      <AstraTaskSnapshotPanel
+        snapshot={snapshot}
+        sources={sources}
+        workRecord={workRecord}
+      />
+    );
+  }
+
   const stages = Array.isArray(work.stages) ? work.stages : [];
-  const openIssues = work.rollup.openIssues ?? stages.reduce(
+  const openIssues = rollup.openIssues ?? stages.reduce(
     (total, stage) => total + (stage.issues ?? []).filter((issue) => issue.status === "open").length,
     0,
   );
@@ -492,17 +504,17 @@ function ThreadWorkSnapshotPanel({
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <div className="text-caption uppercase text-ink/35">{t("thread.snapshot")}</div>
-          <div className="truncate font-medium text-ink/80">{work.goal}</div>
+          <div className="truncate font-medium text-ink/80">{work.goal ?? snapshot.threadId}</div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
           <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
             {t("thread.snapshot_complete", {
-              completed: work.rollup.completed,
-              total: work.rollup.total,
+              completed: rollup.completed,
+              total: rollup.total,
             })}
           </span>
           <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
-            {t("thread.snapshot_blocked", { count: work.rollup.blocked })}
+            {t("thread.snapshot_blocked", { count: rollup.blocked })}
           </span>
           <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
             {t("thread.snapshot_open_issues", { count: openIssues })}
@@ -541,27 +553,130 @@ function ThreadWorkSnapshotPanel({
           </div>
         ))}
       </div>
-      {sources.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {sources.slice(0, 10).map((source) => (
-            <span
-              key={`${source.kind}:${source.id}`}
-              title={source.filePath ?? source.sessionId ?? source.id}
-              className="max-w-[260px] truncate rounded border border-card-border/[0.10] bg-card-panel px-1.5 py-0.5 text-caption text-ink/45"
-            >
-              {source.kind}: {source.label}
-              {source.ancestorIndex != null ? ` #${source.ancestorIndex}` : ""}
-            </span>
-          ))}
-          {sources.length > 10 && (
-            <span className="rounded border border-card-border/[0.10] bg-card-panel px-1.5 py-0.5 text-caption text-ink/35">
-              +{sources.length - 10}
-            </span>
-          )}
-        </div>
-      )}
+      <ThreadWorkSnapshotSources sources={sources} />
     </section>
   );
+}
+
+function AstraTaskSnapshotPanel({
+  snapshot,
+  sources,
+  workRecord,
+}: {
+  snapshot: ThreadWorkSnapshotResult;
+  sources: ThreadWorkSnapshotSourceRef[];
+  workRecord: Record<string, unknown>;
+}) {
+  const { t } = useI18n();
+  const task = asRecord(workRecord.task);
+  const contextPolicy = asRecord(workRecord.contextPolicy);
+  const assistantSnapshot = asRecord(workRecord.assistantSnapshot);
+  const agentSnapshot = asRecord(workRecord.agentSnapshot);
+  const agentInfo = asRecord(agentSnapshot.agentInfo);
+  const kind = pickString(workRecord.kind);
+  const taskTitle = pickString(task.title) ?? pickString(task.id);
+  const assistantLabel = pickString(assistantSnapshot.name)
+    ?? pickString(assistantSnapshot.assistantId)
+    ?? pickString(task.assistantId)
+    ?? pickString(workRecord.focusedAssistantId);
+  const agentLabel = pickString(agentInfo.displayName)
+    ?? pickString(agentInfo.name)
+    ?? pickString(agentSnapshot.agent)
+    ?? pickString(task.targetAgent);
+  const policyMode = pickString(contextPolicy.mode);
+  const laneId = pickString(contextPolicy.laneId);
+  const chips = [
+    kind ? threadSnapshotKindLabel(kind, t) : null,
+    taskTitle ? t("thread.snapshot_task", { value: taskTitle }) : null,
+    assistantLabel ? t("thread.snapshot_assistant", { value: assistantLabel }) : null,
+    agentLabel ? t("thread.snapshot_agent", { value: agentLabel }) : null,
+    policyMode ? t("thread.snapshot_policy", { value: policyMode.replace(/_/g, " ") }) : null,
+    laneId ? t("thread.snapshot_lane", { value: laneId }) : null,
+  ].filter(Boolean);
+
+  return (
+    <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5 text-body-sm">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-caption uppercase text-ink/35">{t("thread.snapshot")}</div>
+          <div className="truncate font-medium text-ink/80">{pickString(workRecord.goal) ?? snapshot.threadId}</div>
+        </div>
+      </div>
+      {chips.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-ink/45">
+          {chips.map((chip) => (
+            <span key={chip} className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5">
+              {chip}
+            </span>
+          ))}
+        </div>
+      )}
+      <ThreadWorkSnapshotSources sources={sources} />
+    </section>
+  );
+}
+
+function ThreadWorkSnapshotSources({
+  sources,
+}: {
+  sources: ThreadWorkSnapshotSourceRef[];
+}) {
+  if (sources.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {sources.slice(0, 10).map((source) => (
+        <span
+          key={`${source.kind}:${source.id}`}
+          title={source.filePath ?? source.sessionId ?? source.id}
+          className="max-w-[260px] truncate rounded border border-card-border/[0.10] bg-card-panel px-1.5 py-0.5 text-caption text-ink/45"
+        >
+          {source.kind}: {source.label}
+          {source.ancestorIndex != null ? ` #${source.ancestorIndex}` : ""}
+        </span>
+      ))}
+      {sources.length > 10 && (
+        <span className="rounded border border-card-border/[0.10] bg-card-panel px-1.5 py-0.5 text-caption text-ink/35">
+          +{sources.length - 10}
+        </span>
+      )}
+    </div>
+  );
+}
+
+type SnapshotRollup = {
+  completed: number;
+  total: number;
+  blocked: number;
+  openIssues: number | null;
+};
+
+function snapshotRollup(value: unknown): SnapshotRollup | null {
+  const record = asRecord(value);
+  const completed = pickNumber(record.completed);
+  const total = pickNumber(record.total);
+  const blocked = pickNumber(record.blocked);
+  if (completed == null || total == null || blocked == null) return null;
+  return {
+    completed,
+    total,
+    blocked,
+    openIssues: pickNumber(record.openIssues),
+  };
+}
+
+function threadSnapshotKindLabel(
+  kind: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  switch (kind) {
+    case "workflow":
+    case "teamwork":
+    case "brainstorm":
+    case "debate":
+      return t(`thread.kind.${kind}`);
+    default:
+      return kind;
+  }
 }
 
 function MessageStream({

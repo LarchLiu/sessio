@@ -130,18 +130,30 @@ function statusLabel(status: StageStatus): string {
  */
 export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot, targetAgent?: Agent | null): string {
   const lines: string[] = [];
+  const stages = snapshot.stages ?? [];
+  const rollup = snapshot.rollup ?? {
+    completed: 0,
+    incomplete: stages.length,
+    blocked: stages.filter((stage) => stage.status === "blocked").length,
+    openIssues: stages.reduce(
+      (total, stage) => total + (stage.issues ?? []).filter((issue) => issue.status === "open").length,
+      0,
+    ),
+    currentStage: null,
+    total: stages.length,
+  };
   lines.push("# Thread work-state snapshot");
   lines.push(`Goal: ${snapshot.goal}`);
   if (snapshot.description) lines.push(`Description: ${snapshot.description}`);
   lines.push(
-    `Progress: ${snapshot.rollup.completed}/${snapshot.rollup.total} stages complete` +
-      (snapshot.rollup.blocked > 0 ? `, ${snapshot.rollup.blocked} blocked` : "") +
-      ((snapshot.rollup.openIssues ?? 0) > 0 ? `, ${snapshot.rollup.openIssues} open issues` : "") +
-      (snapshot.rollup.currentStage ? `, current stage: ${snapshot.rollup.currentStage}` : ""),
+    `Progress: ${rollup.completed}/${rollup.total} stages complete` +
+      (rollup.blocked > 0 ? `, ${rollup.blocked} blocked` : "") +
+      ((rollup.openIssues ?? 0) > 0 ? `, ${rollup.openIssues} open issues` : "") +
+      (rollup.currentStage ? `, current stage: ${rollup.currentStage}` : ""),
   );
   lines.push("");
   lines.push("## Stages");
-  for (const stage of snapshot.stages) {
+  for (const stage of stages) {
     const focus = stage.threadStageId === snapshot.focusedStageId ? " <- you are here" : "";
     lines.push(`- ${statusLabel(stage.status)} ${stage.name}${focus}`);
     if (stage.summary) lines.push(`    summary: ${stage.summary}`);
@@ -154,7 +166,7 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot, targetAgen
       lines.push(`    [${ref.agent}:${ref.sessionId}] ${ref.title ?? ""}`.trimEnd());
     }
   }
-  const focusedStage = snapshot.stages.find((stage) => stage.threadStageId === snapshot.focusedStageId) ?? null;
+  const focusedStage = stages.find((stage) => stage.threadStageId === snapshot.focusedStageId) ?? null;
   const assistantInstructions = focusedStage
     ? stageAssistantInstructions(focusedStage, targetAgent)
     : [];

@@ -459,7 +459,7 @@ async function collectThreadHistorySnapshots(snapshot: ThreadWorkSnapshot): Prom
   }
 
   const byKey = new Map(loadedRefs.map((ref) => [`${ref.agent}:${ref.sessionId}`, ref]));
-  const stages = snapshot.stages.map((stage) => ({
+  const stages = (snapshot.stages ?? []).map((stage) => ({
     ...stage,
     sessionRefs: stage.sessionRefs.map((ref) => byKey.get(`${ref.agent}:${ref.sessionId}`) ?? ref),
   }));
@@ -477,7 +477,7 @@ async function collectThreadHistorySnapshots(snapshot: ThreadWorkSnapshot): Prom
       },
       detailRefs: {
         threadId: snapshot.threadId,
-        focusedStageId: snapshot.focusedStageId,
+        focusedStageId: snapshot.focusedStageId ?? null,
         stageIds: stages.map((stage) => stage.threadStageId),
         issueIds: stages.flatMap((stage) => (stage.issues ?? []).map((issue) => issue.id)),
         sessionRefs: sourceRefs,
