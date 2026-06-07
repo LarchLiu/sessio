@@ -387,8 +387,6 @@ export interface AstraTaskResult {
   error: string | null;
   attemptCount: number;
   retryLimitReached: boolean;
-  decisionAction?: string | null;
-  decisionReason?: string | null;
   completedAt: number;
 }
 

@@ -182,24 +182,7 @@ pub struct AstraTaskResult {
     pub error: Option<String>,
     pub attempt_count: u32,
     pub retry_limit_reached: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision_reason: Option<String>,
     pub completed_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AstraStageMutationResult {
-    pub ok: bool,
-    #[serde(default)]
-    pub stage: Option<Value>,
-    #[serde(default)]
-    pub issue: Option<Value>,
-    #[serde(default)]
-    pub error: Option<String>,
-    pub applied_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

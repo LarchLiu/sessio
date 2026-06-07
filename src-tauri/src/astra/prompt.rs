@@ -754,8 +754,6 @@ mod tests {
             error: None,
             attempt_count: 1,
             retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
             completed_at: 1,
         }
     }
@@ -825,7 +823,6 @@ mod tests {
         assert!(instruction.contains("mode: parallel|sequential|null"));
         assert!(instruction.contains("assistantId: thread-assistant-id"));
         assert!(instruction.contains("response schema is closed"));
-        assert!(!instruction.contains("update_stage"));
         assert!(!instruction.contains("targetStageId"));
         assert!(!instruction.contains(r#""stage": {"#));
         assert!(!prompt.contains("targetStageId"));

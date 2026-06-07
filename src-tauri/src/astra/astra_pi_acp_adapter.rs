@@ -1065,8 +1065,7 @@ summary: done
 runIntent: continue
 reason: legacy
 mode: parallel
-decisions:
-  - action: update_stage
+decisions: []
 tasks: []
 "#,
             &run(),

@@ -41,8 +41,8 @@ use orchestrator::{dedicated_backend_required_error, RustNativeWorkerOutcome};
 use planner::next_dispatchable_tasks;
 use prompt::{build_stage_task_context, build_teamwork_task_context};
 pub use types::{
-    AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraStageMutationResult, AstraTaskProposal,
-    AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk,
+    AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraTaskProposal, AstraTaskResult,
+    AstraTaskResultStatus, AstraTaskRisk,
 };
 pub(crate) use types::{AstraOrchestration, AstraRunIntent, AstraTaskCompletion};
 
@@ -1247,8 +1247,6 @@ impl AstraService {
             error,
             attempt_count: state.attempt_count,
             retry_limit_reached: state.retry_limit_reached,
-            decision_action: None,
-            decision_reason: None,
             completed_at: now_ms(),
         };
         let run = self.record_task_result(&state.run_id, result.clone())?;
@@ -3632,8 +3630,6 @@ mod tests {
             error: None,
             attempt_count: 1,
             retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
             completed_at: 1,
         }
     }
