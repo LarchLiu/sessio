@@ -4,7 +4,7 @@
 
 本文档定义 Astra task-centric 编排的目标形态：**assistant 负责路由和上下文，task 负责执行事实，run 负责整体编排进度**。
 
-它是 `teamwork` thread kind 的标准编排模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它迁移为 assistant-routed teamwork：用户配置 thread-level assistants，Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
+它是 `teamwork` thread kind 的标准编排模型，不是 `workflow` 的自动调度模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它迁移为 assistant-routed teamwork：用户配置 thread-level assistants，Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
 
 持久化模型以 `docs/thread-types-plan-rounds.md` 为准。Astra run 负责编排进度、backend、diagnostics 和终态原因；`thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions` 负责每轮计划、task lifecycle、session 关联和 reload 恢复。本文档不再定义长期 `task_states_json` 或另一套 task state 事实源。
 
@@ -23,6 +23,8 @@ debate     = isolated contexts + cross-verification + convergence
 - `teamwork` 是本文档的范围：所有 assistants 共享 thread context，Astra 生成 plan round/tasks，并把 tasks 分派给 `assistantId` 或 `targetAgent`。
 - `brainstorm` 不是普通 teamwork 的同义词。它需要 shared-board 生成、下一轮注入和 synthesis 策略。
 - `debate` / PK 不是普通 teamwork 的同义词。它需要 isolated lanes、artifact 可见范围、cross-check 和 convergence 判断。
+
+换句话说，旧的 stage-routed Astra 不是要沉淀为新的 workflow 调度器，而是要迁移为 teamwork 的 assistant-routed Astra。workflow 保留人工 stage 流程；teamwork 才拥有 Astra task orchestration。
 
 ## 当前问题
 
@@ -176,6 +178,8 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ## 阶段计划
 
+下面阶段按 `docs/thread-types-plan-rounds.md` 的全局实施顺序对齐。Phase 1/2 是 teamwork 编排的前置基础；真正改变 Astra contract 和调度行为从 Phase 3 开始。
+
 ### Phase 0: 冻结旧 stage-decision 补丁方向
 
 目标：停止继续围绕旧 `decisions` contract 打兼容补丁，把当前 worktree 中的 YAML/decision patch 视为过渡探索，不再扩大。
@@ -192,64 +196,67 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 - 文档落地。
 - 后续代码改动按实施顺序拆分，不再混合 parser hotfix 和架构重构。
 
-### Phase 1: 接入 thread plan round/task 状态持久化
+### Phase 1: 接入 ThreadKind 和 thread assistants
 
-目标：让 task lifecycle 成为可 reload 的事实源，先解决多个并行 task 切换界面后 running 丢失的问题。
+目标：先让 thread 能表达 `workflow | teamwork | brainstorm | debate`，并让 teamwork 有 thread-level assistants 作为路由对象。
 
 执行内容：
 
-- 按 `docs/thread-types-plan-rounds.md` 新增或复用 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`。
-- Astra planner 输出 task batch 后，先创建 `thread_plan_rounds` 和对应 `thread_plan_tasks`。
-- 写入 task 时保存 assistant / agent 快照；若兼容旧 stage-based run，也可保存 stage 快照，但新 teamwork 不依赖 stage。
-- dispatch task batch 前，在同一事务中把本轮应启动的 plan tasks 更新为 `running`。
-- terminal result 到达时，把对应 `thread_plan_tasks.status` 更新为 completed/failed/errored/cancelled，并写入 result summary / error。
-- dispatch/result 到达时，通过 `thread_plan_task_sessions` 记录 delegated/runtime session refs，session 身份包含 agent 和 session id。
-- `listAstraRuns` 可以返回 plan task 派生摘要，前端 running 状态必须能从 plan tasks 恢复。
-- 不新增长期 `task_states_json` 事实源；如果为了兼容短期保留缓存，它必须由 `thread_plan_tasks` 派生，并有明确删除阶段。
-- 旧 run 兼容：如果没有 plan tasks，仍可从 `approvedTaskIds + taskResults` best-effort 推断；新 run 不依赖它。
+- Rust 新增 `ThreadKind`，旧 thread 默认 `workflow`。
+- `threads` / `ThreadInfo` / Tauri command / TS API 支持 thread kind。
+- 新增 `thread_assistants`，用于绑定 teamwork/brainstorm/debate 的 thread-level assistants。
+- ProjectPage 创建/编辑 thread 时可选择 kind 和 assistants。
+- 本阶段不改变 Astra 自动编排行为；它只是为 teamwork routing 准备数据模型。
 
 验收：
 
-- 多个并行 task 开始后刷新页面，全部仍显示 running。
-- task result 到达后，对应 task 从 running 变为 terminal。
-- `thread_plan_task_sessions` 能从 task 反查 delegated/runtime session。
-- `currentTaskId` 不再影响并行 task 恢复正确性。
+- 旧 thread 读取为 `workflow`。
+- 新建四种 thread kind 后 reload 仍正确。
+- teamwork thread 可绑定多个 assistants。
+- workflow 现有 stage 行为不变，且不因为 kind 落地而获得 Astra 默认调度。
 
-### Phase 2: 重写 teamwork orchestrator 控制流
+### Phase 2: 接入 plan round/task/session 持久化
 
-目标：移除 Astra 自动编排路径里的 LLM decision mutation，把 run/round/task 作为控制源。
+目标：让 plan round 和 task lifecycle 成为可 reload 的事实源，但暂不改变 Astra 编排 contract。
+
+执行内容：
+
+- 按 `docs/thread-types-plan-rounds.md` 新增 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`。
+- `thread_plan_rounds` 包含 `UNIQUE(thread_id, round_index)`、`astra_run_id` FK 和常用查询索引。
+- `thread_plan_tasks` 保存 stage / assistant / agent 执行快照。
+- `thread_plan_task_sessions` 保存 task 到 `(agent, session_id, role)` 的引用。
+- 新增 create/list/get plan rounds with tasks、update task status、link/list task sessions 的 store API。
+- sequential round 的“terminal 当前 task + start next task”必须在同一事务中完成，并保证同一 round 任一时刻最多一个 running task。
+- 本阶段不让 Astra 新 contract 写表；它只建立共享事实源和执行不变量。
+
+验收：
+
+- 可以创建 parallel round 和 sequential round。
+- parallel round 可同时存在多个 running task。
+- sequential round 无法在 reload/并发下出现两个 running task。
+- task result 可独立写入 terminal 状态、summary 和 error。
+- 一个 task 可以关联多个 sessions。
+- 删除 thread 时 plan rounds/tasks/task sessions cascade 删除。
+
+### Phase 3: Astra 新 contract 写入 plan rounds/tasks
+
+目标：把 Astra planner contract 改为 assistant-routed tasks-only YAML，并让新 run 写入 plan round/task/session 表。
 
 执行内容：
 
 - `AstraOrchestration` 改为 `{ summary, runIntent, reason, mode, tasks }`。
-- 主循环在 task batch 完成后调用 planner/backend 获取下一轮 tasks 或 terminal intent。
-- 删除自动编排路径对 `AstraDecision::UpdateStage` / `AddOrUpdateIssue` / `RetryStage` 的依赖。
-- Rust 根据 `runIntent` 处理 run 终态：
-  - `complete` -> completed
-  - `wait_for_human` -> completed 或 interrupted-like 可诊断终态，保留 reason
-  - `error` -> errored
-  - `continue` -> 创建下一轮 plan round/tasks 并按 mode dispatch
-- Rust 根据 `mode` 和 plan task 状态执行 dispatch，不让 LLM 返回 running/completed mutation。
-
-验收：
-
-- LLM 不返回任何 stage/issue mutation，run 仍能持续推进。
-- failed/errored/cancelled task 不导致 parser 需要 stage decision 才能继续。
-- round status 从 task status 聚合。
-- sequential round 任一时刻最多一个 running task。
-
-### Phase 3: 重写 prompt/parser/backend contract
-
-目标：把 orchestrator backend 统一到 assistant-routed tasks-only YAML contract，消除两边 prompt 重写和解析不一致。
-
-执行内容：
-
 - 抽出公共 contract builder，runtime agent backend 和 Astra Pi ACP backend 共用。
 - prompt 明确 teamwork 使用 `assistantId`，不返回 `targetStageId`。
 - parser 只接受新 YAML shape。
 - parser 使用 `deny_unknown_fields` 或等价严格校验，拒绝旧字段。
 - 错误信息包含失败 code、简短 parser message、raw response snippet。
 - `ASTRA_ORCHESTRATOR_TIMEOUT_MS` 只在一个位置定义为 `300_000`，所有 orchestrator backend 复用。
+- planner 输出 task batch 后，先创建 `thread_plan_rounds` 和对应 `thread_plan_tasks`。
+- 写入 task 时保存 assistant / agent 快照；若兼容旧 stage-based run，也可保存 stage 快照，但新 teamwork 不依赖 stage。
+- dispatch task batch 前，在同一事务中把本轮应启动的 plan tasks 更新为 `running`。
+- dispatch/result 到达时，通过 `thread_plan_task_sessions` 记录 delegated/runtime session refs。
+- result 到达时更新 plan task terminal 状态、result summary、error。
+- `AstraHandle` 可过渡性保留旧字段，但 UI 新逻辑优先使用 plan task 状态。
 
 验收：
 
@@ -258,13 +265,25 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 - 旧 `decisions/action/status/issueStatus/targetStageId` response 被拒绝。
 - runtime agent 和 Astra Pi ACP 使用同一份 contract 文案。
 - timeout 统一为 300s。
+- Astra 每轮 plan 在 DB 中有 round 记录。
+- 多 task 并行时所有 task running 可恢复。
+- 每个 delegated/runtime session 都能从对应 plan task 反查。
+- `currentTaskId` 不再影响并行 task 恢复正确性。
 
-### Phase 4: teamwork shared context 和 assistant routing
+### Phase 4: Teamwork shared context 和 assistant routing
 
 目标：让 teamwork thread 不需要 stages，也能由 Astra 自动拆解和执行。
 
 执行内容：
 
+- 主循环在 task batch 完成后调用 planner/backend 获取下一轮 tasks 或 terminal intent。
+- Rust 根据 `runIntent` 处理 run 终态：
+  - `complete` -> completed
+  - `wait_for_human` -> completed 或 interrupted-like 可诊断终态，保留 reason
+  - `error` -> errored
+  - `continue` -> 创建下一轮 plan round/tasks 并按 mode dispatch
+- Rust 根据 `mode` 和 plan task 状态执行 dispatch，不让 LLM 返回 running/completed mutation。
+- 删除自动编排路径对 `AstraDecision::UpdateStage` / `AddOrUpdateIssue` / `RetryStage` 的依赖。
 - Planner 输入包含 thread goal、thread-level assistants、assistant system prompts、历史 plan task results、用户反馈和 run diagnostics。
 - Planner 不读取 stage status，不读取全局 stage issues。
 - Dispatch 时按 `assistant_id` 找到 assistant 的 runtime agent 和 system prompt，并使用 task 快照构造 runtime prompt。
@@ -277,6 +296,8 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 - 多 assistants parallel task 可同时运行并在 reload 后恢复。
 - Sequential teamwork round 按 `sort_order` 执行。
 - Teamwork 不读取 stage status，不写 stage/issue mutation。
+- failed/errored/cancelled task 不需要 stage decision 也能进入下一轮、等待人工或终态。
+- round status 从 task status 聚合。
 
 ### Phase 5: 前端和诊断收敛
 
