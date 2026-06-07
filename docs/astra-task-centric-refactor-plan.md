@@ -1,0 +1,381 @@
+# Astra Task-Centric Refactor / Teamwork 编排标准
+
+## 摘要
+
+本文档定义 Astra task-centric 编排的目标形态：**assistant 负责路由和上下文，task 负责执行事实，run 负责整体编排进度**。
+
+它是 `teamwork` thread kind 的标准编排模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它迁移为 assistant-routed teamwork：用户配置 thread-level assistants，Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
+
+持久化模型以 `docs/thread-types-plan-rounds.md` 为准。Astra run 负责编排进度、backend、diagnostics 和终态原因；`thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions` 负责每轮计划、task lifecycle、session 关联和 reload 恢复。本文档不再定义长期 `task_states_json` 或另一套 task state 事实源。
+
+## 与 Thread Kind 的关系
+
+四种 thread kind 的边界如下：
+
+```text
+workflow   = human-defined stages, no Astra scheduling
+teamwork   = shared context + Astra task orchestration
+brainstorm = shared context + parallel opinions + synthesis
+debate     = isolated contexts + cross-verification + convergence
+```
+
+- `workflow` 使用人为定义的 stages 和顺序。系统可以把人工 stage task 记录到 plan round/task，便于统一历史回看，但 workflow 不默认由 Astra 自动调度。
+- `teamwork` 是本文档的范围：所有 assistants 共享 thread context，Astra 生成 plan round/tasks，并把 tasks 分派给 `assistantId` 或 `targetAgent`。
+- `brainstorm` 不是普通 teamwork 的同义词。它需要 shared-board 生成、下一轮注入和 synthesis 策略。
+- `debate` / PK 不是普通 teamwork 的同义词。它需要 isolated lanes、artifact 可见范围、cross-check 和 convergence 判断。
+
+## 当前问题
+
+### 1. 旧 Astra 把 stage/issue mutation 交给 LLM
+
+当前 prompt 要求 Astra 返回 `decisions`，并在其中表达 stage pass/fail/retry、issue open/resolve/dismiss、run complete/error 等状态变更。实际运行中已经出现多类问题：
+
+- 返回结构不稳定，比如 JSON/YAML 混用、旧字段和新字段混用、列表解析 EOF。
+- LLM 容易返回 stage id 作为 task id，或漏写 `approvedTaskIds` / issue 状态。
+- 同一批并行 task 的聚合判断容易和单 task 判断混淆。
+- 为了解析模型输出不断加兼容和补丁，但这会掩盖契约错误。
+
+这说明 LLM 不适合做持久化状态 mutation 的 owner。LLM 更适合负责“下一步做什么”，Rust/store 更适合负责“已经发生了什么”和“run 是否终止”。
+
+### 2. stage/status/issues 不是 teamwork 的控制面
+
+现有模型里，`stage.status` 和 `issues` 同时用于 UI 展示、planner 过滤、prompt 上下文和下一轮决策输入。这会形成反馈回路：上一轮 LLM 生成的 issue 或 stage status，会被下一轮 LLM 当成事实继续推理。
+
+在目标模型里：
+
+- workflow stages 仍然保留给人为流程、归档和历史回看。
+- teamwork 不读取 stage status，不写 stage/issue mutation。
+- teamwork 的返工输入来自 prior task results、round summary、用户反馈和 explicit replan/retry，而不是 `thread_stage_issues`。
+
+### 3. 并行 task running 状态不可可靠恢复
+
+当前 UI 对 running task 的判断依赖 live event、`currentTaskId` 和 `approvedTaskIds` 推断。多个并行 task 刚开始时可以显示 running，但切换界面再回来后，只能从持久化 run 中恢复部分状态，导致只剩一个 task 显示 running。
+
+根因是 task lifecycle 没有作为 thread-level 一等持久化状态存在。`currentTaskId` 是单值，不足以表达并行 task；live event 是瞬时信号，不能作为 reload 后的事实源。
+
+## 目标架构
+
+### 核心模型
+
+```text
+assistant = 路由 / 上下文 / agent 配置 / session 归档
+task      = 执行事实 / 生命周期状态 / 结果记录
+round     = 本轮计划 / dispatch mode / task batch
+run       = 编排进度 / round cursor / 终态 / diagnostics
+```
+
+### assistant 负责路由，但不拥有 lifecycle
+
+teamwork 的路由对象是 thread-level assistant：
+
+- `assistantId` 表示产品成员和上下文角色。
+- `targetAgent` 表示实际 runtime agent，可由 assistant 配置推出，也允许 agent-level task 没有 assistant。
+- assistant 的 prompt、model、tools、runtime agent 等执行配置要在 task 创建时写入 `assistant_snapshot_json` / `agent_snapshot_json`。
+- assistant 后续配置变化不能覆盖旧 task 的历史解释。
+
+assistant 不表达 task lifecycle。planned/running/completed/failed/errored/cancelled 都由 `thread_plan_tasks.status` 表达。
+
+### task 是执行事实源
+
+task 至少支持：
+
+- `planned`
+- `running`
+- `completed`
+- `failed`
+- `errored`
+- `cancelled`
+
+task 状态通过 `thread_plan_tasks.status` 持久化。`approvedTaskIds` 和 `currentTaskId` 不再作为 running 恢复的唯一来源。若后续需要人工 approval gate，应建模为 run/round 级 gate 或独立 action log，不作为 task lifecycle 状态。
+
+并行 task dispatch 时，应一次性写入所有应启动 task 的 running 状态。reload 后，UI 应能只依赖 plan round/task 持久化数据恢复全部 running task；`listAstraRuns` 可以携带派生视图，但不能成为 task lifecycle 的唯一事实源。
+
+### run 控制编排
+
+run 负责：
+
+- 当前 round index / round limit。
+- active/terminal status。
+- planner backend / diagnostics。
+- terminal reason / error code。
+- 是否继续生成下一轮、等待人工、完成或失败。
+
+run 不读取 stage status 作为 blocked/needs_review/completed 控制条件。teamwork 下一步做什么由 Astra 根据 thread goal、thread assistants、shared context、历史 plan task results 和用户反馈生成。
+
+## 新 Astra Contract
+
+### 返回格式
+
+Astra teamwork orchestrator 只返回一个完整 YAML document，不兼容 JSON，不接受 markdown code fence，不做 repair/fallback。
+
+```yaml
+summary: string
+runIntent: continue|complete|wait_for_human|error
+reason: string
+mode: parallel|sequential
+tasks: []
+```
+
+### 字段语义
+
+- `summary`：本轮规划摘要，用于 `thread_plan_rounds.summary`、run diagnostics 和 UI 展示。
+- `runIntent`：
+  - `continue`：继续自动编排，必须返回下一批 tasks。
+  - `complete`：run 正常完成，`tasks` 必须为空。
+  - `wait_for_human`：需要人工介入或评审，run 进入可诊断终态，`tasks` 必须为空。
+  - `error`：不可恢复错误，run 进入 errored，`tasks` 必须为空。
+- `reason`：解释 `runIntent`，用于 terminal reason 或 diagnostics。
+- `mode`：`continue` 时必须存在，并写入 `thread_plan_rounds.mode`；terminal intent 时可忽略。
+- `tasks`：下一批 task。`continue` 时不能为空；其他 intent 时必须为空。
+
+### Task shape
+
+```yaml
+tasks:
+  - title: string
+    assistantId: assistant-id
+    targetAgent: codex|claude|gemini|astra-pi
+    prompt: string
+    expectedOutput: string
+    risk: low|medium|high
+```
+
+规则：
+
+- `assistantId` 是 teamwork 的主要路由字段；没有 stage 时不能返回 `targetStageId`。
+- `targetAgent` 表示实际 runtime agent。通常来自 assistant 配置，但允许显式覆盖。
+- 允许 agent-level task 不带 `assistantId`，但 v1 UI 应优先鼓励绑定 assistant，便于团队成员语义和历史回看。
+- `mode = parallel` 时，本轮 tasks 可以同时 dispatch。
+- `mode = sequential` 时，本轮 tasks 按落库后的 `sort_order` 逐个 dispatch，且同一 round 任一时刻最多一个 running task。
+
+### 明确删除的能力
+
+LLM 不再返回以下内容：
+
+- `decisions`
+- `outcome`
+- `issueAction`
+- `stage mutation`
+- `issue mutation`
+- `approvedTaskIds`
+- `currentTaskId`
+- `targetStageId`
+- `action/status/issueStatus` 等旧 decision shape
+
+Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格式错就是编排失败，并记录 raw response snippet 到 diagnostics。
+
+## 实施顺序
+
+全局实施顺序以 `docs/thread-types-plan-rounds.md` 为准：
+
+1. `ThreadKind` / `thread_assistants` 先落地，让 thread 能表达 `workflow | teamwork | brainstorm | debate`，并能绑定 thread-level assistants。
+2. 直接新增 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，建立 plan round 和 task lifecycle 的事实源。
+3. 改 Astra 新 contract，让 planner 输出 `{ summary, runIntent, reason, mode, tasks }`，并把 plan round/tasks/session refs 写入上述表。
+4. 接入 teamwork：使用本文档的 assistant-routed task-centric 编排，不要求 stages，不读 stage status，不写 stage/issue mutation。
+5. 最后再做 brainstorm / debate；它们分别需要 shared-board backend 和 isolated-lane / cross-check backend，不能只靠普通 teamwork planner 宣称完成。
+
+## 阶段计划
+
+### Phase 0: 冻结旧 stage-decision 补丁方向
+
+目标：停止继续围绕旧 `decisions` contract 打兼容补丁，把当前 worktree 中的 YAML/decision patch 视为过渡探索，不再扩大。
+
+执行内容：
+
+- 记录当前未完成补丁的意图和风险。
+- 明确后续持久化事实源以 `docs/thread-types-plan-rounds.md` 为准。
+- 保留 300s timeout 和诊断增强方向。
+- 不再新增 JSON repair、legacy decision shape 兼容或 pseudo function-call wrapper。
+
+验收：
+
+- 文档落地。
+- 后续代码改动按实施顺序拆分，不再混合 parser hotfix 和架构重构。
+
+### Phase 1: 接入 thread plan round/task 状态持久化
+
+目标：让 task lifecycle 成为可 reload 的事实源，先解决多个并行 task 切换界面后 running 丢失的问题。
+
+执行内容：
+
+- 按 `docs/thread-types-plan-rounds.md` 新增或复用 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`。
+- Astra planner 输出 task batch 后，先创建 `thread_plan_rounds` 和对应 `thread_plan_tasks`。
+- 写入 task 时保存 assistant / agent 快照；若兼容旧 stage-based run，也可保存 stage 快照，但新 teamwork 不依赖 stage。
+- dispatch task batch 前，在同一事务中把本轮应启动的 plan tasks 更新为 `running`。
+- terminal result 到达时，把对应 `thread_plan_tasks.status` 更新为 completed/failed/errored/cancelled，并写入 result summary / error。
+- dispatch/result 到达时，通过 `thread_plan_task_sessions` 记录 delegated/runtime session refs，session 身份包含 agent 和 session id。
+- `listAstraRuns` 可以返回 plan task 派生摘要，前端 running 状态必须能从 plan tasks 恢复。
+- 不新增长期 `task_states_json` 事实源；如果为了兼容短期保留缓存，它必须由 `thread_plan_tasks` 派生，并有明确删除阶段。
+- 旧 run 兼容：如果没有 plan tasks，仍可从 `approvedTaskIds + taskResults` best-effort 推断；新 run 不依赖它。
+
+验收：
+
+- 多个并行 task 开始后刷新页面，全部仍显示 running。
+- task result 到达后，对应 task 从 running 变为 terminal。
+- `thread_plan_task_sessions` 能从 task 反查 delegated/runtime session。
+- `currentTaskId` 不再影响并行 task 恢复正确性。
+
+### Phase 2: 重写 teamwork orchestrator 控制流
+
+目标：移除 Astra 自动编排路径里的 LLM decision mutation，把 run/round/task 作为控制源。
+
+执行内容：
+
+- `AstraOrchestration` 改为 `{ summary, runIntent, reason, mode, tasks }`。
+- 主循环在 task batch 完成后调用 planner/backend 获取下一轮 tasks 或 terminal intent。
+- 删除自动编排路径对 `AstraDecision::UpdateStage` / `AddOrUpdateIssue` / `RetryStage` 的依赖。
+- Rust 根据 `runIntent` 处理 run 终态：
+  - `complete` -> completed
+  - `wait_for_human` -> completed 或 interrupted-like 可诊断终态，保留 reason
+  - `error` -> errored
+  - `continue` -> 创建下一轮 plan round/tasks 并按 mode dispatch
+- Rust 根据 `mode` 和 plan task 状态执行 dispatch，不让 LLM 返回 running/completed mutation。
+
+验收：
+
+- LLM 不返回任何 stage/issue mutation，run 仍能持续推进。
+- failed/errored/cancelled task 不导致 parser 需要 stage decision 才能继续。
+- round status 从 task status 聚合。
+- sequential round 任一时刻最多一个 running task。
+
+### Phase 3: 重写 prompt/parser/backend contract
+
+目标：把 orchestrator backend 统一到 assistant-routed tasks-only YAML contract，消除两边 prompt 重写和解析不一致。
+
+执行内容：
+
+- 抽出公共 contract builder，runtime agent backend 和 Astra Pi ACP backend 共用。
+- prompt 明确 teamwork 使用 `assistantId`，不返回 `targetStageId`。
+- parser 只接受新 YAML shape。
+- parser 使用 `deny_unknown_fields` 或等价严格校验，拒绝旧字段。
+- 错误信息包含失败 code、简短 parser message、raw response snippet。
+- `ASTRA_ORCHESTRATOR_TIMEOUT_MS` 只在一个位置定义为 `300_000`，所有 orchestrator backend 复用。
+
+验收：
+
+- JSON response 被拒绝。
+- code fence response 被拒绝。
+- 旧 `decisions/action/status/issueStatus/targetStageId` response 被拒绝。
+- runtime agent 和 Astra Pi ACP 使用同一份 contract 文案。
+- timeout 统一为 300s。
+
+### Phase 4: teamwork shared context 和 assistant routing
+
+目标：让 teamwork thread 不需要 stages，也能由 Astra 自动拆解和执行。
+
+执行内容：
+
+- Planner 输入包含 thread goal、thread-level assistants、assistant system prompts、历史 plan task results、用户反馈和 run diagnostics。
+- Planner 不读取 stage status，不读取全局 stage issues。
+- Dispatch 时按 `assistant_id` 找到 assistant 的 runtime agent 和 system prompt，并使用 task 快照构造 runtime prompt。
+- 同 assistant retry/rework 时，prompt 带上相关 prior task result 和 rework reason，而不是 stage issue。
+- Task result 回写 `thread_plan_tasks`，并驱动下一轮 plan。
+
+验收：
+
+- Teamwork thread 没有 stages 也能自动拆解和执行。
+- 多 assistants parallel task 可同时运行并在 reload 后恢复。
+- Sequential teamwork round 按 `sort_order` 执行。
+- Teamwork 不读取 stage status，不写 stage/issue mutation。
+
+### Phase 5: 前端和诊断收敛
+
+目标：让 UI 与新事实源一致，并让错误可定位。
+
+执行内容：
+
+- Astra task card 状态从 `thread_plan_tasks` 或其派生视图读取。
+- delegated session badge 从 `thread_plan_task_sessions` 展示。
+- active run 面板展示 `runIntent` / terminal reason / last error code。
+- parser failure、timeout、malformed response、backend session id 写入 run diagnostics。
+- internal planner session 仍只进入 internal session ids，不进入普通 chat session 列表。
+
+验收：
+
+- reload 后 UI 和 plan task 持久化一致。
+- “task result 跑到普通 chat”问题不复现。
+- Astra planning session 不出现在普通 session 列表，只作为 internal diagnostics 可追踪。
+
+### Phase 6: 删除旧 stage-decision 代码和旧测试
+
+目标：清理旧控制面，避免未来继续误用。
+
+执行内容：
+
+- 删除或隔离旧 `AstraDecision` 自动编排路径。
+- 删除旧 parser tests 中关于 update_stage/add_or_update_issue/retry_stage 的用例。
+- 更新 deterministic backend，使其只输出新 `AstraOrchestration`。
+- 清理 prompt 中所有 stage/issue mutation 和 `targetStageId` teamwork 说明。
+- 保留 store API 和 CLI 的 stage/issue 人工操作能力，供 workflow/manual UI 使用。
+
+验收：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml astra::` 通过。
+- 前端 typecheck/build 通过。
+- repo 中 Astra teamwork prompt 不再出现 `issueAction`、`update_stage`、`add_or_update_issue`、`targetStageId` 等旧 contract。
+
+## 验收标准
+
+### Parser / Contract
+
+- 只接受 YAML mapping。
+- 拒绝 JSON。
+- 拒绝 markdown code fence。
+- 拒绝旧 decision 字段。
+- 拒绝 `targetStageId` 作为 teamwork routing。
+- malformed response hard fail，不 fallback，不 repair。
+
+### Teamwork Task
+
+- task 使用 `assistantId` 或 agent-level `targetAgent` 路由。
+- 同一 parallel round 多个 task 全部写入 running。
+- 页面 reload 后全部 running 可恢复。
+- 每个 task terminal result 独立更新，不影响其他 running task。
+- sequential round 任一时刻最多一个 running task。
+
+### Stage / Workflow
+
+- Workflow 不默认由 Astra 自动调度。
+- Teamwork 不读取 `stage.status` 作为 blocked/needs_review/completed 控制条件。
+- Teamwork 不创建、关闭、dismiss stage issues。
+- stage session 和 task session 继续保存，并能从 thread replay 聚合。
+
+### Timeout / Diagnostics
+
+- orchestrator timeout 统一为 300s。
+- 不使用固定 sleep 处理数据流完成。
+- timeout、parser failure、backend empty response 都写入 run diagnostics。
+
+## 风险与取舍
+
+### 风险 1: 旧 stage-based Astra 迁移面大
+
+这次不是 parser hotfix，而是控制面重构。需要按实施顺序拆分：先落 `ThreadKind` / `thread_assistants`，再落 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，再改 Astra contract 写这些表，最后接入 teamwork/brainstorm/debate。
+
+### 风险 2: 旧 run 兼容
+
+旧 run 没有 plan tasks，只能从 `approvedTaskIds + taskResults + currentTaskId` 推断。兼容逻辑只能 best-effort，新 run 必须使用 `thread_plan_tasks`。
+
+### 风险 3: workflow stage UI 与 teamwork Astra 分离
+
+用户可能仍在 workflow UI 中看到 stage status 和 issues，但 teamwork Astra 自动编排不再受其控制。需要在实现和 UI 文案上避免暗示 stage status 会阻塞 teamwork。
+
+### 风险 4: Brainstorm / Debate 不能只复用普通 teamwork
+
+Teamwork 是 shared context + task orchestration。Brainstorm 还需要 shared board 和 synthesis；debate 还需要 isolated lanes、cross-check 和 convergence。后两者必须在 `docs/thread-types-plan-rounds.md` Phase 5/6 中通过专用 backend 或 v2 延后处理。
+
+### 风险 5: 不 fallback 会暴露更多错误
+
+严格契约会让 malformed response 直接失败，短期看错误会更明显。但这是有意选择：不要用 fallback 掩盖模型输出不符合协议的问题。诊断要足够清楚，让 prompt/backend 能被修正。
+
+## 明确不做
+
+- 不做破坏性 DB migration。
+- 不删除 workflow stage/issue 人工 API。
+- 不把 stage/issues 作为 teamwork prompt 控制输入。
+- 不让 LLM 返回 stage/issue mutation。
+- 不兼容 JSON。
+- 不做 parser repair。
+- 不做静默 deterministic fallback。
+- 不在本文档内实现 brainstorm shared-board backend。
+- 不在本文档内实现 debate isolated-lane / cross-check backend。
