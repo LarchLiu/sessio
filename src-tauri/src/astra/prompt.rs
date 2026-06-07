@@ -122,7 +122,6 @@ pub(super) fn build_astra_orchestration_prompt(
             "roundIndex": round_index,
             "retryLimit": run.retry_limit,
             "completedTaskIds": run.completed_task_ids,
-            "stageAttemptCounts": run.stage_attempt_counts,
         },
         "userPrompt": user_prompt.unwrap_or(""),
         "completedTasks": completed_tasks,
@@ -799,12 +798,21 @@ mod tests {
 
     #[test]
     fn teamwork_orchestration_prompt_uses_assistants_without_stage_contract() {
+        let mut run = run();
+        run.stage_attempt_counts = HashMap::from([("stage-legacy-1".to_string(), 2)]);
+        let mut task = teamwork_task();
+        task.target_stage_id = Some("stage-legacy-1".to_string());
+        let mut result = task_result();
+        result.task_id = task.id.clone();
+        result.thread_stage_id = Some("stage-legacy-1".to_string());
+        let completion = AstraTaskCompletion { task, result };
+
         let prompt = build_astra_orchestration_prompt(
-            &run(),
+            &run,
             &teamwork_thread(),
             Some("split work"),
             1,
-            &[],
+            &[completion],
         );
         let value: Value = serde_json::from_str(&prompt).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
@@ -820,6 +828,9 @@ mod tests {
         assert!(!instruction.contains("update_stage"));
         assert!(!instruction.contains("targetStageId"));
         assert!(!instruction.contains(r#""stage": {"#));
+        assert!(!prompt.contains("targetStageId"));
+        assert!(!prompt.contains("threadStageId"));
+        assert!(!prompt.contains("stageAttemptCounts"));
         assert_eq!(value["thread"]["kind"], "teamwork");
         assert_eq!(
             value["thread"]["assistants"][0]["assistantId"],
@@ -830,6 +841,15 @@ mod tests {
             "assistant-claude"
         );
         assert!(value["thread"]["stages"].as_array().unwrap().is_empty());
+        assert!(value["run"].get("stageAttemptCounts").is_none());
+        assert_eq!(
+            value["completedTasks"][0]["task"]["assistantId"],
+            "assistant-codex"
+        );
+        assert_eq!(
+            value["completedTasks"][0]["result"]["taskId"],
+            "task-teamwork-1"
+        );
     }
 
     #[test]
