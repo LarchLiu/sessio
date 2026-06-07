@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    next_dispatchable_tasks, now_ms, rolling_stage_task_batch, AstraBackendConfig,
+    next_dispatchable_tasks, now_ms, validate_teamwork_astra_tasks, AstraBackendConfig,
     AstraOrchestration, AstraRun, AstraRunIntent, AstraRunStatus, AstraService,
     AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
@@ -341,12 +341,18 @@ impl AstraService {
         let mode = orchestration
             .mode
             .ok_or_else(|| anyhow::anyhow!("continue runIntent requires a plan round mode"))?;
-        let tasks = match mode {
-            PlanRoundMode::Parallel => rolling_stage_task_batch(orchestration.tasks),
-            PlanRoundMode::Sequential => orchestration.tasks,
-        };
+        let tasks = orchestration.tasks;
         let summary = orchestration.summary;
         let latest_thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+        if let Err(error) = validate_teamwork_astra_tasks(&tasks) {
+            let _ = self.error_run(
+                &run.run_id,
+                "orchestrator_legacy_stage_task",
+                "orchestrator_legacy_stage_task",
+                error.to_string(),
+            )?;
+            return Ok((self.load_run(&run.run_id)?, Vec::new()));
+        }
         if tasks.is_empty() {
             let _ = self.error_run(
                 &run.run_id,
@@ -401,10 +407,7 @@ impl AstraService {
             }),
         );
         let dispatch_batch = match mode {
-            PlanRoundMode::Parallel => {
-                let dispatchable = next_dispatchable_tasks(&planned, &latest_thread);
-                rolling_stage_task_batch(dispatchable)
-            }
+            PlanRoundMode::Parallel => next_dispatchable_tasks(&planned, &latest_thread),
             PlanRoundMode::Sequential => tasks.into_iter().take(1).collect(),
         };
         Ok((planned, dispatch_batch))

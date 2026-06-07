@@ -50,25 +50,16 @@ pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
 const ASTRA_DEFAULT_RETRY_LIMIT: u32 = 3;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
-const ASTRA_ROLLING_TASK_BATCH_LIMIT: usize = 4;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 
-fn rolling_stage_task_batch(tasks: Vec<AstraTaskProposal>) -> Vec<AstraTaskProposal> {
-    let Some(first) = tasks.first() else {
-        return Vec::new();
-    };
-    let target_stage_id = first.target_stage_id.clone();
-    if target_stage_id.is_none() {
-        return tasks
-            .into_iter()
-            .filter(|task| task.target_stage_id.is_none())
-            .collect();
+fn validate_teamwork_astra_tasks(tasks: &[AstraTaskProposal]) -> Result<()> {
+    if let Some(task) = tasks.iter().find(|task| task.target_stage_id.is_some()) {
+        bail!(
+            "Astra automatic orchestration only supports assistant-routed teamwork tasks; task {} includes targetStageId",
+            task.id
+        );
     }
-    tasks
-        .into_iter()
-        .filter(|task| task.target_stage_id == target_stage_id)
-        .take(ASTRA_ROLLING_TASK_BATCH_LIMIT)
-        .collect()
+    Ok(())
 }
 
 fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
@@ -178,16 +169,6 @@ struct OwnedAstraPlanTask {
 enum AstraWorkerState {
     Pending,
     Running,
-}
-
-enum DispatchTaskBatchDecision {
-    RetryLimit {
-        results: Vec<AstraTaskResult>,
-        retry_limit: u32,
-    },
-    Dispatch {
-        attempt_count: u32,
-    },
 }
 
 /// The stage/attempt coordinates that always travel together when dispatching
@@ -750,105 +731,17 @@ impl AstraService {
         if tasks.is_empty() {
             return Ok(Vec::new());
         }
-        let first_target_stage_id = tasks[0].target_stage_id.as_deref();
-        if tasks
-            .iter()
-            .any(|task| task.target_stage_id.as_deref() != first_target_stage_id)
-        {
-            bail!("Astra rolling task batch must target a single stage");
-        }
+        validate_teamwork_astra_tasks(tasks)?;
 
-        let mut thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-        let stage_id = first_target_stage_id
-            .map(|id| resolve_thread_stage_id(&thread, id))
-            .transpose()?;
-        if let Some(stage_id) = stage_id.as_deref() {
-            thread = self.prepare_stage_for_delegated_task(&run.thread_id, stage_id)?;
-        }
-
-        let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
-        let approved_task_ids = task_ids.clone();
-        let stage_id_for_run = stage_id.clone();
-        let (next, decision) = self.mutate_run(&run.run_id, move |next| {
+        let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+        let (next, ()) = self.mutate_run(&run.run_id, move |next| {
             if !next.status.active() {
                 bail!("Astra run is not active: {}", next.run_id);
             }
-
             next.status = AstraRunStatus::Running;
-            next.current_stage_id = stage_id_for_run.clone();
-            for task_id in &approved_task_ids {
-                if !next.approved_task_ids.iter().any(|id| id == task_id) {
-                    next.approved_task_ids.push(task_id.clone());
-                }
-            }
-            let prior_attempt_count = stage_id_for_run
-                .as_ref()
-                .map(|id| *next.stage_attempt_counts.entry(id.clone()).or_insert(0))
-                .unwrap_or(0);
-            let retry_limit_reached = stage_id_for_run
-                .as_ref()
-                .map(|_| prior_attempt_count >= next.retry_limit)
-                .unwrap_or(false);
-            if retry_limit_reached {
-                let results = task_ids
-                    .iter()
-                    .map(|task_id| {
-                        let result = AstraTaskResult {
-                            task_id: task_id.clone(),
-                            thread_stage_id: stage_id_for_run.clone(),
-                            sessio_runtime_session_id: String::new(),
-                            turn_id: None,
-                            status: AstraTaskResultStatus::Failed,
-                            output: String::new(),
-                            error: Some("retry limit reached".to_string()),
-                            attempt_count: prior_attempt_count,
-                            retry_limit_reached: true,
-                            decision_action: None,
-                            decision_reason: None,
-                            completed_at: now_ms(),
-                        };
-                        upsert_task_result_in_run(next, result.clone());
-                        result
-                    })
-                    .collect::<Vec<_>>();
-                return Ok(DispatchTaskBatchDecision::RetryLimit {
-                    results,
-                    retry_limit: next.retry_limit,
-                });
-            }
-            let attempt_count = stage_id_for_run
-                .as_ref()
-                .map(|id| {
-                    let count = next.stage_attempt_counts.entry(id.clone()).or_insert(0);
-                    *count += 1;
-                    *count
-                })
-                .unwrap_or(1);
-            Ok(DispatchTaskBatchDecision::Dispatch { attempt_count })
+            Ok(())
         })?;
-
-        let attempt_count = match decision {
-            DispatchTaskBatchDecision::RetryLimit {
-                results,
-                retry_limit,
-            } => {
-                for result in &results {
-                    self.record_plan_task_result(&next, result)?;
-                    self.emit(
-                        &next,
-                        "retry_limit",
-                        json!({
-                            "taskId": result.task_id,
-                            "threadStageId": stage_id,
-                            "attemptCount": result.attempt_count,
-                            "retryLimit": retry_limit,
-                        }),
-                    );
-                }
-                return Ok(results);
-            }
-            DispatchTaskBatchDecision::Dispatch { attempt_count } => attempt_count,
-        };
+        let attempt_count = 1;
 
         self.mark_astra_plan_tasks_running(tasks)?;
 
@@ -861,7 +754,7 @@ impl AstraService {
                 &thread,
                 task,
                 DelegatedAttempt {
-                    thread_stage_id: stage_id.as_deref(),
+                    thread_stage_id: None,
                     attempt_count,
                     retry_limit_reached: false,
                 },
@@ -886,17 +779,15 @@ impl AstraService {
                 "task_dispatch",
                 json!({
                     "taskId": task.id,
-                    "threadStageId": stage_id,
                     "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
                     "attemptCount": attempt_count,
                 }),
             );
             log::info!(
-                "[astra:task:dispatch] runId={} threadId={} taskId={} threadStageId={:?} runtimeSessionId={} attemptCount={}",
+                "[astra:task:dispatch] runId={} threadId={} taskId={} runtimeSessionId={} attemptCount={}",
                 next.run_id,
                 next.thread_id,
                 task.id,
-                stage_id,
                 handle.sessio_runtime_session_id,
                 attempt_count
             );
@@ -2129,15 +2020,6 @@ fn plan_task_status_from_astra(status: AstraTaskResultStatus) -> PlanTaskStatus 
     }
 }
 
-fn resolve_thread_stage_id(thread: &ThreadInfo, stage_id: &str) -> Result<String> {
-    thread
-        .stages
-        .iter()
-        .find(|stage| stage.id == stage_id || stage.stage_id == stage_id)
-        .map(|stage| stage.id.clone())
-        .ok_or_else(|| anyhow::anyhow!("stage does not belong to Astra run thread: {stage_id}"))
-}
-
 fn stable_run_id(thread_id: &str, now: i64) -> String {
     format!("astra-{}-{}", short_hash(thread_id), now)
 }
@@ -2439,6 +2321,21 @@ mod tests {
         let value = filtered_task_completion_value(&AstraTaskCompletion { task, result });
 
         assert_eq!(value["result"]["finalOutput"], "implemented and verified");
+    }
+
+    #[test]
+    fn automatic_astra_tasks_reject_legacy_stage_routing() {
+        let stage_task = test_task("task-legacy-stage", "stage-1");
+
+        let error = validate_teamwork_astra_tasks(&[stage_task]).unwrap_err();
+
+        assert!(error.to_string().contains("targetStageId"));
+
+        let mut teamwork_task = test_task("task-teamwork", "stage-1");
+        teamwork_task.target_stage_id = None;
+        teamwork_task.assistant_id = Some("assistant-codex".to_string());
+
+        validate_teamwork_astra_tasks(&[teamwork_task]).unwrap();
     }
 
     #[test]
@@ -2910,57 +2807,6 @@ mod tests {
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));
-    }
-
-    #[test]
-    fn resolves_project_or_thread_stage_id_to_thread_stage_id() {
-        let thread = ThreadInfo {
-            id: "thread-1".to_string(),
-            project_id: "project-1".to_string(),
-            goal: "Ship".to_string(),
-            description: None,
-            stage_id: None,
-            kind: crate::models::ThreadKind::Workflow,
-            enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            assistants: Vec::new(),
-            stages: vec![crate::models::StageInfo {
-                id: "thread-stage-1".to_string(),
-                thread_id: "thread-1".to_string(),
-                stage_id: "project-stage-1".to_string(),
-                project_id: "project-1".to_string(),
-                assistant_ids: Vec::new(),
-                assistants: Vec::new(),
-                stage_type: crate::models::ProjectStageType::Custom,
-                workflow_id: None,
-                kind: None,
-                name: Some("Build".to_string()),
-                description: None,
-                icon: None,
-                order: 0,
-                status: StageStatus::NotStarted,
-                summary: None,
-                outcome: None,
-                enabled: true,
-                allow_empty_assistants: true,
-                created_at: 1,
-                updated_at: 1,
-                sessions: Vec::new(),
-                issues: Vec::new(),
-            }],
-            sessions: Vec::new(),
-        };
-
-        assert_eq!(
-            resolve_thread_stage_id(&thread, "thread-stage-1").unwrap(),
-            "thread-stage-1"
-        );
-        assert_eq!(
-            resolve_thread_stage_id(&thread, "project-stage-1").unwrap(),
-            "thread-stage-1"
-        );
-        assert!(resolve_thread_stage_id(&thread, "other-stage").is_err());
     }
 
     #[test]
