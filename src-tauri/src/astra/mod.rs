@@ -26,6 +26,7 @@ use crate::store::{
 
 mod astra_pi_acp_adapter;
 mod backend;
+mod brainstorm_backend;
 mod deterministic_backend;
 mod orchestrator;
 mod planner;
@@ -51,10 +52,10 @@ const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 
-fn validate_teamwork_astra_tasks(tasks: &[AstraTaskProposal]) -> Result<()> {
+fn validate_assistant_routed_astra_tasks(tasks: &[AstraTaskProposal]) -> Result<()> {
     if let Some(task) = tasks.iter().find(|task| task.target_stage_id.is_some()) {
         bail!(
-            "Astra automatic orchestration only supports assistant-routed teamwork tasks; task {} includes targetStageId",
+            "Astra automatic orchestration only supports assistant-routed plan tasks; task {} includes targetStageId",
             task.id
         );
     }
@@ -721,7 +722,7 @@ impl AstraService {
         if tasks.is_empty() {
             return Ok(Vec::new());
         }
-        validate_teamwork_astra_tasks(tasks)?;
+        validate_assistant_routed_astra_tasks(tasks)?;
 
         let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
         let (next, ()) = self.mutate_run(&run.run_id, move |next| {
@@ -2227,7 +2228,7 @@ mod tests {
     fn automatic_astra_tasks_reject_legacy_stage_routing() {
         let stage_task = test_task("task-legacy-stage", "stage-1");
 
-        let error = validate_teamwork_astra_tasks(&[stage_task]).unwrap_err();
+        let error = validate_assistant_routed_astra_tasks(&[stage_task]).unwrap_err();
 
         assert!(error.to_string().contains("targetStageId"));
 
@@ -2235,7 +2236,7 @@ mod tests {
         teamwork_task.target_stage_id = None;
         teamwork_task.assistant_id = Some("assistant-codex".to_string());
 
-        validate_teamwork_astra_tasks(&[teamwork_task]).unwrap();
+        validate_assistant_routed_astra_tasks(&[teamwork_task]).unwrap();
     }
 
     #[test]

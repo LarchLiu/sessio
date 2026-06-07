@@ -43,6 +43,7 @@ fn deterministic_orchestration(
             reason: "astra_orchestration_unsupported_for_thread_kind".to_string(),
             mode: None,
             tasks: Vec::new(),
+            diagnostics: Vec::new(),
         });
     }
 
@@ -63,6 +64,7 @@ fn deterministic_orchestration(
             reason: "teamwork_task_failed".to_string(),
             mode: None,
             tasks: Vec::new(),
+            diagnostics: Vec::new(),
         });
     }
 
@@ -76,6 +78,7 @@ fn deterministic_orchestration(
             reason: "teamwork_round_completed".to_string(),
             mode: None,
             tasks: Vec::new(),
+            diagnostics: Vec::new(),
         });
     }
 
@@ -87,6 +90,7 @@ fn deterministic_orchestration(
             reason: "teamwork_no_dispatchable_tasks".to_string(),
             mode: None,
             tasks: Vec::new(),
+            diagnostics: Vec::new(),
         });
     }
 
@@ -96,5 +100,6 @@ fn deterministic_orchestration(
         reason: "continue_with_teamwork_tasks".to_string(),
         mode: Some(PlanRoundMode::Parallel),
         tasks: plan.tasks,
+        diagnostics: Vec::new(),
     })
 }

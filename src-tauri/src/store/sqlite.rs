@@ -641,25 +641,7 @@ CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_updated
 
 CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_active
     ON astra_runs(thread_id, status);
-"#;
 
-const SCHEMA_V6_THREAD_KIND: &str = r#"
-CREATE TABLE IF NOT EXISTS thread_assistants (
-    thread_id    TEXT NOT NULL,
-    assistant_id TEXT NOT NULL,
-    sort_order   INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL,
-    PRIMARY KEY(thread_id, assistant_id),
-    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
-    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
-);
-
-CREATE INDEX IF NOT EXISTS idx_thread_assistants_assistant
-    ON thread_assistants(assistant_id);
-"#;
-
-const SCHEMA_V7_PLAN_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS thread_plan_rounds (
     id           TEXT PRIMARY KEY,
     thread_id    TEXT NOT NULL,
@@ -827,46 +809,8 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         seed_builtins(conn)?;
     }
-    if current < 6 {
-        ensure_v6_thread_kind_schema(conn)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
-            [],
-        )?;
-    }
-    if current < 7 {
-        ensure_v7_plan_tables_schema(conn)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
-            [],
-        )?;
-    }
-    ensure_v6_thread_kind_schema(conn)?;
-    ensure_v7_plan_tables_schema(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
-}
-
-fn ensure_v6_thread_kind_schema(conn: &Connection) -> Result<()> {
-    let columns = table_columns(conn, "threads")?;
-    if !columns.contains("kind") {
-        conn.execute_batch(
-            "ALTER TABLE threads ADD COLUMN kind TEXT NOT NULL DEFAULT 'workflow' CHECK(kind IN ('workflow', 'teamwork', 'brainstorm', 'debate'));",
-        )?;
-    }
-    conn.execute_batch(SCHEMA_V6_THREAD_KIND)?;
-    Ok(())
-}
-
-fn ensure_v7_plan_tables_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA_V7_PLAN_TABLES)?;
-    Ok(())
-}
-
-fn table_columns(conn: &Connection, table_name: &str) -> Result<HashSet<String>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    Ok(rows.collect::<rusqlite::Result<HashSet<_>>>()?)
 }
 
 /// Seed all builtin data in dependency order: workflows, their stages,
@@ -8035,7 +7979,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 7);
+        assert_eq!(latest_schema_version, 5);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();

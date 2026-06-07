@@ -2,15 +2,17 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    astra_task_from_plan_task, next_dispatchable_tasks, now_ms, validate_teamwork_astra_tasks,
-    AstraBackendConfig, AstraOrchestration, AstraRun, AstraRunIntent, AstraRunStatus, AstraService,
-    AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+    astra_task_from_plan_task, next_dispatchable_tasks, now_ms,
+    validate_assistant_routed_astra_tasks, AstraBackendConfig, AstraOrchestration, AstraRun,
+    AstraRunIntent, AstraRunStatus, AstraService, AstraTaskCompletion,
+    ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
 use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
+use crate::astra::brainstorm_backend::BrainstormBackend;
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
-use crate::models::{PlanRoundMode, PlanTaskStatus, ThreadKind};
+use crate::models::{PlanRoundMode, PlanTaskStatus, ThreadInfo, ThreadKind};
 
 const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
 const MAX_RUN_DIAGNOSTICS: usize = 100;
@@ -171,7 +173,7 @@ impl AstraService {
     ) -> std::result::Result<(AstraOrchestration, String), BackendFailure> {
         let backend_config = self.astra_backend_config();
         let orchestrator_backend: Box<dyn OrchestratorBackend> =
-            self.create_orchestrator_backend(&backend_config);
+            self.create_orchestrator_backend(thread, &backend_config);
         let config_value = json!(backend_config.provider_config);
 
         match orchestrator_backend.orchestrate(
@@ -231,8 +233,14 @@ impl AstraService {
 
     fn create_orchestrator_backend(
         &self,
+        thread: &ThreadInfo,
         config: &AstraBackendConfig,
     ) -> Box<dyn OrchestratorBackend> {
+        if thread.kind == ThreadKind::Brainstorm {
+            log::info!("[astra:orchestrator:backend] using brainstorm_backend");
+            return Box::new(BrainstormBackend);
+        }
+
         if let Some(agent) = config.agent {
             log::info!(
                 "[astra:orchestrator:backend] using runtime_agent backend with agent={}",
@@ -267,6 +275,11 @@ impl AstraService {
         orchestrator_backend: &str,
         round_index: u32,
     ) -> Result<(AstraRun, Vec<super::AstraTaskProposal>)> {
+        let mut orchestration = orchestration;
+        self.record_orchestration_diagnostics(
+            &run.run_id,
+            std::mem::take(&mut orchestration.diagnostics),
+        )?;
         match orchestration.run_intent {
             AstraRunIntent::Continue => self.apply_orchestration_tasks(
                 run,
@@ -329,7 +342,7 @@ impl AstraService {
         let tasks = orchestration.tasks;
         let summary = orchestration.summary;
         let latest_thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-        if let Err(error) = validate_teamwork_astra_tasks(&tasks) {
+        if let Err(error) = validate_assistant_routed_astra_tasks(&tasks) {
             let _ = self.error_run(
                 &run.run_id,
                 "orchestrator_unsupported_stage_task",
@@ -461,6 +474,22 @@ impl AstraService {
         Ok(())
     }
 
+    fn record_orchestration_diagnostics(
+        &self,
+        run_id: &str,
+        diagnostics: Vec<serde_json::Value>,
+    ) -> Result<()> {
+        if diagnostics.is_empty() {
+            return Ok(());
+        }
+        self.mutate_run(run_id, move |next| {
+            next.run_diagnostics.extend(diagnostics);
+            trim_vec_front(&mut next.run_diagnostics, MAX_RUN_DIAGNOSTICS);
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     fn mark_run_status(
         &self,
         run_id: &str,
@@ -547,7 +576,7 @@ pub(super) fn dedicated_backend_required_error(
             "Workflow threads are human-defined stages and do not use Astra automatic scheduling"
                 .to_string(),
         )),
-        ThreadKind::Brainstorm | ThreadKind::Debate => Some((
+        ThreadKind::Debate => Some((
             "dedicated_backend_required",
             "dedicated_backend_required",
             format!(
@@ -555,7 +584,7 @@ pub(super) fn dedicated_backend_required_error(
                 thread.kind.as_str()
             ),
         )),
-        ThreadKind::Teamwork => None,
+        ThreadKind::Teamwork | ThreadKind::Brainstorm => None,
     }
 }
 
@@ -581,19 +610,25 @@ mod tests {
     }
 
     #[test]
-    fn brainstorm_and_debate_require_dedicated_backend_before_planning() {
-        for kind in [ThreadKind::Brainstorm, ThreadKind::Debate] {
-            let mut thread = test_thread(Vec::new());
-            thread.kind = kind;
+    fn brainstorm_is_allowed_by_dedicated_backend_guard() {
+        let mut thread = test_thread(Vec::new());
+        thread.kind = ThreadKind::Brainstorm;
 
-            let Some((reason, code, message)) = dedicated_backend_required_error(&thread) else {
-                panic!("expected dedicated backend guard for {}", kind.as_str());
-            };
+        assert!(dedicated_backend_required_error(&thread).is_none());
+    }
 
-            assert_eq!(reason, "dedicated_backend_required");
-            assert_eq!(code, "dedicated_backend_required");
-            assert!(message.contains(kind.as_str()));
-        }
+    #[test]
+    fn debate_requires_dedicated_backend_before_planning() {
+        let mut thread = test_thread(Vec::new());
+        thread.kind = ThreadKind::Debate;
+
+        let Some((reason, code, message)) = dedicated_backend_required_error(&thread) else {
+            panic!("expected dedicated backend guard for debate");
+        };
+
+        assert_eq!(reason, "dedicated_backend_required");
+        assert_eq!(code, "dedicated_backend_required");
+        assert!(message.contains("debate"));
     }
 
     #[test]

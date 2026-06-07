@@ -699,6 +699,7 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
         reason,
         mode,
         tasks,
+        diagnostics: Vec::new(),
     })
 }
 
