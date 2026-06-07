@@ -21,7 +21,7 @@ use super::{
 };
 use crate::astra::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
 use crate::astra::prompt::build_astra_orchestration_prompt;
-use crate::models::{Agent, IssueSeverity, IssueStatus, StageStatus, ThreadInfo};
+use crate::models::{Agent, IssueSeverity, IssueStatus, StageStatus, ThreadInfo, ThreadKind};
 
 #[derive(Debug, Clone)]
 pub(super) struct AstraPiAcpConfig {
@@ -678,6 +678,7 @@ struct RawAstraPiAcpTask {
     #[serde(rename = "id")]
     id: Option<String>,
     title: Option<String>,
+    assistant_id: Option<String>,
     target_stage_id: Option<String>,
     target_agent: Option<String>,
     prompt: Option<String>,
@@ -757,7 +758,9 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
             ),
         ));
     }
-    tasks = rolling_stage_task_batch(tasks);
+    if planning_thread.kind != ThreadKind::Teamwork {
+        tasks = rolling_stage_task_batch(tasks);
+    }
 
     Ok(AstraOrchestration {
         summary: summary
@@ -888,7 +891,66 @@ fn sanitize_astra_pi_acp_task(
         .prompt
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "task missing prompt"))?;
+    let assistant_id = raw.assistant_id.filter(|value| !value.trim().is_empty());
     let stage_id = raw.target_stage_id.filter(|value| !value.trim().is_empty());
+    if thread.kind == ThreadKind::Teamwork {
+        if stage_id.is_some() {
+            return Err(AstraPiAcpFailure::new(
+                "validation_failed",
+                "teamwork task must not include targetStageId",
+            ));
+        }
+        let assistant_id = assistant_id.ok_or_else(|| {
+            AstraPiAcpFailure::new("validation_failed", "teamwork task missing assistantId")
+        })?;
+        let assistant = thread
+            .assistants
+            .iter()
+            .find(|assistant| assistant.assistant_id == assistant_id)
+            .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "unknown assistantId"))?;
+        let assistant_agent = Agent::from_db_str(&assistant.agent.id).ok_or_else(|| {
+            AstraPiAcpFailure::new("validation_failed", "assistant has no valid runtime agent")
+        })?;
+        let target_agent = raw
+            .target_agent
+            .as_deref()
+            .and_then(Agent::from_db_str)
+            .unwrap_or(assistant_agent);
+        if target_agent != assistant_agent {
+            return Err(AstraPiAcpFailure::new(
+                "validation_failed",
+                "task targetAgent does not match assistantId",
+            ));
+        }
+        let title = raw
+            .title
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("{} teamwork task", assistant.name));
+        let id = format!(
+            "task-{}",
+            short_hash(&format!(
+                "{}:{}:{}:{}:{}",
+                run.run_id, run.thread_id, assistant_id, round_index, idx
+            ))
+        );
+        return Ok(AstraTaskProposal {
+            id,
+            plan_task_id: None,
+            assistant_id: Some(assistant_id),
+            title,
+            target_stage_id: None,
+            target_agent,
+            prompt,
+            expected_output: raw
+                .expected_output
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| {
+                    "Teamwork task result, concrete progress, decisions, and verification notes."
+                        .to_string()
+                }),
+            risk: parse_task_risk(raw.risk.as_deref()),
+        });
+    }
     let stage = stage_id
         .as_deref()
         .map(|stage_id| {
@@ -972,6 +1034,7 @@ fn sanitize_astra_pi_acp_task(
     Ok(AstraTaskProposal {
         id,
         plan_task_id: None,
+        assistant_id: None,
         title,
         target_stage_id,
         target_agent,
@@ -1400,6 +1463,42 @@ mod tests {
         super::super::tests::test_thread(vec![stage, next_stage])
     }
 
+    fn teamwork_thread() -> ThreadInfo {
+        let mut thread = super::super::tests::test_thread(Vec::new());
+        thread.kind = crate::models::ThreadKind::Teamwork;
+        thread.assistants = vec![
+            crate::models::ThreadAssistantInfo {
+                assistant_id: "assistant-codex".to_string(),
+                name: "Builder".to_string(),
+                color: None,
+                agent: crate::models::AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Build carefully.".to_string()),
+                order: 0,
+            },
+            crate::models::ThreadAssistantInfo {
+                assistant_id: "assistant-claude".to_string(),
+                name: "Reviewer".to_string(),
+                color: None,
+                agent: crate::models::AssistantAgentInfo {
+                    id: "claude".to_string(),
+                    name: "Claude".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Review carefully.".to_string()),
+                order: 1,
+            },
+        ];
+        thread
+    }
+
     #[test]
     fn parses_fenced_orchestration_and_sanitizes_task() {
         let orchestration = parse_astra_pi_acp_orchestration_response(
@@ -1524,6 +1623,64 @@ mod tests {
         assert_eq!(orchestration.tasks.len(), 1);
         assert_eq!(orchestration.tasks[0].target_stage_id, None);
         assert_eq!(orchestration.tasks[0].target_agent, Agent::Codex);
+    }
+
+    #[test]
+    fn parses_teamwork_assistant_tasks_without_stage_batch_trimming() {
+        let response = r#"{"summary":"teamwork","tasks":[
+            {"title":"Build","assistantId":"assistant-codex","targetAgent":"codex","prompt":"Build the feature"},
+            {"title":"Review","assistantId":"assistant-claude","targetAgent":"claude","prompt":"Review the feature"}
+        ]}"#;
+
+        let orchestration =
+            parse_astra_pi_acp_orchestration_response(response, &run(), &teamwork_thread(), 0, &[])
+                .unwrap();
+
+        assert_eq!(orchestration.tasks.len(), 2);
+        assert!(orchestration
+            .tasks
+            .iter()
+            .all(|task| task.target_stage_id.is_none()));
+        assert_eq!(
+            orchestration.tasks[0].assistant_id.as_deref(),
+            Some("assistant-codex")
+        );
+        assert_eq!(
+            orchestration.tasks[1].assistant_id.as_deref(),
+            Some("assistant-claude")
+        );
+        assert_eq!(orchestration.tasks[0].target_agent, Agent::Codex);
+        assert_eq!(orchestration.tasks[1].target_agent, Agent::Claude);
+    }
+
+    #[test]
+    fn rejects_teamwork_task_with_target_stage_id() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","tasks":[{"assistantId":"assistant-codex","targetStageId":"stage-1","targetAgent":"codex","prompt":"Work"}]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("must not include targetStageId"));
+    }
+
+    #[test]
+    fn rejects_teamwork_task_with_unknown_assistant_id() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","tasks":[{"assistantId":"assistant-missing","targetAgent":"codex","prompt":"Work"}]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("unknown assistantId"));
     }
 
     #[test]
@@ -1660,6 +1817,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1711,6 +1869,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1767,6 +1926,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1813,6 +1973,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Task".to_string(),
             target_stage_id: None,
             target_agent: Agent::Codex,
@@ -1869,6 +2030,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Review research".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1916,6 +2078,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Recover research".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1960,6 +2123,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,

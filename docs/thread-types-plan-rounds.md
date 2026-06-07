@@ -71,7 +71,7 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，
 
 `workflow` 是带 stages 的阶段式工作流。
 
-它可以理解为当前产品里 deterministic 工作模式的正式 thread kind：流程由人预先定义，系统按确定的 stage 顺序记录和推进。注意这里的 deterministic 是产品语义，不等同于代码里的 `DeterministicOrchestratorBackend` fallback；workflow 默认不需要 Astra 自动编排。
+它可以理解为当前产品里 deterministic 工作模式的正式 thread kind：流程由人预先定义，系统按确定的 stage 顺序记录和推进。注意这里的 deterministic 是产品语义，不等同于代码里的 `DeterministicOrchestratorBackend` fallback；workflow 不由 Astra 自动调度。
 
 适用场景：
 
@@ -85,7 +85,7 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，
 - task 可以绑定 `thread_stage_id`。
 - stage 主要作为路由、上下文和 session 归档。
 - stage 顺序由人定义，默认按阶段顺序执行。
-- 无需 Astra 自动编排；Astra 可以作为可选辅助，但不是 workflow 的默认控制器。
+- 无 Astra scheduling：workflow 的下一步由用户、UI 或显式人工规则推进，不由 Astra planner 决定。
 - workflow thread 可以同时拥有 thread-level assistants，但 v1 不要求使用。
 
 ### `teamwork`
@@ -161,7 +161,7 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，
 
 ### Workflow: 人为流程控制
 
-workflow 的目标是让用户可以手工定制阶段和顺序。系统记录阶段、任务和结果，但不默认让 Astra 决定下一步。
+workflow 的目标是让用户可以手工定制阶段和顺序。系统记录阶段、任务和结果，但不让 Astra 决定下一步。
 
 执行方式：
 
@@ -173,7 +173,7 @@ workflow 的目标是让用户可以手工定制阶段和顺序。系统记录�
 实现重点：
 
 - 保留现有 workflow/project/stage 能力。
-- plan round 主要作为记录层，不作为强制自动调度器。
+- plan round 在 workflow 中主要作为记录和 replay 层，不作为调度状态机。
 - workflow task 优先绑定 `thread_stage_id`。
 
 ### Teamwork: Assistant 路由的 Astra Task-Centric 编排

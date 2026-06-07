@@ -5,7 +5,7 @@ use super::{
     task_blocked_by_thread_exception, AstraPlan, AstraRun, AstraTaskProposal,
     AstraTaskResultStatus, AstraTaskRisk,
 };
-use crate::models::{IssueStatus, StageStatus, ThreadInfo};
+use crate::models::{Agent, IssueStatus, StageStatus, ThreadInfo, ThreadKind};
 
 pub(super) fn deterministic_plan(
     run: &AstraRun,
@@ -13,6 +13,10 @@ pub(super) fn deterministic_plan(
     user_prompt: Option<&str>,
     round_index: u32,
 ) -> AstraPlan {
+    if thread.kind == ThreadKind::Teamwork {
+        return deterministic_teamwork_plan(run, thread, user_prompt, round_index);
+    }
+
     let mut stages = thread.stages.clone();
     stages.sort_by_key(|stage| stage.order);
     let completed: HashSet<&str> = run.completed_task_ids.iter().map(String::as_str).collect();
@@ -76,6 +80,7 @@ pub(super) fn deterministic_plan(
             Some(AstraTaskProposal {
                 id: task_id,
                 plan_task_id: None,
+                assistant_id: None,
                 title: format!(
                     "{} {}",
                     if needs_review {
@@ -121,6 +126,74 @@ pub(super) fn deterministic_plan(
     }
 }
 
+fn deterministic_teamwork_plan(
+    run: &AstraRun,
+    thread: &ThreadInfo,
+    user_prompt: Option<&str>,
+    round_index: u32,
+) -> AstraPlan {
+    let completed: HashSet<&str> = run.completed_task_ids.iter().map(String::as_str).collect();
+    let mut assistants = thread.assistants.clone();
+    assistants.sort_by_key(|assistant| assistant.order);
+    let tasks = assistants
+        .into_iter()
+        .filter_map(|assistant| {
+            let target_agent = Agent::from_db_str(&assistant.agent.id)?;
+            let task_id = format!(
+                "task-{}",
+                short_hash(&format!(
+                    "{}:{}:{}:{}",
+                    run.thread_id, assistant.assistant_id, target_agent.as_str(), round_index
+                ))
+            );
+            if completed.contains(task_id.as_str())
+                || run.task_results.iter().any(|result| {
+                    result.task_id == task_id
+                        && matches!(result.status, AstraTaskResultStatus::Completed)
+                })
+            {
+                return None;
+            }
+            let prompt = [
+                user_prompt
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| format!("User orchestration instruction: {value}")),
+                Some(format!(
+                    "Work as the thread assistant \"{}\" on the shared thread goal. Return concrete progress, decisions, and verification notes.",
+                    assistant.name
+                )),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
+            Some(AstraTaskProposal {
+                id: task_id,
+                plan_task_id: None,
+                assistant_id: Some(assistant.assistant_id),
+                title: format!("{} teamwork task", assistant.name),
+                target_stage_id: None,
+                target_agent,
+                prompt,
+                expected_output:
+                    "Teamwork task result, concrete progress, decisions, and verification notes."
+                        .to_string(),
+                risk: AstraTaskRisk::Low,
+            })
+        })
+        .collect::<Vec<_>>();
+    AstraPlan {
+        summary: format!(
+            "Deterministic Astra Orchestrator selected {} teamwork task{} for \"{}\".",
+            tasks.len(),
+            if tasks.len() == 1 { "" } else { "s" },
+            thread.goal
+        ),
+        tasks,
+    }
+}
+
 pub(super) fn next_dispatchable_tasks(
     run: &AstraRun,
     thread: &ThreadInfo,
@@ -128,7 +201,18 @@ pub(super) fn next_dispatchable_tasks(
     run.proposed_tasks
         .iter()
         .filter(|task| {
+            if thread.kind == ThreadKind::Teamwork && task.target_stage_id.is_none() {
+                return true;
+            }
             task_blocked_by_thread_exception(run, thread, task.target_stage_id.as_deref()).is_none()
+        })
+        .filter(|task| {
+            task.assistant_id.as_deref().is_none_or(|assistant_id| {
+                thread
+                    .assistants
+                    .iter()
+                    .any(|assistant| assistant.assistant_id == assistant_id)
+            })
         })
         .filter(|task| {
             task.target_stage_id.as_deref().is_none_or(|stage_id| {

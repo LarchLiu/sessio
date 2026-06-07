@@ -18,7 +18,7 @@ use crate::agents::runtime::RuntimeManager;
 use crate::models::{
     Agent, AgentInfo, IssueSeverity, IssueStatus, PlanRoundMode, PlanRoundSource, PlanRoundStatus,
     PlanTaskRisk, PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageIssueInfo, StageStatus,
-    StageType, ThreadInfo,
+    StageType, ThreadInfo, ThreadKind,
 };
 use crate::store::{
     AstraRunRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch,
@@ -41,7 +41,7 @@ use astra_pi_acp_adapter::{
 };
 use orchestrator::RustNativeWorkerOutcome;
 use planner::next_dispatchable_tasks;
-use prompt::build_stage_task_context;
+use prompt::{build_stage_task_context, build_teamwork_task_context};
 use types::AstraDecision;
 pub use types::{
     AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraStageMutationResult, AstraTaskProposal,
@@ -61,6 +61,12 @@ fn rolling_stage_task_batch(tasks: Vec<AstraTaskProposal>) -> Vec<AstraTaskPropo
         return Vec::new();
     };
     let target_stage_id = first.target_stage_id.clone();
+    if target_stage_id.is_none() {
+        return tasks
+            .into_iter()
+            .filter(|task| task.target_stage_id.is_none())
+            .collect();
+    }
     tasks
         .into_iter()
         .filter(|task| task.target_stage_id == target_stage_id)
@@ -77,15 +83,24 @@ pub(crate) fn stage_needs_agent_review(stage: &crate::models::StageInfo) -> bool
 }
 
 pub(crate) fn thread_has_agent_review_stage(thread: &ThreadInfo) -> bool {
+    if thread.kind != ThreadKind::Workflow {
+        return false;
+    }
     thread.stages.iter().any(stage_needs_agent_review)
 }
 
 pub(crate) fn thread_waiting_for_review(thread: &ThreadInfo) -> bool {
+    if thread.kind != ThreadKind::Workflow {
+        return false;
+    }
     thread.stages.iter().any(stage_waiting_for_human_review)
         && !thread_has_agent_review_stage(thread)
 }
 
 pub(crate) fn thread_has_blocked_stage(thread: &ThreadInfo) -> bool {
+    if thread.kind != ThreadKind::Workflow {
+        return false;
+    }
     thread
         .stages
         .iter()
@@ -110,6 +125,9 @@ pub(crate) fn task_blocked_by_thread_exception(
     thread: &ThreadInfo,
     target_stage_id: Option<&str>,
 ) -> Option<&'static str> {
+    if thread.kind != ThreadKind::Workflow {
+        return None;
+    }
     if thread_has_agent_review_stage(thread) {
         let Some(target_stage_id) = target_stage_id else {
             return Some(
@@ -160,6 +178,7 @@ fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
         "task": {
             "id": completion.task.id,
             "title": completion.task.title,
+            "assistantId": completion.task.assistant_id,
             "targetStageId": completion.task.target_stage_id,
             "targetAgent": completion.task.target_agent,
             "expectedOutput": completion.task.expected_output,
@@ -734,10 +753,14 @@ impl AstraService {
         attempt: DelegatedAttempt<'_>,
         task_waiter: Option<mpsc::Sender<AstraTaskResult>>,
     ) -> Result<AgentSessionHandle> {
-        let stage_context = attempt
-            .thread_stage_id
-            .map(|stage_id| build_stage_task_context(thread, stage_id, task))
-            .transpose()?;
+        let stage_context = match attempt.thread_stage_id {
+            Some(stage_id) => Some(build_stage_task_context(thread, stage_id, task)?),
+            None => task
+                .assistant_id
+                .as_deref()
+                .map(|assistant_id| build_teamwork_task_context(thread, assistant_id, task))
+                .transpose()?,
+        };
         let mut options = RuntimeMetadata::default();
         options.insert("astraRunId".to_string(), Value::String(run.run_id.clone()));
         options.insert("astraTaskId".to_string(), Value::String(task.id.clone()));
@@ -2519,13 +2542,26 @@ fn astra_task_to_plan_task(
     task: &AstraTaskProposal,
     idx: usize,
 ) -> Result<OwnedAstraPlanTask> {
+    let thread_assistant = task
+        .assistant_id
+        .as_deref()
+        .map(|assistant_id| {
+            thread
+                .assistants
+                .iter()
+                .find(|assistant| assistant.assistant_id == assistant_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("assistant does not belong to Astra run thread: {assistant_id}")
+                })
+        })
+        .transpose()?;
     let stage = task.target_stage_id.as_deref().and_then(|stage_id| {
         thread
             .stages
             .iter()
             .find(|stage| stage.id == stage_id || stage.stage_id == stage_id)
     });
-    let assistant = stage.and_then(|stage| {
+    let stage_assistant = stage.and_then(|stage| {
         stage
             .assistants
             .iter()
@@ -2539,10 +2575,15 @@ fn astra_task_to_plan_task(
 
     Ok(OwnedAstraPlanTask {
         thread_stage_id: stage.map(|stage| stage.id.clone()),
-        assistant_id: assistant.map(|assistant| assistant.assistant_id.clone()),
+        assistant_id: thread_assistant
+            .map(|assistant| assistant.assistant_id.clone())
+            .or_else(|| stage_assistant.map(|assistant| assistant.assistant_id.clone())),
         target_agent: task.target_agent,
         stage_snapshot_json: stage.map(serde_json::to_string).transpose()?,
-        assistant_snapshot_json: assistant.map(serde_json::to_string).transpose()?,
+        assistant_snapshot_json: thread_assistant
+            .map(serde_json::to_string)
+            .or_else(|| stage_assistant.map(serde_json::to_string))
+            .transpose()?,
         agent_snapshot_json: serde_json::to_string(&json!({
             "agent": task.target_agent,
             "agentInfo": agent_snapshot,
@@ -2662,7 +2703,8 @@ fn extract_result_text(value: &Value) -> Option<String> {
 }
 
 pub(crate) fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
-    !thread.stages.is_empty()
+    thread.kind == ThreadKind::Workflow
+        && !thread.stages.is_empty()
         && thread
             .stages
             .iter()
@@ -2688,7 +2730,7 @@ mod tests {
     use super::decision::deterministic_decision;
     use super::planner::deterministic_plan;
     use super::*;
-    use crate::models::{AssistantAgentInfo, AssistantType, StageAssistantInfo};
+    use crate::models::{AssistantAgentInfo, AssistantType, StageAssistantInfo, ThreadKind};
     use crate::store::{sqlite::SqliteStore, NewAssistant};
     use std::path::Path;
 
@@ -2962,6 +3004,7 @@ mod tests {
                 AstraTaskProposal {
                     id: "task-1".to_string(),
                     plan_task_id: None,
+                    assistant_id: None,
                     title: "Build persistence bridge".to_string(),
                     target_stage_id: Some(stage.id.clone()),
                     target_agent: Agent::Codex,
@@ -2972,6 +3015,7 @@ mod tests {
                 AstraTaskProposal {
                     id: "task-2".to_string(),
                     plan_task_id: None,
+                    assistant_id: None,
                     title: "Review persistence bridge".to_string(),
                     target_stage_id: Some(stage.id.clone()),
                     target_agent: Agent::Codex,
@@ -3083,6 +3127,125 @@ mod tests {
     }
 
     #[test]
+    fn astra_plan_task_write_through_records_teamwork_assistant_snapshot() {
+        let db_path = std::env::temp_dir().join(format!(
+            "astra-teamwork-plan-write-through-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "astra-teamwork-plan-write-through-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Teamwork Plan Write Through",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let assistant = store
+            .create_assistant(NewAssistant {
+                name: "Builder",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Build from shared teamwork context."),
+                color: Some("#3366ff"),
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let thread = store
+            .create_thread_with_options(
+                &project.id,
+                "Ship Astra teamwork plan task persistence",
+                Some("Use thread-level assistants."),
+                ThreadKind::Teamwork,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+        let thread = store.get_thread_work_state(&thread.id).unwrap();
+        assert_eq!(thread.kind, ThreadKind::Teamwork);
+        assert_eq!(thread.assistants.len(), 1);
+
+        let run = AstraRun {
+            run_id: "astra-run-teamwork-plan-write-through".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: AstraRunStatus::Running,
+            proposed_tasks: Vec::new(),
+            approved_task_ids: Vec::new(),
+            delegated_session_ids: Vec::new(),
+            task_results: Vec::new(),
+            mode: "auto".to_string(),
+            current_stage_id: None,
+            completed_task_ids: Vec::new(),
+            stage_attempt_counts: HashMap::new(),
+            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
+            planner_backend: Some("deterministic".to_string()),
+            decision_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            internal_decision_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.upsert_astra_run(&run_to_record(&run)).unwrap();
+
+        let tasks = create_plan_round_for_astra_tasks_in_store(
+            &store,
+            &run,
+            &thread,
+            "Bridge Astra teamwork tasks into plan tables.",
+            7,
+            vec![AstraTaskProposal {
+                id: "task-teamwork-1".to_string(),
+                plan_task_id: None,
+                assistant_id: Some(assistant.id.clone()),
+                title: "Build teamwork persistence bridge".to_string(),
+                target_stage_id: None,
+                target_agent: Agent::Codex,
+                prompt: "Implement the teamwork bridge.".to_string(),
+                expected_output: "Implementation summary.".to_string(),
+                risk: AstraTaskRisk::Medium,
+            }],
+        )
+        .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].plan_task_id.is_some());
+
+        let rounds = store.list_plan_rounds(&thread.id).unwrap();
+        assert_eq!(rounds.len(), 1);
+        let task = &rounds[0].tasks[0];
+        assert_eq!(task.thread_stage_id, None);
+        assert_eq!(task.stage_snapshot_json, None);
+        assert_eq!(task.assistant_id.as_deref(), Some(assistant.id.as_str()));
+        let assistant_snapshot = task.assistant_snapshot_json.as_deref().unwrap();
+        assert!(assistant_snapshot.contains("Builder"));
+        assert!(assistant_snapshot.contains("Build from shared teamwork context."));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    #[test]
     fn resolves_project_or_thread_stage_id_to_thread_stage_id() {
         let thread = ThreadInfo {
             id: "thread-1".to_string(),
@@ -3176,6 +3339,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Build stage worker".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -3303,6 +3467,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Implement focused worker".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -3385,6 +3550,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Research stage".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -3642,6 +3808,7 @@ mod tests {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Advance Build API".to_string(),
             target_stage_id: Some("thread-stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -3879,6 +4046,59 @@ mod tests {
         assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
         assert_eq!(plan.tasks[0].title, "Review stage-1");
         assert!(plan.tasks[0].prompt.contains("Review this stage"));
+    }
+
+    #[test]
+    fn deterministic_plan_routes_teamwork_tasks_to_thread_assistants() {
+        let mut thread = test_thread(Vec::new());
+        thread.kind = ThreadKind::Teamwork;
+        thread.assistants = vec![
+            crate::models::ThreadAssistantInfo {
+                assistant_id: "assistant-codex".to_string(),
+                name: "Builder".to_string(),
+                color: None,
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Build carefully.".to_string()),
+                order: 1,
+            },
+            crate::models::ThreadAssistantInfo {
+                assistant_id: "assistant-claude".to_string(),
+                name: "Reviewer".to_string(),
+                color: None,
+                agent: AssistantAgentInfo {
+                    id: "claude".to_string(),
+                    name: "Claude".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Review carefully.".to_string()),
+                order: 0,
+            },
+        ];
+        let run = test_run("run-teamwork-plan");
+
+        let plan = deterministic_plan(&run, &thread, Some("Coordinate assistants"), 0);
+
+        assert_eq!(plan.tasks.len(), 2);
+        assert!(plan.tasks.iter().all(|task| task.target_stage_id.is_none()));
+        assert_eq!(
+            plan.tasks[0].assistant_id.as_deref(),
+            Some("assistant-claude")
+        );
+        assert_eq!(plan.tasks[0].target_agent, Agent::Claude);
+        assert_eq!(
+            plan.tasks[1].assistant_id.as_deref(),
+            Some("assistant-codex")
+        );
+        assert_eq!(plan.tasks[1].target_agent, Agent::Codex);
+        assert!(plan.tasks[0].prompt.contains("Coordinate assistants"));
     }
 
     #[test]
@@ -4364,6 +4584,7 @@ mod tests {
         AstraTaskProposal {
             id: task_id.to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Advance stage".to_string(),
             target_stage_id: Some(stage_id.to_string()),
             target_agent: Agent::Codex,

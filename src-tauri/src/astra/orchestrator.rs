@@ -11,7 +11,7 @@ use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
-use crate::models::{IssueStatus, StageStatus, StageType, ThreadInfo};
+use crate::models::{IssueStatus, StageStatus, StageType, ThreadInfo, ThreadKind};
 
 #[cfg(test)]
 const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
@@ -691,6 +691,9 @@ fn empty_done_stage_without_assistant(stage: &crate::models::StageInfo) -> bool 
 }
 
 fn thread_has_dispatchable_stage(run: &AstraRun, thread: &crate::models::ThreadInfo) -> bool {
+    if thread.kind != ThreadKind::Workflow {
+        return false;
+    }
     thread.stages.iter().any(|stage| {
         !matches!(stage.status, StageStatus::Completed | StageStatus::Skipped)
             && super::pick_stage_agent(stage).is_some()
@@ -735,6 +738,33 @@ enum NoDispatchableOutcome<'a> {
 }
 
 fn classify_no_dispatchable_tasks(thread: &crate::models::ThreadInfo) -> NoDispatchableOutcome<'_> {
+    match thread.kind {
+        ThreadKind::Teamwork => {
+            if thread.assistants.is_empty() {
+                return NoDispatchableOutcome::Errored {
+                    reason: "teamwork_without_assistants",
+                    code: "teamwork_without_assistants",
+                    message: "Astra teamwork requires at least one thread assistant".to_string(),
+                };
+            }
+            return NoDispatchableOutcome::Errored {
+                reason: "no_dispatchable_tasks",
+                code: "no_dispatchable_tasks",
+                message: "Astra Orchestrator produced no dispatchable teamwork tasks".to_string(),
+            };
+        }
+        ThreadKind::Brainstorm | ThreadKind::Debate => {
+            return NoDispatchableOutcome::Errored {
+                reason: "dedicated_backend_required",
+                code: "dedicated_backend_required",
+                message: format!(
+                    "Astra {} requires a dedicated backend before automatic orchestration",
+                    thread.kind.as_str()
+                ),
+            };
+        }
+        ThreadKind::Workflow => {}
+    }
     if thread.stages.is_empty() {
         return NoDispatchableOutcome::Completed("no_stages_to_orchestrate");
     }
@@ -877,6 +907,7 @@ mod tests {
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-plan".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Plan".to_string(),
             target_stage_id: Some("plan".to_string()),
             target_agent: Agent::Codex,
@@ -887,6 +918,7 @@ mod tests {
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-review".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Review".to_string(),
             target_stage_id: Some("research".to_string()),
             target_agent: Agent::Codex,
@@ -912,6 +944,7 @@ mod tests {
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-plan".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Plan".to_string(),
             target_stage_id: Some("plan".to_string()),
             target_agent: Agent::Codex,
@@ -922,6 +955,7 @@ mod tests {
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-blocked".to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: "Unblock".to_string(),
             target_stage_id: Some("blocked".to_string()),
             target_agent: Agent::Codex,
@@ -1010,6 +1044,7 @@ mod tests {
         super::super::AstraTaskProposal {
             id: id.to_string(),
             plan_task_id: None,
+            assistant_id: None,
             title: id.to_string(),
             target_stage_id: None,
             target_agent: Agent::Codex,

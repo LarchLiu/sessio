@@ -75,6 +75,8 @@ pub struct AstraTaskProposal {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_id: Option<String>,
     pub title: String,
     pub target_stage_id: Option<String>,
     pub target_agent: Agent,

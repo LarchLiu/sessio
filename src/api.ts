@@ -337,6 +337,7 @@ export type AstraTaskRisk = "low" | "medium" | "high";
 export interface AstraTaskProposal {
   id: string;
   planTaskId?: string | null;
+  assistantId?: string | null;
   title: string;
   targetStageId: string | null;
   targetAgent: Agent;

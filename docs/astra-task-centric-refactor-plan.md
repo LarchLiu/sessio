@@ -6,9 +6,11 @@
 
 它是 `teamwork` thread kind 的标准编排模型，不是 `workflow` 的自动调度模型。现有代码中 stage-based Astra 只是历史实现形态，本次重构要把它迁移为 assistant-routed teamwork：也就是把当前 Astra task 路由里的 stages 改为 thread-level assistants，由 Astra 根据 shared context 拆解 tasks、选择 assistants、调度执行、汇总结果，并决定下一轮或终态。
 
+一句话边界：**`astra-task-centric-refactor-plan` 是 teamwork 的标准；它只把当前 Astra task-centric 流程里的 stages 改为 assistants，不把 workflow 改造成 Astra-scheduled workflow。**
+
 因此本文档的“重构”含义非常窄：保留 Astra task-centric 编排能力，但把 routing/control plane 从 `targetStageId`、stage status 和 stage issue mutation，迁移到 `assistantId`、plan round/task lifecycle 和 task result。它不是把 `workflow` 变成 Astra-scheduled workflow，也不是给人为 stage 流程增加默认自动调度。
 
-持久化模型以 `docs/thread-types-plan-rounds.md` 为准。Astra run 负责编排进度、backend、diagnostics 和终态原因；`thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions` 负责每轮计划、task lifecycle、session 关联和 reload 恢复。本文档不再定义长期 `task_states_json` 或另一套 task state 事实源。
+持久化模型以 `docs/thread-types-plan-rounds.md` 为准。在 teamwork 自动编排路径中，Astra run 负责编排进度、backend、diagnostics 和终态原因；`thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions` 负责每轮计划、task lifecycle、session 关联和 reload 恢复。本文档不再定义长期 `task_states_json` 或另一套 task state 事实源。
 
 ## 与 Thread Kind 的关系
 
@@ -110,7 +112,7 @@ run 不读取 stage status 作为 blocked/needs_review/completed 控制条件。
 
 ### 返回格式
 
-Astra teamwork orchestrator 只返回一个完整 YAML document，不兼容 JSON，不接受 markdown code fence，不做 repair/fallback。
+Astra teamwork orchestrator 只返回一个完整 YAML document，不兼容 JSON，不接受 markdown code fence，不做 repair/fallback。这个 contract 只约束 teamwork backend；workflow 的人工 stage 流程、brainstorm 的 shared-board backend、debate 的 isolated-lane backend 不用它冒充完成。
 
 ```yaml
 summary: string
@@ -242,7 +244,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ### Phase 3: Astra 新 contract 写入 plan rounds/tasks
 
-目标：把 Astra planner contract 改为 assistant-routed tasks-only YAML，并让新 run 写入 plan round/task/session 表。
+目标：把 teamwork Astra planner contract 改为 assistant-routed tasks-only YAML，并让新 run 写入 plan round/task/session 表。
 
 执行内容：
 
