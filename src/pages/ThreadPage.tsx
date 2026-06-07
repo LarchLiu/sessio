@@ -24,7 +24,6 @@ import { sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result"]);
-const ASTRA_TASK_TERMINAL_EVENTS = new Set(["task_result", "retry_limit", "completed", "cancelled", "error"]);
 
 export default function ThreadPage({
   project,
@@ -175,7 +174,6 @@ function ThreadAstraPanel({
   const { t } = useI18n();
   const [runs, setRuns] = useState<AstraHandle[]>([]);
   const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
-  const [runningTaskIds, setRunningTaskIds] = useState<Record<string, string[]>>({});
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
   const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
@@ -204,36 +202,7 @@ function ThreadAstraPanel({
     let unlisten: (() => void) | null = null;
     listen<AstraEvent>("astra-run-event", (event) => {
       if (event.payload.threadId !== thread.id) return;
-      const runId = event.payload.runId;
       const eventType = event.payload.eventType;
-      if (eventType === "task_dispatch") {
-        const taskId = astraEventTaskId(event.payload.data);
-        if (taskId) {
-          setRunningTaskIds((prev) => {
-            const existing = prev[runId] ?? [];
-            if (existing.includes(taskId)) return prev;
-            return { ...prev, [runId]: [...existing, taskId] };
-          });
-        }
-      }
-      if (ASTRA_TASK_TERMINAL_EVENTS.has(eventType)) {
-        const taskId = astraEventTaskId(event.payload.data);
-        setRunningTaskIds((prev) => {
-          if (!(runId in prev)) return prev;
-          const next = { ...prev };
-          if (taskId && eventType !== "completed" && eventType !== "cancelled" && eventType !== "error") {
-            const remaining = next[runId].filter((id) => id !== taskId);
-            if (remaining.length > 0) {
-              next[runId] = remaining;
-            } else {
-              delete next[runId];
-            }
-          } else {
-            delete next[runId];
-          }
-          return next;
-        });
-      }
       void reloadAstraState();
       if (THREAD_REFRESH_ASTRA_EVENTS.has(eventType)) {
         void onReload();
@@ -340,19 +309,14 @@ function ThreadAstraPanel({
 
         {legacyTaskHistory.length > 0 && (
           <div className="grid gap-2">
-            {legacyTaskHistory.map(({ run, task }) => {
-              const taskRunningIds = astraRunningTaskIds(run, runningTaskIds[run.runId] ?? []);
-              return (
-                <AstraLegacyTaskCard
-                  key={`${run.runId}:${task.id}`}
-                  run={run}
-                  task={task}
-                  runningTaskIds={taskRunningIds}
-                  result={run.taskResults.find((result) => result.taskId === task.id) ?? null}
-                  stage={stages.find((stage) => stage.id === task.targetStageId) ?? null}
-                />
-              );
-            })}
+            {legacyTaskHistory.map(({ run, task }) => (
+              <AstraLegacyTaskCard
+                key={`${run.runId}:${task.id}`}
+                task={task}
+                result={run.taskResults.find((result) => result.taskId === task.id) ?? null}
+                stage={stages.find((stage) => stage.id === task.targetStageId) ?? null}
+              />
+            ))}
           </div>
         )}
 
@@ -493,20 +457,16 @@ function AstraDelegatedSessions({ run }: { run: AstraHandle }) {
 }
 
 function AstraLegacyTaskCard({
-  run,
   task,
-  runningTaskIds,
   result,
   stage,
 }: {
-  run: AstraHandle;
   task: AstraTaskProposal;
-  runningTaskIds: string[];
   result: AstraTaskResult | null;
   stage: StageInfo | null;
 }) {
   const { t } = useI18n();
-  const status = astraTaskDisplayStatus(run, task, runningTaskIds, result);
+  const status = result?.status ?? "planned";
   return (
     <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
       <div className="min-w-0">
@@ -1106,17 +1066,6 @@ function upsertRun(runs: AstraHandle[], run: AstraHandle): AstraHandle[] {
   return next.slice().sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-function astraRunningTaskIds(run: AstraHandle, liveRunningTaskIds: string[]): string[] {
-  if (!isAstraActive(run.status)) return [];
-  const finishedTaskIds = new Set(run.taskResults.map((result) => result.taskId));
-  const ids = new Set(liveRunningTaskIds);
-  if (run.currentTaskId) ids.add(run.currentTaskId);
-  for (const taskId of run.approvedTaskIds) {
-    if (!finishedTaskIds.has(taskId)) ids.add(taskId);
-  }
-  return Array.from(ids).filter((taskId) => !finishedTaskIds.has(taskId));
-}
-
 function formatAstraStatus(status: AstraRunStatus): string {
   return status.replace(/_/g, " ");
 }
@@ -1166,25 +1115,6 @@ function astraResultClass(status: AstraTaskResult["status"]): string {
     default:
       return "bg-ink/[0.08] text-ink/45";
   }
-}
-
-function astraTaskDisplayStatus(
-  run: AstraHandle,
-  task: AstraTaskProposal,
-  runningTaskIds: string[],
-  result: AstraTaskResult | null,
-): PlanTaskStatus {
-  if (result) return result.status;
-  if (isAstraActive(run.status) && runningTaskIds.includes(task.id)) {
-    return "running";
-  }
-  return "planned";
-}
-
-function astraEventTaskId(data: unknown): string | null {
-  if (!data || typeof data !== "object") return null;
-  const taskId = (data as { taskId?: unknown }).taskId;
-  return typeof taskId === "string" && taskId.trim() ? taskId : null;
 }
 
 function astraTaskStatusClass(status: PlanTaskStatus): string {
