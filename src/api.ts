@@ -117,6 +117,17 @@ export interface StageAssistantInfo {
   order: number;
 }
 
+export type ThreadKind = "workflow" | "teamwork" | "brainstorm" | "debate";
+
+export interface ThreadAssistantInfo {
+  assistantId: string;
+  name: string;
+  color: string | null;
+  agent: AssistantAgentInfo;
+  systemPrompt?: string | null;
+  order: number;
+}
+
 export type StageType =
   | "research"
   | "plan"
@@ -206,9 +217,11 @@ export interface ThreadInfo {
   goal: string;
   description: string | null;
   stageId: string | null;
+  kind: ThreadKind;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
+  assistants: ThreadAssistantInfo[];
   stages: StageInfo[];
   sessions: SessionInfo[];
 }
@@ -965,22 +978,37 @@ export async function createThread(
   projectId: string,
   goal: string,
   description?: string | null,
+  kind?: ThreadKind,
+  assistantIds?: string[],
 ): Promise<ThreadInfo> {
   return invoke<ThreadInfo>("create_thread", {
     projectId,
     goal,
     description: description ?? null,
+    kind: kind ?? null,
+    assistantIds: assistantIds ?? null,
   });
 }
 
 export async function updateThread(
   threadId: string,
-  patch: { goal?: string | null; description?: string | null; enabled?: boolean | null },
+  patch: {
+    goal?: string | null;
+    description?: string | null;
+    enabled?: boolean | null;
+    kind?: ThreadKind | null;
+    assistantIds?: string[] | null;
+  },
 ): Promise<ThreadInfo> {
   return invoke<ThreadInfo>("update_thread", {
     threadId,
     goal: patch.goal ?? null,
     enabled: patch.enabled ?? null,
+    kind: patch.kind ?? null,
+    assistantIds:
+      Object.prototype.hasOwnProperty.call(patch, "assistantIds")
+        ? patch.assistantIds ?? []
+        : null,
     description:
       Object.prototype.hasOwnProperty.call(patch, "description")
         ? patch.description === null

@@ -13,7 +13,7 @@ import HashIcon from "@iconify-react/mynaui/hash";
 import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
 import HashtagChatLinearIcon from "@iconify-react/solar/hashtag-chat-linear";
 import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
-import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo } from "../api";
+import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo, ThreadKind } from "../api";
 import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
@@ -32,6 +32,7 @@ import { sessionDisplayTitle } from "../appUtils";
 
 type ProjectView = "threads" | "stages" | "assistants";
 type ThreadPanelView = "threads" | "thread-chats";
+const THREAD_KINDS: ThreadKind[] = ["workflow", "teamwork", "brainstorm", "debate"];
 
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
@@ -39,6 +40,15 @@ function sessionIdentityKey(s: SessionInfo): string {
 
 function stageAllowsThreadAddition(stage: ProjectStageInfo): boolean {
   return stage.assistants.length > 0 || stage.allowEmptyAssistants;
+}
+
+function assistantSwatch(color: string | null | undefined) {
+  return (
+    <span
+      className="h-2.5 w-2.5 shrink-0 rounded-full border border-ink/10"
+      style={{ backgroundColor: color ?? "rgb(var(--color-brand))" }}
+    />
+  );
 }
 
 interface MetaRow {
@@ -308,6 +318,7 @@ export function ProjectWorkbenchPage({
               project={project}
               threads={threads}
               projectStages={projectStages}
+              assistants={assistants}
               loading={workflowLoading}
               onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
               onThreadUpdated={patchThread}
@@ -415,6 +426,7 @@ function ThreadWorkflowPanel({
   project,
   threads,
   projectStages,
+  assistants,
   loading,
   onThreadCreated,
   onThreadUpdated,
@@ -429,6 +441,7 @@ function ThreadWorkflowPanel({
   project: ProjectInfo;
   threads: ThreadInfo[];
   projectStages: ProjectStageInfo[];
+  assistants: AssistantInfo[];
   loading: boolean;
   onThreadCreated: (thread: ThreadInfo) => void;
   onThreadUpdated: (thread: ThreadInfo) => void;
@@ -443,6 +456,8 @@ function ThreadWorkflowPanel({
   const { t } = useI18n();
   const [goal, setGoal] = useState("");
   const [description, setDescription] = useState("");
+  const [createKind, setCreateKind] = useState<ThreadKind>("workflow");
+  const [createAssistantIds, setCreateAssistantIds] = useState<string[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [panelView, setPanelView] = useState<ThreadPanelView>("threads");
@@ -457,6 +472,23 @@ function ThreadWorkflowPanel({
   );
   const [selectedStageIds, setSelectedStageIds] = useState<string[]>([]);
   const [createStageOrder, setCreateStageOrder] = useState<string[]>([]);
+  const projectAssistants = useMemo(
+    () => assistants.filter((assistant) => assistant.projectId === project.id && assistant.enabled),
+    [assistants, project.id],
+  );
+  const assistantOptions = useMemo(
+    () =>
+      projectAssistants.map((assistant) => ({
+        value: assistant.id,
+        label: assistant.name,
+        icon: assistantSwatch(assistant.color),
+      })),
+    [projectAssistants],
+  );
+  const threadKindTabs = useMemo<SegmentedTabItem<ThreadKind>[]>(
+    () => THREAD_KINDS.map((kind) => ({ value: kind, label: t(`thread.kind.${kind}`) })),
+    [t],
+  );
   const linkedSessionKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const thread of threads) {
@@ -504,6 +536,10 @@ function ThreadWorkflowPanel({
     }
   }, [selectedThreadChatThreadId, threads]);
 
+  useEffect(() => {
+    if (createKind === "workflow") setCreateAssistantIds([]);
+  }, [createKind]);
+
   const toggleCreateStage = (stageId: string) => {
     if (!selectableProjectStages.some((stage) => stage.id === stageId)) return;
     setSelectedStageIds((current) =>
@@ -542,9 +578,18 @@ function ThreadWorkflowPanel({
     setCreating(true);
     onError(null);
     try {
-      const thread = await createThread(project.id, nextGoal, description);
+      const thread = await createThread(
+        project.id,
+        nextGoal,
+        description,
+        createKind,
+        createKind === "workflow" ? [] : createAssistantIds,
+      );
       let nextThread = thread;
-      for (const stageId of createStageOrder.filter((id) => selectedStageIds.includes(id))) {
+      const stageIds = createKind === "workflow"
+        ? createStageOrder.filter((id) => selectedStageIds.includes(id))
+        : [];
+      for (const stageId of stageIds) {
         const stage = await addThreadStage(thread.id, stageId, []);
         nextThread = {
           ...nextThread,
@@ -555,6 +600,8 @@ function ThreadWorkflowPanel({
       onThreadCreated(nextThread);
       setGoal("");
       setDescription("");
+      setCreateKind("workflow");
+      setCreateAssistantIds([]);
       setCreateOpen(false);
     } catch (err) {
       onError(String(err));
@@ -622,7 +669,26 @@ function ThreadWorkflowPanel({
                     rows={3}
                     className="min-w-0 resize-none rounded-md border border-ink/10 bg-ink/5 px-3 py-2 text-body-sm text-ink outline-none placeholder:text-ink/35 focus:border-ink/25"
                   />
-                  {orderedCreateStages.length > 0 && (
+                  <SegmentedTabs
+                    items={threadKindTabs}
+                    value={createKind}
+                    onChange={setCreateKind}
+                    itemWidth={118}
+                    itemHeight={30}
+                    className="w-max"
+                  />
+                  {createKind !== "workflow" && assistantOptions.length > 0 && (
+                    <div className="inline-flex h-8 w-max min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
+                      <MultiPicker
+                        selectedValues={createAssistantIds}
+                        options={assistantOptions}
+                        onChange={setCreateAssistantIds}
+                        placeholder={t("thread.assistants_placeholder")}
+                        className="h-8 max-w-[340px]"
+                      />
+                    </div>
+                  )}
+                  {createKind === "workflow" && orderedCreateStages.length > 0 && (
                     <DragDropProvider onDragEnd={handleCreateStageDragEnd}>
                       <div className="flex flex-wrap gap-1.5 border-t border-ink/10 pt-3">
                         {orderedCreateStages.map((stage, index) => (
@@ -679,6 +745,7 @@ function ThreadWorkflowPanel({
                 key={thread.id}
                 thread={thread}
                 projectStages={projectStages}
+                assistants={assistants}
                 onThreadUpdated={onThreadUpdated}
                 onThreadDeleted={onThreadDeleted}
                 onStageAdded={onStageAdded}
@@ -891,6 +958,7 @@ function ThreadStageChip({
 function ThreadCard({
   thread,
   projectStages,
+  assistants,
   onThreadUpdated,
   onThreadDeleted,
   onStageAdded,
@@ -902,6 +970,7 @@ function ThreadCard({
 }: {
   thread: ThreadInfo;
   projectStages: ProjectStageInfo[];
+  assistants: AssistantInfo[];
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
   onStageAdded: (stage: StageInfo) => void;
@@ -917,16 +986,45 @@ function ThreadCard({
   const [textOverflowing, setTextOverflowing] = useState(false);
   const [goal, setGoal] = useState(thread.goal);
   const [description, setDescription] = useState(thread.description ?? "");
+  const [editKind, setEditKind] = useState<ThreadKind>(thread.kind);
+  const [editAssistantIds, setEditAssistantIds] = useState<string[]>(
+    () => thread.assistants.map((assistant) => assistant.assistantId),
+  );
   const [selectedStageIds, setSelectedStageIds] = useState<string[]>([]);
   const goalRef = useRef<HTMLDivElement>(null);
   const descriptionRef = useRef<HTMLDivElement>(null);
+  const threadKindTabs = useMemo<SegmentedTabItem<ThreadKind>[]>(
+    () => THREAD_KINDS.map((kind) => ({ value: kind, label: t(`thread.kind.${kind}`) })),
+    [t],
+  );
+  const assistantOptions = useMemo(
+    () =>
+      assistants
+        .filter((assistant) => assistant.projectId === thread.projectId && assistant.enabled)
+        .map((assistant) => ({
+          value: assistant.id,
+          label: assistant.name,
+          icon: assistantSwatch(assistant.color),
+        })),
+    [assistants, thread.projectId],
+  );
+  const visibleAssistants = useMemo(
+    () => [...thread.assistants].sort((a, b) => a.order - b.order),
+    [thread.assistants],
+  );
 
   useEffect(() => {
     setGoal(thread.goal);
     setDescription(thread.description ?? "");
+    setEditKind(thread.kind);
+    setEditAssistantIds(thread.assistants.map((assistant) => assistant.assistantId));
     setExpandedText(false);
     setTextOverflowing(false);
-  }, [thread.description, thread.goal]);
+  }, [thread.assistants, thread.description, thread.goal, thread.kind]);
+
+  useEffect(() => {
+    if (editKind === "workflow") setEditAssistantIds([]);
+  }, [editKind]);
 
   useLayoutEffect(() => {
     const measure = () => {
@@ -948,7 +1046,12 @@ function ThreadCard({
 
   const save = async () => {
     try {
-      onThreadUpdated(await updateThread(thread.id, { goal, description }));
+      onThreadUpdated(await updateThread(thread.id, {
+        goal,
+        description,
+        kind: editKind,
+        assistantIds: editKind === "workflow" ? [] : editAssistantIds,
+      }));
       setEditing(false);
     } catch (err) {
       onError(String(err));
@@ -1056,6 +1159,27 @@ function ThreadCard({
             rows={2}
             className="min-w-0 resize-none rounded-md border border-ink/10 bg-ink/5 px-2 py-1.5 text-body-sm text-ink outline-none"
           />
+          <div className="flex flex-wrap items-center gap-2">
+            <SegmentedTabs
+              items={threadKindTabs}
+              value={editKind}
+              onChange={setEditKind}
+              itemWidth={112}
+              itemHeight={28}
+              className="w-max"
+            />
+            {editKind !== "workflow" && assistantOptions.length > 0 && (
+              <div className="inline-flex h-7 min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
+                <MultiPicker
+                  selectedValues={editAssistantIds}
+                  options={assistantOptions}
+                  onChange={setEditAssistantIds}
+                  placeholder={t("thread.assistants_placeholder")}
+                  className="max-w-[300px]"
+                />
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         <div className="min-w-0">
@@ -1122,6 +1246,25 @@ function ThreadCard({
               {thread.description}
             </div>
           )}
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="inline-flex h-6 items-center rounded-md border border-ink/10 bg-ink/[0.035] px-2 text-caption font-medium text-ink/55">
+              {t(`thread.kind.${thread.kind}`)}
+            </span>
+            {visibleAssistants.map((assistant) => (
+              <span
+                key={assistant.assistantId}
+                className="inline-flex h-6 max-w-[180px] items-center gap-1.5 rounded-md border border-ink/10 bg-ink/[0.025] px-2 text-caption text-ink/55"
+              >
+                {assistantSwatch(assistant.color)}
+                <span className="truncate">{assistant.name}</span>
+              </span>
+            ))}
+            {thread.kind !== "workflow" && visibleAssistants.length === 0 && (
+              <span className="inline-flex h-6 items-center rounded-md border border-dashed border-ink/15 px-2 text-caption text-ink/35">
+                {t("thread.no_assistants")}
+              </span>
+            )}
+          </div>
           {textOverflowing && (
             <Tooltip content={t(expandedText ? "detail.collapse" : "detail.expand")} placement="top">
               <button
@@ -1135,7 +1278,7 @@ function ThreadCard({
               </button>
             </Tooltip>
           )}
-          {(orderedThreadStages.length > 0 || availableProjectStages.length > 0) && (
+          {thread.kind === "workflow" && (orderedThreadStages.length > 0 || availableProjectStages.length > 0) && (
             <DragDropProvider onDragEnd={handleThreadStageDragEnd}>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {orderedThreadStages.map((stage, index) => {

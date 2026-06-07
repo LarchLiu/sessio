@@ -9,7 +9,7 @@ use crate::models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
     ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
 };
 
 /// Optional patch fields shared by the agent-preference update methods. Every
@@ -263,6 +263,17 @@ pub trait SessionStore: Send + Sync {
         goal: &str,
         description: Option<&str>,
     ) -> Result<ThreadInfo>;
+    fn create_thread_with_options(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+        kind: ThreadKind,
+        assistant_ids: &[String],
+    ) -> Result<ThreadInfo> {
+        let _ = (kind, assistant_ids);
+        self.create_thread(project_id, goal, description)
+    }
     fn update_thread(
         &self,
         thread_id: &str,
@@ -270,6 +281,18 @@ pub trait SessionStore: Send + Sync {
         description: Option<Option<&str>>,
         enabled: Option<bool>,
     ) -> Result<ThreadInfo>;
+    fn update_thread_with_options(
+        &self,
+        thread_id: &str,
+        goal: Option<&str>,
+        description: Option<Option<&str>>,
+        enabled: Option<bool>,
+        kind: Option<ThreadKind>,
+        assistant_ids: Option<&[String]>,
+    ) -> Result<ThreadInfo> {
+        let _ = (kind, assistant_ids);
+        self.update_thread(thread_id, goal, description, enabled)
+    }
     fn delete_thread(&self, thread_id: &str) -> Result<()>;
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>>;
     fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>>;

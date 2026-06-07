@@ -15,7 +15,8 @@ use crate::models::{
     AssistantInfo, AssistantType, AstraConfig, IssueSeverity, IssueStatus, KanbanItem,
     KanbanStatus, ProjectInfo, ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata,
     SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus,
-    StageType, SubagentInfo, ThreadInfo, WorkflowInfo, WorkflowType,
+    StageType, SubagentInfo, ThreadAssistantInfo, ThreadInfo, ThreadKind, WorkflowInfo,
+    WorkflowType,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -394,6 +395,7 @@ CREATE TABLE IF NOT EXISTS threads (
     goal        TEXT NOT NULL,
     description TEXT,
     stage_id    TEXT,
+    kind        TEXT NOT NULL DEFAULT 'workflow' CHECK(kind IN ('workflow', 'teamwork', 'brainstorm', 'debate')),
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
@@ -405,6 +407,20 @@ CREATE INDEX IF NOT EXISTS idx_threads_project_updated
     ON threads(project_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_threads_stage
     ON threads(stage_id);
+
+CREATE TABLE IF NOT EXISTS thread_assistants (
+    thread_id    TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    sort_order   INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY(thread_id, assistant_id),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_assistants_assistant
+    ON thread_assistants(assistant_id);
 
 CREATE TABLE IF NOT EXISTS stages (
     id           TEXT PRIMARY KEY,
@@ -636,6 +652,22 @@ CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_active
     ON astra_runs(thread_id, status);
 "#;
 
+const SCHEMA_V6_THREAD_KIND: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_assistants (
+    thread_id    TEXT NOT NULL,
+    assistant_id TEXT NOT NULL,
+    sort_order   INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY(thread_id, assistant_id),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+    FOREIGN KEY(assistant_id) REFERENCES assistants(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_assistants_assistant
+    ON thread_assistants(assistant_id);
+"#;
+
 // Backfill for pre-v1 (v0.3.2) databases whose sessions table predates the
 // rename_title column the v1 bootstrap schema now includes. Applied
 // fault-tolerantly inside the v5 migration; a no-op on any v1+ database.
@@ -724,7 +756,15 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         seed_builtins(conn)?;
     }
+    if current < 6 {
+        ensure_v6_thread_kind_schema(conn)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
+            [],
+        )?;
+    }
     ensure_v5_astra_columns(conn)?;
+    ensure_v6_thread_kind_schema(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
 }
@@ -777,6 +817,17 @@ fn ensure_v5_astra_columns(conn: &Connection) -> Result<()> {
             let _ = conn.execute_batch(ddl);
         }
     }
+    Ok(())
+}
+
+fn ensure_v6_thread_kind_schema(conn: &Connection) -> Result<()> {
+    let columns = table_columns(conn, "threads")?;
+    if !columns.contains("kind") {
+        conn.execute_batch(
+            "ALTER TABLE threads ADD COLUMN kind TEXT NOT NULL DEFAULT 'workflow' CHECK(kind IN ('workflow', 'teamwork', 'brainstorm', 'debate'));",
+        )?;
+    }
+    conn.execute_batch(SCHEMA_V6_THREAD_KIND)?;
     Ok(())
 }
 
@@ -2341,15 +2392,18 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
 }
 
 fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
+    let kind_raw: String = row.get(5)?;
     Ok(ThreadInfo {
         id: row.get(0)?,
         project_id: row.get(1)?,
         goal: row.get(2)?,
         description: row.get(3)?,
         stage_id: row.get(4)?,
-        enabled: row.get::<_, i64>(5)? != 0,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        kind: ThreadKind::from_db_str(&kind_raw).unwrap_or_default(),
+        enabled: row.get::<_, i64>(6)? != 0,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        assistants: Vec::new(),
         stages: Vec::new(),
         sessions: Vec::new(),
     })
@@ -2485,7 +2539,7 @@ fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<Assista
 fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
     let mut thread = conn
         .query_row(
-            "SELECT id, project_id, goal, description, stage_id, enabled, created_at, updated_at
+            "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at
              FROM threads
              WHERE id = ?",
             params![thread_id],
@@ -2493,6 +2547,7 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
         )
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?;
+    thread.assistants = load_thread_assistants(conn, &thread.id)?;
     thread.stages = load_thread_stages(conn, &thread.id)?;
     thread.sessions = load_thread_sessions(conn, &thread.id)?;
     Ok(thread)
@@ -2889,9 +2944,31 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let thread_usages = {
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(p.name, 'Unknown'),
+                t.goal
+             FROM thread_assistants ta
+             INNER JOIN threads t ON t.id = ta.thread_id
+             LEFT JOIN projects p ON p.id = t.project_id
+             WHERE ta.assistant_id = ?
+               AND t.project_id = ?
+             ORDER BY p.name COLLATE NOCASE ASC, t.updated_at DESC",
+        )?;
+        let rows = stmt.query_map(params![assistant_id, project_id], |row| {
+            let project_name: String = row.get(0)?;
+            let thread_goal: String = row.get(1)?;
+            Ok(format!(
+                "project \"{project_name}\" thread \"{thread_goal}\""
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
     if !project_stage_usages.is_empty()
         || !workflow_stage_usages.is_empty()
         || !thread_stage_usages.is_empty()
+        || !thread_usages.is_empty()
     {
         let mut parts = Vec::new();
         if !project_stage_usages.is_empty() {
@@ -2913,6 +2990,13 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
                 "{} thread stage assistant binding(s): {}",
                 thread_stage_usages.len(),
                 usage_list(&thread_stage_usages)
+            ));
+        }
+        if !thread_usages.is_empty() {
+            parts.push(format!(
+                "{} thread assistant binding(s): {}",
+                thread_usages.len(),
+                usage_list(&thread_usages)
             ));
         }
         anyhow::bail!(
@@ -3026,6 +3110,36 @@ fn load_project_stage_assistants(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn load_thread_assistants(conn: &Connection, thread_id: &str) -> Result<Vec<ThreadAssistantInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT ta.assistant_id, a.name, a.color, a.agent_json, a.system_prompt, ta.sort_order
+         FROM thread_assistants ta
+         INNER JOIN assistants a ON a.id = ta.assistant_id
+         WHERE ta.thread_id = ?
+         ORDER BY ta.sort_order ASC, ta.created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![thread_id], |row| {
+        let agent_json: String = row.get(3)?;
+        Ok(ThreadAssistantInfo {
+            assistant_id: row.get(0)?,
+            name: row.get(1)?,
+            color: row.get(2)?,
+            agent: serde_json::from_str::<AssistantAgentInfo>(&agent_json).unwrap_or_else(|_| {
+                AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: String::new(),
+                    mode: String::new(),
+                    effort: String::new(),
+                }
+            }),
+            system_prompt: row.get(4)?,
+            order: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn stage_assistant_from_assistant(assistant: AssistantInfo, order: i64) -> StageAssistantInfo {
     StageAssistantInfo {
         assistant_id: assistant.id,
@@ -3086,6 +3200,26 @@ fn replace_thread_stage_assistants(
                 now,
                 now
             ],
+        )?;
+    }
+    Ok(())
+}
+
+fn replace_thread_assistants(
+    conn: &Connection,
+    thread_id: &str,
+    assistants: &[AssistantInfo],
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM thread_assistants WHERE thread_id = ?",
+        params![thread_id],
+    )?;
+    for (index, assistant) in assistants.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO thread_assistants (thread_id, assistant_id, sort_order, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![thread_id, assistant.id, index as i64, now, now],
         )?;
     }
     Ok(())
@@ -4914,12 +5048,13 @@ impl SessionStore for SqliteStore {
         let stage_count: i64 = conn.query_row(
             "SELECT
                 (SELECT count(*) FROM thread_stage_assistants WHERE assistant_id = ?) +
-                (SELECT count(*) FROM stage_assistants WHERE assistant_id = ?)",
-            params![assistant_id, assistant_id],
+                (SELECT count(*) FROM stage_assistants WHERE assistant_id = ?) +
+                (SELECT count(*) FROM thread_assistants WHERE assistant_id = ?)",
+            params![assistant_id, assistant_id, assistant_id],
             |row| row.get(0),
         )?;
         if stage_count > 0 {
-            anyhow::bail!("assistant is used by stages");
+            anyhow::bail!("assistant is used by stages or threads");
         }
         conn.execute("DELETE FROM assistants WHERE id = ?", params![assistant_id])?;
         Ok(())
@@ -4929,7 +5064,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         load_project_by_id(&conn, project_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, goal, description, stage_id, enabled, created_at, updated_at
+            "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at
              FROM threads
              WHERE project_id = ?
              ORDER BY updated_at DESC, created_at DESC",
@@ -4938,6 +5073,7 @@ impl SessionStore for SqliteStore {
             .query_map(params![project_id], thread_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for thread in threads.iter_mut() {
+            thread.assistants = load_thread_assistants(&conn, &thread.id)?;
             thread.stages = load_thread_stages(&conn, &thread.id)?;
             thread.sessions = load_thread_sessions(&conn, &thread.id)?;
         }
@@ -4955,21 +5091,37 @@ impl SessionStore for SqliteStore {
         goal: &str,
         description: Option<&str>,
     ) -> Result<ThreadInfo> {
+        self.create_thread_with_options(project_id, goal, description, ThreadKind::Workflow, &[])
+    }
+
+    fn create_thread_with_options(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+        kind: ThreadKind,
+        assistant_ids: &[String],
+    ) -> Result<ThreadInfo> {
         let goal = goal.trim();
         if goal.is_empty() {
             anyhow::bail!("thread goal cannot be empty");
         }
         let description = description.map(str::trim).filter(|s| !s.is_empty());
-        let conn = self.conn.lock().unwrap();
-        load_project_by_id(&conn, project_id)?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        load_project_by_id(&tx, project_id)?;
+        let assistants = validate_assistants_for_project(&tx, project_id, assistant_ids)?;
         let now = now_ms();
         let id = stable_thread_id(project_id, goal, now);
-        conn.execute(
-            "INSERT INTO threads (id, project_id, goal, description, stage_id, enabled, created_at, updated_at)
-             VALUES (?, ?, ?, ?, NULL, 1, ?, ?)",
-            params![id, project_id, goal, description, now, now],
+        tx.execute(
+            "INSERT INTO threads (id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?)",
+            params![id, project_id, goal, description, kind.as_str(), now, now],
         )?;
-        load_thread_by_id(&conn, &id)
+        replace_thread_assistants(&tx, &id, &assistants, now)?;
+        let thread = load_thread_by_id(&tx, &id)?;
+        tx.commit()?;
+        Ok(thread)
     }
 
     fn update_thread(
@@ -4979,8 +5131,21 @@ impl SessionStore for SqliteStore {
         description: Option<Option<&str>>,
         enabled: Option<bool>,
     ) -> Result<ThreadInfo> {
-        let conn = self.conn.lock().unwrap();
-        let current = load_thread_by_id(&conn, thread_id)?;
+        self.update_thread_with_options(thread_id, goal, description, enabled, None, None)
+    }
+
+    fn update_thread_with_options(
+        &self,
+        thread_id: &str,
+        goal: Option<&str>,
+        description: Option<Option<&str>>,
+        enabled: Option<bool>,
+        kind: Option<ThreadKind>,
+        assistant_ids: Option<&[String]>,
+    ) -> Result<ThreadInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let current = load_thread_by_id(&tx, thread_id)?;
         let next_goal = match goal {
             Some(value) => {
                 let value = value.trim();
@@ -5003,19 +5168,30 @@ impl SessionStore for SqliteStore {
             None => current.description,
         };
         let next_enabled = enabled.unwrap_or(current.enabled);
-        conn.execute(
+        let next_kind = kind.unwrap_or(current.kind);
+        let assistant_bindings = assistant_ids
+            .map(|ids| validate_assistants_for_project(&tx, &current.project_id, ids))
+            .transpose()?;
+        let now = now_ms();
+        tx.execute(
             "UPDATE threads
-             SET goal = ?, description = ?, enabled = ?, updated_at = ?
+             SET goal = ?, description = ?, kind = ?, enabled = ?, updated_at = ?
              WHERE id = ?",
             params![
                 next_goal,
                 next_description,
+                next_kind.as_str(),
                 next_enabled as i64,
-                now_ms(),
+                now,
                 thread_id
             ],
         )?;
-        load_thread_by_id(&conn, thread_id)
+        if let Some(assistants) = assistant_bindings.as_deref() {
+            replace_thread_assistants(&tx, thread_id, assistants, now)?;
+        }
+        let thread = load_thread_by_id(&tx, thread_id)?;
+        tx.commit()?;
+        Ok(thread)
     }
 
     fn delete_thread(&self, thread_id: &str) -> Result<()> {
@@ -7176,7 +7352,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 5);
+        assert_eq!(latest_schema_version, 6);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -7195,6 +7371,13 @@ mod migration_tests {
         assert!(session_columns.contains(&"forked_from_id".to_string()));
         assert!(session_columns.contains(&"rename_title".to_string()));
         assert!(session_columns.contains(&"title".to_string()));
+
+        let thread_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(threads)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(thread_columns.contains(&"kind".to_string()));
 
         let projects_count: i64 = conn
             .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
@@ -7265,6 +7448,15 @@ mod migration_tests {
         assert!(astra_columns.contains(&"last_error_code".to_string()));
         assert!(astra_columns.contains(&"last_error_message".to_string()));
 
+        let thread_assistants_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='thread_assistants'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_assistants_table, 1);
+
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }
@@ -7295,6 +7487,13 @@ mod migration_tests {
         assert!(session_columns.contains(&"forked_from_id".to_string()));
         assert!(session_columns.contains(&"rename_title".to_string()));
         assert!(session_columns.contains(&"title".to_string()));
+
+        let thread_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(threads)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(thread_columns.contains(&"kind".to_string()));
 
         // memory_artifacts table exists from V3 already.
         let artifact_table: i64 = conn
@@ -7350,6 +7549,7 @@ mod migration_tests {
             "threads",
             "stages",
             "thread_stages",
+            "thread_assistants",
             "stage_sessions",
             "thread_stage_issues",
             "astra_runs",
@@ -9000,6 +9200,183 @@ mod migration_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
         let _ = std::fs::remove_dir_all(&other_parent);
+    }
+
+    #[test]
+    fn thread_kind_and_thread_assistants_roundtrip() {
+        let path = unique_db("sessio-thread-kind-assistants");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-kind-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "thread-kinds",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let builder = store
+            .create_assistant(NewAssistant {
+                name: "Builder",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-only".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Build carefully"),
+                color: Some("#22c55e"),
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let reviewer = store
+            .create_assistant(NewAssistant {
+                name: "Reviewer",
+                agent: AssistantAgentInfo {
+                    id: "claude".to_string(),
+                    name: "Claude".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    mode: "workspace-write".to_string(),
+                    effort: "high".to_string(),
+                },
+                system_prompt: None,
+                color: Some("#60a5fa"),
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+
+        let legacy = store
+            .create_thread(&project.id, "Legacy workflow", None)
+            .unwrap();
+        assert_eq!(legacy.kind, ThreadKind::Workflow);
+        assert!(legacy.assistants.is_empty());
+
+        let assistant_ids = vec![builder.id.clone(), reviewer.id.clone()];
+        let teamwork = store
+            .create_thread_with_options(
+                &project.id,
+                "Teamwork lane",
+                Some("shared context"),
+                ThreadKind::Teamwork,
+                &assistant_ids,
+            )
+            .unwrap();
+        assert_eq!(teamwork.kind, ThreadKind::Teamwork);
+        assert_eq!(
+            teamwork
+                .assistants
+                .iter()
+                .map(|assistant| assistant.assistant_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![builder.id.as_str(), reviewer.id.as_str()]
+        );
+        assert_eq!(teamwork.assistants[0].name, "Builder");
+        assert_eq!(teamwork.assistants[0].agent.id, "codex");
+        assert_eq!(
+            teamwork.assistants[0].system_prompt.as_deref(),
+            Some("Build carefully")
+        );
+        assert_eq!(teamwork.assistants[1].agent.id, "claude");
+
+        let brainstorm = store
+            .create_thread_with_options(
+                &project.id,
+                "Brainstorm lane",
+                None,
+                ThreadKind::Brainstorm,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(brainstorm.kind, ThreadKind::Brainstorm);
+        assert!(brainstorm.assistants.is_empty());
+
+        let debate_assistants = vec![reviewer.id.clone()];
+        let debate = store
+            .create_thread_with_options(
+                &project.id,
+                "Debate lane",
+                None,
+                ThreadKind::Debate,
+                &debate_assistants,
+            )
+            .unwrap();
+        assert_eq!(debate.kind, ThreadKind::Debate);
+        assert_eq!(debate.assistants.len(), 1);
+        assert_eq!(debate.assistants[0].assistant_id, reviewer.id);
+
+        let listed = store.list_threads(&project.id).unwrap();
+        assert!(listed.iter().any(|thread| thread.id == legacy.id
+            && thread.kind == ThreadKind::Workflow
+            && thread.assistants.is_empty()));
+        assert!(listed.iter().any(|thread| thread.id == teamwork.id
+            && thread.kind == ThreadKind::Teamwork
+            && thread.assistants.len() == 2));
+        assert!(listed.iter().any(|thread| thread.id == brainstorm.id
+            && thread.kind == ThreadKind::Brainstorm
+            && thread.assistants.is_empty()));
+        assert!(listed.iter().any(|thread| thread.id == debate.id
+            && thread.kind == ThreadKind::Debate
+            && thread.assistants.len() == 1));
+
+        let reordered = vec![reviewer.id.clone(), builder.id.clone()];
+        let updated = store
+            .update_thread_with_options(
+                &teamwork.id,
+                Some("Teamwork lane updated"),
+                Some(Some("reordered")),
+                None,
+                Some(ThreadKind::Teamwork),
+                Some(&reordered),
+            )
+            .unwrap();
+        assert_eq!(updated.goal, "Teamwork lane updated");
+        assert_eq!(updated.description.as_deref(), Some("reordered"));
+        assert_eq!(
+            updated
+                .assistants
+                .iter()
+                .map(|assistant| assistant.assistant_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![reviewer.id.as_str(), builder.id.as_str()]
+        );
+        assert_eq!(updated.assistants[0].order, 0);
+        assert_eq!(updated.assistants[1].order, 1);
+
+        let disable_error = store
+            .update_assistant(&builder.id, None, None, None, None, Some(false))
+            .unwrap_err()
+            .to_string();
+        assert!(disable_error.contains("thread assistant binding(s)"));
+        assert!(disable_error.contains("thread \"Teamwork lane updated\""));
+        assert!(store
+            .delete_assistant(&builder.id)
+            .unwrap_err()
+            .to_string()
+            .contains("stages or threads"));
+
+        store.delete_thread(&updated.id).unwrap();
+        let binding_count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM thread_assistants WHERE thread_id = ?",
+                params![updated.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(binding_count, 0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]

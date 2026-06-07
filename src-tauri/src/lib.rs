@@ -35,7 +35,7 @@ use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, ProjectInfo,
     ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, ThreadInfo, WorkflowInfo,
+    StageIssueInfo, StageStatus, ThreadInfo, ThreadKind, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -646,11 +646,19 @@ fn create_thread(
     project_id: String,
     goal: String,
     description: Option<String>,
+    kind: Option<ThreadKind>,
+    assistant_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ThreadInfo, String> {
     let thread = store
-        .create_thread(&project_id, &goal, description.as_deref())
+        .create_thread_with_options(
+            &project_id,
+            &goal,
+            description.as_deref(),
+            kind.unwrap_or_default(),
+            assistant_ids.as_deref().unwrap_or(&[]),
+        )
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(thread)
@@ -662,12 +670,21 @@ fn update_thread(
     goal: Option<String>,
     description: Option<Option<String>>,
     enabled: Option<bool>,
+    kind: Option<ThreadKind>,
+    assistant_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ThreadInfo, String> {
     let description_ref = description.as_ref().map(|value| value.as_deref());
     let thread = store
-        .update_thread(&thread_id, goal.as_deref(), description_ref, enabled)
+        .update_thread_with_options(
+            &thread_id,
+            goal.as_deref(),
+            description_ref,
+            enabled,
+            kind,
+            assistant_ids.as_deref(),
+        )
         .map_err(|e| e.to_string())?;
     app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
     Ok(thread)

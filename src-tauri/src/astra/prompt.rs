@@ -553,9 +553,11 @@ mod tests {
             goal: "Ship the thread".to_string(),
             description: None,
             stage_id: None,
+            kind: crate::models::ThreadKind::Workflow,
             enabled: true,
             created_at: 1,
             updated_at: 1,
+            assistants: Vec::new(),
             stages: vec![StageInfo {
                 id: "stage-1".to_string(),
                 thread_id: "thread-1".to_string(),

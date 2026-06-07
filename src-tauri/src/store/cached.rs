@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
     KanbanItem, KanbanStatus, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, WorkflowInfo,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -295,6 +295,18 @@ impl SessionStore for CachedStore {
         self.inner.create_thread(project_id, goal, description)
     }
 
+    fn create_thread_with_options(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+        kind: ThreadKind,
+        assistant_ids: &[String],
+    ) -> Result<ThreadInfo> {
+        self.inner
+            .create_thread_with_options(project_id, goal, description, kind, assistant_ids)
+    }
+
     fn update_thread(
         &self,
         thread_id: &str,
@@ -304,6 +316,25 @@ impl SessionStore for CachedStore {
     ) -> Result<ThreadInfo> {
         self.inner
             .update_thread(thread_id, goal, description, enabled)
+    }
+
+    fn update_thread_with_options(
+        &self,
+        thread_id: &str,
+        goal: Option<&str>,
+        description: Option<Option<&str>>,
+        enabled: Option<bool>,
+        kind: Option<ThreadKind>,
+        assistant_ids: Option<&[String]>,
+    ) -> Result<ThreadInfo> {
+        self.inner.update_thread_with_options(
+            thread_id,
+            goal,
+            description,
+            enabled,
+            kind,
+            assistant_ids,
+        )
     }
 
     fn delete_thread(&self, thread_id: &str) -> Result<()> {

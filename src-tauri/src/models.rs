@@ -514,6 +514,49 @@ pub struct StageIssueInfo {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadKind {
+    #[default]
+    Workflow,
+    Teamwork,
+    Brainstorm,
+    Debate,
+}
+
+impl ThreadKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThreadKind::Workflow => "workflow",
+            ThreadKind::Teamwork => "teamwork",
+            ThreadKind::Brainstorm => "brainstorm",
+            ThreadKind::Debate => "debate",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "workflow" => Some(ThreadKind::Workflow),
+            "teamwork" => Some(ThreadKind::Teamwork),
+            "brainstorm" => Some(ThreadKind::Brainstorm),
+            "debate" => Some(ThreadKind::Debate),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadAssistantInfo {
+    pub assistant_id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub agent: AssistantAgentInfo,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    pub order: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadInfo {
@@ -522,9 +565,13 @@ pub struct ThreadInfo {
     pub goal: String,
     pub description: Option<String>,
     pub stage_id: Option<String>,
+    #[serde(default)]
+    pub kind: ThreadKind,
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub assistants: Vec<ThreadAssistantInfo>,
     #[serde(default)]
     pub stages: Vec<StageInfo>,
     #[serde(default)]
