@@ -102,7 +102,7 @@ export default function ThreadPage({
           <div className="grid gap-5">
             <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
               <ThreadStat label={t("stage.project_stages")} value={String(sortedStages.length)} />
-              <ThreadStat label={t("assistant.title")} value={String(uniqueAssistantCount(sortedStages))} />
+              <ThreadStat label={t("assistant.title")} value={String(threadAssistantCount(thread, sortedStages))} />
               <ThreadStat label={t("thread.sessions")} value={String(replay?.sessions.length ?? thread.sessions.length)} />
               <ThreadStat label={t("meta.updated")} value={formatDate(thread.updatedAt, lang) ?? "-"} />
             </div>
@@ -124,7 +124,30 @@ export default function ThreadPage({
               <ThreadReplaySessions replay={replay} onSelectSession={onSelectSession} />
             )}
 
-            {sortedStages.length === 0 ? (
+            {sortedStages.length === 0 && thread.kind !== "workflow" ? (
+              thread.assistants.length > 0 ? (
+                <div className="grid gap-2">
+                  {thread.assistants.map((assistant) => {
+                    const runtimeAgent = agentFromId(assistant.agent.id);
+                    return (
+                      <AssistantSessionLane
+                        key={assistant.assistantId}
+                        label={assistant.name}
+                        agent={runtimeAgent}
+                        agentLabel={runtimeAgent ? undefined : assistant.agent.name}
+                        assistantColor={assistant.color}
+                        sessions={[]}
+                        onSelectSession={onSelectSession}
+                      />
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-ink/15 py-16 text-center text-body-sm text-ink/40">
+                  {t("thread.no_assistants")}
+                </div>
+              )
+            ) : sortedStages.length === 0 ? (
               <div className="rounded-lg border border-dashed border-ink/15 py-16 text-center text-body-sm text-ink/40">
                 {t("stage.empty")}
               </div>
@@ -1110,8 +1133,15 @@ function issueSeverityTextClass(severity: IssueSeverity): string {
   }
 }
 
-function uniqueAssistantCount(stages: StageInfo[]): number {
+function threadAssistantCount(thread: ThreadInfo, stages: StageInfo[]): number {
+  if (thread.kind !== "workflow") return thread.assistants.length;
   return new Set(stages.flatMap((stage) => stage.assistants.map((assistant) => assistant.assistantId))).size;
+}
+
+function agentFromId(value: string): Agent | null {
+  return value === "astra-pi" || value === "codex" || value === "claude" || value === "gemini"
+    ? value
+    : null;
 }
 
 function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
