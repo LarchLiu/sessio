@@ -30,15 +30,13 @@ reason: string
 mode: parallel|sequential|null
 tasks: []
 
-Teamwork uses shared thread context plus Astra task orchestration. It does not use workflow stage scheduling.
+Teamwork uses shared thread context plus Astra task orchestration. The response schema is closed: return only the top-level keys and task keys listed here.
 
 Use runIntent:
 - continue: create and dispatch one plan round. mode must be parallel or sequential, and tasks must be non-empty.
 - complete: stop the Astra run successfully. mode must be null and tasks must be empty.
 - wait_for_human: stop for human input or review. mode must be null and tasks must be empty.
 - error: stop with a diagnostic error. mode must be null and tasks must be empty.
-
-Do not return decisions. Do not return update_stage, retry_stage, add_or_update_issue, action, outcome, stage mutation, issue mutation, or targetStageId for teamwork.
 
 Teamwork task shape:
 tasks:
@@ -818,8 +816,9 @@ mod tests {
         assert!(instruction.contains("runIntent: continue|complete|wait_for_human|error"));
         assert!(instruction.contains("mode: parallel|sequential|null"));
         assert!(instruction.contains("assistantId: thread-assistant-id"));
-        assert!(instruction.contains("Do not return update_stage"));
-        assert!(instruction.contains("Do not return decisions"));
+        assert!(instruction.contains("response schema is closed"));
+        assert!(!instruction.contains("update_stage"));
+        assert!(!instruction.contains("targetStageId"));
         assert!(!instruction.contains(r#""stage": {"#));
         assert_eq!(value["thread"]["kind"], "teamwork");
         assert_eq!(
