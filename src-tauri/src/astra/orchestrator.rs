@@ -55,6 +55,10 @@ impl AstraService {
             return Ok(RustNativeWorkerOutcome::Claimed);
         }
         let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+        if let Some((reason, code, message)) = dedicated_backend_required_error(&thread) {
+            let _ = self.error_run(&run.run_id, reason, code, message)?;
+            return Ok(RustNativeWorkerOutcome::Claimed);
+        }
         if thread_all_stages_terminal(&thread) {
             let _ = self.complete_run(&run.run_id, "all_stages_terminal")?;
             return Ok(RustNativeWorkerOutcome::Claimed);
@@ -737,6 +741,22 @@ enum NoDispatchableOutcome<'a> {
     },
 }
 
+fn dedicated_backend_required_error(
+    thread: &crate::models::ThreadInfo,
+) -> Option<(&'static str, &'static str, String)> {
+    match thread.kind {
+        ThreadKind::Brainstorm | ThreadKind::Debate => Some((
+            "dedicated_backend_required",
+            "dedicated_backend_required",
+            format!(
+                "Astra {} requires a dedicated backend before automatic orchestration",
+                thread.kind.as_str()
+            ),
+        )),
+        ThreadKind::Workflow | ThreadKind::Teamwork => None,
+    }
+}
+
 fn classify_no_dispatchable_tasks(thread: &crate::models::ThreadInfo) -> NoDispatchableOutcome<'_> {
     match thread.kind {
         ThreadKind::Teamwork => {
@@ -754,13 +774,12 @@ fn classify_no_dispatchable_tasks(thread: &crate::models::ThreadInfo) -> NoDispa
             };
         }
         ThreadKind::Brainstorm | ThreadKind::Debate => {
+            let (reason, code, message) = dedicated_backend_required_error(thread)
+                .expect("brainstorm/debate require dedicated backend");
             return NoDispatchableOutcome::Errored {
-                reason: "dedicated_backend_required",
-                code: "dedicated_backend_required",
-                message: format!(
-                    "Astra {} requires a dedicated backend before automatic orchestration",
-                    thread.kind.as_str()
-                ),
+                reason,
+                code,
+                message,
             };
         }
         ThreadKind::Workflow => {}
@@ -807,6 +826,37 @@ mod tests {
             }
             NoDispatchableOutcome::Errored { reason, .. } => {
                 panic!("unexpected error outcome: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn brainstorm_and_debate_require_dedicated_backend_before_planning() {
+        for kind in [ThreadKind::Brainstorm, ThreadKind::Debate] {
+            let mut thread = test_thread(Vec::new());
+            thread.kind = kind;
+
+            let Some((reason, code, message)) = dedicated_backend_required_error(&thread) else {
+                panic!("expected dedicated backend guard for {}", kind.as_str());
+            };
+
+            assert_eq!(reason, "dedicated_backend_required");
+            assert_eq!(code, "dedicated_backend_required");
+            assert!(message.contains(kind.as_str()));
+
+            match classify_no_dispatchable_tasks(&thread) {
+                NoDispatchableOutcome::Errored {
+                    reason,
+                    code,
+                    message,
+                } => {
+                    assert_eq!(reason, "dedicated_backend_required");
+                    assert_eq!(code, "dedicated_backend_required");
+                    assert!(message.contains(kind.as_str()));
+                }
+                NoDispatchableOutcome::Completed(reason) => {
+                    panic!("unexpected completed outcome: {reason}")
+                }
             }
         }
     }
