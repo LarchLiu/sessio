@@ -99,17 +99,106 @@ fn debate_orchestration(
 
     let artifact_set = lane_artifact_set(thread, round_index.saturating_sub(1), completions);
     if has_cross_check_marker(completions) {
+        let convergence =
+            convergence_diagnostic(thread, round_index.saturating_sub(1), &artifact_set);
+        let status = convergence
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("needs_review")
+            .to_string();
+        if status == "converged" {
+            return AstraOrchestration {
+                summary: "Debate cross-check converged; convergence diagnostics are recorded."
+                    .to_string(),
+                run_intent: AstraRunIntent::Complete,
+                reason: "debate_cross_check_converged".to_string(),
+                mode: None,
+                tasks: Vec::new(),
+                diagnostics: vec![artifact_set, convergence],
+            };
+        }
+
+        if !has_room_for_terminal_after_followup(run, round_index) {
+            let mut terminal = convergence;
+            if let Some(record) = terminal.as_object_mut() {
+                record.insert(
+                    "terminalReason".to_string(),
+                    Value::String("round_limit_reached".to_string()),
+                );
+                record.insert("roundLimit".to_string(), json!(run.round_limit));
+                record.insert(
+                    "nextAction".to_string(),
+                    Value::String(
+                        "Preserve consensus, disagreements, and arbitration recommendation for human review."
+                            .to_string(),
+                    ),
+                );
+            }
+            return AstraOrchestration {
+                summary: format!(
+                    "Debate reached the round limit with {} cross-check status; diagnostics preserve the remaining disagreements.",
+                    status
+                ),
+                run_intent: AstraRunIntent::Complete,
+                reason: "debate_round_limit_reached".to_string(),
+                mode: None,
+                tasks: Vec::new(),
+                diagnostics: vec![artifact_set, terminal],
+            };
+        }
+
+        let tasks = debate_lane_tasks(run, thread, user_prompt, round_index, Some(&artifact_set));
+        if tasks.is_empty() {
+            return AstraOrchestration {
+                summary: "Debate cross-check needs another pass, but no assistants are available."
+                    .to_string(),
+                run_intent: AstraRunIntent::WaitForHuman,
+                reason: "debate_no_cross_check_lanes".to_string(),
+                mode: None,
+                tasks,
+                diagnostics: vec![artifact_set, convergence],
+            };
+        }
+
         return AstraOrchestration {
-            summary: "Debate cross-check completed; convergence diagnostics are recorded."
-                .to_string(),
+            summary: format!(
+                "Debate cross-check is {}; another cross-check round will exchange stage artifacts only.",
+                status
+            ),
+            run_intent: AstraRunIntent::Continue,
+            reason: "debate_need_more_cross_check".to_string(),
+            mode: Some(PlanRoundMode::Parallel),
+            tasks,
+            diagnostics: vec![artifact_set, convergence],
+        };
+    }
+
+    if !has_room_for_terminal_after_followup(run, round_index) {
+        let mut convergence =
+            convergence_diagnostic(thread, round_index.saturating_sub(1), &artifact_set);
+        if let Some(record) = convergence.as_object_mut() {
+            record.insert(
+                "terminalReason".to_string(),
+                Value::String("round_limit_reached_before_cross_check".to_string()),
+            );
+            record.insert("roundLimit".to_string(), json!(run.round_limit));
+            record.insert(
+                "nextAction".to_string(),
+                Value::String(
+                    "Review isolated lane artifacts manually; no round budget remains for cross-check."
+                        .to_string(),
+                ),
+            );
+        }
+        return AstraOrchestration {
+            summary:
+                "Debate reached the round limit before a cross-check round; isolated lane artifacts are recorded."
+                    .to_string(),
             run_intent: AstraRunIntent::Complete,
-            reason: "debate_cross_check_complete".to_string(),
+            reason: "debate_round_limit_reached".to_string(),
             mode: None,
             tasks: Vec::new(),
-            diagnostics: vec![
-                artifact_set.clone(),
-                convergence_diagnostic(thread, round_index.saturating_sub(1), &artifact_set),
-            ],
+            diagnostics: vec![artifact_set, convergence],
         };
     }
 
@@ -136,6 +225,10 @@ fn debate_orchestration(
         tasks,
         diagnostics: vec![artifact_set],
     }
+}
+
+fn has_room_for_terminal_after_followup(run: &AstraRun, round_index: u32) -> bool {
+    round_index.saturating_add(1) < run.round_limit
 }
 
 fn debate_lane_tasks(
@@ -438,6 +531,13 @@ mod tests {
         }
     }
 
+    fn run_with_limit(round_limit: u32) -> AstraRun {
+        AstraRun {
+            round_limit,
+            ..run()
+        }
+    }
+
     fn completion(task: AstraTaskProposal, output: &str) -> AstraTaskCompletion {
         AstraTaskCompletion {
             result: AstraTaskResult {
@@ -526,13 +626,70 @@ mod tests {
         let terminal = debate_orchestration(&run(), &thread(), None, 2, &cross_check_completions);
 
         assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
-        assert_eq!(terminal.reason, "debate_cross_check_complete");
+        assert_eq!(terminal.reason, "debate_cross_check_converged");
         assert!(terminal
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic["kind"] == "debate_convergence"));
         assert!(terminal.diagnostics.iter().any(|diagnostic| {
             diagnostic["kind"] == "debate_convergence" && diagnostic["status"] == "converged"
+        }));
+    }
+
+    #[test]
+    fn divergent_cross_check_continues_when_round_budget_remains() {
+        let first = debate_orchestration(&run(), &thread(), None, 0, &[]);
+        let first_completions = first
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "Final result: Proposal A."))
+            .collect::<Vec<_>>();
+        let cross_check = debate_orchestration(&run(), &thread(), None, 1, &first_completions);
+        let cross_check_completions = cross_check
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "Final result: disagree; claims conflict."))
+            .collect::<Vec<_>>();
+
+        let next = debate_orchestration(&run(), &thread(), None, 2, &cross_check_completions);
+
+        assert_eq!(next.run_intent, AstraRunIntent::Continue);
+        assert_eq!(next.reason, "debate_need_more_cross_check");
+        assert_eq!(next.mode, Some(PlanRoundMode::Parallel));
+        assert!(next
+            .tasks
+            .iter()
+            .all(|task| task.prompt.contains(CROSS_CHECK_MARKER)));
+        assert!(next.diagnostics.iter().any(|diagnostic| {
+            diagnostic["kind"] == "debate_convergence" && diagnostic["status"] == "diverged"
+        }));
+    }
+
+    #[test]
+    fn divergent_cross_check_finishes_with_round_limit_diagnostic() {
+        let run = run_with_limit(3);
+        let first = debate_orchestration(&run, &thread(), None, 0, &[]);
+        let first_completions = first
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "Final result: Proposal A."))
+            .collect::<Vec<_>>();
+        let cross_check = debate_orchestration(&run, &thread(), None, 1, &first_completions);
+        let cross_check_completions = cross_check
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "Final result: disagree; assumptions conflict."))
+            .collect::<Vec<_>>();
+
+        let terminal = debate_orchestration(&run, &thread(), None, 2, &cross_check_completions);
+
+        assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
+        assert_eq!(terminal.reason, "debate_round_limit_reached");
+        assert!(terminal.tasks.is_empty());
+        assert!(terminal.diagnostics.iter().any(|diagnostic| {
+            diagnostic["kind"] == "debate_convergence"
+                && diagnostic["status"] == "diverged"
+                && diagnostic["terminalReason"] == "round_limit_reached"
         }));
     }
 }
