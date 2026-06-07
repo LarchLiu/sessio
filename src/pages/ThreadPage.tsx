@@ -910,7 +910,7 @@ function ThreadReplaySessions({
   onSelectSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
-  const groups = groupReplaySessionsByAgent(replay.sessions);
+  const groups = groupReplaySessionsByThreadKind(replay, t);
   return (
     <section className="rounded-lg border border-card-border/[0.12] bg-card p-3">
       <div className="mb-3 flex items-center gap-2 text-body-sm font-medium text-ink/75">
@@ -918,12 +918,12 @@ function ThreadReplaySessions({
         {t("thread.replay_sessions")}
       </div>
       <div className="grid gap-2">
-        {groups.map(({ agent, sessions: agentSessions }) => (
+        {groups.map(({ key, label, agent, sessions: groupSessions }) => (
           <ThreadReplaySessionLane
-            key={agent}
-            label={AGENT_LABEL[agent]}
+            key={key}
+            label={label}
             agent={agent}
-            sessions={agentSessions}
+            sessions={groupSessions}
             onSelectSession={onSelectSession}
           />
         ))}
@@ -939,7 +939,7 @@ function ThreadReplaySessionLane({
   onSelectSession,
 }: {
   label: string;
-  agent: Agent;
+  agent: Agent | null;
   sessions: ThreadReplaySessionInfo[];
   onSelectSession: (session: SessionInfo) => void;
 }) {
@@ -947,7 +947,11 @@ function ThreadReplaySessionLane({
   return (
     <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
       <div className="flex min-w-0 items-center gap-2">
-        <AgentGlyph agent={agent} className="h-4 w-4 shrink-0" />
+        {agent ? (
+          <AgentGlyph agent={agent} className="h-4 w-4 shrink-0" />
+        ) : (
+          <HashIcon className="h-4 w-4 shrink-0 text-ink/35" />
+        )}
         <div className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink/75">{label}</div>
         <span className="shrink-0 text-meta text-ink/35">
           {t("astra.task_sessions", { count: sessions.length })}
@@ -1122,17 +1126,111 @@ function compareReplaySessionTime(a: ThreadReplaySessionInfo, b: ThreadReplaySes
   return right - left;
 }
 
-function groupReplaySessionsByAgent(sessions: ThreadReplaySessionInfo[]): Array<{ agent: Agent; sessions: ThreadReplaySessionInfo[] }> {
-  const byAgent = new Map<Agent, ThreadReplaySessionInfo[]>();
-  for (const session of sessions) {
-    const group = byAgent.get(session.agent) ?? [];
-    group.push(session);
-    byAgent.set(session.agent, group);
+type ReplaySessionGroup = {
+  key: string;
+  label: string;
+  agent: Agent | null;
+  sessions: ThreadReplaySessionInfo[];
+};
+
+function groupReplaySessionsByThreadKind(
+  replay: ThreadReplayInfo,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): ReplaySessionGroup[] {
+  const keyForSession = replay.kind === "workflow"
+    ? (session: ThreadReplaySessionInfo) => workflowReplayGroupKey(session, t)
+    : (session: ThreadReplaySessionInfo) => roundReplayGroupKey(session, t);
+  const groups = new Map<string, ReplaySessionGroup>();
+  for (const session of replay.sessions) {
+    const seed = keyForSession(session);
+    const group = groups.get(seed.key) ?? { ...seed, sessions: [] };
+    group.sessions.push(session);
+    groups.set(seed.key, group);
   }
-  return Array.from(byAgent, ([agent, rows]) => ({
-    agent,
-    sessions: rows.slice().sort(compareReplaySessionTime),
-  }));
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      sessions: group.sessions.slice().sort(compareReplaySessionTime),
+    }))
+    .sort(compareReplayGroups);
+}
+
+function workflowReplayGroupKey(
+  session: ThreadReplaySessionInfo,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): ReplaySessionGroup {
+  const stageSource = session.sources.find((source) => source.kind === "stage" || source.stageId);
+  if (stageSource) {
+    const label = stageSource.label ?? stageSource.stageId ?? t("thread.replay_source.stage");
+    return {
+      key: `stage:${stageSource.stageId ?? label}`,
+      label,
+      agent: null,
+      sessions: [],
+    };
+  }
+  return fallbackReplayGroupKey(session, t);
+}
+
+function roundReplayGroupKey(
+  session: ThreadReplaySessionInfo,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): ReplaySessionGroup {
+  const roundSource = session.sources.find((source) => source.planRoundId || source.kind === "plan_task");
+  if (roundSource) {
+    const value = roundSource.planRoundId
+      ? shortSessionId(roundSource.planRoundId)
+      : roundSource.label ?? roundSource.planTaskId ?? t("thread.replay_source.plan_task");
+    return {
+      key: `round:${roundSource.planRoundId ?? roundSource.planTaskId ?? value}`,
+      label: t("thread.replay_group.round", { value }),
+      agent: null,
+      sessions: [],
+    };
+  }
+  return fallbackReplayGroupKey(session, t);
+}
+
+function fallbackReplayGroupKey(
+  session: ThreadReplaySessionInfo,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): ReplaySessionGroup {
+  const source = session.sources[0] ?? null;
+  if (source?.kind === "thread") {
+    return {
+      key: `thread:${session.agent}`,
+      label: t("thread.replay_group.thread"),
+      agent: session.agent,
+      sessions: [],
+    };
+  }
+  if (source?.kind === "astra_internal") {
+    return {
+      key: `astra:${source.astraRunId ?? session.agent}`,
+      label: source.label ?? t("thread.replay_source.astra_internal"),
+      agent: null,
+      sessions: [],
+    };
+  }
+  return {
+    key: `agent:${session.agent}`,
+    label: AGENT_LABEL[session.agent],
+    agent: session.agent,
+    sessions: [],
+  };
+}
+
+function compareReplayGroups(a: ReplaySessionGroup, b: ReplaySessionGroup): number {
+  const latestA = latestReplayGroupTime(a);
+  const latestB = latestReplayGroupTime(b);
+  return latestB - latestA || a.label.localeCompare(b.label);
+}
+
+function latestReplayGroupTime(group: ReplaySessionGroup): number {
+  return group.sessions.reduce((latest, session) => {
+    const time = session.lastSeenAt ?? session.firstSeenAt ?? session.session?.updatedAt ?? session.session?.startedAt ?? 0;
+    return Math.max(latest, time);
+  }, 0);
 }
 
 function replaySourceKey(source: ThreadReplaySessionSourceInfo): string {
