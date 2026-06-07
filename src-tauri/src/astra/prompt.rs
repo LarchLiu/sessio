@@ -10,29 +10,25 @@ const ASTRA_WORKFLOW_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Or
 
 Workflow threads are human-defined stages and do not use Astra automatic scheduling. Return an error terminal response if invoked for workflow.
 
-Return only one complete valid JSON object. Do not return markdown, code fences, comments, prose, trailing commas, partial JSON, or multiple JSON values.
+Return only one complete YAML mapping. Do not return JSON, markdown, code fences, comments, prose, or multiple YAML documents.
 
-Required top-level response:
-{
-  "summary": "string",
-  "runIntent": "error",
-  "reason": "workflow_astra_orchestration_unsupported",
-  "mode": null,
-  "tasks": []
-}"#;
+Required top-level YAML response:
+summary: string
+runIntent: error
+reason: workflow_astra_orchestration_unsupported
+mode: null
+tasks: []"#;
 
 const ASTRA_TEAMWORK_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Teamwork Orchestrator.
 
-Return only one complete valid JSON object. Do not return markdown, code fences, comments, prose, trailing commas, partial JSON, or multiple JSON values.
+Return only one complete YAML mapping. Do not return JSON, markdown, code fences, comments, prose, or multiple YAML documents.
 
-Required top-level response:
-{
-  "summary": "string",
-  "runIntent": "continue|complete|wait_for_human|error",
-  "reason": "string",
-  "mode": "parallel|sequential|null",
-  "tasks": []
-}
+Required top-level YAML response:
+summary: string
+runIntent: continue|complete|wait_for_human|error
+reason: string
+mode: parallel|sequential|null
+tasks: []
 
 Teamwork uses shared thread context plus Astra task orchestration. It does not use workflow stage scheduling.
 
@@ -45,14 +41,13 @@ Use runIntent:
 Do not return decisions. Do not return update_stage, retry_stage, add_or_update_issue, action, outcome, stage mutation, issue mutation, or targetStageId for teamwork.
 
 Teamwork task shape:
-{
-  "title": "string",
-  "assistantId": "thread-assistant-id",
-  "targetAgent": "codex|claude|gemini|astra-pi",
-  "prompt": "string",
-  "expectedOutput": "string",
-  "risk": "low|medium|high"
-}
+tasks:
+  - title: string
+    assistantId: thread-assistant-id
+    targetAgent: codex|claude|gemini|astra-pi
+    prompt: string
+    expectedOutput: string
+    risk: low|medium|high
 
 assistantId must reference one of thread.assistants. targetAgent should match that assistant's runtime agent. If you create an agent-level task without assistantId, targetAgent is required, but prefer assistantId so Sessio can preserve team-member history and assistant snapshots.
 
@@ -786,11 +781,13 @@ mod tests {
         let value: Value = serde_json::from_str(&prompt).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
 
-        assert!(instruction.contains(r#""summary": "string""#));
-        assert!(instruction.contains(r#""runIntent": "error""#));
-        assert!(instruction.contains(r#""reason": "workflow_astra_orchestration_unsupported""#));
-        assert!(instruction.contains(r#""mode": null"#));
-        assert!(instruction.contains(r#""tasks": []"#));
+        assert!(instruction.contains("Return only one complete YAML mapping"));
+        assert!(instruction.contains("Do not return JSON"));
+        assert!(instruction.contains("summary: string"));
+        assert!(instruction.contains("runIntent: error"));
+        assert!(instruction.contains("reason: workflow_astra_orchestration_unsupported"));
+        assert!(instruction.contains("mode: null"));
+        assert!(instruction.contains("tasks: []"));
         assert!(instruction.contains(
             "Workflow threads are human-defined stages and do not use Astra automatic scheduling"
         ));
@@ -816,9 +813,11 @@ mod tests {
 
         assert!(instruction.contains("Astra Teamwork Orchestrator"));
         assert!(instruction.contains("Teamwork uses shared thread context"));
-        assert!(instruction.contains(r#""runIntent": "continue|complete|wait_for_human|error""#));
-        assert!(instruction.contains(r#""mode": "parallel|sequential|null""#));
-        assert!(instruction.contains(r#""assistantId": "thread-assistant-id""#));
+        assert!(instruction.contains("Return only one complete YAML mapping"));
+        assert!(instruction.contains("Do not return JSON"));
+        assert!(instruction.contains("runIntent: continue|complete|wait_for_human|error"));
+        assert!(instruction.contains("mode: parallel|sequential|null"));
+        assert!(instruction.contains("assistantId: thread-assistant-id"));
         assert!(instruction.contains("Do not return update_stage"));
         assert!(instruction.contains("Do not return decisions"));
         assert!(!instruction.contains(r#""stage": {"#));

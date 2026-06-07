@@ -13,6 +13,7 @@ use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use serde_yaml::Value as YamlValue;
 
 use super::{
     pick_stage_agent, short_hash, stage_label, task_blocked_by_thread_exception,
@@ -609,6 +610,7 @@ fn content_chunk_text(chunk: &ContentChunk) -> Result<String> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct RawAstraPiAcpOrchestration {
     summary: Option<String>,
@@ -620,6 +622,7 @@ struct RawAstraPiAcpOrchestration {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 struct RawAstraPiAcpTask {
     #[serde(rename = "id")]
@@ -640,10 +643,10 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
     round_index: u32,
     completions: &[AstraTaskCompletion],
 ) -> Result<AstraOrchestration, AstraPiAcpFailure> {
-    let value = parse_json_object(response)?;
+    let value = parse_yaml_mapping(response)?;
     reject_legacy_orchestration_fields(&value)?;
-    let raw: RawAstraPiAcpOrchestration = serde_json::from_value(value)
-        .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
+    let raw: RawAstraPiAcpOrchestration = serde_yaml::from_value(value)
+        .map_err(|error| AstraPiAcpFailure::new("invalid_yaml", error.to_string()))?;
     let RawAstraPiAcpOrchestration {
         summary,
         run_intent,
@@ -695,8 +698,8 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
     })
 }
 
-fn reject_legacy_orchestration_fields(value: &Value) -> Result<(), AstraPiAcpFailure> {
-    let Some(object) = value.as_object() else {
+fn reject_legacy_orchestration_fields(value: &YamlValue) -> Result<(), AstraPiAcpFailure> {
+    let Some(object) = value.as_mapping() else {
         return Ok(());
     };
     for key in [
@@ -710,7 +713,8 @@ fn reject_legacy_orchestration_fields(value: &Value) -> Result<(), AstraPiAcpFai
         "issue",
         "retry",
     ] {
-        if object.contains_key(key) {
+        let key_value = YamlValue::String(key.to_string());
+        if object.contains_key(&key_value) {
             return Err(AstraPiAcpFailure::new(
                 "validation_failed",
                 format!("legacy Astra orchestration field is not supported: {key}"),
@@ -952,7 +956,7 @@ fn parse_task_risk(value: Option<&str>) -> AstraTaskRisk {
     }
 }
 
-fn parse_json_object(response: &str) -> Result<Value, AstraPiAcpFailure> {
+fn parse_yaml_mapping(response: &str) -> Result<YamlValue, AstraPiAcpFailure> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
         return Err(AstraPiAcpFailure::new(
@@ -960,43 +964,27 @@ fn parse_json_object(response: &str) -> Result<Value, AstraPiAcpFailure> {
             "Astra Pi ACP returned an empty response",
         ));
     }
-    let candidate = extract_json_candidate(trimmed).ok_or_else(|| {
-        AstraPiAcpFailure::new(
-            "invalid_json",
-            "Astra Pi ACP response did not contain a JSON object",
-        )
-    })?;
-    let value: Value = serde_json::from_str(candidate)
-        .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
-    if !value.is_object() {
+    if trimmed.contains("```") {
         return Err(AstraPiAcpFailure::new(
-            "invalid_json",
-            "Astra Pi ACP response JSON must be an object",
+            "invalid_yaml",
+            "Astra Pi ACP response must be a plain YAML mapping, not a markdown code fence",
+        ));
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return Err(AstraPiAcpFailure::new(
+            "invalid_yaml",
+            "JSON Astra orchestration responses are not supported; return a YAML mapping",
+        ));
+    }
+    let value: YamlValue = serde_yaml::from_str(trimmed)
+        .map_err(|error| AstraPiAcpFailure::new("invalid_yaml", error.to_string()))?;
+    if !value.is_mapping() {
+        return Err(AstraPiAcpFailure::new(
+            "invalid_yaml",
+            "Astra Pi ACP response YAML must be a mapping",
         ));
     }
     Ok(value)
-}
-
-fn extract_json_candidate(value: &str) -> Option<&str> {
-    if value.starts_with('{') && value.ends_with('}') {
-        return Some(value);
-    }
-    if let Some(fenced) = value.strip_prefix("```") {
-        let fenced = fenced
-            .strip_prefix("json")
-            .or_else(|| fenced.strip_prefix("JSON"))
-            .unwrap_or(fenced)
-            .trim_start();
-        if let Some(end) = fenced.rfind("```") {
-            return extract_json_candidate(fenced[..end].trim());
-        }
-    }
-    let start = value.find('{')?;
-    let end = value.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    Some(&value[start..=end])
 }
 
 #[cfg(test)]
@@ -1074,11 +1062,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_fenced_teamwork_continue_and_sanitizes_assistant_task() {
+    fn parses_yaml_teamwork_continue_and_sanitizes_assistant_task() {
         let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"```json
-            {"summary":"ok","runIntent":"continue","reason":"initial_plan","mode":"parallel","tasks":[{"id":"bad id!","title":"Build","assistantId":"assistant-codex","targetAgent":"codex","prompt":"Work","expectedOutput":"Notes","risk":"medium"}]}
-            ```"#,
+            r#"
+summary: ok
+runIntent: continue
+reason: initial_plan
+mode: parallel
+tasks:
+  - id: bad id!
+    title: Build
+    assistantId: assistant-codex
+    targetAgent: codex
+    prompt: Work
+    expectedOutput: Notes
+    risk: medium
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1103,10 +1102,21 @@ mod tests {
 
     #[test]
     fn parses_teamwork_sequential_tasks_without_batch_trimming() {
-        let response = r#"{"summary":"teamwork","runIntent":"continue","reason":"ordered_plan","mode":"sequential","tasks":[
-            {"title":"Build","assistantId":"assistant-codex","targetAgent":"codex","prompt":"Build the feature"},
-            {"title":"Review","assistantId":"assistant-claude","targetAgent":"claude","prompt":"Review the feature"}
-        ]}"#;
+        let response = r#"
+summary: teamwork
+runIntent: continue
+reason: ordered_plan
+mode: sequential
+tasks:
+  - title: Build
+    assistantId: assistant-codex
+    targetAgent: codex
+    prompt: Build the feature
+  - title: Review
+    assistantId: assistant-claude
+    targetAgent: claude
+    prompt: Review the feature
+"#;
 
         let orchestration =
             parse_astra_pi_acp_orchestration_response(response, &run(), &teamwork_thread(), 0, &[])
@@ -1134,7 +1144,15 @@ mod tests {
     #[test]
     fn rejects_legacy_decisions_field() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"done","runIntent":"continue","reason":"legacy","mode":"parallel","decisions":[{"action":"update_stage"}],"tasks":[]}"#,
+            r#"
+summary: done
+runIntent: continue
+reason: legacy
+mode: parallel
+decisions:
+  - action: update_stage
+tasks: []
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1149,7 +1167,15 @@ mod tests {
     #[test]
     fn rejects_continue_without_mode() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","runIntent":"continue","reason":"missing_mode","tasks":[{"assistantId":"assistant-codex","targetAgent":"codex","prompt":"Work"}]}"#,
+            r#"
+summary: bad
+runIntent: continue
+reason: missing_mode
+tasks:
+  - assistantId: assistant-codex
+    targetAgent: codex
+    prompt: Work
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1164,7 +1190,13 @@ mod tests {
     #[test]
     fn rejects_continue_with_empty_tasks() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","runIntent":"continue","reason":"empty","mode":"parallel","tasks":[]}"#,
+            r#"
+summary: bad
+runIntent: continue
+reason: empty
+mode: parallel
+tasks: []
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1179,7 +1211,16 @@ mod tests {
     #[test]
     fn rejects_continue_for_workflow_thread() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","runIntent":"continue","reason":"workflow","mode":"parallel","tasks":[{"title":"Thread task","targetAgent":"codex","prompt":"Work thread"}]}"#,
+            r#"
+summary: bad
+runIntent: continue
+reason: workflow
+mode: parallel
+tasks:
+  - title: Thread task
+    targetAgent: codex
+    prompt: Work thread
+"#,
             &run(),
             &super::super::tests::test_thread(Vec::new()),
             0,
@@ -1194,7 +1235,13 @@ mod tests {
     #[test]
     fn rejects_terminal_intent_with_mode_or_tasks() {
         let mode_error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"done","runIntent":"complete","reason":"done","mode":"parallel","tasks":[]}"#,
+            r#"
+summary: done
+runIntent: complete
+reason: done
+mode: parallel
+tasks: []
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1205,7 +1252,16 @@ mod tests {
         assert!(mode_error.message.contains("must not include mode"));
 
         let tasks_error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"done","runIntent":"complete","reason":"done","mode":null,"tasks":[{"assistantId":"assistant-codex","targetAgent":"codex","prompt":"Work"}]}"#,
+            r#"
+summary: done
+runIntent: complete
+reason: done
+mode: null
+tasks:
+  - assistantId: assistant-codex
+    targetAgent: codex
+    prompt: Work
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1224,7 +1280,13 @@ mod tests {
             ("error", AstraRunIntent::Error),
         ] {
             let response = format!(
-                r#"{{"summary":"terminal","runIntent":"{intent}","reason":"terminal_reason","mode":null,"tasks":[]}}"#
+                r#"
+summary: terminal
+runIntent: {intent}
+reason: terminal_reason
+mode: null
+tasks: []
+"#
             );
             let orchestration = parse_astra_pi_acp_orchestration_response(
                 &response,
@@ -1245,7 +1307,17 @@ mod tests {
     #[test]
     fn rejects_teamwork_task_with_target_stage_id() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","runIntent":"continue","reason":"bad_task","mode":"parallel","tasks":[{"assistantId":"assistant-codex","targetStageId":"stage-1","targetAgent":"codex","prompt":"Work"}]}"#,
+            r#"
+summary: bad
+runIntent: continue
+reason: bad_task
+mode: parallel
+tasks:
+  - assistantId: assistant-codex
+    targetStageId: stage-1
+    targetAgent: codex
+    prompt: Work
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1260,7 +1332,16 @@ mod tests {
     #[test]
     fn rejects_teamwork_task_with_unknown_assistant_id() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","runIntent":"continue","reason":"bad_task","mode":"parallel","tasks":[{"assistantId":"assistant-missing","targetAgent":"codex","prompt":"Work"}]}"#,
+            r#"
+summary: bad
+runIntent: continue
+reason: bad_task
+mode: parallel
+tasks:
+  - assistantId: assistant-missing
+    targetAgent: codex
+    prompt: Work
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1275,7 +1356,16 @@ mod tests {
     #[test]
     fn rejects_teamwork_task_with_mismatched_target_agent() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","runIntent":"continue","reason":"bad_task","mode":"parallel","tasks":[{"assistantId":"assistant-codex","targetAgent":"claude","prompt":"Work"}]}"#,
+            r#"
+summary: bad
+runIntent: continue
+reason: bad_task
+mode: parallel
+tasks:
+  - assistantId: assistant-codex
+    targetAgent: claude
+    prompt: Work
+"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1288,15 +1378,54 @@ mod tests {
     }
 
     #[test]
-    fn rejects_orchestration_without_json_object() {
-        assert!(parse_astra_pi_acp_orchestration_response(
-            "no json here",
+    fn rejects_json_orchestration_response() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","runIntent":"continue","reason":"json","mode":"parallel","tasks":[]}"#,
             &run(),
             &teamwork_thread(),
             0,
             &[]
         )
-        .is_err());
+        .unwrap_err();
+
+        assert_eq!(error.code, "invalid_yaml");
+        assert!(error.message.contains("JSON"));
+    }
+
+    #[test]
+    fn rejects_fenced_yaml_orchestration_response() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"```yaml
+summary: bad
+runIntent: complete
+reason: fenced
+mode: null
+tasks: []
+```"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "invalid_yaml");
+        assert!(error.message.contains("code fence"));
+    }
+
+    #[test]
+    fn rejects_orchestration_without_yaml_mapping() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            "no yaml mapping here",
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "invalid_yaml");
+        assert!(error.message.contains("must be a mapping"));
     }
 
     #[test]
