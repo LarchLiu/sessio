@@ -114,23 +114,13 @@ pub struct AstraRunRecord {
     pub project_path: String,
     pub status: String,
     pub mode: String,
-    pub proposed_tasks_json: String,
-    pub approved_task_ids_json: String,
-    pub delegated_session_ids_json: String,
-    pub task_results_json: String,
-    pub current_stage_id: Option<String>,
-    pub completed_task_ids_json: String,
-    pub stage_attempt_counts_json: String,
-    pub retry_limit: i64,
     pub planner_backend: Option<String>,
-    pub decision_backend: Option<String>,
     pub round_index: Option<i64>,
     pub round_limit: i64,
     pub terminal_reason: Option<String>,
     pub last_error_code: Option<String>,
     pub last_error_message: Option<String>,
     pub internal_planner_session_ids_json: String,
-    pub internal_decision_session_ids_json: String,
     pub run_diagnostics_json: String,
     pub error: Option<String>,
     pub created_at: i64,
@@ -404,35 +394,6 @@ pub trait SessionStore: Send + Sync {
                             .as_ref()
                             .map(|backend| format!("Astra planner: {backend}"))
                             .or_else(|| Some("Astra planner".to_string())),
-                        created_at: Some(run.updated_at),
-                    },
-                );
-            }
-
-            let decision_agent =
-                replay_agent_for_backend(run.decision_backend.as_deref()).unwrap_or(Agent::AstraPi);
-            for session_id in parse_session_id_vec(&run.internal_decision_session_ids_json) {
-                let session = session_lookup
-                    .get(&(decision_agent, session_id.clone()))
-                    .cloned();
-                add_replay_session_source(
-                    &mut sessions,
-                    decision_agent,
-                    &session_id,
-                    session,
-                    ThreadReplaySessionSourceInfo {
-                        kind: ThreadReplaySessionSourceKind::AstraInternal,
-                        thread_id: Some(thread.id.clone()),
-                        stage_id: None,
-                        plan_round_id: None,
-                        plan_task_id: None,
-                        astra_run_id: Some(run.run_id.clone()),
-                        role: Some(PlanTaskSessionRole::Diagnostic),
-                        label: run
-                            .decision_backend
-                            .as_ref()
-                            .map(|backend| format!("Astra internal: {backend}"))
-                            .or_else(|| Some("Astra internal".to_string())),
                         created_at: Some(run.updated_at),
                     },
                 );

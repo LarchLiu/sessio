@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
-import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal, AstraTaskResult, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo } from "../api";
+import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo } from "../api";
 import {
   AGENT_LABEL,
   cancelAstraRun,
@@ -206,9 +206,6 @@ function ThreadAstraPanel({
     () => planRounds.slice().sort((a, b) => b.roundIndex - a.roundIndex || b.createdAt - a.createdAt),
     [planRounds],
   );
-  const legacyTaskHistory = planRounds.length === 0
-    ? runs.flatMap((run) => run.proposedTasks.map((task) => ({ run, task })))
-    : [];
 
   const reloadAstraState = useCallback(() => {
     return Promise.all([listAstraRuns(thread.id), listPlanRounds(thread.id)])
@@ -342,22 +339,6 @@ function ThreadAstraPanel({
           </div>
         )}
 
-        {legacyTaskHistory.length > 0 && (
-          <div className="grid gap-2">
-            {legacyTaskHistory.map(({ run, task }) => (
-              <AstraLegacyTaskCard
-                key={`${run.runId}:${task.id}`}
-                task={task}
-                result={run.taskResults.find((result) => result.taskId === task.id) ?? null}
-                stage={stages.find((stage) => stage.id === task.targetStageId) ?? null}
-              />
-            ))}
-          </div>
-        )}
-
-        {activeRun && activeRun.delegatedSessionIds.length > 0 && (
-          <AstraDelegatedSessions run={activeRun} />
-        )}
         {activeRun && (
           <AstraRunDiagnostics run={activeRun} />
         )}
@@ -509,29 +490,6 @@ function AstraPlanTaskSessions({ sessions }: { sessions: PlanTaskSessionInfo[] }
   );
 }
 
-function AstraDelegatedSessions({ run }: { run: AstraHandle }) {
-  const resultsBySession = new Map(run.taskResults.map((result) => [result.sessioRuntimeSessionId, result]));
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {run.delegatedSessionIds.map((id) => {
-        const result = resultsBySession.get(id);
-        return (
-          <span
-            key={id}
-            title={result ? astraResultTitle(result) : id}
-            className={
-              "max-w-full truncate rounded px-1.5 py-0.5 text-meta " +
-              (result ? astraResultClass(result.status) : "bg-ink/[0.06] text-ink/40")
-            }
-          >
-            {result ? `${result.taskId}: ${result.status}` : id}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
 function AstraRunDiagnostics({ run }: { run: AstraHandle }) {
   const { t } = useI18n();
   const diagnostics = run.runDiagnostics.slice(-3).reverse().map((diagnostic, index) => {
@@ -579,43 +537,6 @@ function AstraRunDiagnostics({ run }: { run: AstraHandle }) {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-function AstraLegacyTaskCard({
-  task,
-  result,
-  stage,
-}: {
-  task: AstraTaskProposal;
-  result: AstraTaskResult | null;
-  stage: StageInfo | null;
-}) {
-  const { t } = useI18n();
-  const status = result?.status ?? "planned";
-  return (
-    <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
-      <div className="min-w-0">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="truncate text-body-sm font-medium text-ink/78">{task.title}</span>
-          <AgentGlyph agent={task.targetAgent} className="h-3.5 w-3.5 shrink-0" />
-          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraRiskClass(task.risk)}>
-            {t(`astra.risk.${task.risk}`)}
-          </span>
-          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraTaskStatusClass(status)}>
-            {status}
-          </span>
-          {stage && (
-            <span className="truncate text-meta text-ink/35">
-              {projectStageLabel(stage, t)}
-            </span>
-          )}
-        </div>
-        <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-ink/45">
-          {task.expectedOutput}
-        </div>
-      </div>
     </div>
   );
 }
@@ -1336,7 +1257,7 @@ function astraRiskClass(risk: "low" | "medium" | "high"): string {
   }
 }
 
-function astraResultClass(status: AstraTaskResult["status"]): string {
+function astraResultClass(status: PlanTaskStatus): string {
   switch (status) {
     case "completed":
       return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
@@ -1496,12 +1417,6 @@ function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
 
 function formatPlanStatus(status: string): string {
   return status.replace(/_/g, " ");
-}
-
-function astraResultTitle(result: AstraTaskResult): string {
-  const output = result.output.trim();
-  const detail = result.error ?? (output.length > 180 ? `${output.slice(0, 180)}...` : output);
-  return [result.sessioRuntimeSessionId, detail].filter(Boolean).join("\n");
 }
 
 function knownAgent(value: string): Agent | null {

@@ -120,7 +120,6 @@ pub(super) fn build_astra_orchestration_prompt(
         "run": {
             "id": run.run_id,
             "roundIndex": round_index,
-            "retryLimit": run.retry_limit,
         },
         "userPrompt": user_prompt.unwrap_or(""),
         "completedTasks": completed_tasks,
@@ -582,8 +581,6 @@ fn session_ref_json(session: &SessionInfo, source_kind: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
     use crate::astra::{AstraRunStatus, AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk};
     use crate::models::{
@@ -598,24 +595,14 @@ mod tests {
             project_id: "project-1".to_string(),
             project_path: "/tmp/project".to_string(),
             status: AstraRunStatus::Planning,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
             mode: "auto".to_string(),
-            current_stage_id: None,
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: 3,
             planner_backend: None,
-            decision_backend: None,
             round_index: None,
             round_limit: 3,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
             run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
@@ -795,8 +782,6 @@ mod tests {
 
     #[test]
     fn teamwork_orchestration_prompt_uses_assistants_without_stage_contract() {
-        let mut run = run();
-        run.stage_attempt_counts = HashMap::from([("stage-legacy-1".to_string(), 2)]);
         let mut task = teamwork_task();
         task.target_stage_id = Some("stage-legacy-1".to_string());
         let mut result = task_result();
@@ -805,7 +790,7 @@ mod tests {
         let completion = AstraTaskCompletion { task, result };
 
         let prompt = build_astra_orchestration_prompt(
-            &run,
+            &run(),
             &teamwork_thread(),
             Some("split work"),
             1,

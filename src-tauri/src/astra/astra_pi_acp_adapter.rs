@@ -346,18 +346,16 @@ async fn run_internal_astra_pi_acp_async(
                     init.agent_capabilities
                 );
                 let mut request = NewSessionRequest::new(workspace);
-                let backend_key = if purpose == "decision" {
-                    "decisionBackend"
-                } else {
-                    "plannerBackend"
-                };
                 let mut sessio_meta = serde_json::Map::new();
                 sessio_meta.insert("astraRunId".to_string(), Value::String(run_id.clone()));
                 sessio_meta.insert(
                     "astraInternalPurpose".to_string(),
                     Value::String(purpose.clone()),
                 );
-                sessio_meta.insert(backend_key.to_string(), Value::String("astra_pi_acp".to_string()));
+                sessio_meta.insert(
+                    "orchestratorBackend".to_string(),
+                    Value::String("astra_pi_acp".to_string()),
+                );
                 sessio_meta.insert("astraPiAcp".to_string(), Value::Object(meta));
                 request.meta = Some(
                     json!({ "sessio": Value::Object(sessio_meta) })
@@ -905,8 +903,6 @@ fn parse_yaml_mapping(response: &str) -> Result<YamlValue, AstraPiAcpFailure> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
 
     fn run() -> AstraRun {
@@ -916,24 +912,14 @@ mod tests {
             project_id: "project-1".to_string(),
             project_path: "/tmp/project".to_string(),
             status: super::super::AstraRunStatus::Planning,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
             mode: "rust_native".to_string(),
-            current_stage_id: None,
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: 3,
             planner_backend: None,
-            decision_backend: None,
             round_index: None,
             round_limit: 3,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
             run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,

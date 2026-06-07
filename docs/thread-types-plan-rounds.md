@@ -38,14 +38,14 @@ plan task 还必须保存执行时的 stage / assistant / agent 配置快照。`
 
 ### 3. 每轮 plan 还不是一等对象
 
-当前 Astra run 中有 `proposed_tasks_json` 和 `task_results_json`，但它们不是“每轮 plan”的清晰建模：
+此前设计曾把 Astra task lifecycle 放进 `astra_runs` 的 `proposed_tasks_json` / `task_results_json` 一类字段里，但这不是“每轮 plan”的清晰建模，也不再作为新实现的存储结构：
 
 - 不能自然表达第几轮 plan。
 - 不能明确一轮中的 tasks 是并行还是串行。
 - reload 后 task running 状态恢复依赖其他字段或 live event。
 - 普通 thread 类型也没有 plan/task 历史记录能力。
 
-后续需要把 plan round 和 plan task 从 Astra 内部字段提升为 thread 级别的一等数据。
+后续需要把 plan round 和 plan task 从 Astra 内部字段提升为 thread 级别的一等数据。旧 Astra run lifecycle 字段和旧 stage-decision 逻辑直接删除；因为这批 schema 还没有 release，不需要为旧 `astra_runs` 表形状做兼容迁移。
 
 ### 4. thread 与 sessions 的关系还不够完整
 
@@ -619,7 +619,7 @@ thread_plan_task_sessions(
 
 ### 与 Astra 的关系
 
-旧 Astra run 可以继续保留 `proposedTasks` 和 `taskResults` 作为只读历史归档字段，但新事实源必须直接使用 `thread_plan_rounds` / `thread_plan_tasks`。实现不从旧 `currentTaskId` / `approvedTaskIds` / stage-decision contract 反推新的 lifecycle，也不保留旧 workflow stage-decision 自动调度兼容入口。
+Astra run 只保留编排元数据、backend、diagnostics、round cursor 和终态原因；task lifecycle 必须直接使用 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`。旧 `proposedTasks` / `taskResults` / `currentTaskId` / `approvedTaskIds` 存储字段、API 展示字段和 orchestrator 逻辑都删除，不做只读归档兼容，也不从旧 stage-decision contract 反推新的 lifecycle。
 
 目标行为：
 
@@ -729,7 +729,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - dispatch 时更新 plan task 为 running。
 - dispatch/result 到达时写入 `thread_plan_task_sessions`，session 身份使用 `(agent, session_id)`。
 - result 到达时更新 plan task terminal 状态、result summary、error。
-- `AstraHandle` 可保留派生展示字段，但 UI 新逻辑和 task lifecycle 必须以 plan task 状态为准。
+- `AstraHandle` 只暴露 run 元数据、backend、diagnostics 和终态信息；task 展示从 plan round/task 查询，或由服务端基于 plan tables 显式派生，不能从 run lifecycle 字段读取。
 
 验收：
 
@@ -839,23 +839,25 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - Brainstorm 展示 shared board / synthesis。
 - Debate 展示 lane、交叉验证和最终收敛状态。
 
-### Phase 8: 清理旧 proposedTasks/taskResults 事实源依赖
+### Phase 8: 删除旧 run lifecycle 存储和逻辑依赖
 
-目标：避免长期两套事实源冲突。
+目标：避免长期两套事实源冲突。旧 Astra run lifecycle 字段来自未发布实现，直接移除，不做 archive compatibility。
 
 执行内容：
 
-- `proposedTasks` / `taskResults` 仅作为 Astra run 只读历史归档或派生展示字段。
-- 新 UI 和新 orchestrator 逻辑以 plan rounds/tasks 为准。
-- 清理只依赖 `currentTaskId` / `approvedTaskIds` 恢复 running 的逻辑。
-- 新 Astra 自动编排不再接受旧 stage-decision contract，也不通过旧字段恢复或继续调度。
+- 从 Rust run record、SQLite DDL、Tauri API、TS API、UI 和 orchestrator 中删除 `proposedTasks` / `taskResults` / `currentTaskId` / `approvedTaskIds` 等 run lifecycle 字段。
+- 新 UI 和新 orchestrator 逻辑只以 plan rounds/tasks 为准。
+- 删除依赖 `currentTaskId` / `approvedTaskIds` 恢复 running 的逻辑。
+- 新 Astra 自动编排不接受旧 stage-decision contract，也不通过旧字段恢复或继续调度。
+- SQLite 当前版本直接修改 schema；旧表形状未 release，不写兼容迁移。
 - 更新测试，确保 plan tasks 是 lifecycle owner。
 
 验收：
 
 - running/planned/completed 展示不依赖 `currentTaskId`。
 - 多并行 task reload 稳定。
-- 旧 run 可以作为历史归档显示，但不作为旧 stage-decision 自动调度兼容入口。
+- `astra_runs` 不包含旧 lifecycle 列。
+- `AstraHandle` 不包含旧 lifecycle 字段。
 
 ## 测试矩阵
 
@@ -929,9 +931,9 @@ UI 文案可以解释为“Workflow thread”或“阶段式工作流”。
 
 v1 不支持复杂 DAG，这是有意取舍。复杂流程通过多轮 plan 表达，降低实现复杂度。
 
-### 风险 3: 旧 run 只读归档边界
+### 风险 3: 旧 run lifecycle 双轨风险
 
-Astra 旧字段 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 还会存在一段时间，但只能用于历史展示、诊断或派生归档。新 UI 和新 orchestrator 必须以 plan tasks 为事实源；旧字段不能作为 lifecycle owner、running 恢复依据或旧 stage-decision 自动调度兼容入口。
+Astra 旧字段 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 如果继续存在，会让 UI、orchestrator 和 reload 恢复出现双轨事实源。处理方式不是保留只读归档，而是直接从 schema、API、UI 和逻辑层删除；新 UI 和新 orchestrator 必须以 plan tasks 为唯一 lifecycle owner。
 
 ### 风险 4: non-workflow thread 是否允许无 assistants
 
@@ -960,7 +962,7 @@ stage、assistant、agent 都是可配置对象。历史 task 如果 replay 时�
 
 - v1 不做一轮内复杂 DAG。
 - v1 不删除现有 workflow/project/stage 模型。
-- v1 不强制删除旧 Astra proposedTasks/taskResults 字段，但它们只能只读归档，不作为兼容调度入口。
+- v1 不保留旧 Astra run lifecycle 字段或旧 stage-decision 调度兼容逻辑；未发布 SQLite 旧表形状直接按新 schema 修改。
 - v1 不要求 workflow thread 必须使用 thread-level assistants。
-- v1 不做破坏性迁移。
+- v1 不删除 workflow/project/stage 人工流程模型和人工 stage/issue API。
 - 如果不实现 `brainstorm_backend` / `debate_backend` 或等价专用策略，v1 不宣称完整支持 brainstorm/debate 自动编排。

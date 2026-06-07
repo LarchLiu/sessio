@@ -92,7 +92,7 @@ task 至少支持：
 - `errored`
 - `cancelled`
 
-task 状态通过 `thread_plan_tasks.status` 持久化。`approvedTaskIds` 和 `currentTaskId` 不再作为 running 恢复的唯一来源。若后续需要人工 approval gate，应建模为 run/round 级 gate 或独立 action log，不作为 task lifecycle 状态。
+task 状态通过 `thread_plan_tasks.status` 持久化。`approvedTaskIds` 和 `currentTaskId` 从 run lifecycle contract 中删除，不参与 running 恢复。若后续需要人工 approval gate，应建模为 run/round 级 gate 或独立 action log，不作为 task lifecycle 状态。
 
 并行 task dispatch 时，应一次性写入所有应启动 task 的 running 状态。reload 后，UI 应能只依赖 plan round/task 持久化数据恢复全部 running task；`listAstraRuns` 可以携带派生视图，但不能成为 task lifecycle 的唯一事实源。
 
@@ -186,20 +186,22 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ### Phase 0: 直接替换旧 stage-decision 自动编排路径
 
-目标：停止围绕旧 `decisions` contract 打兼容补丁，并把 workflow 的旧 stage-decision Astra 自动编排路径直接替换为 teamwork 的 assistant-routed plan-task contract。旧 run 只保留只读历史展示；新 run 不再进入旧 workflow stage-decision 调度路径。
+目标：停止围绕旧 `decisions` contract 打兼容补丁，并把旧 stage-routed Astra 自动编排路径直接替换为 teamwork 的 assistant-routed plan-task contract。workflow 不再进入 Astra stage-decision 调度路径；旧 run lifecycle 存储字段和逻辑层直接删除，不做只读归档兼容。
 
 执行内容：
 
 - 明确后续持久化事实源以 `docs/thread-types-plan-rounds.md` 为准。
 - 保留 300s timeout 和诊断增强方向。
 - 不再新增 JSON repair、legacy decision shape 兼容或 pseudo function-call wrapper。
-- 删除或隔离旧 stage-decision 自动调度入口；workflow thread 调用 Astra 时直接拒绝，不创建兼容 run。
-- 旧 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 只能作为历史归档读取，不参与 running 恢复、下一轮规划或继续调度。
+- 删除旧 stage-decision 自动调度入口；workflow thread 调用 Astra 时直接拒绝，不创建兼容 run。
+- 从 Rust run record、SQLite DDL、Tauri API、TS API、UI 和 orchestrator 中删除 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 等旧 run lifecycle 字段。
+- 旧 SQLite 表形状未 release，直接按新 schema 修改，不写旧 Astra run 存储兼容迁移。
 
 验收：
 
 - workflow / brainstorm / debate 不再能启动通用 Astra 自动编排；teamwork 是唯一 v1 自动编排入口。
 - 旧 stage-decision response shape 被拒绝，不进入 fallback 或 repair。
+- `AstraHandle` 不包含旧 run lifecycle 字段；task 展示从 plan round/task 查询。
 - 后续代码改动按实施顺序拆分，不再混合 parser hotfix 和架构重构。
 
 ### Phase 1: 接入 ThreadKind 和 thread assistants
@@ -262,7 +264,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 - dispatch task batch 前，在同一事务中把本轮应启动的 plan tasks 更新为 `running`。
 - dispatch/result 到达时，通过 `thread_plan_task_sessions` 记录 delegated/runtime session refs。
 - result 到达时更新 plan task terminal 状态、result summary、error。
-- `AstraHandle` 可保留派生展示字段，但 task lifecycle 必须以 plan task 状态为准。
+- `AstraHandle` 只暴露 run 元数据、backend、diagnostics 和终态信息；task lifecycle 展示必须从 plan round/task 查询，或由服务端基于 plan tables 显式派生。
 
 验收：
 
@@ -380,9 +382,9 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 这次不是 parser hotfix，而是控制面重构。需要按实施顺序拆分：先落 `ThreadKind` / `thread_assistants`，再落 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，再改 Astra contract 写这些表，最后接入 teamwork/brainstorm/debate。
 
-### 风险 2: 旧 run 展示边界
+### 风险 2: 旧 run lifecycle 双轨风险
 
-旧 run 可能没有 plan tasks，只能作为只读历史归档或派生展示处理。新自动编排不兼容旧 stage-decision contract，也不能从 `approvedTaskIds + taskResults + currentTaskId` 反推出新的 lifecycle 事实源；新 run 必须使用 `thread_plan_tasks`。workflow 的旧 stage-decision 调度入口不需要兼容，直接由 teamwork assistant-routed contract 替换。
+旧 run lifecycle 字段如果继续存在，会让 UI、orchestrator 和 reload 恢复出现双轨事实源。处理方式不是只读历史归档或派生展示，而是直接删除旧字段和旧逻辑层；新 run 必须使用 `thread_plan_tasks`。workflow 的旧 stage-decision 调度入口不需要兼容，直接由 teamwork assistant-routed contract 替换。
 
 ### 风险 3: workflow stage UI 与 teamwork Astra 分离
 
@@ -398,7 +400,7 @@ Teamwork 是 shared context + task orchestration。Brainstorm 还需要 shared b
 
 ## 明确不做
 
-- 不做破坏性 DB migration。
+- 不做旧 Astra run 存储兼容迁移；这些 SQLite schema 尚未 release，直接按新 schema 修改。
 - 不删除 workflow stage/issue 人工 API。
 - 不把 stage/issues 作为 teamwork prompt 控制输入。
 - 不让 LLM 返回 stage/issue mutation。

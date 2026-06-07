@@ -2,8 +2,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    next_dispatchable_tasks, now_ms, validate_teamwork_astra_tasks, AstraBackendConfig,
-    AstraOrchestration, AstraRun, AstraRunIntent, AstraRunStatus, AstraService,
+    astra_task_from_plan_task, next_dispatchable_tasks, now_ms, validate_teamwork_astra_tasks,
+    AstraBackendConfig, AstraOrchestration, AstraRun, AstraRunIntent, AstraRunStatus, AstraService,
     AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
 use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
@@ -311,22 +311,7 @@ impl AstraService {
             else {
                 continue;
             };
-            let Some(task) = run.proposed_tasks.iter().find(|task| {
-                task.plan_task_id.as_deref() == Some(running_task.id.as_str())
-                    && !run.task_results.iter().any(|result| {
-                        result.task_id == task.id
-                            && matches!(
-                                result.status,
-                                super::AstraTaskResultStatus::Completed
-                                    | super::AstraTaskResultStatus::Failed
-                                    | super::AstraTaskResultStatus::Errored
-                                    | super::AstraTaskResultStatus::Cancelled
-                            )
-                    })
-            }) else {
-                continue;
-            };
-            return Ok(vec![task.clone()]);
+            return Ok(vec![astra_task_from_plan_task(running_task)]);
         }
         Ok(Vec::new())
     }
@@ -347,8 +332,8 @@ impl AstraService {
         if let Err(error) = validate_teamwork_astra_tasks(&tasks) {
             let _ = self.error_run(
                 &run.run_id,
-                "orchestrator_legacy_stage_task",
-                "orchestrator_legacy_stage_task",
+                "orchestrator_unsupported_stage_task",
+                "orchestrator_unsupported_stage_task",
                 error.to_string(),
             )?;
             return Ok((self.load_run(&run.run_id)?, Vec::new()));
@@ -371,27 +356,14 @@ impl AstraService {
             tasks,
         )?;
         let orchestrator_backend_for_run = orchestrator_backend.to_string();
-        let (planned, ()) = self.mutate_run(&run.run_id, {
-            let tasks = tasks.clone();
-            move |next| {
-                if !next.status.active() {
-                    return Ok(());
-                }
-                next.status = AstraRunStatus::Dispatching;
-                next.planner_backend = Some(orchestrator_backend_for_run);
-                next.decision_backend = next.planner_backend.clone();
-                next.round_index = Some(round_index);
-                for task in tasks {
-                    if !next
-                        .proposed_tasks
-                        .iter()
-                        .any(|existing| existing.id == task.id)
-                    {
-                        next.proposed_tasks.push(task);
-                    }
-                }
-                Ok(())
+        let (planned, ()) = self.mutate_run(&run.run_id, move |next| {
+            if !next.status.active() {
+                return Ok(());
             }
+            next.status = AstraRunStatus::Dispatching;
+            next.planner_backend = Some(orchestrator_backend_for_run);
+            next.round_index = Some(round_index);
+            Ok(())
         })?;
         self.emit(
             &planned,
@@ -407,7 +379,7 @@ impl AstraService {
             }),
         );
         let dispatch_batch = match mode {
-            PlanRoundMode::Parallel => next_dispatchable_tasks(&planned, &latest_thread),
+            PlanRoundMode::Parallel => next_dispatchable_tasks(&tasks, &latest_thread),
             PlanRoundMode::Sequential => tasks.into_iter().take(1).collect(),
         };
         Ok((planned, dispatch_batch))
@@ -493,7 +465,7 @@ impl AstraService {
         &self,
         run_id: &str,
         status: AstraRunStatus,
-        thread_stage_id: Option<String>,
+        _thread_stage_id: Option<String>,
         reason: &'static str,
     ) -> Result<AstraRun> {
         let (run, changed) = self.mutate_run(run_id, move |next| {
@@ -501,9 +473,6 @@ impl AstraService {
                 return Ok(false);
             }
             next.status = status;
-            if let Some(stage_id) = thread_stage_id {
-                next.current_stage_id = Some(stage_id);
-            }
             Ok(true)
         })?;
         if changed {
@@ -704,72 +673,74 @@ mod tests {
 
     #[test]
     fn workflow_stage_tasks_are_not_automatically_dispatchable() {
-        let mut run = test_run("run-dispatch-exception");
         let mut research = test_stage("research", StageStatus::NeedsReview);
         let mut plan = test_stage("plan", StageStatus::InProgress);
         research.assistants.push(stage_assistant());
         plan.assistants.push(stage_assistant());
-        run.proposed_tasks.push(super::super::AstraTaskProposal {
-            id: "task-plan".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Plan".to_string(),
-            target_stage_id: Some("plan".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Plan next.".to_string(),
-            expected_output: "Plan.".to_string(),
-            risk: super::super::AstraTaskRisk::Low,
-        });
-        run.proposed_tasks.push(super::super::AstraTaskProposal {
-            id: "task-review".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Review".to_string(),
-            target_stage_id: Some("research".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Review research.".to_string(),
-            expected_output: "Review notes.".to_string(),
-            risk: super::super::AstraTaskRisk::Medium,
-        });
+        let tasks = vec![
+            super::super::AstraTaskProposal {
+                id: "task-plan".to_string(),
+                plan_task_id: None,
+                assistant_id: None,
+                title: "Plan".to_string(),
+                target_stage_id: Some("plan".to_string()),
+                target_agent: Agent::Codex,
+                prompt: "Plan next.".to_string(),
+                expected_output: "Plan.".to_string(),
+                risk: super::super::AstraTaskRisk::Low,
+            },
+            super::super::AstraTaskProposal {
+                id: "task-review".to_string(),
+                plan_task_id: None,
+                assistant_id: None,
+                title: "Review".to_string(),
+                target_stage_id: Some("research".to_string()),
+                target_agent: Agent::Codex,
+                prompt: "Review research.".to_string(),
+                expected_output: "Review notes.".to_string(),
+                risk: super::super::AstraTaskRisk::Medium,
+            },
+        ];
         let thread = test_thread(vec![research, plan]);
 
-        let dispatchable = next_dispatchable_tasks(&run, &thread);
+        let dispatchable = next_dispatchable_tasks(&tasks, &thread);
 
         assert!(dispatchable.is_empty());
     }
 
     #[test]
     fn workflow_blocked_stage_tasks_are_not_automatically_dispatchable() {
-        let mut run = test_run("run-dispatch-blocked");
         let mut blocked = test_stage("blocked", StageStatus::Blocked);
         let mut plan = test_stage("plan", StageStatus::InProgress);
         blocked.assistants.push(stage_assistant());
         plan.assistants.push(stage_assistant());
-        run.proposed_tasks.push(super::super::AstraTaskProposal {
-            id: "task-plan".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Plan".to_string(),
-            target_stage_id: Some("plan".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Plan next.".to_string(),
-            expected_output: "Plan.".to_string(),
-            risk: super::super::AstraTaskRisk::Low,
-        });
-        run.proposed_tasks.push(super::super::AstraTaskProposal {
-            id: "task-blocked".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Unblock".to_string(),
-            target_stage_id: Some("blocked".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Recover blocked stage.".to_string(),
-            expected_output: "Recovery notes.".to_string(),
-            risk: super::super::AstraTaskRisk::High,
-        });
+        let tasks = vec![
+            super::super::AstraTaskProposal {
+                id: "task-plan".to_string(),
+                plan_task_id: None,
+                assistant_id: None,
+                title: "Plan".to_string(),
+                target_stage_id: Some("plan".to_string()),
+                target_agent: Agent::Codex,
+                prompt: "Plan next.".to_string(),
+                expected_output: "Plan.".to_string(),
+                risk: super::super::AstraTaskRisk::Low,
+            },
+            super::super::AstraTaskProposal {
+                id: "task-blocked".to_string(),
+                plan_task_id: None,
+                assistant_id: None,
+                title: "Unblock".to_string(),
+                target_stage_id: Some("blocked".to_string()),
+                target_agent: Agent::Codex,
+                prompt: "Recover blocked stage.".to_string(),
+                expected_output: "Recovery notes.".to_string(),
+                risk: super::super::AstraTaskRisk::High,
+            },
+        ];
         let thread = test_thread(vec![blocked, plan]);
 
-        let dispatchable = next_dispatchable_tasks(&run, &thread);
+        let dispatchable = next_dispatchable_tasks(&tasks, &thread);
 
         assert!(dispatchable.is_empty());
     }
@@ -809,38 +780,6 @@ mod tests {
             prompt: "Work".to_string(),
             expected_output: "Notes".to_string(),
             risk: super::super::AstraTaskRisk::Low,
-        }
-    }
-
-    fn test_run(run_id: &str) -> AstraRun {
-        AstraRun {
-            run_id: run_id.to_string(),
-            thread_id: "thread-1".to_string(),
-            project_id: "project-1".to_string(),
-            project_path: "/tmp".to_string(),
-            status: AstraRunStatus::Running,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
-            mode: "auto".to_string(),
-            current_stage_id: None,
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: std::collections::HashMap::new(),
-            retry_limit: super::super::ASTRA_DEFAULT_RETRY_LIMIT,
-            planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
-            round_index: None,
-            round_limit: super::super::RUST_NATIVE_ROUND_LIMIT,
-            terminal_reason: None,
-            last_error_code: None,
-            last_error_message: None,
-            internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
-            run_diagnostics: Vec::new(),
-            error: None,
-            created_at: 1,
-            updated_at: 1,
         }
     }
 

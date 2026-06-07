@@ -16,7 +16,7 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::runtime::RuntimeManager;
 use crate::models::{
-    Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskRisk,
+    Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo,
 };
 use crate::store::{
@@ -48,7 +48,6 @@ pub(crate) use types::{AstraOrchestration, AstraRunIntent, AstraTaskCompletion};
 
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
-const ASTRA_DEFAULT_RETRY_LIMIT: u32 = 3;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 
@@ -138,7 +137,7 @@ pub(super) struct AstraBackendConfig {
 #[derive(Debug, Clone)]
 struct DelegatedSessionState {
     run_id: String,
-    task_id: String,
+    task: AstraTaskProposal,
     thread_stage_id: Option<String>,
     agent_session_id: Option<String>,
     stage_task_context: Option<StageTaskContext>,
@@ -417,20 +416,11 @@ impl AstraService {
     pub fn recover_interrupted_runs(&self) -> Result<()> {
         let interrupted = self.inner.store.interrupt_active_astra_runs()?;
         for record in &interrupted {
-            let session_ids =
-                serde_json::from_str::<Vec<String>>(&record.delegated_session_ids_json)
-                    .unwrap_or_default();
-            let cleaned = self
-                .inner
-                .store
-                .cleanup_partial_astra_sessions(&session_ids)?;
-            if cleaned > 0 {
-                log::info!(
-                    "[astra:recover:cleanup-partial] runId={} cleanedSessions={}",
-                    record.run_id,
-                    cleaned
-                );
-            }
+            log::info!(
+                "[astra:recover:interrupt-run] runId={} status={}",
+                record.run_id,
+                record.status
+            );
         }
         Ok(())
     }
@@ -491,24 +481,14 @@ impl AstraService {
                 project_id: thread.project_id.clone(),
                 project_path: project.path.clone(),
                 status: AstraRunStatus::Planning,
-                proposed_tasks: Vec::new(),
-                approved_task_ids: Vec::new(),
-                delegated_session_ids: Vec::new(),
-                task_results: Vec::new(),
                 mode: "rust_native".to_string(),
-                current_stage_id: None,
-                completed_task_ids: Vec::new(),
-                stage_attempt_counts: HashMap::new(),
-                retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
                 planner_backend: Some("deterministic".to_string()),
-                decision_backend: Some("deterministic".to_string()),
                 round_index: None,
                 round_limit: RUST_NATIVE_ROUND_LIMIT,
                 terminal_reason: None,
                 last_error_code: None,
                 last_error_message: None,
                 internal_planner_session_ids: Vec::new(),
-                internal_decision_session_ids: Vec::new(),
                 run_diagnostics: Vec::new(),
                 error: None,
                 created_at: now,
@@ -676,11 +656,21 @@ impl AstraService {
         let handle = self.inner.runtime.start_session(req)?;
         self.track_delegated_session(
             &run.run_id,
-            &task.id,
+            task,
             attempt,
             &handle.sessio_runtime_session_id,
             stage_context,
         )?;
+        if is_persistable_agent_session_id(&handle.agent_runtime_session_id) {
+            self.record_ready_delegated_session(
+                &run.run_id,
+                task.target_agent,
+                &task.id,
+                attempt.thread_stage_id,
+                &handle.agent_runtime_session_id,
+                &handle.sessio_runtime_session_id,
+            )?;
+        }
         // Register the result waiter before sending the prompt: a fast (or
         // synchronous fake) turn can reach a terminal state inside send_input,
         // so the waiter must already be in place or its wakeup is lost.
@@ -855,7 +845,7 @@ impl AstraService {
     fn track_delegated_session(
         &self,
         run_id: &str,
-        task_id: &str,
+        task: &AstraTaskProposal,
         attempt: DelegatedAttempt<'_>,
         sessio_runtime_session_id: &str,
         stage_task_context: Option<StageTaskContext>,
@@ -869,7 +859,7 @@ impl AstraService {
             .entry(sessio_runtime_session_id.to_string())
             .and_modify(|state| {
                 state.run_id = run_id.to_string();
-                state.task_id = task_id.to_string();
+                state.task = task.clone();
                 state.thread_stage_id = attempt.thread_stage_id.map(ToString::to_string);
                 state.attempt_count = attempt.attempt_count;
                 state.retry_limit_reached = attempt.retry_limit_reached;
@@ -879,7 +869,7 @@ impl AstraService {
             })
             .or_insert_with(|| DelegatedSessionState {
                 run_id: run_id.to_string(),
-                task_id: task_id.to_string(),
+                task: task.clone(),
                 thread_stage_id: attempt.thread_stage_id.map(ToString::to_string),
                 agent_session_id: None,
                 stage_task_context,
@@ -909,26 +899,7 @@ impl AstraService {
                     return Ok(());
                 };
                 let thread_stage_id = metadata.get("astraThreadStageId").and_then(Value::as_str);
-                let attempt_count = metadata
-                    .get("astraAttemptCount")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(1) as u32;
-                let retry_limit_reached = metadata
-                    .get("astraRetryLimitReached")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
                 if is_persistable_agent_session_id(&agent_runtime_session_id) {
-                    self.track_delegated_session(
-                        run_id,
-                        task_id,
-                        DelegatedAttempt {
-                            thread_stage_id,
-                            attempt_count,
-                            retry_limit_reached,
-                        },
-                        &sessio_runtime_session_id,
-                        None,
-                    )?;
                     self.record_ready_delegated_session(
                         run_id,
                         agent,
@@ -1080,7 +1051,7 @@ impl AstraService {
         agent_session_id: &str,
         sessio_runtime_session_id: &str,
     ) -> Result<()> {
-        let (state_context, already_recorded, already_finished) = {
+        let (state_context, state_task, already_recorded, already_finished) = {
             let delegated = self
                 .inner
                 .delegated_sessions
@@ -1088,6 +1059,7 @@ impl AstraService {
                 .map_err(|_| anyhow::anyhow!("Astra delegated session lock poisoned"))?;
             let state = delegated.get(sessio_runtime_session_id);
             let context = state.and_then(|state| state.stage_task_context.clone());
+            let task = state.map(|state| state.task.clone());
             let recorded = state
                 .map(|state| {
                     state.session_recorded
@@ -1095,13 +1067,11 @@ impl AstraService {
                 })
                 .unwrap_or(false);
             let finished = state.map(|state| state.finished).unwrap_or(true);
-            (context, recorded, finished)
+            (context, task, recorded, finished)
         };
         if already_recorded || already_finished {
             return Ok(());
         }
-        let sessio_runtime_session_id_for_run = sessio_runtime_session_id.to_string();
-        let agent_session_id_for_run = agent_session_id.to_string();
         let (run, task) = {
             let _guard = self
                 .inner
@@ -1112,12 +1082,8 @@ impl AstraService {
             if !run.status.active() {
                 return Ok(());
             }
-            let task = run
-                .proposed_tasks
-                .iter()
-                .find(|task| task.id == task_id)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Astra task not found: {task_id}"))?;
+            let task =
+                state_task.ok_or_else(|| anyhow::anyhow!("Astra task not found: {task_id}"))?;
             let context = match (state_context, thread_stage_id) {
                 (Some(context), _) => Some(context),
                 (None, Some(stage_id)) => {
@@ -1141,15 +1107,6 @@ impl AstraService {
                 agent_session_id,
                 PlanTaskSessionRole::Delegated,
             )?;
-            run.delegated_session_ids
-                .retain(|id| id != &sessio_runtime_session_id_for_run);
-            if !run
-                .delegated_session_ids
-                .iter()
-                .any(|id| id == &agent_session_id_for_run)
-            {
-                run.delegated_session_ids.push(agent_session_id_for_run);
-            }
             run.updated_at = now_ms();
             self.inner.store.upsert_astra_run(&run_to_record(&run))?;
             (run, task)
@@ -1235,7 +1192,7 @@ impl AstraService {
             state.clone()
         };
         let result = AstraTaskResult {
-            task_id: state.task_id.clone(),
+            task_id: state.task.id.clone(),
             thread_stage_id: state.thread_stage_id.clone(),
             sessio_runtime_session_id: state
                 .agent_session_id
@@ -1273,10 +1230,7 @@ impl AstraService {
 
     fn record_task_result(&self, run_id: &str, result: AstraTaskResult) -> Result<AstraRun> {
         let result_for_plan = result.clone();
-        let (run, _) = self.mutate_run(run_id, move |run| {
-            upsert_task_result_in_run(run, result);
-            Ok(())
-        })?;
+        let run = self.load_run(run_id)?;
         self.record_plan_task_result(&run, &result_for_plan)?;
         Ok(run)
     }
@@ -1403,20 +1357,14 @@ impl AstraService {
             thread_id: run.thread_id,
             project_id: run.project_id,
             status: run.status,
-            proposed_tasks: run.proposed_tasks,
-            delegated_session_ids: run.delegated_session_ids,
-            task_results: run.task_results,
             mode: run.mode,
-            retry_limit: run.retry_limit,
             planner_backend: run.planner_backend,
-            decision_backend: run.decision_backend,
             round_index: run.round_index,
             round_limit: run.round_limit,
             terminal_reason: run.terminal_reason,
             last_error_code: run.last_error_code,
             last_error_message: run.last_error_message,
             internal_planner_session_ids: run.internal_planner_session_ids,
-            internal_decision_session_ids: run.internal_decision_session_ids,
             run_diagnostics: run.run_diagnostics,
             error: run.error,
             created_at: run.created_at,
@@ -1547,11 +1495,12 @@ impl AstraService {
             .lock()
             .map_err(|_| anyhow::anyhow!("Astra worker registry lock poisoned"))?;
         match workers.get_mut(run_id) {
-            Some(state @ AstraWorkerState::Pending) => {
+            Some(state) if *state == AstraWorkerState::Pending => {
                 *state = AstraWorkerState::Running;
                 Ok(true)
             }
-            Some(AstraWorkerState::Running) => Ok(false),
+            Some(state) if *state == AstraWorkerState::Running => Ok(false),
+            Some(_) => Ok(false),
             None => {
                 workers.insert(run_id.to_string(), AstraWorkerState::Running);
                 Ok(true)
@@ -1885,22 +1834,7 @@ fn run_to_record(run: &AstraRun) -> AstraRunRecord {
         project_path: run.project_path.clone(),
         status: run.status.as_str().to_string(),
         mode: run.mode.clone(),
-        proposed_tasks_json: serde_json::to_string(&run.proposed_tasks)
-            .unwrap_or_else(|_| "[]".to_string()),
-        approved_task_ids_json: serde_json::to_string(&run.approved_task_ids)
-            .unwrap_or_else(|_| "[]".to_string()),
-        delegated_session_ids_json: serde_json::to_string(&run.delegated_session_ids)
-            .unwrap_or_else(|_| "[]".to_string()),
-        task_results_json: serde_json::to_string(&run.task_results)
-            .unwrap_or_else(|_| "[]".to_string()),
-        current_stage_id: run.current_stage_id.clone(),
-        completed_task_ids_json: serde_json::to_string(&run.completed_task_ids)
-            .unwrap_or_else(|_| "[]".to_string()),
-        stage_attempt_counts_json: serde_json::to_string(&run.stage_attempt_counts)
-            .unwrap_or_else(|_| "{}".to_string()),
-        retry_limit: i64::from(run.retry_limit),
         planner_backend: run.planner_backend.clone(),
-        decision_backend: run.decision_backend.clone(),
         round_index: run.round_index.map(i64::from),
         round_limit: i64::from(run.round_limit),
         terminal_reason: run.terminal_reason.clone(),
@@ -1908,10 +1842,6 @@ fn run_to_record(run: &AstraRun) -> AstraRunRecord {
         last_error_message: run.last_error_message.clone(),
         internal_planner_session_ids_json: serde_json::to_string(&run.internal_planner_session_ids)
             .unwrap_or_else(|_| "[]".to_string()),
-        internal_decision_session_ids_json: serde_json::to_string(
-            &run.internal_decision_session_ids,
-        )
-        .unwrap_or_else(|_| "[]".to_string()),
         run_diagnostics_json: serde_json::to_string(&run.run_diagnostics)
             .unwrap_or_else(|_| "[]".to_string()),
         error: run.error.clone(),
@@ -1927,23 +1857,8 @@ fn record_to_run(record: AstraRunRecord) -> Result<AstraRun> {
         project_id: record.project_id,
         project_path: record.project_path,
         status: AstraRunStatus::from_db_str(&record.status).unwrap_or(AstraRunStatus::Errored),
-        proposed_tasks: serde_json::from_str(&record.proposed_tasks_json).unwrap_or_default(),
-        approved_task_ids: serde_json::from_str(&record.approved_task_ids_json).unwrap_or_default(),
-        delegated_session_ids: serde_json::from_str(&record.delegated_session_ids_json)
-            .unwrap_or_default(),
-        task_results: serde_json::from_str(&record.task_results_json).unwrap_or_default(),
         mode: record.mode,
-        current_stage_id: record.current_stage_id,
-        completed_task_ids: serde_json::from_str(&record.completed_task_ids_json)
-            .unwrap_or_default(),
-        stage_attempt_counts: serde_json::from_str(&record.stage_attempt_counts_json)
-            .unwrap_or_default(),
-        retry_limit: u32::try_from(record.retry_limit)
-            .ok()
-            .filter(|value| *value > 0)
-            .unwrap_or(ASTRA_DEFAULT_RETRY_LIMIT),
         planner_backend: record.planner_backend,
-        decision_backend: record.decision_backend,
         round_index: record
             .round_index
             .and_then(|value| u32::try_from(value).ok()),
@@ -1958,31 +1873,11 @@ fn record_to_run(record: AstraRunRecord) -> Result<AstraRun> {
             &record.internal_planner_session_ids_json,
         )
         .unwrap_or_default(),
-        internal_decision_session_ids: serde_json::from_str(
-            &record.internal_decision_session_ids_json,
-        )
-        .unwrap_or_default(),
         run_diagnostics: serde_json::from_str(&record.run_diagnostics_json).unwrap_or_default(),
         error: record.error,
         created_at: record.created_at,
         updated_at: record.updated_at,
     })
-}
-
-fn upsert_task_result_in_run(run: &mut AstraRun, result: AstraTaskResult) {
-    let key = (
-        result.task_id.clone(),
-        result.sessio_runtime_session_id.clone(),
-    );
-    if let Some(existing) = run
-        .task_results
-        .iter_mut()
-        .find(|existing| existing.task_id == key.0 && existing.sessio_runtime_session_id == key.1)
-    {
-        *existing = result;
-    } else {
-        run.task_results.push(result);
-    }
 }
 
 fn plan_task_risk_from_astra(risk: AstraTaskRisk) -> PlanTaskRisk {
@@ -1999,6 +1894,31 @@ fn plan_task_status_from_astra(status: AstraTaskResultStatus) -> PlanTaskStatus 
         AstraTaskResultStatus::Failed => PlanTaskStatus::Failed,
         AstraTaskResultStatus::Errored => PlanTaskStatus::Errored,
         AstraTaskResultStatus::Cancelled => PlanTaskStatus::Cancelled,
+    }
+}
+
+fn astra_task_risk_from_plan(risk: PlanTaskRisk) -> AstraTaskRisk {
+    match risk {
+        PlanTaskRisk::Low => AstraTaskRisk::Low,
+        PlanTaskRisk::Medium => AstraTaskRisk::Medium,
+        PlanTaskRisk::High => AstraTaskRisk::High,
+    }
+}
+
+pub(crate) fn astra_task_from_plan_task(task: &PlanTaskInfo) -> AstraTaskProposal {
+    AstraTaskProposal {
+        id: task.id.clone(),
+        plan_task_id: Some(task.id.clone()),
+        assistant_id: task.assistant_id.clone(),
+        title: task.title.clone(),
+        target_stage_id: task.thread_stage_id.clone(),
+        target_agent: task.target_agent,
+        prompt: task.prompt.clone(),
+        expected_output: task
+            .expected_output
+            .clone()
+            .unwrap_or_else(|| "Task result.".to_string()),
+        risk: astra_task_risk_from_plan(task.risk),
     }
 }
 
@@ -2059,9 +1979,8 @@ fn create_plan_round_for_astra_tasks_in_store(
 
     let mut next_tasks = tasks;
     for (task, plan_task) in next_tasks.iter_mut().zip(round.tasks.iter()) {
-        if task.plan_task_id.is_none() {
-            task.plan_task_id = Some(plan_task.id.clone());
-        }
+        task.id = plan_task.id.clone();
+        task.plan_task_id = Some(plan_task.id.clone());
     }
     Ok(next_tasks)
 }
@@ -2169,16 +2088,10 @@ fn record_plan_task_result_in_store(
     run: &AstraRun,
     result: &AstraTaskResult,
 ) -> Result<()> {
-    let Some(task) = run
-        .proposed_tasks
-        .iter()
-        .find(|task| task.id == result.task_id)
-    else {
+    let plan_task_id = result.task_id.trim();
+    if plan_task_id.is_empty() {
         return Ok(());
-    };
-    let Some(plan_task_id) = task.plan_task_id.as_deref() else {
-        return Ok(());
-    };
+    }
     let summary = summarize_task_output(&final_task_output(&result.output));
     let result_summary = if summary.trim().is_empty() {
         result.error.as_deref()
@@ -2194,6 +2107,11 @@ fn record_plan_task_result_in_store(
     let round = rounds
         .iter()
         .find(|round| round.tasks.iter().any(|task| task.id == plan_task_id));
+    let Some(task) =
+        round.and_then(|round| round.tasks.iter().find(|task| task.id == plan_task_id))
+    else {
+        return Ok(());
+    };
     if round.is_some_and(|round| round.mode == PlanRoundMode::Sequential) {
         store.complete_plan_task_and_start_next(plan_task_id, patch)?;
     } else {
@@ -2419,39 +2337,6 @@ mod tests {
     }
 
     #[test]
-    fn task_result_upsert_preserves_unrelated_run_metadata() {
-        let mut run = test_run("run-merge");
-        run.delegated_session_ids = vec!["session-1".to_string()];
-        run.stage_attempt_counts = HashMap::from([("stage-1".to_string(), 2)]);
-        run.task_results = vec![test_task_result("task-1", "session-1", "first")];
-
-        upsert_task_result_in_run(&mut run, test_task_result("task-2", "session-2", "second"));
-
-        assert_eq!(run.delegated_session_ids, vec!["session-1"]);
-        assert_eq!(run.stage_attempt_counts["stage-1"], 2);
-        assert_eq!(run.task_results.len(), 2);
-        assert!(run
-            .task_results
-            .iter()
-            .any(|result| result.task_id == "task-1"));
-        assert!(run
-            .task_results
-            .iter()
-            .any(|result| result.task_id == "task-2"));
-    }
-
-    #[test]
-    fn task_result_upsert_replaces_same_task_session_pair() {
-        let mut run = test_run("run-upsert");
-        run.task_results = vec![test_task_result("task-1", "session-1", "old")];
-
-        upsert_task_result_in_run(&mut run, test_task_result("task-1", "session-1", "new"));
-
-        assert_eq!(run.task_results.len(), 1);
-        assert_eq!(run.task_results[0].output, "new");
-    }
-
-    #[test]
     fn astra_plan_task_write_through_records_round_sessions_and_results() {
         let db_path = std::env::temp_dir().join(format!(
             "astra-plan-write-through-{}.sqlite",
@@ -2507,30 +2392,20 @@ mod tests {
             )
             .unwrap();
         let thread = store.get_thread_work_state(&thread.id).unwrap();
-        let mut run = AstraRun {
+        let run = AstraRun {
             run_id: "astra-run-plan-write-through".to_string(),
             thread_id: thread.id.clone(),
             project_id: project.id.clone(),
             project_path: project.path.clone(),
             status: AstraRunStatus::Running,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
             mode: "auto".to_string(),
-            current_stage_id: Some(stage.id.clone()),
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
             planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
             round_index: None,
             round_limit: RUST_NATIVE_ROUND_LIMIT,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
             run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
@@ -2572,14 +2447,8 @@ mod tests {
         )
         .unwrap();
         assert!(tasks.iter().all(|task| task.plan_task_id.is_some()));
-
-        run.proposed_tasks = tasks.clone();
-        store.upsert_astra_run(&run_to_record(&run)).unwrap();
-        let stored_run = record_to_run(store.get_astra_run(&run.run_id).unwrap().unwrap()).unwrap();
-        assert_eq!(
-            stored_run.proposed_tasks[0].plan_task_id,
-            tasks[0].plan_task_id
-        );
+        assert_eq!(tasks[0].id, tasks[0].plan_task_id.clone().unwrap());
+        assert_eq!(tasks[1].id, tasks[1].plan_task_id.clone().unwrap());
 
         let rounds = store.list_plan_rounds(&thread.id).unwrap();
         assert_eq!(rounds.len(), 1);
@@ -2634,7 +2503,7 @@ mod tests {
         )
         .unwrap();
         let result = test_task_result(
-            "task-1",
+            &tasks[0].id,
             "runtime-session-1",
             "Working notes.\nFinal result: implemented and verified.",
         );
@@ -2645,7 +2514,7 @@ mod tests {
         let completed_task = completed_round
             .tasks
             .iter()
-            .find(|task| task.id == tasks[0].plan_task_id.clone().unwrap())
+            .find(|task| task.id == tasks[0].id)
             .unwrap();
         assert_eq!(completed_task.status, PlanTaskStatus::Completed);
         assert_eq!(
@@ -2663,7 +2532,7 @@ mod tests {
         let still_running = completed_round
             .tasks
             .iter()
-            .find(|task| task.id == tasks[1].plan_task_id.clone().unwrap())
+            .find(|task| task.id == tasks[1].id)
             .unwrap();
         assert_eq!(still_running.status, PlanTaskStatus::Running);
 
@@ -2729,24 +2598,14 @@ mod tests {
             project_id: project.id.clone(),
             project_path: project.path.clone(),
             status: AstraRunStatus::Running,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
             mode: "auto".to_string(),
-            current_stage_id: None,
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
             planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
             round_index: None,
             round_limit: RUST_NATIVE_ROUND_LIMIT,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
             run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
@@ -2848,24 +2707,14 @@ mod tests {
             project_id: project.id.clone(),
             project_path: project.path.clone(),
             status: AstraRunStatus::Running,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
             mode: "auto".to_string(),
-            current_stage_id: Some(stage.id.clone()),
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
             planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
             round_index: None,
             round_limit: RUST_NATIVE_ROUND_LIMIT,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
             run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
@@ -3068,24 +2917,14 @@ mod tests {
             project_id: project.id.clone(),
             project_path: project.path.clone(),
             status: AstraRunStatus::Running,
-            proposed_tasks: vec![task.clone()],
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
             mode: "auto".to_string(),
-            current_stage_id: Some(stage.id.clone()),
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
             planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
             round_index: None,
             round_limit: RUST_NATIVE_ROUND_LIMIT,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
             run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,
@@ -3578,24 +3417,14 @@ mod tests {
             project_id: "project-1".to_string(),
             project_path: "/tmp".to_string(),
             status: AstraRunStatus::Running,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
             mode: "auto".to_string(),
-            current_stage_id: None,
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
             planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
             round_index: None,
             round_limit: RUST_NATIVE_ROUND_LIMIT,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
             run_diagnostics: Vec::new(),
             error: None,
             created_at: 1,

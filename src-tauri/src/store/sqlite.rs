@@ -621,24 +621,14 @@ CREATE TABLE IF NOT EXISTS astra_runs (
     project_id                 TEXT NOT NULL,
     project_path               TEXT NOT NULL,
     status                     TEXT NOT NULL,
-    proposed_tasks_json        TEXT NOT NULL DEFAULT '[]',
-    approved_task_ids_json     TEXT NOT NULL DEFAULT '[]',
-    delegated_session_ids_json TEXT NOT NULL DEFAULT '[]',
-    task_results_json          TEXT NOT NULL DEFAULT '[]',
     mode                       TEXT NOT NULL DEFAULT 'auto',
-    current_stage_id           TEXT,
-    completed_task_ids_json    TEXT NOT NULL DEFAULT '[]',
-    stage_attempt_counts_json  TEXT NOT NULL DEFAULT '{}',
-    retry_limit                INTEGER NOT NULL DEFAULT 3,
     planner_backend            TEXT,
-    decision_backend           TEXT,
     round_index                INTEGER,
     round_limit                INTEGER NOT NULL DEFAULT 3,
     terminal_reason            TEXT,
     last_error_code            TEXT,
     last_error_message         TEXT,
     internal_planner_session_ids_json  TEXT NOT NULL DEFAULT '[]',
-    internal_decision_session_ids_json TEXT NOT NULL DEFAULT '[]',
     run_diagnostics_json               TEXT NOT NULL DEFAULT '[]',
     error                      TEXT,
     created_at                 INTEGER NOT NULL,
@@ -759,11 +749,9 @@ ALTER TABLE sessions ADD COLUMN rename_title TEXT;
 "#;
 
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
-    proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
-    current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
-    planner_backend, decision_backend, round_index, round_limit, terminal_reason,
+    planner_backend, round_index, round_limit, terminal_reason,
     last_error_code, last_error_message, internal_planner_session_ids_json,
-    internal_decision_session_ids_json, run_diagnostics_json, error, created_at, updated_at";
+    run_diagnostics_json, error, created_at, updated_at";
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -853,61 +841,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    ensure_v5_astra_columns(conn)?;
     ensure_v6_thread_kind_schema(conn)?;
     ensure_v7_plan_tables_schema(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
-    Ok(())
-}
-
-fn ensure_v5_astra_columns(conn: &Connection) -> Result<()> {
-    let columns = table_columns(conn, "astra_runs")?;
-    for (name, ddl) in [
-        (
-            "planner_backend",
-            "ALTER TABLE astra_runs ADD COLUMN planner_backend TEXT",
-        ),
-        (
-            "decision_backend",
-            "ALTER TABLE astra_runs ADD COLUMN decision_backend TEXT",
-        ),
-        (
-            "round_index",
-            "ALTER TABLE astra_runs ADD COLUMN round_index INTEGER",
-        ),
-        (
-            "round_limit",
-            "ALTER TABLE astra_runs ADD COLUMN round_limit INTEGER NOT NULL DEFAULT 3",
-        ),
-        (
-            "terminal_reason",
-            "ALTER TABLE astra_runs ADD COLUMN terminal_reason TEXT",
-        ),
-        (
-            "last_error_code",
-            "ALTER TABLE astra_runs ADD COLUMN last_error_code TEXT",
-        ),
-        (
-            "last_error_message",
-            "ALTER TABLE astra_runs ADD COLUMN last_error_message TEXT",
-        ),
-        (
-            "internal_planner_session_ids_json",
-            "ALTER TABLE astra_runs ADD COLUMN internal_planner_session_ids_json TEXT NOT NULL DEFAULT '[]'",
-        ),
-        (
-            "internal_decision_session_ids_json",
-            "ALTER TABLE astra_runs ADD COLUMN internal_decision_session_ids_json TEXT NOT NULL DEFAULT '[]'",
-        ),
-        (
-            "run_diagnostics_json",
-            "ALTER TABLE astra_runs ADD COLUMN run_diagnostics_json TEXT NOT NULL DEFAULT '[]'",
-        ),
-    ] {
-        if !columns.contains(name) {
-            let _ = conn.execute_batch(ddl);
-        }
-    }
     Ok(())
 }
 
@@ -2684,27 +2620,17 @@ fn astra_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunRecor
         project_path: row.get(3)?,
         status: row.get(4)?,
         mode: row.get(5)?,
-        proposed_tasks_json: row.get(6)?,
-        approved_task_ids_json: row.get(7)?,
-        delegated_session_ids_json: row.get(8)?,
-        task_results_json: row.get(9)?,
-        current_stage_id: row.get(10)?,
-        completed_task_ids_json: row.get(11)?,
-        stage_attempt_counts_json: row.get(12)?,
-        retry_limit: row.get(13)?,
-        planner_backend: row.get(14)?,
-        decision_backend: row.get(15)?,
-        round_index: row.get(16)?,
-        round_limit: row.get(17)?,
-        terminal_reason: row.get(18)?,
-        last_error_code: row.get(19)?,
-        last_error_message: row.get(20)?,
-        internal_planner_session_ids_json: row.get(21)?,
-        internal_decision_session_ids_json: row.get(22)?,
-        run_diagnostics_json: row.get(23)?,
-        error: row.get(24)?,
-        created_at: row.get(25)?,
-        updated_at: row.get(26)?,
+        planner_backend: row.get(6)?,
+        round_index: row.get(7)?,
+        round_limit: row.get(8)?,
+        terminal_reason: row.get(9)?,
+        last_error_code: row.get(10)?,
+        last_error_message: row.get(11)?,
+        internal_planner_session_ids_json: row.get(12)?,
+        run_diagnostics_json: row.get(13)?,
+        error: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -7027,35 +6953,23 @@ impl SessionStore for SqliteStore {
         conn.execute(
             "INSERT INTO astra_runs (
                 run_id, thread_id, project_id, project_path, status, mode,
-                proposed_tasks_json, approved_task_ids_json, delegated_session_ids_json, task_results_json,
-                current_stage_id, completed_task_ids_json, stage_attempt_counts_json, retry_limit,
-                planner_backend, decision_backend, round_index, round_limit, terminal_reason,
+                planner_backend, round_index, round_limit, terminal_reason,
                 last_error_code, last_error_message, internal_planner_session_ids_json,
-                internal_decision_session_ids_json, run_diagnostics_json, error, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                run_diagnostics_json, error, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(run_id) DO UPDATE SET
                 thread_id = excluded.thread_id,
                 project_id = excluded.project_id,
                 project_path = excluded.project_path,
                 status = excluded.status,
                 mode = excluded.mode,
-                proposed_tasks_json = excluded.proposed_tasks_json,
-                approved_task_ids_json = excluded.approved_task_ids_json,
-                delegated_session_ids_json = excluded.delegated_session_ids_json,
-                task_results_json = excluded.task_results_json,
-                current_stage_id = excluded.current_stage_id,
-                completed_task_ids_json = excluded.completed_task_ids_json,
-                stage_attempt_counts_json = excluded.stage_attempt_counts_json,
-                retry_limit = excluded.retry_limit,
                 planner_backend = excluded.planner_backend,
-                decision_backend = excluded.decision_backend,
                 round_index = excluded.round_index,
                 round_limit = excluded.round_limit,
                 terminal_reason = excluded.terminal_reason,
                 last_error_code = excluded.last_error_code,
                 last_error_message = excluded.last_error_message,
                 internal_planner_session_ids_json = excluded.internal_planner_session_ids_json,
-                internal_decision_session_ids_json = excluded.internal_decision_session_ids_json,
                 run_diagnostics_json = excluded.run_diagnostics_json,
                 error = excluded.error,
                 updated_at = excluded.updated_at",
@@ -7066,23 +6980,13 @@ impl SessionStore for SqliteStore {
                 run.project_path,
                 run.status,
                 run.mode,
-                run.proposed_tasks_json,
-                run.approved_task_ids_json,
-                run.delegated_session_ids_json,
-                run.task_results_json,
-                run.current_stage_id,
-                run.completed_task_ids_json,
-                run.stage_attempt_counts_json,
-                run.retry_limit,
                 run.planner_backend,
-                run.decision_backend,
                 run.round_index,
                 run.round_limit,
                 run.terminal_reason,
                 run.last_error_code,
                 run.last_error_message,
                 run.internal_planner_session_ids_json,
-                run.internal_decision_session_ids_json,
                 run.run_diagnostics_json,
                 run.error,
                 run.created_at,
@@ -8036,6 +7940,55 @@ mod migration_tests {
         std::env::temp_dir().join(format!("{prefix}-{}.db", unique_suffix()))
     }
 
+    fn assert_current_astra_run_columns(conn: &Connection) {
+        let astra_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(astra_runs)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        for column in [
+            "run_id",
+            "thread_id",
+            "project_id",
+            "project_path",
+            "status",
+            "mode",
+            "planner_backend",
+            "round_index",
+            "round_limit",
+            "terminal_reason",
+            "last_error_code",
+            "last_error_message",
+            "internal_planner_session_ids_json",
+            "run_diagnostics_json",
+            "error",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                astra_columns.contains(&column.to_string()),
+                "{column} should exist"
+            );
+        }
+        for legacy_column in [
+            "proposed_tasks_json",
+            "approved_task_ids_json",
+            "delegated_session_ids_json",
+            "task_results_json",
+            "current_stage_id",
+            "completed_task_ids_json",
+            "stage_attempt_counts_json",
+            "retry_limit",
+            "decision_backend",
+            "internal_decision_session_ids_json",
+        ] {
+            assert!(
+                !astra_columns.contains(&legacy_column.to_string()),
+                "{legacy_column} should not exist"
+            );
+        }
+    }
+
     // Verify a synthetic v0.3.2-era schema migrates cleanly into the current
     // shape.
     #[test]
@@ -8159,24 +8112,7 @@ mod migration_tests {
             .unwrap();
         assert_eq!(astra_table, 1);
 
-        let astra_columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(astra_runs)").unwrap();
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(astra_columns.contains(&"task_results_json".to_string()));
-        assert!(astra_columns.contains(&"mode".to_string()));
-        assert!(astra_columns.contains(&"current_stage_id".to_string()));
-        assert!(astra_columns.contains(&"completed_task_ids_json".to_string()));
-        assert!(astra_columns.contains(&"stage_attempt_counts_json".to_string()));
-        assert!(astra_columns.contains(&"retry_limit".to_string()));
-        assert!(astra_columns.contains(&"planner_backend".to_string()));
-        assert!(astra_columns.contains(&"decision_backend".to_string()));
-        assert!(astra_columns.contains(&"round_index".to_string()));
-        assert!(astra_columns.contains(&"round_limit".to_string()));
-        assert!(astra_columns.contains(&"terminal_reason".to_string()));
-        assert!(astra_columns.contains(&"last_error_code".to_string()));
-        assert!(astra_columns.contains(&"last_error_message".to_string()));
+        assert_current_astra_run_columns(&conn);
 
         let thread_assistants_table: i64 = conn
             .query_row(
@@ -8276,17 +8212,7 @@ mod migration_tests {
         };
         assert!(snapshot_columns.contains(&"history_cache_version".to_string()));
 
-        let astra_columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(astra_runs)").unwrap();
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(astra_columns.contains(&"task_results_json".to_string()));
-        assert!(astra_columns.contains(&"mode".to_string()));
-        assert!(astra_columns.contains(&"current_stage_id".to_string()));
-        assert!(astra_columns.contains(&"completed_task_ids_json".to_string()));
-        assert!(astra_columns.contains(&"stage_attempt_counts_json".to_string()));
-        assert!(astra_columns.contains(&"retry_limit".to_string()));
+        assert_current_astra_run_columns(&conn);
 
         for table in [
             "agents",
@@ -8363,23 +8289,13 @@ mod migration_tests {
             project_path: project.path.clone(),
             status: "running".to_string(),
             mode: "auto".to_string(),
-            proposed_tasks_json: r#"[{"id":"task-1"}]"#.to_string(),
-            approved_task_ids_json: r#"["task-1"]"#.to_string(),
-            delegated_session_ids_json: r#"["runtime-1"]"#.to_string(),
-            task_results_json: r#"[{"taskId":"task-1","status":"completed"}]"#.to_string(),
-            current_stage_id: Some("stage-1".to_string()),
-            completed_task_ids_json: r#"["task-1"]"#.to_string(),
-            stage_attempt_counts_json: r#"{"stage-1":1}"#.to_string(),
-            retry_limit: 3,
             planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
             round_index: Some(0),
             round_limit: 3,
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
             internal_planner_session_ids_json: r#"["planner-session-1"]"#.to_string(),
-            internal_decision_session_ids_json: r#"["decision-session-1"]"#.to_string(),
             run_diagnostics_json: r#"[{"kind":"planner_failure","code":"timeout"}]"#.to_string(),
             error: None,
             created_at: 10,
@@ -8392,10 +8308,6 @@ mod migration_tests {
         assert_eq!(
             active.internal_planner_session_ids_json,
             r#"["planner-session-1"]"#
-        );
-        assert_eq!(
-            active.internal_decision_session_ids_json,
-            r#"["decision-session-1"]"#
         );
         assert_eq!(
             active.run_diagnostics_json,
@@ -10446,23 +10358,13 @@ mod migration_tests {
                 project_path: project.path.clone(),
                 status: "completed".to_string(),
                 mode: "auto".to_string(),
-                proposed_tasks_json: "[]".to_string(),
-                approved_task_ids_json: "[]".to_string(),
-                delegated_session_ids_json: "[]".to_string(),
-                task_results_json: "[]".to_string(),
-                current_stage_id: None,
-                completed_task_ids_json: "[]".to_string(),
-                stage_attempt_counts_json: "{}".to_string(),
-                retry_limit: 3,
                 planner_backend: Some("astra_pi_acp".to_string()),
-                decision_backend: None,
                 round_index: Some(0),
                 round_limit: 3,
                 terminal_reason: None,
                 last_error_code: None,
                 last_error_message: None,
                 internal_planner_session_ids_json: r#"["planner-session"]"#.to_string(),
-                internal_decision_session_ids_json: "[]".to_string(),
                 run_diagnostics_json: "[]".to_string(),
                 error: None,
                 created_at: 70,

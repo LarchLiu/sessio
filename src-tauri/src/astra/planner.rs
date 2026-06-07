@@ -1,8 +1,4 @@
-use std::collections::HashSet;
-
-use super::{
-    short_hash, AstraPlan, AstraRun, AstraTaskProposal, AstraTaskResultStatus, AstraTaskRisk,
-};
+use super::{short_hash, AstraPlan, AstraRun, AstraTaskProposal, AstraTaskRisk};
 use crate::models::{Agent, ThreadInfo, ThreadKind};
 
 pub(super) fn deterministic_plan(
@@ -19,7 +15,6 @@ pub(super) fn deterministic_plan(
         };
     }
 
-    let completed: HashSet<&str> = run.completed_task_ids.iter().map(String::as_str).collect();
     let mut assistants = thread.assistants.clone();
     assistants.sort_by_key(|assistant| assistant.order);
     let tasks = assistants
@@ -33,14 +28,6 @@ pub(super) fn deterministic_plan(
                     run.thread_id, assistant.assistant_id, target_agent.as_str(), round_index
                 ))
             );
-            if completed.contains(task_id.as_str())
-                || run.task_results.iter().any(|result| {
-                    result.task_id == task_id
-                        && matches!(result.status, AstraTaskResultStatus::Completed)
-                })
-            {
-                return None;
-            }
             let prompt = [
                 user_prompt
                     .map(str::trim)
@@ -82,14 +69,14 @@ pub(super) fn deterministic_plan(
 }
 
 pub(super) fn next_dispatchable_tasks(
-    run: &AstraRun,
+    tasks: &[AstraTaskProposal],
     thread: &ThreadInfo,
 ) -> Vec<AstraTaskProposal> {
     if thread.kind != ThreadKind::Teamwork {
         return Vec::new();
     }
 
-    run.proposed_tasks
+    tasks
         .iter()
         .filter(|task| task.target_stage_id.is_none())
         .filter(|task| {
@@ -98,18 +85,6 @@ pub(super) fn next_dispatchable_tasks(
                     .assistants
                     .iter()
                     .any(|assistant| assistant.assistant_id == assistant_id)
-            })
-        })
-        .filter(|task| {
-            !run.task_results.iter().any(|result| {
-                result.task_id == task.id
-                    && matches!(
-                        result.status,
-                        AstraTaskResultStatus::Completed
-                            | AstraTaskResultStatus::Failed
-                            | AstraTaskResultStatus::Errored
-                            | AstraTaskResultStatus::Cancelled
-                    )
             })
         })
         .cloned()
