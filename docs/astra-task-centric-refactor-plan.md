@@ -184,20 +184,22 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 下面阶段按 `docs/thread-types-plan-rounds.md` 的全局实施顺序对齐。Phase 1/2 是 teamwork 编排的前置基础；真正改变 Astra contract 和调度行为从 Phase 3 开始。
 
-### Phase 0: 冻结旧 stage-decision 补丁方向
+### Phase 0: 直接替换旧 stage-decision 自动编排路径
 
-目标：停止继续围绕旧 `decisions` contract 打兼容补丁，把当前 worktree 中的 YAML/decision patch 视为过渡探索，不再扩大。
+目标：停止围绕旧 `decisions` contract 打兼容补丁，并把 workflow 的旧 stage-decision Astra 自动编排路径直接替换为 teamwork 的 assistant-routed plan-task contract。旧 run 只保留只读历史展示；新 run 不再进入旧 workflow stage-decision 调度路径。
 
 执行内容：
 
-- 记录当前未完成补丁的意图和风险。
 - 明确后续持久化事实源以 `docs/thread-types-plan-rounds.md` 为准。
 - 保留 300s timeout 和诊断增强方向。
 - 不再新增 JSON repair、legacy decision shape 兼容或 pseudo function-call wrapper。
+- 删除或隔离旧 stage-decision 自动调度入口；workflow thread 调用 Astra 时直接拒绝，不创建兼容 run。
+- 旧 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 只能作为历史归档读取，不参与 running 恢复、下一轮规划或继续调度。
 
 验收：
 
-- 文档落地。
+- workflow / brainstorm / debate 不再能启动通用 Astra 自动编排；teamwork 是唯一 v1 自动编排入口。
+- 旧 stage-decision response shape 被拒绝，不进入 fallback 或 repair。
 - 后续代码改动按实施顺序拆分，不再混合 parser hotfix 和架构重构。
 
 ### Phase 1: 接入 ThreadKind 和 thread assistants
@@ -214,7 +216,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 验收：
 
-- 旧 thread 读取为 `workflow`。
+- 旧 thread 读取为 `workflow`，只表示历史数据可读，不表示保留旧 Astra stage-decision 自动调度兼容路径。
 - 新建四种 thread kind 后 reload 仍正确。
 - teamwork thread 可绑定多个 assistants。
 - workflow 现有 stage 行为不变，且不因为 kind 落地而获得 Astra 默认调度。
@@ -267,6 +269,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 - JSON response 被拒绝。
 - code fence response 被拒绝。
 - 旧 `decisions/action/status/issueStatus/targetStageId` response 被拒绝。
+- workflow / brainstorm / debate 创建 Astra run 直接失败，不通过旧 stage-decision 或 generic teamwork planner 兜底。
 - runtime agent 和 Astra Pi ACP 使用同一份 contract 文案。
 - timeout 统一为 300s。
 - Astra 每轮 plan 在 DB 中有 round 记录。
@@ -327,7 +330,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 执行内容：
 
-- 删除或隔离旧 `AstraDecision` 自动编排路径。
+- 删除或隔离旧 `AstraDecision` 自动编排路径；不需要为 workflow 保留旧 stage-decision 兼容入口。
 - 删除旧 parser tests 中关于 update_stage/add_or_update_issue/retry_stage 的用例。
 - 更新 deterministic backend，使其只输出新 `AstraOrchestration`。
 - 清理 prompt 中所有 stage/issue mutation 和 `targetStageId` teamwork 说明。
@@ -379,7 +382,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ### 风险 2: 旧 run 展示边界
 
-旧 run 可能没有 plan tasks，只能作为历史归档或派生展示处理。新自动编排不兼容旧 stage-decision contract，也不能从 `approvedTaskIds + taskResults + currentTaskId` 反推出新的 lifecycle 事实源；新 run 必须使用 `thread_plan_tasks`。
+旧 run 可能没有 plan tasks，只能作为只读历史归档或派生展示处理。新自动编排不兼容旧 stage-decision contract，也不能从 `approvedTaskIds + taskResults + currentTaskId` 反推出新的 lifecycle 事实源；新 run 必须使用 `thread_plan_tasks`。workflow 的旧 stage-decision 调度入口不需要兼容，直接由 teamwork assistant-routed contract 替换。
 
 ### 风险 3: workflow stage UI 与 teamwork Astra 分离
 

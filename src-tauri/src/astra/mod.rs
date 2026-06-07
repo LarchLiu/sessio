@@ -37,7 +37,7 @@ use astra_pi_acp_adapter::{
     prepare_astra_pi_agent_config, AstraPiAcpConfig, AstraPiAcpProviderConfig,
     AstraPiAcpPurposeConfig,
 };
-use orchestrator::RustNativeWorkerOutcome;
+use orchestrator::{dedicated_backend_required_error, RustNativeWorkerOutcome};
 use planner::next_dispatchable_tasks;
 use prompt::{build_stage_task_context, build_teamwork_task_context};
 pub use types::{
@@ -461,6 +461,9 @@ impl AstraService {
             bail!("threadId is required");
         }
         let thread = self.inner.store.get_thread_work_state(&req.thread_id)?;
+        if let Some((_reason, code, message)) = dedicated_backend_required_error(&thread) {
+            bail!("{code}: {message}");
+        }
         let project = self
             .inner
             .store

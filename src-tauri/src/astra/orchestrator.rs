@@ -565,7 +565,7 @@ impl Drop for AstraWorkerGuard {
     }
 }
 
-fn dedicated_backend_required_error(
+pub(super) fn dedicated_backend_required_error(
     thread: &crate::models::ThreadInfo,
 ) -> Option<(&'static str, &'static str, String)> {
     match thread.kind {

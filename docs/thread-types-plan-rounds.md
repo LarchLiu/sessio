@@ -377,7 +377,7 @@ kind TEXT NOT NULL DEFAULT 'workflow'
 workflow | teamwork | brainstorm | debate
 ```
 
-旧 thread 默认 `workflow`，保证向后兼容。
+旧 thread 数据迁移后默认读取为 `workflow`。这只是保证历史数据可读，不表示旧 Astra stage-decision 自动调度路径需要继续兼容。
 
 ### `thread_assistants`
 
@@ -619,7 +619,7 @@ thread_plan_task_sessions(
 
 ### 与 Astra 的关系
 
-Astra run 可以继续保留 `proposedTasks` 和 `taskResults` 做过渡兼容，但新事实源应逐步迁移到 `thread_plan_rounds` / `thread_plan_tasks`。
+旧 Astra run 可以继续保留 `proposedTasks` 和 `taskResults` 作为只读历史归档字段，但新事实源必须直接使用 `thread_plan_rounds` / `thread_plan_tasks`。实现不从旧 `currentTaskId` / `approvedTaskIds` / stage-decision contract 反推新的 lifecycle，也不保留旧 workflow stage-decision 自动调度兼容入口。
 
 目标行为：
 
@@ -845,9 +845,10 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 执行内容：
 
-- `proposedTasks` / `taskResults` 仅作为 Astra run 历史归档或派生展示字段。
+- `proposedTasks` / `taskResults` 仅作为 Astra run 只读历史归档或派生展示字段。
 - 新 UI 和新 orchestrator 逻辑以 plan rounds/tasks 为准。
 - 清理只依赖 `currentTaskId` / `approvedTaskIds` 恢复 running 的逻辑。
+- 新 Astra 自动编排不再接受旧 stage-decision contract，也不通过旧字段恢复或继续调度。
 - 更新测试，确保 plan tasks 是 lifecycle owner。
 
 验收：
@@ -928,9 +929,9 @@ UI 文案可以解释为“Workflow thread”或“阶段式工作流”。
 
 v1 不支持复杂 DAG，这是有意取舍。复杂流程通过多轮 plan 表达，降低实现复杂度。
 
-### 风险 3: 新旧 task 事实源过渡
+### 风险 3: 旧 run 只读归档边界
 
-Astra 旧字段 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 还会存在一段时间。实现时必须明确新 UI 和新逻辑优先使用 plan tasks，旧字段只做兼容。
+Astra 旧字段 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 还会存在一段时间，但只能用于历史展示、诊断或派生归档。新 UI 和新 orchestrator 必须以 plan tasks 为事实源；旧字段不能作为 lifecycle owner、running 恢复依据或旧 stage-decision 自动调度兼容入口。
 
 ### 风险 4: non-workflow thread 是否允许无 assistants
 
@@ -959,7 +960,7 @@ stage、assistant、agent 都是可配置对象。历史 task 如果 replay 时�
 
 - v1 不做一轮内复杂 DAG。
 - v1 不删除现有 workflow/project/stage 模型。
-- v1 不强制删除旧 Astra proposedTasks/taskResults 字段。
+- v1 不强制删除旧 Astra proposedTasks/taskResults 字段，但它们只能只读归档，不作为兼容调度入口。
 - v1 不要求 workflow thread 必须使用 thread-level assistants。
 - v1 不做破坏性迁移。
 - 如果不实现 `brainstorm_backend` / `debate_backend` 或等价专用策略，v1 不宣称完整支持 brainstorm/debate 自动编排。
