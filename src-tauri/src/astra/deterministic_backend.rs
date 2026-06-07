@@ -1,12 +1,11 @@
 use serde_json::Value;
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
-use super::decision::deterministic_decision;
 use super::planner::deterministic_plan;
-use super::{AstraDecision, AstraOrchestration, AstraRun, AstraTaskCompletion, AstraTaskDecision};
-use crate::models::{StageStatus, ThreadInfo};
+use super::{AstraOrchestration, AstraRun, AstraRunIntent, AstraTaskCompletion};
+use crate::models::{PlanRoundMode, ThreadInfo, ThreadKind};
 
-/// Deterministic Orchestrator backend (rule-based, no external agent)
+/// Deterministic Orchestrator backend (rule-based, no external agent).
 pub struct DeterministicOrchestratorBackend;
 
 impl OrchestratorBackend for DeterministicOrchestratorBackend {
@@ -19,81 +18,83 @@ impl OrchestratorBackend for DeterministicOrchestratorBackend {
         completions: &[AstraTaskCompletion],
         _config: &Value,
     ) -> Result<BackendResponse<AstraOrchestration>, BackendFailure> {
-        let decisions = completions
-            .iter()
-            .map(|completion| AstraTaskDecision {
-                task_id: completion.task.id.clone(),
-                decision: deterministic_decision(thread, &completion.result, &completion.task),
-            })
-            .collect::<Vec<_>>();
-        let mut planning_thread = thread.clone();
-        for task_decision in &decisions {
-            apply_decision_to_thread(&mut planning_thread, &task_decision.decision);
-        }
-        let tasks = if decisions
-            .iter()
-            .any(|task_decision| decision_is_terminal(&task_decision.decision))
-        {
-            Vec::new()
-        } else {
-            deterministic_plan(run, &planning_thread, user_prompt, round_index).tasks
-        };
+        let orchestration =
+            deterministic_orchestration(run, thread, user_prompt, round_index, completions)?;
         Ok(BackendResponse {
-            data: AstraOrchestration {
-                summary: format!(
-                    "Deterministic Astra Orchestrator handled {} completion(s) and selected {} task(s).",
-                    completions.len(),
-                    tasks.len()
-                ),
-                decisions,
-                tasks,
-            },
+            data: orchestration,
             session_id: format!("deterministic-orchestrator-{}-{}", run.run_id, round_index),
             backend_type: "deterministic".to_string(),
         })
     }
 }
 
-fn apply_decision_to_thread(thread: &mut ThreadInfo, decision: &AstraDecision) {
-    match decision {
-        AstraDecision::UpdateStage { args } => {
-            let Some(stage_id) = args
-                .get("threadStageId")
-                .or_else(|| args.get("stageId"))
-                .and_then(Value::as_str)
-            else {
-                return;
-            };
-            let Some(status) = args
-                .get("status")
-                .and_then(Value::as_str)
-                .and_then(StageStatus::from_db_str)
-            else {
-                return;
-            };
-            if let Some(stage) = thread
-                .stages
-                .iter_mut()
-                .find(|stage| stage.id == stage_id || stage.stage_id == stage_id)
-            {
-                stage.status = status;
-            }
-        }
-        AstraDecision::Composite { decisions } => {
-            for decision in decisions {
-                apply_decision_to_thread(thread, decision);
-            }
-        }
-        _ => {}
+fn deterministic_orchestration(
+    run: &AstraRun,
+    thread: &ThreadInfo,
+    user_prompt: Option<&str>,
+    round_index: u32,
+    completions: &[AstraTaskCompletion],
+) -> Result<AstraOrchestration, BackendFailure> {
+    if thread.kind != ThreadKind::Teamwork {
+        return Ok(AstraOrchestration {
+            summary: "Astra automatic orchestration is only supported for teamwork threads."
+                .to_string(),
+            run_intent: AstraRunIntent::Error,
+            reason: "astra_orchestration_unsupported_for_thread_kind".to_string(),
+            mode: None,
+            tasks: Vec::new(),
+        });
     }
-}
 
-fn decision_is_terminal(decision: &AstraDecision) -> bool {
-    match decision {
-        AstraDecision::CancelRun { .. }
-        | AstraDecision::CompleteRun { .. }
-        | AstraDecision::ErrorRun { .. } => true,
-        AstraDecision::Composite { decisions } => decisions.iter().any(decision_is_terminal),
-        _ => false,
+    if completions.iter().any(|completion| {
+        matches!(
+            completion.result.status,
+            super::AstraTaskResultStatus::Failed
+                | super::AstraTaskResultStatus::Errored
+                | super::AstraTaskResultStatus::Cancelled
+        )
+    }) {
+        return Ok(AstraOrchestration {
+            summary: format!(
+                "Deterministic Astra Orchestrator received {} completion(s) with a terminal failure.",
+                completions.len()
+            ),
+            run_intent: AstraRunIntent::Error,
+            reason: "teamwork_task_failed".to_string(),
+            mode: None,
+            tasks: Vec::new(),
+        });
     }
+
+    if !completions.is_empty() {
+        return Ok(AstraOrchestration {
+            summary: format!(
+                "Deterministic Astra Orchestrator completed after {} teamwork completion(s).",
+                completions.len()
+            ),
+            run_intent: AstraRunIntent::Complete,
+            reason: "teamwork_round_completed".to_string(),
+            mode: None,
+            tasks: Vec::new(),
+        });
+    }
+
+    let plan = deterministic_plan(run, thread, user_prompt, round_index);
+    if plan.tasks.is_empty() {
+        return Ok(AstraOrchestration {
+            summary: plan.summary,
+            run_intent: AstraRunIntent::WaitForHuman,
+            reason: "teamwork_no_dispatchable_tasks".to_string(),
+            mode: None,
+            tasks: Vec::new(),
+        });
+    }
+
+    Ok(AstraOrchestration {
+        summary: plan.summary,
+        run_intent: AstraRunIntent::Continue,
+        reason: "continue_with_teamwork_tasks".to_string(),
+        mode: Some(PlanRoundMode::Parallel),
+        tasks: plan.tasks,
+    })
 }

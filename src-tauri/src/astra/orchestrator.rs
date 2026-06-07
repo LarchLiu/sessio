@@ -3,27 +3,21 @@ use serde_json::json;
 
 use super::{
     next_dispatchable_tasks, now_ms, rolling_stage_task_batch, thread_all_stages_terminal,
-    thread_waiting_for_review, AstraBackendConfig, AstraDecision, AstraOrchestration, AstraRun,
-    AstraRunStatus, AstraService, AstraStageMutationResult, AstraTaskCompletion,
-    ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+    AstraBackendConfig, AstraOrchestration, AstraRun, AstraRunIntent, AstraRunStatus, AstraService,
+    AstraStageMutationResult, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
 use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
-use crate::models::{IssueStatus, StageStatus, StageType, ThreadInfo, ThreadKind};
+use crate::models::{
+    IssueStatus, PlanRoundMode, PlanTaskStatus, StageStatus, StageType, ThreadInfo, ThreadKind,
+};
 
 #[cfg(test)]
 const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
 #[cfg(test)]
 const MAX_RUN_DIAGNOSTICS: usize = 100;
-
-enum DecisionOutcome {
-    Continue,
-    RetryTask,
-    PlanNextRound,
-    Terminal,
-}
 
 #[cfg(test)]
 fn trim_vec_front<T>(values: &mut Vec<T>, max_len: usize) {
@@ -50,102 +44,92 @@ impl AstraService {
         let round_limit = self.load_run(run_id)?.round_limit;
         let mut round_index = 0u32;
 
-        let mut run = self.load_run(run_id)?;
-        if !run.status.active() {
+        let mut current_run = self.load_run(run_id)?;
+        if !current_run.status.active() {
             return Ok(RustNativeWorkerOutcome::Claimed);
         }
-        let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+        let thread = self
+            .inner
+            .store
+            .get_thread_work_state(&current_run.thread_id)?;
         if let Some((reason, code, message)) = dedicated_backend_required_error(&thread) {
-            let _ = self.error_run(&run.run_id, reason, code, message)?;
+            let _ = self.error_run(&current_run.run_id, reason, code, message)?;
             return Ok(RustNativeWorkerOutcome::Claimed);
         }
         if thread_all_stages_terminal(&thread) {
-            let _ = self.complete_run(&run.run_id, "all_stages_terminal")?;
+            let _ = self.complete_run(&current_run.run_id, "all_stages_terminal")?;
             return Ok(RustNativeWorkerOutcome::Claimed);
         }
 
-        run = self.mark_run_status(
-            &run.run_id,
-            AstraRunStatus::Planning,
-            None,
-            "planning_round",
-        )?;
-        if !run.status.active() {
-            return Ok(RustNativeWorkerOutcome::Claimed);
-        }
-        if round_index >= round_limit {
-            let _ = self.error_run(
-                run_id,
-                "round_limit_reached",
-                "round_limit_reached",
-                "Astra round limit reached before initial planning".to_string(),
-            )?;
-            return Ok(RustNativeWorkerOutcome::Claimed);
-        }
-        let current_round_index = round_index;
-        round_index += 1;
-        let (orchestration, orchestrator_backend) = match self.orchestrate_astra_round(
-            &run,
-            &thread,
-            prompt.as_deref(),
-            current_round_index,
-            &[],
-        ) {
-            Ok(orchestration) => orchestration,
-            Err(error) => {
-                let _ = self.error_run(
-                    &run.run_id,
-                    "orchestrator_policy_denied",
-                    error.code,
-                    error.message,
-                )?;
-                return Ok(RustNativeWorkerOutcome::Claimed);
-            }
-        };
-        let (planned, mut dispatch_batch) = self.apply_orchestration_tasks(
-            &run,
-            orchestration,
-            &orchestrator_backend,
-            current_round_index,
-        )?;
-        let mut current_run = planned;
+        let mut dispatch_batch = Vec::new();
+        let mut completions = Vec::new();
 
         loop {
             if dispatch_batch.is_empty() {
-                let mut latest = self
-                    .inner
-                    .store
-                    .get_thread_work_state(&current_run.thread_id)?;
-                if self.auto_complete_empty_done_stages(&current_run, &latest)? {
-                    latest = self
-                        .inner
-                        .store
-                        .get_thread_work_state(&current_run.thread_id)?;
+                current_run = self.mark_run_status(
+                    &current_run.run_id,
+                    AstraRunStatus::Planning,
+                    None,
+                    "planning_round",
+                )?;
+                if !current_run.status.active() {
+                    return Ok(RustNativeWorkerOutcome::Claimed);
                 }
-                if thread_all_stages_terminal(&latest) {
-                    let _ = self.complete_run(
-                        &current_run.run_id,
-                        "no_dispatchable_tasks_all_stages_terminal",
+                if round_index >= round_limit {
+                    let _ = self.error_run(
+                        run_id,
+                        "round_limit_reached",
+                        "round_limit_reached",
+                        "Astra round limit reached before planning the next round".to_string(),
                     )?;
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
-                if super::thread_waiting_for_review(&latest) {
-                    let _ = self.complete_run(&current_run.run_id, "pending_human_review")?;
+                let current_round_index = round_index;
+                round_index += 1;
+                let latest_thread = self
+                    .inner
+                    .store
+                    .get_thread_work_state(&current_run.thread_id)?;
+                let (orchestration, orchestrator_backend) = match self.orchestrate_astra_round(
+                    &current_run,
+                    &latest_thread,
+                    prompt.as_deref(),
+                    current_round_index,
+                    &completions,
+                ) {
+                    Ok(orchestration) => orchestration,
+                    Err(error) => {
+                        let _ = self.error_run(
+                            &current_run.run_id,
+                            "orchestrator_policy_denied",
+                            error.code,
+                            error.message,
+                        )?;
+                        return Ok(RustNativeWorkerOutcome::Claimed);
+                    }
+                };
+                let (next_run, next_batch) = self.apply_orchestration_intent(
+                    &current_run,
+                    orchestration,
+                    &orchestrator_backend,
+                    current_round_index,
+                )?;
+                current_run = next_run;
+                if !current_run.status.active() {
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
-                match classify_no_dispatchable_tasks(&latest) {
-                    NoDispatchableOutcome::Completed(reason) => {
-                        let _ = self.complete_run(&current_run.run_id, reason)?;
-                    }
-                    NoDispatchableOutcome::Errored {
-                        reason,
-                        code,
-                        message,
-                    } => {
-                        let _ = self.error_run(&current_run.run_id, reason, code, message)?;
-                    }
+                dispatch_batch = next_batch;
+                completions.clear();
+                if dispatch_batch.is_empty() {
+                    let _ = self.error_run(
+                        &current_run.run_id,
+                        "orchestrator_missing_next_tasks",
+                        "orchestrator_missing_next_tasks",
+                        "Astra Orchestrator returned continue without dispatchable tasks"
+                            .to_string(),
+                    )?;
+                    return Ok(RustNativeWorkerOutcome::Claimed);
                 }
-                return Ok(RustNativeWorkerOutcome::Claimed);
             }
 
             current_run = self.load_run(run_id)?;
@@ -159,7 +143,7 @@ impl AstraService {
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
             };
-            let completions = results
+            completions = results
                 .into_iter()
                 .map(|result| {
                     let task = dispatch_batch
@@ -183,83 +167,7 @@ impl AstraService {
             if !current_run.status.active() {
                 return Ok(RustNativeWorkerOutcome::Claimed);
             }
-            if round_index >= round_limit {
-                let _ = self.error_run(
-                    &current_run.run_id,
-                    "round_limit_reached",
-                    "round_limit_reached",
-                    "Astra round limit reached before evaluating returned task results".to_string(),
-                )?;
-                return Ok(RustNativeWorkerOutcome::Claimed);
-            }
-            let current_round_index = round_index;
-            round_index += 1;
-            let latest_thread = self
-                .inner
-                .store
-                .get_thread_work_state(&current_run.thread_id)?;
-            let (orchestration, orchestrator_backend) = match self.orchestrate_astra_round(
-                &current_run,
-                &latest_thread,
-                prompt.as_deref(),
-                current_round_index,
-                &completions,
-            ) {
-                Ok(orchestration) => orchestration,
-                Err(error) => {
-                    let _ = self.error_run(
-                        &current_run.run_id,
-                        "orchestrator_policy_denied",
-                        error.code,
-                        error.message,
-                    )?;
-                    return Ok(RustNativeWorkerOutcome::Claimed);
-                }
-            };
-            current_run = self.apply_orchestration_decisions(
-                &current_run,
-                &orchestration,
-                &completions,
-                &orchestrator_backend,
-            )?;
-            if !current_run.status.active() {
-                return Ok(RustNativeWorkerOutcome::Claimed);
-            }
-            if orchestration
-                .decisions
-                .iter()
-                .any(|decision| matches!(decision.decision, AstraDecision::RetryStage { .. }))
-            {
-                let _ = self.error_run(
-                    &current_run.run_id,
-                    "batch_retry_stage_unsupported",
-                    "batch_retry_stage_unsupported",
-                    "Astra Orchestrator requested retry_stage after a batch result; return tasks for the next rolling batch instead.".to_string(),
-                )?;
-                return Ok(RustNativeWorkerOutcome::Claimed);
-            }
-            let (next_run, next_batch) = self.apply_orchestration_tasks(
-                &current_run,
-                orchestration,
-                &orchestrator_backend,
-                current_round_index,
-            )?;
-            current_run = next_run;
-            dispatch_batch = next_batch;
-            if !current_run.status.active() {
-                return Ok(RustNativeWorkerOutcome::Claimed);
-            }
-            if dispatch_batch.is_empty()
-                && thread_all_stages_terminal(
-                    &self
-                        .inner
-                        .store
-                        .get_thread_work_state(&current_run.thread_id)?,
-                )
-            {
-                let _ = self.complete_run(&current_run.run_id, "all_stages_terminal")?;
-                return Ok(RustNativeWorkerOutcome::Claimed);
-            }
+            dispatch_batch = self.next_running_sequential_task_batch(&current_run)?;
         }
     }
 
@@ -338,51 +246,75 @@ impl AstraService {
         Box::new(DeterministicOrchestratorBackend)
     }
 
-    fn apply_orchestration_decisions(
+    fn apply_orchestration_intent(
         &self,
         run: &AstraRun,
-        orchestration: &AstraOrchestration,
-        completions: &[AstraTaskCompletion],
+        orchestration: AstraOrchestration,
         orchestrator_backend: &str,
-    ) -> Result<AstraRun> {
-        let orchestrator_backend_for_run = orchestrator_backend.to_string();
-        let _ = self.mutate_run(&run.run_id, |next| {
-            if next.status.active() {
-                next.decision_backend = Some(orchestrator_backend_for_run);
+        round_index: u32,
+    ) -> Result<(AstraRun, Vec<super::AstraTaskProposal>)> {
+        match orchestration.run_intent {
+            AstraRunIntent::Continue => self.apply_orchestration_tasks(
+                run,
+                orchestration,
+                orchestrator_backend,
+                round_index,
+            ),
+            AstraRunIntent::Complete => {
+                self.complete_run(&run.run_id, &orchestration.reason)?;
+                Ok((self.load_run(&run.run_id)?, Vec::new()))
             }
-            Ok(())
-        })?;
-        let mut latest = self.load_run(&run.run_id)?;
-        for task_decision in &orchestration.decisions {
-            if !completions
-                .iter()
-                .any(|completion| completion.task.id == task_decision.task_id)
-            {
-                let _ = self.error_run(
-                    &latest.run_id,
-                    "decision_without_completed_task",
-                    "decision_without_completed_task",
-                    format!(
-                        "Astra Orchestrator returned a decision for unknown task {}",
-                        task_decision.task_id
-                    ),
+            AstraRunIntent::WaitForHuman => {
+                self.complete_run(&run.run_id, &orchestration.reason)?;
+                Ok((self.load_run(&run.run_id)?, Vec::new()))
+            }
+            AstraRunIntent::Error => {
+                self.error_run(
+                    &run.run_id,
+                    &orchestration.reason,
+                    "orchestrator_error",
+                    orchestration.summary,
                 )?;
-                return self.load_run(&run.run_id);
-            }
-            match self.apply_astra_decision(
-                &latest,
-                task_decision.decision.clone(),
-                &task_decision.task_id,
-            )? {
-                DecisionOutcome::Continue
-                | DecisionOutcome::PlanNextRound
-                | DecisionOutcome::RetryTask => {
-                    latest = self.load_run(&run.run_id)?;
-                }
-                DecisionOutcome::Terminal => return self.load_run(&run.run_id),
+                Ok((self.load_run(&run.run_id)?, Vec::new()))
             }
         }
-        Ok(latest)
+    }
+
+    fn next_running_sequential_task_batch(
+        &self,
+        run: &AstraRun,
+    ) -> Result<Vec<super::AstraTaskProposal>> {
+        let rounds = self.inner.store.list_plan_rounds(&run.thread_id)?;
+        for round in rounds
+            .iter()
+            .filter(|round| round.astra_run_id.as_deref() == Some(run.run_id.as_str()))
+            .filter(|round| round.mode == PlanRoundMode::Sequential)
+        {
+            let Some(running_task) = round
+                .tasks
+                .iter()
+                .find(|task| task.status == PlanTaskStatus::Running)
+            else {
+                continue;
+            };
+            let Some(task) = run.proposed_tasks.iter().find(|task| {
+                task.plan_task_id.as_deref() == Some(running_task.id.as_str())
+                    && !run.task_results.iter().any(|result| {
+                        result.task_id == task.id
+                            && matches!(
+                                result.status,
+                                super::AstraTaskResultStatus::Completed
+                                    | super::AstraTaskResultStatus::Failed
+                                    | super::AstraTaskResultStatus::Errored
+                                    | super::AstraTaskResultStatus::Cancelled
+                            )
+                    })
+            }) else {
+                continue;
+            };
+            return Ok(vec![task.clone()]);
+        }
+        Ok(Vec::new())
     }
 
     fn apply_orchestration_tasks(
@@ -392,27 +324,29 @@ impl AstraService {
         orchestrator_backend: &str,
         round_index: u32,
     ) -> Result<(AstraRun, Vec<super::AstraTaskProposal>)> {
-        let tasks = rolling_stage_task_batch(orchestration.tasks);
+        let mode = orchestration
+            .mode
+            .ok_or_else(|| anyhow::anyhow!("continue runIntent requires a plan round mode"))?;
+        let tasks = match mode {
+            PlanRoundMode::Parallel => rolling_stage_task_batch(orchestration.tasks),
+            PlanRoundMode::Sequential => orchestration.tasks,
+        };
         let summary = orchestration.summary;
         let latest_thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
         if tasks.is_empty() {
-            if !thread_all_stages_terminal(&latest_thread)
-                && !thread_waiting_for_review(&latest_thread)
-                && thread_has_dispatchable_stage(run, &latest_thread)
-            {
-                let _ = self.error_run(
-                    &run.run_id,
-                    "orchestrator_missing_next_tasks",
-                    "orchestrator_missing_next_tasks",
-                    "Astra Orchestrator returned no next tasks while the thread still has dispatchable stages.".to_string(),
-                )?;
-                return Ok((self.load_run(&run.run_id)?, Vec::new()));
-            }
+            let _ = self.error_run(
+                &run.run_id,
+                "orchestrator_missing_next_tasks",
+                "orchestrator_missing_next_tasks",
+                "Astra Orchestrator returned continue without tasks".to_string(),
+            )?;
+            return Ok((self.load_run(&run.run_id)?, Vec::new()));
         }
         let tasks = self.create_plan_round_for_astra_tasks(
             run,
             &latest_thread,
             &summary,
+            mode,
             round_index,
             tasks,
         )?;
@@ -425,6 +359,7 @@ impl AstraService {
                 }
                 next.status = AstraRunStatus::Dispatching;
                 next.planner_backend = Some(orchestrator_backend_for_run);
+                next.decision_backend = next.planner_backend.clone();
                 next.round_index = Some(round_index);
                 for task in tasks {
                     if !next
@@ -443,111 +378,25 @@ impl AstraService {
             "plan",
             json!({
                 "summary": summary,
+                "runIntent": "continue",
+                "reason": orchestration.reason,
+                "mode": mode.as_str(),
                 "tasks": tasks.clone(),
                 "plannerBackend": orchestrator_backend,
                 "roundIndex": round_index,
             }),
         );
-        let dispatchable = next_dispatchable_tasks(&planned, &latest_thread);
-        let dispatch_batch = rolling_stage_task_batch(dispatchable);
+        let dispatch_batch = match mode {
+            PlanRoundMode::Parallel => {
+                let dispatchable = next_dispatchable_tasks(&planned, &latest_thread);
+                rolling_stage_task_batch(dispatchable)
+            }
+            PlanRoundMode::Sequential => tasks.into_iter().take(1).collect(),
+        };
         Ok((planned, dispatch_batch))
     }
 
-    fn emit_decision(&self, run: &AstraRun, decision: &AstraDecision) -> Result<()> {
-        self.emit(run, "decision", serde_json::to_value(decision)?);
-        Ok(())
-    }
-
-    fn apply_astra_decision(
-        &self,
-        run: &AstraRun,
-        decision: AstraDecision,
-        current_task_id: &str,
-    ) -> Result<DecisionOutcome> {
-        self.emit_decision(run, &decision)?;
-        match decision {
-            AstraDecision::UpdateStage { args } => {
-                let outcome = self.apply_stage_update_decision(run, &args)?;
-                if !outcome.ok {
-                    return self.fail_run(
-                        &run.run_id,
-                        outcome
-                            .error
-                            .unwrap_or_else(|| "stage update failed".to_string()),
-                    );
-                }
-                Ok(DecisionOutcome::Continue)
-            }
-            AstraDecision::AddOrUpdateIssue { args } => {
-                let outcome = self.apply_issue_decision(run, &args)?;
-                if !outcome.ok {
-                    return self.fail_run(
-                        &run.run_id,
-                        outcome
-                            .error
-                            .unwrap_or_else(|| "issue update failed".to_string()),
-                    );
-                }
-                Ok(DecisionOutcome::Continue)
-            }
-            AstraDecision::RetryStage { reason } => {
-                self.record_task_decision(run, current_task_id, "retry_stage", &reason)?;
-                Ok(DecisionOutcome::RetryTask)
-            }
-            AstraDecision::PlanNextRound { reason } => {
-                self.record_task_decision(run, current_task_id, "plan_next_round", &reason)?;
-                Ok(DecisionOutcome::PlanNextRound)
-            }
-            AstraDecision::CancelRun { reason } => self.cancel_run(&run.run_id, reason),
-            AstraDecision::CompleteRun { reason } => self.complete_run(&run.run_id, &reason),
-            AstraDecision::ErrorRun { reason } => self.fail_run(&run.run_id, reason),
-            AstraDecision::Composite { decisions } => {
-                for decision in decisions {
-                    match self.apply_astra_decision(run, decision, current_task_id)? {
-                        DecisionOutcome::Continue => {}
-                        other => return Ok(other),
-                    }
-                }
-                Ok(DecisionOutcome::Continue)
-            }
-        }
-    }
-
-    fn record_task_decision(
-        &self,
-        run: &AstraRun,
-        task_id: &str,
-        action: &str,
-        reason: &str,
-    ) -> Result<()> {
-        let _ = self.mutate_run(&run.run_id, |next| {
-            if let Some(result) = next
-                .task_results
-                .iter_mut()
-                .rev()
-                .find(|result| result.task_id == task_id)
-            {
-                result.decision_action = Some(action.to_string());
-                result.decision_reason = Some(reason.to_string());
-            }
-            Ok(())
-        })?;
-        Ok(())
-    }
-
-    fn cancel_run(&self, run_id: &str, reason: String) -> Result<DecisionOutcome> {
-        let (cancelled, changed) = self.mark_run_cancelled(run_id, &reason)?;
-        if changed {
-            self.emit(
-                &cancelled,
-                "cancelled",
-                json!({ "status": cancelled.status.as_str(), "reason": reason }),
-            );
-        }
-        Ok(DecisionOutcome::Terminal)
-    }
-
-    fn complete_run(&self, run_id: &str, reason: &str) -> Result<DecisionOutcome> {
+    fn complete_run(&self, run_id: &str, reason: &str) -> Result<()> {
         let run = self.load_run(run_id)?;
         if run.status.active() {
             let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
@@ -557,16 +406,10 @@ impl AstraService {
         if changed {
             self.emit(&completed, "completed", json!({ "reason": reason }));
         }
-        Ok(DecisionOutcome::Terminal)
+        Ok(())
     }
 
-    fn error_run(
-        &self,
-        run_id: &str,
-        reason: &str,
-        code: &str,
-        message: String,
-    ) -> Result<DecisionOutcome> {
+    fn error_run(&self, run_id: &str, reason: &str, code: &str, message: String) -> Result<()> {
         let (errored, changed) = self.mark_run_errored(run_id, reason, code, message.clone())?;
         if changed {
             self.emit(
@@ -575,10 +418,10 @@ impl AstraService {
                 json!({ "message": message, "reason": reason, "errorCode": code }),
             );
         }
-        Ok(DecisionOutcome::Terminal)
+        Ok(())
     }
 
-    fn fail_run(&self, run_id: &str, message: String) -> Result<DecisionOutcome> {
+    fn fail_run(&self, run_id: &str, message: String) -> Result<()> {
         self.error_run(
             run_id,
             "orchestrator_failure",
@@ -694,17 +537,6 @@ fn empty_done_stage_without_assistant(stage: &crate::models::StageInfo) -> bool 
         && stage.assistants.is_empty()
 }
 
-fn thread_has_dispatchable_stage(run: &AstraRun, thread: &crate::models::ThreadInfo) -> bool {
-    if thread.kind != ThreadKind::Workflow {
-        return false;
-    }
-    thread.stages.iter().any(|stage| {
-        !matches!(stage.status, StageStatus::Completed | StageStatus::Skipped)
-            && super::pick_stage_agent(stage).is_some()
-            && super::task_blocked_by_thread_exception(run, thread, Some(&stage.id)).is_none()
-    })
-}
-
 struct AstraWorkerGuard {
     service: AstraService,
     run_id: String,
@@ -730,21 +562,16 @@ impl Drop for AstraWorkerGuard {
     }
 }
 
-enum NoDispatchableOutcome<'a> {
-    #[cfg_attr(not(test), allow(dead_code))]
-    Completed(&'a str),
-    #[cfg_attr(not(test), allow(dead_code))]
-    Errored {
-        reason: &'a str,
-        code: &'a str,
-        message: String,
-    },
-}
-
 fn dedicated_backend_required_error(
     thread: &crate::models::ThreadInfo,
 ) -> Option<(&'static str, &'static str, String)> {
     match thread.kind {
+        ThreadKind::Workflow => Some((
+            "astra_orchestration_unsupported_for_workflow",
+            "astra_orchestration_unsupported_for_workflow",
+            "Workflow threads are human-defined stages and do not use Astra automatic scheduling"
+                .to_string(),
+        )),
         ThreadKind::Brainstorm | ThreadKind::Debate => Some((
             "dedicated_backend_required",
             "dedicated_backend_required",
@@ -753,58 +580,7 @@ fn dedicated_backend_required_error(
                 thread.kind.as_str()
             ),
         )),
-        ThreadKind::Workflow | ThreadKind::Teamwork => None,
-    }
-}
-
-fn classify_no_dispatchable_tasks(thread: &crate::models::ThreadInfo) -> NoDispatchableOutcome<'_> {
-    match thread.kind {
-        ThreadKind::Teamwork => {
-            if thread.assistants.is_empty() {
-                return NoDispatchableOutcome::Errored {
-                    reason: "teamwork_without_assistants",
-                    code: "teamwork_without_assistants",
-                    message: "Astra teamwork requires at least one thread assistant".to_string(),
-                };
-            }
-            return NoDispatchableOutcome::Errored {
-                reason: "no_dispatchable_tasks",
-                code: "no_dispatchable_tasks",
-                message: "Astra Orchestrator produced no dispatchable teamwork tasks".to_string(),
-            };
-        }
-        ThreadKind::Brainstorm | ThreadKind::Debate => {
-            let (reason, code, message) = dedicated_backend_required_error(thread)
-                .expect("brainstorm/debate require dedicated backend");
-            return NoDispatchableOutcome::Errored {
-                reason,
-                code,
-                message,
-            };
-        }
-        ThreadKind::Workflow => {}
-    }
-    if thread.stages.is_empty() {
-        return NoDispatchableOutcome::Completed("no_stages_to_orchestrate");
-    }
-    if super::thread_waiting_for_review(thread) {
-        return NoDispatchableOutcome::Completed("pending_human_review");
-    }
-    if thread.stages.iter().any(|stage| {
-        !matches!(stage.status, StageStatus::Completed | StageStatus::Skipped)
-            && !empty_done_stage_without_assistant(stage)
-            && super::pick_stage_agent(stage).is_none()
-    }) {
-        return NoDispatchableOutcome::Errored {
-            reason: "stage_without_assignable_agent",
-            code: "stage_without_assignable_agent",
-            message: "Astra found non-terminal stages without an assignable assistant".to_string(),
-        };
-    }
-    NoDispatchableOutcome::Errored {
-        reason: "no_dispatchable_tasks",
-        code: "no_dispatchable_tasks",
-        message: "Astra Orchestrator produced no dispatchable tasks".to_string(),
+        ThreadKind::Teamwork => None,
     }
 }
 
@@ -817,17 +593,16 @@ mod tests {
     use crate::models::{Agent, IssueSeverity, StageIssueInfo, StageStatus, StageType};
 
     #[test]
-    fn no_dispatchable_empty_stages_completes() {
+    fn workflow_requires_human_defined_stage_path_before_planning() {
         let thread = test_thread(Vec::new());
 
-        match classify_no_dispatchable_tasks(&thread) {
-            NoDispatchableOutcome::Completed(reason) => {
-                assert_eq!(reason, "no_stages_to_orchestrate")
-            }
-            NoDispatchableOutcome::Errored { reason, .. } => {
-                panic!("unexpected error outcome: {reason}")
-            }
-        }
+        let Some((reason, code, message)) = dedicated_backend_required_error(&thread) else {
+            panic!("expected workflow orchestration guard");
+        };
+
+        assert_eq!(reason, "astra_orchestration_unsupported_for_workflow");
+        assert_eq!(code, "astra_orchestration_unsupported_for_workflow");
+        assert!(message.contains("human-defined stages"));
     }
 
     #[test]
@@ -843,72 +618,6 @@ mod tests {
             assert_eq!(reason, "dedicated_backend_required");
             assert_eq!(code, "dedicated_backend_required");
             assert!(message.contains(kind.as_str()));
-
-            match classify_no_dispatchable_tasks(&thread) {
-                NoDispatchableOutcome::Errored {
-                    reason,
-                    code,
-                    message,
-                } => {
-                    assert_eq!(reason, "dedicated_backend_required");
-                    assert_eq!(code, "dedicated_backend_required");
-                    assert!(message.contains(kind.as_str()));
-                }
-                NoDispatchableOutcome::Completed(reason) => {
-                    panic!("unexpected completed outcome: {reason}")
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn no_dispatchable_stage_without_assistant_is_diagnostic_error() {
-        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
-
-        match classify_no_dispatchable_tasks(&thread) {
-            NoDispatchableOutcome::Errored { reason, code, .. } => {
-                assert_eq!(reason, "stage_without_assignable_agent");
-                assert_eq!(code, "stage_without_assignable_agent");
-            }
-            NoDispatchableOutcome::Completed(reason) => {
-                panic!("unexpected completed outcome: {reason}")
-            }
-        }
-    }
-
-    #[test]
-    fn no_dispatchable_human_review_takes_priority_over_empty_done_stage() {
-        let mut research = test_stage("research", StageStatus::NeedsReview);
-        research.kind = Some(StageType::Human);
-        let mut done = test_stage("done-stage", StageStatus::NotStarted);
-        done.kind = Some(StageType::Done);
-        done.allow_empty_assistants = true;
-        let thread = test_thread(vec![research, done]);
-
-        match classify_no_dispatchable_tasks(&thread) {
-            NoDispatchableOutcome::Completed(reason) => {
-                assert_eq!(reason, "pending_human_review")
-            }
-            NoDispatchableOutcome::Errored { reason, .. } => {
-                panic!("unexpected error outcome: {reason}")
-            }
-        }
-    }
-
-    #[test]
-    fn no_dispatchable_empty_done_stage_is_not_missing_assistant() {
-        let mut done = test_stage("done-stage", StageStatus::NotStarted);
-        done.kind = Some(StageType::Done);
-        done.allow_empty_assistants = true;
-        let thread = test_thread(vec![done]);
-
-        match classify_no_dispatchable_tasks(&thread) {
-            NoDispatchableOutcome::Errored { reason, .. } => {
-                assert_eq!(reason, "no_dispatchable_tasks")
-            }
-            NoDispatchableOutcome::Completed(reason) => {
-                panic!("unexpected completed outcome: {reason}")
-            }
         }
     }
 

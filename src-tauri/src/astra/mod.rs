@@ -16,9 +16,9 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::runtime::RuntimeManager;
 use crate::models::{
-    Agent, AgentInfo, IssueSeverity, IssueStatus, PlanRoundMode, PlanRoundSource, PlanRoundStatus,
-    PlanTaskRisk, PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageIssueInfo, StageStatus,
-    StageType, ThreadInfo, ThreadKind,
+    Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskRisk,
+    PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, StageType, ThreadInfo,
+    ThreadKind,
 };
 use crate::store::{
     AstraRunRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch,
@@ -27,7 +27,6 @@ use crate::store::{
 
 mod astra_pi_acp_adapter;
 mod backend;
-mod decision;
 mod deterministic_backend;
 mod orchestrator;
 mod planner;
@@ -42,12 +41,11 @@ use astra_pi_acp_adapter::{
 use orchestrator::RustNativeWorkerOutcome;
 use planner::next_dispatchable_tasks;
 use prompt::{build_stage_task_context, build_teamwork_task_context};
-use types::AstraDecision;
 pub use types::{
     AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraStageMutationResult, AstraTaskProposal,
     AstraTaskResult, AstraTaskResultStatus, AstraTaskRisk,
 };
-pub(crate) use types::{AstraOrchestration, AstraTaskCompletion, AstraTaskDecision};
+pub(crate) use types::{AstraOrchestration, AstraRunIntent, AstraTaskCompletion};
 
 pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
@@ -708,6 +706,7 @@ impl AstraService {
         run: &AstraRun,
         thread: &ThreadInfo,
         summary: &str,
+        mode: PlanRoundMode,
         round_index: u32,
         tasks: Vec<AstraTaskProposal>,
     ) -> Result<Vec<AstraTaskProposal>> {
@@ -716,6 +715,7 @@ impl AstraService {
             run,
             thread,
             summary,
+            mode,
             round_index,
             tasks,
         )
@@ -1491,138 +1491,6 @@ impl AstraService {
         Ok(run)
     }
 
-    fn apply_stage_update_decision(
-        &self,
-        run: &AstraRun,
-        args: &Value,
-    ) -> Result<AstraStageMutationResult> {
-        let stage_id = args
-            .get("threadStageId")
-            .or_else(|| args.get("stageId"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("threadStageId is required"))?;
-        let status = args
-            .get("status")
-            .and_then(Value::as_str)
-            .map(parse_stage_status)
-            .transpose()?;
-        let summary = optional_string_patch(args, "summary");
-        let outcome = optional_string_patch(args, "outcome");
-
-        let result: Result<(AstraRun, AstraStageMutationResult)> = {
-            let _guard = self
-                .inner
-                .run_write_lock
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
-            let mut latest = self.load_run(&run.run_id)?;
-            if !latest.status.active() {
-                return Ok(inactive_run_mutation_result(&latest));
-            }
-            let thread = self.inner.store.get_thread_work_state(&latest.thread_id)?;
-            let stage_id = resolve_thread_stage_id(&thread, stage_id)?;
-            match self
-                .inner
-                .store
-                .update_thread_stage_state(&stage_id, status, summary, outcome)
-            {
-                Ok(stage) => {
-                    let task_id = args
-                        .get("taskId")
-                        .and_then(Value::as_str)
-                        .map(ToString::to_string);
-                    let stage_id = stage.id.clone();
-                    if stage.status == StageStatus::Completed {
-                        if let Some(task_id) = task_id.as_deref() {
-                            if !latest.completed_task_ids.iter().any(|id| id == task_id) {
-                                latest.completed_task_ids.push(task_id.to_string());
-                            }
-                        }
-                    }
-                    latest.current_stage_id = Some(stage_id);
-                    latest.updated_at = now_ms();
-                    self.inner.store.upsert_astra_run(&run_to_record(&latest))?;
-                    let result = AstraStageMutationResult {
-                        ok: true,
-                        stage: Some(serde_json::to_value(stage)?),
-                        issue: None,
-                        error: None,
-                        applied_at: now_ms(),
-                    };
-                    Ok((latest, result))
-                }
-                Err(error) => Ok((
-                    latest,
-                    AstraStageMutationResult {
-                        ok: false,
-                        stage: None,
-                        issue: None,
-                        error: Some(error.to_string()),
-                        applied_at: now_ms(),
-                    },
-                )),
-            }
-        };
-        let (next, result) = result?;
-        if result.ok {
-            self.emit(&next, "stage_update_result", serde_json::to_value(&result)?);
-        }
-        Ok(result)
-    }
-
-    fn apply_issue_decision(
-        &self,
-        run: &AstraRun,
-        args: &Value,
-    ) -> Result<AstraStageMutationResult> {
-        let result: Result<(AstraRun, AstraStageMutationResult)> = {
-            let _guard = self
-                .inner
-                .run_write_lock
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Astra run write lock poisoned"))?;
-            let latest = self.load_run(&run.run_id)?;
-            if !latest.status.active() {
-                return Ok(inactive_run_mutation_result(&latest));
-            }
-            match self.add_or_update_issue(&latest, args) {
-                Ok(issue) => {
-                    let result = AstraStageMutationResult {
-                        ok: true,
-                        stage: None,
-                        issue: Some(serde_json::to_value(issue)?),
-                        error: None,
-                        applied_at: now_ms(),
-                    };
-                    Ok((latest, result))
-                }
-                Err(error) => Ok((
-                    latest,
-                    AstraStageMutationResult {
-                        ok: false,
-                        stage: None,
-                        issue: None,
-                        error: Some(error.to_string()),
-                        applied_at: now_ms(),
-                    },
-                )),
-            }
-        };
-        let (latest, result) = result?;
-        if result.ok {
-            self.emit(
-                &latest,
-                "issue_update_result",
-                serde_json::to_value(&result)?,
-            );
-        }
-        Ok(result)
-    }
-
-    fn add_or_update_issue(&self, run: &AstraRun, args: &Value) -> Result<StageIssueInfo> {
-        add_or_update_issue_in_store(self.inner.store.as_ref(), &run.thread_id, args)
-    }
-
     fn update_active_terminal_status(
         &self,
         run_id: &str,
@@ -2027,16 +1895,6 @@ fn save_stage_task_work_snapshot(
     })
 }
 
-fn inactive_run_mutation_result(run: &AstraRun) -> AstraStageMutationResult {
-    AstraStageMutationResult {
-        ok: false,
-        stage: None,
-        issue: None,
-        error: Some(format!("Astra run is not active: {}", run.status.as_str())),
-        applied_at: now_ms(),
-    }
-}
-
 fn is_persistable_agent_session_id(agent_runtime_session_id: &str) -> bool {
     !agent_runtime_session_id.trim().is_empty()
         && !agent_runtime_session_id.starts_with("fake-agent-session")
@@ -2379,105 +2237,6 @@ fn resolve_thread_stage_id(thread: &ThreadInfo, stage_id: &str) -> Result<String
         .ok_or_else(|| anyhow::anyhow!("stage does not belong to Astra run thread: {stage_id}"))
 }
 
-fn optional_string_patch(args: &Value, key: &str) -> Option<Option<String>> {
-    if !args
-        .as_object()
-        .map(|object| object.contains_key(key))
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    Some(
-        args.get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string),
-    )
-}
-
-fn parse_stage_status(value: &str) -> Result<StageStatus> {
-    StageStatus::from_db_str(value).ok_or_else(|| anyhow::anyhow!("unknown stage status: {value}"))
-}
-
-fn parse_issue_severity(value: &str) -> Result<IssueSeverity> {
-    IssueSeverity::from_db_str(value)
-        .ok_or_else(|| anyhow::anyhow!("unknown issue severity: {value}"))
-}
-
-fn parse_issue_status(value: &str) -> Result<IssueStatus> {
-    IssueStatus::from_db_str(value).ok_or_else(|| anyhow::anyhow!("unknown issue status: {value}"))
-}
-
-fn add_or_update_issue_in_store(
-    store: &dyn SessionStore,
-    thread_id: &str,
-    args: &Value,
-) -> Result<StageIssueInfo> {
-    let stage_id = args
-        .get("threadStageId")
-        .or_else(|| args.get("stageId"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("threadStageId is required"))?;
-    let thread = store.get_thread_work_state(thread_id)?;
-    let stage_id = resolve_thread_stage_id(&thread, stage_id)?;
-    let issue_id = args
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let title = args
-        .get("title")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if title.is_none() && issue_id.is_none() {
-        bail!("issue title or id is required");
-    }
-    let description = args.get("description").and_then(Value::as_str);
-    let has_description = args.get("description").is_some();
-    let severity = args
-        .get("severity")
-        .and_then(Value::as_str)
-        .map(parse_issue_severity)
-        .transpose()?;
-    let status = args
-        .get("status")
-        .and_then(Value::as_str)
-        .map(parse_issue_status)
-        .transpose()?
-        .unwrap_or(IssueStatus::Open);
-    let existing = store
-        .list_thread_stage_issues(&stage_id)?
-        .into_iter()
-        .find(|issue| {
-            issue_id.is_some_and(|id| issue.id == id)
-                || title.is_some_and(|title| issue.title.eq_ignore_ascii_case(title))
-        });
-    if let Some(existing) = existing {
-        store.update_thread_stage_issue(
-            &existing.id,
-            title,
-            has_description.then_some(description),
-            Some(status),
-            severity,
-        )
-    } else {
-        let title = title.ok_or_else(|| anyhow::anyhow!("issue title is required"))?;
-        let created = store.create_thread_stage_issue(
-            &stage_id,
-            title,
-            description,
-            severity.unwrap_or(IssueSeverity::Medium),
-        )?;
-        if status == IssueStatus::Open {
-            Ok(created)
-        } else {
-            store.update_thread_stage_issue(&created.id, None, None, Some(status), None)
-        }
-    }
-}
-
 fn stable_run_id(thread_id: &str, now: i64) -> String {
     format!("astra-{}-{}", short_hash(thread_id), now)
 }
@@ -2487,14 +2246,20 @@ fn create_plan_round_for_astra_tasks_in_store(
     run: &AstraRun,
     thread: &ThreadInfo,
     summary: &str,
+    mode: PlanRoundMode,
     _round_index: u32,
     tasks: Vec<AstraTaskProposal>,
 ) -> Result<Vec<AstraTaskProposal>> {
-    let owned_tasks = tasks
+    let mut owned_tasks = tasks
         .iter()
         .enumerate()
         .map(|(idx, task)| astra_task_to_plan_task(store, thread, task, idx))
         .collect::<Result<Vec<_>>>()?;
+    if mode == PlanRoundMode::Sequential {
+        if let Some(first_task) = owned_tasks.first_mut() {
+            first_task.status = PlanTaskStatus::Running;
+        }
+    }
     let new_tasks = owned_tasks
         .iter()
         .map(|task| NewPlanTask {
@@ -2517,7 +2282,7 @@ fn create_plan_round_for_astra_tasks_in_store(
         astra_run_id: Some(&run.run_id),
         round_index: None,
         summary: Some(summary),
-        mode: PlanRoundMode::Parallel,
+        mode,
         source: PlanRoundSource::Astra,
         status: if new_tasks.is_empty() {
             PlanRoundStatus::Completed
@@ -2655,14 +2420,20 @@ fn record_plan_task_result_in_store(
     } else {
         Some(summary.as_str())
     };
-    store.update_plan_task_status(
-        plan_task_id,
-        PlanTaskStatusPatch {
-            status: plan_task_status_from_astra(result.status),
-            result_summary: Some(result_summary),
-            error: Some(result.error.as_deref()),
-        },
-    )?;
+    let patch = PlanTaskStatusPatch {
+        status: plan_task_status_from_astra(result.status),
+        result_summary: Some(result_summary),
+        error: Some(result.error.as_deref()),
+    };
+    let rounds = store.list_plan_rounds(&run.thread_id)?;
+    let round = rounds
+        .iter()
+        .find(|round| round.tasks.iter().any(|task| task.id == plan_task_id));
+    if round.is_some_and(|round| round.mode == PlanRoundMode::Sequential) {
+        store.complete_plan_task_and_start_next(plan_task_id, patch)?;
+    } else {
+        store.update_plan_task_status(plan_task_id, patch)?;
+    }
     let session_id = result.sessio_runtime_session_id.trim();
     if !session_id.is_empty() {
         store.link_plan_task_session(NewPlanTaskSession {
@@ -2727,10 +2498,12 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::decision::deterministic_decision;
     use super::planner::deterministic_plan;
     use super::*;
-    use crate::models::{AssistantAgentInfo, AssistantType, StageAssistantInfo, ThreadKind};
+    use crate::models::{
+        AssistantAgentInfo, AssistantType, IssueSeverity, IssueStatus, StageAssistantInfo,
+        StageIssueInfo, ThreadKind,
+    };
     use crate::store::{sqlite::SqliteStore, NewAssistant};
     use std::path::Path;
 
@@ -2999,6 +2772,7 @@ mod tests {
             &run,
             &thread,
             "Bridge Astra tasks into plan tables.",
+            PlanRoundMode::Parallel,
             99,
             vec![
                 AstraTaskProposal {
@@ -3214,6 +2988,7 @@ mod tests {
             &run,
             &thread,
             "Bridge Astra teamwork tasks into plan tables.",
+            PlanRoundMode::Parallel,
             7,
             vec![AstraTaskProposal {
                 id: "task-teamwork-1".to_string(),
@@ -4163,136 +3938,6 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_decision_completed_stage_updates_stage() {
-        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
-        let task = test_task("task-1", "stage-1");
-        let result = test_task_result("task-1", "session-1", "Implemented and verified.");
-
-        let decision = deterministic_decision(&thread, &result, &task);
-
-        match decision {
-            AstraDecision::UpdateStage { args } => {
-                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
-                assert_eq!(args["status"], Value::String("completed".to_string()));
-                assert_eq!(
-                    args["summary"],
-                    Value::String("Implemented and verified.".to_string())
-                );
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deterministic_decision_completed_without_signal_needs_review() {
-        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
-        let task = test_task("task-1", "stage-1");
-        let result = test_task_result("task-1", "session-1", "I made some progress.");
-
-        let decision = deterministic_decision(&thread, &result, &task);
-
-        match decision {
-            AstraDecision::UpdateStage { args } => {
-                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
-                assert_eq!(args["status"], Value::String("needs_review".to_string()));
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deterministic_decision_negative_signal_wins_over_completion_substring() {
-        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
-        let task = test_task("task-1", "stage-1");
-        let result = test_task_result(
-            "task-1",
-            "session-1",
-            "Not completed successfully because more information is needed.",
-        );
-
-        let decision = deterministic_decision(&thread, &result, &task);
-
-        match decision {
-            AstraDecision::UpdateStage { args } => {
-                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
-                assert_eq!(args["status"], Value::String("blocked".to_string()));
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deterministic_retry_limit_blocks_stage_and_creates_issue() {
-        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
-        let task = test_task("task-1", "stage-1");
-        let mut result = test_task_result("task-1", "session-1", "");
-        result.status = AstraTaskResultStatus::Failed;
-        result.error = Some("retry limit reached".to_string());
-        result.retry_limit_reached = true;
-        result.attempt_count = 3;
-
-        let decision = deterministic_decision(&thread, &result, &task);
-
-        match decision {
-            AstraDecision::Composite { decisions } => {
-                assert_eq!(decisions.len(), 2);
-                assert!(matches!(
-                    decisions[0],
-                    AstraDecision::AddOrUpdateIssue { .. }
-                ));
-                match &decisions[1] {
-                    AstraDecision::UpdateStage { args } => {
-                        assert_eq!(args["status"], Value::String("blocked".to_string()));
-                    }
-                    other => panic!("unexpected second decision: {other:?}"),
-                }
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deterministic_decision_failed_stage_creates_issue() {
-        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
-        let task = test_task("task-1", "stage-1");
-        let mut result = test_task_result("task-1", "session-1", "failed output");
-        result.status = AstraTaskResultStatus::Errored;
-        result.error = Some("agent crashed".to_string());
-
-        let decision = deterministic_decision(&thread, &result, &task);
-
-        match decision {
-            AstraDecision::AddOrUpdateIssue { args } => {
-                assert_eq!(args["threadStageId"], Value::String("stage-1".to_string()));
-                assert_eq!(args["severity"], Value::String("high".to_string()));
-                assert_eq!(
-                    args["description"],
-                    Value::String("agent crashed".to_string())
-                );
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn deterministic_decision_cancelled_task_cancels_run() {
-        let thread = test_thread(vec![test_stage("stage-1", StageStatus::InProgress)]);
-        let task = test_task("task-1", "stage-1");
-        let mut result = test_task_result("task-1", "session-1", "");
-        result.status = AstraTaskResultStatus::Cancelled;
-        result.error = Some("turn cancelled".to_string());
-
-        let decision = deterministic_decision(&thread, &result, &task);
-
-        match decision {
-            AstraDecision::CancelRun { reason } => {
-                assert_eq!(reason, "turn cancelled");
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
     fn dispatch_failure_marks_only_active_run_errored() {
         let mut running = test_run("active-run");
 
@@ -4352,188 +3997,6 @@ mod tests {
         ));
         assert_eq!(interrupted.status, AstraRunStatus::Interrupted);
         assert_eq!(interrupted.error, None);
-    }
-
-    #[test]
-    fn deterministic_stage_update_decision_mutates_store() {
-        let db_path = std::env::temp_dir().join(format!(
-            "astra-decision-store-{}.sqlite",
-            short_hash(&now_ms().to_string())
-        ));
-        let store = SqliteStore::open(&db_path).unwrap();
-        store.init().unwrap();
-
-        let parent = std::env::temp_dir().join(format!(
-            "astra-decision-project-{}",
-            short_hash(&db_path.to_string_lossy())
-        ));
-        std::fs::create_dir_all(&parent).unwrap();
-        let project = store
-            .create_project(
-                &parent.to_string_lossy(),
-                "Astra Decision Store",
-                "general".to_string(),
-                None,
-            )
-            .unwrap();
-        let stage_option = store
-            .create_project_stage(&project.id, None, "Implement", None, None)
-            .unwrap();
-        store
-            .update_project_stage(
-                &stage_option.id,
-                crate::store::ProjectStagePatch {
-                    allow_empty_assistants: Some(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let thread = store
-            .create_thread(&project.id, "Ship deterministic decision", None)
-            .unwrap();
-        let stage = store
-            .add_thread_stage(&thread.id, &stage_option.id, &[])
-            .unwrap();
-        let run = AstraRun {
-            run_id: "astra-run-decision-store".to_string(),
-            thread_id: thread.id.clone(),
-            project_id: project.id.clone(),
-            project_path: project.path.clone(),
-            status: AstraRunStatus::Running,
-            proposed_tasks: Vec::new(),
-            approved_task_ids: Vec::new(),
-            delegated_session_ids: Vec::new(),
-            task_results: Vec::new(),
-            mode: "auto".to_string(),
-            current_stage_id: Some(stage.id.clone()),
-            completed_task_ids: Vec::new(),
-            stage_attempt_counts: HashMap::new(),
-            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
-            planner_backend: Some("deterministic".to_string()),
-            decision_backend: Some("deterministic".to_string()),
-            round_index: None,
-            round_limit: RUST_NATIVE_ROUND_LIMIT,
-            terminal_reason: None,
-            last_error_code: None,
-            last_error_message: None,
-            internal_planner_session_ids: Vec::new(),
-            internal_decision_session_ids: Vec::new(),
-            run_diagnostics: Vec::new(),
-            error: None,
-            created_at: 1,
-            updated_at: 1,
-        };
-
-        let args = json!({
-            "taskId": "task-1",
-            "threadStageId": stage.id,
-            "status": "completed",
-            "summary": "Done",
-            "outcome": "Verified",
-        });
-        let status = args
-            .get("status")
-            .and_then(Value::as_str)
-            .map(parse_stage_status)
-            .transpose()
-            .unwrap();
-        let updated = store
-            .update_thread_stage_state(
-                args["threadStageId"].as_str().unwrap(),
-                status,
-                optional_string_patch(&args, "summary"),
-                optional_string_patch(&args, "outcome"),
-            )
-            .unwrap();
-        let mut next = run.clone();
-        if updated.status == StageStatus::Completed {
-            next.completed_task_ids.push("task-1".to_string());
-        }
-
-        assert_eq!(updated.status, StageStatus::Completed);
-        assert_eq!(updated.summary.as_deref(), Some("Done"));
-        assert_eq!(updated.outcome.as_deref(), Some("Verified"));
-        assert_eq!(next.completed_task_ids, vec!["task-1"]);
-
-        let _ = std::fs::remove_file(&db_path);
-        let _ = std::fs::remove_dir_all(Path::new(&project.path));
-    }
-
-    #[test]
-    fn issue_status_decision_resolves_existing_issue() {
-        let db_path = std::env::temp_dir().join(format!(
-            "astra-issue-decision-store-{}.sqlite",
-            short_hash(&now_ms().to_string())
-        ));
-        let store = SqliteStore::open(&db_path).unwrap();
-        store.init().unwrap();
-
-        let parent = std::env::temp_dir().join(format!(
-            "astra-issue-decision-project-{}",
-            short_hash(&db_path.to_string_lossy())
-        ));
-        std::fs::create_dir_all(&parent).unwrap();
-        let project = store
-            .create_project(
-                &parent.to_string_lossy(),
-                "Astra Issue Decision Store",
-                "general".to_string(),
-                None,
-            )
-            .unwrap();
-        let stage_option = store
-            .create_project_stage(&project.id, None, "Research", None, None)
-            .unwrap();
-        store
-            .update_project_stage(
-                &stage_option.id,
-                crate::store::ProjectStagePatch {
-                    allow_empty_assistants: Some(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let thread = store
-            .create_thread(&project.id, "Resolve Astra issue", None)
-            .unwrap();
-        let stage = store
-            .add_thread_stage(&thread.id, &stage_option.id, &[])
-            .unwrap();
-        let issue = store
-            .create_thread_stage_issue(
-                &stage.id,
-                "Need source verification",
-                Some("Search missed citations."),
-                IssueSeverity::High,
-            )
-            .unwrap();
-
-        let updated = add_or_update_issue_in_store(
-            &store,
-            &thread.id,
-            &json!({
-                "taskId": "task-1",
-                "id": issue.id,
-                "threadStageId": stage.id,
-                "status": "resolved",
-            }),
-        )
-        .unwrap();
-
-        assert_eq!(updated.status, IssueStatus::Resolved);
-        assert_eq!(updated.title, "Need source verification");
-        assert_eq!(
-            updated.description.as_deref(),
-            Some("Search missed citations.")
-        );
-        assert_eq!(updated.severity, IssueSeverity::High);
-
-        let issues = store.list_thread_stage_issues(&stage.id).unwrap();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].status, IssueStatus::Resolved);
-
-        let _ = std::fs::remove_file(&db_path);
-        let _ = std::fs::remove_dir_all(Path::new(&project.path));
     }
 
     pub(super) fn test_thread(stages: Vec<crate::models::StageInfo>) -> ThreadInfo {

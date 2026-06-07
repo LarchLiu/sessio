@@ -15,13 +15,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::{
-    pick_stage_agent, rolling_stage_task_batch, short_hash, stage_label, summarize_task_output,
-    task_blocked_by_thread_exception, AstraDecision, AstraOrchestration, AstraRun,
-    AstraTaskCompletion, AstraTaskDecision, AstraTaskProposal, AstraTaskResult, AstraTaskRisk,
+    pick_stage_agent, short_hash, stage_label, task_blocked_by_thread_exception,
+    AstraOrchestration, AstraRun, AstraRunIntent, AstraTaskCompletion, AstraTaskProposal,
+    AstraTaskRisk,
 };
 use crate::astra::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
 use crate::astra::prompt::build_astra_orchestration_prompt;
-use crate::models::{Agent, IssueSeverity, IssueStatus, StageStatus, ThreadInfo, ThreadKind};
+use crate::models::{Agent, PlanRoundMode, StageStatus, ThreadInfo, ThreadKind};
 
 #[derive(Debug, Clone)]
 pub(super) struct AstraPiAcpConfig {
@@ -612,64 +612,11 @@ fn content_chunk_text(chunk: &ContentChunk) -> Result<String> {
 #[serde(rename_all = "camelCase")]
 struct RawAstraPiAcpOrchestration {
     summary: Option<String>,
-    #[serde(default)]
-    decisions: Vec<RawAstraPiAcpTaskDecision>,
+    run_intent: Option<AstraRunIntent>,
+    reason: Option<String>,
+    mode: Option<PlanRoundMode>,
     #[serde(default)]
     tasks: Vec<RawAstraPiAcpTask>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawAstraPiAcpTaskDecision {
-    task_id: String,
-    #[serde(default)]
-    decision: Option<RawAstraPiAcpDecision>,
-    #[serde(default)]
-    action: Option<String>,
-    #[serde(default)]
-    stage: Option<Value>,
-    #[serde(default)]
-    issue: Option<Value>,
-    #[serde(default)]
-    retry: Option<Value>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default, alias = "threadStageId")]
-    stage_id: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    outcome: Option<String>,
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-impl RawAstraPiAcpTaskDecision {
-    fn into_decision(self) -> Result<RawAstraPiAcpDecision, AstraPiAcpFailure> {
-        if let Some(decision) = self.decision {
-            return Ok(decision);
-        }
-        let action = self.action.ok_or_else(|| {
-            AstraPiAcpFailure::new(
-                "validation_failed",
-                format!(
-                    "decision missing action for completed task: {}",
-                    self.task_id
-                ),
-            )
-        })?;
-        Ok(RawAstraPiAcpDecision {
-            action,
-            stage: self.stage,
-            issue: self.issue,
-            retry: self.retry,
-            summary: self.summary,
-            stage_id: self.stage_id,
-            status: self.status,
-            outcome: self.outcome,
-            reason: self.reason,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -694,57 +641,27 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
     completions: &[AstraTaskCompletion],
 ) -> Result<AstraOrchestration, AstraPiAcpFailure> {
     let value = parse_json_object(response)?;
+    reject_legacy_orchestration_fields(&value)?;
     let raw: RawAstraPiAcpOrchestration = serde_json::from_value(value)
         .map_err(|error| AstraPiAcpFailure::new("invalid_json", error.to_string()))?;
     let RawAstraPiAcpOrchestration {
         summary,
-        decisions: raw_decisions,
+        run_intent,
+        reason,
+        mode,
         tasks: raw_tasks,
     } = raw;
 
-    let mut decisions = Vec::new();
-    for raw_decision in raw_decisions {
-        let task_id = raw_decision.task_id.clone();
-        let completion = completions
-            .iter()
-            .find(|completion| completion.task.id == task_id)
-            .ok_or_else(|| {
-                AstraPiAcpFailure::new(
-                    "validation_failed",
-                    format!("decision references unknown completed task: {}", task_id),
-                )
-            })?;
-        let decision = sanitize_astra_pi_acp_decision(
-            raw_decision.into_decision()?,
-            thread,
-            &completion.result,
-            &completion.task,
-        )?;
-        decisions.push(AstraTaskDecision {
-            task_id: completion.task.id.clone(),
-            decision,
-        });
-    }
-    for completion in completions {
-        if !decisions
-            .iter()
-            .any(|decision| decision.task_id == completion.task.id)
-        {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                format!(
-                    "missing decision for completed task: {}",
-                    completion.task.id
-                ),
-            ));
-        }
-    }
-
-    let planning_thread = thread_after_decisions(thread, &decisions);
+    let run_intent = run_intent.ok_or_else(|| {
+        AstraPiAcpFailure::new("validation_failed", "orchestration missing runIntent")
+    })?;
+    let reason = reason
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_orchestration_reason(run_intent, completions.len()));
     let mut tasks = Vec::new();
     let mut invalid_messages = Vec::new();
     for (idx, task) in raw_tasks.into_iter().enumerate() {
-        match sanitize_astra_pi_acp_task(task, run, &planning_thread, round_index, idx) {
+        match sanitize_astra_pi_acp_task(task, run, thread, round_index, idx) {
             Ok(task) => tasks.push(task),
             Err(error) => invalid_messages.push(error.message),
         }
@@ -758,125 +675,105 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
             ),
         ));
     }
-    if planning_thread.kind != ThreadKind::Teamwork {
-        tasks = rolling_stage_task_batch(tasks);
-    }
+    validate_orchestration_contract(thread, run_intent, mode, &tasks)?;
 
     Ok(AstraOrchestration {
         summary: summary
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
                 format!(
-                "Astra Pi Orchestrator handled {} completion(s) and selected {} rolling task(s).",
+                "Astra Pi Orchestrator handled {} completion(s) with intent {} and selected {} task(s).",
                 completions.len(),
+                run_intent.as_str(),
                 tasks.len()
             )
             }),
-        decisions,
+        run_intent,
+        reason,
+        mode,
         tasks,
     })
 }
 
-fn thread_after_decisions(thread: &ThreadInfo, decisions: &[AstraTaskDecision]) -> ThreadInfo {
-    let mut projected = thread.clone();
-    for task_decision in decisions {
-        apply_decision_to_projected_thread(&mut projected, &task_decision.decision);
+fn reject_legacy_orchestration_fields(value: &Value) -> Result<(), AstraPiAcpFailure> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for key in [
+        "decisions",
+        "decision",
+        "action",
+        "outcome",
+        "issueStatus",
+        "targetStageId",
+        "stage",
+        "issue",
+        "retry",
+    ] {
+        if object.contains_key(key) {
+            return Err(AstraPiAcpFailure::new(
+                "validation_failed",
+                format!("legacy Astra orchestration field is not supported: {key}"),
+            ));
+        }
     }
-    projected
+    Ok(())
 }
 
-fn apply_decision_to_projected_thread(thread: &mut ThreadInfo, decision: &AstraDecision) {
-    match decision {
-        AstraDecision::UpdateStage { args } => {
-            let Some(stage_id) = args
-                .get("threadStageId")
-                .or_else(|| args.get("stageId"))
-                .or_else(|| args.get("id"))
-                .and_then(Value::as_str)
-            else {
-                return;
-            };
-            let Some(stage) = thread.stages.iter_mut().find(|stage| stage.id == stage_id) else {
-                return;
-            };
-            if let Some(status) = args
-                .get("status")
-                .and_then(Value::as_str)
-                .and_then(StageStatus::from_db_str)
-            {
-                stage.status = status;
+fn validate_orchestration_contract(
+    thread: &ThreadInfo,
+    run_intent: AstraRunIntent,
+    mode: Option<PlanRoundMode>,
+    tasks: &[AstraTaskProposal],
+) -> Result<(), AstraPiAcpFailure> {
+    match run_intent {
+        AstraRunIntent::Continue => {
+            if thread.kind != ThreadKind::Teamwork {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    "Astra automatic orchestration is only supported for teamwork threads",
+                ));
             }
-            if let Some(summary) = args
-                .get("summary")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                stage.summary = Some(summary.to_string());
+            if mode.is_none() {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    "continue runIntent requires mode",
+                ));
             }
-            if let Some(outcome) = args
-                .get("outcome")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                stage.outcome = Some(outcome.to_string());
+            if tasks.is_empty() {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    "continue runIntent requires at least one task",
+                ));
             }
         }
-        AstraDecision::Composite { decisions } => {
-            for decision in decisions {
-                apply_decision_to_projected_thread(thread, decision);
+        AstraRunIntent::Complete | AstraRunIntent::WaitForHuman | AstraRunIntent::Error => {
+            if mode.is_some() {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    "terminal runIntent must not include mode",
+                ));
+            }
+            if !tasks.is_empty() {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    "terminal runIntent must not include tasks",
+                ));
             }
         }
-        AstraDecision::AddOrUpdateIssue { args } => {
-            let Some(stage_id) = args
-                .get("threadStageId")
-                .or_else(|| args.get("stageId"))
-                .and_then(Value::as_str)
-            else {
-                return;
-            };
-            let Some(stage) = thread.stages.iter_mut().find(|stage| stage.id == stage_id) else {
-                return;
-            };
-            let issue_id = args
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let title = args
-                .get("title")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let status = args
-                .get("status")
-                .and_then(Value::as_str)
-                .and_then(IssueStatus::from_db_str)
-                .unwrap_or(IssueStatus::Open);
-            let Some(issue) = stage.issues.iter_mut().find(|issue| {
-                issue_id.is_some_and(|id| issue.id == id)
-                    || title.is_some_and(|title| issue.title.eq_ignore_ascii_case(title))
-            }) else {
-                return;
-            };
-            issue.status = status;
-            if let Some(severity) = args
-                .get("severity")
-                .and_then(Value::as_str)
-                .and_then(IssueSeverity::from_db_str)
-            {
-                issue.severity = severity;
-            }
-            if let Some(title) = title {
-                issue.title = title.to_string();
-            }
-            if let Some(description) = args.get("description").and_then(Value::as_str) {
-                issue.description = Some(description.to_string());
-            }
-        }
-        _ => {}
     }
+    Ok(())
+}
+
+fn default_orchestration_reason(intent: AstraRunIntent, completion_count: usize) -> String {
+    match intent {
+        AstraRunIntent::Continue => "continue_with_next_plan_round",
+        AstraRunIntent::Complete => "orchestration_complete",
+        AstraRunIntent::WaitForHuman => "waiting_for_human",
+        AstraRunIntent::Error => "orchestration_error",
+    }
+    .to_string()
+        + &format!("_after_{}_completion(s)", completion_count)
 }
 
 fn sanitize_astra_pi_acp_task(
@@ -1055,307 +952,6 @@ fn parse_task_risk(value: Option<&str>) -> AstraTaskRisk {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawAstraPiAcpDecision {
-    action: String,
-    #[serde(default)]
-    stage: Option<Value>,
-    #[serde(default)]
-    issue: Option<Value>,
-    #[serde(default)]
-    retry: Option<Value>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default, alias = "threadStageId")]
-    stage_id: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    outcome: Option<String>,
-    reason: Option<String>,
-}
-
-fn stage_payload_from_decision(
-    raw: &RawAstraPiAcpDecision,
-) -> Result<Option<Value>, AstraPiAcpFailure> {
-    let has_flat_stage_payload = raw
-        .stage_id
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
-        || raw
-            .status
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || raw
-            .summary
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-        || raw
-            .outcome
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
-    if !has_flat_stage_payload {
-        return Ok(raw.stage.clone());
-    }
-
-    let mut value = raw.stage.clone().unwrap_or_else(|| json!({}));
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "stage must be an object"))?;
-    if !object.contains_key("threadStageId")
-        && !object.contains_key("stageId")
-        && !object.contains_key("id")
-    {
-        if let Some(stage_id) = raw
-            .stage_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            object.insert(
-                "threadStageId".to_string(),
-                Value::String(stage_id.to_string()),
-            );
-        }
-    }
-    if !object.contains_key("status") {
-        if let Some(status) = raw
-            .status
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            object.insert("status".to_string(), Value::String(status.to_string()));
-        }
-    }
-    if !object.contains_key("summary") {
-        if let Some(summary) = raw
-            .summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            object.insert("summary".to_string(), Value::String(summary.to_string()));
-        }
-    }
-    if !object.contains_key("outcome") {
-        if let Some(outcome) = raw
-            .outcome
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            object.insert("outcome".to_string(), Value::String(outcome.to_string()));
-        }
-    }
-    Ok(Some(value))
-}
-
-fn sanitize_astra_pi_acp_decision(
-    raw: RawAstraPiAcpDecision,
-    thread: &ThreadInfo,
-    result: &AstraTaskResult,
-    task: &AstraTaskProposal,
-) -> Result<AstraDecision, AstraPiAcpFailure> {
-    let reason = raw
-        .reason
-        .as_deref()
-        .or(raw.summary.as_deref())
-        .filter(|value| !value.trim().is_empty())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| summarize_task_output(&result.output));
-    match raw.action.as_str() {
-        "update_stage" => Ok(AstraDecision::UpdateStage {
-            args: stage_decision_args(
-                stage_payload_from_decision(&raw)?,
-                thread,
-                result,
-                task,
-                &reason,
-            )?,
-        }),
-        "add_or_update_issue" => Ok(AstraDecision::AddOrUpdateIssue {
-            args: issue_decision_args(raw.issue, thread, result, task, &reason)?,
-        }),
-        "retry_stage" => {
-            if result.retry_limit_reached {
-                Ok(AstraDecision::ErrorRun {
-                    reason: "retry limit reached".to_string(),
-                })
-            } else {
-                let retry_reason = raw
-                    .retry
-                    .as_ref()
-                    .and_then(|value| value.get("reason"))
-                    .and_then(Value::as_str)
-                    .unwrap_or(&reason)
-                    .to_string();
-                Ok(AstraDecision::RetryStage {
-                    reason: retry_reason,
-                })
-            }
-        }
-        "plan_next_round" => Ok(AstraDecision::PlanNextRound { reason }),
-        "complete_run" => Ok(AstraDecision::CompleteRun { reason }),
-        "error_run" => Ok(AstraDecision::ErrorRun { reason }),
-        other => Err(AstraPiAcpFailure::new(
-            "validation_failed",
-            format!("unknown decision action: {other}"),
-        )),
-    }
-}
-
-fn stage_decision_args(
-    stage: Option<Value>,
-    thread: &ThreadInfo,
-    result: &AstraTaskResult,
-    task: &AstraTaskProposal,
-    fallback_summary: &str,
-) -> Result<Value, AstraPiAcpFailure> {
-    let mut value = stage.unwrap_or_else(|| json!({}));
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "stage must be an object"))?;
-    let stage_id = object
-        .get("threadStageId")
-        .or_else(|| object.get("stageId"))
-        .or_else(|| object.get("id"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| result.thread_stage_id.clone())
-        .or_else(|| task.target_stage_id.clone())
-        .ok_or_else(|| {
-            AstraPiAcpFailure::new("validation_failed", "stage decision missing stage id")
-        })?;
-    if !thread.stages.iter().any(|stage| stage.id == stage_id) {
-        return Err(AstraPiAcpFailure::new(
-            "validation_failed",
-            "stage decision references unknown stage",
-        ));
-    }
-    object.insert("taskId".to_string(), Value::String(task.id.clone()));
-    object.insert("threadStageId".to_string(), Value::String(stage_id));
-    if !object.contains_key("status") {
-        object.insert(
-            "status".to_string(),
-            Value::String("needs_review".to_string()),
-        );
-    } else {
-        let status = object
-            .get("status")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                AstraPiAcpFailure::new("validation_failed", "stage status must be a string")
-            })?;
-        if StageStatus::from_db_str(status).is_none() {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                format!("unknown stage status: {status}"),
-            ));
-        }
-    }
-    if !object.contains_key("summary") {
-        object.insert(
-            "summary".to_string(),
-            Value::String(fallback_summary.to_string()),
-        );
-    }
-    if !object.contains_key("outcome") {
-        object.insert(
-            "outcome".to_string(),
-            Value::String(fallback_summary.to_string()),
-        );
-    }
-    Ok(value)
-}
-
-fn issue_decision_args(
-    issue: Option<Value>,
-    thread: &ThreadInfo,
-    result: &AstraTaskResult,
-    task: &AstraTaskProposal,
-    fallback_summary: &str,
-) -> Result<Value, AstraPiAcpFailure> {
-    let mut value = issue.unwrap_or_else(|| json!({}));
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "issue must be an object"))?;
-    let stage_id = object
-        .get("threadStageId")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-        .or_else(|| result.thread_stage_id.clone())
-        .or_else(|| task.target_stage_id.clone())
-        .ok_or_else(|| {
-            AstraPiAcpFailure::new("validation_failed", "issue decision missing stage id")
-        })?;
-    if !thread.stages.iter().any(|stage| stage.id == stage_id) {
-        return Err(AstraPiAcpFailure::new(
-            "validation_failed",
-            "issue decision references unknown stage",
-        ));
-    }
-    object.insert("taskId".to_string(), Value::String(task.id.clone()));
-    object.insert("threadStageId".to_string(), Value::String(stage_id));
-    let has_issue_id = object
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
-    if !object.contains_key("title") && !has_issue_id {
-        object.insert(
-            "title".to_string(),
-            Value::String(format!("Astra follow-up: {}", task.title)),
-        );
-    }
-    if !object.contains_key("description") && !has_issue_id {
-        object.insert(
-            "description".to_string(),
-            Value::String(fallback_summary.to_string()),
-        );
-    }
-    if !object.contains_key("severity") && !has_issue_id {
-        object.insert(
-            "severity".to_string(),
-            Value::String(IssueSeverity::High.as_str().to_string()),
-        );
-    } else if object.contains_key("severity") {
-        let severity = object
-            .get("severity")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                AstraPiAcpFailure::new("validation_failed", "issue severity must be a string")
-            })?;
-        if IssueSeverity::from_db_str(severity).is_none() {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                format!("unknown issue severity: {severity}"),
-            ));
-        }
-    }
-    if !object.contains_key("status") {
-        object.insert(
-            "status".to_string(),
-            Value::String(IssueStatus::Open.as_str().to_string()),
-        );
-    } else {
-        let status = object
-            .get("status")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                AstraPiAcpFailure::new("validation_failed", "issue status must be a string")
-            })?;
-        if IssueStatus::from_db_str(status).is_none() {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                format!("unknown issue status: {status}"),
-            ));
-        }
-    }
-    Ok(value)
-}
-
 fn parse_json_object(response: &str) -> Result<Value, AstraPiAcpFailure> {
     let trimmed = response.trim();
     if trimmed.is_empty() {
@@ -1441,28 +1037,6 @@ mod tests {
         }
     }
 
-    fn thread() -> ThreadInfo {
-        let assistant = crate::models::StageAssistantInfo {
-            assistant_id: "assistant-1".to_string(),
-            name: "Codex".to_string(),
-            color: None,
-            agent: crate::models::AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: String::new(),
-                mode: String::new(),
-                effort: String::new(),
-            },
-            system_prompt: None,
-            order: 0,
-        };
-        let mut stage = super::super::tests::test_stage("stage-1", StageStatus::InProgress);
-        stage.assistants.push(assistant.clone());
-        let mut next_stage = super::super::tests::test_stage("stage-2", StageStatus::InProgress);
-        next_stage.assistants.push(assistant);
-        super::super::tests::test_thread(vec![stage, next_stage])
-    }
-
     fn teamwork_thread() -> ThreadInfo {
         let mut thread = super::super::tests::test_thread(Vec::new());
         thread.kind = crate::models::ThreadKind::Teamwork;
@@ -1500,134 +1074,36 @@ mod tests {
     }
 
     #[test]
-    fn parses_fenced_orchestration_and_sanitizes_task() {
+    fn parses_fenced_teamwork_continue_and_sanitizes_assistant_task() {
         let orchestration = parse_astra_pi_acp_orchestration_response(
             r#"```json
-            {"summary":"ok","tasks":[{"id":"bad id!","title":"Do it","targetStageId":"stage-1","targetAgent":"codex","prompt":"Work","expectedOutput":"Notes","risk":"medium"}]}
+            {"summary":"ok","runIntent":"continue","reason":"initial_plan","mode":"parallel","tasks":[{"id":"bad id!","title":"Build","assistantId":"assistant-codex","targetAgent":"codex","prompt":"Work","expectedOutput":"Notes","risk":"medium"}]}
             ```"#,
             &run(),
-            &thread(),
+            &teamwork_thread(),
             0,
             &[],
         )
         .unwrap();
 
         assert_eq!(orchestration.summary, "ok");
+        assert_eq!(orchestration.run_intent, AstraRunIntent::Continue);
+        assert_eq!(orchestration.reason, "initial_plan");
+        assert_eq!(orchestration.mode, Some(PlanRoundMode::Parallel));
         assert_eq!(orchestration.tasks.len(), 1);
         assert!(orchestration.tasks[0].id.starts_with("task-"));
+        assert_eq!(
+            orchestration.tasks[0].assistant_id.as_deref(),
+            Some("assistant-codex")
+        );
+        assert_eq!(orchestration.tasks[0].target_stage_id, None);
+        assert_eq!(orchestration.tasks[0].target_agent, Agent::Codex);
         assert_eq!(orchestration.tasks[0].risk, AstraTaskRisk::Medium);
     }
 
     #[test]
-    fn invalid_orchestration_task_fails_whole_response() {
-        let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","tasks":[{"targetStageId":"missing","targetAgent":"codex","prompt":"Work"}]}"#,
-            &run(),
-            &thread(),
-            0,
-            &[],
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, "validation_failed");
-        assert!(error.message.contains("unknown targetStageId"));
-    }
-
-    #[test]
-    fn rejects_ordinary_task_when_any_stage_needs_review() {
-        let mut thread = thread();
-        thread.stages[0].status = StageStatus::NeedsReview;
-
-        let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","tasks":[{"targetStageId":"stage-2","targetAgent":"codex","prompt":"Work"}]}"#,
-            &run(),
-            &thread,
-            0,
-            &[],
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, "validation_failed");
-        assert!(error.message.contains("needing review"));
-    }
-
-    #[test]
-    fn accepts_review_task_for_agent_stage_needing_review() {
-        let mut thread = thread();
-        thread.stages[0].status = StageStatus::NeedsReview;
-
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"review","tasks":[{"targetStageId":"stage-1","targetAgent":"codex","prompt":"Review the stage result"}]}"#,
-            &run(),
-            &thread,
-            0,
-            &[],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.tasks.len(), 1);
-        assert_eq!(
-            orchestration.tasks[0].target_stage_id.as_deref(),
-            Some("stage-1")
-        );
-    }
-
-    #[test]
-    fn rejects_agent_task_for_human_stage_needing_review() {
-        let mut thread = thread();
-        thread.stages[0].status = StageStatus::NeedsReview;
-        thread.stages[0].kind = Some(crate::models::StageType::Human);
-
-        let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","tasks":[{"targetStageId":"stage-1","targetAgent":"codex","prompt":"Review"}]}"#,
-            &run(),
-            &thread,
-            0,
-            &[],
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, "validation_failed");
-        assert!(error.message.contains("human review"));
-    }
-
-    #[test]
-    fn rejects_ordinary_task_when_blocked_stage_exists() {
-        let mut thread = thread();
-        thread.stages[0].status = StageStatus::Blocked;
-
-        let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","tasks":[{"targetStageId":"stage-2","targetAgent":"codex","prompt":"Work"}]}"#,
-            &run(),
-            &thread,
-            0,
-            &[],
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, "validation_failed");
-        assert!(error.message.contains("blocked stage"));
-    }
-
-    #[test]
-    fn parses_thread_level_orchestration_task() {
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"thread","tasks":[{"title":"Thread task","targetAgent":"codex","prompt":"Work thread"}]}"#,
-            &run(),
-            &thread(),
-            0,
-            &[],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.tasks.len(), 1);
-        assert_eq!(orchestration.tasks[0].target_stage_id, None);
-        assert_eq!(orchestration.tasks[0].target_agent, Agent::Codex);
-    }
-
-    #[test]
-    fn parses_teamwork_assistant_tasks_without_stage_batch_trimming() {
-        let response = r#"{"summary":"teamwork","tasks":[
+    fn parses_teamwork_sequential_tasks_without_batch_trimming() {
+        let response = r#"{"summary":"teamwork","runIntent":"continue","reason":"ordered_plan","mode":"sequential","tasks":[
             {"title":"Build","assistantId":"assistant-codex","targetAgent":"codex","prompt":"Build the feature"},
             {"title":"Review","assistantId":"assistant-claude","targetAgent":"claude","prompt":"Review the feature"}
         ]}"#;
@@ -1636,6 +1112,8 @@ mod tests {
             parse_astra_pi_acp_orchestration_response(response, &run(), &teamwork_thread(), 0, &[])
                 .unwrap();
 
+        assert_eq!(orchestration.run_intent, AstraRunIntent::Continue);
+        assert_eq!(orchestration.mode, Some(PlanRoundMode::Sequential));
         assert_eq!(orchestration.tasks.len(), 2);
         assert!(orchestration
             .tasks
@@ -1654,9 +1132,120 @@ mod tests {
     }
 
     #[test]
+    fn rejects_legacy_decisions_field() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"done","runIntent":"continue","reason":"legacy","mode":"parallel","decisions":[{"action":"update_stage"}],"tasks":[]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("legacy Astra orchestration field"));
+    }
+
+    #[test]
+    fn rejects_continue_without_mode() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","runIntent":"continue","reason":"missing_mode","tasks":[{"assistantId":"assistant-codex","targetAgent":"codex","prompt":"Work"}]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("requires mode"));
+    }
+
+    #[test]
+    fn rejects_continue_with_empty_tasks() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","runIntent":"continue","reason":"empty","mode":"parallel","tasks":[]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("requires at least one task"));
+    }
+
+    #[test]
+    fn rejects_continue_for_workflow_thread() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","runIntent":"continue","reason":"workflow","mode":"parallel","tasks":[{"title":"Thread task","targetAgent":"codex","prompt":"Work thread"}]}"#,
+            &run(),
+            &super::super::tests::test_thread(Vec::new()),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("only supported for teamwork"));
+    }
+
+    #[test]
+    fn rejects_terminal_intent_with_mode_or_tasks() {
+        let mode_error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"done","runIntent":"complete","reason":"done","mode":"parallel","tasks":[]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(mode_error.code, "validation_failed");
+        assert!(mode_error.message.contains("must not include mode"));
+
+        let tasks_error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"done","runIntent":"complete","reason":"done","mode":null,"tasks":[{"assistantId":"assistant-codex","targetAgent":"codex","prompt":"Work"}]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(tasks_error.code, "validation_failed");
+        assert!(tasks_error.message.contains("must not include tasks"));
+    }
+
+    #[test]
+    fn accepts_terminal_intents_without_tasks() {
+        for (intent, expected) in [
+            ("complete", AstraRunIntent::Complete),
+            ("wait_for_human", AstraRunIntent::WaitForHuman),
+            ("error", AstraRunIntent::Error),
+        ] {
+            let response = format!(
+                r#"{{"summary":"terminal","runIntent":"{intent}","reason":"terminal_reason","mode":null,"tasks":[]}}"#
+            );
+            let orchestration = parse_astra_pi_acp_orchestration_response(
+                &response,
+                &run(),
+                &teamwork_thread(),
+                0,
+                &[],
+            )
+            .unwrap();
+
+            assert_eq!(orchestration.run_intent, expected);
+            assert_eq!(orchestration.reason, "terminal_reason");
+            assert_eq!(orchestration.mode, None);
+            assert!(orchestration.tasks.is_empty());
+        }
+    }
+
+    #[test]
     fn rejects_teamwork_task_with_target_stage_id() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","tasks":[{"assistantId":"assistant-codex","targetStageId":"stage-1","targetAgent":"codex","prompt":"Work"}]}"#,
+            r#"{"summary":"bad","runIntent":"continue","reason":"bad_task","mode":"parallel","tasks":[{"assistantId":"assistant-codex","targetStageId":"stage-1","targetAgent":"codex","prompt":"Work"}]}"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1671,7 +1260,7 @@ mod tests {
     #[test]
     fn rejects_teamwork_task_with_unknown_assistant_id() {
         let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"bad","tasks":[{"assistantId":"assistant-missing","targetAgent":"codex","prompt":"Work"}]}"#,
+            r#"{"summary":"bad","runIntent":"continue","reason":"bad_task","mode":"parallel","tasks":[{"assistantId":"assistant-missing","targetAgent":"codex","prompt":"Work"}]}"#,
             &run(),
             &teamwork_thread(),
             0,
@@ -1684,44 +1273,18 @@ mod tests {
     }
 
     #[test]
-    fn orchestration_keeps_first_stage_parallel_batch_only() {
-        let mut tasks = (0..5)
-            .map(|idx| {
-                json!({
-                    "id": format!("task-{idx}"),
-                    "title": format!("Task {idx}"),
-                    "targetStageId": "stage-1",
-                    "targetAgent": "codex",
-                    "prompt": "Work"
-                })
-            })
-            .collect::<Vec<_>>();
-        tasks.push(json!({
-            "id": "task-next-stage",
-            "title": "Next stage task",
-            "targetStageId": "stage-2",
-            "targetAgent": "codex",
-            "prompt": "Work later"
-        }));
-        let response = json!({ "summary": "many", "tasks": tasks }).to_string();
-        let orchestration =
-            parse_astra_pi_acp_orchestration_response(&response, &run(), &thread(), 0, &[])
-                .unwrap();
+    fn rejects_teamwork_task_with_mismatched_target_agent() {
+        let error = parse_astra_pi_acp_orchestration_response(
+            r#"{"summary":"bad","runIntent":"continue","reason":"bad_task","mode":"parallel","tasks":[{"assistantId":"assistant-codex","targetAgent":"claude","prompt":"Work"}]}"#,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
 
-        assert_eq!(orchestration.tasks.len(), 4);
-        assert_eq!(orchestration.tasks[0].title, "Task 0");
-        assert!(orchestration
-            .tasks
-            .iter()
-            .all(|task| task.target_stage_id.as_deref() == Some("stage-1")));
-        assert!(!orchestration
-            .tasks
-            .iter()
-            .any(|task| task.title == "Task 4"));
-        assert!(!orchestration
-            .tasks
-            .iter()
-            .any(|task| task.title == "Next stage task"));
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("does not match assistantId"));
     }
 
     #[test]
@@ -1729,7 +1292,7 @@ mod tests {
         assert!(parse_astra_pi_acp_orchestration_response(
             "no json here",
             &run(),
-            &thread(),
+            &teamwork_thread(),
             0,
             &[]
         )
@@ -1810,352 +1373,5 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn maps_nested_update_stage_decision() {
-        let task = AstraTaskProposal {
-            id: "task-1".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Task".to_string(),
-            target_stage_id: Some("stage-1".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Work".to_string(),
-            expected_output: "Notes".to_string(),
-            risk: AstraTaskRisk::Low,
-        };
-        let result = AstraTaskResult {
-            task_id: "task-1".to_string(),
-            thread_stage_id: Some("stage-1".to_string()),
-            sessio_runtime_session_id: "runtime-1".to_string(),
-            turn_id: None,
-            status: super::super::AstraTaskResultStatus::Completed,
-            output: "done".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
-            completed_at: 1,
-        };
-
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"done","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stage":{"status":"completed"},"reason":"done"}}],"tasks":[{"title":"Review","targetStageId":"stage-2","targetAgent":"codex","prompt":"Review work"}]}"#,
-            &run(),
-            &thread(),
-            1,
-            &[AstraTaskCompletion { task, result }],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.decisions.len(), 1);
-        assert_eq!(orchestration.tasks.len(), 1);
-        assert_eq!(
-            orchestration.tasks[0].target_stage_id.as_deref(),
-            Some("stage-2")
-        );
-        match &orchestration.decisions[0].decision {
-            AstraDecision::UpdateStage { args } => {
-                assert_eq!(args["threadStageId"], "stage-1");
-                assert_eq!(args["status"], "completed");
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn maps_issue_status_decision_for_existing_issue() {
-        let task = AstraTaskProposal {
-            id: "task-1".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Task".to_string(),
-            target_stage_id: Some("stage-1".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Work".to_string(),
-            expected_output: "Notes".to_string(),
-            risk: AstraTaskRisk::Low,
-        };
-        let result = AstraTaskResult {
-            task_id: "task-1".to_string(),
-            thread_stage_id: Some("stage-1".to_string()),
-            sessio_runtime_session_id: "runtime-1".to_string(),
-            turn_id: None,
-            status: super::super::AstraTaskResultStatus::Completed,
-            output: "resolved".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
-            completed_at: 1,
-        };
-
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"resolved","decisions":[{"taskId":"task-1","decision":{"action":"add_or_update_issue","issue":{"id":"issue-1","threadStageId":"stage-1","status":"resolved"},"reason":"fixed"}},{"taskId":"task-1","decision":{"action":"update_stage","stage":{"status":"completed"},"reason":"done"}}],"tasks":[]}"#,
-            &run(),
-            &thread(),
-            1,
-            &[AstraTaskCompletion { task, result }],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.decisions.len(), 2);
-        match &orchestration.decisions[0].decision {
-            AstraDecision::AddOrUpdateIssue { args } => {
-                assert_eq!(args["id"], "issue-1");
-                assert_eq!(args["threadStageId"], "stage-1");
-                assert_eq!(args["status"], "resolved");
-                assert!(args.get("title").is_none());
-                assert!(args.get("severity").is_none());
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-        match &orchestration.decisions[1].decision {
-            AstraDecision::UpdateStage { args } => {
-                assert_eq!(args["threadStageId"], "stage-1");
-                assert_eq!(args["status"], "completed");
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn maps_legacy_flat_update_stage_decision() {
-        let task = AstraTaskProposal {
-            id: "task-1".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Task".to_string(),
-            target_stage_id: Some("stage-1".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Work".to_string(),
-            expected_output: "Notes".to_string(),
-            risk: AstraTaskRisk::Low,
-        };
-        let result = AstraTaskResult {
-            task_id: "task-1".to_string(),
-            thread_stage_id: Some("stage-1".to_string()),
-            sessio_runtime_session_id: "runtime-1".to_string(),
-            turn_id: None,
-            status: super::super::AstraTaskResultStatus::Completed,
-            output: "done".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
-            completed_at: 1,
-        };
-
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"done","decisions":[{"taskId":"task-1","action":"update_stage","stage":{"status":"completed"},"reason":"done"}],"tasks":[]}"#,
-            &run(),
-            &thread(),
-            1,
-            &[AstraTaskCompletion { task, result }],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.decisions.len(), 1);
-        match &orchestration.decisions[0].decision {
-            AstraDecision::UpdateStage { args } => {
-                assert_eq!(args["threadStageId"], "stage-1");
-                assert_eq!(args["status"], "completed");
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn maps_runtime_agent_flat_update_stage_decision() {
-        let task = AstraTaskProposal {
-            id: "task-1".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Task".to_string(),
-            target_stage_id: None,
-            target_agent: Agent::Codex,
-            prompt: "Work".to_string(),
-            expected_output: "Notes".to_string(),
-            risk: AstraTaskRisk::Low,
-        };
-        let result = AstraTaskResult {
-            task_id: "task-1".to_string(),
-            thread_stage_id: None,
-            sessio_runtime_session_id: "runtime-1".to_string(),
-            turn_id: None,
-            status: super::super::AstraTaskResultStatus::Completed,
-            output: "done".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
-            completed_at: 1,
-        };
-
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"ok","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stageId":"stage-1","status":"completed","summary":"done"}}],"tasks":[{"title":"Plan next","targetStageId":"stage-2","targetAgent":"codex","prompt":"Plan"}]}"#,
-            &run(),
-            &thread(),
-            1,
-            &[AstraTaskCompletion { task, result }],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.decisions.len(), 1);
-        assert_eq!(orchestration.tasks.len(), 1);
-        assert_eq!(
-            orchestration.tasks[0].target_stage_id.as_deref(),
-            Some("stage-2")
-        );
-        match &orchestration.decisions[0].decision {
-            AstraDecision::UpdateStage { args } => {
-                assert_eq!(args["threadStageId"], "stage-1");
-                assert_eq!(args["status"], "completed");
-                assert_eq!(args["summary"], "done");
-                assert_eq!(args["outcome"], "done");
-            }
-            other => panic!("unexpected decision: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validates_tasks_after_projecting_stage_decisions() {
-        let mut thread = thread();
-        thread.stages[0].status = StageStatus::NeedsReview;
-
-        let task = AstraTaskProposal {
-            id: "task-1".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Review research".to_string(),
-            target_stage_id: Some("stage-1".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Review".to_string(),
-            expected_output: "Review notes".to_string(),
-            risk: AstraTaskRisk::Low,
-        };
-        let result = AstraTaskResult {
-            task_id: "task-1".to_string(),
-            thread_stage_id: Some("stage-1".to_string()),
-            sessio_runtime_session_id: "runtime-1".to_string(),
-            turn_id: None,
-            status: super::super::AstraTaskResultStatus::Completed,
-            output: "approved-with-corrections".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
-            completed_at: 1,
-        };
-
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"reviewed","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stageId":"stage-1","status":"completed","summary":"approved"}}],"tasks":[{"title":"Plan answer","targetStageId":"stage-2","targetAgent":"codex","prompt":"Plan the answer"}]}"#,
-            &run(),
-            &thread,
-            1,
-            &[AstraTaskCompletion { task, result }],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.decisions.len(), 1);
-        assert_eq!(orchestration.tasks.len(), 1);
-        assert_eq!(
-            orchestration.tasks[0].target_stage_id.as_deref(),
-            Some("stage-2")
-        );
-    }
-
-    #[test]
-    fn validates_tasks_after_projecting_non_review_stage_decisions() {
-        let mut thread = thread();
-        thread.stages[0].status = StageStatus::Blocked;
-
-        let task = AstraTaskProposal {
-            id: "task-1".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Recover research".to_string(),
-            target_stage_id: Some("stage-1".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Recover".to_string(),
-            expected_output: "Recovery notes".to_string(),
-            risk: AstraTaskRisk::Low,
-        };
-        let result = AstraTaskResult {
-            task_id: "task-1".to_string(),
-            thread_stage_id: Some("stage-1".to_string()),
-            sessio_runtime_session_id: "runtime-1".to_string(),
-            turn_id: None,
-            status: super::super::AstraTaskResultStatus::Completed,
-            output: "recovered".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
-            completed_at: 1,
-        };
-
-        let orchestration = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"recovered","decisions":[{"taskId":"task-1","decision":{"action":"update_stage","stageId":"stage-1","status":"completed","summary":"recovered"}}],"tasks":[{"title":"Plan answer","targetStageId":"stage-2","targetAgent":"codex","prompt":"Plan the answer"}]}"#,
-            &run(),
-            &thread,
-            1,
-            &[AstraTaskCompletion { task, result }],
-        )
-        .unwrap();
-
-        assert_eq!(orchestration.decisions.len(), 1);
-        assert_eq!(orchestration.tasks.len(), 1);
-        assert_eq!(
-            orchestration.tasks[0].target_stage_id.as_deref(),
-            Some("stage-2")
-        );
-    }
-
-    #[test]
-    fn orchestration_requires_decision_for_each_completion() {
-        let task = AstraTaskProposal {
-            id: "task-1".to_string(),
-            plan_task_id: None,
-            assistant_id: None,
-            title: "Task".to_string(),
-            target_stage_id: Some("stage-1".to_string()),
-            target_agent: Agent::Codex,
-            prompt: "Work".to_string(),
-            expected_output: "Notes".to_string(),
-            risk: AstraTaskRisk::Low,
-        };
-        let result = AstraTaskResult {
-            task_id: "task-1".to_string(),
-            thread_stage_id: Some("stage-1".to_string()),
-            sessio_runtime_session_id: "runtime-1".to_string(),
-            turn_id: None,
-            status: super::super::AstraTaskResultStatus::Completed,
-            output: "done".to_string(),
-            error: None,
-            attempt_count: 1,
-            retry_limit_reached: false,
-            decision_action: None,
-            decision_reason: None,
-            completed_at: 1,
-        };
-
-        let error = parse_astra_pi_acp_orchestration_response(
-            r#"{"summary":"missing decision","tasks":[]}"#,
-            &run(),
-            &thread(),
-            1,
-            &[AstraTaskCompletion { task, result }],
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, "validation_failed");
-        assert!(error.message.contains("missing decision"));
     }
 }

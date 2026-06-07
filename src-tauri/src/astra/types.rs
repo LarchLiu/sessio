@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::models::Agent;
+use crate::models::PlanRoundMode;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -215,32 +216,34 @@ pub struct AstraTaskCompletion {
     pub result: AstraTaskResult,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AstraTaskDecision {
-    pub task_id: String,
-    pub decision: AstraDecision,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AstraRunIntent {
+    Continue,
+    Complete,
+    WaitForHuman,
+    Error,
+}
+
+impl AstraRunIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Complete => "complete",
+            Self::WaitForHuman => "wait_for_human",
+            Self::Error => "error",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AstraOrchestration {
     pub summary: String,
-    #[serde(default)]
-    pub decisions: Vec<AstraTaskDecision>,
+    pub run_intent: AstraRunIntent,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PlanRoundMode>,
     #[serde(default)]
     pub tasks: Vec<AstraTaskProposal>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "action")]
-pub(crate) enum AstraDecision {
-    UpdateStage { args: Value },
-    AddOrUpdateIssue { args: Value },
-    RetryStage { reason: String },
-    PlanNextRound { reason: String },
-    CancelRun { reason: String },
-    CompleteRun { reason: String },
-    ErrorRun { reason: String },
-    Composite { decisions: Vec<AstraDecision> },
 }

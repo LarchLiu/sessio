@@ -6,112 +6,20 @@ use super::{
 };
 use crate::models::{IssueStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind};
 
-const ASTRA_STAGE_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Orchestrator.
+const ASTRA_WORKFLOW_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Orchestrator.
+
+Workflow threads are human-defined stages and do not use Astra automatic scheduling. Return an error terminal response if invoked for workflow.
 
 Return only one complete valid JSON object. Do not return markdown, code fences, comments, prose, trailing commas, partial JSON, or multiple JSON values.
 
 Required top-level response:
 {
   "summary": "string",
-  "decisions": [],
+  "runIntent": "error",
+  "reason": "workflow_astra_orchestration_unsupported",
+  "mode": null,
   "tasks": []
-}
-
-For each completedTasks item, include at least one decisions item:
-{
-  "taskId": "completedTasks[n].task.id",
-  "decision": { "action": "update_stage|add_or_update_issue|retry_stage|plan_next_round|complete_run|error_run", "...": "..." }
-}
-If one task result needs multiple state changes, return multiple decisions with the same taskId. For example, when a retry resolves an existing open issue and completes the stage, return one add_or_update_issue decision with issue.status "resolved" plus one update_stage decision.
-
-Use these exact decision shapes.
-
-update_stage:
-{
-  "taskId": "task-id",
-  "decision": {
-    "action": "update_stage",
-    "stage": {
-      "threadStageId": "thread-stage-id",
-      "status": "not_started|in_progress|blocked|needs_review|completed|skipped",
-      "summary": "string",
-      "outcome": "string"
-    },
-    "reason": "string"
-  }
-}
-Do not put stageId, threadStageId, status, summary, or outcome directly on decision for update_stage. Put those fields under decision.stage. Use threadStageId, not stageId.
-
-add_or_update_issue:
-{
-  "taskId": "task-id",
-  "decision": {
-    "action": "add_or_update_issue",
-    "issue": {
-      "id": "optional-existing-issue-id",
-      "threadStageId": "thread-stage-id",
-      "title": "string",
-      "description": "string",
-      "status": "open|resolved|dismissed",
-      "severity": "low|medium|high|critical"
-    },
-    "reason": "string"
-  }
-}
-Use add_or_update_issue for issue lifecycle decisions, not only for new failures. When a task output resolves an existing open issue, return add_or_update_issue with the existing issue id if known, the same title, status "resolved", and a short resolution description. Use status "dismissed" only when the issue is invalid or no longer relevant. Use status "open" for unresolved findings that still need follow-up.
-
-retry_stage:
-{
-  "taskId": "task-id",
-  "decision": {
-    "action": "retry_stage",
-    "retry": { "reason": "string" },
-    "reason": "string"
-  }
-}
-
-plan_next_round:
-{
-  "taskId": "task-id",
-  "decision": {
-    "action": "plan_next_round",
-    "reason": "string"
-  }
-}
-
-complete_run:
-{
-  "taskId": "task-id",
-  "decision": {
-    "action": "complete_run",
-    "reason": "string"
-  }
-}
-
-error_run:
-{
-  "taskId": "task-id",
-  "decision": {
-    "action": "error_run",
-    "reason": "string"
-  }
-}
-
-Tasks must be planned against the thread state after applying all decisions in this same response. If the thread still has dispatchable stages after applying decisions and no exceptional stage blocks dispatch, tasks must include the next rolling task batch.
-
-Task shape:
-{
-  "title": "string",
-  "targetStageId": "thread-stage-id",
-  "targetAgent": "codex|claude|gemini|astra-pi",
-  "prompt": "string",
-  "expectedOutput": "string",
-  "risk": "low|medium|high"
-}
-
-Use rolling planning: return only the next safe task batch for one target stage. A batch may include multiple tasks only when every task has the same targetStageId and the tasks can run safely in parallel; never mix targetStageIds in one response. Stage order is context, not a strict dependency chain, so choose any appropriate stage when there are no exceptional stages.
-
-Exceptional stages take priority: if any non-human stage is needs_review, return only review tasks targeting needs_review non-human stages. Human needs_review stages are waiting for human review and should receive no agent tasks. If no agent-review stage exists and any human stage is needs_review, tasks may be empty to stop for human review. If no review exception exists and any stage is blocked, return only recovery tasks for blocked stages."#;
+}"#;
 
 const ASTRA_TEAMWORK_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Teamwork Orchestrator.
 
@@ -120,18 +28,21 @@ Return only one complete valid JSON object. Do not return markdown, code fences,
 Required top-level response:
 {
   "summary": "string",
-  "decisions": [],
+  "runIntent": "continue|complete|wait_for_human|error",
+  "reason": "string",
+  "mode": "parallel|sequential|null",
   "tasks": []
 }
 
 Teamwork uses shared thread context plus Astra task orchestration. It does not use workflow stage scheduling.
 
-For each completedTasks item, include at least one decisions item. Use only these decision actions for teamwork:
-- plan_next_round
-- complete_run
-- error_run
+Use runIntent:
+- continue: create and dispatch one plan round. mode must be parallel or sequential, and tasks must be non-empty.
+- complete: stop the Astra run successfully. mode must be null and tasks must be empty.
+- wait_for_human: stop for human input or review. mode must be null and tasks must be empty.
+- error: stop with a diagnostic error. mode must be null and tasks must be empty.
 
-Do not return update_stage, retry_stage, add_or_update_issue, stage mutation, issue mutation, or targetStageId for teamwork.
+Do not return decisions. Do not return update_stage, retry_stage, add_or_update_issue, action, outcome, stage mutation, issue mutation, or targetStageId for teamwork.
 
 Teamwork task shape:
 {
@@ -145,13 +56,14 @@ Teamwork task shape:
 
 assistantId must reference one of thread.assistants. targetAgent should match that assistant's runtime agent. If you create an agent-level task without assistantId, targetAgent is required, but prefer assistantId so Sessio can preserve team-member history and assistant snapshots.
 
-Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a batch may target different assistants and may run in parallel when independent."#;
+Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants when independent. Use sequential when task order matters within the same round."#;
 
 fn astra_orchestration_response_contract(kind: ThreadKind) -> &'static str {
     match kind {
         ThreadKind::Teamwork => ASTRA_TEAMWORK_ORCHESTRATION_RESPONSE_CONTRACT,
-        ThreadKind::Workflow | ThreadKind::Brainstorm | ThreadKind::Debate => {
-            ASTRA_STAGE_ORCHESTRATION_RESPONSE_CONTRACT
+        ThreadKind::Workflow => ASTRA_WORKFLOW_ORCHESTRATION_RESPONSE_CONTRACT,
+        ThreadKind::Brainstorm | ThreadKind::Debate => {
+            ASTRA_WORKFLOW_ORCHESTRATION_RESPONSE_CONTRACT
         }
     }
 }
@@ -875,23 +787,15 @@ mod tests {
         let instruction = value["instruction"].as_str().unwrap();
 
         assert!(instruction.contains(r#""summary": "string""#));
-        assert!(instruction.contains(r#""decisions": []"#));
+        assert!(instruction.contains(r#""runIntent": "error""#));
+        assert!(instruction.contains(r#""reason": "workflow_astra_orchestration_unsupported""#));
+        assert!(instruction.contains(r#""mode": null"#));
         assert!(instruction.contains(r#""tasks": []"#));
-        assert!(instruction.contains(r#""stage": {"#));
-        assert!(instruction.contains(r#""threadStageId": "thread-stage-id""#));
-        assert!(instruction.contains("include at least one decisions item"));
-        assert!(instruction.contains("return multiple decisions with the same taskId"));
-        assert!(instruction.contains(r#""status": "open|resolved|dismissed""#));
-        assert!(instruction.contains("Use add_or_update_issue for issue lifecycle decisions"));
-        assert!(instruction.contains(r#"status "resolved""#));
         assert!(instruction.contains(
-            "Do not put stageId, threadStageId, status, summary, or outcome directly on decision",
+            "Workflow threads are human-defined stages and do not use Astra automatic scheduling"
         ));
-        assert!(instruction.contains("Use threadStageId, not stageId"));
-        assert!(instruction.contains(
-            "Tasks must be planned against the thread state after applying all decisions"
-        ));
-        assert!(instruction.contains(r#""targetAgent": "codex|claude|gemini|astra-pi""#));
+        assert!(!instruction.contains(r#""decisions": []"#));
+        assert!(!instruction.contains(r#""stage": {"#));
         assert_eq!(value["thread"]["id"], "thread-1");
         assert_eq!(value["run"]["roundIndex"], 2);
         assert_eq!(value["userPrompt"], "user request");
@@ -912,8 +816,11 @@ mod tests {
 
         assert!(instruction.contains("Astra Teamwork Orchestrator"));
         assert!(instruction.contains("Teamwork uses shared thread context"));
+        assert!(instruction.contains(r#""runIntent": "continue|complete|wait_for_human|error""#));
+        assert!(instruction.contains(r#""mode": "parallel|sequential|null""#));
         assert!(instruction.contains(r#""assistantId": "thread-assistant-id""#));
         assert!(instruction.contains("Do not return update_stage"));
+        assert!(instruction.contains("Do not return decisions"));
         assert!(!instruction.contains(r#""stage": {"#));
         assert_eq!(value["thread"]["kind"], "teamwork");
         assert_eq!(
