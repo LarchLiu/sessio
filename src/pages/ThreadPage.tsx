@@ -397,6 +397,7 @@ function AstraPlanTaskRow({
 }) {
   const { t } = useI18n();
   const detail = task.error ?? task.resultSummary ?? task.expectedOutput ?? null;
+  const snapshots = planTaskSnapshotLabels(task, t);
   return (
     <div className="rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -427,6 +428,19 @@ function AstraPlanTaskRow({
       {detail && (
         <div className={"mt-1 line-clamp-2 text-caption leading-relaxed " + (task.error ? "text-status-error" : "text-ink/45")}>
           {detail}
+        </div>
+      )}
+      {snapshots.length > 0 && (
+        <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
+          {snapshots.map((snapshot) => (
+            <span
+              key={`${snapshot.kind}:${snapshot.label}`}
+              title={snapshot.title}
+              className="max-w-full truncate rounded bg-ink/[0.045] px-1.5 py-0.5 text-meta text-ink/40"
+            >
+              {snapshot.label}
+            </span>
+          ))}
         </div>
       )}
     </div>
@@ -1125,6 +1139,81 @@ function astraTaskStatusClass(status: PlanTaskStatus): string {
     return "bg-ink/[0.06] text-ink/45";
   }
   return astraResultClass(status);
+}
+
+type SnapshotChip = {
+  kind: "stage" | "assistant" | "agent";
+  label: string;
+  title: string;
+};
+
+function planTaskSnapshotLabels(task: PlanTaskInfo, t: (key: string, vars?: Record<string, string | number>) => string): SnapshotChip[] {
+  const chips: SnapshotChip[] = [];
+  const stage = parseJsonObject(task.stageSnapshotJson);
+  const assistant = parseJsonObject(task.assistantSnapshotJson);
+  const agent = parseJsonObject(task.agentSnapshotJson);
+
+  const stageName = stringField(stage, "name") ?? stringField(stage, "stageId") ?? stringField(stage, "id");
+  if (stageName) {
+    chips.push({
+      kind: "stage",
+      label: t("astra.snapshot.stage", { value: stageName }),
+      title: task.stageSnapshotJson ?? stageName,
+    });
+  }
+
+  const assistantName = stringField(assistant, "name") ?? stringField(assistant, "assistantId") ?? stringField(assistant, "id");
+  if (assistantName) {
+    const agentInfo = objectField(assistant, "agent");
+    const model = stringField(agentInfo, "model");
+    chips.push({
+      kind: "assistant",
+      label: t("astra.snapshot.assistant", {
+        value: model ? `${assistantName} / ${model}` : assistantName,
+      }),
+      title: task.assistantSnapshotJson ?? assistantName,
+    });
+  }
+
+  const agentInfo = objectField(agent, "agentInfo");
+  const agentLabel = stringField(agentInfo, "displayName")
+    ?? stringField(agentInfo, "name")
+    ?? stringField(agent, "agent")
+    ?? task.targetAgent;
+  const model = stringField(agentInfo, "model");
+  chips.push({
+    kind: "agent",
+    label: t("astra.snapshot.agent", {
+      value: model ? `${agentLabel} / ${model}` : agentLabel,
+    }),
+    title: task.agentSnapshotJson,
+  });
+
+  return chips;
+}
+
+function parseJsonObject(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function objectField(value: Record<string, unknown> | null, key: string): Record<string, unknown> | null {
+  const field = value?.[key];
+  return field && typeof field === "object" && !Array.isArray(field)
+    ? field as Record<string, unknown>
+    : null;
+}
+
+function stringField(value: Record<string, unknown> | null, key: string): string | null {
+  const field = value?.[key];
+  return typeof field === "string" && field.trim() ? field : null;
 }
 
 function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
