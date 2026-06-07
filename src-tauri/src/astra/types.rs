@@ -97,7 +97,6 @@ pub struct AstraHandle {
     pub delegated_session_ids: Vec<String>,
     pub task_results: Vec<AstraTaskResult>,
     pub mode: String,
-    pub completed_task_ids: Vec<String>,
     pub retry_limit: u32,
     pub planner_backend: Option<String>,
     pub decision_backend: Option<String>,

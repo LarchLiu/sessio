@@ -1407,7 +1407,6 @@ impl AstraService {
             delegated_session_ids: run.delegated_session_ids,
             task_results: run.task_results,
             mode: run.mode,
-            completed_task_ids: run.completed_task_ids,
             retry_limit: run.retry_limit,
             planner_backend: run.planner_backend,
             decision_backend: run.decision_backend,

@@ -399,7 +399,6 @@ export interface AstraHandle {
   delegatedSessionIds: string[];
   taskResults: AstraTaskResult[];
   mode: string;
-  completedTaskIds: string[];
   retryLimit: number;
   plannerBackend: string | null;
   decisionBackend: string | null;

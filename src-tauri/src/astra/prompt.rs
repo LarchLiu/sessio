@@ -121,7 +121,6 @@ pub(super) fn build_astra_orchestration_prompt(
             "id": run.run_id,
             "roundIndex": round_index,
             "retryLimit": run.retry_limit,
-            "completedTaskIds": run.completed_task_ids,
         },
         "userPrompt": user_prompt.unwrap_or(""),
         "completedTasks": completed_tasks,
