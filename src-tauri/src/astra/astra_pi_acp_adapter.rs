@@ -16,13 +16,12 @@ use serde_json::{json, Value};
 use serde_yaml::Value as YamlValue;
 
 use super::{
-    pick_stage_agent, short_hash, stage_label, task_blocked_by_thread_exception,
-    AstraOrchestration, AstraRun, AstraRunIntent, AstraTaskCompletion, AstraTaskProposal,
-    AstraTaskRisk,
+    short_hash, AstraOrchestration, AstraRun, AstraRunIntent, AstraTaskCompletion,
+    AstraTaskProposal, AstraTaskRisk,
 };
 use crate::astra::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
 use crate::astra::prompt::build_astra_orchestration_prompt;
-use crate::models::{Agent, PlanRoundMode, StageStatus, ThreadInfo, ThreadKind};
+use crate::models::{Agent, PlanRoundMode, ThreadInfo, ThreadKind};
 
 #[derive(Debug, Clone)]
 pub(super) struct AstraPiAcpConfig {
@@ -658,6 +657,12 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
     let run_intent = run_intent.ok_or_else(|| {
         AstraPiAcpFailure::new("validation_failed", "orchestration missing runIntent")
     })?;
+    if run_intent == AstraRunIntent::Continue && thread.kind != ThreadKind::Teamwork {
+        return Err(AstraPiAcpFailure::new(
+            "validation_failed",
+            "Astra automatic orchestration is only supported for teamwork threads",
+        ));
+    }
     let reason = reason
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default_orchestration_reason(run_intent, completions.len()));
@@ -794,156 +799,66 @@ fn sanitize_astra_pi_acp_task(
         .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "task missing prompt"))?;
     let assistant_id = raw.assistant_id.filter(|value| !value.trim().is_empty());
     let stage_id = raw.target_stage_id.filter(|value| !value.trim().is_empty());
-    if thread.kind == ThreadKind::Teamwork {
-        if stage_id.is_some() {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                "teamwork task must not include targetStageId",
-            ));
-        }
-        let assistant_id = assistant_id.ok_or_else(|| {
-            AstraPiAcpFailure::new("validation_failed", "teamwork task missing assistantId")
-        })?;
-        let assistant = thread
-            .assistants
-            .iter()
-            .find(|assistant| assistant.assistant_id == assistant_id)
-            .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "unknown assistantId"))?;
-        let assistant_agent = Agent::from_db_str(&assistant.agent.id).ok_or_else(|| {
-            AstraPiAcpFailure::new("validation_failed", "assistant has no valid runtime agent")
-        })?;
-        let target_agent = raw
-            .target_agent
-            .as_deref()
-            .and_then(Agent::from_db_str)
-            .unwrap_or(assistant_agent);
-        if target_agent != assistant_agent {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                "task targetAgent does not match assistantId",
-            ));
-        }
-        let title = raw
-            .title
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| format!("{} teamwork task", assistant.name));
-        let id = format!(
-            "task-{}",
-            short_hash(&format!(
-                "{}:{}:{}:{}:{}",
-                run.run_id, run.thread_id, assistant_id, round_index, idx
-            ))
-        );
-        return Ok(AstraTaskProposal {
-            id,
-            plan_task_id: None,
-            assistant_id: Some(assistant_id),
-            title,
-            target_stage_id: None,
-            target_agent,
-            prompt,
-            expected_output: raw
-                .expected_output
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| {
-                    "Teamwork task result, concrete progress, decisions, and verification notes."
-                        .to_string()
-                }),
-            risk: parse_task_risk(raw.risk.as_deref()),
-        });
+    if thread.kind != ThreadKind::Teamwork {
+        return Err(AstraPiAcpFailure::new(
+            "validation_failed",
+            "Astra automatic orchestration tasks are only supported for teamwork threads",
+        ));
     }
-    let stage = stage_id
+    if stage_id.is_some() {
+        return Err(AstraPiAcpFailure::new(
+            "validation_failed",
+            "teamwork task must not include targetStageId",
+        ));
+    }
+    let assistant_id = assistant_id.ok_or_else(|| {
+        AstraPiAcpFailure::new("validation_failed", "teamwork task missing assistantId")
+    })?;
+    let assistant = thread
+        .assistants
+        .iter()
+        .find(|assistant| assistant.assistant_id == assistant_id)
+        .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "unknown assistantId"))?;
+    let assistant_agent = Agent::from_db_str(&assistant.agent.id).ok_or_else(|| {
+        AstraPiAcpFailure::new("validation_failed", "assistant has no valid runtime agent")
+    })?;
+    let target_agent = raw
+        .target_agent
         .as_deref()
-        .map(|stage_id| {
-            thread
-                .stages
-                .iter()
-                .find(|stage| stage.id == stage_id)
-                .ok_or_else(|| AstraPiAcpFailure::new("validation_failed", "unknown targetStageId"))
-        })
-        .transpose()?;
-    let (target_stage_id, target_agent, fallback_title, id_scope) = if let Some(stage) = stage {
-        if matches!(stage.status, StageStatus::Completed | StageStatus::Skipped) {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                "task targets terminal stage",
-            ));
-        }
-        if let Some(reason) = task_blocked_by_thread_exception(run, thread, Some(&stage.id)) {
-            return Err(AstraPiAcpFailure::new("validation_failed", reason));
-        }
-        let assignable_agent = pick_stage_agent(stage).ok_or_else(|| {
-            AstraPiAcpFailure::new("validation_failed", "stage has no assignable agent")
-        })?;
-        let target_agent = raw
-            .target_agent
-            .as_deref()
-            .and_then(Agent::from_db_str)
-            .unwrap_or(assignable_agent);
-        if target_agent != assignable_agent {
-            return Err(AstraPiAcpFailure::new(
-                "validation_failed",
-                "task targetAgent is not assignable for targetStageId",
-            ));
-        }
-        (
-            Some(stage.id.clone()),
-            target_agent,
-            format!(
-                "{} {}",
-                if super::stage_needs_agent_review(stage) {
-                    "Review"
-                } else {
-                    "Advance"
-                },
-                stage_label(stage)
-            ),
-            stage.id.clone(),
-        )
-    } else {
-        if let Some(reason) = task_blocked_by_thread_exception(run, thread, None) {
-            return Err(AstraPiAcpFailure::new("validation_failed", reason));
-        }
-        let target_agent = raw
-            .target_agent
-            .as_deref()
-            .and_then(Agent::from_db_str)
-            .ok_or_else(|| {
-                AstraPiAcpFailure::new(
-                    "validation_failed",
-                    "thread-level task missing valid targetAgent",
-                )
-            })?;
-        (
-            None,
-            target_agent,
-            "Advance thread".to_string(),
-            "thread".to_string(),
-        )
-    };
+        .and_then(Agent::from_db_str)
+        .unwrap_or(assistant_agent);
+    if target_agent != assistant_agent {
+        return Err(AstraPiAcpFailure::new(
+            "validation_failed",
+            "task targetAgent does not match assistantId",
+        ));
+    }
     let title = raw
         .title
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(fallback_title);
+        .unwrap_or_else(|| format!("{} teamwork task", assistant.name));
     let id = format!(
         "task-{}",
         short_hash(&format!(
             "{}:{}:{}:{}:{}",
-            run.run_id, run.thread_id, id_scope, round_index, idx
+            run.run_id, run.thread_id, assistant_id, round_index, idx
         ))
     );
     Ok(AstraTaskProposal {
         id,
         plan_task_id: None,
-        assistant_id: None,
+        assistant_id: Some(assistant_id),
         title,
-        target_stage_id,
+        target_stage_id: None,
         target_agent,
         prompt,
         expected_output: raw
             .expected_output
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "Stage progress summary and verification notes.".to_string()),
+            .unwrap_or_else(|| {
+                "Teamwork task result, concrete progress, decisions, and verification notes."
+                    .to_string()
+            }),
         risk: parse_task_risk(raw.risk.as_deref()),
     })
 }

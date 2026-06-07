@@ -729,7 +729,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - dispatch 时更新 plan task 为 running。
 - dispatch/result 到达时写入 `thread_plan_task_sessions`，session 身份使用 `(agent, session_id)`。
 - result 到达时更新 plan task terminal 状态、result summary、error。
-- `AstraHandle` 可过渡性保留旧字段，但 UI 新逻辑优先使用 plan task 状态。
+- `AstraHandle` 可保留派生展示字段，但 UI 新逻辑和 task lifecycle 必须以 plan task 状态为准。
 
 验收：
 
@@ -845,7 +845,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 执行内容：
 
-- `proposedTasks` / `taskResults` 仅作为 Astra run 兼容字段或派生展示。
+- `proposedTasks` / `taskResults` 仅作为 Astra run 历史归档或派生展示字段。
 - 新 UI 和新 orchestrator 逻辑以 plan rounds/tasks 为准。
 - 清理只依赖 `currentTaskId` / `approvedTaskIds` 恢复 running 的逻辑。
 - 更新测试，确保 plan tasks 是 lifecycle owner。
@@ -854,7 +854,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 - running/planned/completed 展示不依赖 `currentTaskId`。
 - 多并行 task reload 稳定。
-- 旧 run 仍可 best-effort 显示。
+- 旧 run 可以作为历史归档显示，但不作为旧 stage-decision 自动调度兼容入口。
 
 ## 测试矩阵
 

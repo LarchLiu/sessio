@@ -2,17 +2,15 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    next_dispatchable_tasks, now_ms, rolling_stage_task_batch, thread_all_stages_terminal,
-    AstraBackendConfig, AstraOrchestration, AstraRun, AstraRunIntent, AstraRunStatus, AstraService,
-    AstraStageMutationResult, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+    next_dispatchable_tasks, rolling_stage_task_batch, AstraBackendConfig, AstraOrchestration,
+    AstraRun, AstraRunIntent, AstraRunStatus, AstraService, AstraTaskCompletion,
+    ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
 use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
-use crate::models::{
-    IssueStatus, PlanRoundMode, PlanTaskStatus, StageStatus, StageType, ThreadInfo, ThreadKind,
-};
+use crate::models::{PlanRoundMode, PlanTaskStatus, ThreadKind};
 
 #[cfg(test)]
 const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
@@ -56,11 +54,6 @@ impl AstraService {
             let _ = self.error_run(&current_run.run_id, reason, code, message)?;
             return Ok(RustNativeWorkerOutcome::Claimed);
         }
-        if thread_all_stages_terminal(&thread) {
-            let _ = self.complete_run(&current_run.run_id, "all_stages_terminal")?;
-            return Ok(RustNativeWorkerOutcome::Claimed);
-        }
-
         let mut dispatch_batch = Vec::new();
         let mut completions = Vec::new();
 
@@ -397,11 +390,6 @@ impl AstraService {
     }
 
     fn complete_run(&self, run_id: &str, reason: &str) -> Result<()> {
-        let run = self.load_run(run_id)?;
-        if run.status.active() {
-            let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-            self.auto_complete_empty_done_stages(&run, &thread)?;
-        }
         let (completed, changed) = self.mark_run_completed(run_id, reason)?;
         if changed {
             self.emit(&completed, "completed", json!({ "reason": reason }));
@@ -456,85 +444,6 @@ impl AstraService {
         }
         Ok(run)
     }
-
-    fn auto_complete_empty_done_stages(&self, run: &AstraRun, thread: &ThreadInfo) -> Result<bool> {
-        let stages = thread
-            .stages
-            .iter()
-            .filter(|stage| auto_completable_empty_done_stage(thread, stage))
-            .map(|stage| {
-                (
-                    stage.id.clone(),
-                    stage.summary.is_none(),
-                    stage.outcome.is_none(),
-                )
-            })
-            .collect::<Vec<_>>();
-        if stages.is_empty() {
-            return Ok(false);
-        }
-
-        for (stage_id, needs_summary, needs_outcome) in stages {
-            let stage = self.inner.store.update_thread_stage_state(
-                &stage_id,
-                Some(StageStatus::Completed),
-                needs_summary
-                    .then(|| Some("Astra auto-completed this empty final stage.".to_string())),
-                needs_outcome.then(|| {
-                    Some("No delegated work was required for this final stage.".to_string())
-                }),
-            )?;
-            let stage_id_for_run = stage.id.clone();
-            let (next, ()) = self.mutate_run(&run.run_id, move |next| {
-                if next.status.active() {
-                    next.current_stage_id = Some(stage_id_for_run);
-                }
-                Ok(())
-            })?;
-            let result = AstraStageMutationResult {
-                ok: true,
-                stage: Some(serde_json::to_value(stage)?),
-                issue: None,
-                error: None,
-                applied_at: now_ms(),
-            };
-            self.emit(&next, "stage_update_result", serde_json::to_value(&result)?);
-            log::info!(
-                "[astra:stage:auto-complete-empty-done] runId={} threadId={} stageId={}",
-                next.run_id,
-                next.thread_id,
-                stage_id
-            );
-        }
-
-        Ok(true)
-    }
-}
-
-fn auto_completable_empty_done_stage(
-    thread: &crate::models::ThreadInfo,
-    stage: &crate::models::StageInfo,
-) -> bool {
-    empty_done_stage_without_assistant(stage)
-        && matches!(
-            stage.status,
-            StageStatus::NotStarted | StageStatus::InProgress
-        )
-        && !stage
-            .issues
-            .iter()
-            .any(|issue| issue.status == IssueStatus::Open)
-        && thread.stages.iter().all(|other| {
-            other.id == stage.id
-                || matches!(other.status, StageStatus::Completed | StageStatus::Skipped)
-        })
-}
-
-fn empty_done_stage_without_assistant(stage: &crate::models::StageInfo) -> bool {
-    matches!(stage.kind, Some(StageType::Done))
-        && stage.allow_empty_assistants
-        && stage.assistant_ids.is_empty()
-        && stage.assistants.is_empty()
 }
 
 struct AstraWorkerGuard {
@@ -590,7 +499,7 @@ mod tests {
 
     use super::*;
     use crate::astra::tests::{test_stage, test_thread};
-    use crate::models::{Agent, IssueSeverity, StageIssueInfo, StageStatus, StageType};
+    use crate::models::{Agent, StageStatus};
 
     #[test]
     fn workflow_requires_human_defined_stage_path_before_planning() {
@@ -622,17 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_done_stage_auto_completes_after_other_stages_terminal() {
-        let completed = test_stage("writing", StageStatus::Completed);
-        let mut done = test_stage("done-stage", StageStatus::NotStarted);
-        done.kind = Some(StageType::Done);
-        done.allow_empty_assistants = true;
-        let thread = test_thread(vec![completed, done.clone()]);
-
-        assert!(auto_completable_empty_done_stage(&thread, &done));
-    }
-
-    #[test]
     fn rolling_batch_discards_only_undispatched_tasks() {
         let dispatchable = vec![
             test_task("task-1"),
@@ -657,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatchable_tasks_prioritize_agent_review_stage() {
+    fn workflow_stage_tasks_are_not_automatically_dispatchable() {
         let mut run = test_run("run-dispatch-exception");
         let mut research = test_stage("research", StageStatus::NeedsReview);
         let mut plan = test_stage("plan", StageStatus::InProgress);
@@ -689,12 +587,11 @@ mod tests {
 
         let dispatchable = next_dispatchable_tasks(&run, &thread);
 
-        assert_eq!(dispatchable.len(), 1);
-        assert_eq!(dispatchable[0].id, "task-review");
+        assert!(dispatchable.is_empty());
     }
 
     #[test]
-    fn dispatchable_tasks_allow_blocked_stage_recovery_only() {
+    fn workflow_blocked_stage_tasks_are_not_automatically_dispatchable() {
         let mut run = test_run("run-dispatch-blocked");
         let mut blocked = test_stage("blocked", StageStatus::Blocked);
         let mut plan = test_stage("plan", StageStatus::InProgress);
@@ -726,53 +623,7 @@ mod tests {
 
         let dispatchable = next_dispatchable_tasks(&run, &thread);
 
-        assert_eq!(dispatchable.len(), 1);
-        assert_eq!(dispatchable[0].id, "task-blocked");
-    }
-
-    #[test]
-    fn empty_done_stage_without_assistant_is_auto_completable() {
-        let mut stage = test_stage("done-stage", StageStatus::NotStarted);
-        stage.kind = Some(StageType::Done);
-        stage.allow_empty_assistants = true;
-        let thread = test_thread(vec![stage.clone()]);
-
-        assert!(auto_completable_empty_done_stage(&thread, &stage));
-
-        stage.kind = Some(StageType::Human);
-        let thread = test_thread(vec![stage.clone()]);
-        assert!(!auto_completable_empty_done_stage(&thread, &stage));
-
-        stage.kind = Some(StageType::Done);
-        stage.issues.push(StageIssueInfo {
-            id: "issue-1".to_string(),
-            thread_stage_id: stage.id.clone(),
-            title: "Needs final approval".to_string(),
-            description: None,
-            status: crate::models::IssueStatus::Open,
-            severity: IssueSeverity::Medium,
-            created_at: 1,
-            updated_at: 1,
-        });
-        let thread = test_thread(vec![stage.clone()]);
-        assert!(!auto_completable_empty_done_stage(&thread, &stage));
-    }
-
-    #[test]
-    fn empty_done_stage_waits_for_all_other_stages_to_finish() {
-        let mut work = test_stage("work-stage", StageStatus::NotStarted);
-        work.assistants.push(stage_assistant());
-        let mut done = test_stage("done-stage", StageStatus::NotStarted);
-        done.kind = Some(StageType::Done);
-        done.allow_empty_assistants = true;
-        let thread = test_thread(vec![work.clone(), done.clone()]);
-
-        assert!(!auto_completable_empty_done_stage(&thread, &done));
-
-        work.status = StageStatus::Completed;
-        let thread = test_thread(vec![work, done.clone()]);
-
-        assert!(auto_completable_empty_done_stage(&thread, &done));
+        assert!(dispatchable.is_empty());
     }
 
     #[test]

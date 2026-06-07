@@ -256,11 +256,11 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 - 错误信息包含失败 code、简短 parser message、raw response snippet。
 - `ASTRA_ORCHESTRATOR_TIMEOUT_MS` 只在一个位置定义为 `300_000`，所有 orchestrator backend 复用。
 - planner 输出 task batch 后，先创建 `thread_plan_rounds` 和对应 `thread_plan_tasks`。
-- 写入 task 时保存 assistant / agent 快照；若兼容旧 stage-based run，也可保存 stage 快照，但新 teamwork 不依赖 stage。
+- 写入 teamwork task 时保存 assistant / agent 快照；workflow/manual task 的 stage 快照只服务历史回看，不作为 Astra 自动调度兼容入口。
 - dispatch task batch 前，在同一事务中把本轮应启动的 plan tasks 更新为 `running`。
 - dispatch/result 到达时，通过 `thread_plan_task_sessions` 记录 delegated/runtime session refs。
 - result 到达时更新 plan task terminal 状态、result summary、error。
-- `AstraHandle` 可过渡性保留旧字段，但 UI 新逻辑优先使用 plan task 状态。
+- `AstraHandle` 可保留派生展示字段，但 task lifecycle 必须以 plan task 状态为准。
 
 验收：
 
@@ -377,9 +377,9 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 这次不是 parser hotfix，而是控制面重构。需要按实施顺序拆分：先落 `ThreadKind` / `thread_assistants`，再落 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，再改 Astra contract 写这些表，最后接入 teamwork/brainstorm/debate。
 
-### 风险 2: 旧 run 兼容
+### 风险 2: 旧 run 展示边界
 
-旧 run 没有 plan tasks，只能从 `approvedTaskIds + taskResults + currentTaskId` 推断。兼容逻辑只能 best-effort，新 run 必须使用 `thread_plan_tasks`。
+旧 run 可能没有 plan tasks，只能作为历史归档或派生展示处理。新自动编排不兼容旧 stage-decision contract，也不能从 `approvedTaskIds + taskResults + currentTaskId` 反推出新的 lifecycle 事实源；新 run 必须使用 `thread_plan_tasks`。
 
 ### 风险 3: workflow stage UI 与 teamwork Astra 分离
 

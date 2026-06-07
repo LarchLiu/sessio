@@ -17,8 +17,7 @@ use crate::agents::runtime::types::{
 use crate::agents::runtime::RuntimeManager;
 use crate::models::{
     Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskRisk,
-    PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, StageType, ThreadInfo,
-    ThreadKind,
+    PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo,
 };
 use crate::store::{
     AstraRunRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch,
@@ -70,105 +69,6 @@ fn rolling_stage_task_batch(tasks: Vec<AstraTaskProposal>) -> Vec<AstraTaskPropo
         .filter(|task| task.target_stage_id == target_stage_id)
         .take(ASTRA_ROLLING_TASK_BATCH_LIMIT)
         .collect()
-}
-
-pub(crate) fn stage_waiting_for_human_review(stage: &crate::models::StageInfo) -> bool {
-    stage.status == StageStatus::NeedsReview && matches!(stage.kind, Some(StageType::Human))
-}
-
-pub(crate) fn stage_needs_agent_review(stage: &crate::models::StageInfo) -> bool {
-    stage.status == StageStatus::NeedsReview && !stage_waiting_for_human_review(stage)
-}
-
-pub(crate) fn thread_has_agent_review_stage(thread: &ThreadInfo) -> bool {
-    if thread.kind != ThreadKind::Workflow {
-        return false;
-    }
-    thread.stages.iter().any(stage_needs_agent_review)
-}
-
-pub(crate) fn thread_waiting_for_review(thread: &ThreadInfo) -> bool {
-    if thread.kind != ThreadKind::Workflow {
-        return false;
-    }
-    thread.stages.iter().any(stage_waiting_for_human_review)
-        && !thread_has_agent_review_stage(thread)
-}
-
-pub(crate) fn thread_has_blocked_stage(thread: &ThreadInfo) -> bool {
-    if thread.kind != ThreadKind::Workflow {
-        return false;
-    }
-    thread
-        .stages
-        .iter()
-        .any(|stage| stage.status == StageStatus::Blocked)
-}
-
-pub(crate) fn blocked_stage_retry_limit_reached(
-    run: &AstraRun,
-    stage: &crate::models::StageInfo,
-) -> bool {
-    stage.status == StageStatus::Blocked
-        && run
-            .stage_attempt_counts
-            .get(&stage.id)
-            .copied()
-            .unwrap_or(0)
-            >= run.retry_limit
-}
-
-pub(crate) fn task_blocked_by_thread_exception(
-    run: &AstraRun,
-    thread: &ThreadInfo,
-    target_stage_id: Option<&str>,
-) -> Option<&'static str> {
-    if thread.kind != ThreadKind::Workflow {
-        return None;
-    }
-    if thread_has_agent_review_stage(thread) {
-        let Some(target_stage_id) = target_stage_id else {
-            return Some(
-                "thread has an agent stage needing review; task must target a needs_review agent stage",
-            );
-        };
-        let Some(stage) = thread
-            .stages
-            .iter()
-            .find(|stage| stage.id == target_stage_id)
-        else {
-            return None;
-        };
-        if !stage_needs_agent_review(stage) {
-            return Some(
-                "thread has an agent stage needing review; task must target a needs_review agent stage",
-            );
-        }
-        return None;
-    }
-    if thread_waiting_for_review(thread) {
-        return Some("thread is waiting for human review");
-    }
-    if !thread_has_blocked_stage(thread) {
-        return None;
-    }
-    let Some(target_stage_id) = target_stage_id else {
-        return Some("thread has a blocked stage; task must target a blocked stage");
-    };
-    let Some(stage) = thread
-        .stages
-        .iter()
-        .find(|stage| stage.id == target_stage_id)
-    else {
-        return None;
-    };
-    if stage.status != StageStatus::Blocked {
-        return Some("thread has a blocked stage; task must target a blocked stage");
-    }
-    if blocked_stage_retry_limit_reached(run, stage) {
-        return Some("blocked stage retry limit reached");
-    }
-    None
 }
 
 fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
@@ -2473,15 +2373,6 @@ fn extract_result_text(value: &Value) -> Option<String> {
     }
 }
 
-pub(crate) fn thread_all_stages_terminal(thread: &ThreadInfo) -> bool {
-    thread.kind == ThreadKind::Workflow
-        && !thread.stages.is_empty()
-        && thread
-            .stages
-            .iter()
-            .all(|stage| matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
-}
-
 pub(crate) fn short_hash(input: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -3647,104 +3538,10 @@ mod tests {
     }
 
     #[test]
-    fn thread_completion_requires_all_stages_terminal() {
-        let mut thread = ThreadInfo {
-            id: "thread-1".to_string(),
-            project_id: "project-1".to_string(),
-            goal: "Ship the thread".to_string(),
-            description: None,
-            stage_id: None,
-            kind: crate::models::ThreadKind::Workflow,
-            enabled: true,
-            created_at: 1,
-            updated_at: 1,
-            assistants: Vec::new(),
-            stages: Vec::new(),
-            sessions: Vec::new(),
-        };
-        assert!(!thread_all_stages_terminal(&thread));
-
-        thread
-            .stages
-            .push(test_stage("stage-1", StageStatus::Completed));
-        thread
-            .stages
-            .push(test_stage("stage-2", StageStatus::InProgress));
-        assert!(!thread_all_stages_terminal(&thread));
-
-        thread.stages[1].status = StageStatus::Skipped;
-        assert!(thread_all_stages_terminal(&thread));
-    }
-
-    #[test]
-    fn human_needs_review_pauses_run_without_being_terminal() {
-        let mut human_review = test_stage("stage-2", StageStatus::NeedsReview);
-        human_review.kind = Some(crate::models::StageType::Human);
-        let thread = test_thread(vec![
-            test_stage("stage-1", StageStatus::Completed),
-            human_review,
-        ]);
-
-        assert!(!thread_all_stages_terminal(&thread));
-        assert!(thread_waiting_for_review(&thread));
-
-        let mut active = thread.clone();
-        active
-            .stages
-            .push(test_stage("stage-3", StageStatus::InProgress));
-        assert!(thread_waiting_for_review(&active));
-
-        let mut agent_review = test_stage("stage-4", StageStatus::NeedsReview);
-        agent_review.assistants = vec![StageAssistantInfo {
-            assistant_id: "assistant-codex".to_string(),
-            name: "Reviewer".to_string(),
-            color: None,
-            agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-write".to_string(),
-                effort: "medium".to_string(),
-            },
-            system_prompt: None,
-            order: 0,
-        }];
-        active.stages.push(agent_review);
-        assert!(!thread_waiting_for_review(&active));
-    }
-
-    #[test]
-    fn deterministic_plan_targets_incomplete_stage_agent() {
-        let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::NotStarted)]);
-        thread.stages[0].assistants = vec![StageAssistantInfo {
-            assistant_id: "assistant-claude".to_string(),
-            name: "Reviewer".to_string(),
-            color: None,
-            agent: AssistantAgentInfo {
-                id: "claude".to_string(),
-                name: "Claude".to_string(),
-                model: "claude-sonnet-4-5".to_string(),
-                mode: "read-only".to_string(),
-                effort: "medium".to_string(),
-            },
-            system_prompt: None,
-            order: 0,
-        }];
-        let run = test_run("run-plan");
-
-        let plan = deterministic_plan(&run, &thread, Some("Focus the API"), 0);
-
-        assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
-        assert_eq!(plan.tasks[0].target_agent, Agent::Claude);
-        assert!(plan.tasks[0].prompt.contains("Focus the API"));
-    }
-
-    #[test]
-    fn deterministic_plan_uses_rolling_next_task_only() {
+    fn deterministic_plan_does_not_schedule_workflow_stages() {
         let mut thread = test_thread(vec![
             test_stage("stage-1", StageStatus::NotStarted),
-            test_stage("stage-2", StageStatus::NotStarted),
+            test_stage("stage-2", StageStatus::Blocked),
         ]);
         for stage in &mut thread.stages {
             stage.assistants = vec![StageAssistantInfo {
@@ -3762,65 +3559,14 @@ mod tests {
                 order: 0,
             }];
         }
-        let run = test_run("run-plan-rolling");
+        let run = test_run("run-plan");
 
-        let plan = deterministic_plan(&run, &thread, None, 0);
-
-        assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
-    }
-
-    #[test]
-    fn deterministic_plan_skips_blocked_stage_after_retry_limit() {
-        let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::Blocked)]);
-        thread.stages[0].assistants = vec![StageAssistantInfo {
-            assistant_id: "assistant-codex".to_string(),
-            name: "Builder".to_string(),
-            color: None,
-            agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-write".to_string(),
-                effort: "medium".to_string(),
-            },
-            system_prompt: None,
-            order: 0,
-        }];
-        let mut run = test_run("run-plan-retry");
-        run.stage_attempt_counts
-            .insert("stage-1".to_string(), run.retry_limit);
-
-        let plan = deterministic_plan(&run, &thread, None, 0);
+        let plan = deterministic_plan(&run, &thread, Some("Focus the API"), 0);
 
         assert!(plan.tasks.is_empty());
-    }
-
-    #[test]
-    fn deterministic_plan_targets_agent_review_stage() {
-        let mut thread = test_thread(vec![test_stage("stage-1", StageStatus::NeedsReview)]);
-        thread.stages[0].assistants = vec![StageAssistantInfo {
-            assistant_id: "assistant-codex".to_string(),
-            name: "Builder".to_string(),
-            color: None,
-            agent: AssistantAgentInfo {
-                id: "codex".to_string(),
-                name: "Codex".to_string(),
-                model: "gpt-5.3-codex".to_string(),
-                mode: "read-write".to_string(),
-                effort: "medium".to_string(),
-            },
-            system_prompt: None,
-            order: 0,
-        }];
-        let run = test_run("run-plan-review");
-
-        let plan = deterministic_plan(&run, &thread, None, 0);
-
-        assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
-        assert_eq!(plan.tasks[0].title, "Review stage-1");
-        assert!(plan.tasks[0].prompt.contains("Review this stage"));
+        assert!(plan
+            .summary
+            .contains("only plans assistant-routed teamwork"));
     }
 
     #[test]
@@ -3874,67 +3620,6 @@ mod tests {
         );
         assert_eq!(plan.tasks[1].target_agent, Agent::Codex);
         assert!(plan.tasks[0].prompt.contains("Coordinate assistants"));
-    }
-
-    #[test]
-    fn deterministic_plan_prioritizes_agent_review_over_ordinary_stage() {
-        let mut thread = test_thread(vec![
-            test_stage("stage-1", StageStatus::NeedsReview),
-            test_stage("stage-2", StageStatus::NotStarted),
-        ]);
-        for stage in &mut thread.stages {
-            stage.assistants = vec![StageAssistantInfo {
-                assistant_id: "assistant-codex".to_string(),
-                name: "Builder".to_string(),
-                color: None,
-                agent: AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-write".to_string(),
-                    effort: "medium".to_string(),
-                },
-                system_prompt: None,
-                order: 0,
-            }];
-        }
-        let run = test_run("run-plan-after-review");
-
-        let plan = deterministic_plan(&run, &thread, None, 1);
-
-        assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
-        assert_eq!(plan.tasks[0].title, "Review stage-1");
-    }
-
-    #[test]
-    fn deterministic_plan_prioritizes_blocked_stage_over_ordinary_stage() {
-        let mut thread = test_thread(vec![
-            test_stage("stage-1", StageStatus::Blocked),
-            test_stage("stage-2", StageStatus::NotStarted),
-        ]);
-        for stage in &mut thread.stages {
-            stage.assistants = vec![StageAssistantInfo {
-                assistant_id: "assistant-codex".to_string(),
-                name: "Builder".to_string(),
-                color: None,
-                agent: AssistantAgentInfo {
-                    id: "codex".to_string(),
-                    name: "Codex".to_string(),
-                    model: "gpt-5.3-codex".to_string(),
-                    mode: "read-write".to_string(),
-                    effort: "medium".to_string(),
-                },
-                system_prompt: None,
-                order: 0,
-            }];
-        }
-        let run = test_run("run-plan-blocked-first");
-
-        let plan = deterministic_plan(&run, &thread, None, 1);
-
-        assert_eq!(plan.tasks.len(), 1);
-        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
     }
 
     #[test]
