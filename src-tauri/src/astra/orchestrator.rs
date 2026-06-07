@@ -405,6 +405,13 @@ impl AstraService {
                 return Ok((self.load_run(&run.run_id)?, Vec::new()));
             }
         }
+        let tasks = self.create_plan_round_for_astra_tasks(
+            run,
+            &latest_thread,
+            &summary,
+            round_index,
+            tasks,
+        )?;
         let orchestrator_backend_for_run = orchestrator_backend.to_string();
         let (planned, ()) = self.mutate_run(&run.run_id, {
             let tasks = tasks.clone();
@@ -869,6 +876,7 @@ mod tests {
         plan.assistants.push(stage_assistant());
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-plan".to_string(),
+            plan_task_id: None,
             title: "Plan".to_string(),
             target_stage_id: Some("plan".to_string()),
             target_agent: Agent::Codex,
@@ -878,6 +886,7 @@ mod tests {
         });
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-review".to_string(),
+            plan_task_id: None,
             title: "Review".to_string(),
             target_stage_id: Some("research".to_string()),
             target_agent: Agent::Codex,
@@ -902,6 +911,7 @@ mod tests {
         plan.assistants.push(stage_assistant());
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-plan".to_string(),
+            plan_task_id: None,
             title: "Plan".to_string(),
             target_stage_id: Some("plan".to_string()),
             target_agent: Agent::Codex,
@@ -911,6 +921,7 @@ mod tests {
         });
         run.proposed_tasks.push(super::super::AstraTaskProposal {
             id: "task-blocked".to_string(),
+            plan_task_id: None,
             title: "Unblock".to_string(),
             target_stage_id: Some("blocked".to_string()),
             target_agent: Agent::Codex,
@@ -998,6 +1009,7 @@ mod tests {
     fn test_task(id: &str) -> super::super::AstraTaskProposal {
         super::super::AstraTaskProposal {
             id: id.to_string(),
+            plan_task_id: None,
             title: id.to_string(),
             target_stage_id: None,
             target_agent: Agent::Codex,

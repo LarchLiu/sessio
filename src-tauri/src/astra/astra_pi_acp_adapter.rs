@@ -971,6 +971,7 @@ fn sanitize_astra_pi_acp_task(
     );
     Ok(AstraTaskProposal {
         id,
+        plan_task_id: None,
         title,
         target_stage_id,
         target_agent,
@@ -1658,6 +1659,7 @@ mod tests {
     fn maps_nested_update_stage_decision() {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1708,6 +1710,7 @@ mod tests {
     fn maps_issue_status_decision_for_existing_issue() {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1763,6 +1766,7 @@ mod tests {
     fn maps_legacy_flat_update_stage_decision() {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1808,6 +1812,7 @@ mod tests {
     fn maps_runtime_agent_flat_update_stage_decision() {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Task".to_string(),
             target_stage_id: None,
             target_agent: Agent::Codex,
@@ -1863,6 +1868,7 @@ mod tests {
 
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Review research".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1909,6 +1915,7 @@ mod tests {
 
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Recover research".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -1952,6 +1959,7 @@ mod tests {
     fn orchestration_requires_decision_for_each_completion() {
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Task".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,

@@ -75,6 +75,7 @@ pub(super) fn deterministic_plan(
             .join("\n\n");
             Some(AstraTaskProposal {
                 id: task_id,
+                plan_task_id: None,
                 title: format!(
                     "{} {}",
                     if needs_review {

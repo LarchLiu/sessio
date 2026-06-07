@@ -589,6 +589,7 @@ mod tests {
     fn task() -> AstraTaskProposal {
         AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Research".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,

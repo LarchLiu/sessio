@@ -16,10 +16,14 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::runtime::RuntimeManager;
 use crate::models::{
-    Agent, AgentInfo, IssueSeverity, IssueStatus, SessionInfo, StageIssueInfo, StageStatus,
+    Agent, AgentInfo, IssueSeverity, IssueStatus, PlanRoundMode, PlanRoundSource, PlanRoundStatus,
+    PlanTaskRisk, PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageIssueInfo, StageStatus,
     StageType, ThreadInfo,
 };
-use crate::store::{AstraRunRecord, SessionStore, ThreadWorkSnapshotRecord};
+use crate::store::{
+    AstraRunRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch,
+    SessionStore, ThreadWorkSnapshotRecord,
+};
 
 mod astra_pi_acp_adapter;
 mod backend;
@@ -238,6 +242,21 @@ struct DelegatedSessionState {
     text: String,
     last_turn_id: Option<String>,
     finished: bool,
+}
+
+struct OwnedAstraPlanTask {
+    thread_stage_id: Option<String>,
+    assistant_id: Option<String>,
+    target_agent: Agent,
+    stage_snapshot_json: Option<String>,
+    assistant_snapshot_json: Option<String>,
+    agent_snapshot_json: String,
+    title: String,
+    prompt: String,
+    expected_output: Option<String>,
+    risk: PlanTaskRisk,
+    sort_order: i64,
+    status: PlanTaskStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -665,6 +684,48 @@ impl AstraService {
         self.load_run(run_id).map(|run| self.run_to_handle(run))
     }
 
+    pub(super) fn create_plan_round_for_astra_tasks(
+        &self,
+        run: &AstraRun,
+        thread: &ThreadInfo,
+        summary: &str,
+        round_index: u32,
+        tasks: Vec<AstraTaskProposal>,
+    ) -> Result<Vec<AstraTaskProposal>> {
+        create_plan_round_for_astra_tasks_in_store(
+            self.inner.store.as_ref(),
+            run,
+            thread,
+            summary,
+            round_index,
+            tasks,
+        )
+    }
+
+    fn mark_astra_plan_tasks_running(&self, tasks: &[AstraTaskProposal]) -> Result<()> {
+        mark_astra_plan_tasks_running_in_store(self.inner.store.as_ref(), tasks)
+    }
+
+    fn link_astra_plan_task_session(
+        &self,
+        task: &AstraTaskProposal,
+        agent: Agent,
+        session_id: &str,
+        role: PlanTaskSessionRole,
+    ) -> Result<()> {
+        link_astra_plan_task_session_in_store(
+            self.inner.store.as_ref(),
+            task,
+            agent,
+            session_id,
+            role,
+        )
+    }
+
+    fn record_plan_task_result(&self, run: &AstraRun, result: &AstraTaskResult) -> Result<()> {
+        record_plan_task_result_in_store(self.inner.store.as_ref(), run, result)
+    }
+
     fn dispatch_task(
         &self,
         run: &AstraRun,
@@ -848,6 +909,7 @@ impl AstraService {
                 retry_limit,
             } => {
                 for result in &results {
+                    self.record_plan_task_result(&next, result)?;
                     self.emit(
                         &next,
                         "retry_limit",
@@ -863,6 +925,8 @@ impl AstraService {
             }
             DispatchTaskBatchDecision::Dispatch { attempt_count } => attempt_count,
         };
+
+        self.mark_astra_plan_tasks_running(tasks)?;
 
         let mut receivers = Vec::with_capacity(tasks.len());
         let mut handles: Vec<AgentSessionHandle> = Vec::with_capacity(tasks.len());
@@ -887,6 +951,12 @@ impl AstraService {
                     return Err(error);
                 }
             };
+            self.link_astra_plan_task_session(
+                task,
+                task.target_agent,
+                &handle.sessio_runtime_session_id,
+                PlanTaskSessionRole::Runtime,
+            )?;
             self.emit(
                 &next,
                 "task_dispatch",
@@ -1250,6 +1320,12 @@ impl AstraService {
                 thread_stage_id,
                 context.as_ref(),
             )?;
+            self.link_astra_plan_task_session(
+                &task,
+                agent,
+                agent_session_id,
+                PlanTaskSessionRole::Delegated,
+            )?;
             run.delegated_session_ids
                 .retain(|id| id != &sessio_runtime_session_id_for_run);
             if !run
@@ -1383,10 +1459,12 @@ impl AstraService {
     }
 
     fn record_task_result(&self, run_id: &str, result: AstraTaskResult) -> Result<AstraRun> {
+        let result_for_plan = result.clone();
         let (run, _) = self.mutate_run(run_id, move |run| {
             upsert_task_result_in_run(run, result);
             Ok(())
         })?;
+        self.record_plan_task_result(&run, &result_for_plan)?;
         Ok(run)
     }
 
@@ -2252,6 +2330,23 @@ fn upsert_task_result_in_run(run: &mut AstraRun, result: AstraTaskResult) {
     }
 }
 
+fn plan_task_risk_from_astra(risk: AstraTaskRisk) -> PlanTaskRisk {
+    match risk {
+        AstraTaskRisk::Low => PlanTaskRisk::Low,
+        AstraTaskRisk::Medium => PlanTaskRisk::Medium,
+        AstraTaskRisk::High => PlanTaskRisk::High,
+    }
+}
+
+fn plan_task_status_from_astra(status: AstraTaskResultStatus) -> PlanTaskStatus {
+    match status {
+        AstraTaskResultStatus::Completed => PlanTaskStatus::Completed,
+        AstraTaskResultStatus::Failed => PlanTaskStatus::Failed,
+        AstraTaskResultStatus::Errored => PlanTaskStatus::Errored,
+        AstraTaskResultStatus::Cancelled => PlanTaskStatus::Cancelled,
+    }
+}
+
 fn resolve_thread_stage_id(thread: &ThreadInfo, stage_id: &str) -> Result<String> {
     thread
         .stages
@@ -2364,6 +2459,181 @@ fn stable_run_id(thread_id: &str, now: i64) -> String {
     format!("astra-{}-{}", short_hash(thread_id), now)
 }
 
+fn create_plan_round_for_astra_tasks_in_store(
+    store: &dyn SessionStore,
+    run: &AstraRun,
+    thread: &ThreadInfo,
+    summary: &str,
+    _round_index: u32,
+    tasks: Vec<AstraTaskProposal>,
+) -> Result<Vec<AstraTaskProposal>> {
+    let owned_tasks = tasks
+        .iter()
+        .enumerate()
+        .map(|(idx, task)| astra_task_to_plan_task(store, thread, task, idx))
+        .collect::<Result<Vec<_>>>()?;
+    let new_tasks = owned_tasks
+        .iter()
+        .map(|task| NewPlanTask {
+            thread_stage_id: task.thread_stage_id.as_deref(),
+            assistant_id: task.assistant_id.as_deref(),
+            target_agent: task.target_agent,
+            stage_snapshot_json: task.stage_snapshot_json.as_deref(),
+            assistant_snapshot_json: task.assistant_snapshot_json.as_deref(),
+            agent_snapshot_json: &task.agent_snapshot_json,
+            title: &task.title,
+            prompt: &task.prompt,
+            expected_output: task.expected_output.as_deref(),
+            risk: task.risk,
+            sort_order: task.sort_order,
+            status: task.status,
+        })
+        .collect::<Vec<_>>();
+    let round = store.create_plan_round(NewPlanRound {
+        thread_id: &run.thread_id,
+        astra_run_id: Some(&run.run_id),
+        round_index: None,
+        summary: Some(summary),
+        mode: PlanRoundMode::Parallel,
+        source: PlanRoundSource::Astra,
+        status: if new_tasks.is_empty() {
+            PlanRoundStatus::Completed
+        } else {
+            PlanRoundStatus::Planned
+        },
+        tasks: new_tasks,
+    })?;
+
+    let mut next_tasks = tasks;
+    for (task, plan_task) in next_tasks.iter_mut().zip(round.tasks.iter()) {
+        if task.plan_task_id.is_none() {
+            task.plan_task_id = Some(plan_task.id.clone());
+        }
+    }
+    Ok(next_tasks)
+}
+
+fn astra_task_to_plan_task(
+    store: &dyn SessionStore,
+    thread: &ThreadInfo,
+    task: &AstraTaskProposal,
+    idx: usize,
+) -> Result<OwnedAstraPlanTask> {
+    let stage = task.target_stage_id.as_deref().and_then(|stage_id| {
+        thread
+            .stages
+            .iter()
+            .find(|stage| stage.id == stage_id || stage.stage_id == stage_id)
+    });
+    let assistant = stage.and_then(|stage| {
+        stage
+            .assistants
+            .iter()
+            .find(|assistant| assistant.agent.id == task.target_agent.as_str())
+            .or_else(|| stage.assistants.first())
+    });
+    let agent_snapshot = store
+        .list_agents()?
+        .into_iter()
+        .find(|agent| agent.id == task.target_agent.as_str());
+
+    Ok(OwnedAstraPlanTask {
+        thread_stage_id: stage.map(|stage| stage.id.clone()),
+        assistant_id: assistant.map(|assistant| assistant.assistant_id.clone()),
+        target_agent: task.target_agent,
+        stage_snapshot_json: stage.map(serde_json::to_string).transpose()?,
+        assistant_snapshot_json: assistant.map(serde_json::to_string).transpose()?,
+        agent_snapshot_json: serde_json::to_string(&json!({
+            "agent": task.target_agent,
+            "agentInfo": agent_snapshot,
+        }))?,
+        title: task.title.clone(),
+        prompt: task.prompt.clone(),
+        expected_output: Some(task.expected_output.clone()),
+        risk: plan_task_risk_from_astra(task.risk),
+        sort_order: i64::try_from(idx).unwrap_or(i64::MAX),
+        status: PlanTaskStatus::Planned,
+    })
+}
+
+fn mark_astra_plan_tasks_running_in_store(
+    store: &dyn SessionStore,
+    tasks: &[AstraTaskProposal],
+) -> Result<()> {
+    for task in tasks {
+        if let Some(plan_task_id) = task.plan_task_id.as_deref() {
+            store.update_plan_task_status(
+                plan_task_id,
+                PlanTaskStatusPatch {
+                    status: PlanTaskStatus::Running,
+                    result_summary: None,
+                    error: None,
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn link_astra_plan_task_session_in_store(
+    store: &dyn SessionStore,
+    task: &AstraTaskProposal,
+    agent: Agent,
+    session_id: &str,
+    role: PlanTaskSessionRole,
+) -> Result<()> {
+    if let Some(plan_task_id) = task.plan_task_id.as_deref() {
+        store.link_plan_task_session(NewPlanTaskSession {
+            task_id: plan_task_id,
+            agent,
+            session_id,
+            role,
+        })?;
+    }
+    Ok(())
+}
+
+fn record_plan_task_result_in_store(
+    store: &dyn SessionStore,
+    run: &AstraRun,
+    result: &AstraTaskResult,
+) -> Result<()> {
+    let Some(task) = run
+        .proposed_tasks
+        .iter()
+        .find(|task| task.id == result.task_id)
+    else {
+        return Ok(());
+    };
+    let Some(plan_task_id) = task.plan_task_id.as_deref() else {
+        return Ok(());
+    };
+    let summary = summarize_task_output(&final_task_output(&result.output));
+    let result_summary = if summary.trim().is_empty() {
+        result.error.as_deref()
+    } else {
+        Some(summary.as_str())
+    };
+    store.update_plan_task_status(
+        plan_task_id,
+        PlanTaskStatusPatch {
+            status: plan_task_status_from_astra(result.status),
+            result_summary: Some(result_summary),
+            error: Some(result.error.as_deref()),
+        },
+    )?;
+    let session_id = result.sessio_runtime_session_id.trim();
+    if !session_id.is_empty() {
+        store.link_plan_task_session(NewPlanTaskSession {
+            task_id: plan_task_id,
+            agent: task.target_agent,
+            session_id,
+            role: PlanTaskSessionRole::Runtime,
+        })?;
+    }
+    Ok(())
+}
+
 fn extract_result_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -2418,8 +2688,8 @@ mod tests {
     use super::decision::deterministic_decision;
     use super::planner::deterministic_plan;
     use super::*;
-    use crate::models::{AssistantAgentInfo, StageAssistantInfo};
-    use crate::store::sqlite::SqliteStore;
+    use crate::models::{AssistantAgentInfo, AssistantType, StageAssistantInfo};
+    use crate::store::{sqlite::SqliteStore, NewAssistant};
     use std::path::Path;
 
     #[test]
@@ -2596,6 +2866,223 @@ mod tests {
     }
 
     #[test]
+    fn astra_plan_task_write_through_records_round_sessions_and_results() {
+        let db_path = std::env::temp_dir().join(format!(
+            "astra-plan-write-through-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "astra-plan-write-through-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Plan Write Through",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let assistant = store
+            .create_assistant(NewAssistant {
+                name: "Builder",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Build carefully."),
+                color: Some("#3366ff"),
+                assistant_type: AssistantType::Custom,
+                workflow_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let stage_option = store
+            .create_project_stage(&project.id, None, "Build", None, None)
+            .unwrap();
+        store
+            .update_project_stage_assistants(&stage_option.id, std::slice::from_ref(&assistant.id))
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Ship Astra plan task persistence", None)
+            .unwrap();
+        let stage = store
+            .add_thread_stage(
+                &thread.id,
+                &stage_option.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+        let thread = store.get_thread_work_state(&thread.id).unwrap();
+        let mut run = AstraRun {
+            run_id: "astra-run-plan-write-through".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: AstraRunStatus::Running,
+            proposed_tasks: Vec::new(),
+            approved_task_ids: Vec::new(),
+            delegated_session_ids: Vec::new(),
+            task_results: Vec::new(),
+            mode: "auto".to_string(),
+            current_stage_id: Some(stage.id.clone()),
+            completed_task_ids: Vec::new(),
+            stage_attempt_counts: HashMap::new(),
+            retry_limit: ASTRA_DEFAULT_RETRY_LIMIT,
+            planner_backend: Some("deterministic".to_string()),
+            decision_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            internal_decision_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.upsert_astra_run(&run_to_record(&run)).unwrap();
+
+        let tasks = create_plan_round_for_astra_tasks_in_store(
+            &store,
+            &run,
+            &thread,
+            "Bridge Astra tasks into plan tables.",
+            99,
+            vec![
+                AstraTaskProposal {
+                    id: "task-1".to_string(),
+                    plan_task_id: None,
+                    title: "Build persistence bridge".to_string(),
+                    target_stage_id: Some(stage.id.clone()),
+                    target_agent: Agent::Codex,
+                    prompt: "Implement the bridge.".to_string(),
+                    expected_output: "Implementation summary.".to_string(),
+                    risk: AstraTaskRisk::Medium,
+                },
+                AstraTaskProposal {
+                    id: "task-2".to_string(),
+                    plan_task_id: None,
+                    title: "Review persistence bridge".to_string(),
+                    target_stage_id: Some(stage.id.clone()),
+                    target_agent: Agent::Codex,
+                    prompt: "Review the bridge.".to_string(),
+                    expected_output: "Review summary.".to_string(),
+                    risk: AstraTaskRisk::Low,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(tasks.iter().all(|task| task.plan_task_id.is_some()));
+
+        run.proposed_tasks = tasks.clone();
+        store.upsert_astra_run(&run_to_record(&run)).unwrap();
+        let stored_run = record_to_run(store.get_astra_run(&run.run_id).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            stored_run.proposed_tasks[0].plan_task_id,
+            tasks[0].plan_task_id
+        );
+
+        let rounds = store.list_plan_rounds(&thread.id).unwrap();
+        assert_eq!(rounds.len(), 1);
+        let round = &rounds[0];
+        assert_eq!(round.astra_run_id.as_deref(), Some(run.run_id.as_str()));
+        assert_eq!(round.round_index, 0);
+        assert_eq!(round.mode, PlanRoundMode::Parallel);
+        assert_eq!(round.source, PlanRoundSource::Astra);
+        assert_eq!(round.status, PlanRoundStatus::Planned);
+        assert_eq!(
+            round.summary.as_deref(),
+            Some("Bridge Astra tasks into plan tables.")
+        );
+        assert_eq!(round.tasks.len(), 2);
+        assert_eq!(round.tasks[0].id, tasks[0].plan_task_id.clone().unwrap());
+        assert_eq!(
+            round.tasks[0].thread_stage_id.as_deref(),
+            Some(stage.id.as_str())
+        );
+        assert_eq!(
+            round.tasks[0].assistant_id.as_deref(),
+            Some(assistant.id.as_str())
+        );
+        assert_eq!(round.tasks[0].sort_order, 0);
+        assert_eq!(round.tasks[1].sort_order, 1);
+        assert_eq!(round.tasks[0].status, PlanTaskStatus::Planned);
+        assert!(round.tasks[0]
+            .stage_snapshot_json
+            .as_deref()
+            .unwrap()
+            .contains("Build"));
+        assert!(round.tasks[0]
+            .assistant_snapshot_json
+            .as_deref()
+            .unwrap()
+            .contains("Build carefully."));
+
+        mark_astra_plan_tasks_running_in_store(&store, &tasks).unwrap();
+        let running_round = store.get_plan_round(&round.id).unwrap().unwrap();
+        assert_eq!(running_round.status, PlanRoundStatus::Running);
+        assert!(running_round
+            .tasks
+            .iter()
+            .all(|task| task.status == PlanTaskStatus::Running));
+
+        link_astra_plan_task_session_in_store(
+            &store,
+            &tasks[0],
+            Agent::Codex,
+            "delegated-session-1",
+            PlanTaskSessionRole::Delegated,
+        )
+        .unwrap();
+        let result = test_task_result(
+            "task-1",
+            "runtime-session-1",
+            "Working notes.\nFinal result: implemented and verified.",
+        );
+        record_plan_task_result_in_store(&store, &run, &result).unwrap();
+
+        let completed_round = store.get_plan_round(&round.id).unwrap().unwrap();
+        assert_eq!(completed_round.status, PlanRoundStatus::Running);
+        let completed_task = completed_round
+            .tasks
+            .iter()
+            .find(|task| task.id == tasks[0].plan_task_id.clone().unwrap())
+            .unwrap();
+        assert_eq!(completed_task.status, PlanTaskStatus::Completed);
+        assert_eq!(
+            completed_task.result_summary.as_deref(),
+            Some("implemented and verified.")
+        );
+        assert!(completed_task.sessions.iter().any(|session| {
+            session.session_id == "delegated-session-1"
+                && session.role == PlanTaskSessionRole::Delegated
+        }));
+        assert!(completed_task.sessions.iter().any(|session| {
+            session.session_id == "runtime-session-1"
+                && session.role == PlanTaskSessionRole::Runtime
+        }));
+        let still_running = completed_round
+            .tasks
+            .iter()
+            .find(|task| task.id == tasks[1].plan_task_id.clone().unwrap())
+            .unwrap();
+        assert_eq!(still_running.status, PlanTaskStatus::Running);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    #[test]
     fn resolves_project_or_thread_stage_id_to_thread_stage_id() {
         let thread = ThreadInfo {
             id: "thread-1".to_string(),
@@ -2688,6 +3175,7 @@ mod tests {
             .unwrap();
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Build stage worker".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -2814,6 +3302,7 @@ mod tests {
         let thread = store.get_thread_work_state(&thread.id).unwrap();
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Implement focused worker".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -2895,6 +3384,7 @@ mod tests {
             .unwrap();
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Research stage".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -3151,6 +3641,7 @@ mod tests {
         };
         let task = AstraTaskProposal {
             id: "task-1".to_string(),
+            plan_task_id: None,
             title: "Advance Build API".to_string(),
             target_stage_id: Some("thread-stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -3872,6 +4363,7 @@ mod tests {
     fn test_task(task_id: &str, stage_id: &str) -> AstraTaskProposal {
         AstraTaskProposal {
             id: task_id.to_string(),
+            plan_task_id: None,
             title: "Advance stage".to_string(),
             target_stage_id: Some(stage_id.to_string()),
             target_agent: Agent::Codex,
