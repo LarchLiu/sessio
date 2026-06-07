@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use super::{
-    dedupe_session_ref_values, pick_stage_agent, stage_label, status_label, AstraRun,
+    dedupe_session_ref_values, pick_stage_agent, short_hash, stage_label, status_label, AstraRun,
     AstraTaskCompletion, AstraTaskProposal, StageTaskContext,
 };
 use crate::models::{IssueStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind};
@@ -150,7 +150,7 @@ pub(super) fn build_stage_task_context(
     })
 }
 
-pub(super) fn build_teamwork_task_context(
+pub(super) fn build_thread_assistant_task_context(
     thread: &ThreadInfo,
     assistant_id: &str,
     task: &AstraTaskProposal,
@@ -162,8 +162,13 @@ pub(super) fn build_teamwork_task_context(
         .ok_or_else(|| {
             anyhow::anyhow!("assistant does not belong to Astra run thread: {assistant_id}")
         })?;
-    let snapshot = build_teamwork_task_snapshot(thread, assistant_id);
-    let prompt = render_teamwork_task_prompt(thread, assistant, &snapshot, task);
+    let snapshot = build_thread_assistant_task_snapshot(thread, assistant_id);
+    let prompt = match thread.kind {
+        ThreadKind::Teamwork => render_teamwork_task_prompt(thread, assistant, &snapshot, task),
+        ThreadKind::Brainstorm => render_brainstorm_task_prompt(thread, assistant, task),
+        ThreadKind::Debate => render_debate_task_prompt(thread, assistant, task),
+        ThreadKind::Workflow => render_teamwork_task_prompt(thread, assistant, &snapshot, task),
+    };
     Ok(StageTaskContext {
         thread_id: thread.id.clone(),
         thread_goal: thread.goal.clone(),
@@ -173,14 +178,42 @@ pub(super) fn build_teamwork_task_context(
     })
 }
 
-fn build_teamwork_task_snapshot(thread: &ThreadInfo, focused_assistant_id: &str) -> Value {
+fn build_thread_assistant_task_snapshot(thread: &ThreadInfo, focused_assistant_id: &str) -> Value {
     let mut assistants = thread.assistants.clone();
     assistants.sort_by_key(|assistant| assistant.order);
-    let thread_session_refs = thread
-        .sessions
-        .iter()
-        .map(|session| session_ref_json(session, "thread"))
-        .collect::<Vec<_>>();
+    let thread_session_refs = if thread.kind == ThreadKind::Debate {
+        Vec::new()
+    } else {
+        thread
+            .sessions
+            .iter()
+            .map(|session| session_ref_json(session, "thread"))
+            .collect::<Vec<_>>()
+    };
+    let context_policy = match thread.kind {
+        ThreadKind::Debate => json!({
+            "mode": "isolated_lane",
+            "laneId": format!("lane-{}", short_hash(focused_assistant_id)),
+            "sharedInput": "thread_goal_and_user_instruction",
+            "crossCheckVisibility": "stage_artifact_only",
+            "hidden": "full_lane_transcripts",
+        }),
+        ThreadKind::Brainstorm => json!({
+            "mode": "shared_board",
+            "sharedInput": "thread_goal_user_instruction_and_shared_board",
+        }),
+        ThreadKind::Teamwork => json!({
+            "mode": "shared_context_teamwork",
+        }),
+        ThreadKind::Workflow => json!({
+            "mode": "workflow_stage",
+        }),
+    };
+    let related_session_refs = if thread.kind == ThreadKind::Debate {
+        Vec::new()
+    } else {
+        dedupe_session_ref_values(thread_session_refs.clone())
+    };
     json!({
         "threadId": thread.id,
         "projectId": thread.project_id,
@@ -190,8 +223,9 @@ fn build_teamwork_task_snapshot(thread: &ThreadInfo, focused_assistant_id: &str)
         "focusedAssistantId": focused_assistant_id,
         "assistants": assistants,
         "threadSessionRefs": thread_session_refs,
+        "contextPolicy": context_policy,
         "relatedContext": {
-            "sessionExcerptRefs": dedupe_session_ref_values(thread_session_refs.clone()),
+            "sessionExcerptRefs": related_session_refs,
         },
         "detailRefs": {
             "threadId": thread.id,
@@ -273,6 +307,100 @@ fn render_teamwork_task_prompt(
     lines.push("Return a concise final result for Astra with concrete progress, decisions, blockers, and verification notes.".to_string());
     lines.push(
         "Do not update workflow stage state or create stage issues from this teamwork task."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn render_brainstorm_task_prompt(
+    thread: &ThreadInfo,
+    assistant: &crate::models::ThreadAssistantInfo,
+    task: &AstraTaskProposal,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("# Sessio brainstorm task".to_string());
+    lines.push(String::new());
+    lines.push("You are working as a thread-level assistant in shared-board brainstorm mode. Treat the task prompt as the source of truth for the current board or synthesis instruction.".to_string());
+    lines.push(format!("Thread goal: {}", thread.goal));
+    if let Some(description) = thread
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Thread description: {description}"));
+    }
+    lines.push(format!("Assistant: {}", assistant.name));
+    lines.push(format!("Assistant id: {}", assistant.assistant_id));
+    lines.push(format!("Runtime agent: {}", task.target_agent.as_str()));
+    if let Some(system_prompt) = assistant
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(String::new());
+        lines.push("## Assistant instructions".to_string());
+        lines.push(system_prompt.to_string());
+    }
+    lines.push(String::new());
+    lines.push("## Astra task".to_string());
+    lines.push(format!("Task title: {}", task.title));
+    lines.push(format!("Expected output: {}", task.expected_output));
+    lines.push(String::new());
+    lines.push(task.prompt.clone());
+    lines.push(String::new());
+    lines.push("## Reporting".to_string());
+    lines.push("Return a concise final result for Astra. Preserve concrete candidates, agreements, disagreements, risks, and questions.".to_string());
+    lines.push(
+        "Do not update workflow stage state or create stage issues from this brainstorm task."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn render_debate_task_prompt(
+    thread: &ThreadInfo,
+    assistant: &crate::models::ThreadAssistantInfo,
+    task: &AstraTaskProposal,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("# Sessio debate lane task".to_string());
+    lines.push(String::new());
+    lines.push("You are working in an isolated debate lane delegated by Astra. Use only the input explicitly present in this prompt: the shared initial problem, your lane instruction, and any visible cross-check artifacts. Do not assume access to another lane's full transcript.".to_string());
+    lines.push(format!("Thread goal: {}", thread.goal));
+    if let Some(description) = thread
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Thread description: {description}"));
+    }
+    lines.push(format!("Lane assistant: {}", assistant.name));
+    lines.push(format!("Assistant id: {}", assistant.assistant_id));
+    lines.push(format!("Runtime agent: {}", task.target_agent.as_str()));
+    if let Some(system_prompt) = assistant
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(String::new());
+        lines.push("## Lane instructions".to_string());
+        lines.push(system_prompt.to_string());
+    }
+    lines.push(String::new());
+    lines.push("## Astra task".to_string());
+    lines.push(format!("Task title: {}", task.title));
+    lines.push(format!("Expected output: {}", task.expected_output));
+    lines.push(String::new());
+    lines.push(task.prompt.clone());
+    lines.push(String::new());
+    lines.push("## Reporting".to_string());
+    lines.push("Return a concise final result for Astra with answer, evidence, assumptions, confidence, disagreements, and convergence notes.".to_string());
+    lines.push(
+        "Do not update workflow stage state or create stage issues from this debate task."
             .to_string(),
     );
     lines.join("\n")
@@ -838,7 +966,8 @@ mod tests {
         let thread = teamwork_thread();
         let task = teamwork_task();
 
-        let context = build_teamwork_task_context(&thread, "assistant-codex", &task).unwrap();
+        let context =
+            build_thread_assistant_task_context(&thread, "assistant-codex", &task).unwrap();
 
         assert_eq!(
             context.snapshot["focusedAssistantId"],
@@ -866,5 +995,59 @@ mod tests {
         assert!(context
             .prompt
             .contains("Do not update workflow stage state or create stage issues"));
+    }
+
+    #[test]
+    fn debate_task_context_uses_isolated_lane_policy_without_shared_refs() {
+        let mut thread = teamwork_thread();
+        thread.kind = ThreadKind::Debate;
+        thread.sessions = vec![SessionInfo {
+            id: "thread-session-1".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: None,
+            project_name: None,
+            started_at: Some(1),
+            updated_at: Some(1),
+            message_count: 1,
+            rename_title: None,
+            title: Some("Thread session".to_string()),
+            first_user_message: None,
+            file_path: "/tmp/session.jsonl".to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        }];
+        let task = teamwork_task();
+
+        let context =
+            build_thread_assistant_task_context(&thread, "assistant-codex", &task).unwrap();
+
+        assert_eq!(
+            context.snapshot["contextPolicy"]["mode"],
+            Value::String("isolated_lane".to_string())
+        );
+        assert_eq!(
+            context.snapshot["contextPolicy"]["crossCheckVisibility"],
+            Value::String("stage_artifact_only".to_string())
+        );
+        assert!(context.snapshot["threadSessionRefs"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(context.snapshot["relatedContext"]["sessionExcerptRefs"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(context.prompt.contains("isolated debate lane"));
+        assert!(context
+            .prompt
+            .contains("Do not assume access to another lane's full transcript"));
+        assert!(!context
+            .prompt
+            .contains("Treat this as shared-context teamwork"));
     }
 }

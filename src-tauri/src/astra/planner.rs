@@ -72,7 +72,10 @@ pub(super) fn next_dispatchable_tasks(
     tasks: &[AstraTaskProposal],
     thread: &ThreadInfo,
 ) -> Vec<AstraTaskProposal> {
-    if !matches!(thread.kind, ThreadKind::Teamwork | ThreadKind::Brainstorm) {
+    if !matches!(
+        thread.kind,
+        ThreadKind::Teamwork | ThreadKind::Brainstorm | ThreadKind::Debate
+    ) {
         return Vec::new();
     }
 

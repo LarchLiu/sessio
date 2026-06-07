@@ -10,6 +10,7 @@ use super::{
 use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::brainstorm_backend::BrainstormBackend;
+use crate::astra::debate_backend::DebateBackend;
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
 use crate::models::{PlanRoundMode, PlanTaskStatus, ThreadInfo, ThreadKind};
@@ -239,6 +240,10 @@ impl AstraService {
         if thread.kind == ThreadKind::Brainstorm {
             log::info!("[astra:orchestrator:backend] using brainstorm_backend");
             return Box::new(BrainstormBackend);
+        }
+        if thread.kind == ThreadKind::Debate {
+            log::info!("[astra:orchestrator:backend] using debate_backend");
+            return Box::new(DebateBackend);
         }
 
         if let Some(agent) = config.agent {
@@ -576,15 +581,7 @@ pub(super) fn dedicated_backend_required_error(
             "Workflow threads are human-defined stages and do not use Astra automatic scheduling"
                 .to_string(),
         )),
-        ThreadKind::Debate => Some((
-            "dedicated_backend_required",
-            "dedicated_backend_required",
-            format!(
-                "Astra {} requires a dedicated backend before automatic orchestration",
-                thread.kind.as_str()
-            ),
-        )),
-        ThreadKind::Teamwork | ThreadKind::Brainstorm => None,
+        ThreadKind::Teamwork | ThreadKind::Brainstorm | ThreadKind::Debate => None,
     }
 }
 
@@ -618,17 +615,11 @@ mod tests {
     }
 
     #[test]
-    fn debate_requires_dedicated_backend_before_planning() {
+    fn debate_is_allowed_by_dedicated_backend_guard() {
         let mut thread = test_thread(Vec::new());
         thread.kind = ThreadKind::Debate;
 
-        let Some((reason, code, message)) = dedicated_backend_required_error(&thread) else {
-            panic!("expected dedicated backend guard for debate");
-        };
-
-        assert_eq!(reason, "dedicated_backend_required");
-        assert_eq!(code, "dedicated_backend_required");
-        assert!(message.contains("debate"));
+        assert!(dedicated_backend_required_error(&thread).is_none());
     }
 
     #[test]

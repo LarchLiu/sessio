@@ -199,7 +199,8 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 验收：
 
-- workflow / brainstorm / debate 不再能启动通用 Astra 自动编排；teamwork 是唯一 v1 自动编排入口。
+- workflow 不再能启动 Astra 自动编排。
+- brainstorm / debate 不通过旧 stage-decision 或 generic teamwork planner 兜底；只有接入专用 shared-board / isolated-lane backend 后才能启动。
 - 旧 stage-decision response shape 被拒绝，不进入 fallback 或 repair。
 - `AstraHandle` 不包含旧 run lifecycle 字段；task 展示从 plan round/task 查询。
 - 后续代码改动按实施顺序拆分，不再混合 parser hotfix 和架构重构。
@@ -271,7 +272,8 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 - JSON response 被拒绝。
 - code fence response 被拒绝。
 - 旧 `decisions/action/status/issueStatus/targetStageId` response 被拒绝。
-- workflow / brainstorm / debate 创建 Astra run 直接失败，不通过旧 stage-decision 或 generic teamwork planner 兜底。
+- workflow 创建 Astra run 直接失败。
+- brainstorm / debate 不能通过旧 stage-decision 或 generic teamwork planner 创建 run；它们必须由 `docs/thread-types-plan-rounds.md` Phase 5/6 的专用 backend 接管。
 - runtime agent 和 Astra Pi ACP 使用同一份 contract 文案。
 - timeout 统一为 300s。
 - Astra 每轮 plan 在 DB 中有 round 记录。
@@ -407,5 +409,4 @@ Teamwork 是 shared context + task orchestration。Brainstorm 还需要 shared b
 - 不兼容 JSON。
 - 不做 parser repair。
 - 不做静默 deterministic fallback。
-- 不在本文档内实现 brainstorm shared-board backend。
-- 不在本文档内实现 debate isolated-lane / cross-check backend。
+- 不用本文档的 teamwork contract 冒充 brainstorm / debate；两者按 `docs/thread-types-plan-rounds.md` 的专用 backend 语义实现。

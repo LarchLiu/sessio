@@ -200,7 +200,7 @@ function ThreadAstraPanel({
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
   const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
-  const canStartAstra = thread.kind === "teamwork" || thread.kind === "brainstorm";
+  const canStartAstra = thread.kind === "teamwork" || thread.kind === "brainstorm" || thread.kind === "debate";
   const astraBoundary = canStartAstra ? null : t(`astra.unsupported.${thread.kind}`);
   const orderedPlanRounds = useMemo(
     () => planRounds.slice().sort((a, b) => b.roundIndex - a.roundIndex || b.createdAt - a.createdAt),

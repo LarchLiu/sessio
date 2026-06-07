@@ -27,6 +27,7 @@ use crate::store::{
 mod astra_pi_acp_adapter;
 mod backend;
 mod brainstorm_backend;
+mod debate_backend;
 mod deterministic_backend;
 mod orchestrator;
 mod planner;
@@ -40,7 +41,7 @@ use astra_pi_acp_adapter::{
 };
 use orchestrator::{dedicated_backend_required_error, RustNativeWorkerOutcome};
 use planner::next_dispatchable_tasks;
-use prompt::{build_stage_task_context, build_teamwork_task_context};
+use prompt::{build_stage_task_context, build_thread_assistant_task_context};
 pub use types::{
     AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraTaskProposal, AstraTaskResult,
     AstraTaskResultStatus, AstraTaskRisk,
@@ -621,7 +622,7 @@ impl AstraService {
             None => task
                 .assistant_id
                 .as_deref()
-                .map(|assistant_id| build_teamwork_task_context(thread, assistant_id, task))
+                .map(|assistant_id| build_thread_assistant_task_context(thread, assistant_id, task))
                 .transpose()?,
         };
         let mut options = RuntimeMetadata::default();
