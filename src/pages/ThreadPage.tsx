@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
-import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal, AstraTaskResult, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo } from "../api";
+import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, AstraTaskProposal, AstraTaskResult, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo } from "../api";
 import {
   AGENT_LABEL,
   cancelAstraRun,
@@ -434,12 +434,10 @@ function AstraPlanTaskRow({
             {projectStageLabel(stage, t)}
           </span>
         )}
-        {task.sessions.length > 0 && (
-          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/35">
-            {t("astra.task_sessions", { count: task.sessions.length })}
-          </span>
-        )}
       </div>
+      {task.sessions.length > 0 && (
+        <AstraPlanTaskSessions sessions={task.sessions} />
+      )}
       {detail && (
         <div className={"mt-1 line-clamp-2 text-caption leading-relaxed " + (task.error ? "text-status-error" : "text-ink/45")}>
           {detail}
@@ -457,6 +455,32 @@ function AstraPlanTaskRow({
             </span>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function AstraPlanTaskSessions({ sessions }: { sessions: PlanTaskSessionInfo[] }) {
+  const { t } = useI18n();
+  const visible = sessions.slice(0, 3);
+  const hiddenCount = sessions.length - visible.length;
+  return (
+    <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
+      {visible.map((session) => (
+        <span
+          key={`${session.agent}:${session.sessionId}:${session.role}`}
+          title={`${t(`astra.session_role.${session.role}`)}\n${AGENT_LABEL[session.agent]}\n${session.sessionId}`}
+          className="inline-flex max-w-full items-center gap-1 rounded bg-ink/[0.045] px-1.5 py-0.5 text-meta text-ink/40"
+        >
+          <AgentGlyph agent={session.agent} className="h-3 w-3 shrink-0" />
+          <span className="shrink-0">{t(`astra.session_role.${session.role}`)}</span>
+          <span className="min-w-0 truncate text-ink/30">{shortSessionId(session.sessionId)}</span>
+        </span>
+      ))}
+      {hiddenCount > 0 && (
+        <span className="rounded bg-ink/[0.045] px-1.5 py-0.5 text-meta text-ink/35">
+          {t("astra.task_sessions_more", { count: hiddenCount })}
+        </span>
       )}
     </div>
   );
@@ -1318,6 +1342,12 @@ function safeJsonPreview(value: unknown, maxLength: number): string {
   }
   if (!text) return "";
   return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function shortSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  if (trimmed.length <= 18) return trimmed;
+  return `${trimmed.slice(0, 8)}...${trimmed.slice(-6)}`;
 }
 
 function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
