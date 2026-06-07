@@ -41,7 +41,9 @@ use astra_pi_acp_adapter::{
 };
 use orchestrator::{dedicated_backend_required_error, RustNativeWorkerOutcome};
 use planner::next_dispatchable_tasks;
-use prompt::{build_stage_task_context, build_thread_assistant_task_context};
+use prompt::{
+    build_plan_task_snapshot_context, build_stage_task_context, build_thread_assistant_task_context,
+};
 pub use types::{
     AstraHandle, AstraPlan, AstraRun, AstraRunStatus, AstraTaskProposal, AstraTaskResult,
     AstraTaskResultStatus, AstraTaskRisk,
@@ -617,13 +619,32 @@ impl AstraService {
         attempt: DelegatedAttempt<'_>,
         task_waiter: Option<mpsc::Sender<AstraTaskResult>>,
     ) -> Result<AgentSessionHandle> {
-        let stage_context = match attempt.thread_stage_id {
-            Some(stage_id) => Some(build_stage_task_context(thread, stage_id, task)?),
-            None => task
-                .assistant_id
-                .as_deref()
-                .map(|assistant_id| build_thread_assistant_task_context(thread, assistant_id, task))
-                .transpose()?,
+        let plan_task = self.load_astra_plan_task(&run.thread_id, task.plan_task_id.as_deref())?;
+        let stage_context = match plan_task
+            .as_ref()
+            .map(|plan_task| {
+                build_plan_task_snapshot_context(
+                    thread,
+                    task,
+                    plan_task.stage_snapshot_json.as_deref(),
+                    plan_task.assistant_snapshot_json.as_deref(),
+                    Some(plan_task.agent_snapshot_json.as_str()),
+                )
+            })
+            .transpose()?
+            .flatten()
+        {
+            Some(context) => Some(context),
+            None => match attempt.thread_stage_id {
+                Some(stage_id) => Some(build_stage_task_context(thread, stage_id, task)?),
+                None => task
+                    .assistant_id
+                    .as_deref()
+                    .map(|assistant_id| {
+                        build_thread_assistant_task_context(thread, assistant_id, task)
+                    })
+                    .transpose()?,
+            },
         };
         let mut options = RuntimeMetadata::default();
         options.insert("astraRunId".to_string(), Value::String(run.run_id.clone()));
@@ -697,6 +718,23 @@ impl AstraService {
             }
         }
         Ok(handle)
+    }
+
+    fn load_astra_plan_task(
+        &self,
+        thread_id: &str,
+        plan_task_id: Option<&str>,
+    ) -> Result<Option<PlanTaskInfo>> {
+        let Some(plan_task_id) = plan_task_id.filter(|value| !value.trim().is_empty()) else {
+            return Ok(None);
+        };
+        Ok(self
+            .inner
+            .store
+            .list_plan_rounds(thread_id)?
+            .into_iter()
+            .flat_map(|round| round.tasks)
+            .find(|task| task.id == plan_task_id))
     }
 
     pub(super) fn astra_backend_config(&self) -> AstraBackendConfig {

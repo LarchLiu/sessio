@@ -178,6 +178,85 @@ pub(super) fn build_thread_assistant_task_context(
     })
 }
 
+pub(super) fn build_plan_task_snapshot_context(
+    thread: &ThreadInfo,
+    task: &AstraTaskProposal,
+    stage_snapshot_json: Option<&str>,
+    assistant_snapshot_json: Option<&str>,
+    agent_snapshot_json: Option<&str>,
+) -> anyhow::Result<Option<StageTaskContext>> {
+    if stage_snapshot_json.is_none()
+        && assistant_snapshot_json.is_none()
+        && agent_snapshot_json.is_none()
+    {
+        return Ok(None);
+    }
+
+    let stage_snapshot = parse_task_snapshot(stage_snapshot_json, "stage")?;
+    let assistant_snapshot = parse_task_snapshot(assistant_snapshot_json, "assistant")?;
+    let agent_snapshot = parse_task_snapshot(agent_snapshot_json, "agent")?;
+    let stage_name = task_snapshot_label(&stage_snapshot)
+        .or_else(|| task_snapshot_label(&assistant_snapshot))
+        .unwrap_or_else(|| task.title.clone());
+    let snapshot = json!({
+        "threadId": thread.id,
+        "projectId": thread.project_id,
+        "kind": thread.kind,
+        "goal": thread.goal,
+        "description": thread.description,
+        "task": {
+            "id": task.id,
+            "planTaskId": task.plan_task_id,
+            "title": task.title,
+            "assistantId": task.assistant_id,
+            "threadStageId": task.target_stage_id,
+            "targetAgent": task.target_agent,
+            "expectedOutput": task.expected_output,
+            "risk": task.risk,
+        },
+        "stageSnapshot": stage_snapshot,
+        "assistantSnapshot": assistant_snapshot,
+        "agentSnapshot": agent_snapshot,
+        "contextPolicy": {
+            "mode": "persisted_plan_task_snapshot",
+            "source": "thread_plan_tasks",
+        },
+        "capturedAt": super::now_ms(),
+    });
+    let prompt = render_plan_task_snapshot_prompt(thread, &snapshot, task);
+    Ok(Some(StageTaskContext {
+        thread_id: thread.id.clone(),
+        thread_goal: thread.goal.clone(),
+        stage_name,
+        snapshot,
+        prompt,
+    }))
+}
+
+fn parse_task_snapshot(value: Option<&str>, label: &str) -> anyhow::Result<Option<Value>> {
+    value
+        .map(|raw| {
+            serde_json::from_str::<Value>(raw)
+                .map_err(|err| anyhow::anyhow!("invalid plan task {label} snapshot json: {err}"))
+        })
+        .transpose()
+}
+
+fn task_snapshot_label(value: &Option<Value>) -> Option<String> {
+    let value = value.as_ref()?.as_object()?;
+    value
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("stageId").and_then(Value::as_str))
+        .or_else(|| value.get("assistantId").and_then(Value::as_str))
+        .or_else(|| value.get("id").and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn snapshot_text(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
 fn build_thread_assistant_task_snapshot(thread: &ThreadInfo, focused_assistant_id: &str) -> Value {
     let mut assistants = thread.assistants.clone();
     assistants.sort_by_key(|assistant| assistant.order);
@@ -238,6 +317,66 @@ fn build_thread_assistant_task_snapshot(thread: &ThreadInfo, focused_assistant_i
         },
         "capturedAt": super::now_ms(),
     })
+}
+
+fn render_plan_task_snapshot_prompt(
+    thread: &ThreadInfo,
+    snapshot: &Value,
+    task: &AstraTaskProposal,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("# Sessio plan task".to_string());
+    lines.push(String::new());
+    lines.push("You are working on a delegated Astra plan task. Use the persisted task snapshots below as the execution context; they reflect the stage, assistant, and agent configuration captured when this task was planned.".to_string());
+    lines.push(format!("Thread goal: {}", thread.goal));
+    if let Some(description) = thread
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("Thread description: {description}"));
+    }
+    lines.push(format!("Task title: {}", task.title));
+    lines.push(format!("Runtime agent: {}", task.target_agent.as_str()));
+    if let Some(stage_id) = task.target_stage_id.as_deref() {
+        lines.push(format!("Thread stage id: {stage_id}"));
+    }
+    if let Some(assistant_id) = task.assistant_id.as_deref() {
+        lines.push(format!("Assistant id: {assistant_id}"));
+    }
+    lines.push(String::new());
+    lines.push("## Persisted snapshots".to_string());
+    if let Some(stage) = snapshot
+        .get("stageSnapshot")
+        .filter(|value| !value.is_null())
+    {
+        lines.push("### Stage snapshot".to_string());
+        lines.push(snapshot_text(stage));
+    }
+    if let Some(assistant) = snapshot
+        .get("assistantSnapshot")
+        .filter(|value| !value.is_null())
+    {
+        lines.push("### Assistant snapshot".to_string());
+        lines.push(snapshot_text(assistant));
+    }
+    if let Some(agent) = snapshot
+        .get("agentSnapshot")
+        .filter(|value| !value.is_null())
+    {
+        lines.push("### Agent snapshot".to_string());
+        lines.push(snapshot_text(agent));
+    }
+    lines.push(String::new());
+    lines.push("## Astra task".to_string());
+    lines.push(format!("Expected output: {}", task.expected_output));
+    lines.push(String::new());
+    lines.push(task.prompt.clone());
+    lines.push(String::new());
+    lines.push("## Reporting".to_string());
+    lines.push("Return a concise final result for Astra. Do not mutate workflow stages or issues unless this task explicitly asks for a separate manual action.".to_string());
+    lines.join("\n")
 }
 
 fn render_teamwork_task_prompt(
@@ -1049,5 +1188,40 @@ mod tests {
         assert!(!context
             .prompt
             .contains("Treat this as shared-context teamwork"));
+    }
+
+    #[test]
+    fn plan_task_snapshot_context_uses_persisted_task_snapshots() {
+        let mut thread = teamwork_thread();
+        thread.assistants[0].name = "Current Builder".to_string();
+        thread.assistants[0].system_prompt =
+            Some("Current instructions should not win.".to_string());
+        let mut task = teamwork_task();
+        task.plan_task_id = Some("plan-task-1".to_string());
+        let context = build_plan_task_snapshot_context(
+            &thread,
+            &task,
+            None,
+            Some(r#"{"assistantId":"assistant-codex","name":"Original Builder","systemPrompt":"Original persisted instructions."}"#),
+            Some(r#"{"agent":"codex","agentInfo":{"name":"Codex","model":"gpt-5.3-codex-original"}}"#),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            context.snapshot["contextPolicy"]["mode"],
+            Value::String("persisted_plan_task_snapshot".to_string())
+        );
+        assert_eq!(
+            context.snapshot["assistantSnapshot"]["name"],
+            Value::String("Original Builder".to_string())
+        );
+        assert!(context.prompt.contains("Original Builder"));
+        assert!(context.prompt.contains("Original persisted instructions."));
+        assert!(context.prompt.contains("gpt-5.3-codex-original"));
+        assert!(!context.prompt.contains("Current Builder"));
+        assert!(!context
+            .prompt
+            .contains("Current instructions should not win."));
     }
 }
