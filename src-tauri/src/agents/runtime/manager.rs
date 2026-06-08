@@ -499,8 +499,9 @@ impl RuntimeManager {
             }
             state.active_turn_id = Some(turn_id.clone());
             if !input_option_bool(&input.options, RUNTIME_INPUT_SUPPRESS_OPTIMISTIC_OPTION) {
-                let display_text = input_option_string(&input.options, RUNTIME_INPUT_DISPLAY_TEXT_OPTION)
-                    .unwrap_or(input.text.as_str());
+                let display_text =
+                    input_option_string(&input.options, RUNTIME_INPUT_DISPLAY_TEXT_OPTION)
+                        .unwrap_or(input.text.as_str());
                 apply_optimistic_user_message(
                     &mut state.turn_state,
                     &turn_id,
@@ -959,6 +960,7 @@ impl RuntimeManager {
             payload,
         };
         let should_emit_runtime_event = should_emit_runtime_event_to_webview(&event.payload);
+        let should_emit_turn_snapshot = should_emit_turn_snapshot_for_event(&event.payload);
         let snapshot_session_id = if ENABLE_LIVE_RUNTIME_SNAPSHOTS {
             self.apply_event_to_turn_state(&event)
         } else {
@@ -972,7 +974,11 @@ impl RuntimeManager {
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         }
         if let Some(session_id) = snapshot_session_id {
-            self.queue_turn_snapshot(session_id, timestamp, sequence, should_flush_snapshot)?;
+            if should_emit_turn_snapshot {
+                self.queue_turn_snapshot(session_id, timestamp, sequence, should_flush_snapshot)?;
+            } else {
+                self.clear_queued_turn_snapshot(&session_id)?;
+            }
         }
         Ok(())
     }
@@ -1069,6 +1075,16 @@ impl RuntimeManager {
         Ok(())
     }
 
+    fn clear_queued_turn_snapshot(&self, session_id: &str) -> Result<()> {
+        let mut queue = self
+            .inner
+            .snapshot_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime snapshot queue lock poisoned"))?;
+        queue.remove(session_id);
+        Ok(())
+    }
+
     fn emit_turn_snapshot(&self, session_id: &str, sequence: u64, timestamp: i64) -> Result<()> {
         let snapshot = {
             let sessions = self
@@ -1144,8 +1160,11 @@ fn should_emit_snapshot_immediately(payload: &AgentRuntimeEventPayload) -> bool 
             | AgentRuntimeEventPayload::TurnCompleted { .. }
             | AgentRuntimeEventPayload::TurnError { .. }
             | AgentRuntimeEventPayload::TurnCancelled { .. }
-            | AgentRuntimeEventPayload::SessionEnded { .. }
     )
+}
+
+fn should_emit_turn_snapshot_for_event(payload: &AgentRuntimeEventPayload) -> bool {
+    !matches!(payload, AgentRuntimeEventPayload::SessionEnded { .. })
 }
 
 fn event_session_id(payload: &AgentRuntimeEventPayload) -> Option<&str> {

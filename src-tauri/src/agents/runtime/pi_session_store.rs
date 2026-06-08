@@ -184,9 +184,11 @@ impl PiAcpSessionStore {
                     entry.workspace_path = path;
                 }
             }
-            entry
-                .transcript_lines
-                .push(protocol_message_line(message, timestamp, &entry.workspace_path)?);
+            entry.transcript_lines.push(protocol_message_line(
+                message,
+                timestamp,
+                &entry.workspace_path,
+            )?);
             entry.message_count += 1;
             entry.skipped
                 && !is_fake_agent_session_id(&entry.agent_session_id)
@@ -213,20 +215,19 @@ impl PiAcpSessionStore {
                 .sessions
                 .lock()
                 .map_err(|_| anyhow::anyhow!("pi session persistence lock poisoned"))?;
-            let entry =
-                sessions
-                    .entry(sessio_runtime_session_id.to_string())
-                    .or_insert_with(|| PersistedPiSession {
-                        agent_session_id: agent_session_id.to_string(),
-                        file_path: String::new(),
-                        workspace_path: String::new(),
-                        first_user_message: None,
-                        started_at: timestamp,
-                        last_updated_at: timestamp,
-                        message_count: 0,
-                        transcript_lines: Vec::new(),
-                        skipped,
-                    });
+            let entry = sessions
+                .entry(sessio_runtime_session_id.to_string())
+                .or_insert_with(|| PersistedPiSession {
+                    agent_session_id: agent_session_id.to_string(),
+                    file_path: String::new(),
+                    workspace_path: String::new(),
+                    first_user_message: None,
+                    started_at: timestamp,
+                    last_updated_at: timestamp,
+                    message_count: 0,
+                    transcript_lines: Vec::new(),
+                    skipped,
+                });
             if !is_fake_agent_session_id(agent_session_id) {
                 entry.agent_session_id = agent_session_id.to_string();
             }
@@ -261,11 +262,13 @@ impl PiAcpSessionStore {
         {
             return Ok(());
         }
-        let transcript_dir = project_dir_for_workspace_path(Some(&persisted.workspace_path))?;
-        fs::create_dir_all(&transcript_dir)
-            .with_context(|| format!("create pi transcript dir {}", transcript_dir.display()))?;
-        let file_path = transcript_dir.join(session_file_name(&persisted.agent_session_id));
-        write_protocol_message_lines_to_file(&file_path, &persisted.transcript_lines)
+        let store = self.inner.store.clone();
+        thread::spawn(move || {
+            if let Err(error) = persist_finished_session(store.as_ref(), persisted) {
+                log::warn!("[pi-acp-session-store] persist finished transcript failed: {error}");
+            }
+        });
+        Ok(())
     }
 
     fn upsert_session_row(&self, sessio_runtime_session_id: &str) -> Result<()> {
@@ -324,6 +327,63 @@ impl PiAcpSessionStore {
             self.inner.store.upsert_session(&scope, &session)?;
         }
         Ok(())
+    }
+}
+
+fn persist_finished_session(store: &dyn SessionStore, persisted: PersistedPiSession) -> Result<()> {
+    let transcript_dir = project_dir_for_workspace_path(Some(&persisted.workspace_path))?;
+    fs::create_dir_all(&transcript_dir)
+        .with_context(|| format!("create pi transcript dir {}", transcript_dir.display()))?;
+    let file_path = transcript_dir.join(session_file_name(&persisted.agent_session_id));
+    write_protocol_message_lines_to_file(&file_path, &persisted.transcript_lines)?;
+    upsert_finished_session_file(store, persisted, &file_path)
+}
+
+fn upsert_finished_session_file(
+    store: &dyn SessionStore,
+    persisted: PersistedPiSession,
+    file_path: &Path,
+) -> Result<()> {
+    let file_size = fs::metadata(file_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let file_path = file_path.to_string_lossy().into_owned();
+    let project_path =
+        (!persisted.workspace_path.trim().is_empty()).then(|| persisted.workspace_path.clone());
+    let project_name = project_path.as_deref().and_then(|path| {
+        Path::new(path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(String::from)
+    });
+    let session = SessionInfo {
+        id: persisted.agent_session_id,
+        agent: Agent::AstraPi,
+        forked_from_agent: None,
+        forked_from_id: None,
+        project_path,
+        project_name,
+        started_at: Some(persisted.started_at),
+        updated_at: Some(persisted.last_updated_at),
+        message_count: persisted.message_count,
+        rename_title: None,
+        title: persisted.first_user_message.clone(),
+        first_user_message: persisted.first_user_message,
+        file_path: file_path.clone(),
+        file_size,
+        partial: false,
+        available: true,
+        archived: false,
+        subagents: Vec::new(),
+    };
+    let scope = Path::new(&file_path)
+        .parent()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or(file_path);
+    if persisted.skipped {
+        store.upsert_skipped_session(&scope, &session)
+    } else {
+        store.upsert_session(&scope, &session)
     }
 }
 

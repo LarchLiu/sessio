@@ -61,6 +61,8 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
         match execute_agent_session(
             &self.runtime,
             &self.config,
+            run,
+            thread,
             &run.project_path,
             &prompt,
             "orchestration",
@@ -95,12 +97,23 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
 fn execute_agent_session(
     runtime: &RuntimeManager,
     config: &RuntimeAgentBackendConfig,
+    run: &AstraRun,
+    thread: &ThreadInfo,
     workspace_path: &str,
     prompt: &str,
     purpose: &str,
 ) -> Result<(String, String), BackendFailure> {
     let mut options = RuntimeMetadata::default();
     options.insert("astraInternal".to_string(), Value::Bool(true));
+    options.insert("astraRunId".to_string(), Value::String(run.run_id.clone()));
+    options.insert(
+        "astraThreadId".to_string(),
+        Value::String(thread.id.clone()),
+    );
+    options.insert(
+        "astraThreadKind".to_string(),
+        Value::String(thread.kind.as_str().to_string()),
+    );
     options.insert(
         "astraPurpose".to_string(),
         Value::String(purpose.to_string()),

@@ -65,12 +65,14 @@ import type {
 } from "../runtimeChat";
 import { sessionDisplayTitle } from "../appUtils";
 import {
+  buildThreadTimelineRows,
   buildThreadSessionLanes,
   replaySourceKey,
   replaySourceTitle,
   shortSessionId,
   type ThreadSessionLane,
   type ThreadSessionLaneStatus,
+  type ThreadTimelineRow,
 } from "../threadReplayView";
 import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
 import { collectThreadChatSessions } from "../threadChats";
@@ -126,6 +128,8 @@ export default function ThreadMultiSessionChatPage({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [stageTaskMode, setStageTaskMode] = useState(false);
   const [stageTaskBusy, setStageTaskBusy] = useState(false);
+  const [astraRuns, setAstraRuns] = useState<AstraHandle[]>([]);
+  const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
   const composer = useChatComposer({
     runtimeAgents,
     lastRuntimeAgentSelection,
@@ -166,7 +170,7 @@ export default function ThreadMultiSessionChatPage({
     };
   }, [load, onError]);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setRefreshing(true);
     setLoadError(null);
     try {
@@ -180,7 +184,40 @@ export default function ThreadMultiSessionChatPage({
     } finally {
       setRefreshing(false);
     }
-  };
+  }, [load, onError]);
+
+  const reloadAstraState = useCallback(async () => {
+    try {
+      const [nextRuns, nextPlanRounds] = await Promise.all([
+        listAstraRuns(threadId),
+        listPlanRounds(threadId),
+      ]);
+      setAstraRuns(nextRuns);
+      setPlanRounds(nextPlanRounds);
+    } catch (err) {
+      onError(String(err));
+    }
+  }, [onError, threadId]);
+
+  useEffect(() => {
+    void reloadAstraState();
+  }, [reloadAstraState]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<AstraEvent>("astra-run-event", (event) => {
+      if (event.payload.threadId !== threadId) return;
+      void reloadAstraState();
+      if (THREAD_REFRESH_ASTRA_EVENTS.has(event.payload.eventType)) {
+        void refresh();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    }).catch((err) => onError(String(err)));
+    return () => {
+      unlisten?.();
+    };
+  }, [onError, refresh, reloadAstraState, threadId]);
 
   const lanes = useMemo(
     () =>
@@ -203,6 +240,10 @@ export default function ThreadMultiSessionChatPage({
     : null;
   const liveCount = lanes.filter((lane) => lane.status === "live").length;
   const pendingCount = lanes.filter((lane) => lane.status === "pending").length;
+  const timelineRows = useMemo(
+    () => buildThreadTimelineRows(lanes, planRounds, astraRuns, thread?.kind ?? "teamwork"),
+    [astraRuns, lanes, planRounds, thread?.kind],
+  );
   const threadChatSessions = useMemo(
     () => thread ? collectThreadChatSessions(thread, replay) : [],
     [replay, thread],
@@ -387,6 +428,10 @@ export default function ThreadMultiSessionChatPage({
             <ThreadOrchestrationPanel
               thread={thread}
               stages={sortedStages}
+              runs={astraRuns}
+              planRounds={planRounds}
+              onRunUpdated={(run) => setAstraRuns((prev) => upsertAstraRun(prev, run))}
+              onReloadAstraState={reloadAstraState}
               onError={onError}
               onReload={refresh}
             />
@@ -416,24 +461,19 @@ export default function ThreadMultiSessionChatPage({
               </section>
             )}
 
-            {lanes.length === 0 ? (
+            {timelineRows.length === 0 ? (
               <ThreadMultiSessionEmpty
                 icon={<MessagesSquare className="h-5 w-5 text-ink/35" />}
                 title={t("thread.multi_session_empty")}
                 detail={replay ? t("thread.no_chats") : t("thread.history_pending")}
               />
             ) : (
-              <section className="grid gap-3 lg:grid-cols-[repeat(auto-fit,minmax(360px,1fr))]">
-                {lanes.map((lane) => (
-                  <ThreadSessionLaneCard
-                    key={lane.laneId}
-                    lane={lane}
-                    threadKind={thread.kind}
-                    now={Date.now()}
-                    onSelectSession={onSelectSession}
-                  />
-                ))}
-              </section>
+              <ThreadTimeline
+                rows={timelineRows}
+                threadKind={thread.kind}
+                now={Date.now()}
+                onSelectSession={onSelectSession}
+              />
             )}
           </div>
         )}
@@ -628,20 +668,129 @@ function ThreadMultiSessionEmpty({
   );
 }
 
+function ThreadTimeline({
+  rows,
+  threadKind,
+  now,
+  onSelectSession,
+}: {
+  rows: ThreadTimelineRow[];
+  threadKind: ThreadKind;
+  now: number;
+  onSelectSession: (session: SessionInfo) => void;
+}) {
+  return (
+    <section className="grid gap-3">
+      {rows.map((row) => {
+        if (row.kind === "orchestration") {
+          return (
+            <div key={row.key} className="grid gap-2">
+              <ThreadOrchestrationTimelineCard row={row} />
+              {row.lanes.map((lane) => (
+                <ThreadSessionLaneCard
+                  key={lane.laneId}
+                  lane={lane}
+                  threadKind={threadKind}
+                  now={now}
+                  onSelectSession={onSelectSession}
+                />
+              ))}
+            </div>
+          );
+        }
+        return (
+          <div
+            key={row.key}
+            className={row.debatePair ? "grid gap-3 md:grid-cols-2" : "grid gap-3"}
+          >
+            {row.lanes.map((lane) => (
+              <ThreadSessionLaneCard
+                key={lane.laneId}
+                lane={lane}
+                threadKind={threadKind}
+                now={now}
+                onSelectSession={onSelectSession}
+              />
+            ))}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function ThreadOrchestrationTimelineCard({ row }: { row: ThreadTimelineRow }) {
+  const { t } = useI18n();
+  const title = row.round
+    ? t("astra.round", { index: row.round.roundIndex + 1 })
+    : row.run?.runId ?? t("thread.timeline_orchestration");
+  const status = row.round?.status ?? row.run?.status ?? null;
+  const statusClass = row.round
+    ? planRoundStatusClass(row.round.status)
+    : row.run
+      ? astraStatusClass(row.run.status)
+      : "bg-ink/[0.06] text-ink/45";
+  const summary = row.round?.summary ?? row.run?.lastErrorMessage ?? row.run?.error ?? null;
+  const backend = row.run?.plannerBackend ?? null;
+  return (
+    <article className="min-w-0 rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <Sparkles className="h-4 w-4 shrink-0 text-[rgb(var(--color-emerald)/0.85)]" />
+        <span className="text-body-sm font-medium text-ink/78">
+          {t("thread.timeline_orchestration")}
+        </span>
+        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
+          {title}
+        </span>
+        {status && (
+          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + statusClass}>
+            {formatAstraStatus(status)}
+          </span>
+        )}
+        {backend && (
+          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
+            {backend}
+          </span>
+        )}
+      </div>
+      {summary && (
+        <p className="mt-1.5 whitespace-pre-wrap text-body-sm leading-relaxed text-ink/55">
+          {summary}
+        </p>
+      )}
+      {row.round && row.round.tasks.length > 0 && (
+        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-meta text-ink/38">
+          {row.round.tasks.map((task) => (
+            <span key={task.id} className="max-w-full truncate rounded bg-ink/[0.045] px-1.5 py-0.5">
+              {task.title}
+            </span>
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
 function ThreadOrchestrationPanel({
   thread,
   stages,
+  runs,
+  planRounds,
+  onRunUpdated,
+  onReloadAstraState,
   onError,
   onReload,
 }: {
   thread: ThreadInfo;
   stages: StageInfo[];
+  runs: AstraHandle[];
+  planRounds: PlanRoundInfo[];
+  onRunUpdated: (run: AstraHandle) => void;
+  onReloadAstraState: () => Promise<void>;
   onError: (error: string | null) => void;
   onReload: () => Promise<void>;
 }) {
   const { t } = useI18n();
-  const [runs, setRuns] = useState<AstraHandle[]>([]);
-  const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
   const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
@@ -651,44 +800,15 @@ function ThreadOrchestrationPanel({
     [planRounds],
   );
 
-  const reloadAstraState = useCallback(() => {
-    return Promise.all([listAstraRuns(thread.id), listPlanRounds(thread.id)])
-      .then(([nextRuns, nextPlanRounds]) => {
-        setRuns(nextRuns);
-        setPlanRounds(nextPlanRounds);
-      })
-      .catch((err) => onError(String(err)));
-  }, [onError, thread.id]);
-
-  useEffect(() => {
-    void reloadAstraState();
-  }, [reloadAstraState]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    listen<AstraEvent>("astra-run-event", (event) => {
-      if (event.payload.threadId !== thread.id) return;
-      const eventType = event.payload.eventType;
-      void reloadAstraState();
-      if (THREAD_REFRESH_ASTRA_EVENTS.has(eventType)) {
-        void onReload();
-      }
-    }).then((fn) => {
-      unlisten = fn;
-    }).catch((err) => onError(String(err)));
-    return () => {
-      unlisten?.();
-    };
-  }, [onError, onReload, reloadAstraState, thread.id]);
-
   const start = async () => {
     if (!canStartAstra) return;
     setBusy("start");
     try {
       const run = await createAstraRun(thread.id, prompt.trim() || null);
-      setRuns((prev) => upsertAstraRun(prev, run));
+      onRunUpdated(run);
       setPrompt("");
-      await reloadAstraState();
+      await onReloadAstraState();
+      await onReload();
     } catch (err) {
       onError(String(err));
     } finally {
@@ -701,8 +821,9 @@ function ThreadOrchestrationPanel({
     setBusy("cancel");
     try {
       const run = await cancelAstraRun(activeRun.runId);
-      setRuns((prev) => upsertAstraRun(prev, run));
-      await reloadAstraState();
+      onRunUpdated(run);
+      await onReloadAstraState();
+      await onReload();
     } catch (err) {
       onError(String(err));
     } finally {

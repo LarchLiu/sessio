@@ -490,7 +490,10 @@ pub(super) fn prepare_astra_pi_agent_config(
     });
     if super::ENABLE_ASTRA_PI_SESSION_PERSISTENCE {
         if let Some(settings) = settings.as_object_mut() {
-            settings.insert("sessionStore".to_string(), Value::String("jsonl".to_string()));
+            settings.insert(
+                "sessionStore".to_string(),
+                Value::String("jsonl".to_string()),
+            );
             settings.insert(
                 "sessionDurability".to_string(),
                 Value::String("strict".to_string()),

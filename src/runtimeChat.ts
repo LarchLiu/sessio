@@ -32,6 +32,7 @@ export interface LiveRuntimeSession {
   transport: RuntimeTransportKind;
   workspacePath: string;
   capabilities: RuntimeCapabilitySet;
+  metadata?: Record<string, unknown>;
   turns: LiveTurn[];
   sessionState: AcpSessionState;
   protocolMessages: AcpProtocolMessage[];
@@ -512,6 +513,10 @@ function applyRuntimeEventEnvelope(
     transport: event.transport,
     workspacePath: event.workspacePath,
     capabilities,
+    metadata: {
+      ...(existing?.metadata ?? {}),
+      ...(event.metadata ?? {}),
+    },
     turns: existing?.turns ?? [],
     sessionState: existing?.sessionState ?? emptyAcpSessionState(),
     protocolMessages: existing?.protocolMessages ?? [],
@@ -541,6 +546,10 @@ function mergeRuntimeSessionSnapshot(
   return {
     ...snapshot,
     capabilities,
+    metadata: {
+      ...(existing.metadata ?? {}),
+      ...(snapshot.metadata ?? {}),
+    },
   };
 }
 

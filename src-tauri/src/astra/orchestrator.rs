@@ -15,7 +15,7 @@ use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
 use crate::models::{PlanRoundMode, PlanTaskStatus, ThreadInfo, ThreadKind};
 
-const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
+pub(super) const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
 const MAX_RUN_DIAGNOSTICS: usize = 100;
 
 fn trim_vec_front<T>(values: &mut Vec<T>, max_len: usize) {
@@ -520,7 +520,7 @@ impl AstraService {
     }
 }
 
-fn push_unique_bounded(values: &mut Vec<String>, value: String, max_len: usize) {
+pub(super) fn push_unique_bounded(values: &mut Vec<String>, value: String, max_len: usize) {
     if values.iter().any(|existing| existing == &value) {
         return;
     }

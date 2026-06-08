@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type {
   Agent,
+  AstraHandle,
+  PlanRoundInfo,
+  PlanTaskInfo,
   SessionInfo,
   ThreadInfo,
   ThreadReplayInfo,
@@ -10,6 +13,7 @@ import type {
 import type { PendingNewChatSession } from "../src/navigation";
 import type { LiveRuntimeState, LiveTurn } from "../src/runtimeChat";
 import {
+  buildThreadTimelineRows,
   buildThreadSessionLanes,
   groupReplaySessionsByThreadKind,
   replaySourceKey,
@@ -78,6 +82,62 @@ describe("buildThreadSessionLanes", () => {
     expect(lanes).toHaveLength(1);
     expect(lanes[0].sessioRuntimeSessionId).toBe("runtime-1");
     expect(lanes[0].status).toBe("live");
+  });
+
+  it("connects a replay lane whose session id is already the runtime id", () => {
+    const replay: ThreadReplayInfo = {
+      threadId: "thread-1",
+      kind: "teamwork",
+      sessions: [
+        replaySession("codex", "runtime-1", null, [
+          source({ kind: "plan_task", planRoundId: "round-1", planTaskId: "task-1" }),
+        ]),
+      ],
+    };
+
+    const lanes = buildThreadSessionLanes({
+      thread: thread("teamwork"),
+      replay,
+      liveState: {
+        sessions: {
+          "runtime-1": liveSession("codex", "runtime-1", "pending", false),
+        },
+        lastSequence: 1,
+      },
+      runtimeSessionAliases: {},
+      pendingNewChats: {},
+      t,
+    });
+
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0].sessioRuntimeSessionId).toBe("runtime-1");
+    expect(lanes[0].liveSession?.sessioRuntimeSessionId).toBe("runtime-1");
+  });
+
+  it("adds live-only planner lanes from runtime metadata", () => {
+    const lanes = buildThreadSessionLanes({
+      thread: thread("teamwork"),
+      replay: { threadId: "thread-1", kind: "teamwork", sessions: [] },
+      liveState: {
+        sessions: {
+          "runtime-planner": liveSession("codex", "runtime-planner", "planner-session", false, {
+            astraInternal: true,
+            astraPurpose: "orchestration",
+            astraRunId: "run-1",
+            astraThreadId: "thread-1",
+          }),
+        },
+        lastSequence: 1,
+      },
+      runtimeSessionAliases: {},
+      pendingNewChats: {},
+      t,
+    });
+
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0].sources[0].kind).toBe("astra_internal");
+    expect(lanes[0].sources[0].astraRunId).toBe("run-1");
+    expect(lanes[0].sessioRuntimeSessionId).toBe("runtime-planner");
   });
 
   it("adds a pending lane before the real agent session id is known", () => {
@@ -172,6 +232,97 @@ describe("groupReplaySessionsByThreadKind", () => {
   });
 });
 
+describe("buildThreadTimelineRows", () => {
+  it("keeps orchestration before task lanes and hides missing internal planner placeholders", () => {
+    const round = planRound({
+      id: "round-1",
+      astraRunId: "run-1",
+      roundIndex: 0,
+      createdAt: 100,
+      updatedAt: 130,
+      tasks: [planTask({ id: "task-1", roundId: "round-1", sortOrder: 0 })],
+    });
+    const replay: ThreadReplayInfo = {
+      threadId: "thread-1",
+      kind: "brainstorm",
+      sessions: [
+        replaySession("astra-pi", "brainstorm-backend-run-1-0", null, [
+          source({
+            kind: "astra_internal",
+            astraRunId: "run-1",
+            role: "planner",
+            label: "Astra planner: brainstorm_backend",
+            createdAt: 95,
+          }),
+        ]),
+        replaySession("codex", "task-session", session("codex", "task-session"), [
+          source({
+            kind: "plan_task",
+            planRoundId: "round-1",
+            planTaskId: "task-1",
+            astraRunId: "run-1",
+            label: "Opinion",
+            createdAt: 90,
+          }),
+        ]),
+      ],
+    };
+    const lanes = buildThreadSessionLanes({
+      thread: thread("brainstorm"),
+      replay,
+      liveState: emptyLiveState(),
+      runtimeSessionAliases: {},
+      pendingNewChats: {},
+      t,
+    });
+
+    const rows = buildThreadTimelineRows(lanes, [round], [astraRun({ runId: "run-1" })], "brainstorm");
+
+    expect(rows.map((row) => row.kind)).toEqual(["orchestration", "sessions"]);
+    expect(rows[0].round?.id).toBe("round-1");
+    expect(rows[0].lanes).toHaveLength(0);
+    expect(rows[1].lanes.map((lane) => lane.sessionId)).toEqual(["task-session"]);
+    expect(rows.flatMap((row) => row.lanes).some((lane) => lane.sessionId.startsWith("brainstorm-backend"))).toBe(false);
+  });
+
+  it("pairs debate task lanes two at a time inside a round", () => {
+    const round = planRound({
+      id: "round-1",
+      astraRunId: "run-1",
+      tasks: [
+        planTask({ id: "task-1", roundId: "round-1", sortOrder: 0 }),
+        planTask({ id: "task-2", roundId: "round-1", sortOrder: 1 }),
+        planTask({ id: "task-3", roundId: "round-1", sortOrder: 2 }),
+      ],
+    });
+    const replay: ThreadReplayInfo = {
+      threadId: "thread-1",
+      kind: "debate",
+      sessions: [
+        debateReplaySession("codex", "session-1", "task-1", 10),
+        debateReplaySession("claude", "session-2", "task-2", 11),
+        debateReplaySession("gemini", "session-3", "task-3", 12),
+      ],
+    };
+    const lanes = buildThreadSessionLanes({
+      thread: thread("debate"),
+      replay,
+      liveState: emptyLiveState(),
+      runtimeSessionAliases: {},
+      pendingNewChats: {},
+      t,
+    });
+
+    const rows = buildThreadTimelineRows(lanes, [round], [astraRun({ runId: "run-1" })], "debate");
+    const sessionRows = rows.filter((row) => row.kind === "sessions");
+
+    expect(sessionRows).toHaveLength(2);
+    expect(sessionRows[0].debatePair).toBe(true);
+    expect(sessionRows[0].lanes.map((lane) => lane.sessionId)).toEqual(["session-1", "session-2"]);
+    expect(sessionRows[1].lanes.map((lane) => lane.sessionId)).toEqual(["session-3"]);
+  });
+});
+
 describe("replay sources", () => {
   it("builds stable source keys and snapshot titles", () => {
     const item = source({
@@ -195,6 +346,90 @@ describe("replay sources", () => {
 
 function thread(kind: ThreadInfo["kind"]): Pick<ThreadInfo, "id" | "kind"> {
   return { id: "thread-1", kind };
+}
+
+function planRound(patch: Partial<PlanRoundInfo>): PlanRoundInfo {
+  return {
+    id: "round-1",
+    threadId: "thread-1",
+    astraRunId: "run-1",
+    roundIndex: 0,
+    summary: "Plan this round",
+    mode: "parallel",
+    source: "astra",
+    status: "planned",
+    createdAt: 100,
+    updatedAt: 100,
+    tasks: [],
+    ...patch,
+  };
+}
+
+function planTask(patch: Partial<PlanTaskInfo>): PlanTaskInfo {
+  return {
+    id: "task-1",
+    roundId: "round-1",
+    threadStageId: null,
+    assistantId: null,
+    targetAgent: "codex",
+    stageSnapshotJson: null,
+    assistantSnapshotJson: null,
+    agentSnapshotJson: "{}",
+    title: "Task",
+    prompt: "Do the task",
+    expectedOutput: null,
+    risk: "low",
+    sortOrder: 0,
+    status: "planned",
+    resultSummary: null,
+    error: null,
+    startedAt: null,
+    completedAt: null,
+    createdAt: 100,
+    updatedAt: 100,
+    sessions: [],
+    ...patch,
+  };
+}
+
+function astraRun(patch: Partial<AstraHandle>): AstraHandle {
+  return {
+    runId: "run-1",
+    threadId: "thread-1",
+    projectId: "project-1",
+    status: "running",
+    mode: "automatic",
+    plannerBackend: "brainstorm_backend",
+    roundIndex: 0,
+    roundLimit: 3,
+    terminalReason: null,
+    lastErrorCode: null,
+    lastErrorMessage: null,
+    internalPlannerSessionIds: [],
+    runDiagnostics: [],
+    error: null,
+    createdAt: 80,
+    updatedAt: 120,
+    ...patch,
+  };
+}
+
+function debateReplaySession(
+  agent: Agent,
+  sessionId: string,
+  planTaskId: string,
+  createdAt: number,
+): ThreadReplaySessionInfo {
+  return replaySession(agent, sessionId, session(agent, sessionId), [
+    source({
+      kind: "plan_task",
+      planRoundId: "round-1",
+      planTaskId,
+      astraRunId: "run-1",
+      label: `${agent} debate lane`,
+      createdAt,
+    }),
+  ]);
 }
 
 function session(agent: Agent, id: string): SessionInfo {
@@ -263,6 +498,7 @@ function liveSession(
   sessioRuntimeSessionId: string,
   agentRuntimeSessionId: string,
   ended: boolean,
+  metadata: Record<string, unknown> = {},
 ): LiveRuntimeState["sessions"][string] {
   return {
     sessioRuntimeSessionId,
@@ -271,6 +507,7 @@ function liveSession(
     transport: "acp",
     workspacePath: "/tmp/project",
     capabilities: runtimeCapabilities(),
+    metadata,
     turns: [liveTurn("turn-1")],
     sessionState: {
       plan: null,

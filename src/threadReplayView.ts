@@ -1,5 +1,8 @@
 import type {
   Agent,
+  AstraHandle,
+  PlanRoundInfo,
+  PlanTaskInfo,
   ThreadInfo,
   ThreadKind,
   ThreadReplayInfo,
@@ -9,6 +12,7 @@ import type {
 import { AGENT_LABEL } from "./api";
 import type { PendingNewChatSession } from "./navigation";
 import type { LiveRuntimeState } from "./runtimeChat";
+import { isAstraActive } from "./threadAstraView";
 
 type TFn = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -39,6 +43,24 @@ export type ReplaySessionGroup = {
   sessions: ThreadReplaySessionInfo[];
 };
 
+export type ThreadTimelineRow = {
+  key: string;
+  kind: "orchestration" | "sessions";
+  time: number;
+  order: number;
+  round: PlanRoundInfo | null;
+  run: AstraHandle | null;
+  lanes: ThreadSessionLane[];
+  debatePair: boolean;
+};
+
+type ThreadTimelineGroup = {
+  key: string;
+  time: number;
+  order: number;
+  rows: ThreadTimelineRow[];
+};
+
 export function buildThreadSessionLanes({
   thread,
   replay,
@@ -58,7 +80,8 @@ export function buildThreadSessionLanes({
   for (const replaySession of replay?.sessions ?? []) {
     const group = replayGroupForSession(replay?.kind ?? thread?.kind ?? "teamwork", replaySession, t);
     const aliasKey = `${replaySession.agent}:${replaySession.sessionId}`;
-    const runtimeSessionId = runtimeSessionAliases[aliasKey] ?? null;
+    const runtimeSessionId = runtimeSessionAliases[aliasKey]
+      ?? (liveState.sessions[replaySession.sessionId] ? replaySession.sessionId : null);
     const liveSession = runtimeSessionId ? liveState.sessions[runtimeSessionId] : null;
     lanes.push({
       laneId: `${replaySession.agent}:${replaySession.sessionId}:${group.key}`,
@@ -105,9 +128,217 @@ export function buildThreadSessionLanes({
       status: liveSession ? liveSessionStatus(liveSession) : "pending",
       liveSession,
     });
+    existingRuntimeIds.add(pending.sessioRuntimeSessionId);
+  }
+
+  for (const liveSession of Object.values(liveState.sessions)) {
+    if (!isThreadPlannerLiveSession(liveSession, thread?.id)) continue;
+    if (existingRuntimeIds.has(liveSession.sessioRuntimeSessionId)) continue;
+    const sessionId =
+      liveSession.agentRuntimeSessionId && liveSession.agentRuntimeSessionId !== "pending"
+        ? liveSession.agentRuntimeSessionId
+        : liveSession.sessioRuntimeSessionId;
+    const astraRunId = stringMeta(liveSession.metadata, "astraRunId");
+    lanes.push({
+      laneId: `${liveSession.agent}:${sessionId}:planner-live:${liveSession.sessioRuntimeSessionId}`,
+      agent: liveSession.agent,
+      sessionId,
+      sessioRuntimeSessionId: liveSession.sessioRuntimeSessionId,
+      session: null,
+      sources: [{
+        kind: "astra_internal",
+        threadId: thread?.id ?? null,
+        stageId: null,
+        planRoundId: null,
+        planTaskId: null,
+        astraRunId,
+        role: "planner",
+        label: "Astra planner",
+        stageSnapshotJson: null,
+        assistantSnapshotJson: null,
+        agentSnapshotJson: null,
+        createdAt: liveSessionTimelineTime(liveSession) || null,
+      }],
+      groupKey: `astra:${astraRunId ?? sessionId}`,
+      groupLabel: "Astra planner",
+      status: liveSessionStatus(liveSession),
+      liveSession,
+    });
+    existingRuntimeIds.add(liveSession.sessioRuntimeSessionId);
   }
 
   return lanes.sort(compareLanes);
+}
+
+export function buildThreadTimelineRows(
+  lanes: ThreadSessionLane[],
+  planRounds: PlanRoundInfo[],
+  astraRuns: AstraHandle[],
+  threadKind: ThreadKind,
+): ThreadTimelineRow[] {
+  const groups: ThreadTimelineGroup[] = [];
+  const consumed = new Set<string>();
+  const runById = new Map(astraRuns.map((run) => [run.runId, run]));
+  const taskById = new Map<string, PlanTaskInfo>();
+  for (const round of planRounds) {
+    for (const task of round.tasks) taskById.set(task.id, task);
+  }
+
+  const plannerQueues = new Map<string, ThreadSessionLane[]>();
+  for (const lane of lanes) {
+    const source = plannerSourceForLane(lane);
+    if (!source) continue;
+    if (!plannerLaneHasTranscript(lane)) {
+      consumed.add(lane.laneId);
+      continue;
+    }
+    const runKey = source.astraRunId ?? `lane:${lane.laneId}`;
+    const queue = plannerQueues.get(runKey) ?? [];
+    queue.push(lane);
+    plannerQueues.set(runKey, queue);
+  }
+  for (const queue of plannerQueues.values()) {
+    queue.sort((a, b) => laneTimelineTime(a) - laneTimelineTime(b));
+  }
+
+  const sortedRounds = planRounds.slice().sort(comparePlanRoundsAsc);
+  for (const round of sortedRounds) {
+    const run = round.astraRunId ? runById.get(round.astraRunId) ?? null : null;
+    const groupRows: ThreadTimelineRow[] = [];
+    const plannerLanes = round.astraRunId
+      ? (plannerQueues.get(round.astraRunId)?.splice(0, 1) ?? [])
+      : [];
+    for (const lane of plannerLanes) consumed.add(lane.laneId);
+    groupRows.push({
+      key: `orchestration:${round.id}`,
+      kind: "orchestration",
+      time: round.createdAt,
+      order: 0,
+      round,
+      run,
+      lanes: plannerLanes,
+      debatePair: false,
+    });
+
+    const taskLanes = lanes
+      .filter((lane) => {
+        if (consumed.has(lane.laneId)) return false;
+        const source = planTaskSourceForLane(lane);
+        if (!source) return false;
+        return source.planRoundId === round.id
+          || (source.planTaskId ? round.tasks.some((task) => task.id === source.planTaskId) : false);
+      })
+      .sort((a, b) => compareTaskLanes(a, b, taskById));
+
+    for (const lane of taskLanes) consumed.add(lane.laneId);
+    if (threadKind === "debate") {
+      chunkLanes(taskLanes, 2).forEach((pair, index) => {
+        groupRows.push({
+          key: `debate-tasks:${round.id}:${index}`,
+          kind: "sessions",
+          time: firstLaneTime(pair) || round.updatedAt,
+          order: 1 + index,
+          round,
+          run,
+          lanes: pair,
+          debatePair: true,
+        });
+      });
+    } else {
+      taskLanes.forEach((lane, index) => {
+        groupRows.push({
+          key: `task:${round.id}:${lane.laneId}`,
+          kind: "sessions",
+          time: laneTimelineTime(lane) || round.updatedAt,
+          order: 1 + index,
+          round,
+          run,
+          lanes: [lane],
+          debatePair: false,
+        });
+      });
+    }
+
+    groups.push({
+      key: `round:${round.id}`,
+      time: round.createdAt,
+      order: 1000 + round.roundIndex,
+      rows: groupRows,
+    });
+  }
+
+  for (const [runKey, queue] of plannerQueues.entries()) {
+    for (const lane of queue) {
+      if (consumed.has(lane.laneId)) continue;
+      const run = runById.get(runKey) ?? null;
+      consumed.add(lane.laneId);
+      const time = laneTimelineTime(lane) || run?.updatedAt || run?.createdAt || 0;
+      groups.push({
+        key: `orchestration-live:${lane.laneId}`,
+        time,
+        order: 500,
+        rows: [{
+          key: `orchestration-live:${lane.laneId}`,
+          kind: "orchestration",
+          time,
+          order: 0,
+          round: null,
+          run,
+          lanes: [lane],
+          debatePair: false,
+        }],
+      });
+    }
+  }
+
+  for (const run of astraRuns) {
+    if (planRounds.some((round) => round.astraRunId === run.runId)) continue;
+    const livePlannerAlreadyShown = groups.some((group) =>
+      group.rows.some((row) => row.run?.runId === run.runId && row.kind === "orchestration"),
+    );
+    if (livePlannerAlreadyShown || !isAstraActive(run.status)) continue;
+    groups.push({
+      key: `orchestration-run:${run.runId}`,
+      time: run.createdAt,
+      order: 400,
+      rows: [{
+        key: `orchestration-run:${run.runId}`,
+        kind: "orchestration",
+        time: run.createdAt,
+        order: 0,
+        round: null,
+        run,
+        lanes: [],
+        debatePair: false,
+      }],
+    });
+  }
+
+  lanes
+    .filter((lane) => !consumed.has(lane.laneId))
+    .sort((a, b) => laneTimelineTime(a) - laneTimelineTime(b))
+    .forEach((lane, index) => {
+      const time = laneTimelineTime(lane);
+      groups.push({
+        key: `session:${lane.laneId}`,
+        time,
+        order: 10000 + index,
+        rows: [{
+          key: `session:${lane.laneId}`,
+          kind: "sessions",
+          time,
+          order: 50 + index,
+          round: null,
+          run: null,
+          lanes: [lane],
+          debatePair: false,
+        }],
+      });
+    });
+
+  return groups
+    .sort(compareTimelineGroups)
+    .flatMap((group) => group.rows);
 }
 
 export function groupReplaySessionsByThreadKind(
@@ -220,6 +451,98 @@ function liveSessionStatus(liveSession: LiveRuntimeState["sessions"][string]): T
   const hasFailure = liveSession.turns.some((turn) => turn.error);
   if (hasFailure) return "failed";
   return "live";
+}
+
+function isThreadPlannerLiveSession(
+  liveSession: LiveRuntimeState["sessions"][string],
+  threadId: string | undefined,
+): boolean {
+  if (!threadId) return false;
+  const metadata = liveSession.metadata ?? {};
+  const metadataThreadId = stringMeta(metadata, "astraThreadId")
+    ?? stringMeta(metadata, "threadId");
+  if (metadataThreadId !== threadId) return false;
+  if (stringMeta(metadata, "astraPurpose") === "orchestration") return true;
+  return Boolean(metadata.astraInternal && stringMeta(metadata, "astraRunId"));
+}
+
+function stringMeta(metadata: Record<string, unknown> | undefined, key: string): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function liveSessionTimelineTime(liveSession: LiveRuntimeState["sessions"][string]): number {
+  return liveSession.turns.reduce((latest, turn) => {
+    return Math.max(latest, turn.updatedAt ?? 0, turn.startedAt ?? 0);
+  }, 0);
+}
+
+function comparePlanRoundsAsc(a: PlanRoundInfo, b: PlanRoundInfo): number {
+  return a.roundIndex - b.roundIndex || a.createdAt - b.createdAt || a.id.localeCompare(b.id);
+}
+
+function plannerSourceForLane(lane: ThreadSessionLane) {
+  return lane.sources.find((source) => source.kind === "astra_internal") ?? null;
+}
+
+function plannerLaneHasTranscript(lane: ThreadSessionLane): boolean {
+  return Boolean(lane.liveSession || lane.session);
+}
+
+function planTaskSourceForLane(lane: ThreadSessionLane) {
+  return lane.sources.find((source) => source.kind === "plan_task") ?? null;
+}
+
+function compareTaskLanes(
+  a: ThreadSessionLane,
+  b: ThreadSessionLane,
+  taskById: Map<string, PlanTaskInfo>,
+): number {
+  const sourceA = planTaskSourceForLane(a);
+  const sourceB = planTaskSourceForLane(b);
+  const taskA = sourceA?.planTaskId ? taskById.get(sourceA.planTaskId) : null;
+  const taskB = sourceB?.planTaskId ? taskById.get(sourceB.planTaskId) : null;
+  return (taskA?.sortOrder ?? 0) - (taskB?.sortOrder ?? 0)
+    || (sourceA?.createdAt ?? laneTimelineTime(a)) - (sourceB?.createdAt ?? laneTimelineTime(b))
+    || a.laneId.localeCompare(b.laneId);
+}
+
+function chunkLanes(lanes: ThreadSessionLane[], size: number): ThreadSessionLane[][] {
+  const out: ThreadSessionLane[][] = [];
+  for (let index = 0; index < lanes.length; index += size) {
+    out.push(lanes.slice(index, index + size));
+  }
+  return out;
+}
+
+function firstLaneTime(lanes: ThreadSessionLane[]): number {
+  return lanes.reduce((time, lane) => {
+    const laneTime = laneTimelineTime(lane);
+    if (!laneTime) return time;
+    return time === 0 ? laneTime : Math.min(time, laneTime);
+  }, 0);
+}
+
+function laneTimelineTime(lane: ThreadSessionLane): number {
+  const sourceTimes = lane.sources
+    .map((source) => source.createdAt ?? 0)
+    .filter((time) => time > 0);
+  if (sourceTimes.length > 0) return Math.min(...sourceTimes);
+  const liveTurnTimes = (lane.liveSession?.turns ?? [])
+    .flatMap((turn) => [turn.startedAt, turn.updatedAt])
+    .filter((time) => time > 0);
+  if (liveTurnTimes.length > 0) return Math.min(...liveTurnTimes);
+  return lane.session?.startedAt ?? lane.session?.updatedAt ?? 0;
+}
+
+function compareTimelineGroups(a: ThreadTimelineGroup, b: ThreadTimelineGroup): number {
+  return timelineSortTime(a.time) - timelineSortTime(b.time)
+    || a.order - b.order
+    || a.key.localeCompare(b.key);
+}
+
+function timelineSortTime(time: number): number {
+  return time > 0 ? time : Number.MAX_SAFE_INTEGER;
 }
 
 function compareLanes(a: ThreadSessionLane, b: ThreadSessionLane): number {

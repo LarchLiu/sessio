@@ -117,7 +117,6 @@ function shouldDispatchRuntimeEvent(kind: string): boolean {
 }
 
 function shouldFlushSnapshotImmediately(snapshot: LiveRuntimeTurnSnapshotEvent): boolean {
-  if (snapshot.session.ended) return true;
   return snapshot.session.turns.some((turn) =>
     turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled"
   );

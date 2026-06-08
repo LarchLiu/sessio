@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 
 use crate::agents::runtime::types::{
     AcpProtocolMessage, AgentAttachment, AgentAttachmentKind, AgentRuntimeEventPayload,
-    RuntimeCapabilitySet, RuntimeError, RuntimeTransportKind, RuntimeTurnStatus,
+    RuntimeCapabilitySet, RuntimeError, RuntimeMetadata, RuntimeTransportKind, RuntimeTurnStatus,
 };
 use crate::agents::sources::types::HistoryAcpMessage;
 use crate::models::{
@@ -88,6 +88,8 @@ pub struct LiveRuntimeSessionSnapshot {
     pub transport: RuntimeTransportKind,
     pub workspace_path: String,
     pub capabilities: RuntimeCapabilitySet,
+    #[serde(default)]
+    pub metadata: RuntimeMetadata,
     pub turns: Vec<SessionHistoryTurn>,
     pub session_state: AcpCanonicalSessionState,
     pub protocol_messages: Vec<AcpProtocolMessage>,
@@ -110,6 +112,7 @@ pub struct RuntimeTurnState {
     pub transport: RuntimeTransportKind,
     pub workspace_path: String,
     pub capabilities: RuntimeCapabilitySet,
+    pub metadata: RuntimeMetadata,
     pub turns: Vec<SessionHistoryTurn>,
     pub session_state: AcpCanonicalSessionState,
     pub protocol_messages: Vec<AcpProtocolMessage>,
@@ -132,6 +135,7 @@ impl RuntimeTurnState {
             transport,
             workspace_path: workspace_path.into(),
             capabilities,
+            metadata: RuntimeMetadata::default(),
             turns: Vec::new(),
             session_state: AcpCanonicalSessionState::default(),
             protocol_messages: Vec::new(),
@@ -147,6 +151,7 @@ impl RuntimeTurnState {
             transport: self.transport,
             workspace_path: self.workspace_path.clone(),
             capabilities: self.capabilities.clone(),
+            metadata: self.metadata.clone(),
             turns: self.turns.clone(),
             session_state: self.session_state.clone(),
             protocol_messages: self.protocol_messages.clone(),
@@ -509,6 +514,7 @@ pub fn apply_runtime_event_to_state(
             transport,
             workspace_path,
             capabilities,
+            metadata,
             ..
         } => {
             state.agent = *agent;
@@ -516,6 +522,7 @@ pub fn apply_runtime_event_to_state(
             state.transport = *transport;
             state.workspace_path = workspace_path.clone();
             state.capabilities = capabilities.clone();
+            state.metadata = metadata.clone();
             state.ended = false;
         }
         AgentRuntimeEventPayload::TurnStarted { turn_id, .. } => {

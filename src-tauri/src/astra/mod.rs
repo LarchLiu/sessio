@@ -39,7 +39,10 @@ use astra_pi_acp_adapter::{
     prepare_astra_pi_agent_config, AstraPiAcpConfig, AstraPiAcpProviderConfig,
     AstraPiAcpPurposeConfig,
 };
-use orchestrator::{dedicated_backend_required_error, RustNativeWorkerOutcome};
+use orchestrator::{
+    dedicated_backend_required_error, push_unique_bounded, RustNativeWorkerOutcome,
+    MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
+};
 use planner::next_dispatchable_tasks;
 use prompt::{
     build_plan_task_snapshot_context, build_stage_task_context, build_thread_assistant_task_context,
@@ -970,19 +973,25 @@ impl AstraService {
                 let Some(run_id) = metadata.get("astraRunId").and_then(Value::as_str) else {
                     return Ok(());
                 };
-                let Some(task_id) = metadata.get("astraTaskId").and_then(Value::as_str) else {
-                    return Ok(());
-                };
-                let thread_stage_id = metadata.get("astraThreadStageId").and_then(Value::as_str);
                 if is_persistable_agent_session_id(&agent_runtime_session_id) {
-                    self.record_ready_delegated_session(
-                        run_id,
-                        agent,
-                        task_id,
-                        thread_stage_id,
-                        &agent_runtime_session_id,
-                        &sessio_runtime_session_id,
-                    )?;
+                    if let Some(task_id) = metadata.get("astraTaskId").and_then(Value::as_str) {
+                        let thread_stage_id =
+                            metadata.get("astraThreadStageId").and_then(Value::as_str);
+                        self.record_ready_delegated_session(
+                            run_id,
+                            agent,
+                            task_id,
+                            thread_stage_id,
+                            &agent_runtime_session_id,
+                            &sessio_runtime_session_id,
+                        )?;
+                    } else if is_internal_planner_metadata(&metadata) {
+                        self.record_ready_internal_planner_session(
+                            run_id,
+                            agent,
+                            &agent_runtime_session_id,
+                        )?;
+                    }
                 }
             }
             AgentRuntimeEventPayload::TurnStarted {
@@ -1115,6 +1124,38 @@ impl AstraService {
                     .get(sessio_runtime_session_id)
                     .map(|state| state.text.clone())
             })
+    }
+
+    fn record_ready_internal_planner_session(
+        &self,
+        run_id: &str,
+        agent: Agent,
+        agent_session_id: &str,
+    ) -> Result<()> {
+        let store = self.inner.store.clone();
+        let (run, ()) = self.mutate_run(run_id, move |run| {
+            record_ready_internal_planner_session(
+                store.as_ref(),
+                run,
+                agent,
+                agent_session_id,
+            )?;
+            push_unique_bounded(
+                &mut run.internal_planner_session_ids,
+                agent_session_id.to_string(),
+                MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
+            );
+            Ok(())
+        })?;
+        self.emit(
+            &run,
+            "planner_session",
+            json!({
+                "agent": agent,
+                "agentRuntimeSessionId": agent_session_id,
+            }),
+        );
+        Ok(())
     }
 
     fn record_ready_delegated_session(
@@ -1670,6 +1711,47 @@ fn record_and_link_ready_delegated_session(
     Ok(())
 }
 
+fn record_ready_internal_planner_session(
+    store: &dyn SessionStore,
+    run: &AstraRun,
+    agent: Agent,
+    agent_session_id: &str,
+) -> Result<()> {
+    let project_name = store
+        .list_projects()?
+        .into_iter()
+        .find(|project| project.id == run.project_id)
+        .map(|project| project.name)
+        .unwrap_or_else(|| run.project_id.clone());
+    let now = now_ms();
+    let title = run
+        .planner_backend
+        .as_ref()
+        .map(|backend| format!("Astra planner: {backend}"))
+        .unwrap_or_else(|| "Astra planner".to_string());
+    let session = SessionInfo {
+        id: agent_session_id.to_string(),
+        agent,
+        forked_from_agent: None,
+        forked_from_id: None,
+        project_path: Some(run.project_path.clone()),
+        project_name: Some(project_name),
+        started_at: Some(now),
+        updated_at: Some(now),
+        message_count: 0,
+        rename_title: Some(title.clone()),
+        title: Some(title),
+        first_user_message: None,
+        file_path: String::new(),
+        file_size: 0,
+        partial: true,
+        available: true,
+        archived: false,
+        subagents: Vec::new(),
+    };
+    store.upsert_skipped_session(&session.file_path, &session)
+}
+
 #[derive(Debug, Clone)]
 struct StageTaskContext {
     thread_id: String,
@@ -1707,6 +1789,21 @@ fn save_stage_task_work_snapshot(
 fn is_persistable_agent_session_id(agent_runtime_session_id: &str) -> bool {
     !agent_runtime_session_id.trim().is_empty()
         && !agent_runtime_session_id.starts_with("fake-agent-session")
+}
+
+fn is_internal_planner_metadata(metadata: &RuntimeMetadata) -> bool {
+    metadata
+        .get("astraInternal")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || matches!(
+            metadata.get("astraPurpose").and_then(Value::as_str),
+            Some("orchestration" | "planner")
+        )
+        || matches!(
+            metadata.get("astraInternalPurpose").and_then(Value::as_str),
+            Some("orchestration" | "planner")
+        )
 }
 
 fn dedupe_session_ref_values(values: Vec<Value>) -> Vec<Value> {
@@ -2322,6 +2419,55 @@ mod tests {
         teamwork_task.assistant_id = Some("assistant-codex".to_string());
 
         validate_assistant_routed_astra_tasks(&[teamwork_task]).unwrap();
+    }
+
+    #[test]
+    fn internal_planner_session_stays_skipped_after_indexed_file_update() {
+        let db_path = std::env::temp_dir()
+            .join(format!("sessio-astra-internal-planner-{}.db", now_ms()));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+        let run = test_run("run-planner-skip");
+
+        record_ready_internal_planner_session(
+            &store,
+            &run,
+            Agent::Codex,
+            "planner-session-1",
+        )
+        .unwrap();
+
+        assert!(store.list_sessions().unwrap().is_empty());
+        let placeholder = store
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.id == "planner-session-1")
+            .unwrap();
+        assert!(placeholder.partial);
+
+        let real = SessionInfo {
+            file_path: "/tmp/planner-session-1.jsonl".to_string(),
+            file_size: 256,
+            partial: false,
+            message_count: 4,
+            updated_at: Some(30),
+            ..placeholder
+        };
+        store.upsert_session("/tmp", &real).unwrap();
+
+        assert!(store.list_sessions().unwrap().is_empty());
+        let updated = store
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.id == "planner-session-1")
+            .unwrap();
+        assert_eq!(updated.file_path, "/tmp/planner-session-1.jsonl");
+        assert!(!updated.partial);
+        assert_eq!(updated.message_count, 4);
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]

@@ -1595,6 +1595,7 @@ function pendingLiveSession(handle: {
       supportsAttachments: false,
       supportsModes: false,
     },
+    metadata: {},
     turns: [],
     sessionState: {
       plan: null,
