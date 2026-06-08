@@ -1,4 +1,5 @@
 import { Claude, OpenAI, Gemini } from "@lobehub/icons";
+import { Hash } from "lucide-react";
 import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
 import { PredefinedMenuItem } from "@tauri-apps/api/menu/predefinedMenuItem";
@@ -9,6 +10,7 @@ import { Image } from "@tauri-apps/api/image";
 import {
   Agent,
   SessionInfo,
+  ThreadChatSummaryInfo,
 } from "./api";
 import { getMenuIconBytes, type MenuIconComponent } from "./menuIcon";
 import {
@@ -35,6 +37,10 @@ const TRAY_ID = "main";
 
 type TrayTheme = "light" | "dark";
 
+export type TrayRecentEntry =
+  | { kind: "session"; session: SessionInfo; time: number }
+  | { kind: "thread"; thread: ThreadChatSummaryInfo; sessions: SessionInfo[]; time: number };
+
 function themedAgentIconColor(agent: Agent, theme: TrayTheme): string | undefined {
   if (agent !== "codex" && agent !== "astra-pi") return undefined;
   return theme === "dark" ? "#ffffff" : "#1c1c20";
@@ -43,6 +49,12 @@ function themedAgentIconColor(agent: Agent, theme: TrayTheme): string | undefine
 async function getAgentIcon(agent: Agent, theme: TrayTheme): Promise<Uint8Array> {
   return getMenuIconBytes(AGENT_ICONS[agent], {
     color: themedAgentIconColor(agent, theme),
+  });
+}
+
+async function getThreadIcon(theme: TrayTheme): Promise<Uint8Array> {
+  return getMenuIconBytes(Hash as MenuIconComponent, {
+    color: theme === "dark" ? "#ffffff" : "#1c1c20",
   });
 }
 
@@ -107,6 +119,7 @@ async function buildSessionSubmenu(
   s: SessionInfo,
   texts: TrayTexts,
   iconBytes: Record<Agent, Uint8Array>,
+  idScope = "session",
 ): Promise<Submenu> {
   const orderedAgents: Agent[] = ["codex", "claude", "gemini"];
   const subItems: IconMenuItem[] = [];
@@ -114,7 +127,7 @@ async function buildSessionSubmenu(
     const label = a === s.agent ? texts.resumeCommand : texts.crossCommand;
     const icon = await Image.fromBytes(iconBytes[a]);
     const item = await IconMenuItem.new({
-      id: `tray-session-${s.agent}-${s.id}-${a}`,
+      id: `tray-${idScope}-${s.agent}-${s.id}-${a}`,
       text: label,
       icon,
       action: async () => {
@@ -142,15 +155,50 @@ async function buildSessionSubmenu(
   const text = fitTitle(titleSource) || texts.noMessage;
   const icon = await Image.fromBytes(iconBytes[s.agent]);
   return Submenu.new({
-    id: `tray-session-${s.agent}-${s.id}`,
+    id: `tray-${idScope}-${s.agent}-${s.id}`,
     text,
     icon,
     items: subItems,
   });
 }
 
+async function buildThreadSubmenu(
+  entry: Extract<TrayRecentEntry, { kind: "thread" }>,
+  texts: TrayTexts,
+  iconBytes: Record<Agent, Uint8Array>,
+  threadIconBytes: Uint8Array,
+): Promise<Submenu> {
+  const subItems: ItemHandle[] = [];
+  for (const session of entry.sessions) {
+    subItems.push(
+      await buildSessionSubmenu(
+        session,
+        texts,
+        iconBytes,
+        `thread-${entry.thread.threadId}`,
+      ),
+    );
+  }
+  if (subItems.length === 0) {
+    subItems.push(
+      await MenuItem.new({
+        id: `tray-thread-${entry.thread.threadId}-empty`,
+        text: texts.noSessions,
+        enabled: false,
+      }),
+    );
+  }
+  const icon = await Image.fromBytes(threadIconBytes);
+  return Submenu.new({
+    id: `tray-thread-${entry.thread.threadId}`,
+    text: fitTitle(entry.thread.goal) || texts.noMessage,
+    icon,
+    items: subItems,
+  });
+}
+
 async function buildMenu(
-  recent: SessionInfo[],
+  recent: TrayRecentEntry[],
   texts: TrayTexts,
   theme: TrayTheme,
   update: TrayUpdateState,
@@ -161,6 +209,7 @@ async function buildMenu(
     claude: await getAgentIcon("claude", theme),
     gemini: await getAgentIcon("gemini", theme),
   };
+  const threadIconBytes = await getThreadIcon(theme);
 
   const items: ItemHandle[] = [];
 
@@ -172,8 +221,12 @@ async function buildMenu(
     });
     items.push(empty);
   } else {
-    for (const s of recent) {
-      items.push(await buildSessionSubmenu(s, texts, iconBytes));
+    for (const entry of recent) {
+      items.push(
+        entry.kind === "thread"
+          ? await buildThreadSubmenu(entry, texts, iconBytes, threadIconBytes)
+          : await buildSessionSubmenu(entry.session, texts, iconBytes),
+      );
     }
   }
 
@@ -200,7 +253,7 @@ async function buildMenu(
 }
 
 export async function syncTrayMenu(
-  recent: SessionInfo[],
+  recent: TrayRecentEntry[],
   texts: TrayTexts,
   theme: TrayTheme,
   update: TrayUpdateState,

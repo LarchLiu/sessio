@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod pi;
 pub mod registry;
 pub mod shared;
 pub mod types;
@@ -17,6 +18,7 @@ pub fn list_all() -> Vec<SessionInfo> {
         codex::parser::list_sessions as fn() -> Result<Vec<SessionInfo>>,
         claude::parser::list_sessions,
         gemini::parser::list_sessions,
+        pi::parser::list_sessions,
     ] {
         match f() {
             Ok(mut v) => out.append(&mut v),
@@ -33,7 +35,7 @@ pub fn system_time_to_millis(t: SystemTime) -> Option<i64> {
 }
 
 pub fn builtin_agent_sources() -> registry::AgentSourceRegistry {
-    builtin_agent_sources_for([Agent::Codex, Agent::Claude, Agent::Gemini])
+    builtin_agent_sources_for([Agent::AstraPi, Agent::Codex, Agent::Claude, Agent::Gemini])
 }
 
 pub fn builtin_agent_sources_for<I>(agents: I) -> registry::AgentSourceRegistry
@@ -42,6 +44,9 @@ where
 {
     let enabled: HashSet<Agent> = agents.into_iter().collect();
     let mut registry = registry::AgentSourceRegistry::new();
+    if enabled.contains(&Agent::AstraPi) {
+        registry.register(pi::PiSource);
+    }
     if enabled.contains(&Agent::Codex) {
         registry.register(codex::CodexSource);
     }

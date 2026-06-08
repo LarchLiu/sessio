@@ -9,6 +9,7 @@ pub mod network;
 pub mod polling;
 pub mod shell_env;
 pub mod store;
+pub mod thread_chat_summary;
 pub mod turns;
 pub mod watch;
 
@@ -21,6 +22,7 @@ use std::{thread, time::Duration};
 use agents::runtime::metadata::{
     runtime_agents_from_db, startup_probe_runtime_agents, RuntimeAgentsCache,
 };
+use agents::runtime::pi_session_store::PiAcpSessionStore;
 use agents::runtime::types::{
     AgentInput, AgentSessionConfigChange, AgentSessionHandle, AgentTurnHandle,
     EnsureAgentRuntimeSession, RuntimeStatus, StartAgentSession,
@@ -37,7 +39,7 @@ use models::{
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
     RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus,
-    ThreadInfo, ThreadKind, ThreadReplayInfo, WorkflowInfo,
+    ThreadChatSummaryInfo, ThreadInfo, ThreadKind, ThreadReplayInfo, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -53,9 +55,39 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
 };
+use thread_chat_summary::ThreadChatSummaryCache;
 
 const HISTORY_CACHE_VERSION: i64 = 1;
 const THREAD_WORK_SNAPSHOT_VERSION: i64 = 2;
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadsUpdatedPayload {
+    project_id: Option<String>,
+    thread_id: Option<String>,
+}
+
+fn emit_threads_updated(
+    app: &AppHandle,
+    project_id: Option<String>,
+    thread_id: Option<String>,
+) -> Result<(), String> {
+    app.emit(
+        "threads_updated",
+        ThreadsUpdatedPayload {
+            project_id,
+            thread_id,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn thread_project_id(store: &dyn SessionStore, thread_id: &str) -> Option<String> {
+    store
+        .get_thread_work_state(thread_id)
+        .map(|thread| thread.project_id)
+        .ok()
+}
 
 fn default_workflow_id() -> String {
     "code".to_string()
@@ -703,6 +735,38 @@ fn get_thread_replay(
 }
 
 #[tauri::command]
+fn list_thread_chat_summaries(
+    project_id: Option<String>,
+    cache: State<'_, ThreadChatSummaryCache>,
+) -> Result<Vec<ThreadChatSummaryInfo>, String> {
+    match project_id.as_deref() {
+        Some(project_id) => cache.list_project(project_id),
+        None => cache.list_all(),
+    }
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn refresh_thread_chat_summaries(
+    project_id: Option<String>,
+    cache: State<'_, ThreadChatSummaryCache>,
+) -> Result<Vec<ThreadChatSummaryInfo>, String> {
+    match project_id.as_deref() {
+        Some(project_id) => {
+            cache
+                .refresh_project(project_id)
+                .map_err(|e| e.to_string())?;
+            cache.list_project(project_id)
+        }
+        None => {
+            cache.refresh_all().map_err(|e| e.to_string())?;
+            cache.list_all()
+        }
+    }
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn create_thread(
     project_id: String,
     goal: String,
@@ -721,7 +785,11 @@ fn create_thread(
             assistant_ids.as_deref().unwrap_or(&[]),
         )
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(thread.project_id.clone()),
+        Some(thread.id.clone()),
+    )?;
     Ok(thread)
 }
 
@@ -747,7 +815,11 @@ fn update_thread(
             assistant_ids.as_deref(),
         )
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(thread.project_id.clone()),
+        Some(thread.id.clone()),
+    )?;
     Ok(thread)
 }
 
@@ -758,7 +830,7 @@ fn delete_thread(
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<(), String> {
     store.delete_thread(&thread_id).map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, None, Some(thread_id))?;
     Ok(())
 }
 
@@ -798,7 +870,8 @@ fn create_plan_round(
             tasks,
         })
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    let project_id = thread_project_id(store.as_ref(), &round.thread_id);
+    emit_threads_updated(&app, project_id, Some(round.thread_id.clone()))?;
     Ok(round)
 }
 
@@ -838,7 +911,15 @@ fn update_plan_task_status(
             },
         )
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    let thread_id = store
+        .get_plan_round(&task.round_id)
+        .ok()
+        .flatten()
+        .map(|round| round.thread_id);
+    let project_id = thread_id
+        .as_deref()
+        .and_then(|thread_id| thread_project_id(store.as_ref(), thread_id));
+    emit_threads_updated(&app, project_id, thread_id)?;
     Ok(task)
 }
 
@@ -860,7 +941,8 @@ fn complete_plan_task_and_start_next(
             },
         )
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    let project_id = thread_project_id(store.as_ref(), &round.thread_id);
+    emit_threads_updated(&app, project_id, Some(round.thread_id.clone()))?;
     Ok(round)
 }
 
@@ -878,7 +960,7 @@ fn link_plan_task_session(
             role: req.role,
         })
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, None, None)?;
     Ok(session)
 }
 
@@ -931,7 +1013,7 @@ fn create_project_stage(
             icon.as_deref(),
         )
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, Some(project_id), None)?;
     Ok(stage)
 }
 
@@ -965,7 +1047,7 @@ fn update_project_stage(
             },
         )
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, stage.project_id.clone(), None)?;
     Ok(stage)
 }
 
@@ -979,7 +1061,7 @@ fn update_project_stage_assistants(
     let stage = store
         .update_project_stage_assistants(&stage_id, &assistant_ids)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, stage.project_id.clone(), None)?;
     Ok(stage)
 }
 
@@ -992,7 +1074,7 @@ fn delete_project_stage(
     store
         .delete_project_stage(&stage_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, None, None)?;
     Ok(())
 }
 
@@ -1007,7 +1089,11 @@ fn add_thread_stage(
     let stage = store
         .add_thread_stage(&thread_id, &stage_id, &assistant_ids)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(stage.project_id.clone()),
+        Some(stage.thread_id.clone()),
+    )?;
     Ok(stage)
 }
 
@@ -1023,7 +1109,11 @@ fn update_thread_stage(
     let stage = store
         .update_thread_stage(&thread_stage_id, assistant_ids.as_deref(), order, enabled)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(stage.project_id.clone()),
+        Some(stage.thread_id.clone()),
+    )?;
     Ok(stage)
 }
 
@@ -1049,7 +1139,11 @@ fn update_thread_stage_state(
     let stage = store
         .update_thread_stage_state(&thread_stage_id, status, summary, outcome)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(stage.project_id.clone()),
+        Some(stage.thread_id.clone()),
+    )?;
     Ok(stage)
 }
 
@@ -1077,7 +1171,7 @@ fn create_thread_stage_issue(
     let issue = store
         .create_thread_stage_issue(&thread_stage_id, &title, description.as_deref(), severity)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, None, None)?;
     Ok(issue)
 }
 
@@ -1116,7 +1210,7 @@ fn update_thread_stage_issue(
             severity,
         )
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, None, None)?;
     Ok(issue)
 }
 
@@ -1129,7 +1223,7 @@ fn delete_thread_stage_issue(
     store
         .delete_thread_stage_issue(&issue_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, None, None)?;
     Ok(())
 }
 
@@ -1144,7 +1238,11 @@ fn update_thread_stage_assistant_agent(
     let stage = store
         .update_thread_stage_assistant_agent(&thread_stage_id, &assistant_id, agent)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(stage.project_id.clone()),
+        Some(stage.thread_id.clone()),
+    )?;
     Ok(stage)
 }
 
@@ -1157,7 +1255,7 @@ fn delete_thread_stage(
     store
         .delete_thread_stage(&thread_stage_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(&app, None, None)?;
     Ok(())
 }
 
@@ -1171,7 +1269,11 @@ fn set_thread_stage(
     let thread = store
         .set_thread_stage(&thread_id, &stage_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(thread.project_id.clone()),
+        Some(thread.id.clone()),
+    )?;
     Ok(thread)
 }
 
@@ -1186,7 +1288,11 @@ fn link_thread_session(
     let thread = store
         .link_thread_session(&thread_id, agent, &session_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(thread.project_id.clone()),
+        Some(thread.id.clone()),
+    )?;
     Ok(thread)
 }
 
@@ -1201,7 +1307,11 @@ fn unlink_thread_session(
     let thread = store
         .unlink_thread_session(&thread_id, agent, &session_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(thread.project_id.clone()),
+        Some(thread.id.clone()),
+    )?;
     Ok(thread)
 }
 
@@ -1216,7 +1326,11 @@ fn link_stage_session(
     let stage = store
         .link_stage_session(&stage_id, agent, &session_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(stage.project_id.clone()),
+        Some(stage.thread_id.clone()),
+    )?;
     Ok(stage)
 }
 
@@ -1231,7 +1345,11 @@ fn unlink_stage_session(
     let stage = store
         .unlink_stage_session(&stage_id, agent, &session_id)
         .map_err(|e| e.to_string())?;
-    app.emit("threads_updated", ()).map_err(|e| e.to_string())?;
+    emit_threads_updated(
+        &app,
+        Some(stage.project_id.clone()),
+        Some(stage.thread_id.clone()),
+    )?;
     Ok(stage)
 }
 
@@ -2569,12 +2687,12 @@ fn read_session_history_result_from_source(
     }
     let (messages, message_count) = match agent {
         Agent::AstraPi => {
-            // Pi uses the same format as Claude (ACP)
+            let sid = session_id.unwrap_or_default();
             let rows =
-                crate::agents::sources::claude::parser::read_history_acp_messages_with_locations(
-                    &path,
+                crate::agents::sources::pi::parser::read_history_acp_messages_with_locations(
+                    &path, sid,
                 )?;
-            let count = count_source_lines(&rows);
+            let count = rows.len();
             (rows, count)
         }
         Agent::Codex => {
@@ -3374,21 +3492,34 @@ pub fn run() {
             app.manage(store.clone());
             app.manage(memory_store.clone());
             app.manage(indexer_handle);
+            let thread_chat_summary_cache = ThreadChatSummaryCache::new(store.clone());
+            app.manage(thread_chat_summary_cache.clone());
             let runtime_probe_store = store.clone();
             let runtime_agents_cache = RuntimeAgentsCache::default();
             let initial_runtime_agents =
                 runtime_agents_from_db(store.clone(), &[]).unwrap_or_default();
             runtime_agents_cache.set(initial_runtime_agents);
-            let astra_service = AstraService::new(app.handle().clone(), store.clone(), runtime);
+            let astra_service =
+                AstraService::new(app.handle().clone(), store.clone(), runtime.clone());
             if let Err(error) = astra_service.recover_interrupted_runs() {
                 log::warn!("[astra:recover] {error}");
             }
             if let Err(error) = astra_service.watch_runtime_events() {
                 log::warn!("[astra:runtime-watch] {error}");
             }
+            let pi_session_store = PiAcpSessionStore::new(app.handle().clone(), store.clone());
+            if let Err(error) = pi_session_store.watch_runtime_events(runtime.clone()) {
+                log::warn!("[pi-acp-session-store] failed to watch runtime events: {error}");
+            }
+            app.manage(pi_session_store);
             app.manage(astra_service);
             app.manage(runtime_agents_cache);
             let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Err(error) = thread_chat_summary_cache.warm() {
+                    log::warn!("[thread-chat-summary:warm] {error}");
+                }
+            });
 
             tauri::async_runtime::spawn_blocking(move || {
                 match startup_probe_runtime_agents(runtime_probe_store) {
@@ -3463,6 +3594,8 @@ pub fn run() {
             list_threads,
             get_thread_work_state,
             get_thread_replay,
+            list_thread_chat_summaries,
+            refresh_thread_chat_summaries,
             create_thread,
             update_thread,
             delete_thread,

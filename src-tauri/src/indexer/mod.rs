@@ -28,6 +28,7 @@ pub enum IndexTask {
     ReindexClaudeProject(PathBuf),
     ReindexClaudeSubagentFile(PathBuf),
     ReindexGeminiFile(PathBuf),
+    ReindexPiFile(PathBuf),
     DeleteFile(PathBuf),
     DeleteSubagentFile(PathBuf),
 }
@@ -366,7 +367,7 @@ fn enabled_agents_for_store(store: &dyn SessionStore, owner: &str) -> HashSet<Ag
         .map(|agents| crate::agents::sources::enabled_builtin_agents(&agents))
         .unwrap_or_else(|e| {
             log::warn!("{owner}: failed to load enabled agents, using all sources: {e}");
-            [Agent::Codex, Agent::Claude, Agent::Gemini]
+            [Agent::AstraPi, Agent::Codex, Agent::Claude, Agent::Gemini]
                 .into_iter()
                 .collect()
         })
@@ -378,6 +379,7 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
     let mut seen_claude: HashSet<PathBuf> = HashSet::new();
     let mut seen_claude_subagent: HashSet<PathBuf> = HashSet::new();
     let mut seen_gemini: HashSet<PathBuf> = HashSet::new();
+    let mut seen_pi: HashSet<PathBuf> = HashSet::new();
     let mut seen_delete: HashSet<PathBuf> = HashSet::new();
     let mut seen_delete_subagent: HashSet<PathBuf> = HashSet::new();
     let mut full = false;
@@ -409,6 +411,11 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
             IndexTask::ReindexGeminiFile(p) => {
                 if seen_gemini.insert(p.clone()) {
                     out.push(IndexTask::ReindexGeminiFile(p));
+                }
+            }
+            IndexTask::ReindexPiFile(p) => {
+                if seen_pi.insert(p.clone()) {
+                    out.push(IndexTask::ReindexPiFile(p));
                 }
             }
             IndexTask::DeleteFile(p) => {
@@ -470,11 +477,15 @@ fn execute(
         IndexTask::ReindexGeminiFile(path) if enabled_agents.contains(&Agent::Gemini) => {
             reindex_gemini_file(path, store)
         }
+        IndexTask::ReindexPiFile(path) if enabled_agents.contains(&Agent::AstraPi) => {
+            reindex_pi_file(path, store)
+        }
         IndexTask::ReindexCodexFile(_)
         | IndexTask::ReindexClaudeFile(_)
         | IndexTask::ReindexClaudeProject(_)
         | IndexTask::ReindexClaudeSubagentFile(_)
-        | IndexTask::ReindexGeminiFile(_) => Ok(TaskOutcome::default()),
+        | IndexTask::ReindexGeminiFile(_)
+        | IndexTask::ReindexPiFile(_) => Ok(TaskOutcome::default()),
         IndexTask::DeleteFile(path) => {
             let path_str = path.to_string_lossy();
             store.mark_file_path_unavailable(&path_str)?;
@@ -556,6 +567,28 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
             Err(e) => log::warn!("gemini list sessions failed: {e}"),
         }
         store.mark_missing_scopes_unavailable(Agent::Gemini, &gemini_scopes)?;
+    }
+
+    if enabled_agents.contains(&Agent::AstraPi) {
+        let mut pi_scopes: HashSet<String> = HashSet::new();
+        match crate::agents::sources::pi::parser::list_sessions() {
+            Ok(sessions) => {
+                for session in &sessions {
+                    insert_session_project(&mut affected_projects, session);
+                }
+                for (scope, group) in group_by(sessions, |session| {
+                    Path::new(&session.file_path)
+                        .parent()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| session.file_path.clone())
+                }) {
+                    store.replace_by_scope(&scope, Agent::AstraPi, &group)?;
+                    pi_scopes.insert(scope);
+                }
+            }
+            Err(e) => log::warn!("pi list sessions failed: {e}"),
+        }
+        store.mark_missing_scopes_unavailable(Agent::AstraPi, &pi_scopes)?;
     }
 
     Ok(TaskOutcome {
@@ -713,6 +746,29 @@ fn reindex_gemini_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutc
     Ok(outcome)
 }
 
+fn reindex_pi_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutcome> {
+    if !path.exists() {
+        store.mark_file_path_unavailable(&path.to_string_lossy())?;
+        return Ok(TaskOutcome::default());
+    }
+    let Some(parent) = path.parent() else {
+        return Ok(TaskOutcome::default());
+    };
+    let mut outcome = TaskOutcome::default();
+    match crate::agents::sources::pi::parser::parse_session_file(path)? {
+        Some(info) => {
+            push_session_project(&mut outcome, &info);
+            push_session_source(&mut outcome, &info);
+            let scope = parent.to_string_lossy().into_owned();
+            store.upsert_session(&scope, &info)?;
+        }
+        None => {
+            store.mark_file_path_unindexable(Agent::AstraPi, &path.to_string_lossy())?;
+        }
+    }
+    Ok(outcome)
+}
+
 fn build_project_memory_for_indexer(
     project: &ProjectRef,
     store: &dyn MemoryStore,
@@ -828,6 +884,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                     _ => Some(IndexTask::ReindexClaudeFile(path)),
                 },
                 "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
+                "astra-pi" => Some(IndexTask::ReindexPiFile(path)),
                 _ => None,
             };
             if mapped.is_none() {
@@ -1044,6 +1101,13 @@ mod tests {
             SourceKind::MainSession,
         )));
         assert!(matches!(gemini, Some(IndexTask::ReindexGeminiFile(_))));
+
+        let pi = source_task_to_index_task(SourceIndexTask::ReindexSource(src(
+            "astra-pi",
+            "/tmp/pi/project/session.jsonl",
+            SourceKind::MainSession,
+        )));
+        assert!(matches!(pi, Some(IndexTask::ReindexPiFile(_))));
     }
 
     #[test]

@@ -11,10 +11,11 @@ import type {
   SetRuntimeAgentSelectionRequest,
   StageInfo,
   ThreadInfo,
+  ThreadReplayInfo,
   ThreadWorkSnapshot,
   ThreadWorkSnapshotSessionRef,
 } from "../api";
-import { getSessionHistory, getThreadWorkState, listThreads } from "../api";
+import { getSessionHistory, getThreadReplay, getThreadWorkState, listThreads } from "../api";
 import ChatComposer, { NewChatMenuButton, ScrambledProjectName } from "../components/ChatComposer";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "../components/InlineMenuSelect";
 import { RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
@@ -26,6 +27,7 @@ import type { PendingNewChatSession, ProjectGroup } from "../navigation";
 import type { LiveRuntimeAction, LiveRuntimeState } from "../runtimeChat";
 import { sessionDisplayTitle } from "../appUtils";
 import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
+import { collectThreadChatSessions, compareSessionTime } from "../threadChats";
 import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 
 export default function ThreadChatPage({
@@ -69,6 +71,7 @@ export default function ThreadChatPage({
   const [historyTarget, setHistoryTarget] = useState<SessionInfo | null>(null);
   const [historyTurns, setHistoryTurns] = useState<SessionHistoryTurn[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [threadReplay, setThreadReplay] = useState<ThreadReplayInfo | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const composer = useChatComposer({
     runtimeAgents,
@@ -83,6 +86,11 @@ export default function ThreadChatPage({
   const sortedStages = useMemo(
     () => (selectedThread?.stages ?? []).slice().sort((a, b) => a.order - b.order),
     [selectedThread?.stages],
+  );
+  const replayForSelectedThread = threadReplay?.threadId === selectedThread?.id ? threadReplay : null;
+  const threadChatSessions = useMemo(
+    () => selectedThread ? collectThreadChatSessions(selectedThread, replayForSelectedThread) : [],
+    [replayForSelectedThread, selectedThread],
   );
   const snapshotStageId =
     selectedThread?.id === snapshotContext.thread.id
@@ -110,6 +118,7 @@ export default function ThreadChatPage({
     setThreads([]);
     setHistoryTarget(null);
     setHistoryTurns(null);
+    setThreadReplay(null);
     if (!project?.id) return;
     listThreads(project.id)
       .then((rows) => {
@@ -155,8 +164,14 @@ export default function ThreadChatPage({
   useEffect(() => {
     if (!threadId) return;
     let cancelled = false;
-    getThreadWorkState(threadId)
-      .then((thread) => {
+    Promise.all([
+      getThreadWorkState(threadId),
+      getThreadReplay(threadId).catch((err) => {
+        onError(String(err));
+        return null;
+      }),
+    ])
+      .then(([thread, replay]) => {
         if (cancelled) return;
         setThreads((prev) => {
           if (prev.some((item) => item.id === thread.id)) {
@@ -164,6 +179,7 @@ export default function ThreadChatPage({
           }
           return [...prev, thread];
         });
+        setThreadReplay(replay);
       })
       .catch((err) => {
         if (!cancelled) onError(String(err));
@@ -185,7 +201,10 @@ export default function ThreadChatPage({
       return;
     }
     const timestamp = Date.now();
-    const workSnapshot = buildThreadWorkSnapshot(selectedThread, focusedStage, timestamp);
+    const workSnapshot = withThreadChatSessions(
+      buildThreadWorkSnapshot(selectedThread, focusedStage, timestamp),
+      threadChatSessions,
+    );
     const { snapshot: snapshotWithSources, historySnapshots } = await collectThreadHistorySnapshots(workSnapshot);
     const sent = await composer.runStartSession(prompt, {
       workspacePath,
@@ -217,6 +236,7 @@ export default function ThreadChatPage({
               thread={selectedThread}
               stages={sortedStages}
               currentStage={focusedStage}
+              threadChatSessions={threadChatSessions}
               onSelectSession={(session) => {
                 setHistoryTarget(session);
                 if (!session.filePath) setHistoryTurns(null);
@@ -313,6 +333,7 @@ function ThreadWorkOverview({
   thread,
   stages,
   currentStage,
+  threadChatSessions,
   onSelectSession,
   onOpenFullSession,
 }: {
@@ -320,6 +341,7 @@ function ThreadWorkOverview({
   thread: ThreadInfo;
   stages: StageInfo[];
   currentStage: StageInfo | null;
+  threadChatSessions: SessionInfo[];
   onSelectSession: (session: SessionInfo) => void;
   onOpenFullSession: (session: SessionInfo) => void;
 }) {
@@ -347,6 +369,37 @@ function ThreadWorkOverview({
         <OverviewStat label={t("issue.status.open")} value={String(openIssues)} />
         {currentStage && (
           <OverviewStat label={t("thread.current_stage")} value={projectStageLabel(currentStage, t)} />
+        )}
+      </div>
+      <div className="mb-3 rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
+        <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2 text-body-sm font-medium text-ink/75">
+            <HashIcon className="h-4 w-4 shrink-0 text-ink/35" />
+            <span className="truncate">{t("thread.chats")}</span>
+          </div>
+          <span className="shrink-0 text-meta text-ink/35">
+            {t("thread.chats_count", { count: threadChatSessions.length })}
+          </span>
+        </div>
+        {threadChatSessions.length === 0 ? (
+          <div className="rounded border border-dashed border-card-border/[0.10] px-2 py-2 text-caption text-ink/35">
+            {t("thread.no_chats")}
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {threadChatSessions.slice().sort(compareSessionTime).map((session) => (
+              <button
+                key={`${session.agent}:${session.id}`}
+                type="button"
+                onClick={() => onSelectSession(session)}
+                onDoubleClick={() => onOpenFullSession(session)}
+                className="flex max-w-[260px] items-center gap-1.5 rounded border border-card-border/[0.10] bg-card px-2 py-1 text-caption text-ink/55 hover:bg-card-hover hover:text-ink/80"
+              >
+                <Bot className="h-3.5 w-3.5 shrink-0 text-ink/35" />
+                <span className="truncate">{sessionDisplayTitle(session) ?? session.id}</span>
+              </button>
+            ))}
+          </div>
         )}
       </div>
       <div className="grid gap-2">
@@ -424,10 +477,42 @@ function OverviewStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
-  const left = a.updatedAt ?? a.startedAt ?? 0;
-  const right = b.updatedAt ?? b.startedAt ?? 0;
-  return right - left;
+function withThreadChatSessions(
+  snapshot: ThreadWorkSnapshot,
+  sessions: SessionInfo[],
+): ThreadWorkSnapshot {
+  const sessionRefs = sessions.map(threadSessionRef);
+  const threadSessionRefs = dedupeSnapshotSessionRefs([
+    ...(snapshot.threadSessionRefs ?? []),
+    ...sessionRefs,
+  ]);
+  const existingDetailRefs = snapshot.detailRefs?.sessionRefs ?? [];
+  const sourceRefs = dedupeSnapshotSessionRefs([...existingDetailRefs, ...threadSessionRefs]);
+  return {
+    ...snapshot,
+    threadSessionRefs,
+    relatedContext: {
+      ...snapshot.relatedContext,
+      sessionExcerptRefs: sourceRefs,
+    },
+    detailRefs: {
+      threadId: snapshot.threadId,
+      focusedStageId: snapshot.focusedStageId ?? null,
+      stageIds: snapshot.detailRefs?.stageIds ?? snapshot.stages?.map((stage) => stage.threadStageId) ?? [],
+      issueIds: snapshot.detailRefs?.issueIds ?? snapshot.stages?.flatMap((stage) => (stage.issues ?? []).map((issue) => issue.id)) ?? [],
+      sessionRefs: sourceRefs,
+    },
+  };
+}
+
+function threadSessionRef(session: SessionInfo): ThreadWorkSnapshotSessionRef {
+  return {
+    agent: session.agent,
+    sessionId: session.id,
+    title: sessionDisplayTitle(session),
+    filePath: session.filePath || null,
+    sourceKind: "thread",
+  };
 }
 
 async function collectThreadHistorySnapshots(snapshot: ThreadWorkSnapshot): Promise<{

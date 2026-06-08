@@ -588,6 +588,19 @@ pub struct ThreadReplayInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadChatSummaryInfo {
+    pub thread_id: String,
+    pub project_id: String,
+    pub goal: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub time: i64,
+    pub sessions: Vec<SessionInfo>,
+    pub session_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadReplaySessionInfo {
     pub agent: Agent,
     pub session_id: String,

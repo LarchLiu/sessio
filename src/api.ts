@@ -260,6 +260,17 @@ export interface ThreadReplayInfo {
   sessions: ThreadReplaySessionInfo[];
 }
 
+export interface ThreadChatSummaryInfo {
+  threadId: string;
+  projectId: string;
+  goal: string;
+  createdAt: number;
+  updatedAt: number;
+  time: number;
+  sessions: SessionInfo[];
+  sessionKeys: string[];
+}
+
 export type PlanRoundMode = "parallel" | "sequential";
 export type PlanRoundSource = "astra" | "manual" | "agent";
 export type PlanRoundStatus = "planned" | "running" | "completed" | "cancelled" | "errored";
@@ -1090,6 +1101,18 @@ export async function getThreadWorkState(threadId: string): Promise<ThreadWorkSt
 
 export async function getThreadReplay(threadId: string): Promise<ThreadReplayInfo> {
   return invoke<ThreadReplayInfo>("get_thread_replay", { threadId });
+}
+
+export async function listThreadChatSummaries(projectId?: string | null): Promise<ThreadChatSummaryInfo[]> {
+  return invoke<ThreadChatSummaryInfo[]>("list_thread_chat_summaries", {
+    projectId: projectId ?? null,
+  });
+}
+
+export async function refreshThreadChatSummaries(projectId?: string | null): Promise<ThreadChatSummaryInfo[]> {
+  return invoke<ThreadChatSummaryInfo[]>("refresh_thread_chat_summaries", {
+    projectId: projectId ?? null,
+  });
 }
 
 export async function createThread(

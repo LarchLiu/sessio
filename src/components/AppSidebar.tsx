@@ -27,10 +27,13 @@ import {
   WorkflowInfo,
   addExistingProject,
   createDefaultProject,
+  listThreadChatSummaries,
   listWorkflowStages,
   listThreads,
   listWorkflows,
+  refreshThreadChatSummaries,
   type ProjectStageInfo,
+  type ThreadChatSummaryInfo,
   type ThreadInfo,
 } from "../api";
 import { useI18n } from "../i18n";
@@ -51,8 +54,24 @@ import Tooltip from "./Tooltip";
 const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 
 type SidebarSessionEntry = {
+  kind: "session";
   session: SessionInfo;
-  source: "project" | "thread";
+  time: number;
+};
+
+type SidebarThreadChatEntry = {
+  kind: "thread";
+  summary: ThreadChatSummaryInfo;
+  time: number;
+};
+
+type SidebarListEntry = SidebarSessionEntry | SidebarThreadChatEntry;
+
+type SidebarThreadRef = {
+  id: string;
+  goal: string;
+  createdAt: number;
+  updatedAt: number;
 };
 
 type AppSidebarProps = {
@@ -78,7 +97,7 @@ type AppSidebarProps = {
   onOpenKanban: (project: ProjectGroup) => void;
   onNewProjectChat: (project: ProjectGroup) => void;
   onSelectSession: (project: ProjectGroup, session: SessionInfo) => void;
-  onSelectThread: (project: ProjectGroup, thread: ThreadInfo) => void;
+  onSelectThread: (project: ProjectGroup, thread: SidebarThreadRef) => void;
   onToggleProjectSessions: (projectKey: string) => void;
   onProjectContextMenu: (project: ProjectGroup, e: MouseEvent) => void;
   onSessionContextMenu: (
@@ -124,13 +143,26 @@ export default function AppSidebar({
   const { t } = useI18n();
   const [projectListModes, setProjectListModes] = useState<Record<string, "sessions" | "threads">>({});
   const [projectThreads, setProjectThreads] = useState<Record<string, ThreadInfo[]>>({});
+  const [threadChatSummaries, setThreadChatSummaries] = useState<Record<string, ThreadChatSummaryInfo[]>>({});
   const [loadingProjectThreads, setLoadingProjectThreads] = useState<Set<string>>(new Set());
+
+  const refreshProjectThreadSummaries = (project: ProjectGroup, force = false) => {
+    const load = force
+      ? refreshThreadChatSummaries(project.project.id)
+      : listThreadChatSummaries(project.project.id);
+    load
+      .then((summaries) => {
+        setThreadChatSummaries((prev) => ({ ...prev, [project.key]: summaries }));
+      })
+      .catch((err) => onError(String(err)));
+  };
 
   const refreshProjectThreads = (project: ProjectGroup) => {
     setLoadingProjectThreads((prev) => new Set(prev).add(project.key));
     listThreads(project.project.id)
       .then((threads) => {
         setProjectThreads((prev) => ({ ...prev, [project.key]: threads }));
+        refreshProjectThreadSummaries(project);
       })
       .catch((err) => onError(String(err)))
       .finally(() => {
@@ -143,17 +175,30 @@ export default function AppSidebar({
   };
 
   useEffect(() => {
-    const unlisten = listen("threads_updated", () => {
+    const unlisten = listen<{
+      projectId?: string | null;
+      threadId?: string | null;
+    }>("threads_updated", (event) => {
       for (const project of projectGroups) {
         if (expandedProjects.has(project.key) || projectListModes[project.key] === "threads") {
           refreshProjectThreads(project);
+        } else if (event.payload?.projectId === project.project.id) {
+          refreshProjectThreadSummaries(project, true);
+        }
+      }
+    });
+    const sessionsUnlisten = listen("sessions_index_updated", () => {
+      for (const project of projectGroups) {
+        if (expandedProjects.has(project.key) || threadChatSummaries[project.key]) {
+          refreshProjectThreadSummaries(project, true);
         }
       }
     });
     return () => {
       unlisten.then((f) => f()).catch(() => {});
+      sessionsUnlisten.then((f) => f()).catch(() => {});
     };
-  }, [expandedProjects, projectGroups, projectListModes]);
+  }, [expandedProjects, projectGroups, projectListModes, threadChatSummaries]);
 
   useEffect(() => {
     for (const project of projectGroups) {
@@ -162,6 +207,14 @@ export default function AppSidebar({
       refreshProjectThreads(project);
     }
   }, [expandedProjects, loadingProjectThreads, projectGroups, projectThreads]);
+
+  useEffect(() => {
+    for (const project of projectGroups) {
+      if (!expandedProjects.has(project.key)) continue;
+      if (threadChatSummaries[project.key]) continue;
+      refreshProjectThreadSummaries(project);
+    }
+  }, [expandedProjects, projectGroups, threadChatSummaries]);
 
   const toggleProjectListMode = (project: ProjectGroup) => {
     setProjectListModes((prev) => {
@@ -246,6 +299,7 @@ export default function AppSidebar({
                 unreadSessionIds={unreadSessionIds}
                 listMode={projectListModes[project.key] ?? "sessions"}
                 threads={projectThreads[project.key] ?? []}
+                threadChatSummaries={threadChatSummaries[project.key] ?? []}
                 threadsLoading={loadingProjectThreads.has(project.key)}
                 onSelectProject={() => onToggleProjectExpanded(project.key)}
                 onToggleListMode={() => toggleProjectListMode(project)}
@@ -626,6 +680,7 @@ function ProjectSidebarGroup({
   unreadSessionIds,
   listMode,
   threads,
+  threadChatSummaries,
   threadsLoading,
   onSelectProject,
   onToggleListMode,
@@ -649,13 +704,14 @@ function ProjectSidebarGroup({
   unreadSessionIds: Set<string>;
   listMode: "sessions" | "threads";
   threads: ThreadInfo[];
+  threadChatSummaries: ThreadChatSummaryInfo[];
   threadsLoading: boolean;
   onSelectProject: () => void;
   onToggleListMode: () => void;
   onOpenKanban: () => void;
   onNewChat: () => void;
   onSelectSession: (session: SessionInfo) => void;
-  onSelectThread: (thread: ThreadInfo) => void;
+  onSelectThread: (thread: SidebarThreadRef) => void;
   onToggleSessionLimit: () => void;
   onProjectContextMenu: (e: MouseEvent) => void;
   onSessionContextMenu: (
@@ -666,28 +722,39 @@ function ProjectSidebarGroup({
   const { t } = useI18n();
   const projectButtonRef = useRef<HTMLButtonElement>(null);
   const FolderIcon = expanded ? FolderOpen : Folder;
-  const sessionEntries = useMemo(() => {
-    const byKey = new Map<string, SidebarSessionEntry>();
-    for (const session of project.sessions) {
-      byKey.set(sessionIdentityKey(session), { session, source: "project" });
-    }
-    for (const thread of threads) {
-      for (const session of thread.sessions) {
-        byKey.set(sessionIdentityKey(session), { session, source: "thread" });
+  const sidebarEntries = useMemo<SidebarListEntry[]>(() => {
+    const linkedSessionKeys = new Set<string>();
+    const threadEntries: SidebarThreadChatEntry[] = [];
+    for (const summary of threadChatSummaries) {
+      for (const key of summary.sessionKeys) linkedSessionKeys.add(key);
+      if (summary.sessions.length > 0) {
+        threadEntries.push({
+          kind: "thread",
+          summary,
+          time: summary.time,
+        });
       }
     }
-    return Array.from(byKey.values()).sort((a, b) => {
-      const left = a.session.updatedAt ?? a.session.startedAt ?? 0;
-      const right = b.session.updatedAt ?? b.session.startedAt ?? 0;
-      return right - left;
-    });
-  }, [project.sessions, threads]);
-  const visibleSessions = sessionsExpanded
-    ? sessionEntries
-    : sessionEntries.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+
+    const byKey = new Map<string, SidebarSessionEntry>();
+    for (const session of project.sessions) {
+      const key = sessionIdentityKey(session);
+      if (linkedSessionKeys.has(key)) continue;
+      const time = sessionTime(session);
+      const current = byKey.get(key);
+      if (!current || time > current.time) {
+        byKey.set(key, { kind: "session", session, time });
+      }
+    }
+
+    return [...Array.from(byKey.values()), ...threadEntries].sort((a, b) => b.time - a.time);
+  }, [project.sessions, threadChatSummaries]);
+  const visibleEntries = sessionsExpanded
+    ? sidebarEntries
+    : sidebarEntries.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
   const canToggleSessionLimit =
-    listMode === "sessions" && sessionEntries.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
-  const displayCount = listMode === "threads" ? threads.length : project.count;
+    listMode === "sessions" && sidebarEntries.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+  const displayCount = listMode === "threads" ? threads.length : sidebarEntries.length;
   const ProjectListModeIcon = listMode === "threads" ? MessagesSquare : HashesOutlineIcon;
   const projectActive = selectedProjectId === project.project.id;
   const toggleSessionLimit = () => {
@@ -812,14 +879,26 @@ function ProjectSidebarGroup({
                 threads.map((thread) => (
                   <SidebarThreadItem
                     key={thread.id}
-                    thread={thread}
+                    thread={threadRefFromThread(thread)}
                     active={selectedThreadId === thread.id}
-                    onSelect={() => onSelectThread(thread)}
+                    onSelect={() => onSelectThread(threadRefFromThread(thread))}
                   />
                 ))
               )
             ) : (
-              visibleSessions.map(({ session, source }) => {
+              visibleEntries.map((entry) => {
+                if (entry.kind === "thread") {
+                  return (
+                    <SidebarThreadItem
+                      key={entry.summary.threadId}
+                      thread={threadRefFromSummary(entry.summary)}
+                      time={entry.time}
+                      active={selectedThreadId === entry.summary.threadId}
+                      onSelect={() => onSelectThread(threadRefFromSummary(entry.summary))}
+                    />
+                  );
+                }
+                const { session } = entry;
                 const key = sessionKey(session);
                 const unreadKeys = sessionUnreadKeys(session, runtimeSessionAliases);
                 const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)] ?? session.id;
@@ -828,7 +907,7 @@ function ProjectSidebarGroup({
                   <SidebarSessionItem
                     key={key}
                     item={session}
-                    source={source}
+                    source="project"
                     active={selectedKey === key || selectedIdentityKey === sessionIdentityKey(session)}
                     liveActivity={liveActivity}
                     unread={intersectsSet(unreadKeys, unreadSessionIds)}
@@ -922,15 +1001,17 @@ function SidebarSessionItem({
 
 function SidebarThreadItem({
   thread,
+  time,
   active,
   onSelect,
 }: {
-  thread: ThreadInfo;
+  thread: SidebarThreadRef;
+  time?: number;
   active: boolean;
   onSelect: () => void;
 }) {
   const { t } = useI18n();
-  const relativeTime = formatShortRelativeTime(thread.updatedAt ?? thread.createdAt, t);
+  const relativeTime = formatShortRelativeTime(time ?? thread.updatedAt ?? thread.createdAt, t);
   return (
     <button
       type="button"
@@ -950,6 +1031,24 @@ function SidebarThreadItem({
       </span>
     </button>
   );
+}
+
+function threadRefFromThread(thread: ThreadInfo): SidebarThreadRef {
+  return {
+    id: thread.id,
+    goal: thread.goal,
+    createdAt: thread.createdAt,
+    updatedAt: thread.updatedAt,
+  };
+}
+
+function threadRefFromSummary(summary: ThreadChatSummaryInfo): SidebarThreadRef {
+  return {
+    id: summary.threadId,
+    goal: summary.goal,
+    createdAt: summary.createdAt,
+    updatedAt: summary.updatedAt,
+  };
 }
 
 function SidebarThreadStatusIcon() {
@@ -1002,6 +1101,10 @@ function sessionKey(s: SessionInfo): string {
 
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
+}
+
+function sessionTime(session: SessionInfo): number {
+  return session.updatedAt ?? session.startedAt ?? 0;
 }
 
 function sessionUnreadKeys(

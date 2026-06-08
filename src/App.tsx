@@ -14,13 +14,16 @@ import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   Agent,
   getDebugConfig,
+  listThreadChatSummaries,
+  refreshThreadChatSummaries,
   SessionInfo,
   removeSessionsByScope,
   removeSessionFiles,
   updateSessionRenameTitle,
   type SessionScope,
+  type ThreadChatSummaryInfo,
 } from "./api";
-import { syncTrayMenu } from "./tray";
+import { syncTrayMenu, type TrayRecentEntry } from "./tray";
 import AppLayout from "./layouts/AppLayout";
 import { type ActiveMessageMeta } from "./pages/ChatPage";
 import AppHeader from "./components/AppHeader";
@@ -129,6 +132,7 @@ export default function App() {
   } | null>(null);
   const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
   const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
+  const [threadChatSummaries, setThreadChatSummaries] = useState<ThreadChatSummaryInfo[]>([]);
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
@@ -308,10 +312,77 @@ export default function App() {
     setPendingSelectSession,
   });
 
-  const recentForMenu = useMemo(
-    () => availableSessions.filter((s) => !isSubagentOnly(s)).slice(0, 5),
-    [availableSessions]
-  );
+  const refreshThreadSummaries = useCallback((projectId?: string | null) => {
+    return refreshThreadChatSummaries(projectId).then((rows) => {
+      setThreadChatSummaries((prev) => {
+        if (!projectId) return rows;
+        const next = prev.filter((summary) => summary.projectId !== projectId);
+        return [...next, ...rows].sort((a, b) => b.time - a.time);
+      });
+    });
+  }, []);
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      setThreadChatSummaries([]);
+      return;
+    }
+    let cancelled = false;
+    const refresh = () => {
+      listThreadChatSummaries()
+        .then((rows) => {
+          if (!cancelled) setThreadChatSummaries(rows);
+        })
+        .catch((err) => {
+          if (!cancelled) console.warn("load thread chat summaries failed", err);
+        });
+    };
+    refresh();
+    const unlistenThreads = listen<{
+      projectId?: string | null;
+      threadId?: string | null;
+    }>("threads_updated", (event) => {
+      const projectId = event.payload?.projectId ?? null;
+      refreshThreadSummaries(projectId).catch((err) => {
+        if (!cancelled) console.warn("refresh thread chat summaries failed", err);
+      });
+    });
+    const unlistenSessions = listen("sessions_index_updated", () => {
+      refreshThreadSummaries(null).catch((err) => {
+        if (!cancelled) console.warn("refresh thread chat summaries failed", err);
+      });
+    });
+    return () => {
+      cancelled = true;
+      unlistenThreads.then((f) => f()).catch(() => {});
+      unlistenSessions.then((f) => f()).catch(() => {});
+    };
+  }, [projects.length, refreshThreadSummaries]);
+
+  const recentForMenu = useMemo<TrayRecentEntry[]>(() => {
+    const linkedSessionKeys = new Set<string>();
+    const entries: TrayRecentEntry[] = [];
+    for (const summary of threadChatSummaries) {
+      if (summary.sessions.length === 0) continue;
+      for (const key of summary.sessionKeys) linkedSessionKeys.add(key);
+      entries.push({
+        kind: "thread",
+        thread: summary,
+        sessions: summary.sessions,
+        time: summary.time,
+      });
+    }
+    for (const session of availableSessions) {
+      if (isSubagentOnly(session)) continue;
+      if (linkedSessionKeys.has(sessionIdentityKey(session))) continue;
+      entries.push({
+        kind: "session",
+        session,
+        time: session.updatedAt ?? session.startedAt ?? 0,
+      });
+    }
+    return entries.sort((a, b) => b.time - a.time).slice(0, 5);
+  }, [availableSessions, threadChatSummaries]);
 
   useEffect(() => {
     if (!selectedProject) return;
