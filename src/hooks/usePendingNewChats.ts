@@ -2,10 +2,12 @@ import { useEffect, useRef } from "react";
 import {
   createPendingSession,
   linkKanbanItemSession,
+  linkPlanTaskSession,
   linkStageSession,
   linkThreadSession,
   saveSessionHistorySnapshots,
   saveThreadWorkSnapshot,
+  updatePlanTaskStatus,
   updateKanbanItemStatus,
   type Agent,
   type KanbanItem,
@@ -131,6 +133,30 @@ export function usePendingNewChats({
             } else {
               await linkThreadSession(pending.threadLink.threadId, pending.agent, agentSessionId);
             }
+          }
+          if (pending.planTaskLink) {
+            await linkPlanTaskSession({
+              taskId: pending.planTaskLink.taskId,
+              agent: pending.agent,
+              sessionId: agentSessionId,
+              role: pending.planTaskLink.role,
+            });
+            await updatePlanTaskStatus(pending.planTaskLink.taskId, { status: "running" });
+            setPendingNewChats((prev) => {
+              const current = prev[pending.sessioRuntimeSessionId];
+              if (!current?.planTaskLink) return prev;
+              if (current.planTaskLink.runtimeStarted) return prev;
+              return {
+                ...prev,
+                [pending.sessioRuntimeSessionId]: {
+                  ...current,
+                  planTaskLink: {
+                    ...current.planTaskLink,
+                    runtimeStarted: true,
+                  },
+                },
+              };
+            });
           }
           let linkedKanbanItem: KanbanItem | null = null;
           if (pending.kanbanItemId) {

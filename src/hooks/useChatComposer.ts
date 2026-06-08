@@ -52,6 +52,7 @@ export interface ChatComposerStartOptions {
   projectName: string;
   extraContext?: string | null;
   pendingSession?: PendingSessionExtras;
+  onPendingCreated?: (session: PendingNewChatSession) => void;
 }
 
 export interface ChatComposerController {
@@ -320,7 +321,7 @@ export function useChatComposer({
         sequenceRef: fallbackRuntimeSequenceRef,
         timestamp,
       });
-      onPendingSession({
+      const pendingSession: PendingNewChatSession = {
         ...(options.pendingSession ?? {}),
         sessioRuntimeSessionId: handle.sessioRuntimeSessionId,
         agent: handle.agent,
@@ -328,7 +329,9 @@ export function useChatComposer({
         projectName: options.projectName,
         prompt,
         timestamp,
-      });
+      };
+      onPendingSession(pendingSession);
+      options.onPendingCreated?.(pendingSession);
       const inputText = options.extraContext
         ? `${options.extraContext}\n\n---\n\n${prompt}`
         : prompt;

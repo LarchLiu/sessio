@@ -1,7 +1,7 @@
 export type ViewMode = "native" | "cross";
 export type DetailMode = "chat" | "project" | "threadMultiSessionChat";
 
-import type { Agent, KanbanStatus, ProjectInfo, SessionHistorySnapshotGroup, SessionInfo, ThreadWorkSnapshot } from "./api";
+import type { Agent, KanbanStatus, PlanTaskSessionRole, ProjectInfo, SessionHistorySnapshotGroup, SessionInfo, ThreadWorkSnapshot } from "./api";
 
 export interface ProjectGroup {
   key: string;
@@ -33,6 +33,11 @@ export interface PendingNewChatSession {
   threadLink?: {
     threadId: string;
     stageId: string | null;
+  };
+  planTaskLink?: {
+    taskId: string;
+    role: PlanTaskSessionRole;
+    runtimeStarted?: boolean;
   };
   suppressAutoSelect?: boolean;
   origin?: "new_chat" | "thread_chat" | "thread_multi_session";

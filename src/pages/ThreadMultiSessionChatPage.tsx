@@ -1,27 +1,51 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import HashIcon from "@iconify-react/mynaui/hash";
 import {
   AlertCircle,
   ArrowLeft,
+  Bot,
   Clock,
   ExternalLink,
   GitBranch,
+  ListChecks,
   LoaderCircle,
   MessagesSquare,
+  Sparkles,
+  Square,
   RefreshCw,
 } from "lucide-react";
 import type {
+  Agent,
+  AstraEvent,
+  AstraHandle,
+  AstraRunStatus,
+  PlanRoundInfo,
+  PlanTaskInfo,
+  PlanTaskStatus,
   ProjectInfo,
   RuntimeAgentMetadata,
   RuntimeAgentSelection,
   SessionInfo,
   SetRuntimeAgentSelectionRequest,
+  StageInfo,
   ThreadInfo,
   ThreadKind,
   ThreadReplayInfo,
   ThreadWorkState,
 } from "../api";
-import { AGENT_LABEL, getSessionHistory, getThreadReplay, getThreadWorkState } from "../api";
+import {
+  AGENT_LABEL,
+  cancelAstraRun,
+  createAstraRun,
+  createPlanRound,
+  getSessionHistory,
+  getThreadReplay,
+  getThreadWorkState,
+  listAstraRuns,
+  listPlanRounds,
+  updatePlanTaskStatus,
+} from "../api";
 import ChatComposer, { NewChatMenuButton } from "../components/ChatComposer";
 import { AgentGlyph } from "../components/AgentIcon";
 import { LiveSessionStatusBadge } from "../components/AcpTranscriptPanel";
@@ -49,6 +73,8 @@ import { collectThreadChatSessions } from "../threadChats";
 import { collectThreadHistorySnapshots, withThreadChatSessions } from "../threadWorkContext";
 import { projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { MarkdownContent, type MarkdownImage } from "./ChatPage";
+
+const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result", "task_dispatch"]);
 
 export default function ThreadMultiSessionChatPage({
   project,
@@ -85,6 +111,8 @@ export default function ThreadMultiSessionChatPage({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [stageTaskMode, setStageTaskMode] = useState(false);
+  const [stageTaskBusy, setStageTaskBusy] = useState(false);
   const composer = useChatComposer({
     runtimeAgents,
     lastRuntimeAgentSelection,
@@ -166,6 +194,8 @@ export default function ThreadMultiSessionChatPage({
     () => thread ? collectThreadChatSessions(thread, replay) : [],
     [replay, thread],
   );
+  const canRunStageTask =
+    Boolean(thread && thread.kind === "workflow" && activeStage && composer.selectedAgent);
 
   const handleSend = async () => {
     const prompt = composer.text.trim();
@@ -184,26 +214,70 @@ export default function ThreadMultiSessionChatPage({
       threadChatSessions,
     );
     const { snapshot: snapshotWithSources, historySnapshots } = await collectThreadHistorySnapshots(baseSnapshot);
-    const sent = await composer.runStartSession(prompt, {
-      workspacePath: project.path,
-      projectName: project.name,
-      extraContext: renderThreadWorkContext(snapshotWithSources, composer.selectedAgent),
-      pendingSession: {
-        suppressAutoSelect: true,
-        origin: "thread_multi_session",
-        historySnapshots,
-        workSnapshot: {
-          threadId: thread.id,
-          stageId: null,
-          snapshot: snapshotWithSources,
+    const stageId = thread.kind === "workflow" ? activeStage?.id ?? null : null;
+    if (stageTaskMode && !stageId) {
+      composer.setComposerError(t("thread.stage_task_requires_stage"));
+      return;
+    }
+    if (stageTaskMode && !composer.selectedAgent) {
+      composer.setComposerError(t("thread.stage_task_requires_agent"));
+      return;
+    }
+    setStageTaskBusy(stageTaskMode);
+    let manualTask: PlanTaskInfo | null = null;
+    let pendingRuntimeCreated = false;
+    try {
+      manualTask = stageTaskMode && stageId
+        ? await createManualStagePlanTask({
+          thread,
+          stage: activeStage!,
+          targetAgent: composer.selectedAgent!,
+          prompt,
+          runtimeAgent: runtimeAgents.find((agent) => agent.agent === composer.selectedAgent) ?? null,
+        })
+        : null;
+      const sent = await composer.runStartSession(prompt, {
+        workspacePath: project.path,
+        projectName: project.name,
+        extraContext: renderThreadWorkContext(snapshotWithSources, composer.selectedAgent),
+        pendingSession: {
+          suppressAutoSelect: true,
+          origin: "thread_multi_session",
+          historySnapshots,
+          workSnapshot: {
+            threadId: thread.id,
+            stageId,
+            snapshot: snapshotWithSources,
+          },
+          threadLink: {
+            threadId: thread.id,
+            stageId,
+          },
+          ...(manualTask ? { planTaskLink: { taskId: manualTask.id, role: "runtime" } } : {}),
         },
-        threadLink: {
-          threadId: thread.id,
-          stageId: null,
+        onPendingCreated: () => {
+          pendingRuntimeCreated = true;
         },
-      },
-    });
-    if (sent) void refresh();
+      });
+      if (!sent && manualTask) {
+        await updatePlanTaskStatus(manualTask.id, {
+          status: "failed",
+          error: "Runtime session did not start",
+        });
+      }
+      if (sent) void refresh();
+    } catch (err) {
+      if (manualTask && !pendingRuntimeCreated) {
+        updatePlanTaskStatus(manualTask.id, {
+          status: "failed",
+          error: String(err),
+        }).catch((statusErr) => onError(String(statusErr)));
+      }
+      composer.setComposerError(String(err));
+      onError(String(err));
+    } finally {
+      setStageTaskBusy(false);
+    }
   };
 
   return (
@@ -297,6 +371,13 @@ export default function ThreadMultiSessionChatPage({
               </p>
             )}
 
+            <ThreadOrchestrationPanel
+              thread={thread}
+              stages={sortedStages}
+              onError={onError}
+              onReload={refresh}
+            />
+
             {sortedStages.length > 0 && (
               <section className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
                 {sortedStages.map((stage) => {
@@ -349,13 +430,39 @@ export default function ThreadMultiSessionChatPage({
           <ChatComposer
             composer={composer}
             title={null}
-            canSend={Boolean(thread) && composer.canSendWithWorkspace(project.path)}
+            canSend={
+              Boolean(thread) &&
+              composer.canSendWithWorkspace(project.path) &&
+              (!stageTaskMode || canRunStageTask) &&
+              !stageTaskBusy
+            }
             onSend={() => void handleSend()}
             bottomRow={
-              <div className="flex h-10 items-center gap-2 px-3 text-body-sm text-ink/55">
+              <div className="flex h-10 min-w-0 items-center gap-2 px-3 text-body-sm text-ink/55">
                 <span className="min-w-0 truncate rounded-md px-1.5 py-1 text-ink/55">
                   {thread?.goal ?? t("thread.multi_session_chat")}
                 </span>
+                {thread?.kind === "workflow" && (
+                  <button
+                    type="button"
+                    onClick={() => setStageTaskMode((value) => !value)}
+                    disabled={!activeStage || !composer.selectedAgent || stageTaskBusy}
+                    className={
+                      "flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 transition disabled:opacity-40 " +
+                      (stageTaskMode
+                        ? "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]"
+                        : "text-ink/55 hover:bg-ink/8 hover:text-ink")
+                    }
+                    title={t("thread.run_stage_task")}
+                  >
+                    {stageTaskBusy ? (
+                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <ListChecks className="h-4 w-4" />
+                    )}
+                    <span className="truncate">{t("thread.stage_task_mode")}</span>
+                  </button>
+                )}
                 <NewChatMenuButton icon={GitBranch} label="thread" text />
               </div>
             }
@@ -504,6 +611,234 @@ function ThreadMultiSessionEmpty({
           <div className="mt-1 text-caption leading-relaxed text-ink/38">{detail}</div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ThreadOrchestrationPanel({
+  thread,
+  stages,
+  onError,
+  onReload,
+}: {
+  thread: ThreadInfo;
+  stages: StageInfo[];
+  onError: (error: string | null) => void;
+  onReload: () => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [runs, setRuns] = useState<AstraHandle[]>([]);
+  const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
+  const [prompt, setPrompt] = useState("");
+  const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
+  const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
+  const canStartAstra = thread.kind === "teamwork" || thread.kind === "brainstorm" || thread.kind === "debate";
+  const orderedPlanRounds = useMemo(
+    () => planRounds.slice().sort((a, b) => b.roundIndex - a.roundIndex || b.createdAt - a.createdAt),
+    [planRounds],
+  );
+
+  const reloadAstraState = useCallback(() => {
+    return Promise.all([listAstraRuns(thread.id), listPlanRounds(thread.id)])
+      .then(([nextRuns, nextPlanRounds]) => {
+        setRuns(nextRuns);
+        setPlanRounds(nextPlanRounds);
+      })
+      .catch((err) => onError(String(err)));
+  }, [onError, thread.id]);
+
+  useEffect(() => {
+    void reloadAstraState();
+  }, [reloadAstraState]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen<AstraEvent>("astra-run-event", (event) => {
+      if (event.payload.threadId !== thread.id) return;
+      const eventType = event.payload.eventType;
+      void reloadAstraState();
+      if (THREAD_REFRESH_ASTRA_EVENTS.has(eventType)) {
+        void onReload();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    }).catch((err) => onError(String(err)));
+    return () => {
+      unlisten?.();
+    };
+  }, [onError, onReload, reloadAstraState, thread.id]);
+
+  const start = async () => {
+    if (!canStartAstra) return;
+    setBusy("start");
+    try {
+      const run = await createAstraRun(thread.id, prompt.trim() || null);
+      setRuns((prev) => upsertRun(prev, run));
+      setPrompt("");
+      await reloadAstraState();
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const cancel = async () => {
+    if (!activeRun) return;
+    setBusy("cancel");
+    try {
+      const run = await cancelAstraRun(activeRun.runId);
+      setRuns((prev) => upsertRun(prev, run));
+      await reloadAstraState();
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2 text-body-sm font-medium text-ink/78">
+            <Sparkles className="h-4 w-4 text-[rgb(var(--color-emerald)/0.85)]" />
+            <span>Astra</span>
+            {activeRun && (
+              <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraStatusClass(activeRun.status)}>
+                {formatPlanStatus(activeRun.status)}
+              </span>
+            )}
+            {thread.kind === "workflow" && (
+              <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
+                {t("thread.workflow_manual_tasks")}
+              </span>
+            )}
+          </div>
+          <div className="mt-1 max-w-[760px] truncate text-caption text-ink/38">
+            {activeRun ? activeRun.runId : canStartAstra ? t("astra.idle") : t("astra.unsupported.workflow")}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {activeRun && isAstraActive(activeRun.status) && (
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void cancel()}
+              title={t("astra.cancel")}
+              className="flex h-8 w-8 items-center justify-center rounded border border-ink/15 bg-surface-panel text-ink/45 hover:bg-red-500/[0.08] hover:text-red-500 disabled:opacity-40"
+            >
+              {busy === "cancel" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
+            </button>
+          )}
+          {canStartAstra && (
+            <button
+              type="button"
+              disabled={busy !== null || Boolean(activeRun && isAstraActive(activeRun.status))}
+              onClick={() => void start()}
+              title={t("astra.start")}
+              className="flex h-8 items-center gap-1.5 rounded border border-ink/15 bg-surface-panel px-2 text-caption text-ink/55 hover:bg-ink/[0.05] hover:text-ink/80 disabled:opacity-40"
+            >
+              {busy === "start" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
+              {t("astra.start")}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-2 grid gap-2">
+        {canStartAstra && (
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            rows={2}
+            placeholder={t("astra.prompt_placeholder")}
+            className="min-w-0 resize-none rounded-md border border-input-border/[0.16] bg-input px-3 py-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30"
+          />
+        )}
+        {orderedPlanRounds.length > 0 && (
+          <div className="grid gap-1.5">
+            {orderedPlanRounds.slice(0, 3).map((round) => (
+              <ThreadPlanRoundSummary key={round.id} round={round} stages={stages} thread={thread} />
+            ))}
+          </div>
+        )}
+        {activeRun?.error && (
+          <div className="rounded-md border border-status-error/20 bg-status-error/10 px-2.5 py-2 text-caption text-status-error">
+            {activeRun.error}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ThreadPlanRoundSummary({
+  round,
+  stages,
+  thread,
+}: {
+  round: PlanRoundInfo;
+  stages: StageInfo[];
+  thread: ThreadInfo;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="text-caption font-medium text-ink/65">
+          {t("astra.round", { index: round.roundIndex + 1 })}
+        </span>
+        <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + planRoundStatusClass(round.status)}>
+          {formatPlanStatus(round.status)}
+        </span>
+        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
+          {t(`astra.mode.${round.mode}`)}
+        </span>
+        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
+          {round.tasks.length} {t("thread.tasks")}
+        </span>
+      </div>
+      {round.tasks.length > 0 && (
+        <div className="mt-1.5 grid gap-1">
+          {round.tasks.slice(0, 4).map((task) => (
+            <ThreadPlanTaskSummary
+              key={task.id}
+              task={task}
+              stage={stages.find((stage) => stage.id === task.threadStageId) ?? null}
+              assistantName={thread.assistants.find((assistant) => assistant.assistantId === task.assistantId)?.name ?? null}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThreadPlanTaskSummary({
+  task,
+  stage,
+  assistantName,
+}: {
+  task: PlanTaskInfo;
+  stage: StageInfo | null;
+  assistantName: string | null;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-1.5 rounded bg-card px-2 py-1 text-caption text-ink/50">
+      <AgentGlyph agent={task.targetAgent} className="h-3.5 w-3.5 shrink-0" />
+      <span className="min-w-0 max-w-[320px] truncate font-medium text-ink/68">{task.title}</span>
+      <span className={"rounded px-1 py-0.5 text-meta font-medium " + astraTaskStatusClass(task.status)}>
+        {formatPlanStatus(task.status)}
+      </span>
+      {assistantName && <span className="truncate text-ink/35">{assistantName}</span>}
+      {stage && <span className="truncate text-ink/35">{projectStageLabel(stage, t)}</span>}
+      {task.sessions.length > 0 && (
+        <span className="rounded bg-ink/[0.045] px-1 py-0.5 text-meta text-ink/35">
+          {t("astra.task_sessions", { count: task.sessions.length })}
+        </span>
+      )}
     </div>
   );
 }
@@ -921,6 +1256,146 @@ function stablePreviewText(value: unknown, maxLength: number): string {
     text = String(value);
   }
   return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+async function createManualStagePlanTask({
+  thread,
+  stage,
+  targetAgent,
+  prompt,
+  runtimeAgent,
+}: {
+  thread: ThreadInfo;
+  stage: StageInfo;
+  targetAgent: Agent;
+  prompt: string;
+  runtimeAgent: RuntimeAgentMetadata | null;
+}): Promise<PlanTaskInfo> {
+  const stageAssistant =
+    stage.assistants.find((assistant) => assistant.agent.id === targetAgent)
+    ?? stage.assistants[0]
+    ?? null;
+  const threadAssistant =
+    stageAssistant
+      ? thread.assistants.find((assistant) => assistant.assistantId === stageAssistant.assistantId) ?? null
+      : null;
+  const assistantSnapshot = stageAssistant ?? threadAssistant;
+  const title = manualStageTaskTitle(stage, prompt);
+  const round = await createPlanRound({
+    threadId: thread.id,
+    mode: "parallel",
+    source: "manual",
+    status: "planned",
+    summary: title,
+    tasks: [
+      {
+        threadStageId: stage.id,
+        assistantId: stageAssistant?.assistantId ?? threadAssistant?.assistantId ?? null,
+        targetAgent,
+        stageSnapshotJson: JSON.stringify(stage),
+        assistantSnapshotJson: assistantSnapshot ? JSON.stringify(assistantSnapshot) : null,
+        agentSnapshotJson: JSON.stringify({
+          agent: targetAgent,
+          agentInfo: runtimeAgent,
+        }),
+        title,
+        prompt,
+        expectedOutput: null,
+        risk: "medium",
+        sortOrder: 0,
+        status: "planned",
+      },
+    ],
+  });
+  const task = round.tasks[0];
+  if (!task) {
+    throw new Error("Manual plan round did not create a task");
+  }
+  return task;
+}
+
+function manualStageTaskTitle(stage: StageInfo, prompt: string): string {
+  const stageName = stage.name?.trim() || stage.kind || "Stage";
+  const compactPrompt = prompt.replace(/\s+/g, " ").trim();
+  const shortPrompt =
+    compactPrompt.length > 72 ? `${compactPrompt.slice(0, 69)}...` : compactPrompt;
+  return `${stageName}: ${shortPrompt || "Manual task"}`;
+}
+
+function isAstraActive(status: AstraRunStatus): boolean {
+  return (
+    status === "planning"
+    || status === "thinking"
+    || status === "awaiting_approval"
+    || status === "dispatching"
+    || status === "running"
+  );
+}
+
+function upsertRun(runs: AstraHandle[], run: AstraHandle): AstraHandle[] {
+  const next = runs.some((item) => item.runId === run.runId)
+    ? runs.map((item) => item.runId === run.runId ? run : item)
+    : [run, ...runs];
+  return next.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function astraStatusClass(status: AstraRunStatus): string {
+  switch (status) {
+    case "awaiting_approval":
+      return "bg-sky-500/[0.10] text-sky-500";
+    case "thinking":
+      return "bg-violet-500/[0.10] text-violet-500";
+    case "dispatching":
+    case "running":
+      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
+    case "errored":
+      return "bg-red-500/[0.10] text-red-500";
+    case "cancelled":
+    case "interrupted":
+      return "bg-ink/[0.08] text-ink/45";
+    case "completed":
+      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
+    case "planning":
+    default:
+      return "bg-amber-500/[0.10] text-amber-500";
+  }
+}
+
+function astraTaskStatusClass(status: PlanTaskStatus): string {
+  switch (status) {
+    case "running":
+      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
+    case "completed":
+      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
+    case "failed":
+    case "errored":
+      return "bg-red-500/[0.10] text-red-500";
+    case "cancelled":
+      return "bg-ink/[0.08] text-ink/45";
+    case "planned":
+    default:
+      return "bg-ink/[0.06] text-ink/45";
+  }
+}
+
+function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
+  switch (status) {
+    case "running":
+      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
+    case "completed":
+      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
+    case "errored":
+      return "bg-red-500/[0.10] text-red-500";
+    case "cancelled":
+      return "bg-ink/[0.08] text-ink/45";
+    case "planned":
+    default:
+      return "bg-amber-500/[0.10] text-amber-500";
+  }
+}
+
+function formatPlanStatus(status: string): string {
+  return status.replace(/_/g, " ");
 }
 
 function threadAssistantCount(thread: ThreadInfo): number {

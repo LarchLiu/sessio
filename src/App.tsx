@@ -36,6 +36,7 @@ import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
 import { useAppData } from "./hooks/useAppData";
 import { usePendingNewChats } from "./hooks/usePendingNewChats";
+import { usePlanTaskRuntimeCompletion } from "./hooks/usePlanTaskRuntimeCompletion";
 import { useProjectGroups } from "./hooks/useProjectGroups";
 import { useRuntimeEventSubscription } from "./hooks/useRuntimeEventSubscription";
 import { useSelectedSessionSync } from "./hooks/useSelectedSessionSync";
@@ -235,6 +236,12 @@ export default function App() {
     setDetailMode,
     setPendingSelectSession,
     setPendingNewChats,
+    setError,
+  });
+
+  usePlanTaskRuntimeCompletion({
+    pendingNewChats,
+    liveSessions: liveRuntimeState.sessions,
     setError,
   });
 
