@@ -16,23 +16,36 @@ export function usePlanTaskRuntimeCompletion({
 
   useEffect(() => {
     for (const pending of Object.values(pendingNewChats)) {
-      const taskId = pending.planTaskLink?.taskId;
-      if (!taskId || completedRef.current.has(taskId)) continue;
-      if (!pending.planTaskLink?.runtimeStarted) continue;
-      const liveSession = liveSessions[pending.sessioRuntimeSessionId];
-      if (!liveSession?.ended) continue;
-      completedRef.current.add(taskId);
-      const patch = terminalPatchForLiveSession(liveSession);
-      updatePlanTaskStatus(taskId, patch)
+      const completion = planTaskRuntimeCompletionForPending(pending, liveSessions);
+      if (!completion || completedRef.current.has(completion.taskId)) continue;
+      completedRef.current.add(completion.taskId);
+      updatePlanTaskStatus(completion.taskId, completion.patch)
         .catch((err) => {
-          completedRef.current.delete(taskId);
+          completedRef.current.delete(completion.taskId);
           setError(String(err));
         });
     }
   }, [liveSessions, pendingNewChats, setError]);
 }
 
-function terminalPatchForLiveSession(
+export function planTaskRuntimeCompletionForPending(
+  pending: PendingNewChatSession,
+  liveSessions: LiveRuntimeState["sessions"],
+): {
+  taskId: string;
+  patch: Parameters<typeof updatePlanTaskStatus>[1];
+} | null {
+  const link = pending.planTaskLink;
+  if (!link?.taskId || !link.runtimeStarted) return null;
+  const liveSession = liveSessions[pending.sessioRuntimeSessionId];
+  if (!liveSession?.ended) return null;
+  return {
+    taskId: link.taskId,
+    patch: terminalPatchForLiveSession(liveSession),
+  };
+}
+
+export function terminalPatchForLiveSession(
   session: LiveRuntimeSession,
 ): Parameters<typeof updatePlanTaskStatus>[1] {
   const failedTurn = session.turns.find((turn) => turn.error || turn.status === "failed");

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
-import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo } from "../api";
+import type { Agent, AstraEvent, AstraHandle, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo } from "../api";
 import {
   AGENT_LABEL,
   cancelAstraRun,
@@ -28,6 +28,15 @@ import {
   replaySourceTitle,
   shortSessionId,
 } from "../threadReplayView";
+import {
+  astraRiskClass,
+  astraStatusClass,
+  astraTaskStatusClass,
+  formatAstraStatus,
+  isAstraActive,
+  planRoundStatusClass,
+  upsertAstraRun,
+} from "../threadAstraView";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result"]);
@@ -262,7 +271,7 @@ function ThreadAstraPanel({
     setBusy("start");
     try {
       const run = await createAstraRun(thread.id, prompt.trim() || null);
-      setRuns((prev) => upsertRun(prev, run));
+      setRuns((prev) => upsertAstraRun(prev, run));
       setPrompt("");
       await reloadAstraState();
     } catch (err) {
@@ -277,7 +286,7 @@ function ThreadAstraPanel({
     setBusy("cancel");
     try {
       const run = await cancelAstraRun(activeRun.runId);
-      setRuns((prev) => upsertRun(prev, run));
+      setRuns((prev) => upsertAstraRun(prev, run));
       await reloadAstraState();
     } catch (err) {
       onError(String(err));
@@ -393,7 +402,7 @@ function AstraPlanRoundCard({
           {t("astra.round", { index: round.roundIndex + 1 })}
         </span>
         <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + planRoundStatusClass(round.status)}>
-          {formatPlanStatus(round.status)}
+          {formatAstraStatus(round.status)}
         </span>
         <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/45">
           {t(`astra.mode.${round.mode}`)}
@@ -446,7 +455,7 @@ function AstraPlanTaskRow({
           {t(`astra.risk.${task.risk}`)}
         </span>
         <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraTaskStatusClass(task.status)}>
-          {formatPlanStatus(task.status)}
+          {formatAstraStatus(task.status)}
         </span>
         {assistantName && (
           <span className="truncate text-meta text-ink/35">
@@ -1091,78 +1100,6 @@ function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
   return right - left;
 }
 
-function isAstraActive(status: AstraRunStatus): boolean {
-  return status === "planning" || status === "thinking" || status === "awaiting_approval" || status === "dispatching" || status === "running";
-}
-
-function upsertRun(runs: AstraHandle[], run: AstraHandle): AstraHandle[] {
-  const next = runs.some((item) => item.runId === run.runId)
-    ? runs.map((item) => item.runId === run.runId ? run : item)
-    : [run, ...runs];
-  return next.slice().sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
-function formatAstraStatus(status: AstraRunStatus): string {
-  return status.replace(/_/g, " ");
-}
-
-function astraStatusClass(status: AstraRunStatus): string {
-  switch (status) {
-    case "awaiting_approval":
-      return "bg-sky-500/[0.10] text-sky-500";
-    case "thinking":
-      return "bg-violet-500/[0.10] text-violet-500";
-    case "dispatching":
-    case "running":
-      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "errored":
-      return "bg-red-500/[0.10] text-red-500";
-    case "cancelled":
-    case "interrupted":
-      return "bg-ink/[0.08] text-ink/45";
-    case "completed":
-      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "planning":
-    default:
-      return "bg-amber-500/[0.10] text-amber-500";
-  }
-}
-
-function astraRiskClass(risk: "low" | "medium" | "high"): string {
-  switch (risk) {
-    case "high":
-      return "bg-red-500/[0.10] text-red-500";
-    case "medium":
-      return "bg-amber-500/[0.10] text-amber-500";
-    case "low":
-    default:
-      return "bg-ink/[0.06] text-ink/45";
-  }
-}
-
-function astraResultClass(status: PlanTaskStatus): string {
-  switch (status) {
-    case "completed":
-      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "failed":
-    case "errored":
-      return "bg-red-500/[0.10] text-red-500";
-    case "cancelled":
-    default:
-      return "bg-ink/[0.08] text-ink/45";
-  }
-}
-
-function astraTaskStatusClass(status: PlanTaskStatus): string {
-  if (status === "running") {
-    return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
-  }
-  if (status === "planned") {
-    return "bg-ink/[0.06] text-ink/45";
-  }
-  return astraResultClass(status);
-}
-
 type SnapshotChip = {
   kind: "stage" | "assistant" | "agent";
   label: string;
@@ -1375,26 +1312,6 @@ function safeJsonPreview(value: unknown, maxLength: number): string {
   }
   if (!text) return "";
   return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
-}
-
-function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
-  switch (status) {
-    case "running":
-      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "completed":
-      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "errored":
-      return "bg-red-500/[0.10] text-red-500";
-    case "cancelled":
-      return "bg-ink/[0.08] text-ink/45";
-    case "planned":
-    default:
-      return "bg-amber-500/[0.10] text-amber-500";
-  }
-}
-
-function formatPlanStatus(status: string): string {
-  return status.replace(/_/g, " ");
 }
 
 function knownAgent(value: string): Agent | null {

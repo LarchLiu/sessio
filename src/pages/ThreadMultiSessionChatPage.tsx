@@ -19,10 +19,8 @@ import type {
   Agent,
   AstraEvent,
   AstraHandle,
-  AstraRunStatus,
   PlanRoundInfo,
   PlanTaskInfo,
-  PlanTaskStatus,
   ProjectInfo,
   RuntimeAgentMetadata,
   RuntimeAgentSelection,
@@ -71,6 +69,14 @@ import {
 import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
 import { collectThreadChatSessions } from "../threadChats";
 import { collectThreadHistorySnapshots, withThreadChatSessions } from "../threadWorkContext";
+import {
+  astraStatusClass,
+  astraTaskStatusClass,
+  formatAstraStatus,
+  isAstraActive,
+  planRoundStatusClass,
+  upsertAstraRun,
+} from "../threadAstraView";
 import { projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { MarkdownContent, type MarkdownImage } from "./ChatPage";
 
@@ -673,7 +679,7 @@ function ThreadOrchestrationPanel({
     setBusy("start");
     try {
       const run = await createAstraRun(thread.id, prompt.trim() || null);
-      setRuns((prev) => upsertRun(prev, run));
+      setRuns((prev) => upsertAstraRun(prev, run));
       setPrompt("");
       await reloadAstraState();
     } catch (err) {
@@ -688,7 +694,7 @@ function ThreadOrchestrationPanel({
     setBusy("cancel");
     try {
       const run = await cancelAstraRun(activeRun.runId);
-      setRuns((prev) => upsertRun(prev, run));
+      setRuns((prev) => upsertAstraRun(prev, run));
       await reloadAstraState();
     } catch (err) {
       onError(String(err));
@@ -706,7 +712,7 @@ function ThreadOrchestrationPanel({
             <span>Astra</span>
             {activeRun && (
               <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraStatusClass(activeRun.status)}>
-                {formatPlanStatus(activeRun.status)}
+                {formatAstraStatus(activeRun.status)}
               </span>
             )}
             {thread.kind === "workflow" && (
@@ -790,7 +796,7 @@ function ThreadPlanRoundSummary({
           {t("astra.round", { index: round.roundIndex + 1 })}
         </span>
         <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + planRoundStatusClass(round.status)}>
-          {formatPlanStatus(round.status)}
+          {formatAstraStatus(round.status)}
         </span>
         <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
           {t(`astra.mode.${round.mode}`)}
@@ -830,7 +836,7 @@ function ThreadPlanTaskSummary({
       <AgentGlyph agent={task.targetAgent} className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0 max-w-[320px] truncate font-medium text-ink/68">{task.title}</span>
       <span className={"rounded px-1 py-0.5 text-meta font-medium " + astraTaskStatusClass(task.status)}>
-        {formatPlanStatus(task.status)}
+        {formatAstraStatus(task.status)}
       </span>
       {assistantName && <span className="truncate text-ink/35">{assistantName}</span>}
       {stage && <span className="truncate text-ink/35">{projectStageLabel(stage, t)}</span>}
@@ -1320,82 +1326,6 @@ function manualStageTaskTitle(stage: StageInfo, prompt: string): string {
   const shortPrompt =
     compactPrompt.length > 72 ? `${compactPrompt.slice(0, 69)}...` : compactPrompt;
   return `${stageName}: ${shortPrompt || "Manual task"}`;
-}
-
-function isAstraActive(status: AstraRunStatus): boolean {
-  return (
-    status === "planning"
-    || status === "thinking"
-    || status === "awaiting_approval"
-    || status === "dispatching"
-    || status === "running"
-  );
-}
-
-function upsertRun(runs: AstraHandle[], run: AstraHandle): AstraHandle[] {
-  const next = runs.some((item) => item.runId === run.runId)
-    ? runs.map((item) => item.runId === run.runId ? run : item)
-    : [run, ...runs];
-  return next.slice().sort((a, b) => b.updatedAt - a.updatedAt);
-}
-
-function astraStatusClass(status: AstraRunStatus): string {
-  switch (status) {
-    case "awaiting_approval":
-      return "bg-sky-500/[0.10] text-sky-500";
-    case "thinking":
-      return "bg-violet-500/[0.10] text-violet-500";
-    case "dispatching":
-    case "running":
-      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "errored":
-      return "bg-red-500/[0.10] text-red-500";
-    case "cancelled":
-    case "interrupted":
-      return "bg-ink/[0.08] text-ink/45";
-    case "completed":
-      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "planning":
-    default:
-      return "bg-amber-500/[0.10] text-amber-500";
-  }
-}
-
-function astraTaskStatusClass(status: PlanTaskStatus): string {
-  switch (status) {
-    case "running":
-      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "completed":
-      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "failed":
-    case "errored":
-      return "bg-red-500/[0.10] text-red-500";
-    case "cancelled":
-      return "bg-ink/[0.08] text-ink/45";
-    case "planned":
-    default:
-      return "bg-ink/[0.06] text-ink/45";
-  }
-}
-
-function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
-  switch (status) {
-    case "running":
-      return "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "completed":
-      return "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]";
-    case "errored":
-      return "bg-red-500/[0.10] text-red-500";
-    case "cancelled":
-      return "bg-ink/[0.08] text-ink/45";
-    case "planned":
-    default:
-      return "bg-amber-500/[0.10] text-amber-500";
-  }
-}
-
-function formatPlanStatus(status: string): string {
-  return status.replace(/_/g, " ");
 }
 
 function threadAssistantCount(thread: ThreadInfo): number {

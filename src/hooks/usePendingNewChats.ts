@@ -95,13 +95,14 @@ export function usePendingNewChats({
         [`${pending.agent}:${agentSessionId}`]: pending.sessioRuntimeSessionId,
       }));
       setSessions((prev) => mergePendingSession(prev, pendingSession));
-      if (!pending.suppressAutoSelect) {
+      const autoSelect = shouldAutoSelectPendingSession(pending);
+      if (autoSelect) {
         setSelected(pendingSession);
         setSelectedThread(null);
         setDetailMode("chat");
         setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
       }
-      if (!pending.suppressAutoSelect) {
+      if (autoSelect) {
         setPendingNewChats((prev) => {
           const next = { ...prev };
           delete next[pending.sessioRuntimeSessionId];
@@ -199,4 +200,8 @@ export function usePendingNewChats({
     setSelectedThread,
     setSessions,
   ]);
+}
+
+export function shouldAutoSelectPendingSession(pending: PendingNewChatSession): boolean {
+  return !pending.suppressAutoSelect;
 }
