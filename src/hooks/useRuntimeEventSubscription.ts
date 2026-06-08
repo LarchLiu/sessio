@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
 import type { SessionInfo } from "../api";
-import type { LiveRuntimeAction } from "../runtimeChat";
+import type { LiveRuntimeAction, LiveRuntimeTurnSnapshotEvent } from "../runtimeChat";
 import { normalizeAgentRuntimeEvent, normalizeRuntimeTurnSnapshot } from "../runtimeChat";
 import {
   addUnreadKeys,
@@ -25,6 +25,8 @@ export function useRuntimeEventSubscription({
 }) {
   const runtimeSessionAliasesRef = useRef<Record<string, string>>({});
   const selectedUnreadKeysRef = useRef<Set<string>>(new Set());
+  const pendingSnapshotsRef = useRef<Map<string, LiveRuntimeTurnSnapshotEvent>>(new Map());
+  const snapshotFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     runtimeSessionAliasesRef.current = runtimeSessionAliases;
@@ -37,10 +39,31 @@ export function useRuntimeEventSubscription({
     let cancelled = false;
     let unlisten: (() => void) | null = null;
     let unlistenSnapshot: (() => void) | null = null;
+    const flushSnapshots = () => {
+      if (snapshotFlushTimerRef.current) {
+        clearTimeout(snapshotFlushTimerRef.current);
+        snapshotFlushTimerRef.current = null;
+      }
+      if (pendingSnapshotsRef.current.size === 0) return;
+      const snapshots = Array.from(pendingSnapshotsRef.current.values())
+        .sort((a, b) => a.sequence - b.sequence);
+      pendingSnapshotsRef.current.clear();
+      for (const snapshot of snapshots) {
+        dispatchLiveRuntimeEvent({ type: "runtime-turn-snapshot", event: snapshot });
+      }
+    };
+    const queueSnapshot = (snapshot: LiveRuntimeTurnSnapshotEvent) => {
+      pendingSnapshotsRef.current.set(snapshot.session.sessioRuntimeSessionId, snapshot);
+      if (shouldFlushSnapshotImmediately(snapshot)) {
+        flushSnapshots();
+        return;
+      }
+      if (snapshotFlushTimerRef.current) return;
+      snapshotFlushTimerRef.current = setTimeout(flushSnapshots, 160);
+    };
     listen<unknown>("agent-runtime-event", (event) => {
       if (cancelled) return;
       const payload = normalizeAgentRuntimeEvent(event.payload);
-      console.info("[sessio-runtime:frontend:event]", payload);
       const unreadKeys = runtimeEventUnreadKeys(
         payload,
         runtimeSessionAliasesRef.current,
@@ -53,7 +76,9 @@ export function useRuntimeEventSubscription({
           return addUnreadKeys(prev, unreadKeys);
         });
       }
-      dispatchLiveRuntimeEvent({ type: "runtime-event", event: payload });
+      if (shouldDispatchRuntimeEvent(payload.kind)) {
+        dispatchLiveRuntimeEvent({ type: "runtime-event", event: payload });
+      }
     })
       .then((fn) => {
         if (cancelled) fn();
@@ -63,8 +88,7 @@ export function useRuntimeEventSubscription({
     listen<unknown>("agent-runtime-turn-snapshot", (event) => {
       if (cancelled) return;
       const payload = normalizeRuntimeTurnSnapshot(event.payload);
-      console.info("[sessio-runtime:frontend:turn-snapshot]", payload);
-      dispatchLiveRuntimeEvent({ type: "runtime-turn-snapshot", event: payload });
+      queueSnapshot(payload);
     })
       .then((fn) => {
         if (cancelled) fn();
@@ -73,6 +97,11 @@ export function useRuntimeEventSubscription({
       .catch((err) => setError(String(err)));
     return () => {
       cancelled = true;
+      if (snapshotFlushTimerRef.current) {
+        clearTimeout(snapshotFlushTimerRef.current);
+        snapshotFlushTimerRef.current = null;
+      }
+      pendingSnapshotsRef.current.clear();
       unlisten?.();
       unlistenSnapshot?.();
     };
@@ -81,4 +110,15 @@ export function useRuntimeEventSubscription({
     setError,
     setUnreadSessionIds,
   ]);
+}
+
+function shouldDispatchRuntimeEvent(kind: string): boolean {
+  return kind === "sessionStarted" || kind === "sessionEnded";
+}
+
+function shouldFlushSnapshotImmediately(snapshot: LiveRuntimeTurnSnapshotEvent): boolean {
+  if (snapshot.session.ended) return true;
+  return snapshot.session.turns.some((turn) =>
+    turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled"
+  );
 }

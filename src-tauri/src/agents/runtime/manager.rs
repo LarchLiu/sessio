@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tauri::{AppHandle, Emitter};
@@ -39,6 +40,7 @@ struct RuntimeManagerInner {
     id_counter: AtomicU64,
     sessions: Mutex<HashMap<String, RuntimeSessionState>>,
     event_listeners: Mutex<Vec<mpsc::Sender<AgentRuntimeEvent>>>,
+    snapshot_queue: Mutex<HashMap<String, PendingRuntimeSnapshot>>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,10 +55,19 @@ struct RuntimeSessionState {
     acp_controller: Option<AcpSessionController>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PendingRuntimeSnapshot {
+    sequence: u64,
+    timestamp: i64,
+    scheduled: bool,
+}
+
 pub(crate) enum RuntimePermissionDecision {
     Selected { option_id: String },
     Cancelled,
 }
+
+const LIVE_RUNTIME_SNAPSHOT_THROTTLE_MS: u64 = 160;
 
 impl RuntimeManager {
     pub fn new(app: AppHandle) -> Self {
@@ -67,6 +78,7 @@ impl RuntimeManager {
                 id_counter: AtomicU64::new(1),
                 sessions: Mutex::new(HashMap::new()),
                 event_listeners: Mutex::new(Vec::new()),
+                snapshot_queue: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -872,22 +884,24 @@ impl RuntimeManager {
     pub(crate) fn emit(&self, payload: AgentRuntimeEventPayload) -> Result<()> {
         log_runtime_event(&payload);
         let timestamp = now_ms();
+        let sequence = self.inner.sequence.fetch_add(1, Ordering::Relaxed);
+        let should_flush_snapshot = should_emit_snapshot_immediately(&payload);
         let event = AgentRuntimeEvent {
-            sequence: self.inner.sequence.fetch_add(1, Ordering::Relaxed),
+            sequence,
             timestamp,
             payload,
         };
-        let snapshot = self.apply_event_to_turn_state(&event);
+        let should_emit_runtime_event = should_emit_runtime_event_to_webview(&event.payload);
+        let snapshot_session_id = self.apply_event_to_turn_state(&event);
         self.notify_event_listeners(&event);
-        self.inner
-            .app
-            .emit("agent-runtime-event", event)
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        if let Some(snapshot) = snapshot {
+        if should_emit_runtime_event {
             self.inner
                 .app
-                .emit("agent-runtime-turn-snapshot", snapshot)
+                .emit("agent-runtime-event", event)
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        }
+        if let Some(session_id) = snapshot_session_id {
+            self.queue_turn_snapshot(session_id, timestamp, sequence, should_flush_snapshot)?;
         }
         Ok(())
     }
@@ -910,19 +924,102 @@ impl RuntimeManager {
     fn apply_event_to_turn_state(
         &self,
         event: &AgentRuntimeEvent,
-    ) -> Option<LiveRuntimeTurnSnapshotEvent> {
+    ) -> Option<String> {
         let sessio_runtime_session_id = event_session_id(&event.payload)?;
-        let snapshot = {
+        {
             let mut sessions = self.inner.sessions.lock().ok()?;
             let state = sessions.get_mut(sessio_runtime_session_id)?;
             apply_runtime_event_to_state(&mut state.turn_state, &event.payload, event.timestamp);
+        }
+        Some(sessio_runtime_session_id.to_string())
+    }
+
+    fn queue_turn_snapshot(
+        &self,
+        session_id: String,
+        timestamp: i64,
+        sequence: u64,
+        immediate: bool,
+    ) -> Result<()> {
+        if immediate {
+            if let Ok(mut queue) = self.inner.snapshot_queue.lock() {
+                queue.remove(&session_id);
+            }
+            return self.emit_turn_snapshot(&session_id, sequence, timestamp);
+        }
+
+        let should_schedule = {
+            let mut queue = self
+                .inner
+                .snapshot_queue
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime snapshot queue lock poisoned"))?;
+            let pending = queue
+                .entry(session_id.clone())
+                .or_insert(PendingRuntimeSnapshot {
+                    sequence,
+                    timestamp,
+                    scheduled: false,
+                });
+            pending.sequence = sequence;
+            pending.timestamp = timestamp;
+            if pending.scheduled {
+                false
+            } else {
+                pending.scheduled = true;
+                true
+            }
+        };
+
+        if should_schedule {
+            let manager = self.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(LIVE_RUNTIME_SNAPSHOT_THROTTLE_MS));
+                let _ = manager.flush_queued_turn_snapshot(&session_id);
+            });
+        }
+        Ok(())
+    }
+
+    fn flush_queued_turn_snapshot(&self, session_id: &str) -> Result<()> {
+        let pending = {
+            let mut queue = self
+                .inner
+                .snapshot_queue
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime snapshot queue lock poisoned"))?;
+            queue.remove(session_id)
+        };
+        if let Some(pending) = pending {
+            self.emit_turn_snapshot(session_id, pending.sequence, pending.timestamp)?;
+        }
+        Ok(())
+    }
+
+    fn emit_turn_snapshot(&self, session_id: &str, sequence: u64, timestamp: i64) -> Result<()> {
+        let snapshot = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+            let Some(state) = sessions.get(session_id) else {
+                return Ok(());
+            };
             state.turn_state.snapshot()
         };
-        Some(LiveRuntimeTurnSnapshotEvent {
-            sequence: event.sequence,
-            timestamp: event.timestamp,
-            session: snapshot,
-        })
+        self.inner
+            .app
+            .emit(
+                "agent-runtime-turn-snapshot",
+                LiveRuntimeTurnSnapshotEvent {
+                    sequence,
+                    timestamp,
+                    session: snapshot,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(())
     }
 
     fn next_id(&self, prefix: &str) -> String {
@@ -957,6 +1054,24 @@ fn is_live_runtime_message(payload: &AgentRuntimeEventPayload) -> bool {
             | AgentRuntimeEventPayload::ToolStatusChanged { .. }
             | AgentRuntimeEventPayload::SessionUpdate { .. }
             | AgentRuntimeEventPayload::AcpProtocolMessage { .. }
+    )
+}
+
+fn should_emit_runtime_event_to_webview(payload: &AgentRuntimeEventPayload) -> bool {
+    !is_live_runtime_message(payload)
+}
+
+fn should_emit_snapshot_immediately(payload: &AgentRuntimeEventPayload) -> bool {
+    matches!(
+        payload,
+        AgentRuntimeEventPayload::SessionStarted { .. }
+            | AgentRuntimeEventPayload::TurnStarted { .. }
+            | AgentRuntimeEventPayload::PermissionRequested { .. }
+            | AgentRuntimeEventPayload::PermissionResolved { .. }
+            | AgentRuntimeEventPayload::TurnCompleted { .. }
+            | AgentRuntimeEventPayload::TurnError { .. }
+            | AgentRuntimeEventPayload::TurnCancelled { .. }
+            | AgentRuntimeEventPayload::SessionEnded { .. }
     )
 }
 

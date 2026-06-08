@@ -50,7 +50,6 @@ import { LiveSessionStatusBadge } from "../components/AcpTranscriptPanel";
 import ScrollArea from "../components/ScrollArea";
 import {
   contentBlocksText,
-  mergeHistoryWithLiveTurns,
   stripImagePlaceholders,
 } from "../historyMerge";
 import { useChatComposer } from "../hooks/useChatComposer";
@@ -905,13 +904,9 @@ function ThreadSessionLanePreview({ lane }: { lane: ThreadSessionLane }) {
     sessionMessageCount,
   ]);
 
-  const mergedTurns = useMemo(
-    () => mergeHistoryWithLiveTurns(historyTurns, lane.liveSession?.turns ?? []),
-    [historyTurns, lane.liveSession?.turns],
-  );
   const preview = useMemo(
-    () => latestLanePreviewItem(mergedTurns, t),
-    [mergedTurns, t],
+    () => latestLanePreviewItem(lane.liveSession?.turns ?? [], t) ?? latestLanePreviewItem(historyTurns, t),
+    [historyTurns, lane.liveSession?.turns, t],
   );
   const emptyText = lanePreviewEmptyText({
     lane,

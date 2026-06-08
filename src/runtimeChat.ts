@@ -22,6 +22,7 @@ export type LiveRuntimeAction =
 export interface LiveRuntimeState {
   sessions: Record<string, LiveRuntimeSession>;
   lastSequence: number;
+  sessionSequences?: Record<string, number>;
 }
 
 export interface LiveRuntimeSession {
@@ -280,6 +281,7 @@ export interface AcpSessionInfo {
 export const emptyLiveRuntimeState: LiveRuntimeState = {
   sessions: {},
   lastSequence: 0,
+  sessionSequences: {},
 };
 
 export function emptyAcpSessionState(): AcpSessionState {
@@ -368,11 +370,32 @@ function latestLiveTurn(session: LiveRuntimeSession | null | undefined): LiveTur
 }
 
 export function normalizeAgentRuntimeEvent(raw: unknown): AgentRuntimeEvent {
+  if (isCamelRuntimeEvent(raw)) return raw;
   return camelizeKeys(raw) as AgentRuntimeEvent;
 }
 
 export function normalizeRuntimeTurnSnapshot(raw: unknown): LiveRuntimeTurnSnapshotEvent {
+  if (isCamelRuntimeTurnSnapshot(raw)) return raw;
   return camelizeKeys(raw) as LiveRuntimeTurnSnapshotEvent;
+}
+
+function isCamelRuntimeEvent(value: unknown): value is AgentRuntimeEvent {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  if (value.kind === "sessionStarted") {
+    return typeof value.sessioRuntimeSessionId === "string"
+      && typeof value.agentRuntimeSessionId === "string";
+  }
+  return typeof value.sessioRuntimeSessionId === "string";
+}
+
+function isCamelRuntimeTurnSnapshot(value: unknown): value is LiveRuntimeTurnSnapshotEvent {
+  if (!isRecord(value) || typeof value.sequence !== "number") return false;
+  const session = value.session;
+  return isRecord(session) && typeof session.sessioRuntimeSessionId === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 export function applyRuntimeAction(
@@ -383,12 +406,18 @@ export function applyRuntimeAction(
   if (action.type === "runtime-event") return applyRuntimeEventEnvelope(state, action.event);
 
   if (action.type === "ensure-session") {
+    const sessionSequences = state.sessionSequences ?? {};
     return {
       ...state,
       sessions: {
         ...state.sessions,
         [action.session.sessioRuntimeSessionId]:
           state.sessions[action.session.sessioRuntimeSessionId] ?? action.session,
+      },
+      sessionSequences: {
+        ...sessionSequences,
+        [action.session.sessioRuntimeSessionId]:
+          sessionSequences[action.session.sessioRuntimeSessionId] ?? state.lastSequence,
       },
     };
   }
@@ -427,8 +456,10 @@ function applyRuntimeTurnSnapshot(
   state: LiveRuntimeState,
   event: LiveRuntimeTurnSnapshotEvent,
 ): LiveRuntimeState {
-  if (event.sequence < state.lastSequence) return state;
-  const existing = state.sessions[event.session.sessioRuntimeSessionId];
+  const sessionId = event.session.sessioRuntimeSessionId;
+  const sessionSequences = state.sessionSequences ?? {};
+  if (event.sequence < (sessionSequences[sessionId] ?? 0)) return state;
+  const existing = state.sessions[sessionId];
   const session = existing
     ? mergeRuntimeSessionSnapshot(existing, event.session)
     : event.session;
@@ -437,7 +468,11 @@ function applyRuntimeTurnSnapshot(
       ...state.sessions,
       [session.sessioRuntimeSessionId]: session,
     },
-    lastSequence: event.sequence,
+    sessionSequences: {
+      ...sessionSequences,
+      [session.sessioRuntimeSessionId]: event.sequence,
+    },
+    lastSequence: Math.max(state.lastSequence, event.sequence),
   };
 }
 
@@ -445,19 +480,24 @@ function applyRuntimeEventEnvelope(
   state: LiveRuntimeState,
   event: AgentRuntimeEvent,
 ): LiveRuntimeState {
-  if (event.sequence < state.lastSequence) return state;
+  const sessionSequences = state.sessionSequences ?? {};
+  if (event.sequence < (sessionSequences[event.sessioRuntimeSessionId] ?? 0)) return state;
   if (event.kind !== "sessionStarted" && event.kind !== "sessionEnded") {
-    return { ...state, lastSequence: event.sequence };
+    return { ...state, lastSequence: Math.max(state.lastSequence, event.sequence) };
   }
   if (event.kind === "sessionEnded") {
     const session = state.sessions[event.sessioRuntimeSessionId];
-    if (!session) return { ...state, lastSequence: event.sequence };
+    if (!session) return { ...state, lastSequence: Math.max(state.lastSequence, event.sequence) };
     return {
       sessions: {
         ...state.sessions,
         [session.sessioRuntimeSessionId]: { ...session, ended: true },
       },
-      lastSequence: event.sequence,
+      sessionSequences: {
+        ...sessionSequences,
+        [session.sessioRuntimeSessionId]: event.sequence,
+      },
+      lastSequence: Math.max(state.lastSequence, event.sequence),
     };
   }
   const existing = state.sessions[event.sessioRuntimeSessionId];
@@ -482,7 +522,11 @@ function applyRuntimeEventEnvelope(
       ...state.sessions,
       [session.sessioRuntimeSessionId]: session,
     },
-    lastSequence: event.sequence,
+    sessionSequences: {
+      ...sessionSequences,
+      [session.sessioRuntimeSessionId]: event.sequence,
+    },
+    lastSequence: Math.max(state.lastSequence, event.sequence),
   };
 }
 
