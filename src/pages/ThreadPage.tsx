@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
-import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo } from "../api";
+import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo } from "../api";
 import {
   AGENT_LABEL,
   cancelAstraRun,
@@ -21,6 +21,13 @@ import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
 import { sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
+import {
+  compareReplaySessionTime,
+  groupReplaySessionsByThreadKind,
+  replaySourceKey,
+  replaySourceTitle,
+  shortSessionId,
+} from "../threadReplayView";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result"]);
@@ -1084,202 +1091,6 @@ function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
   return right - left;
 }
 
-function compareReplaySessionTime(a: ThreadReplaySessionInfo, b: ThreadReplaySessionInfo): number {
-  const left = a.lastSeenAt ?? a.firstSeenAt ?? a.session?.updatedAt ?? a.session?.startedAt ?? 0;
-  const right = b.lastSeenAt ?? b.firstSeenAt ?? b.session?.updatedAt ?? b.session?.startedAt ?? 0;
-  return right - left;
-}
-
-type ReplaySessionGroup = {
-  key: string;
-  label: string;
-  agent: Agent | null;
-  sessions: ThreadReplaySessionInfo[];
-};
-
-function groupReplaySessionsByThreadKind(
-  replay: ThreadReplayInfo,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): ReplaySessionGroup[] {
-  const keyForSession = replay.kind === "workflow"
-    ? (session: ThreadReplaySessionInfo) => workflowReplayGroupKey(session, t)
-    : replay.kind === "debate"
-      ? (session: ThreadReplaySessionInfo) => debateReplayGroupKey(session, t)
-      : (session: ThreadReplaySessionInfo) => roundReplayGroupKey(session, t);
-  const groups = new Map<string, ReplaySessionGroup>();
-  for (const session of replay.sessions) {
-    const seed = keyForSession(session);
-    const group = groups.get(seed.key) ?? { ...seed, sessions: [] };
-    group.sessions.push(session);
-    groups.set(seed.key, group);
-  }
-  return Array.from(groups.values())
-    .map((group) => ({
-      ...group,
-      sessions: group.sessions.slice().sort(compareReplaySessionTime),
-    }))
-    .sort(compareReplayGroups);
-}
-
-function workflowReplayGroupKey(
-  session: ThreadReplaySessionInfo,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): ReplaySessionGroup {
-  const stageSource = session.sources.find((source) => source.kind === "stage" || source.stageId);
-  if (stageSource) {
-    const label = stageSource.label ?? stageSource.stageId ?? t("thread.replay_source.stage");
-    return {
-      key: `stage:${stageSource.stageId ?? label}`,
-      label,
-      agent: null,
-      sessions: [],
-    };
-  }
-  return fallbackReplayGroupKey(session, t);
-}
-
-function roundReplayGroupKey(
-  session: ThreadReplaySessionInfo,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): ReplaySessionGroup {
-  const roundSource = session.sources.find((source) => source.planRoundId || source.kind === "plan_task");
-  if (roundSource) {
-    const value = roundSource.planRoundId
-      ? shortSessionId(roundSource.planRoundId)
-      : roundSource.label ?? roundSource.planTaskId ?? t("thread.replay_source.plan_task");
-    return {
-      key: `round:${roundSource.planRoundId ?? roundSource.planTaskId ?? value}`,
-      label: t("thread.replay_group.round", { value }),
-      agent: null,
-      sessions: [],
-    };
-  }
-  return fallbackReplayGroupKey(session, t);
-}
-
-function debateReplayGroupKey(
-  session: ThreadReplaySessionInfo,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): ReplaySessionGroup {
-  const roundSource = session.sources.find((source) => source.planRoundId || source.kind === "plan_task");
-  if (roundSource) {
-    const round = roundSource.planRoundId
-      ? shortSessionId(roundSource.planRoundId)
-      : t("thread.replay_source.plan_task");
-    const lane = debateLaneLabel(roundSource)
-      ?? (roundSource.planTaskId ? shortSessionId(roundSource.planTaskId) : roundSource.label)
-      ?? AGENT_LABEL[session.agent];
-    return {
-      key: `debate:${roundSource.planRoundId ?? "round"}:${roundSource.planTaskId ?? lane}`,
-      label: t("thread.replay_group.round_lane", { round, lane }),
-      agent: session.agent,
-      sessions: [],
-    };
-  }
-  return fallbackReplayGroupKey(session, t);
-}
-
-function debateLaneLabel(source: ThreadReplaySessionSourceInfo): string | null {
-  const label = source.label?.trim();
-  if (!label) return null;
-  return label
-    .replace(/\s+debate\s+(lane|cross-check)$/i, "")
-    .trim() || label;
-}
-
-function fallbackReplayGroupKey(
-  session: ThreadReplaySessionInfo,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): ReplaySessionGroup {
-  const source = session.sources[0] ?? null;
-  if (source?.kind === "thread") {
-    return {
-      key: `thread:${session.agent}`,
-      label: t("thread.replay_group.thread"),
-      agent: session.agent,
-      sessions: [],
-    };
-  }
-  if (source?.kind === "astra_internal") {
-    return {
-      key: `astra:${source.astraRunId ?? session.agent}`,
-      label: source.label ?? t("thread.replay_source.astra_internal"),
-      agent: null,
-      sessions: [],
-    };
-  }
-  return {
-    key: `agent:${session.agent}`,
-    label: AGENT_LABEL[session.agent],
-    agent: session.agent,
-    sessions: [],
-  };
-}
-
-function compareReplayGroups(a: ReplaySessionGroup, b: ReplaySessionGroup): number {
-  const latestA = latestReplayGroupTime(a);
-  const latestB = latestReplayGroupTime(b);
-  return latestB - latestA || a.label.localeCompare(b.label);
-}
-
-function latestReplayGroupTime(group: ReplaySessionGroup): number {
-  return group.sessions.reduce((latest, session) => {
-    const time = session.lastSeenAt ?? session.firstSeenAt ?? session.session?.updatedAt ?? session.session?.startedAt ?? 0;
-    return Math.max(latest, time);
-  }, 0);
-}
-
-function replaySourceKey(source: ThreadReplaySessionSourceInfo): string {
-  return [
-    source.kind,
-    source.stageId,
-    source.planRoundId,
-    source.planTaskId,
-    source.astraRunId,
-    source.role,
-    source.createdAt,
-  ].filter(Boolean).join(":");
-}
-
-function replaySourceTitle(source: ThreadReplaySessionSourceInfo): string {
-  return [
-    source.label,
-    source.kind,
-    source.role,
-    source.planTaskId,
-    source.planRoundId,
-    source.stageId,
-    source.astraRunId,
-    ...replaySourceSnapshotTitles(source),
-  ].filter(Boolean).join("\n");
-}
-
-function replaySourceSnapshotTitles(source: ThreadReplaySessionSourceInfo): string[] {
-  const titles: string[] = [];
-  const stage = parseJsonObject(source.stageSnapshotJson);
-  const stageName = stringField(stage, "name") ?? stringField(stage, "stageId") ?? stringField(stage, "id");
-  if (stageName) titles.push(`Stage snapshot: ${stageName}`);
-
-  const assistant = parseJsonObject(source.assistantSnapshotJson);
-  const assistantName = stringField(assistant, "name") ?? stringField(assistant, "assistantId") ?? stringField(assistant, "id");
-  if (assistantName) {
-    const agentInfo = objectField(assistant, "agent");
-    const model = stringField(agentInfo, "model");
-    titles.push(`Assistant snapshot: ${model ? `${assistantName} / ${model}` : assistantName}`);
-  }
-
-  const agent = parseJsonObject(source.agentSnapshotJson);
-  const agentInfo = objectField(agent, "agentInfo");
-  const agentLabel = stringField(agentInfo, "displayName")
-    ?? stringField(agentInfo, "name")
-    ?? stringField(agent, "agent");
-  if (agentLabel) {
-    const model = stringField(agentInfo, "model");
-    titles.push(`Agent snapshot: ${model ? `${agentLabel} / ${model}` : agentLabel}`);
-  }
-  return titles;
-}
-
 function isAstraActive(status: AstraRunStatus): boolean {
   return status === "planning" || status === "thinking" || status === "awaiting_approval" || status === "dispatching" || status === "running";
 }
@@ -1564,12 +1375,6 @@ function safeJsonPreview(value: unknown, maxLength: number): string {
   }
   if (!text) return "";
   return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
-}
-
-function shortSessionId(sessionId: string): string {
-  const trimmed = sessionId.trim();
-  if (trimmed.length <= 18) return trimmed;
-  return `${trimmed.slice(0, 8)}...${trimmed.slice(-6)}`;
 }
 
 function planRoundStatusClass(status: PlanRoundInfo["status"]): string {
