@@ -97,7 +97,11 @@ type AppSidebarProps = {
   onOpenKanban: (project: ProjectGroup) => void;
   onNewProjectChat: (project: ProjectGroup) => void;
   onSelectSession: (project: ProjectGroup, session: SessionInfo) => void;
-  onSelectThread: (project: ProjectGroup, thread: SidebarThreadRef) => void;
+  onSelectThread: (
+    project: ProjectGroup,
+    thread: SidebarThreadRef,
+    source: "thread" | "threadChat",
+  ) => void;
   onToggleProjectSessions: (projectKey: string) => void;
   onProjectContextMenu: (project: ProjectGroup, e: MouseEvent) => void;
   onSessionContextMenu: (
@@ -313,7 +317,7 @@ export default function AppSidebar({
                 onOpenKanban={() => onOpenKanban(project)}
                 onNewChat={() => onNewProjectChat(project)}
                 onSelectSession={(session) => onSelectSession(project, session)}
-                onSelectThread={(thread) => onSelectThread(project, thread)}
+                onSelectThread={(thread, source) => onSelectThread(project, thread, source)}
                 onToggleSessionLimit={() => onToggleProjectSessions(project.key)}
                 onProjectContextMenu={(event) => onProjectContextMenu(project, event)}
                 onSessionContextMenu={onSessionContextMenu}
@@ -718,7 +722,7 @@ function ProjectSidebarGroup({
   onOpenKanban: () => void;
   onNewChat: () => void;
   onSelectSession: (session: SessionInfo) => void;
-  onSelectThread: (thread: SidebarThreadRef) => void;
+  onSelectThread: (thread: SidebarThreadRef, source: "thread" | "threadChat") => void;
   onToggleSessionLimit: () => void;
   onProjectContextMenu: (e: MouseEvent) => void;
   onSessionContextMenu: (
@@ -888,7 +892,7 @@ function ProjectSidebarGroup({
                     key={thread.id}
                     thread={threadRefFromThread(thread)}
                     active={selectedThreadId === thread.id}
-                    onSelect={() => onSelectThread(threadRefFromThread(thread))}
+                    onSelect={() => onSelectThread(threadRefFromThread(thread), "thread")}
                   />
                 ))
               )
@@ -901,7 +905,7 @@ function ProjectSidebarGroup({
                       thread={threadRefFromSummary(entry.summary)}
                       time={entry.time}
                       active={selectedThreadId === entry.summary.threadId}
-                      onSelect={() => onSelectThread(threadRefFromSummary(entry.summary))}
+                      onSelect={() => onSelectThread(threadRefFromSummary(entry.summary), "threadChat")}
                     />
                   );
                 }

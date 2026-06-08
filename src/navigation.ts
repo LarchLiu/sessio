@@ -1,5 +1,5 @@
 export type ViewMode = "native" | "cross";
-export type DetailMode = "chat" | "project";
+export type DetailMode = "chat" | "project" | "threadMultiSessionChat";
 
 import type { Agent, KanbanStatus, ProjectInfo, SessionHistorySnapshotGroup, SessionInfo, ThreadWorkSnapshot } from "./api";
 
@@ -34,4 +34,6 @@ export interface PendingNewChatSession {
     threadId: string;
     stageId: string | null;
   };
+  suppressAutoSelect?: boolean;
+  origin?: "new_chat" | "thread_chat" | "thread_multi_session";
 }

@@ -49,7 +49,7 @@ import {
   emptyLiveRuntimeState,
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
-import { Folder, Goal, Hash, Kanban, MessageSquare, MessageSquareText } from "lucide-react";
+import { Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
 import type { DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
   isSubagentOnly,
@@ -572,7 +572,9 @@ export default function App() {
   const headerContextTitle = selected
     ? { label: t("header.chat"), icon: MessageSquareText }
     : selectedThreadId
-      ? { label: t("thread.detail"), icon: Hash }
+      ? detailMode === "threadMultiSessionChat"
+        ? { label: t("thread.multi_session_chat"), icon: MessagesSquare }
+        : { label: t("thread.detail"), icon: Hash }
       : activeProject
         ? { label: t("project.workbench"), icon: Kanban }
         : { label: t("sidebar.new_chat"), icon: MessageSquare };
@@ -662,12 +664,12 @@ export default function App() {
         setSelected(session);
         setDetailMode("chat");
       }}
-      onSelectThread={(projectGroup, thread) => {
+      onSelectThread={(projectGroup, thread, source) => {
         setSelected(null);
         setSelectedProject(null);
         setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id, goal: thread.goal });
         setNewChatProjectKey(null);
-        setDetailMode("project");
+        setDetailMode(source === "threadChat" ? "threadMultiSessionChat" : "project");
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
       }}
       onToggleProjectSessions={(projectKeyValue) => {
@@ -823,6 +825,7 @@ export default function App() {
           runtimeSessionAliases={runtimeSessionAliases}
           selectedAncestorSessions={selectedAncestorSessions}
           newChatProjectKey={newChatProjectKey}
+          pendingNewChats={pendingNewChats}
           setNewChatProjectKey={setNewChatProjectKey}
           projectGroups={projectGroups}
           availableSessions={availableSessions}

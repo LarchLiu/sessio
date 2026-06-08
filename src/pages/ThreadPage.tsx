@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, Plus, Sparkles, Square, Trash2 } from "lucide-react";
+import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
 import type { Agent, AstraEvent, AstraHandle, AstraRunStatus, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, PlanTaskStatus, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo } from "../api";
 import {
@@ -30,12 +30,14 @@ export default function ThreadPage({
   threadId,
   onSelectSession,
   onNewStageChat,
+  onOpenMultiSessionChat,
   onError,
 }: {
   project: ProjectInfo;
   threadId: string;
   onSelectSession: (session: SessionInfo) => void;
   onNewStageChat: (thread: ThreadInfo, stage: StageInfo | null) => void;
+  onOpenMultiSessionChat: () => void;
   onError: (error: string | null) => void;
 }) {
   const { t, lang } = useI18n();
@@ -105,6 +107,17 @@ export default function ThreadPage({
               <ThreadStat label={t("assistant.title")} value={String(threadAssistantCount(thread, sortedStages))} />
               <ThreadStat label={t("thread.sessions")} value={String(replay?.sessions.length ?? thread.sessions.length)} />
               <ThreadStat label={t("meta.updated")} value={formatDate(thread.updatedAt, lang) ?? "-"} />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={onOpenMultiSessionChat}
+                className="inline-flex h-8 items-center gap-1.5 rounded border border-ink/15 bg-surface-panel px-2.5 text-body-sm font-medium text-ink/62 transition hover:bg-ink/[0.05] hover:text-ink/85"
+              >
+                <MessagesSquare className="h-4 w-4" />
+                {t("thread.open_multi_session_chat")}
+              </button>
             </div>
 
             {thread.description && (

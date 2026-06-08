@@ -6,8 +6,9 @@ import NewChatPage from "../pages/NewChatPage";
 import { ProjectWorkbenchPage } from "../pages/ProjectPage";
 import ThreadPage from "../pages/ThreadPage";
 import ThreadChatPage from "../pages/ThreadChatPage";
+import ThreadMultiSessionChatPage from "../pages/ThreadMultiSessionChatPage";
 import { projectFilterKey, type Filter } from "../appUtils";
-import type { PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
+import type { DetailMode, PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
 import type {
   LiveRuntimeAction,
   LiveRuntimeState,
@@ -28,6 +29,7 @@ export default function AppMain({
   runtimeSessionAliases,
   selectedAncestorSessions,
   newChatProjectKey,
+  pendingNewChats,
   setNewChatProjectKey,
   projectGroups,
   availableSessions,
@@ -48,7 +50,7 @@ export default function AppMain({
   selectedThreadId: string | null;
   selected: SessionInfo | null;
   selectedSessionProject: ProjectInfo | null;
-  detailRoute: "chat" | "project";
+  detailRoute: DetailMode;
   viewMode: ViewMode;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
@@ -58,6 +60,7 @@ export default function AppMain({
   runtimeSessionAliases: Record<string, string>;
   selectedAncestorSessions: SessionInfo[];
   newChatProjectKey: string | null;
+  pendingNewChats: Record<string, PendingNewChatSession>;
   setNewChatProjectKey: Dispatch<SetStateAction<string | null>>;
   projectGroups: ProjectGroup[];
   availableSessions: SessionInfo[];
@@ -67,7 +70,7 @@ export default function AppMain({
   setSelectedProject: Dispatch<SetStateAction<{ kind: "project"; projectId: string } | null>>;
   setSelectedThread: Dispatch<SetStateAction<{ projectId: string; threadId: string; goal: string } | null>>;
   setSelected: Dispatch<SetStateAction<SessionInfo | null>>;
-  setDetailMode: Dispatch<SetStateAction<"chat" | "project">>;
+  setDetailMode: Dispatch<SetStateAction<DetailMode>>;
   setPendingNewChats: Dispatch<SetStateAction<Record<string, PendingNewChatSession>>>;
   refreshSessions: () => Promise<void>;
   onMessageCount: (
@@ -133,12 +136,24 @@ export default function AppMain({
   if (activeProject) {
     return (
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {selectedThreadId ? (
+        {selectedThreadId && detailRoute === "threadMultiSessionChat" ? (
+          <ThreadMultiSessionChatPage
+            project={activeProject}
+            threadId={selectedThreadId}
+            liveState={liveState}
+            runtimeSessionAliases={runtimeSessionAliases}
+            pendingNewChats={pendingNewChats}
+            onBackToOverview={() => setDetailMode("project")}
+            onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
+            onError={onError}
+          />
+        ) : selectedThreadId ? (
           <ThreadPage
             project={activeProject}
             threadId={selectedThreadId}
             onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
             onNewStageChat={openNewChatForStage}
+            onOpenMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
             onError={onError}
           />
         ) : (
