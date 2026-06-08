@@ -354,6 +354,10 @@ impl SessionStore for CachedStore {
         self.inner.list_plan_rounds(thread_id)
     }
 
+    fn get_plan_task_thread_id(&self, task_id: &str) -> Result<Option<String>> {
+        self.inner.get_plan_task_thread_id(task_id)
+    }
+
     fn update_plan_task_status(
         &self,
         task_id: &str,

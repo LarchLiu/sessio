@@ -179,10 +179,17 @@ export default function AppSidebar({
       projectId?: string | null;
       threadId?: string | null;
     }>("threads_updated", (event) => {
+      const changedProjectId = event.payload?.projectId ?? null;
       for (const project of projectGroups) {
-        if (expandedProjects.has(project.key) || projectListModes[project.key] === "threads") {
+        const shouldRefreshThreads =
+          expandedProjects.has(project.key) ||
+          projectListModes[project.key] === "threads";
+        const shouldRefreshSummaries =
+          changedProjectId === project.project.id ||
+          (!changedProjectId && Boolean(threadChatSummaries[project.key]));
+        if (shouldRefreshThreads) {
           refreshProjectThreads(project);
-        } else if (event.payload?.projectId === project.project.id) {
+        } else if (shouldRefreshSummaries) {
           refreshProjectThreadSummaries(project, true);
         }
       }

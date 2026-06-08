@@ -829,8 +829,9 @@ fn delete_thread(
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<(), String> {
+    let project_id = thread_project_id(store.as_ref(), &thread_id);
     store.delete_thread(&thread_id).map_err(|e| e.to_string())?;
-    emit_threads_updated(&app, None, Some(thread_id))?;
+    emit_threads_updated(&app, project_id, Some(thread_id))?;
     Ok(())
 }
 
@@ -952,6 +953,9 @@ fn link_plan_task_session(
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<PlanTaskSessionInfo, String> {
+    let thread_id = store
+        .get_plan_task_thread_id(&req.task_id)
+        .map_err(|e| e.to_string())?;
     let session = store
         .link_plan_task_session(NewPlanTaskSession {
             task_id: &req.task_id,
@@ -960,7 +964,10 @@ fn link_plan_task_session(
             role: req.role,
         })
         .map_err(|e| e.to_string())?;
-    emit_threads_updated(&app, None, None)?;
+    let project_id = thread_id
+        .as_deref()
+        .and_then(|thread_id| thread_project_id(store.as_ref(), thread_id));
+    emit_threads_updated(&app, project_id, thread_id)?;
     Ok(session)
 }
 

@@ -5700,6 +5700,20 @@ impl SessionStore for SqliteStore {
         Ok(rounds)
     }
 
+    fn get_plan_task_thread_id(&self, task_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT r.thread_id
+             FROM thread_plan_tasks t
+             INNER JOIN thread_plan_rounds r ON r.id = t.round_id
+             WHERE t.id = ?",
+            params![task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     fn update_plan_task_status(
         &self,
         task_id: &str,

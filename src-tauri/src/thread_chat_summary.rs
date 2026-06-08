@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
 
@@ -14,11 +14,12 @@ pub struct ThreadChatSummaryCache {
 struct ThreadChatSummaryCacheInner {
     store: Arc<dyn SessionStore>,
     state: RwLock<ThreadChatSummaryState>,
+    refresh_lock: Mutex<()>,
 }
 
 #[derive(Default)]
 struct ThreadChatSummaryState {
-    loaded: bool,
+    all_loaded: bool,
     by_thread: HashMap<String, ThreadChatSummaryInfo>,
     by_project: HashMap<String, Vec<String>>,
 }
@@ -29,15 +30,21 @@ impl ThreadChatSummaryCache {
             inner: Arc::new(ThreadChatSummaryCacheInner {
                 store,
                 state: RwLock::new(ThreadChatSummaryState::default()),
+                refresh_lock: Mutex::new(()),
             }),
         }
     }
 
     pub fn warm(&self) -> Result<()> {
-        self.refresh_all()
+        self.ensure_loaded()
     }
 
     pub fn refresh_all(&self) -> Result<()> {
+        let _refresh = self.inner.refresh_lock.lock().unwrap();
+        self.refresh_all_inner()
+    }
+
+    fn refresh_all_inner(&self) -> Result<()> {
         let summaries = build_all_summaries(self.inner.store.as_ref())?;
         let mut by_thread = HashMap::new();
         let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
@@ -51,7 +58,7 @@ impl ThreadChatSummaryCache {
         sort_project_threads(&mut by_project, &by_thread);
         let mut state = self.inner.state.write().unwrap();
         *state = ThreadChatSummaryState {
-            loaded: true,
+            all_loaded: true,
             by_thread,
             by_project,
         };
@@ -59,7 +66,16 @@ impl ThreadChatSummaryCache {
     }
 
     pub fn refresh_project(&self, project_id: &str) -> Result<()> {
-        let summaries = build_project_summaries(self.inner.store.as_ref(), project_id)?;
+        let _refresh = self.inner.refresh_lock.lock().unwrap();
+        self.refresh_project_inner(project_id)
+    }
+
+    fn refresh_project_inner(&self, project_id: &str) -> Result<()> {
+        let summaries = match build_project_summaries(self.inner.store.as_ref(), project_id) {
+            Ok(summaries) => summaries,
+            Err(error) if project_missing_error(&error) => Vec::new(),
+            Err(error) => return Err(error),
+        };
         let mut state = self.inner.state.write().unwrap();
         for thread_id in state.by_project.remove(project_id).unwrap_or_default() {
             state.by_thread.remove(&thread_id);
@@ -72,15 +88,12 @@ impl ThreadChatSummaryCache {
         ids.sort_by(|a, b| {
             summary_sort_time(&state.by_thread, b).cmp(&summary_sort_time(&state.by_thread, a))
         });
-        if !ids.is_empty() {
-            state.by_project.insert(project_id.to_string(), ids);
-        }
-        state.loaded = true;
+        state.by_project.insert(project_id.to_string(), ids);
         Ok(())
     }
 
     pub fn list_project(&self, project_id: &str) -> Result<Vec<ThreadChatSummaryInfo>> {
-        self.ensure_loaded()?;
+        self.ensure_project_loaded(project_id)?;
         let state = self.inner.state.read().unwrap();
         let Some(ids) = state.by_project.get(project_id) else {
             return Ok(Vec::new());
@@ -100,10 +113,29 @@ impl ThreadChatSummaryCache {
     }
 
     fn ensure_loaded(&self) -> Result<()> {
-        if self.inner.state.read().unwrap().loaded {
+        if self.inner.state.read().unwrap().all_loaded {
             return Ok(());
         }
-        self.refresh_all()
+        let _refresh = self.inner.refresh_lock.lock().unwrap();
+        if self.inner.state.read().unwrap().all_loaded {
+            return Ok(());
+        }
+        self.refresh_all_inner()
+    }
+
+    fn ensure_project_loaded(&self, project_id: &str) -> Result<()> {
+        let state = self.inner.state.read().unwrap();
+        if state.all_loaded || state.by_project.contains_key(project_id) {
+            return Ok(());
+        }
+        drop(state);
+        let _refresh = self.inner.refresh_lock.lock().unwrap();
+        let state = self.inner.state.read().unwrap();
+        if state.all_loaded || state.by_project.contains_key(project_id) {
+            return Ok(());
+        }
+        drop(state);
+        self.refresh_project_inner(project_id)
     }
 }
 
@@ -126,6 +158,10 @@ fn build_project_summaries(
 ) -> Result<Vec<ThreadChatSummaryInfo>> {
     let session_lookup = session_lookup(store)?;
     build_project_summaries_with_lookup(store, project_id, &session_lookup)
+}
+
+fn project_missing_error(error: &anyhow::Error) -> bool {
+    error.to_string().starts_with("project not found:")
 }
 
 fn build_project_summaries_with_lookup(

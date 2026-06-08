@@ -467,6 +467,7 @@ pub trait SessionStore: Send + Sync {
     fn create_plan_round(&self, round: NewPlanRound<'_>) -> Result<PlanRoundInfo>;
     fn get_plan_round(&self, round_id: &str) -> Result<Option<PlanRoundInfo>>;
     fn list_plan_rounds(&self, thread_id: &str) -> Result<Vec<PlanRoundInfo>>;
+    fn get_plan_task_thread_id(&self, task_id: &str) -> Result<Option<String>>;
     fn update_plan_task_status(
         &self,
         task_id: &str,
