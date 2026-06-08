@@ -42,6 +42,7 @@ import {
   getThreadWorkState,
   listAstraRuns,
   listPlanRounds,
+  respondAgentPermission,
   updatePlanTaskStatus,
 } from "../api";
 import ChatComposer, { NewChatMenuButton } from "../components/ChatComposer";
@@ -55,7 +56,13 @@ import {
 import { useChatComposer } from "../hooks/useChatComposer";
 import { localeTag, useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
-import type { AcpRenderBlock, LiveRuntimeAction, LiveRuntimeState, LiveTurn } from "../runtimeChat";
+import type {
+  AcpPermissionRequest,
+  AcpRenderBlock,
+  LiveRuntimeAction,
+  LiveRuntimeState,
+  LiveTurn,
+} from "../runtimeChat";
 import { sessionDisplayTitle } from "../appUtils";
 import {
   buildThreadSessionLanes,
@@ -80,6 +87,7 @@ import { projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { MarkdownContent, type MarkdownImage } from "./ChatPage";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result", "task_dispatch"]);
+const LANE_PREVIEW_ITEM_LIMIT = 12;
 
 export default function ThreadMultiSessionChatPage({
   project,
@@ -855,6 +863,7 @@ type LanePreviewItem = {
   markdown: boolean;
   tone: "normal" | "muted" | "danger";
   timestamp: number | null;
+  permission?: AcpPermissionRequest | null;
 };
 
 function ThreadSessionLanePreview({ lane }: { lane: ThreadSessionLane }) {
@@ -904,46 +913,55 @@ function ThreadSessionLanePreview({ lane }: { lane: ThreadSessionLane }) {
     sessionMessageCount,
   ]);
 
-  const preview = useMemo(
-    () => latestLanePreviewItem(lane.liveSession?.turns ?? [], t) ?? latestLanePreviewItem(historyTurns, t),
-    [historyTurns, lane.liveSession?.turns, t],
+  const livePreviewItems = useMemo(
+    () => lanePreviewItems(lane.liveSession?.turns ?? [], t),
+    [lane.liveSession?.turns, t],
   );
+  const historyPreviewItems = useMemo(
+    () => lanePreviewItems(historyTurns, t),
+    [historyTurns, t],
+  );
+  const previewItems = livePreviewItems.length > 0 ? livePreviewItems : historyPreviewItems;
   const emptyText = lanePreviewEmptyText({
     lane,
     loading,
     loadError,
     t,
   });
-  const visiblePreview = preview ?? (
+  const visiblePreviewItems = previewItems.length > 0 ? previewItems : (
     loadError
-      ? {
+      ? [{
         key: `error:${loadError}`,
         label: t("thread.preview_error"),
         text: loadError,
         markdown: false,
         tone: "danger" as const,
         timestamp: null,
-      }
-      : null
+      }]
+      : []
   );
+  const latestPreview = visiblePreviewItems.at(-1) ?? null;
+  const previewFingerprint = visiblePreviewItems
+    .map((item) => `${item.key}:${item.text.length}:${item.timestamp ?? ""}`)
+    .join("|");
 
   useEffect(() => {
     const viewport = previewScrollRef.current;
     if (!viewport) return;
     viewport.scrollTop = viewport.scrollHeight;
-  }, [visiblePreview?.key, visiblePreview?.text]);
+  }, [previewFingerprint]);
 
   return (
     <div className="min-h-0 overflow-hidden rounded-md border border-card-border/[0.12] bg-card-panel">
       <div className="flex h-8 items-center justify-between gap-2 border-b border-card-border/[0.10] px-2.5">
         <div className="min-w-0 truncate text-caption font-medium text-ink/48">
-          {visiblePreview?.label ?? t("thread.preview_latest")}
+          {latestPreview?.label ?? t("thread.preview_latest")}
         </div>
         {loading ? (
           <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-ink/32" />
-        ) : visiblePreview?.timestamp ? (
+        ) : latestPreview?.timestamp ? (
           <span className="shrink-0 text-meta text-ink/28">
-            {formatPreviewTime(visiblePreview.timestamp)}
+            {formatPreviewTime(latestPreview.timestamp)}
           </span>
         ) : null}
       </div>
@@ -953,16 +971,18 @@ function ThreadSessionLanePreview({ lane }: { lane: ThreadSessionLane }) {
         viewportClassName="px-3 py-2.5"
         persistScrollbars
       >
-        {visiblePreview ? (
-          visiblePreview.markdown ? (
-            <div className={lanePreviewTextClass(visiblePreview.tone)}>
-              <MarkdownContent text={visiblePreview.text} onPreviewImage={onPreviewImage} />
-            </div>
-          ) : (
-            <pre className={lanePreviewPlainTextClass(visiblePreview.tone)}>
-              {visiblePreview.text}
-            </pre>
-          )
+        {visiblePreviewItems.length > 0 ? (
+          <div className="grid gap-2">
+            {visiblePreviewItems.map((item) => (
+              <LanePreviewItemView
+                key={item.key}
+                item={item}
+                sessioRuntimeSessionId={lane.sessioRuntimeSessionId}
+                live={Boolean(lane.liveSession && !lane.liveSession.ended)}
+                onPreviewImage={onPreviewImage}
+              />
+            ))}
+          </div>
         ) : (
           <div className="flex h-full min-h-[136px] items-center justify-center px-2 text-center">
             <div className="max-w-[300px]">
@@ -979,9 +999,126 @@ function ThreadSessionLanePreview({ lane }: { lane: ThreadSessionLane }) {
           </div>
         )}
       </ScrollArea>
-      {loadError && preview && (
+      {loadError && previewItems.length > 0 && (
         <div className="border-t border-status-error/15 px-2.5 py-1.5 text-meta text-status-error/80">
           {loadError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LanePreviewItemView({
+  item,
+  sessioRuntimeSessionId,
+  live,
+  onPreviewImage,
+}: {
+  item: LanePreviewItem;
+  sessioRuntimeSessionId: string | null;
+  live: boolean;
+  onPreviewImage: (image: MarkdownImage) => void;
+}) {
+  return (
+    <div className="min-w-0 rounded-md bg-card/[0.72] px-2.5 py-2">
+      <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
+        <span className="min-w-0 truncate text-meta font-medium text-ink/42">
+          {item.label}
+        </span>
+        {item.timestamp && (
+          <span className="shrink-0 text-meta text-ink/24">
+            {formatPreviewTime(item.timestamp)}
+          </span>
+        )}
+      </div>
+      {item.markdown ? (
+        <div className={lanePreviewTextClass(item.tone)}>
+          <MarkdownContent text={item.text} onPreviewImage={onPreviewImage} />
+        </div>
+      ) : (
+        <pre className={lanePreviewPlainTextClass(item.tone)}>
+          {item.text}
+        </pre>
+      )}
+      {item.permission && sessioRuntimeSessionId && (
+        <LanePermissionActions
+          permission={item.permission}
+          sessioRuntimeSessionId={sessioRuntimeSessionId}
+          live={live}
+        />
+      )}
+    </div>
+  );
+}
+
+function LanePermissionActions({
+  permission,
+  sessioRuntimeSessionId,
+  live,
+}: {
+  permission: AcpPermissionRequest;
+  sessioRuntimeSessionId: string;
+  live: boolean;
+}) {
+  const [pendingChoice, setPendingChoice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const resolved = Boolean(permission.selectedOptionId || permission.cancelled);
+  const options = permission.options.length > 0
+    ? permission.options
+    : [
+        { optionId: "allow_once", name: "Allow once", kind: "allow_once", meta: null },
+        { optionId: "reject_once", name: "Reject once", kind: "reject_once", meta: null },
+      ];
+  const detail = permissionPreviewDetail(permission);
+  const canRespond = live && !resolved && !pendingChoice;
+  const respond = (optionId: string) => {
+    if (!canRespond) return;
+    setPendingChoice(optionId);
+    setError(null);
+    respondAgentPermission(sessioRuntimeSessionId, permission.requestId, optionId)
+      .catch((err) => {
+        setError(String(err));
+        setPendingChoice(null);
+      });
+  };
+
+  return (
+    <div className="mt-2 overflow-hidden rounded-md border border-status-warn/25 bg-status-warn/[0.055]">
+      <div className="border-b border-status-warn/20 px-2.5 py-1.5">
+        <div className="text-caption font-medium text-ink/65">
+          {permissionStatusText(permission, pendingChoice, live)}
+        </div>
+        {detail.reason && (
+          <div className="mt-0.5 truncate text-meta text-ink/42" title={detail.reason}>
+            {detail.reason}
+          </div>
+        )}
+        {detail.command && (
+          <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap break-words rounded bg-ink/[0.05] px-2 py-1 font-mono text-meta leading-relaxed text-ink/62">
+            {detail.command}
+          </pre>
+        )}
+      </div>
+      {!resolved && (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))]">
+          {options.map((option) => (
+            <button
+              key={option.optionId}
+              type="button"
+              disabled={!canRespond}
+              onClick={() => respond(option.optionId)}
+              className="min-w-0 border-r border-status-warn/20 px-2.5 py-1.5 text-left text-caption font-medium text-ink/68 transition last:border-r-0 hover:bg-status-warn/[0.09] hover:text-ink/86 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="block truncate">
+                {pendingChoice === option.optionId ? "Applying..." : option.name}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {error && (
+        <div className="border-t border-status-error/20 px-2.5 py-1.5 text-meta text-status-error">
+          {error}
         </div>
       )}
     </div>
@@ -992,50 +1129,48 @@ function normalizeSessionHistoryTurns(turns: unknown[] | undefined): LiveTurn[] 
   return Array.isArray(turns) ? (turns as LiveTurn[]) : [];
 }
 
-function latestLanePreviewItem(
+function lanePreviewItems(
   turns: LiveTurn[],
   t: (key: string, vars?: Record<string, string | number>) => string,
-): LanePreviewItem | null {
-  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
-    const turn = turns[turnIndex];
-    for (let blockIndex = turn.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
-      const block = turn.blocks[blockIndex];
-      if (block.kind !== "assistant") continue;
-      const item = previewItemForBlock(block, turn, blockIndex, t, false);
-      if (item) return item;
-    }
-  }
-
-  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
-    const turn = turns[turnIndex];
+): LanePreviewItem[] {
+  const primary: LanePreviewItem[] = [];
+  const userFallback: LanePreviewItem[] = [];
+  for (const turn of turns) {
+    turn.blocks.forEach((block, blockIndex) => {
+      const includeUser = block.kind === "user";
+      const item = previewItemForBlock(block, turn, blockIndex, t, includeUser);
+      if (!item) return;
+      if (block.kind === "user") userFallback.push(item);
+      else primary.push(item);
+    });
     if (turn.error) {
-      return {
+      primary.push({
         key: `${turn.turnId}:turn-error`,
         label: t("thread.preview_error"),
         text: turn.error.message,
         markdown: false,
         tone: "danger",
         timestamp: turn.updatedAt,
-      };
-    }
-    for (let blockIndex = turn.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
-      const block = turn.blocks[blockIndex];
-      if (block.kind === "assistant" || block.kind === "user") continue;
-      const item = previewItemForBlock(block, turn, blockIndex, t, false);
-      if (item) return item;
+      });
     }
   }
+  return limitLanePreviewItems(primary.length > 0 ? primary : userFallback);
+}
 
-  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
-    const turn = turns[turnIndex];
-    for (let blockIndex = turn.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
-      const block = turn.blocks[blockIndex];
-      if (block.kind !== "user") continue;
-      const item = previewItemForBlock(block, turn, blockIndex, t, true);
-      if (item) return item;
-    }
+function limitLanePreviewItems(items: LanePreviewItem[]): LanePreviewItem[] {
+  if (items.length <= LANE_PREVIEW_ITEM_LIMIT) return items;
+  const limited = items.slice(-LANE_PREVIEW_ITEM_LIMIT);
+  const pendingPermission = items
+    .slice()
+    .reverse()
+    .find((item) => item.permission && !isPermissionResolved(item.permission));
+  if (!pendingPermission || limited.some((item) => item.key === pendingPermission.key)) {
+    return limited;
   }
-  return null;
+  return [
+    pendingPermission,
+    ...limited.slice(-(LANE_PREVIEW_ITEM_LIMIT - 1)),
+  ];
 }
 
 function previewItemForBlock(
@@ -1107,7 +1242,68 @@ function previewItemForBlock(
       markdown: false,
       tone: "muted",
       timestamp: block.timestamp ?? turn.updatedAt,
+      permission,
     };
+  }
+  return null;
+}
+
+function isPermissionResolved(permission: AcpPermissionRequest): boolean {
+  return Boolean(permission.selectedOptionId || permission.cancelled);
+}
+
+function permissionStatusText(
+  permission: AcpPermissionRequest,
+  pendingChoice: string | null,
+  live: boolean,
+): string {
+  if (pendingChoice) return "Applying permission decision";
+  if (permission.cancelled) return "Cancelled";
+  if (permission.selectedOptionId) return `Resolved - ${permission.selectedOptionId}`;
+  if (!live) return "Waiting for live session";
+  return "Waiting for approval";
+}
+
+function permissionPreviewDetail(permission: AcpPermissionRequest): {
+  reason: string | null;
+  command: string | null;
+} {
+  const input = parseMaybeJsonObject(permission.input);
+  const raw = parseMaybeJsonObject(permission.raw);
+  const rawToolCall = parseMaybeJsonObject(permission.toolCall);
+  const toolFields = parseMaybeJsonObject(rawToolCall?.fields) ?? rawToolCall;
+  const reason =
+    pickString(input?.reason) ??
+    pickString(toolFields?.reason) ??
+    pickString(raw?.reason) ??
+    pickString(raw?.description) ??
+    permission.toolName;
+  const command =
+    pickPermissionCommand(input) ??
+    pickPermissionCommand(toolFields) ??
+    pickPermissionCommand(raw);
+  return { reason, command };
+}
+
+function pickPermissionCommand(record: Record<string, unknown> | null): string | null {
+  if (!record) return null;
+  const direct =
+    pickString(record.command) ??
+    pickString(record.cmd) ??
+    pickString(record.input);
+  if (direct) return direct;
+  for (const key of ["command", "cmd", "parsedCommand"]) {
+    const value = record[key];
+    if (!Array.isArray(value)) continue;
+    const parts = value
+      .map((item) => {
+        const parsed = parseMaybeJsonObject(item);
+        return parsed
+          ? pickString(parsed.cmd) ?? pickString(parsed.command)
+          : pickString(item);
+      })
+      .filter((item): item is string => Boolean(item));
+    if (parts.length > 0) return parts.join(key === "parsedCommand" ? "\n" : " ");
   }
   return null;
 }
@@ -1233,6 +1429,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function pickString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function stringField(value: Record<string, unknown>, key: string): string | null {

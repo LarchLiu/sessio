@@ -10,7 +10,7 @@ use crate::agents::sources::shared::convert::{
 };
 use crate::agents::sources::types::{
     AgentKind, MessageEvent, PathEvent, PathEventKind, SessionRecord, SessionSource,
-    SourceIndexTask, SourceKind, WatchPurpose, WatchRoot,
+    SourceIndexTask, SourceKind, WatchRoot,
 };
 use crate::models::Agent;
 
@@ -26,15 +26,9 @@ impl AgentSource for PiSource {
     }
 
     fn roots(&self) -> Result<Vec<WatchRoot>> {
-        Ok(parser::root_dir()?
-            .into_iter()
-            .map(|path| WatchRoot {
-                agent: self.agent(),
-                path,
-                recursive: true,
-                purpose: WatchPurpose::Sessions,
-            })
-            .collect())
+        // Pi/AstraPi session files are discovered by polling after final
+        // transcript persistence; live streaming must not trigger watcher IO.
+        Ok(Vec::new())
     }
 
     fn discover(&self) -> Result<Vec<SessionSource>> {

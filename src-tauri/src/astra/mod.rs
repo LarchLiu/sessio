@@ -54,6 +54,7 @@ pub const ASTRA_EVENT_NAME: &str = "astra-run-event";
 const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
+const ENABLE_ASTRA_PI_SESSION_PERSISTENCE: bool = false;
 
 fn validate_assistant_routed_astra_tasks(tasks: &[AstraTaskProposal]) -> Result<()> {
     if let Some(task) = tasks.iter().find(|task| task.target_stage_id.is_some()) {
@@ -217,12 +218,14 @@ pub fn bundled_astra_pi_acp_command() -> Option<String> {
     }
     let session_dir = astra_session_dir();
     let agent_dir = astra_agent_dir();
-    if let Err(error) = std::fs::create_dir_all(&session_dir) {
-        log::warn!(
-            "[astra:astra-pi-acp] failed to create session dir {}: {error}",
-            session_dir.display()
-        );
-        return None;
+    if ENABLE_ASTRA_PI_SESSION_PERSISTENCE {
+        if let Err(error) = std::fs::create_dir_all(&session_dir) {
+            log::warn!(
+                "[astra:astra-pi-acp] failed to create session dir {}: {error}",
+                session_dir.display()
+            );
+            return None;
+        }
     }
     if let Err(error) = std::fs::create_dir_all(&agent_dir) {
         log::warn!(
@@ -235,6 +238,7 @@ pub fn bundled_astra_pi_acp_command() -> Option<String> {
         &executable,
         &session_dir,
         &agent_dir,
+        ENABLE_ASTRA_PI_SESSION_PERSISTENCE,
     ))
 }
 
@@ -242,19 +246,21 @@ fn astra_pi_acp_stdio_command_json(
     executable: &std::path::Path,
     session_dir: &std::path::Path,
     agent_dir: &std::path::Path,
+    persist_sessions: bool,
 ) -> String {
-    json!({
-        "type": "stdio",
-        "name": "astra-pi",
-        "command": executable,
-        "args": [
+    let args = if persist_sessions {
+        json!([
             "--session-dir",
             session_dir,
             "--session-durability",
             "strict",
             "--acp",
-        ],
-        "env": [
+        ])
+    } else {
+        json!(["--no-session", "--acp"])
+    };
+    let env = if persist_sessions {
+        json!([
             {
                 "name": "PI_CODING_AGENT_DIR",
                 "value": agent_dir,
@@ -263,7 +269,21 @@ fn astra_pi_acp_stdio_command_json(
                 "name": "PI_SESSIONS_DIR",
                 "value": session_dir,
             },
-        ],
+        ])
+    } else {
+        json!([
+            {
+                "name": "PI_CODING_AGENT_DIR",
+                "value": agent_dir,
+            },
+        ])
+    };
+    json!({
+        "type": "stdio",
+        "name": "astra-pi",
+        "command": executable,
+        "args": args,
+        "env": env,
     })
     .to_string()
 }
@@ -411,7 +431,15 @@ impl AstraService {
             AgentRuntimeEventPayload::SessionStarted { metadata, .. } => {
                 metadata.contains_key("astraRunId")
             }
-            _ => runtime_filter.event_session_metadata_has(payload, "astraRunId"),
+            AgentRuntimeEventPayload::TurnStarted { .. }
+            | AgentRuntimeEventPayload::TextDelta { .. }
+            | AgentRuntimeEventPayload::TurnCompleted { .. }
+            | AgentRuntimeEventPayload::TurnError { .. }
+            | AgentRuntimeEventPayload::TurnCancelled { .. }
+            | AgentRuntimeEventPayload::SessionEnded { .. } => {
+                runtime_filter.event_session_metadata_has(payload, "astraRunId")
+            }
+            _ => false,
         })?;
         let service = self.clone();
         thread::spawn(move || {
@@ -1175,6 +1203,7 @@ impl AstraService {
                 "agent": agent,
             }),
         );
+        self.emit_threads_updated(&run);
         log::info!(
             "[astra:task:delegated] runId={} threadId={} taskId={} threadStageId={:?} agentSessionId={} runtimeSessionId={}",
             run.run_id,
@@ -1432,6 +1461,16 @@ impl AstraService {
             },
         );
     }
+
+    fn emit_threads_updated(&self, run: &AstraRun) {
+        let _ = self.inner.app.emit(
+            "threads_updated",
+            json!({
+                "projectId": run.project_id,
+                "threadId": run.thread_id,
+            }),
+        );
+    }
 }
 
 impl AstraService {
@@ -1598,7 +1637,7 @@ fn record_and_link_ready_delegated_session(
         archived: false,
         subagents: Vec::new(),
     };
-    store.upsert_session(&session.file_path, &session)?;
+    store.upsert_skipped_session(&session.file_path, &session)?;
 
     if let Some(stage_id) = resolved_thread_stage_id {
         store
@@ -2348,37 +2387,25 @@ mod tests {
     }
 
     #[test]
-    fn astra_pi_acp_stdio_command_sets_session_dir_env_and_strict_durability() {
+    fn astra_pi_acp_stdio_command_disables_session_persistence() {
         let command = astra_pi_acp_stdio_command_json(
             std::path::Path::new("/tmp/astra-pi"),
             std::path::Path::new("/tmp/sessions"),
             std::path::Path::new("/tmp/agent"),
+            ENABLE_ASTRA_PI_SESSION_PERSISTENCE,
         );
         let value: Value = serde_json::from_str(&command).unwrap();
 
         assert_eq!(value["command"], "/tmp/astra-pi");
         assert_eq!(value["name"], "astra-pi");
-        assert_eq!(
-            value["args"],
-            json!([
-                "--session-dir",
-                "/tmp/sessions",
-                "--session-durability",
-                "strict",
-                "--acp"
-            ])
-        );
+        assert_eq!(value["args"], json!(["--no-session", "--acp"]));
         assert_eq!(
             value["env"],
             json!([
                 {
                     "name": "PI_CODING_AGENT_DIR",
                     "value": "/tmp/agent",
-                },
-                {
-                    "name": "PI_SESSIONS_DIR",
-                    "value": "/tmp/sessions",
-                },
+                }
             ])
         );
     }

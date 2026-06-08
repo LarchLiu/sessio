@@ -75,6 +75,9 @@ pub(crate) enum RuntimePermissionDecision {
 }
 
 const LIVE_RUNTIME_SNAPSHOT_THROTTLE_MS: u64 = 160;
+const ENABLE_LIVE_RUNTIME_SNAPSHOTS: bool = true;
+const RUNTIME_INPUT_DISPLAY_TEXT_OPTION: &str = "displayText";
+const RUNTIME_INPUT_SUPPRESS_OPTIMISTIC_OPTION: &str = "suppressOptimisticUserMessage";
 
 impl RuntimeManager {
     pub fn new(app: AppHandle) -> Self {
@@ -495,13 +498,17 @@ impl RuntimeManager {
                 );
             }
             state.active_turn_id = Some(turn_id.clone());
-            apply_optimistic_user_message(
-                &mut state.turn_state,
-                &turn_id,
-                &input.text,
-                &input.attachments,
-                now_ms(),
-            );
+            if !input_option_bool(&input.options, RUNTIME_INPUT_SUPPRESS_OPTIMISTIC_OPTION) {
+                let display_text = input_option_string(&input.options, RUNTIME_INPUT_DISPLAY_TEXT_OPTION)
+                    .unwrap_or(input.text.as_str());
+                apply_optimistic_user_message(
+                    &mut state.turn_state,
+                    &turn_id,
+                    display_text,
+                    &input.attachments,
+                    now_ms(),
+                );
+            }
             state
                 .turn_cancellations
                 .insert(turn_id.clone(), cancel_token.clone());
@@ -952,7 +959,11 @@ impl RuntimeManager {
             payload,
         };
         let should_emit_runtime_event = should_emit_runtime_event_to_webview(&event.payload);
-        let snapshot_session_id = self.apply_event_to_turn_state(&event);
+        let snapshot_session_id = if ENABLE_LIVE_RUNTIME_SNAPSHOTS {
+            self.apply_event_to_turn_state(&event)
+        } else {
+            None
+        };
         self.notify_event_listeners(&event);
         if should_emit_runtime_event {
             self.inner
@@ -1240,6 +1251,24 @@ fn option_string(options: &super::types::RuntimeMetadata, key: &str) -> Option<S
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn input_option_string<'a>(
+    options: &'a super::types::RuntimeMetadata,
+    key: &str,
+) -> Option<&'a str> {
+    options
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn input_option_bool(options: &super::types::RuntimeMetadata, key: &str) -> bool {
+    options
+        .get(key)
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

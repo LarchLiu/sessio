@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     partial            INTEGER NOT NULL DEFAULT 0,
     available          INTEGER NOT NULL DEFAULT 1,
     archived           INTEGER NOT NULL DEFAULT 0,
+    skip               INTEGER NOT NULL DEFAULT 0,
     last_indexed_at    INTEGER NOT NULL,
     PRIMARY KEY (agent, session_id, scope)
 );
@@ -730,6 +731,13 @@ const SCHEMA_CURRENT_SESSION_RENAME_TITLE: &str = r#"
 ALTER TABLE sessions ADD COLUMN rename_title TEXT;
 "#;
 
+// Current-schema backfill for databases created before thread live sessions
+// gained an internal "hide from ordinary session list" flag. This is applied
+// fault-tolerantly without bumping schema_migrations.
+const SCHEMA_CURRENT_SESSION_SKIP: &str = r#"
+ALTER TABLE sessions ADD COLUMN skip INTEGER NOT NULL DEFAULT 0;
+"#;
+
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
     planner_backend, round_index, round_limit, terminal_reason,
     last_error_code, last_error_message, internal_planner_session_ids_json,
@@ -809,6 +817,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         seed_builtins(conn)?;
     }
+    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SKIP);
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
 }
@@ -1620,12 +1629,39 @@ fn delete_duplicate_session_rows(
     agent: Agent,
     session_id: &str,
     keep_scope: &str,
+    force_skip: bool,
 ) -> Result<()> {
+    preserve_session_skip(conn, agent, session_id, keep_scope, force_skip)?;
     conn.execute(
         "DELETE FROM sessions
          WHERE agent = ? AND session_id = ? AND scope != ?",
         params![agent.as_str(), session_id, keep_scope],
     )?;
+    Ok(())
+}
+
+fn preserve_session_skip(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+    scope: &str,
+    force_skip: bool,
+) -> Result<()> {
+    let existing_skip: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(skip), 0)
+         FROM sessions
+         WHERE agent = ? AND session_id = ?",
+        params![agent.as_str(), session_id],
+        |row| row.get(0),
+    )?;
+    if force_skip || existing_skip != 0 {
+        conn.execute(
+            "UPDATE sessions
+             SET skip = 1
+             WHERE agent = ? AND session_id = ? AND scope = ?",
+            params![agent.as_str(), session_id, scope],
+        )?;
+    }
     Ok(())
 }
 
@@ -1674,7 +1710,7 @@ struct ExistingPlaceholder {
     scope: String,
 }
 
-fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
+fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: bool) -> Result<()> {
     let identity_rows = load_identity_session_rows(conn, s.agent, &s.id)?;
     let incoming_real = is_real_session_file_path(&s.file_path);
     let existing_real = identity_rows
@@ -1730,7 +1766,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, &existing.scope)?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, &existing.scope, force_skip)?;
             return Ok(());
         }
     }
@@ -1771,7 +1807,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
             return Ok(());
         }
         if let Some(existing) = existing_real.clone().filter(|row| row.scope != scope) {
@@ -1810,7 +1846,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
             return Ok(());
         }
         if let Some(existing) = existing_placeholder(conn, s.agent, &s.id, scope, s)? {
@@ -1823,6 +1859,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                 params![s.agent.as_str(), s.id, scope],
                 |_| Ok(()),
             ).optional()?.is_some() {
+                preserve_session_skip(conn, s.agent, &s.id, scope, force_skip)?;
                 conn.execute(
                     "DELETE FROM sessions
                      WHERE agent = ? AND session_id = ? AND scope = ?",
@@ -1861,7 +1898,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                         existing.scope,
                     ],
                 )?;
-                delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+                delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
                 return Ok(());
             }
         }
@@ -1912,7 +1949,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                 existing_same_scope.scope,
             ],
         )?;
-        delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+        delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
         return Ok(());
     }
     let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
@@ -1949,7 +1986,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
             forked_from_id,
         ],
     )?;
-    delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
+    delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
     // Subagent rows are written through upsert_subagent so their lifecycle
     // is independent from the parent session's reindex.
     Ok(())
@@ -2478,7 +2515,7 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
         "SELECT p.id, p.path, p.name, p.workflow_id, p.created_at, p.updated_at,
                 COUNT(s.session_id) AS session_count
          FROM projects p
-         LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
+         LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.skip = 0
          WHERE p.id = ? AND p.archived = 0
          GROUP BY p.id",
         params![project_id],
@@ -4666,6 +4703,7 @@ fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<Sess
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM sessions s
          INNER JOIN projects p ON p.path = s.project_path AND p.archived = 0
+         WHERE s.skip = 0
          ORDER BY s.updated_at DESC"
     } else {
         "SELECT agent, session_id, file_path, project_path, project_name,
@@ -4907,7 +4945,7 @@ impl SessionStore for SqliteStore {
             "SELECT p.id, p.path, p.name, p.workflow_id, p.created_at, p.updated_at,
                     COUNT(s.session_id) AS session_count
              FROM projects p
-             LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
+             LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.skip = 0
              WHERE p.archived = 0
              GROUP BY p.id
              ORDER BY p.updated_at DESC, p.name COLLATE NOCASE ASC",
@@ -7058,7 +7096,12 @@ impl SessionStore for SqliteStore {
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        insert_session(&conn, scope, session)
+        insert_session(&conn, scope, session, false)
+    }
+
+    fn upsert_skipped_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        insert_session(&conn, scope, session, true)
     }
 
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()> {
@@ -7086,7 +7129,7 @@ impl SessionStore for SqliteStore {
             }
         }
         for s in sessions {
-            insert_session(&tx, scope, s)?;
+            insert_session(&tx, scope, s, false)?;
         }
         tx.commit()?;
         Ok(())
@@ -8674,6 +8717,90 @@ mod migration_tests {
         assert_eq!(db_row_count, 1);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn skipped_placeholder_stays_hidden_after_real_path_update() {
+        let path = unique_db("sessio-skipped-placeholder-real-path");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_dir = temp_child_path(&std::env::temp_dir(), "sessio-skipped-placeholder");
+        std::fs::create_dir(&project_dir).unwrap();
+        let project_path = std::fs::canonicalize(&project_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        store
+            .add_project(
+                &project_path,
+                Some("Skipped Placeholder"),
+                "research".to_string(),
+                None,
+            )
+            .unwrap();
+
+        let placeholder = SessionInfo {
+            id: "pi-live-session".to_string(),
+            agent: Agent::AstraPi,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project_path.clone()),
+            project_name: Some("Skipped Placeholder".to_string()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 2,
+            rename_title: None,
+            title: Some("live title".to_string()),
+            first_user_message: Some("live prompt".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_skipped_session("", &placeholder).unwrap();
+        assert!(store.list_sessions().unwrap().is_empty());
+
+        let real_path = project_dir
+            .join("pi-live-session.jsonl")
+            .to_string_lossy()
+            .to_string();
+        let real = SessionInfo {
+            file_path: real_path.clone(),
+            file_size: 128,
+            partial: false,
+            message_count: 4,
+            updated_at: Some(30),
+            ..placeholder
+        };
+        store.upsert_session(&project_path, &real).unwrap();
+
+        assert!(store.list_sessions().unwrap().is_empty());
+        let row = store
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::AstraPi && session.id == "pi-live-session")
+            .unwrap();
+        assert_eq!(row.file_path, real_path);
+        assert!(!row.partial);
+        assert_eq!(row.message_count, 4);
+
+        let skip: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT skip FROM sessions WHERE agent = ? AND session_id = ?",
+                params![Agent::AstraPi.as_str(), "pi-live-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(skip, 1);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_dir);
     }
 
     #[test]

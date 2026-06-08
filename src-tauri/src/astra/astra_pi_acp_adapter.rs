@@ -451,8 +451,10 @@ pub(super) fn prepare_astra_pi_agent_config(
     let agent_dir = PathBuf::from(&config.agent_dir);
     std::fs::create_dir_all(&agent_dir)
         .map_err(|error| AstraPiAcpFailure::new("config_write_failed", error.to_string()))?;
-    std::fs::create_dir_all(&config.session_dir)
-        .map_err(|error| AstraPiAcpFailure::new("config_write_failed", error.to_string()))?;
+    if super::ENABLE_ASTRA_PI_SESSION_PERSISTENCE {
+        std::fs::create_dir_all(&config.session_dir)
+            .map_err(|error| AstraPiAcpFailure::new("config_write_failed", error.to_string()))?;
+    }
 
     let provider_id = provider
         .provider
@@ -479,15 +481,22 @@ pub(super) fn prepare_astra_pi_agent_config(
         .filter(|value| !value.is_empty())
         .unwrap_or("openai-responses");
 
-    let settings = json!({
+    let mut settings = json!({
         "defaultProvider": provider_id,
         "defaultModel": model_id,
         "defaultThinkingLevel": provider.thinking_level.as_deref().unwrap_or("off"),
-        "sessionStore": "jsonl",
-        "sessionDurability": "strict",
         "quietStartup": true,
         "packages": [],
     });
+    if super::ENABLE_ASTRA_PI_SESSION_PERSISTENCE {
+        if let Some(settings) = settings.as_object_mut() {
+            settings.insert("sessionStore".to_string(), Value::String("jsonl".to_string()));
+            settings.insert(
+                "sessionDurability".to_string(),
+                Value::String("strict".to_string()),
+            );
+        }
+    }
     let mut provider_json = serde_json::Map::new();
     provider_json.insert("baseUrl".to_string(), Value::String(base_url.to_string()));
     provider_json.insert("api".to_string(), Value::String(api.to_string()));
@@ -572,10 +581,12 @@ fn internal_astra_pi_acp_meta(
     {
         meta.insert("baseUrl".to_string(), Value::String(base_url.to_string()));
     }
-    meta.insert(
-        "sessionDir".to_string(),
-        Value::String(config.session_dir.clone()),
-    );
+    if super::ENABLE_ASTRA_PI_SESSION_PERSISTENCE {
+        meta.insert(
+            "sessionDir".to_string(),
+            Value::String(config.session_dir.clone()),
+        );
+    }
     meta
 }
 
@@ -1384,8 +1395,8 @@ tasks: []
         assert_eq!(settings["defaultProvider"], "custom-endpoint");
         assert_eq!(settings["defaultModel"], "gpt-test");
         assert_eq!(settings["defaultThinkingLevel"], "high");
-        assert_eq!(settings["sessionStore"], "jsonl");
-        assert_eq!(settings["sessionDurability"], "strict");
+        assert!(settings.get("sessionStore").is_none());
+        assert!(settings.get("sessionDurability").is_none());
         assert_eq!(
             models["providers"]["custom-endpoint"]["baseUrl"],
             "https://example.test/v1"

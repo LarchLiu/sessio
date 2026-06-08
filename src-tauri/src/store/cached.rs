@@ -92,6 +92,43 @@ impl CachedStore {
             available: sub.available,
         }
     }
+
+    fn upsert_session_snapshot(&self, scope: &str, session: &SessionInfo) -> Result<()> {
+        let new_rec = Self::to_indexed_session_only(scope, session);
+        let key = (
+            new_rec.agent,
+            new_rec.session_id.clone(),
+            new_rec.scope.clone(),
+        );
+        let mut snap = self.snapshot.write().unwrap();
+        let placeholder_key = snap
+            .by_pk
+            .iter()
+            .find(|((agent, session_id, scope), rec)| {
+                *agent == new_rec.agent
+                    && session_id == &new_rec.session_id
+                    && scope != &new_rec.scope
+                    && rec.file_size == 0
+                    && rec.available
+            })
+            .map(|(key, _)| key.clone());
+        let placeholder_subs = placeholder_key
+            .as_ref()
+            .and_then(|key| snap.by_pk.remove(key))
+            .map(|rec| rec.subagents)
+            .unwrap_or_default();
+        // Preserve any subagents already attached to this session in the
+        // snapshot; their lifecycle is independent of the main row.
+        let existing_subs = snap
+            .by_pk
+            .get(&key)
+            .map(|r| r.subagents.clone())
+            .unwrap_or(placeholder_subs);
+        let mut rec = new_rec;
+        rec.subagents = existing_subs;
+        snap.by_pk.insert(key, rec);
+        Ok(())
+    }
 }
 
 fn now_ms() -> i64 {
@@ -681,40 +718,12 @@ impl SessionStore for CachedStore {
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         self.inner.upsert_session(scope, session)?;
-        let new_rec = Self::to_indexed_session_only(scope, session);
-        let key = (
-            new_rec.agent,
-            new_rec.session_id.clone(),
-            new_rec.scope.clone(),
-        );
-        let mut snap = self.snapshot.write().unwrap();
-        let placeholder_key = snap
-            .by_pk
-            .iter()
-            .find(|((agent, session_id, scope), rec)| {
-                *agent == new_rec.agent
-                    && session_id == &new_rec.session_id
-                    && scope != &new_rec.scope
-                    && rec.file_size == 0
-                    && rec.available
-            })
-            .map(|(key, _)| key.clone());
-        let placeholder_subs = placeholder_key
-            .as_ref()
-            .and_then(|key| snap.by_pk.remove(key))
-            .map(|rec| rec.subagents)
-            .unwrap_or_default();
-        // Preserve any subagents already attached to this session in the
-        // snapshot; their lifecycle is independent of the main row.
-        let existing_subs = snap
-            .by_pk
-            .get(&key)
-            .map(|r| r.subagents.clone())
-            .unwrap_or(placeholder_subs);
-        let mut rec = new_rec;
-        rec.subagents = existing_subs;
-        snap.by_pk.insert(key, rec);
-        Ok(())
+        self.upsert_session_snapshot(scope, session)
+    }
+
+    fn upsert_skipped_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
+        self.inner.upsert_skipped_session(scope, session)?;
+        self.upsert_session_snapshot(scope, session)
     }
 
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()> {

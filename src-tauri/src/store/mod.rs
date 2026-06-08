@@ -638,6 +638,7 @@ pub trait SessionStore: Send + Sync {
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>>;
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
+    fn upsert_skipped_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(
         &self,
