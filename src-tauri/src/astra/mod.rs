@@ -405,7 +405,14 @@ impl AstraService {
     }
 
     pub fn watch_runtime_events(&self) -> Result<()> {
-        let receiver = self.inner.runtime.subscribe_events()?;
+        let runtime = self.inner.runtime.clone();
+        let runtime_filter = runtime.clone();
+        let receiver = runtime.subscribe_events_filtered(move |payload| match payload {
+            AgentRuntimeEventPayload::SessionStarted { metadata, .. } => {
+                metadata.contains_key("astraRunId")
+            }
+            _ => runtime_filter.event_session_metadata_has(payload, "astraRunId"),
+        })?;
         let service = self.clone();
         thread::spawn(move || {
             for event in receiver {

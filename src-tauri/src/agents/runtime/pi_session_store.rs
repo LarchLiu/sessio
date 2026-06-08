@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -23,6 +24,7 @@ struct PiAcpSessionStoreInner {
     app: AppHandle,
     store: Arc<dyn SessionStore>,
     sessions: Mutex<HashMap<String, PersistedPiSession>>,
+    pending_writes: Mutex<HashMap<String, PendingPiTranscriptBatch>>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +38,14 @@ struct PersistedPiSession {
     message_count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct PendingPiTranscriptBatch {
+    lines: Vec<String>,
+    scheduled: bool,
+}
+
+const PI_TRANSCRIPT_FLUSH_MS: u64 = 250;
+
 impl PiAcpSessionStore {
     pub fn new(app: AppHandle, store: Arc<dyn SessionStore>) -> Self {
         Self {
@@ -43,6 +53,7 @@ impl PiAcpSessionStore {
                 app,
                 store,
                 sessions: Mutex::new(HashMap::new()),
+                pending_writes: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -51,7 +62,18 @@ impl PiAcpSessionStore {
         &self,
         runtime: crate::agents::runtime::RuntimeManager,
     ) -> Result<()> {
-        let receiver = runtime.subscribe_events()?;
+        let runtime_filter = runtime.clone();
+        let receiver = runtime.subscribe_events_filtered(move |payload| {
+            use crate::agents::runtime::types::AgentRuntimeEventPayload;
+
+            match payload {
+                AgentRuntimeEventPayload::SessionStarted { agent, .. } => *agent == Agent::AstraPi,
+                AgentRuntimeEventPayload::AcpProtocolMessage { .. } => {
+                    runtime_filter.event_session_agent(payload) == Some(Agent::AstraPi)
+                }
+                _ => false,
+            }
+        })?;
         let service = self.clone();
         thread::spawn(move || {
             for event in receiver {
@@ -203,18 +225,7 @@ impl PiAcpSessionStore {
                 })?
         };
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .with_context(|| format!("open pi transcript {}", file_path))?;
-        append_protocol_message_to_file(
-            Path::new(&file_path),
-            &mut file,
-            message,
-            timestamp,
-            &workspace_path,
-        )?;
+        let line = protocol_message_line(message, timestamp, &workspace_path)?;
 
         let should_refresh_index = {
             let mut sessions = self
@@ -243,10 +254,70 @@ impl PiAcpSessionStore {
                 || is_turn_terminal_message(message)
         };
 
+        self.queue_protocol_message_line(file_path.clone(), line, should_refresh_index)?;
         if should_refresh_index {
+            self.flush_protocol_messages(&file_path)?;
             self.upsert_session_row(sessio_runtime_session_id)?;
         }
         Ok(())
+    }
+
+    fn queue_protocol_message_line(
+        &self,
+        file_path: String,
+        line: String,
+        immediate: bool,
+    ) -> Result<()> {
+        let should_schedule = {
+            let mut pending = self
+                .inner
+                .pending_writes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pi transcript pending write lock poisoned"))?;
+            let batch =
+                pending
+                    .entry(file_path.clone())
+                    .or_insert_with(|| PendingPiTranscriptBatch {
+                        lines: Vec::new(),
+                        scheduled: false,
+                    });
+            batch.lines.push(line);
+            if immediate || batch.scheduled {
+                false
+            } else {
+                batch.scheduled = true;
+                true
+            }
+        };
+
+        if should_schedule {
+            let service = self.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(PI_TRANSCRIPT_FLUSH_MS));
+                if let Err(error) = service.flush_protocol_messages(&file_path) {
+                    log::warn!("[pi-acp-session-store:flush] {error}");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    fn flush_protocol_messages(&self, file_path: &str) -> Result<()> {
+        let batch = {
+            let mut pending = self
+                .inner
+                .pending_writes
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pi transcript pending write lock poisoned"))?;
+            pending.remove(file_path)
+        };
+        let Some(batch) = batch else {
+            return Ok(());
+        };
+        if batch.lines.is_empty() {
+            return Ok(());
+        }
+        append_protocol_message_lines_to_file(Path::new(file_path), &batch.lines)
     }
 
     fn remember_session_start(
@@ -409,19 +480,27 @@ fn session_workspace_path(message: &AcpProtocolMessage) -> Option<String> {
     }
 }
 
-fn append_protocol_message_to_file(
-    file_path: &Path,
-    file: &mut std::fs::File,
+fn protocol_message_line(
     message: &AcpProtocolMessage,
     timestamp: i64,
     workspace_path: &str,
-) -> Result<()> {
+) -> Result<String> {
     let message = message_with_persistence_meta(message, timestamp, workspace_path);
-    let serialized = serde_json::to_string(&message)?;
-    file.write_all(serialized.as_bytes())
-        .with_context(|| format!("write pi transcript {}", file_path.display()))?;
-    file.write_all(b"\n")
-        .with_context(|| format!("write newline to pi transcript {}", file_path.display()))?;
+    serde_json::to_string(&message).map_err(anyhow::Error::from)
+}
+
+fn append_protocol_message_lines_to_file(file_path: &Path, lines: &[String]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file_path)
+        .with_context(|| format!("open pi transcript {}", file_path.display()))?;
+    for serialized in lines {
+        file.write_all(serialized.as_bytes())
+            .with_context(|| format!("write pi transcript {}", file_path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("write newline to pi transcript {}", file_path.display()))?;
+    }
     file.flush()
         .with_context(|| format!("flush pi transcript {}", file_path.display()))?;
     Ok(())
@@ -463,7 +542,9 @@ fn message_with_persistence_meta(
 
 #[cfg(test)]
 mod tests {
-    use super::message_with_persistence_meta;
+    use super::{
+        append_protocol_message_lines_to_file, message_with_persistence_meta, protocol_message_line,
+    };
     use crate::agents::runtime::types::AcpProtocolMessage;
     use serde_json::json;
 
@@ -496,5 +577,49 @@ mod tests {
             persisted.data["_meta"]["sessio"]["workspacePath"],
             "/tmp/demo"
         );
+    }
+
+    #[test]
+    fn batched_transcript_write_keeps_one_json_message_per_line() {
+        let path = std::env::temp_dir().join(format!(
+            "sessio-pi-batched-transcript-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let message = AcpProtocolMessage {
+            direction: "agent_to_client".to_string(),
+            message_kind: "notification".to_string(),
+            method: "session/update".to_string(),
+            protocol_version: Some("1".to_string()),
+            acp_session_id: Some("pi-session-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            request_id: None,
+            update_type: Some("agent_message_chunk".to_string()),
+            data: json!({
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": [{ "type": "text", "text": "hello" }]
+                }
+            }),
+        };
+        let lines = vec![
+            protocol_message_line(&message, 1_780_912_800_000, "/tmp/demo").unwrap(),
+            protocol_message_line(&message, 1_780_912_800_100, "/tmp/demo").unwrap(),
+        ];
+
+        append_protocol_message_lines_to_file(&path, &lines).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let rows = written.lines().collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let parsed: serde_json::Value = serde_json::from_str(row).unwrap();
+            assert_eq!(parsed["method"], "session/update");
+            assert_eq!(
+                parsed["data"]["_meta"]["sessio"]["workspacePath"],
+                "/tmp/demo"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }

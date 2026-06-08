@@ -39,7 +39,7 @@ struct RuntimeManagerInner {
     sequence: AtomicU64,
     id_counter: AtomicU64,
     sessions: Mutex<HashMap<String, RuntimeSessionState>>,
-    event_listeners: Mutex<Vec<mpsc::Sender<AgentRuntimeEvent>>>,
+    event_listeners: Mutex<Vec<RuntimeEventListener>>,
     snapshot_queue: Mutex<HashMap<String, PendingRuntimeSnapshot>>,
 }
 
@@ -53,6 +53,13 @@ struct RuntimeSessionState {
     turn_cancellations: HashMap<String, Arc<AtomicBool>>,
     permission_waiters: HashMap<String, mpsc::Sender<RuntimePermissionDecision>>,
     acp_controller: Option<AcpSessionController>,
+}
+
+type RuntimeEventFilter = Arc<dyn Fn(&AgentRuntimeEventPayload) -> bool + Send + Sync>;
+
+struct RuntimeEventListener {
+    sender: mpsc::Sender<AgentRuntimeEvent>,
+    filter: RuntimeEventFilter,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,13 +91,56 @@ impl RuntimeManager {
     }
 
     pub fn subscribe_events(&self) -> Result<mpsc::Receiver<AgentRuntimeEvent>> {
+        self.subscribe_events_filtered(|_| true)
+    }
+
+    pub fn subscribe_events_filtered<F>(
+        &self,
+        filter: F,
+    ) -> Result<mpsc::Receiver<AgentRuntimeEvent>>
+    where
+        F: Fn(&AgentRuntimeEventPayload) -> bool + Send + Sync + 'static,
+    {
         let (sender, receiver) = mpsc::channel();
         self.inner
             .event_listeners
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime event listeners lock poisoned"))?
-            .push(sender);
+            .push(RuntimeEventListener {
+                sender,
+                filter: Arc::new(filter),
+            });
         Ok(receiver)
+    }
+
+    pub(crate) fn event_session_agent(&self, payload: &AgentRuntimeEventPayload) -> Option<Agent> {
+        let session_id = event_session_id(payload)?;
+        self.inner
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(session_id).map(|state| state.handle.agent))
+    }
+
+    pub(crate) fn event_session_metadata_has(
+        &self,
+        payload: &AgentRuntimeEventPayload,
+        key: &str,
+    ) -> bool {
+        let session_id = event_session_id(payload);
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        self.inner
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                sessions
+                    .get(session_id)
+                    .map(|state| state.metadata.contains_key(key))
+            })
+            .unwrap_or(false)
     }
 
     pub fn status(&self, agent: Agent) -> RuntimeStatus {
@@ -150,12 +200,22 @@ impl RuntimeManager {
     }
 
     pub fn dispose_session_silent(&self, sessio_runtime_session_id: &str) -> Result<()> {
-        let mut sessions = self
+        let should_emit = self
             .inner
             .sessions
             .lock()
-            .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
-        sessions.remove(sessio_runtime_session_id);
+            .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?
+            .contains_key(sessio_runtime_session_id);
+        if should_emit {
+            self.emit(AgentRuntimeEventPayload::SessionEnded {
+                sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
+            })?;
+        }
+        self.inner
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?
+            .remove(sessio_runtime_session_id);
         Ok(())
     }
 
@@ -918,13 +978,15 @@ impl RuntimeManager {
         let Ok(mut listeners) = self.inner.event_listeners.lock() else {
             return;
         };
-        listeners.retain(|sender| sender.send(event.clone()).is_ok());
+        listeners.retain(|listener| {
+            if !(listener.filter)(&event.payload) {
+                return true;
+            }
+            listener.sender.send(event.clone()).is_ok()
+        });
     }
 
-    fn apply_event_to_turn_state(
-        &self,
-        event: &AgentRuntimeEvent,
-    ) -> Option<String> {
+    fn apply_event_to_turn_state(&self, event: &AgentRuntimeEvent) -> Option<String> {
         let sessio_runtime_session_id = event_session_id(&event.payload)?;
         {
             let mut sessions = self.inner.sessions.lock().ok()?;
