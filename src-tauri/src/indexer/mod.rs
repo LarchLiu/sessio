@@ -6,7 +6,6 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
 use crate::agents::runtime::RuntimeManager;
@@ -346,18 +345,6 @@ fn run_loop(ctx: IndexLoopContext, tx: Sender<IndexTask>, rx: Receiver<IndexTask
             .app
             .emit("sessions_index_status", current_status(&ctx.state));
         if !had_error {
-            for source in affected_sources.values() {
-                let _ = ctx.app.emit(
-                    "session_index_updated",
-                    json!({
-                        "agent": source.agent.as_str(),
-                        "sessionId": source.session_id,
-                        "filePath": source.file_path,
-                        "projectKey": source.project.as_ref().map(|project| project.project_key.as_str()),
-                        "projectPath": source.project.as_ref().and_then(|project| project.project_path.as_deref()),
-                    }),
-                );
-            }
             let _ = ctx.app.emit("sessions_index_updated", ());
         }
     }

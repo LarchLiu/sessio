@@ -86,15 +86,9 @@ export default function AppMain({
     thread: ThreadInfo;
     stage: StageInfo | null;
   } | null>(null);
-  const [threadChatSnapshot, setThreadChatSnapshot] = useState<{
-    thread: ThreadInfo;
-    stage: StageInfo | null;
-    historyTarget: SessionInfo | null;
-  } | null>(null);
 
   const addPendingSession = (pending: PendingNewChatSession) => {
     setNewChatSnapshot(null);
-    setThreadChatSnapshot(null);
     setPendingNewChats((prev) => ({
       ...prev,
       [pending.sessioRuntimeSessionId]: pending,
@@ -103,29 +97,10 @@ export default function AppMain({
 
   const openNewChatForStage = (thread: ThreadInfo, stage: StageInfo | null) => {
     setNewChatSnapshot({ thread, stage });
-    setThreadChatSnapshot(null);
     setSelectedProject(null);
     setSelectedThread(null);
     setSelected(null);
     setDetailMode("chat");
-  };
-
-  const openThreadChatHistory = (thread: ThreadInfo, session: SessionInfo) => {
-    const projectGroup = projectGroups.find((group) => group.project.id === thread.projectId);
-    setNewChatSnapshot(null);
-    setThreadChatSnapshot({ thread, stage: null, historyTarget: session });
-    setSelectedProject(null);
-    setSelectedThread({
-      projectId: thread.projectId,
-      threadId: thread.id,
-      goal: thread.goal,
-    });
-    setSelected(null);
-    setDetailMode("threadChat");
-    if (projectGroup) {
-      setNewChatProjectKey(projectGroup.key);
-      setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
-    }
   };
 
   const projectWorkbenchProps = (project: ProjectInfo) => ({
@@ -141,7 +116,6 @@ export default function AppMain({
     },
     onSelectSession: (session: SessionInfo) => {
       setNewChatSnapshot(null);
-      setThreadChatSnapshot(null);
       setSelectedProject(null);
       setSelectedThread(null);
       setSelected(session);
@@ -150,7 +124,6 @@ export default function AppMain({
     onNewThreadChat: (thread: ThreadInfo) => {
       const projectGroup = projectGroups.find((group) => group.project.id === project.id);
       setNewChatSnapshot({ thread, stage: null });
-      setThreadChatSnapshot(null);
       setSelectedProject(null);
       setSelectedThread(null);
       setSelected(null);
@@ -162,29 +135,9 @@ export default function AppMain({
   });
 
   if (activeProject) {
-    const threadChatProjectKey =
-      projectGroups.find((group) => group.project.id === activeProject.id)?.key ??
-      projectFilterKey(activeProject);
     return (
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {selectedThreadId &&
-        detailRoute === "threadChat" &&
-        threadChatSnapshot?.thread.id === selectedThreadId ? (
-          <ThreadChatPage
-            projects={projectGroups}
-            initialProjectKey={threadChatProjectKey}
-            snapshotContext={threadChatSnapshot}
-            initialHistoryTarget={threadChatSnapshot.historyTarget}
-            runtimeAgents={runtimeAgents}
-            lastRuntimeAgentSelection={lastRuntimeAgentSelection}
-            rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
-            liveState={liveState}
-            dispatchLiveEvent={dispatchLiveEvent}
-            onError={onError}
-            onPendingSession={addPendingSession}
-            onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
-          />
-        ) : selectedThreadId && detailRoute === "threadMultiSessionChat" ? (
+        {selectedThreadId && detailRoute === "threadMultiSessionChat" ? (
           <ThreadMultiSessionChatPage
             project={activeProject}
             threadId={selectedThreadId}
@@ -196,7 +149,6 @@ export default function AppMain({
             pendingNewChats={pendingNewChats}
             dispatchLiveEvent={dispatchLiveEvent}
             onBackToOverview={() => setDetailMode("project")}
-            onOpenThreadSession={openThreadChatHistory}
             onPendingSession={addPendingSession}
             onError={onError}
           />
@@ -206,10 +158,7 @@ export default function AppMain({
             threadId={selectedThreadId}
             onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
             onNewStageChat={openNewChatForStage}
-            onOpenMultiSessionChat={() => {
-              setThreadChatSnapshot(null);
-              setDetailMode("threadMultiSessionChat");
-            }}
+            onOpenMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
             onError={onError}
           />
         ) : (
@@ -235,7 +184,6 @@ export default function AppMain({
           onPendingSession={addPendingSession}
           onSelectSession={(session) => {
             setNewChatSnapshot(null);
-            setThreadChatSnapshot(null);
             setSelectedProject(null);
             setSelectedThread(null);
             setSelected(session);

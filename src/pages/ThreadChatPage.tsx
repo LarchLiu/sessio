@@ -40,12 +40,10 @@ export default function ThreadChatPage({
   onError,
   onPendingSession,
   onSelectSession,
-  initialHistoryTarget = null,
 }: {
   projects: ProjectGroup[];
   initialProjectKey: string | null;
   snapshotContext: { thread: ThreadInfo; stage: StageInfo | null };
-  initialHistoryTarget?: SessionInfo | null;
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
   rememberRuntimeAgentSelection: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -68,7 +66,7 @@ export default function ThreadChatPage({
   const workspacePath = projectGroup?.path ?? null;
   const [threads, setThreads] = useState<ThreadInfo[]>([snapshotContext.thread]);
   const [threadId, setThreadId] = useState(snapshotContext.thread.id);
-  const [historyTarget, setHistoryTarget] = useState<SessionInfo | null>(() => initialHistoryTarget);
+  const [historyTarget, setHistoryTarget] = useState<SessionInfo | null>(null);
   const [historyTurns, setHistoryTurns] = useState<SessionHistoryTurn[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [threadReplay, setThreadReplay] = useState<ThreadReplayInfo | null>(null);
@@ -116,7 +114,7 @@ export default function ThreadChatPage({
   useEffect(() => {
     let cancelled = false;
     setThreads([snapshotContext.thread]);
-    setHistoryTarget(initialHistoryTarget);
+    setHistoryTarget(null);
     setHistoryTurns(null);
     setThreadReplay(null);
     if (!project?.id) return;
@@ -136,7 +134,7 @@ export default function ThreadChatPage({
     return () => {
       cancelled = true;
     };
-  }, [initialHistoryTarget, onError, project?.id, reloadToken, snapshotContext.thread]);
+  }, [onError, project?.id, reloadToken, snapshotContext.thread]);
 
   useEffect(() => {
     if (!historyTarget) {

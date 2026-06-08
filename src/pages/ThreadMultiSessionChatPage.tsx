@@ -6,7 +6,6 @@ import {
   ArrowLeft,
   Bot,
   Clock,
-  ExternalLink,
   GitBranch,
   ListChecks,
   LoaderCircle,
@@ -24,7 +23,6 @@ import type {
   ProjectInfo,
   RuntimeAgentMetadata,
   RuntimeAgentSelection,
-  SessionInfo,
   SetRuntimeAgentSelectionRequest,
   StageInfo,
   ThreadInfo,
@@ -63,7 +61,7 @@ import type {
   LiveRuntimeState,
   LiveTurn,
 } from "../runtimeChat";
-import { isPersistedSession, sessionDisplayTitle, sessionIdentity } from "../appUtils";
+import { isPersistedSession, sessionDisplayTitle } from "../appUtils";
 import {
   buildThreadTimelineRows,
   buildThreadSessionLanes,
@@ -91,14 +89,6 @@ import { MarkdownContent, type MarkdownImage } from "./ChatPage";
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result", "task_dispatch"]);
 const LANE_PREVIEW_ITEM_LIMIT = 12;
 
-type SessionIndexUpdatedEvent = {
-  agent: Agent;
-  sessionId: string;
-  filePath?: string | null;
-  projectKey?: string | null;
-  projectPath?: string | null;
-};
-
 export default function ThreadMultiSessionChatPage({
   project,
   threadId,
@@ -110,7 +100,6 @@ export default function ThreadMultiSessionChatPage({
   pendingNewChats,
   dispatchLiveEvent,
   onBackToOverview,
-  onOpenThreadSession,
   onPendingSession,
   onError,
 }: {
@@ -124,7 +113,6 @@ export default function ThreadMultiSessionChatPage({
   pendingNewChats: Record<string, PendingNewChatSession>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onBackToOverview: () => void;
-  onOpenThreadSession: (thread: ThreadInfo, session: SessionInfo) => void;
   onPendingSession: (session: PendingNewChatSession) => void;
   onError: (error: string | null) => void;
 }) {
@@ -194,14 +182,6 @@ export default function ThreadMultiSessionChatPage({
     }
   }, [load, onError]);
 
-  const refreshReplay = useCallback(async () => {
-    try {
-      setReplay(await getThreadReplay(threadId));
-    } catch (err) {
-      onError(String(err));
-    }
-  }, [onError, threadId]);
-
   const reloadAstraState = useCallback(async () => {
     try {
       const [nextRuns, nextPlanRounds] = await Promise.all([
@@ -247,28 +227,6 @@ export default function ThreadMultiSessionChatPage({
       }),
     [liveState, pendingNewChats, replay, runtimeSessionAliases, t, thread],
   );
-  const laneSessionKeysRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    laneSessionKeysRef.current = new Set(
-      lanes.flatMap((lane) => [
-        sessionIdentity(lane.agent, lane.sessionId),
-        ...(lane.session ? [sessionIdentity(lane.session.agent, lane.session.id)] : []),
-      ]),
-    );
-  }, [lanes]);
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    listen<SessionIndexUpdatedEvent>("session_index_updated", (event) => {
-      const key = sessionIdentity(event.payload.agent, event.payload.sessionId);
-      if (!laneSessionKeysRef.current.has(key)) return;
-      void refreshReplay();
-    }).then((fn) => {
-      unlisten = fn;
-    }).catch((err) => onError(String(err)));
-    return () => {
-      unlisten?.();
-    };
-  }, [onError, refreshReplay]);
   const sortedStages = useMemo(
     () => (thread?.stages ?? []).slice().sort((a, b) => a.order - b.order),
     [thread?.stages],
@@ -288,11 +246,6 @@ export default function ThreadMultiSessionChatPage({
   );
   const canRunStageTask =
     Boolean(thread && thread.kind === "workflow" && activeStage && composer.selectedAgent);
-  const handleOpenThreadSession = useCallback((session: SessionInfo) => {
-    if (!thread) return;
-    onOpenThreadSession(thread, session);
-  }, [onOpenThreadSession, thread]);
-
   const handleSend = async () => {
     const prompt = composer.text.trim();
     if (!prompt) return;
@@ -514,7 +467,6 @@ export default function ThreadMultiSessionChatPage({
                 rows={timelineRows}
                 threadKind={thread.kind}
                 now={Date.now()}
-                onOpenThreadSession={handleOpenThreadSession}
               />
             )}
           </div>
@@ -572,15 +524,12 @@ function ThreadSessionLaneCard({
   lane,
   threadKind,
   now,
-  onOpenThreadSession,
 }: {
   lane: ThreadSessionLane;
   threadKind: ThreadKind;
   now: number;
-  onOpenThreadSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
-  const canOpenDetail = isPersistedSession(lane.session);
   return (
     <article className="flex min-h-[260px] min-w-0 flex-col overflow-hidden rounded-lg border border-card-border/[0.12] bg-card">
       <header className="shrink-0 border-b border-card-border/[0.10] px-3 py-2.5">
@@ -615,17 +564,6 @@ function ThreadSessionLaneCard({
               )}
             </div>
           </div>
-          {canOpenDetail && lane.session && (
-            <button
-              type="button"
-              onClick={() => onOpenThreadSession(lane.session!)}
-              title={t("thread.open_full_chat")}
-              className="flex h-8 shrink-0 items-center gap-1.5 rounded border border-ink/12 bg-surface-panel px-2 text-caption font-medium text-ink/55 transition hover:bg-ink/[0.05] hover:text-ink/82"
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-              <span>{t("thread.open_detail_page")}</span>
-            </button>
-          )}
         </div>
         <div className="mt-2 flex min-w-0 flex-wrap gap-1">
           {lane.sources.length === 0 ? (
@@ -715,12 +653,10 @@ function ThreadTimeline({
   rows,
   threadKind,
   now,
-  onOpenThreadSession,
 }: {
   rows: ThreadTimelineRow[];
   threadKind: ThreadKind;
   now: number;
-  onOpenThreadSession: (session: SessionInfo) => void;
 }) {
   return (
     <section className="grid gap-3">
@@ -735,7 +671,6 @@ function ThreadTimeline({
                   lane={lane}
                   threadKind={threadKind}
                   now={now}
-                  onOpenThreadSession={onOpenThreadSession}
                 />
               ))}
             </div>
@@ -752,7 +687,6 @@ function ThreadTimeline({
                 lane={lane}
                 threadKind={threadKind}
                 now={now}
-                onOpenThreadSession={onOpenThreadSession}
               />
             ))}
           </div>

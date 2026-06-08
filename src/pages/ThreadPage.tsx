@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { AlertCircle, Bot, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Square, Trash2 } from "lucide-react";
+import { AlertCircle, Bot, ExternalLink, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Square, Trash2 } from "lucide-react";
 import HashIcon from "@iconify-react/mynaui/hash";
 import type { Agent, AstraEvent, AstraHandle, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo } from "../api";
 import {
@@ -20,7 +20,7 @@ import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
-import { sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
+import { isPersistedSession, sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
 import {
   compareReplaySessionTime,
   groupReplaySessionsByThreadKind,
@@ -98,6 +98,23 @@ export default function ThreadPage({
       cancelled = true;
     };
   }, [loadThreadData, onError]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let reloadTimer: ReturnType<typeof window.setTimeout> | null = null;
+    listen("sessions_index_updated", () => {
+      if (reloadTimer) window.clearTimeout(reloadTimer);
+      reloadTimer = window.setTimeout(() => {
+        void reload();
+      }, 150);
+    }).then((fn) => {
+      unlisten = fn;
+    }).catch((err) => onError(String(err)));
+    return () => {
+      unlisten?.();
+      if (reloadTimer) window.clearTimeout(reloadTimer);
+    };
+  }, [onError, reload]);
 
   const thread = threads.find((row) => row.id === threadId) ?? null;
   const sortedStages = useMemo(
@@ -932,6 +949,7 @@ function ThreadReplaySessionLane({
       </div>
       <div className="mt-2 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
         {sessions.slice().sort(compareReplaySessionTime).map((replaySession) => {
+          const canOpenDetail = isPersistedSession(replaySession.session);
           const content = (
             <>
               <div className="truncate text-body-sm text-ink/75">
@@ -967,21 +985,23 @@ function ThreadReplaySessionLane({
             </>
           );
 
-          return replaySession.session ? (
-            <button
-              key={`${replaySession.agent}:${replaySession.sessionId}`}
-              type="button"
-              onClick={() => onSelectSession(replaySession.session!)}
-              className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5 text-left transition hover:bg-card-hover"
-            >
-              {content}
-            </button>
-          ) : (
+          return (
             <div
               key={`${replaySession.agent}:${replaySession.sessionId}`}
               className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5"
             >
               {content}
+              {canOpenDetail && replaySession.session && (
+                <button
+                  type="button"
+                  onClick={() => onSelectSession(replaySession.session!)}
+                  title={t("thread.open_full_chat")}
+                  className="mt-2 inline-flex h-7 items-center gap-1.5 rounded border border-ink/12 bg-surface-panel px-2 text-caption font-medium text-ink/55 transition hover:bg-ink/[0.05] hover:text-ink/82"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  {t("thread.open_detail_page")}
+                </button>
+              )}
             </div>
           );
         })}
@@ -1034,21 +1054,33 @@ function AssistantSessionLane({
         </div>
       ) : (
         <div className="mt-2 grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-2">
-          {sessions.slice().sort(compareSessionTime).map((session) => (
-            <button
-              key={sessionIdentityKey(session)}
-              type="button"
-              onClick={() => onSelectSession(session)}
-              className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5 text-left transition hover:bg-card-hover"
-            >
-              <div className="truncate text-body-sm text-ink/75">
-                {sessionDisplayTitle(session) ?? t("list.no_user_message")}
+          {sessions.slice().sort(compareSessionTime).map((session) => {
+            const canOpenDetail = isPersistedSession(session);
+            return (
+              <div
+                key={sessionIdentityKey(session)}
+                className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5"
+              >
+                <div className="truncate text-body-sm text-ink/75">
+                  {sessionDisplayTitle(session) ?? t("list.no_user_message")}
+                </div>
+                <div className="mt-0.5 text-meta text-ink/35">
+                  {t("list.msgs", { count: session.messageCount })}
+                </div>
+                {canOpenDetail && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectSession(session)}
+                    title={t("thread.open_full_chat")}
+                    className="mt-2 inline-flex h-7 items-center gap-1.5 rounded border border-ink/12 bg-surface-panel px-2 text-caption font-medium text-ink/55 transition hover:bg-ink/[0.05] hover:text-ink/82"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    {t("thread.open_detail_page")}
+                  </button>
+                )}
               </div>
-              <div className="mt-0.5 text-meta text-ink/35">
-                {t("list.msgs", { count: session.messageCount })}
-              </div>
-            </button>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
