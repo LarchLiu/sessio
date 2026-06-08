@@ -93,15 +93,19 @@ export function usePendingNewChats({
         [`${pending.agent}:${agentSessionId}`]: pending.sessioRuntimeSessionId,
       }));
       setSessions((prev) => mergePendingSession(prev, pendingSession));
-      setSelected(pendingSession);
-      setSelectedThread(null);
-      setDetailMode("chat");
-      setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
-      setPendingNewChats((prev) => {
-        const next = { ...prev };
-        delete next[pending.sessioRuntimeSessionId];
-        return next;
-      });
+      if (!pending.suppressAutoSelect) {
+        setSelected(pendingSession);
+        setSelectedThread(null);
+        setDetailMode("chat");
+        setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
+      }
+      if (!pending.suppressAutoSelect) {
+        setPendingNewChats((prev) => {
+          const next = { ...prev };
+          delete next[pending.sessioRuntimeSessionId];
+          return next;
+        });
+      }
 
       createPendingSession(pendingSession)
         .then(async () => {

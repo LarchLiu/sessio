@@ -141,10 +141,15 @@ export default function AppMain({
             project={activeProject}
             threadId={selectedThreadId}
             liveState={liveState}
+            runtimeAgents={runtimeAgents}
+            lastRuntimeAgentSelection={lastRuntimeAgentSelection}
+            rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
             runtimeSessionAliases={runtimeSessionAliases}
             pendingNewChats={pendingNewChats}
+            dispatchLiveEvent={dispatchLiveEvent}
             onBackToOverview={() => setDetailMode("project")}
             onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
+            onPendingSession={addPendingSession}
             onError={onError}
           />
         ) : selectedThreadId ? (

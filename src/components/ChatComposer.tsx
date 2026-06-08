@@ -30,7 +30,7 @@ export default function ChatComposer({
   onSend,
 }: {
   composer: ChatComposerController;
-  title: ReactNode;
+  title?: ReactNode;
   bottomRow?: ReactNode;
   canSend?: boolean;
   onSend: () => void;
@@ -46,9 +46,11 @@ export default function ChatComposer({
 
   return (
     <div className="w-full max-w-[730px]">
-      <h1 className="mb-11 text-center text-[28px] font-medium leading-tight tracking-normal text-ink/92">
-        {title}
-      </h1>
+      {title && (
+        <h1 className="mb-11 text-center text-[28px] font-medium leading-tight tracking-normal text-ink/92">
+          {title}
+        </h1>
+      )}
       {composer.composerError && (
         <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
           {composer.composerError}

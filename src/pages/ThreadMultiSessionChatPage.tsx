@@ -5,19 +5,24 @@ import {
   ArrowLeft,
   Clock,
   ExternalLink,
+  GitBranch,
   LoaderCircle,
   MessagesSquare,
   RefreshCw,
 } from "lucide-react";
 import type {
   ProjectInfo,
+  RuntimeAgentMetadata,
+  RuntimeAgentSelection,
   SessionInfo,
+  SetRuntimeAgentSelectionRequest,
   ThreadInfo,
   ThreadKind,
   ThreadReplayInfo,
   ThreadWorkState,
 } from "../api";
 import { AGENT_LABEL, getSessionHistory, getThreadReplay, getThreadWorkState } from "../api";
+import ChatComposer, { NewChatMenuButton } from "../components/ChatComposer";
 import { AgentGlyph } from "../components/AgentIcon";
 import { LiveSessionStatusBadge } from "../components/AcpTranscriptPanel";
 import ScrollArea from "../components/ScrollArea";
@@ -26,9 +31,10 @@ import {
   mergeHistoryWithLiveTurns,
   stripImagePlaceholders,
 } from "../historyMerge";
+import { useChatComposer } from "../hooks/useChatComposer";
 import { localeTag, useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
-import type { AcpRenderBlock, LiveRuntimeState, LiveTurn } from "../runtimeChat";
+import type { AcpRenderBlock, LiveRuntimeAction, LiveRuntimeState, LiveTurn } from "../runtimeChat";
 import { sessionDisplayTitle } from "../appUtils";
 import {
   buildThreadSessionLanes,
@@ -38,6 +44,9 @@ import {
   type ThreadSessionLane,
   type ThreadSessionLaneStatus,
 } from "../threadReplayView";
+import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
+import { collectThreadChatSessions } from "../threadChats";
+import { collectThreadHistorySnapshots, withThreadChatSessions } from "../threadWorkContext";
 import { projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { MarkdownContent, type MarkdownImage } from "./ChatPage";
 
@@ -45,19 +54,29 @@ export default function ThreadMultiSessionChatPage({
   project,
   threadId,
   liveState,
+  runtimeAgents,
+  lastRuntimeAgentSelection,
+  rememberRuntimeAgentSelection,
   runtimeSessionAliases,
   pendingNewChats,
+  dispatchLiveEvent,
   onBackToOverview,
   onSelectSession,
+  onPendingSession,
   onError,
 }: {
   project: ProjectInfo;
   threadId: string;
   liveState: LiveRuntimeState;
+  runtimeAgents: RuntimeAgentMetadata[];
+  lastRuntimeAgentSelection: RuntimeAgentSelection | null;
+  rememberRuntimeAgentSelection: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
   runtimeSessionAliases: Record<string, string>;
   pendingNewChats: Record<string, PendingNewChatSession>;
+  dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onBackToOverview: () => void;
   onSelectSession: (session: SessionInfo) => void;
+  onPendingSession: (session: PendingNewChatSession) => void;
   onError: (error: string | null) => void;
 }) {
   const { t, lang } = useI18n();
@@ -66,6 +85,15 @@ export default function ThreadMultiSessionChatPage({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const composer = useChatComposer({
+    runtimeAgents,
+    lastRuntimeAgentSelection,
+    rememberRuntimeAgentSelection,
+    liveState,
+    dispatchLiveEvent,
+    onError,
+    onPendingSession,
+  });
 
   const load = useCallback(async () => {
     const nextThread = await getThreadWorkState(threadId);
@@ -134,6 +162,49 @@ export default function ThreadMultiSessionChatPage({
     : null;
   const liveCount = lanes.filter((lane) => lane.status === "live").length;
   const pendingCount = lanes.filter((lane) => lane.status === "pending").length;
+  const threadChatSessions = useMemo(
+    () => thread ? collectThreadChatSessions(thread, replay) : [],
+    [replay, thread],
+  );
+
+  const handleSend = async () => {
+    const prompt = composer.text.trim();
+    if (!prompt) return;
+    if (!thread) {
+      composer.setComposerError(t("thread.not_found"));
+      return;
+    }
+    if (!project.path) {
+      composer.setComposerError(t("new_chat.no_project"));
+      return;
+    }
+    const timestamp = Date.now();
+    const baseSnapshot = withThreadChatSessions(
+      buildThreadWorkSnapshot(thread, activeStage, timestamp),
+      threadChatSessions,
+    );
+    const { snapshot: snapshotWithSources, historySnapshots } = await collectThreadHistorySnapshots(baseSnapshot);
+    const sent = await composer.runStartSession(prompt, {
+      workspacePath: project.path,
+      projectName: project.name,
+      extraContext: renderThreadWorkContext(snapshotWithSources, composer.selectedAgent),
+      pendingSession: {
+        suppressAutoSelect: true,
+        origin: "thread_multi_session",
+        historySnapshots,
+        workSnapshot: {
+          threadId: thread.id,
+          stageId: null,
+          snapshot: snapshotWithSources,
+        },
+        threadLink: {
+          threadId: thread.id,
+          stageId: null,
+        },
+      },
+    });
+    if (sent) void refresh();
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
@@ -273,6 +344,24 @@ export default function ThreadMultiSessionChatPage({
           </div>
         )}
       </ScrollArea>
+      <div className="shrink-0 border-t border-ink/[0.08] bg-surface-panel px-5 py-3">
+        <div className="mx-auto flex w-full max-w-[760px] justify-center">
+          <ChatComposer
+            composer={composer}
+            title={null}
+            canSend={Boolean(thread) && composer.canSendWithWorkspace(project.path)}
+            onSend={() => void handleSend()}
+            bottomRow={
+              <div className="flex h-10 items-center gap-2 px-3 text-body-sm text-ink/55">
+                <span className="min-w-0 truncate rounded-md px-1.5 py-1 text-ink/55">
+                  {thread?.goal ?? t("thread.multi_session_chat")}
+                </span>
+                <NewChatMenuButton icon={GitBranch} label="thread" text />
+              </div>
+            }
+          />
+        </div>
+      </div>
     </div>
   );
 }
