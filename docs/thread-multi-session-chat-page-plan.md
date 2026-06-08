@@ -135,7 +135,7 @@ type DetailMode = "chat" | "project" | "threadMultiSessionChat";
 - 在页面底部放置 composer，默认单 agent 选择，复用 `useChatComposer` 或抽取其可复用部分。
 - 发送时注入 thread context：
   - thread goal / kind / description。
-  - workflow 当前 stage 或非 workflow assistants 摘要。
+  - workflow 当前 stage、teamwork assistants 摘要，或 brainstorm/debate agent participants 摘要。
   - 最近 plan round/task 摘要。
 - pending session 写入：
   - `threadLink: { threadId, stageId: null }`。

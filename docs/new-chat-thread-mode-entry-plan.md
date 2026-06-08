@@ -2,15 +2,55 @@
 
 ## 摘要
 
-在 New Chat 输入框上方新增 thread 模式入口，支持 `workflow`、`teamwork`、`brainstorm`、`debate` 四种模式。用户选择模式后，New Chat 从普通会话入口变为 thread 创建入口：根据模式展示不同配置项，发送时创建 thread、启动第一条关联会话，并进入现有的 `ThreadChatPage`。
+在 New Chat 输入框上方新增 thread 模式入口，支持 `workflow`、`teamwork`、`brainstorm`、`debate` 四种模式。用户选择模式后，New Chat 从普通会话入口变为 thread 创建入口：根据模式展示不同配置项，发送时创建 thread、启动第一条关联会话，并进入已新增的 `ThreadMultiSessionChatPage`。
+
+## 最新代码校准
+
+- 当前代码已经有 `ThreadMultiSessionChatPage`，并通过 `DetailMode = "threadMultiSessionChat"` 路由：`AppMain` 在 `selectedThreadId && detailRoute === "threadMultiSessionChat"` 时渲染该页面。
+- `PendingNewChatSession` 已有 `threadLink`、`workSnapshot`、`suppressAutoSelect`、`origin` 字段；首条 linked session 应复用这条 pending 流程，并使用 `origin: "thread_multi_session"`、`suppressAutoSelect: true`，避免 session 落库后自动切到普通 `ChatPage`。
+- `NewChatPage` 当前仍只是普通 runtime session 入口，还没有 thread mode UI 和 thread 创建流程。
+- thread API / store 当前已有 `ThreadKind` 和 `assistantIds` / `thread_assistants`，但还没有 `ThreadAgentInfo`、`agentParticipants`、`thread_agents`。本方案里 agent participant 相关部分仍是新增工作。
+- `ThreadChatPage` 仍存在，但它是旧的 snapshot/stage chat 入口。New Chat 的 thread mode 新流程不应再把它作为最终落点。
 
 ## 目标行为
 
 - 未选择 thread 模式时，New Chat 保持现有普通 runtime session 行为。
 - 选择 thread 模式后，输入框内容同时作为 thread goal 和首条用户消息。
 - 按发送后先创建 thread，再启动首条 linked chat session。
-- 成功启动后打开 `ThreadChatPage`，而不是跳到普通 `ChatPage`。
+- 成功启动后打开 `ThreadMultiSessionChatPage`，而不是跳到普通 `ChatPage` 或旧的 `ThreadChatPage`。
 - 运行中的 session 仍通过现有 pending session / runtime alias 流程落库和索引。
+
+## 跳转规则
+
+- mode 为空 / 普通 New Chat：调用 `composer.runStartSession`，保持现有自动选择逻辑，最终进入普通 `ChatPage`。
+- mode 为 `workflow`、`teamwork`、`brainstorm`、`debate` 任意一种：创建 thread 和首条 linked session 后，设置 `selectedThread` + `detailMode = "threadMultiSessionChat"`，最终进入 `ThreadMultiSessionChatPage`。
+- 这四种 thread mode 都不进入旧 `ThreadChatPage`；旧页面只服务现有 stage snapshot chat 路径。
+
+## 输入框交互
+
+- 不在输入框上方额外增加一排大按钮；保持 New Chat 当前紧凑输入框形态。
+- 将底部第二个 selector 从 `No kanban item` 替换为 thread kind selector：
+  - `Chat`：普通 New Chat，不创建 thread，最终进入 `ChatPage`。
+  - `Workflow`：创建 `workflow` thread。
+  - `Teamwork`：创建 `teamwork` thread。
+  - `Brainstorm`：创建 `brainstorm` thread。
+  - `Debate`：创建 `debate` thread。
+- bottom row 推荐顺序：
+  - project selector
+  - thread kind selector
+  - branch selector
+- 选中 `Chat` 时不展示 thread 配置，保留普通发送体验。
+- 选中四种 thread kind 时，在输入框下方/底部行上方展开轻量配置区，只展示当前 kind 需要的配置：
+  - `Workflow`：stage chips + ordering。
+  - `Teamwork`：assistant multi-select。
+  - `Brainstorm`：agent participant list，默认可用当前 composer 的 agent/model 作为第一个 participant。
+  - `Debate`：agent participant lanes，至少 2 个。
+- 发送按钮按 mode 切换视觉语义：
+  - `Chat`：保留当前圆形 `ArrowUp` 普通发送按钮。
+  - `Workflow` / `Teamwork` / `Brainstorm` / `Debate`：把 primary send button 替换为 `ThreadMultiSessionChatPage` 里 Astra start button 的 `Sparkles` shimmer 样式，表示创建 thread 并进入 multi-session run。
+  - thread mode 发送中使用同位置 `LoaderCircle`，不要额外显示第二个 Astra 按钮。
+  - thread mode tooltip/aria label 使用 `Create thread` 或更具体的 `Create workflow thread` / `Create debate thread`。
+- Kanban item selector 从 New Chat 移除；Kanban 后续如仍需关联，可放到 Project/Workbench 或 session detail 的次级操作里，不作为 New Chat 主流程。
 
 ## 模式配置
 
@@ -40,10 +80,19 @@
 ## 前端实施
 
 - 修改 `src/pages/NewChatPage.tsx`
-  - 在 `ChatComposer` 上方增加 mode segmented control。
+  - 移除当前 bottom row 的 Kanban item selector。
+  - 在原 Kanban item selector 位置新增 thread kind selector。
   - 根据当前 mode 加载和展示 mode-specific selector。
   - project 切换时重置不再合法的 stage / assistant / participant 选择。
-  - thread mode 发送时调用新 thread 创建流程；普通 mode 保持 `composer.runStartSession`。
+  - thread mode 发送时调用新 thread 创建流程；未选择 thread mode 时保持 `composer.runStartSession` 并跳普通 `ChatPage`。
+  - thread mode 创建首条 session 时写入 `pendingSession.threadLink`；若已经构建 thread work snapshot，也写入 `workSnapshot`。
+  - thread mode 首条 session 使用 `suppressAutoSelect: true` 和 `origin: "thread_multi_session"`，让 pending/live lane 留在 multi-session 页面中展示。
+
+- 修改 `src/components/ChatComposer.tsx`
+  - 支持 primary send button 按 mode 替换样式，例如新增 `sendButtonVariant?: "chat" | "astra"` 或 `renderSendButton`。
+  - `chat` variant 保持当前 `ArrowUp` 样式。
+  - `astra` variant 复用 `ThreadMultiSessionChatPage` 的 Sparkles shimmer 按钮样式，busy 时显示 `LoaderCircle`。
+  - 不通过 `sendActions` 增加第二个按钮；thread mode 是替换当前 primary send button。
 
 - 复用现有组件和交互模式
   - stages 使用 `StageSelectChip` / drag ordering 的既有样式。
@@ -51,11 +100,13 @@
   - agent model 选择复用 `agentModelSelectOptions`、`RuntimeMenuSelect`、effort / permission option helper。
 
 - 修改 `src/components/AppMain.tsx`
-  - 新增从 New Chat 创建 thread 后进入 `ThreadChatPage` 的回调。
-  - 保持现有 `newChatSnapshot` 机制，用新 thread 作为 `snapshotContext.thread`。
+  - 新增从 New Chat 创建 thread 后进入 `ThreadMultiSessionChatPage` 的回调。
+  - 回调应设置 `selectedThread = { projectId, threadId, goal }`、清空普通 session selection，并设置 `detailMode = "threadMultiSessionChat"`。
+  - 不要沿用 `newChatSnapshot` 作为这条新流程的主入口；`newChatSnapshot` 只保留给旧 `ThreadChatPage` / stage snapshot chat 路径。
 
 - 修改 `src/navigation.ts`
-  - 若需要，扩展 `PendingNewChatSession` 中的 thread metadata，确保首条会话能正确 link 到 thread 或 stage。
+  - 当前 `PendingNewChatSession` 已具备 `threadLink` / `workSnapshot` / `suppressAutoSelect` / `origin`，新增流程优先复用这些字段。
+  - 若首条会话需要表达创建来源或 participant 信息，再扩展 metadata，确保 session 能正确 link 到 thread 或 stage。
 
 ## API 和存储实施
 
@@ -119,7 +170,8 @@
   - `teamwork` 模式能选择 project assistants，并创建带 thread assistants 的 thread。
   - `brainstorm` 模式能选择 agent participants，并创建 agent-based thread。
   - `debate` 少于 2 个 participants 时禁止发送或提示错误。
-  - thread mode 发送后进入 `ThreadChatPage`。
+  - thread mode 发送后进入 `ThreadMultiSessionChatPage`。
+  - 首条 pending/live session 进入该 thread 的 multi-session lane，且不会因为 `usePendingNewChats` 自动跳到普通 `ChatPage`。
 
 - Rust/store
   - `thread_agents` create/list/update/delete round trip。
@@ -142,4 +194,4 @@
 - `workflow` 和 `teamwork` 不在本轮改成 agent-based。
 - `brainstorm` / `debate` 不把 agent participant 偷偷写成 assistant。
 - 首条输入既是 thread goal，也是首条 thread chat message。
-- 新页面不从零实现，复用现有 `ThreadChatPage`。
+- 最终落点复用已新增的 `ThreadMultiSessionChatPage`，不再跳转到旧 `ThreadChatPage`。

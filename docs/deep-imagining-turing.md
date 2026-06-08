@@ -1,5 +1,7 @@
 # Phase 4：issue 建模 + ThreadChatPage + 快照打磨
 
+> 历史说明：本文档描述的是旧的 stage snapshot / work overview `ThreadChatPage` 路径。New Chat 的四种 thread mode 入口不再以该页为最终落点；最新规则见 `docs/new-chat-thread-mode-entry-plan.md`，四种 thread mode 都跳转 `ThreadMultiSessionChatPage`，普通 New Chat 才进入 `ChatPage`。
+
 ## Context（为什么做）
 
 Sessio 的 thread/stage 工作状态已走完 Phase 1-3：6 态 `StageStatus` 可经 GUI/CLI 读写持久（取代顺序推算），新 chat 能注入并保存 `thread_work_snapshots`。但还有三处缺口：

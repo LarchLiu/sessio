@@ -174,7 +174,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 全局实施顺序以 `docs/thread-types-plan-rounds.md` 为准：
 
-1. `ThreadKind` / `thread_assistants` 先落地，让 thread 能表达 `workflow | teamwork | brainstorm | debate`，并能绑定 thread-level assistants。
+1. `ThreadKind` / `thread_assistants` / `thread_agents` 先落地，让 thread 能表达 `workflow | teamwork | brainstorm | debate`；teamwork 绑定 thread-level assistants，brainstorm/debate 绑定 agent participants。
 2. 直接新增 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，建立 plan round 和 task lifecycle 的事实源。
 3. 改 Astra 新 contract，让 planner 输出 `{ summary, runIntent, reason, mode, tasks }`，并把 plan round/tasks/session refs 写入上述表。
 4. 接入 teamwork：使用本文档的 assistant-routed task-centric 编排，不要求 stages，不读 stage status，不写 stage/issue mutation。
@@ -207,14 +207,15 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ### Phase 1: 接入 ThreadKind 和 thread assistants
 
-目标：先让 thread 能表达 `workflow | teamwork | brainstorm | debate`，并让 teamwork 有 thread-level assistants 作为路由对象。
+目标：先让 thread 能表达 `workflow | teamwork | brainstorm | debate`，并让 teamwork 有 thread-level assistants 作为路由对象；brainstorm/debate 的参与者使用 agent participants，不复用 assistants。
 
 执行内容：
 
 - Rust 新增 `ThreadKind`，当前 schema 对未指定 kind 的 thread 默认使用 `workflow`。
 - `threads` / `ThreadInfo` / Tauri command / TS API 支持 thread kind。
-- 新增 `thread_assistants`，用于绑定 teamwork/brainstorm/debate 的 thread-level assistants。
-- ProjectPage 创建/编辑 thread 时可选择 kind 和 assistants。
+- 新增 `thread_assistants`，用于绑定 teamwork 的 thread-level assistants。
+- 新增 `thread_agents`，用于绑定 brainstorm/debate 的 agent participants。
+- ProjectPage 创建/编辑 thread 时可选择 kind，并按 kind 选择 assistants 或 agent participants。
 - 本阶段不改变 Astra 自动编排行为；它只是为 teamwork routing 准备数据模型。
 
 验收：
@@ -382,7 +383,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ### 风险 1: 旧 stage-based Astra 替换面大
 
-这次不是 parser hotfix，而是控制面重构。需要按实施顺序拆分：先落 `ThreadKind` / `thread_assistants`，再落 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，再改 Astra contract 写这些表，最后接入 teamwork/brainstorm/debate。SQLite 侧对这批未发布表形状直接改当前 DDL，不写旧 Astra/plan 表兼容迁移。
+这次不是 parser hotfix，而是控制面重构。需要按实施顺序拆分：先落 `ThreadKind` / `thread_assistants` / `thread_agents`，再落 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，再改 Astra contract 写这些表，最后接入 teamwork/brainstorm/debate。SQLite 侧对这批未发布表形状直接改当前 DDL，不写旧 Astra/plan 表兼容迁移。
 
 ### 风险 2: 旧 run lifecycle 双轨风险
 
@@ -394,7 +395,7 @@ Rust 不做 JSON 兼容、不做 response repair、不做静默 fallback。格�
 
 ### 风险 4: Brainstorm / Debate 不能只复用普通 teamwork
 
-Teamwork 是 shared context + task orchestration。Brainstorm 还需要 shared board 和 synthesis；debate 还需要 isolated lanes、cross-check 和 convergence。后两者必须在 `docs/thread-types-plan-rounds.md` Phase 5/6 中通过专用 backend 或 v2 延后处理。
+Teamwork 是 assistant-routed shared context + task orchestration。Brainstorm 还需要 agent participants、shared board 和 synthesis；debate 还需要 agent participants、isolated lanes、cross-check 和 convergence。后两者必须在 `docs/thread-types-plan-rounds.md` Phase 5/6 中通过专用 backend 或 v2 延后处理。
 
 ### 风险 5: 不 fallback 会暴露更多错误
 

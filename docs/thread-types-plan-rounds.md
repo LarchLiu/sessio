@@ -15,7 +15,7 @@
 
 thread 还必须是全过程容器。一个 thread 下直接对话、stage task、plan task、Astra 内部 plan/synthesis/diagnostic 产生的所有 sessions，都需要能从 thread 反查并重放。
 
-plan task 还必须保存执行时的 stage / assistant / agent 配置快照。`thread_stage_id`、`assistant_id`、`target_agent` 只负责关联和导航，不能作为历史重放的唯一事实源，因为同一个 stage、assistant 或 agent 后续都可能被重新配置。
+plan task 还必须保存执行时的 stage / assistant / agent participant 配置快照。`thread_stage_id`、`assistant_id`、`agent_participant_id`、`target_agent` 只负责关联和导航，不能作为历史重放的唯一事实源，因为同一个 stage、assistant 或 agent runtime 配置后续都可能被重新配置。
 
 ## 背景问题
 
@@ -30,11 +30,14 @@ plan task 还必须保存执行时的 stage / assistant / agent 配置快照。`
 - 多模型共享上下文、并行发散再汇总的 brainstorm。
 - 多模型上下文隔离、交叉验证、直到统一的 debate。
 
-### 2. assistants 只绑定在 workflow/stage 层，不适合所有 thread 类型
+### 2. assistant 和 agent participant 需要分开建模
 
-`workflow` 类型可以继续通过 stage assistants 分配任务。但 `teamwork`、`brainstorm`、`debate` 不一定需要 stages，它们更自然的模型是 thread-level assistants。
+`workflow` 类型可以继续通过 stage assistants 分配任务；`teamwork` 需要 thread-level assistants 作为稳定团队成员和路由对象。
 
-因此需要为 thread 本身增加 assistants 绑定关系，作为非 workflow 类型的协作成员列表。
+但 `brainstorm`、`debate` 的参与者更像一次 thread 内的临时运行席位：用户通常只想选择几个 agent/model/effort/permission 组合，不应该为了开一次发散或辩论创建一批长期 assistant。因此需要同时保留两种绑定：
+
+- `thread_assistants`：服务 `teamwork` 的稳定成员。
+- `thread_agents` / `agentParticipants`：服务 `brainstorm`、`debate` 的临时 agent participants。
 
 ### 3. 每轮 plan 还不是一等对象
 
@@ -55,7 +58,7 @@ plan task 还必须保存执行时的 stage / assistant / agent 配置快照。`
 
 ### 5. task 只保存 id 无法还原当时的执行配置
 
-plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，历史重放时会读到这些对象的当前配置，而不是 task 执行时的配置。
+plan task 如果只保存 `thread_stage_id`、`assistant_id`、`agent_participant_id`、`target_agent`，历史重放时会读到这些对象的当前配置，而不是 task 执行时的配置。
 
 典型问题：
 
@@ -111,11 +114,11 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，
 
 ### `brainstorm`
 
-`brainstorm` 是带 thread-level assistants 的发散模式。
+`brainstorm` 是带 thread-level agent participants 的发散模式。
 
 适用场景：
 
-- 多 assistants 各自提出方案。
+- 多个 agent participants 各自提出方案。
 - 多视角生成选题、产品方向、技术路线。
 - 希望先发散，再由用户或 Astra 汇总。
 
@@ -123,7 +126,7 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，
 
 - 不要求 stages。
 - 默认 plan mode 倾向 `parallel`。
-- 多个 assistants 可以同时产出不同想法。
+- 多个 agent participants 可以同时产出不同想法。
 - 后续 round 可以进入汇总、筛选或扩展。
 - 所有参与模型共享 thread 初始上下文。
 - 每一轮结束后，Astra 生成 shared board，保留观点、亮点、冲突点和待展开问题。
@@ -136,14 +139,14 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`target_agent`，
 
 适用场景：
 
-- 多个 assistants 持不同立场辩论。
+- 多个 agent participants 持不同立场辩论。
 - 比较多个方案的优劣。
 - 先分别陈述，再互评，最后汇总结论。
 
 行为约定：
 
 - 不要求 stages。
-- 需要 thread-level assistants。
+- 需要 thread-level agent participants，至少 2 个。
 - v1 中每轮 plan 只能整体标记为 `parallel` 或 `sequential`。
 - “先并行产出观点，再串行交叉质询，再汇总”的复杂流程，用多轮 plan 表达，而不是在一轮内建 DAG。
 - 每个参与模型运行在 isolated lane 中，彼此不共享完整上下文。
@@ -213,10 +216,10 @@ brainstorm 的目标是让多个不同模型在共享上下文下各抒己见，
 
 执行方式：
 
-1. Round 1 使用 `parallel`，所有 assistants 看到相同 thread context 和用户目标。
-2. 每个 assistant 独立输出观点、方案或问题清单。
+1. Round 1 使用 `parallel`，所有 agent participants 看到相同 thread context 和用户目标。
+2. 每个 participant 独立输出观点、方案或问题清单。
 3. Astra 读取本轮所有结果，生成 shared board。
-4. 下一轮 assistants 都看到 shared board，并继续补充、反驳、扩展。
+4. 下一轮 participants 都看到 shared board，并继续补充、反驳、扩展。
 5. 需要结束时，Astra 生成 synthesis：候选方案、共识、分歧、推荐。
 
 实现重点：
@@ -263,8 +266,8 @@ debate 的目标是让两个或多个模型彼此独立思考，再交叉验证�
 - 这是第几轮。
 - 本轮为什么这样安排。
 - 本轮 tasks 是并行还是串行。
-- 每个 task 分配给哪个 stage / assistant / agent。
-- 每个 task 执行时使用的 stage / assistant / agent 配置快照是什么。
+- 每个 task 分配给哪个 stage / assistant / agent participant / agent。
+- 每个 task 执行时使用的 stage / assistant / agent participant 配置快照是什么。
 - 每个 task 当前状态是什么。
 - 每个 task 产出了什么结果或错误。
 
@@ -278,7 +281,7 @@ debate 的目标是让两个或多个模型彼此独立思考，再交叉验证�
 v1 不支持一轮内混合 DAG，例如“前两个并行，完成后第三个汇总”。这类流程用多轮 plan 表达：
 
 ```text
-Round 1: parallel  -> 多 assistant 各自产出
+Round 1: parallel  -> 多 participant 各自产出
 Round 2: sequential 或 single task -> 汇总/评审
 ```
 
@@ -399,10 +402,38 @@ thread_assistants(
 用途：
 
 - `teamwork` 的团队成员。
-- `brainstorm` 的发散参与者。
-- `debate` 的辩论参与者。
 
 `workflow` 可以保留为空，继续优先使用 stage assistants。
+
+`brainstorm`、`debate` 不使用 `thread_assistants` 表达参与者，避免为了临时模型席位创建一次性 assistants。
+
+### `thread_agents`
+
+新增 thread-level agent participant 绑定表：
+
+```sql
+thread_agents(
+  thread_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  model TEXT,
+  effort TEXT,
+  permission_mode TEXT,
+  sort_order INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(thread_id, participant_id),
+  FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+)
+```
+
+用途：
+
+- `brainstorm` 的发散参与者。
+- `debate` 的 isolated lane / cross-check 参与者。
+- 保存一次 thread 内的完整运行配置：`agent`、`model`、`effort`、`permissionMode`、`order`。
+
+`teamwork` 继续使用 `thread_assistants`，不在本轮改成 agent-based。
 
 ### `thread_plan_rounds`
 
@@ -461,6 +492,7 @@ thread_plan_tasks(
   round_id TEXT NOT NULL,
   thread_stage_id TEXT,
   assistant_id TEXT,
+  agent_participant_id TEXT,
   target_agent TEXT NOT NULL,
   stage_snapshot_json TEXT,
   assistant_snapshot_json TEXT,
@@ -488,13 +520,14 @@ thread_plan_tasks(
 字段说明：
 
 - `thread_stage_id`：workflow task 可绑定 stage。
-- `assistant_id`：teamwork/brainstorm/debate task 可绑定 thread assistant。
+- `assistant_id`：teamwork task 可绑定 thread assistant。
+- `agent_participant_id`：brainstorm/debate task 可绑定 thread-level agent participant；历史解释仍以 `agent_snapshot_json` 为准。
 - `target_agent`：实际 runtime agent。
 - `stage_snapshot_json`：task 创建或 dispatch 时的 stage 快照；无 stage task 可为空。
 - `assistant_snapshot_json`：task 创建或 dispatch 时的 assistant 快照；无 assistant task 可为空。
 - `agent_snapshot_json`：task 创建或 dispatch 时的 runtime agent 快照。
 - `sort_order`：串行 round 的执行顺序，也用于 UI 稳定排序。
-- 后续 debate 可在 task 层扩展 `lane_id` 和 `visible_artifact_ids_json`，用于表达隔离 lane 和交叉验证可见范围；v1 可先通过 metadata/diagnostics 记录。
+- 后续 debate 可在 task 层扩展 `lane_id` 和 `visible_artifact_ids_json`，用于表达隔离 lane 和交叉验证可见范围；lane 默认基于 `agent_participant_id`，v1 可先通过 metadata/diagnostics 记录。
 
 建议索引：
 
@@ -565,7 +598,7 @@ thread_plan_task_sessions(
 - `kind = workflow`
 - `assistantIds = []`
 
-如果 `kind != workflow`，UI 应鼓励选择至少一个 assistant，但后端 v1 可以只做宽松校验，避免阻塞创建、编辑和测试。
+如果 `kind == teamwork`，UI 应鼓励选择至少一个 assistant；如果 `kind == brainstorm`，UI 应鼓励选择至少一个 agent participant；如果 `kind == debate`，UI 应要求至少两个 agent participants。后端 v1 可以先做宽松校验，避免阻塞创建、编辑和测试。
 
 ### 更新 thread
 
@@ -581,11 +614,11 @@ thread_plan_task_sessions(
 
 - 不删除已有 stages。
 - stages 保留为历史和可回退结构。
-- 非 workflow 的新 plan 默认使用 thread assistants。
+- teamwork 的新 plan 默认使用 thread assistants；brainstorm/debate 的新 plan 默认使用 agent participants。
 
 如果从非 workflow 切换到 `workflow`：
 
-- 不删除 thread assistants。
+- 不删除 thread assistants，也不把 brainstorm/debate participants 写进 thread assistants。
 - workflow 仍优先使用 stage assistants。
 
 ### Plan round 创建
@@ -624,11 +657,11 @@ Astra run 只保留编排元数据、backend、diagnostics、round cursor 和终
 目标行为：
 
 - Astra 每轮 planner 输出 tasks 后，先写 plan round/task。
-- dispatch 从 plan task 读取，并使用 task 内的 stage/assistant/agent 快照构造 prompt 和 runtime 参数。
+- dispatch 从 plan task 读取，并使用 task 内的 stage/assistant/agent participant 快照构造 prompt 和 runtime 参数。
 - task result 回写 plan task status 和 result summary。
 - UI 从 plan tasks 展示 planned/running/completed。
 - teamwork 是 Astra task-centric 流程的 assistant-routed 版本：没有 stages，Astra 根据 assistants 生成和派发 tasks。
-- brainstorm/debate 在通用 plan round/task 之上增加不同的上下文策略：brainstorm 共享 shared board，debate 使用 isolated lanes。
+- brainstorm/debate 在通用 plan round/task 之上增加不同的上下文策略：brainstorm 共享 shared board，debate 使用 isolated lanes；二者的参与者来自 agent participants。
 
 ### 与 workflow stages 的关系
 
@@ -647,13 +680,13 @@ workflow task 的 `thread_stage_id` 用于导航和分组，执行和 replay 使
 
 ### 与 assistants 的关系
 
-非 workflow thread 的 task 主要绑定 `assistant_id`。
+teamwork task 主要绑定 `assistant_id`。brainstorm/debate task 主要绑定 `agent_participant_id` + `target_agent`，并用 `agent_snapshot_json` 保存 participant 的完整运行配置。
 
 如果 task 只指定 `target_agent` 而没有 assistant：
 
 - 允许保存。
 - UI 展示为 agent-level task。
-- 后续可以补充 assistant binding。
+- 后续可以补充 assistant binding 或 participant binding。
 
 如果 task 同时有 `assistant_id` 和 `target_agent`：
 
@@ -662,35 +695,38 @@ workflow task 的 `thread_stage_id` 用于导航和分组，执行和 replay 使
 - 二者通常一致，但不强制完全一致，以支持 assistant 配置变化后的历史回看。
 
 assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapshot_json` 为准。`assistant_id` 和 `target_agent` 用于关联当前对象、过滤和分组，不用于覆盖历史执行配置。
+brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用 `agent_participant_id` 和 `agent_snapshot_json`。
 
 ## 分阶段执行方案
 
 推荐实施顺序：
 
-1. 先实现 `ThreadKind` / `thread_assistants`，让 thread 可以表达四种协作模式并绑定 thread-level assistants。
+1. 先实现 `ThreadKind` / `thread_assistants` / `thread_agents`，让 thread 可以表达四种协作模式；teamwork 绑定 assistants，brainstorm/debate 绑定 agent participants。
 2. 直接实现 `thread_plan_rounds` / `thread_plan_tasks` / `thread_plan_task_sessions`，建立所有 thread kind 共享的 plan/task 事实源。
 3. 改 Astra 新 contract，让 planner 输出 `{ summary, runIntent, reason, mode, tasks }`，并把 plan round/tasks/session refs 写入上述表。
 4. 接入 teamwork：使用 `docs/astra-task-centric-refactor-plan.md` 的 assistant-routed task-centric 编排，不要求 stages，不读 stage status，不写 stage/issue mutation。
 5. 最后再做 brainstorm / debate；它们分别需要 shared-board backend 和 isolated-lane / cross-check backend，不能只靠普通 teamwork planner 宣称完成。
 
-### Phase 1: 新增 thread kind 和 thread assistants
+### Phase 1: 新增 thread kind、thread assistants 和 thread agents
 
-目标：先让 thread 类型和 thread-level assistants 可持久化。
+目标：先让 thread 类型、teamwork assistants、brainstorm/debate agent participants 可持久化。
 
 执行内容：
 
 - Rust 新增 `ThreadKind` enum。
 - `ThreadInfo` 新增 `kind` 和 `assistants`。
 - `threads` 表新增 `kind`，旧数据默认 `workflow`。
-- 新增 `thread_assistants` 表。
-- store trait / sqlite / cached / Tauri command / TS API 支持创建和更新 thread kind + assistant ids。
-- ProjectPage 创建/编辑 thread 时可选择类型和 assistants。
+- 新增 `thread_assistants` 表，用于 teamwork。
+- 新增 `thread_agents` 表，用于 brainstorm/debate。
+- store trait / sqlite / cached / Tauri command / TS API 支持创建和更新 thread kind + assistant ids + agent participants。
+- ProjectPage / NewChat thread mode 创建和编辑 thread 时，按 kind 展示 assistants 或 agent participants。
 
 验收：
 
 - 未指定 kind 的 thread 按当前 schema 默认读取为 `workflow`。
 - 新建四种 thread 类型后 reload 仍正确。
-- teamwork/brainstorm/debate 可绑定 thread assistants。
+- teamwork 可绑定 thread assistants。
+- brainstorm/debate 可绑定 agent participants，且不要求创建 assistants。
 - workflow 现有 stage 行为不变。
 
 ### Phase 2: 新增 plan rounds/tasks 持久化
@@ -701,7 +737,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 - 新增 `PlanRoundInfo`、`PlanTaskInfo` 类型。
 - 新增 `thread_plan_rounds` / `thread_plan_tasks` 表。
-- `thread_plan_tasks` 保存 stage / assistant / agent 执行快照字段。
+- `thread_plan_tasks` 保存 stage / assistant / agent participant 执行快照字段。
 - 新增 `thread_plan_task_sessions` 表，保存 plan task 到 `(agent, session_id)` 的引用。
 - 新增 list/get/create/update task status 的 store API。
 - 新增 link/list task sessions 的 store API，用于 task dispatch 后记录 delegated/runtime/synthesis/cross-check sessions。
@@ -713,7 +749,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - 可以创建 parallel round 和 sequential round。
 - 可以更新 task status。
 - 一个 task 可以关联多个 sessions，且每个引用都包含 agent 和 session id。
-- 一个 task 保存当时的 stage / assistant / agent 快照，后续配置变化不影响旧 task。
+- 一个 task 保存当时的 stage / assistant / agent participant 快照，后续配置变化不影响旧 task。
 - reload 后 round/tasks 状态不丢。
 - 删除 thread 时 plan rounds/tasks/task sessions cascade 删除。
 
@@ -725,7 +761,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 - Astra planner 输出 tasks 后创建 `thread_plan_rounds`。
 - 将每个 `AstraTaskProposal` 映射为 `thread_plan_tasks`。
-- 写入 task 时解析并保存当时的 stage / assistant / agent 快照。
+- 写入 task 时解析并保存当时的 stage / assistant / agent participant 快照。
 - dispatch 时更新 plan task 为 running。
 - dispatch/result 到达时写入 `thread_plan_task_sessions`，session 身份使用 `(agent, session_id)`。
 - result 到达时更新 plan task terminal 状态、result summary、error。
@@ -736,7 +772,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - Astra 每轮 plan 在 DB 中有 round 记录。
 - 多 task 并行时所有 task running 可恢复。
 - 每个 delegated session 都能从对应 plan task 反查。
-- dispatch 使用 task 快照，而不是读取 stage/assistant/agent 的最新配置覆盖旧 task。
+- dispatch 使用 task 快照，而不是读取 stage/assistant/agent participant 的最新配置覆盖旧 task。
 - sequential mode 能按顺序 dispatch。
 - Astra terminal 后 round status 正确聚合。
 
@@ -769,18 +805,18 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - `brainstorm_backend` 负责在每轮 task terminal 后读取本轮结果，生成 shared board，并把 shared board 固定到 plan round diagnostics/summary 或后续结构化字段。
 - `brainstorm_backend` 负责构造下一轮 task prompt，显式注入最近 shared board 和必要的历史 board 摘要。
 - `brainstorm_backend` 负责判断是否继续发散、进入扩展 round，或生成最终 synthesis round。
-- Brainstorm 默认第一轮使用 `parallel`，每个 assistant 获取相同 thread context。
+- Brainstorm 默认第一轮使用 `parallel`，每个 participant 获取相同 thread context。
 - Astra 在每轮结束后生成 shared board，记录观点、亮点、冲突点、待展开问题。
-- 下一轮 prompt 给所有 assistants 注入 shared board。
+- 下一轮 prompt 给所有 participants 注入 shared board。
 - 最终 synthesis round 输出候选方案、共识、分歧、推荐。
 - Shared board v1 可写入 plan round summary/diagnostics，后续再独立结构化字段。
 - 如果 v1 不实现 brainstorm 专用 orchestrator，则 Phase 5 只能标记为 schema/API 准备，真正 shared-board 编排推迟到 v2，不能宣称已实现 brainstorm mode。
 
 验收：
 
-- Brainstorm 多 assistants 能并行产出不同观点。
+- Brainstorm 多 participants 能并行产出不同观点。
 - 每轮 task terminal 后确实生成 shared board，并且 reload 后可追踪。
-- 第二轮 assistants 能看到上一轮 shared board。
+- 第二轮 participants 能看到上一轮 shared board。
 - 下一轮 task prompt 中能验证 shared board 被注入，而不是只依赖隐式历史上下文。
 - Synthesis 输出能区分共识和分歧。
 - Brainstorm 不使用 isolated lane；所有参与者共享汇总上下文。
@@ -792,10 +828,10 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 执行内容：
 
 - 新增 debate 专用 orchestrator 策略，例如 `debate_backend`，不能只复用普通 task-centric planner。
-- `debate_backend` 负责为每个 assistant 创建和维护 isolated lane，并记录 lane id、lane artifact 和可见 artifact 范围。
+- `debate_backend` 负责为每个 agent participant 创建和维护 isolated lane，并记录 lane id、lane artifact 和可见 artifact 范围。
 - `debate_backend` 负责生成 cross-check tasks：只向某个 lane 暴露对方阶段性产物或 Astra 摘要，不暴露完整 transcript。
 - `debate_backend` 负责比较各 lane 的最新结论，判断 converged / diverged / need_more_cross_check / round_limit_reached。
-- Debate 为每个 assistant 创建 lane，lane 之间不共享完整 transcript。
+- Debate 为每个 participant 创建 lane，lane 之间不共享完整 transcript。
 - Round 1 各 lane 只看到同一份初始问题。
 - Cross-check round 只交换对方阶段性产物或 Astra 摘要，不交换完整上下文。
 - Astra 比较 lane 输出，若一致则 complete；不一致则生成下一轮 cross-check tasks。
@@ -814,16 +850,16 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 
 ### Phase 7: 前端展示和 reload 恢复
 
-目标：让用户能看到 thread 类型、assistants 和 plan history。
+目标：让用户能看到 thread 类型、teamwork assistants、brainstorm/debate participants 和 plan history。
 
 执行内容：
 
 - 新增 thread replay 查询/API，聚合 `thread_sessions`、`stage_sessions`、`thread_plan_task_sessions` 和 Astra diagnostic session refs。
 - Thread card 展示 kind。
-- 非 workflow thread 展示 assistants。
+- teamwork thread 展示 assistants；brainstorm/debate thread 展示 agent participants。
 - Thread detail / Astra panel 展示 plan rounds。
 - task card 状态从 `thread_plan_tasks.status` 恢复。
-- task detail 展示当时执行快照，并可跳转到当前 stage / assistant / agent。
+- task detail 展示当时执行快照，并可跳转到当前 stage / assistant / agent participant / agent。
 - parallel/sequential 用清晰标签展示。
 - Replay 视图按 thread kind 分组：workflow 按 stage，teamwork/brainstorm 按 round，debate 按 round + lane。
 - Replay 聚合结果按 `(agent, session_id)` 去重，同时保留来源标签。
@@ -833,9 +869,9 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - 切换界面再回来，running tasks 仍正确。
 - 用户能看到每轮 plan 的 summary、mode、tasks。
 - 用户能从 thread 入口看到所有相关 sessions，并打开对应 transcript。
-- 用户能看到 task 执行时的 stage / assistant / agent 配置，即使当前配置已变化。
+- 用户能看到 task 执行时的 stage / assistant / agent participant 配置，即使当前配置已变化。
 - workflow task 显示绑定 stage。
-- teamwork/brainstorm/debate task 显示绑定 assistant。
+- teamwork task 显示绑定 assistant；brainstorm/debate task 显示绑定 agent participant。
 - Brainstorm 展示 shared board / synthesis。
 - Debate 展示 lane、交叉验证和最终收敛状态。
 
@@ -866,7 +902,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - 当前 DDL 中 `threads.kind` 默认值为 `workflow`。
 - 当前 DDL 不包含旧 Astra run lifecycle 列。
 - 新表创建幂等。
-- 删除 thread cascade 删除 thread assistants、plan rounds、plan tasks、plan task sessions。
+- 删除 thread cascade 删除 thread assistants、thread agents、plan rounds、plan tasks、plan task sessions。
 
 ### Thread 类型
 
@@ -874,7 +910,8 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - 创建/读取/更新 `teamwork`。
 - 创建/读取/更新 `brainstorm`。
 - 创建/读取/更新 `debate`。
-- 非 workflow thread 可以绑定多个 assistants。
+- teamwork thread 可以绑定多个 assistants。
+- brainstorm/debate thread 可以绑定多个 agent participants。
 
 ### Plan Round
 
@@ -883,14 +920,15 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - task terminal 后 round status 聚合正确。
 - reload 后 task status 和 round status 保持一致。
 - task session refs 可保存多个 `(agent, session_id, role)`。
-- task 创建后保存 stage/assistant/agent 快照。
-- stage/assistant/agent 后续改名、改 prompt、改 model 后，旧 task replay 仍显示旧快照。
+- task 创建后保存 stage/assistant/agent participant 快照。
+- stage/assistant/agent participant 后续改名、改 prompt、改 model 后，旧 task replay 仍显示旧快照。
 
 ### 绑定关系
 
 - workflow plan task 可绑定 `thread_stage_id`。
-- teamwork/brainstorm/debate plan task 可绑定 `assistant_id`。
-- task 无 assistant 但有 target agent 时可保存和展示。
+- teamwork plan task 可绑定 `assistant_id`。
+- brainstorm/debate plan task 可绑定 `agent_participant_id`。
+- task 无 assistant/participant 但有 target agent 时可保存和展示。
 - task 的 id 关联用于当前对象跳转，历史执行解释使用 snapshot。
 
 ### Astra
@@ -900,7 +938,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - sequential round 按顺序 dispatch。
 - task result 更新对应 plan task。
 - task dispatch/result 写入 `thread_plan_task_sessions`，而不是只写单个 session id。
-- Astra dispatch 使用 `thread_plan_tasks` 中的 stage/assistant/agent 快照。
+- Astra dispatch 使用 `thread_plan_tasks` 中的 stage/assistant/agent participant 快照。
 
 ### Thread Replay
 
@@ -913,7 +951,7 @@ assistant 和 agent 的历史解释以 `assistant_snapshot_json` / `agent_snapsh
 - teamwork/brainstorm replay 可按 round 分组。
 - debate replay 可按 round + lane 分组。
 - 同一个 session 同时来自 thread/stage/task 时只展示一次，但保留多个来源标签。
-- replay 展示 task 当时的 stage/assistant/agent 快照，不被当前配置覆盖。
+- replay 展示 task 当时的 stage/assistant/agent participant 快照，不被当前配置覆盖。
 
 ## 风险与取舍
 
@@ -936,9 +974,9 @@ v1 不支持复杂 DAG，这是有意取舍。复杂流程通过多轮 plan 表�
 
 Astra 旧字段 `proposedTasks/taskResults/currentTaskId/approvedTaskIds` 如果继续存在，会让 UI、orchestrator 和 reload 恢复出现双轨事实源。处理方式不是保留只读归档，而是直接从 schema、API、UI 和逻辑层删除；新 UI 和新 orchestrator 必须以 plan tasks 为唯一 lifecycle owner。
 
-### 风险 4: non-workflow thread 是否允许无 assistants
+### 风险 4: thread mode 是否允许无参与者
 
-产品上非 workflow thread 最好至少有一个 assistant。但 v1 后端建议宽松允许，UI 做提示，避免创建流程和测试复杂化。
+产品上 teamwork 最好至少有一个 assistant，brainstorm 最好至少有一个 agent participant，debate 最好至少两个 agent participants。但 v1 后端建议宽松允许，UI 做提示或禁用发送，避免创建流程和测试复杂化。
 
 ### 风险 5: session replay 来源过多导致重复或遗漏
 
@@ -946,7 +984,7 @@ thread replay 会同时聚合 thread、stage、plan task 和 Astra diagnostic �
 
 ### 风险 6: 只保存 id 导致历史执行配置漂移
 
-stage、assistant、agent 都是可配置对象。历史 task 如果 replay 时读取当前配置，会把后来修改的 prompt、model、tools 或 timeout 套到旧执行上，导致审计和 debug 失真。实现时必须把 id 关联和执行快照分开：id 用于导航和聚合，snapshot 用于执行、重放和解释。
+stage、assistant、agent participant 都是可配置对象。历史 task 如果 replay 时读取当前配置，会把后来修改的 prompt、model、tools 或 timeout 套到旧执行上，导致审计和 debug 失真。实现时必须把 id 关联和执行快照分开：id 用于导航和聚合，snapshot 用于执行、重放和解释。
 
 ### 风险 7: Brainstorm / Debate 复杂度被 round mode 低估
 
