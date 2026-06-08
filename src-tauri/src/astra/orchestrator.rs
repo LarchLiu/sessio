@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    astra_task_from_plan_task, next_dispatchable_tasks, now_ms,
+    astra_task_from_plan_task, is_runtime_placeholder_session_id, next_dispatchable_tasks, now_ms,
     validate_assistant_routed_astra_tasks, AstraBackendConfig, AstraOrchestration, AstraRun,
     AstraRunIntent, AstraRunStatus, AstraService, AstraTaskCompletion,
     ASTRA_ORCHESTRATOR_TIMEOUT_MS,
@@ -439,11 +439,7 @@ impl AstraService {
         }
         let session_id = session_id.to_string();
         self.mutate_run(run_id, move |next| {
-            push_unique_bounded(
-                &mut next.internal_planner_session_ids,
-                session_id,
-                MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
-            );
+            push_internal_planner_session_id(&mut next.internal_planner_session_ids, session_id);
             Ok(())
         })?;
         Ok(())
@@ -466,10 +462,9 @@ impl AstraService {
             .map(str::to_string);
         self.mutate_run(run_id, move |next| {
             if let Some(session_id) = session_id {
-                push_unique_bounded(
+                push_internal_planner_session_id(
                     &mut next.internal_planner_session_ids,
                     session_id,
-                    MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
                 );
             }
             next.run_diagnostics.push(diagnostic);
@@ -526,6 +521,15 @@ pub(super) fn push_unique_bounded(values: &mut Vec<String>, value: String, max_l
     }
     values.push(value);
     trim_vec_front(values, max_len);
+}
+
+pub(super) fn push_internal_planner_session_id(values: &mut Vec<String>, value: String) {
+    let value = value.trim().to_string();
+    if is_runtime_placeholder_session_id(&value) {
+        return;
+    }
+    values.retain(|existing| !is_runtime_placeholder_session_id(existing));
+    push_unique_bounded(values, value, MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS);
 }
 
 fn orchestrator_backend_failure_diagnostic(
@@ -694,6 +698,26 @@ mod tests {
                 .filter(|value| value.as_str() == "session-54")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn internal_planner_sessions_drop_runtime_placeholders() {
+        let mut values = Vec::new();
+        push_internal_planner_session_id(&mut values, "runtime-1".to_string());
+        push_internal_planner_session_id(&mut values, "fake-agent-session-1".to_string());
+        assert!(values.is_empty());
+
+        values.push("runtime-2".to_string());
+        values.push("planner-session-old".to_string());
+        push_internal_planner_session_id(&mut values, "planner-session-real".to_string());
+
+        assert_eq!(
+            values,
+            vec![
+                "planner-session-old".to_string(),
+                "planner-session-real".to_string()
+            ]
         );
     }
 

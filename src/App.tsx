@@ -370,7 +370,6 @@ export default function App() {
     const linkedSessionKeys = new Set<string>();
     const entries: TrayRecentEntry[] = [];
     for (const summary of threadChatSummaries) {
-      if (summary.sessions.length === 0) continue;
       for (const key of summary.sessionKeys) linkedSessionKeys.add(key);
       entries.push({
         kind: "thread",

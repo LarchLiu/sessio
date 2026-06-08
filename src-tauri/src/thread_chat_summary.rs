@@ -244,10 +244,6 @@ fn build_thread_summary(
         }
     }
 
-    if sessions_by_key.is_empty() {
-        return None;
-    }
-
     let mut sessions = sessions_by_key.into_values().collect::<Vec<_>>();
     sessions.sort_by(|a, b| session_time(b).cmp(&session_time(a)));
     let mut session_keys = session_keys.into_iter().collect::<Vec<_>>();
@@ -357,4 +353,61 @@ fn summary_sort_time(by_thread: &HashMap<String, ThreadChatSummaryInfo>, thread_
         .get(thread_id)
         .map(|summary| summary.time)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::store::sqlite::SqliteStore;
+
+    #[test]
+    fn summary_keeps_thread_chat_entry_without_sessions() {
+        let path = temp_db_path("sessio-thread-chat-summary-empty");
+        let store = Arc::new(SqliteStore::open(&path).unwrap());
+        store.init().unwrap();
+        let project_dir = temp_project_path("sessio-thread-chat-summary-empty-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project = store
+            .create_project(
+                &project_dir.to_string_lossy(),
+                "thread-chat-summary-empty",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Show thread chat entry", None)
+            .unwrap();
+
+        let cache = ThreadChatSummaryCache::new(store.clone());
+        let summaries = cache.list_project(&project.id).unwrap();
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.thread_id == thread.id)
+            .unwrap();
+        assert_eq!(summary.goal, thread.goal);
+        assert!(summary.sessions.is_empty());
+        assert!(summary.session_keys.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    fn temp_db_path(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("{prefix}-{}.db", unique_suffix()))
+    }
+
+    fn temp_project_path(prefix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("{prefix}-{}", unique_suffix()))
+    }
+
+    fn unique_suffix() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{}-{nanos}", std::process::id())
+    }
 }

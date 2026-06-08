@@ -738,13 +738,11 @@ function ProjectSidebarGroup({
     const threadEntries: SidebarThreadChatEntry[] = [];
     for (const summary of threadChatSummaries) {
       for (const key of summary.sessionKeys) linkedSessionKeys.add(key);
-      if (summary.sessions.length > 0) {
-        threadEntries.push({
-          kind: "thread",
-          summary,
-          time: summary.time,
-        });
-      }
+      threadEntries.push({
+        kind: "thread",
+        summary,
+        time: summary.time,
+      });
     }
 
     const byKey = new Map<string, SidebarSessionEntry>();

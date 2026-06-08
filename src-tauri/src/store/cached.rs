@@ -4,8 +4,9 @@ use std::sync::{Arc, RwLock};
 
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
-    KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, ProjectInfo,
-    ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo,
+    KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo,
+    PlanTaskSessionRole, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo,
+    StageStatus, SubagentInfo,
     ThreadInfo, ThreadKind, WorkflowInfo,
 };
 use crate::store::{
@@ -416,6 +417,16 @@ impl SessionStore for CachedStore {
         session: NewPlanTaskSession<'_>,
     ) -> Result<PlanTaskSessionInfo> {
         self.inner.link_plan_task_session(session)
+    }
+
+    fn relink_plan_task_session(
+        &self,
+        from: NewPlanTaskSession<'_>,
+        to_session_id: &str,
+        to_role: PlanTaskSessionRole,
+    ) -> Result<PlanTaskSessionInfo> {
+        self.inner
+            .relink_plan_task_session(from, to_session_id, to_role)
     }
 
     fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>> {

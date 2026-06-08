@@ -40,8 +40,7 @@ use astra_pi_acp_adapter::{
     AstraPiAcpPurposeConfig,
 };
 use orchestrator::{
-    dedicated_backend_required_error, push_unique_bounded, RustNativeWorkerOutcome,
-    MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
+    dedicated_backend_required_error, push_internal_planner_session_id, RustNativeWorkerOutcome,
 };
 use planner::next_dispatchable_tasks;
 use prompt::{
@@ -645,6 +644,26 @@ impl AstraService {
         )
     }
 
+    fn relink_astra_plan_task_session(
+        &self,
+        task: &AstraTaskProposal,
+        agent: Agent,
+        from_session_id: &str,
+        from_role: PlanTaskSessionRole,
+        to_session_id: &str,
+        to_role: PlanTaskSessionRole,
+    ) -> Result<()> {
+        relink_astra_plan_task_session_in_store(
+            self.inner.store.as_ref(),
+            task,
+            agent,
+            from_session_id,
+            from_role,
+            to_session_id,
+            to_role,
+        )
+    }
+
     fn record_plan_task_result(&self, run: &AstraRun, result: &AstraTaskResult) -> Result<()> {
         record_plan_task_result_in_store(self.inner.store.as_ref(), run, result)
     }
@@ -1140,10 +1159,9 @@ impl AstraService {
                 agent,
                 agent_session_id,
             )?;
-            push_unique_bounded(
+            push_internal_planner_session_id(
                 &mut run.internal_planner_session_ids,
                 agent_session_id.to_string(),
-                MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS,
             );
             Ok(())
         })?;
@@ -1217,9 +1235,11 @@ impl AstraService {
                 thread_stage_id,
                 context.as_ref(),
             )?;
-            self.link_astra_plan_task_session(
+            self.relink_astra_plan_task_session(
                 &task,
                 agent,
+                sessio_runtime_session_id,
+                PlanTaskSessionRole::Runtime,
                 agent_session_id,
                 PlanTaskSessionRole::Delegated,
             )?;
@@ -1791,6 +1811,13 @@ fn is_persistable_agent_session_id(agent_runtime_session_id: &str) -> bool {
         && !agent_runtime_session_id.starts_with("fake-agent-session")
 }
 
+fn is_runtime_placeholder_session_id(session_id: &str) -> bool {
+    let session_id = session_id.trim();
+    session_id.is_empty()
+        || session_id.starts_with("runtime-")
+        || session_id.starts_with("fake-agent-session")
+}
+
 fn is_internal_planner_metadata(metadata: &RuntimeMetadata) -> bool {
     metadata
         .get("astraInternal")
@@ -2266,6 +2293,30 @@ fn link_astra_plan_task_session_in_store(
     Ok(())
 }
 
+fn relink_astra_plan_task_session_in_store(
+    store: &dyn SessionStore,
+    task: &AstraTaskProposal,
+    agent: Agent,
+    from_session_id: &str,
+    from_role: PlanTaskSessionRole,
+    to_session_id: &str,
+    to_role: PlanTaskSessionRole,
+) -> Result<()> {
+    if let Some(plan_task_id) = task.plan_task_id.as_deref() {
+        store.relink_plan_task_session(
+            NewPlanTaskSession {
+                task_id: plan_task_id,
+                agent,
+                session_id: from_session_id,
+                role: from_role,
+            },
+            to_session_id,
+            to_role,
+        )?;
+    }
+    Ok(())
+}
+
 fn record_plan_task_result_in_store(
     store: &dyn SessionStore,
     run: &AstraRun,
@@ -2301,7 +2352,13 @@ fn record_plan_task_result_in_store(
         store.update_plan_task_status(plan_task_id, patch)?;
     }
     let session_id = result.sessio_runtime_session_id.trim();
-    if !session_id.is_empty() {
+    let result_session_already_linked = task.sessions.iter().any(|session| {
+        session.agent == task.target_agent && session.session_id == session_id
+    });
+    if !session_id.is_empty()
+        && !is_runtime_placeholder_session_id(session_id)
+        && !result_session_already_linked
+    {
         store.link_plan_task_session(NewPlanTaskSession {
             task_id: plan_task_id,
             agent: task.target_agent,
@@ -2745,7 +2802,7 @@ mod tests {
             session.session_id == "delegated-session-1"
                 && session.role == PlanTaskSessionRole::Delegated
         }));
-        assert!(completed_task.sessions.iter().any(|session| {
+        assert!(!completed_task.sessions.iter().any(|session| {
             session.session_id == "runtime-session-1"
                 && session.role == PlanTaskSessionRole::Runtime
         }));

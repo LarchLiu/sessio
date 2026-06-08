@@ -183,6 +183,10 @@ fn execute_agent_session(
         config.timeout_ms,
         &format!("runtime_agent_{}", config.agent.as_str()),
     );
+    let agent_session_id = runtime
+        .agent_runtime_session_id_for_session(&session_id)
+        .filter(|value| is_persistable_runtime_agent_session_id(value))
+        .unwrap_or_else(|| session_id.clone());
 
     // Clean up session
     let _ = runtime.dispose_session_silent(&session_id);
@@ -195,10 +199,17 @@ fn execute_agent_session(
             "empty_response",
             "Agent returned empty response",
         )
-        .with_session_id(Some(session_id)));
+        .with_session_id(Some(agent_session_id)));
     }
 
-    Ok((output, session_id))
+    Ok((output, agent_session_id))
+}
+
+fn is_persistable_runtime_agent_session_id(session_id: &str) -> bool {
+    let session_id = session_id.trim();
+    !session_id.is_empty()
+        && !session_id.starts_with("runtime-")
+        && !session_id.starts_with("fake-agent-session")
 }
 
 fn wait_for_agent_output(

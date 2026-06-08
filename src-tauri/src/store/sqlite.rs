@@ -5848,6 +5848,70 @@ impl SessionStore for SqliteStore {
         .map_err(Into::into)
     }
 
+    fn relink_plan_task_session(
+        &self,
+        from: NewPlanTaskSession<'_>,
+        to_session_id: &str,
+        to_role: PlanTaskSessionRole,
+    ) -> Result<PlanTaskSessionInfo> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        load_plan_task_by_id(&tx, from.task_id)?;
+        let now = now_ms();
+        let existing_created_at = tx
+            .query_row(
+                "SELECT MIN(created_at)
+                 FROM thread_plan_task_sessions
+                 WHERE task_id = ? AND agent = ? AND role = ?",
+                params![
+                    from.task_id,
+                    from.agent.as_str(),
+                    from.role.as_str(),
+                ],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+        tx.execute(
+            "DELETE FROM thread_plan_task_sessions
+             WHERE task_id = ? AND agent = ? AND role = ? AND session_id != ?",
+            params![
+                from.task_id,
+                from.agent.as_str(),
+                from.role.as_str(),
+                to_session_id,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO thread_plan_task_sessions (task_id, agent, session_id, role, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(task_id, agent, session_id, role) DO UPDATE SET
+                updated_at = excluded.updated_at",
+            params![
+                from.task_id,
+                from.agent.as_str(),
+                to_session_id,
+                to_role.as_str(),
+                existing_created_at.unwrap_or(now),
+                now,
+            ],
+        )?;
+        let linked = tx.query_row(
+            "SELECT task_id, agent, session_id, role, created_at, updated_at
+             FROM thread_plan_task_sessions
+             WHERE task_id = ? AND agent = ? AND session_id = ? AND role = ?",
+            params![
+                from.task_id,
+                from.agent.as_str(),
+                to_session_id,
+                to_role.as_str(),
+            ],
+            plan_task_session_from_row,
+        )?;
+        tx.commit()?;
+        Ok(linked)
+    }
+
     fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>> {
         let conn = self.conn.lock().unwrap();
         load_plan_task_by_id(&conn, task_id)?;
@@ -10086,11 +10150,44 @@ mod migration_tests {
             })
             .unwrap();
         assert_eq!(session_ref.role, PlanTaskSessionRole::Runtime);
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &parallel.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: "runtime-session-stale",
+                role: PlanTaskSessionRole::Runtime,
+            })
+            .unwrap();
+        let parallel = store.get_plan_round(&parallel.id).unwrap().unwrap();
+        assert_eq!(parallel.tasks[0].sessions.len(), 2);
+        assert!(parallel.tasks[0]
+            .sessions
+            .iter()
+            .any(|session| session.session_id == "runtime-session-1"));
+        assert!(parallel.tasks[0]
+            .sessions
+            .iter()
+            .any(|session| session.session_id == "runtime-session-stale"));
+        let relinked = store
+            .relink_plan_task_session(
+                NewPlanTaskSession {
+                    task_id: &parallel.tasks[0].id,
+                    agent: Agent::Codex,
+                    session_id: "runtime-session-1",
+                    role: PlanTaskSessionRole::Runtime,
+                },
+                "agent-session-1",
+                PlanTaskSessionRole::Delegated,
+            )
+            .unwrap();
+        assert_eq!(relinked.session_id, "agent-session-1");
+        assert_eq!(relinked.role, PlanTaskSessionRole::Delegated);
         let parallel = store.get_plan_round(&parallel.id).unwrap().unwrap();
         assert_eq!(parallel.tasks[0].sessions.len(), 1);
+        assert_eq!(parallel.tasks[0].sessions[0].session_id, "agent-session-1");
         assert_eq!(
-            parallel.tasks[0].sessions[0].session_id,
-            "runtime-session-1"
+            parallel.tasks[0].sessions[0].role,
+            PlanTaskSessionRole::Delegated
         );
 
         store

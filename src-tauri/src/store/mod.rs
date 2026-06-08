@@ -482,6 +482,12 @@ pub trait SessionStore: Send + Sync {
         &self,
         session: NewPlanTaskSession<'_>,
     ) -> Result<PlanTaskSessionInfo>;
+    fn relink_plan_task_session(
+        &self,
+        from: NewPlanTaskSession<'_>,
+        to_session_id: &str,
+        to_role: PlanTaskSessionRole,
+    ) -> Result<PlanTaskSessionInfo>;
     fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>>;
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>>;
     fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>>;

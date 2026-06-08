@@ -178,6 +178,17 @@ impl RuntimeManager {
         })
     }
 
+    pub fn agent_runtime_session_id_for_session(
+        &self,
+        sessio_runtime_session_id: &str,
+    ) -> Option<String> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(sessio_runtime_session_id)
+                .map(|s| s.handle.agent_runtime_session_id.clone())
+        })
+    }
+
     pub fn capabilities_for_session(
         &self,
         sessio_runtime_session_id: &str,
