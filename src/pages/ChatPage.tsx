@@ -150,7 +150,7 @@ export interface ActiveMessageMeta {
   partial: boolean;
 }
 
-interface FilePreview {
+export interface FilePreview {
   title: string;
   text: string;
 }
@@ -371,7 +371,7 @@ function ChatPage({
           </ScrollArea>
         )}
 
-        <MessageStream
+        <AcpTranscriptPanel
           key={
             tab.kind === "main"
               ? mainMessageStreamKey
@@ -679,29 +679,7 @@ function threadSnapshotKindLabel(
   }
 }
 
-function MessageStream({
-  agent,
-  filePath,
-  sessionId,
-  ancestorSessions = [],
-  available,
-  emptyHint,
-  viewMode,
-  liveState,
-  runtimeAgents,
-  rememberRuntimeAgentSelection,
-  debugAcpConfig,
-  runtimeSessionAliases,
-  dispatchLiveEvent,
-  onPendingSession,
-  onPreviewImage,
-  onPreviewFile,
-  onFilePreviewError,
-  onMessageCount,
-  messageCount,
-  workspacePath,
-  skipHistoryLoad = false,
-}: {
+export interface AcpTranscriptPanelProps {
   agent: SessionInfo["agent"];
   filePath: string;
   sessionId: string;
@@ -728,9 +706,36 @@ function MessageStream({
   messageCount: number;
   workspacePath: string | null;
   skipHistoryLoad?: boolean;
-}) {
+  scrollKey?: string;
+}
+
+export function AcpTranscriptPanel({
+  agent,
+  filePath,
+  sessionId,
+  ancestorSessions = [],
+  available,
+  emptyHint,
+  viewMode,
+  liveState,
+  runtimeAgents,
+  rememberRuntimeAgentSelection,
+  debugAcpConfig,
+  runtimeSessionAliases,
+  dispatchLiveEvent,
+  onPendingSession,
+  onPreviewImage,
+  onPreviewFile,
+  onFilePreviewError,
+  onMessageCount,
+  messageCount,
+  workspacePath,
+  skipHistoryLoad = false,
+  scrollKey,
+}: AcpTranscriptPanelProps) {
   const { t } = useI18n();
-  const sourceKey = historySourceKey(agent, filePath, sessionId);
+  const historyKey = historySourceKey(agent, filePath, sessionId);
+  const sourceKey = scrollKey ?? historyKey;
   const readableAncestorSessions = useMemo(
     () => ancestorSessions.filter((session) => session.available && session.filePath),
     [ancestorSessions],
@@ -758,7 +763,7 @@ function MessageStream({
       const cached = historyCache.get(historySourceKey(session.agent, session.filePath, session.id));
       return cached?.messageCount === session.messageCount;
     });
-  const cachedEntry = historyCache.get(sourceKey);
+  const cachedEntry = historyCache.get(historyKey);
   const isFreshCache =
     Boolean(cachedEntry) && cachedEntry?.messageCount === messageCount;
   const hasCachedHistory = Boolean(cachedEntry);
@@ -870,7 +875,7 @@ function MessageStream({
 
   useEffect(() => {
     if (!available || !filePath || skipHistoryLoad) return;
-    const cached = historyCache.get(sourceKey);
+    const cached = historyCache.get(historyKey);
     if (cached && cached.messageCount === messageCount) return;
 
     let cancelled = false;
@@ -882,7 +887,7 @@ function MessageStream({
           .then((result) => {
             if (cancelled) return;
             const turns = normalizeSessionHistoryTurns(result.turns);
-            historyCache.set(sourceKey, {
+            historyCache.set(historyKey, {
               turns,
               indexedThrough: result.indexedThrough,
               messageCount: result.messageCount,
@@ -928,7 +933,7 @@ function MessageStream({
     available,
     messageCount,
     onMessageCount,
-    sourceKey,
+    historyKey,
     dispatchLiveEvent,
     runtimeSessionId,
     skipHistoryLoad,
@@ -1054,14 +1059,14 @@ function MessageStream({
       mergedAncestorTurns,
       historyTurns,
     );
-    const historyKey = ancestorCacheKey ? `${ancestorCacheKey}->${sourceKey}` : sourceKey;
-    const historyViewModel = cachedHistoryViewModel(historyKey, viewMode, historyTurnsForView);
+    const historyViewKey = ancestorCacheKey ? `${ancestorCacheKey}->${historyKey}` : historyKey;
+    const historyViewModel = cachedHistoryViewModel(historyViewKey, viewMode, historyTurnsForView);
     if (!liveSession || liveSession.turns.length === 0) return historyViewModel;
     return mergeHistoryAndLiveViewModels(
       historyViewModel,
       liveSessionToAcpViewModel(liveSession),
     );
-  }, [ancestorCacheKey, historyTurns, liveSession, mergedAncestorTurns, sourceKey, viewMode]);
+  }, [ancestorCacheKey, historyKey, historyTurns, liveSession, mergedAncestorTurns, viewMode]);
 
   const liveTurnIdsKey = useMemo(
     () => liveSession?.turns.map((turn) => turn.turnId).join("|") ?? "",
@@ -1144,7 +1149,7 @@ function MessageStream({
       setError(null);
       return;
     }
-    const cached = historyCache.get(sourceKey);
+    const cached = historyCache.get(historyKey);
     if (cached) {
       setHistoryTurns(cached.turns);
       setLoading(cached.messageCount !== messageCount);
@@ -1157,7 +1162,7 @@ function MessageStream({
     // Keep cached sessions fully rendered so the vertical scrollbar thumb
     // does not shrink after a delayed history expansion when switching back.
     setHistoryRenderReady(hasCachedHistory);
-  }, [available, filePath, hasCachedHistory, messageCount, sourceKey, skipHistoryLoad]);
+  }, [available, filePath, hasCachedHistory, historyKey, messageCount, sourceKey, skipHistoryLoad]);
 
   useEffect(() => {
     if (liveSession || historyRenderReady) return;
@@ -1499,25 +1504,17 @@ function MessageStream({
               debugAcpConfig={debugAcpConfig}
               onRunCommand={handleSendText}
             />
-            {visibleDisplayItems.map((item, i) => (
-              <div
-                key={visibleDisplayItemKeys[i]}
-                ref={(el) => {
-                  bubbleRefs.current[i] = el;
-                }}
-                className={renderItemSide(item) === "user" ? "flex justify-end" : ""}
-              >
-                <AcpLiveItem
-                  item={item}
-                  sessioRuntimeSessionId={runtimeSessionId}
-                  now={runtimeNow}
-                  onPreviewImage={onPreviewImage}
-                  onPreviewFile={onPreviewFile}
-                  onFilePreviewError={onFilePreviewError}
-                  onPermissionResponse={respondAgentPermission}
-                />
-              </div>
-            ))}
+            <AcpRenderItems
+              items={visibleDisplayItems}
+              itemKeys={visibleDisplayItemKeys}
+              bubbleRefs={bubbleRefs}
+              sessioRuntimeSessionId={runtimeSessionId}
+              now={runtimeNow}
+              onPreviewImage={onPreviewImage}
+              onPreviewFile={onPreviewFile}
+              onFilePreviewError={onFilePreviewError}
+              onPermissionResponse={respondAgentPermission}
+            />
           </div>
         </ScrollArea>
         <RoleNav
@@ -2428,6 +2425,56 @@ function scrollBlockStartIntoView(el: HTMLElement | null) {
       }
     });
   });
+}
+
+export function AcpRenderItems({
+  items,
+  itemKeys,
+  bubbleRefs,
+  sessioRuntimeSessionId,
+  now,
+  onPreviewImage,
+  onPreviewFile,
+  onFilePreviewError,
+  onPermissionResponse,
+}: {
+  items: AcpRenderItem[];
+  itemKeys: string[];
+  bubbleRefs: React.RefObject<(HTMLDivElement | null)[]>;
+  sessioRuntimeSessionId: string;
+  now: number;
+  onPreviewImage: (image: MarkdownImage) => void;
+  onPreviewFile: (file: FilePreview) => void;
+  onFilePreviewError: (message: string) => void;
+  onPermissionResponse: (
+    sessioRuntimeSessionId: string,
+    requestId: string,
+    optionId: string,
+  ) => Promise<void>;
+}) {
+  return (
+    <>
+      {items.map((item, i) => (
+        <div
+          key={itemKeys[i]}
+          ref={(el) => {
+            bubbleRefs.current[i] = el;
+          }}
+          className={renderItemSide(item) === "user" ? "flex justify-end" : ""}
+        >
+          <AcpLiveItem
+            item={item}
+            sessioRuntimeSessionId={sessioRuntimeSessionId}
+            now={now}
+            onPreviewImage={onPreviewImage}
+            onPreviewFile={onPreviewFile}
+            onFilePreviewError={onFilePreviewError}
+            onPermissionResponse={onPermissionResponse}
+          />
+        </div>
+      ))}
+    </>
+  );
 }
 
 function AcpLiveItem({
@@ -3881,7 +3928,7 @@ function liveWorkingIndicatorTurn(liveSession: LiveRuntimeSession | null | undef
   return null;
 }
 
-function mergeHistoryAndLiveViewModels(
+export function mergeHistoryAndLiveViewModels(
   historyViewModel: AcpViewModel,
   liveViewModel: AcpViewModel,
 ): AcpViewModel {
@@ -5055,6 +5102,34 @@ function CodeScrollArea({
       {children}
     </ScrollArea>
   );
+}
+
+export function LiveSessionStatusBadge({
+  liveSession,
+  now,
+}: {
+  liveSession: LiveRuntimeSession | null | undefined;
+  now: number;
+}) {
+  const turn = latestStatusTurn(liveSession);
+  if (!turn) return null;
+  return <RuntimeStatusContent text={liveTurnStatusText(turn, now)} />;
+}
+
+function latestStatusTurn(liveSession: LiveRuntimeSession | null | undefined): LiveTurn | null {
+  if (!liveSession) return null;
+  for (let index = liveSession.turns.length - 1; index >= 0; index -= 1) {
+    const turn = liveSession.turns[index];
+    if (
+      turn.status === "pending" ||
+      turn.status === "streaming" ||
+      turn.status === "cancelling" ||
+      turn.status === "completed"
+    ) {
+      return turn;
+    }
+  }
+  return null;
 }
 
 function RuntimeStatusContent({ text }: { text: string }) {

@@ -22,6 +22,7 @@ import type {
 } from "../api";
 import { AGENT_LABEL, getThreadReplay, getThreadWorkState } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
+import { LiveSessionStatusBadge } from "../components/AcpTranscriptPanel";
 import ScrollArea from "../components/ScrollArea";
 import { localeTag, useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
@@ -46,6 +47,7 @@ interface ThreadSessionLane {
   groupKey: string;
   groupLabel: string;
   status: ThreadSessionLaneStatus;
+  liveSession: LiveRuntimeState["sessions"][string] | null;
 }
 
 export default function ThreadMultiSessionChatPage({
@@ -271,6 +273,7 @@ export default function ThreadMultiSessionChatPage({
                     key={lane.laneId}
                     lane={lane}
                     threadKind={thread.kind}
+                    now={Date.now()}
                     onSelectSession={onSelectSession}
                   />
                 ))}
@@ -286,10 +289,12 @@ export default function ThreadMultiSessionChatPage({
 function ThreadSessionLaneCard({
   lane,
   threadKind,
+  now,
   onSelectSession,
 }: {
   lane: ThreadSessionLane;
   threadKind: ThreadKind;
+  now: number;
   onSelectSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
@@ -314,6 +319,7 @@ function ThreadSessionLaneCard({
                 {lane.groupLabel}
               </span>
               <LaneStatusBadge status={lane.status} />
+              <LiveSessionStatusBadge liveSession={lane.liveSession} now={now} />
               {threadKind === "brainstorm" && (
                 <span className="rounded bg-sky-500/[0.08] px-1.5 py-0.5 text-meta text-sky-500">
                   {t("thread.shared_board")}
@@ -472,6 +478,7 @@ function buildThreadSessionLanes({
         : replaySession.session
           ? "history"
           : "missing",
+      liveSession,
     });
   }
 
@@ -496,6 +503,7 @@ function buildThreadSessionLanes({
       groupKey: "pending",
       groupLabel: t("thread.pending_lane"),
       status: liveSession ? liveSessionStatus(liveSession) : "pending",
+      liveSession,
     });
   }
 
