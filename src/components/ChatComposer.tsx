@@ -25,12 +25,18 @@ const PROJECT_NAME_SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq
 export default function ChatComposer({
   composer,
   title,
+  variant = "default",
+  modeActions,
+  sendActions,
   bottomRow,
   canSend,
   onSend,
 }: {
   composer: ChatComposerController;
   title?: ReactNode;
+  variant?: "default" | "chat";
+  modeActions?: ReactNode;
+  sendActions?: ReactNode;
   bottomRow?: ReactNode;
   canSend?: boolean;
   onSend: () => void;
@@ -43,9 +49,13 @@ export default function ChatComposer({
     imageLabel: t("new_chat.add_images"),
     fileLabel: t("new_chat.add_files"),
   });
+  const outerClassName = variant === "chat" ? "w-full" : "w-full max-w-[730px]";
+  const controlsClassName =
+    "flex h-12 items-center justify-between gap-3 px-3 pb-2 " +
+    (bottomRow ? "border-b border-ink/5" : "");
 
   return (
-    <div className="w-full max-w-[730px]">
+    <div className={outerClassName}>
       {title && (
         <h1 className="mb-11 text-center text-[28px] font-medium leading-tight tracking-normal text-ink/92">
           {title}
@@ -84,7 +94,7 @@ export default function ChatComposer({
           }}
           className="chat-composer-textarea block w-full resize-none bg-transparent px-3.5 py-3.5 text-body leading-5 text-ink/88 placeholder:text-ink/38 outline-none"
         />
-        <div className="flex h-12 items-center justify-between gap-3 border-b border-ink/5 px-3 pb-2">
+        <div className={controlsClassName}>
           <div className="flex min-w-0 items-center gap-3">
             {composer.supportsAttachments && (
               <Tooltip content={t("new_chat.add_context")} placement="top">
@@ -108,6 +118,7 @@ export default function ChatComposer({
               disabled={!composer.selectedRuntimeAgent}
               options={composer.permissionOptions}
             />
+            {modeActions}
           </div>
           <div className="flex shrink-0 items-center gap-2.5">
             <RuntimeMenuSelect
@@ -129,6 +140,7 @@ export default function ChatComposer({
                 <ArrowUp className="h-5 w-5" />
               </button>
             </Tooltip>
+            {sendActions}
           </div>
         </div>
         {bottomRow}

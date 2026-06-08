@@ -198,7 +198,7 @@ export function buildThreadTimelineRows(
     plannerQueues.set(runKey, queue);
   }
   for (const queue of plannerQueues.values()) {
-    queue.sort((a, b) => laneTimelineTime(a) - laneTimelineTime(b));
+    queue.sort(compareTimelineLanesAsc);
   }
 
   const sortedRounds = planRounds.slice().sort(comparePlanRoundsAsc);
@@ -316,7 +316,7 @@ export function buildThreadTimelineRows(
 
   lanes
     .filter((lane) => !consumed.has(lane.laneId))
-    .sort((a, b) => laneTimelineTime(a) - laneTimelineTime(b))
+    .sort(compareTimelineLanesAsc)
     .forEach((lane, index) => {
       const time = laneTimelineTime(lane);
       groups.push({
@@ -504,7 +504,7 @@ function compareTaskLanes(
   const taskB = sourceB?.planTaskId ? taskById.get(sourceB.planTaskId) : null;
   return (taskA?.sortOrder ?? 0) - (taskB?.sortOrder ?? 0)
     || (sourceA?.createdAt ?? laneTimelineTime(a)) - (sourceB?.createdAt ?? laneTimelineTime(b))
-    || a.laneId.localeCompare(b.laneId);
+    || compareTimelineLanesAsc(a, b);
 }
 
 function chunkLanes(lanes: ThreadSessionLane[], size: number): ThreadSessionLane[][] {
@@ -533,6 +533,22 @@ function laneTimelineTime(lane: ThreadSessionLane): number {
     .filter((time) => time > 0);
   if (liveTurnTimes.length > 0) return Math.min(...liveTurnTimes);
   return lane.session?.startedAt ?? lane.session?.updatedAt ?? 0;
+}
+
+function compareTimelineLanesAsc(a: ThreadSessionLane, b: ThreadSessionLane): number {
+  return timelineSortTime(laneTimelineTime(a)) - timelineSortTime(laneTimelineTime(b))
+    || timelineSortTime(laneActivityTime(a)) - timelineSortTime(laneActivityTime(b))
+    || a.groupLabel.localeCompare(b.groupLabel)
+    || a.sessionId.localeCompare(b.sessionId)
+    || a.laneId.localeCompare(b.laneId);
+}
+
+function laneActivityTime(lane: ThreadSessionLane): number {
+  const liveTurnTimes = (lane.liveSession?.turns ?? [])
+    .flatMap((turn) => [turn.startedAt, turn.updatedAt])
+    .filter((time) => time > 0);
+  if (liveTurnTimes.length > 0) return Math.max(...liveTurnTimes);
+  return lane.session?.updatedAt ?? lane.session?.startedAt ?? latestSourceTime(lane.sources);
 }
 
 function compareTimelineGroups(a: ThreadTimelineGroup, b: ThreadTimelineGroup): number {

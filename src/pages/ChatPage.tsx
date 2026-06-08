@@ -3831,7 +3831,7 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-type AcpRenderItem =
+export type AcpRenderItem =
   | { kind: "turnStatus"; turn: LiveTurn }
   | { kind: "workingIndicator"; turn: LiveTurn }
   | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
@@ -3840,7 +3840,7 @@ type AcpRenderItem =
   | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
   | { kind: "error"; turn: LiveTurn; error: RuntimeError };
 
-function acpViewModelToRenderItems(
+export function acpViewModelToRenderItems(
   viewModel: AcpViewModel,
   liveTurnIds: Set<string>,
   workingIndicatorTurnId: string,
@@ -3920,7 +3920,7 @@ function latestTurnWithIds(turns: LiveTurn[], ids: Set<string>): LiveTurn | null
   return null;
 }
 
-function liveWorkingIndicatorTurn(liveSession: LiveRuntimeSession | null | undefined): LiveTurn | null {
+export function liveWorkingIndicatorTurn(liveSession: LiveRuntimeSession | null | undefined): LiveTurn | null {
   if (!liveSession) return null;
   for (let index = liveSession.turns.length - 1; index >= 0; index -= 1) {
     const turn = liveSession.turns[index];
@@ -4049,7 +4049,7 @@ function liveTurnStatusText(turn: LiveTurn, now: number): string {
   return `${state}|${formatDuration(elapsedMs)}`;
 }
 
-function renderItemKeys(items: AcpRenderItem[]): string[] {
+export function renderItemKeys(items: AcpRenderItem[]): string[] {
   const blockCounts = new Map<string, number>();
   return items.map((item) => {
     if (item.kind !== "block") return renderItemKey(item);

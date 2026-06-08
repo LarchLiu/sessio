@@ -148,7 +148,6 @@ export default function AppMain({
             runtimeSessionAliases={runtimeSessionAliases}
             pendingNewChats={pendingNewChats}
             dispatchLiveEvent={dispatchLiveEvent}
-            onBackToOverview={() => setDetailMode("project")}
             onPendingSession={addPendingSession}
             onError={onError}
           />

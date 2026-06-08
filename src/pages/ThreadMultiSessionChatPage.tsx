@@ -1,18 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import HashIcon from "@iconify-react/mynaui/hash";
 import {
   AlertCircle,
-  ArrowLeft,
-  Bot,
-  Clock,
-  GitBranch,
+  ArrowDownToLine,
   ListChecks,
   LoaderCircle,
   MessagesSquare,
   Sparkles,
   Square,
-  RefreshCw,
 } from "lucide-react";
 import type {
   Agent,
@@ -26,8 +22,8 @@ import type {
   SetRuntimeAgentSelectionRequest,
   StageInfo,
   ThreadInfo,
-  ThreadKind,
   ThreadReplayInfo,
+  ThreadReplaySessionSourceInfo,
   ThreadWorkState,
 } from "../api";
 import {
@@ -43,33 +39,29 @@ import {
   respondAgentPermission,
   updatePlanTaskStatus,
 } from "../api";
-import ChatComposer, { NewChatMenuButton } from "../components/ChatComposer";
+import ChatComposer from "../components/ChatComposer";
 import { AgentGlyph } from "../components/AgentIcon";
-import { LiveSessionStatusBadge } from "../components/AcpTranscriptPanel";
+import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
-import {
-  contentBlocksText,
-  stripImagePlaceholders,
-} from "../historyMerge";
+import Tooltip from "../components/Tooltip";
 import { useChatComposer } from "../hooks/useChatComposer";
-import { localeTag, useI18n } from "../i18n";
+import { useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
-import type {
-  AcpPermissionRequest,
-  AcpRenderBlock,
-  LiveRuntimeAction,
-  LiveRuntimeState,
-  LiveTurn,
+import {
+  historyTurnsToAcpViewModel,
+  liveSessionToAcpViewModel,
+  type AcpRenderBlock,
+  type AcpViewModel,
+  type LiveRuntimeAction,
+  type LiveRuntimeState,
+  type LiveTurn,
 } from "../runtimeChat";
 import { isPersistedSession, sessionDisplayTitle } from "../appUtils";
 import {
   buildThreadTimelineRows,
   buildThreadSessionLanes,
-  replaySourceKey,
-  replaySourceTitle,
   shortSessionId,
   type ThreadSessionLane,
-  type ThreadSessionLaneStatus,
   type ThreadTimelineRow,
 } from "../threadReplayView";
 import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
@@ -77,17 +69,21 @@ import { collectThreadChatSessions } from "../threadChats";
 import { collectThreadHistorySnapshots, withThreadChatSessions } from "../threadWorkContext";
 import {
   astraStatusClass,
-  astraTaskStatusClass,
   formatAstraStatus,
   isAstraActive,
-  planRoundStatusClass,
   upsertAstraRun,
 } from "../threadAstraView";
-import { projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
-import { MarkdownContent, type MarkdownImage } from "./ChatPage";
+import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
+import {
+  AcpRenderItems,
+  acpViewModelToRenderItems,
+  liveWorkingIndicatorTurn,
+  renderItemKeys,
+  type AcpRenderItem,
+  type MarkdownImage,
+} from "./ChatPage";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result", "task_dispatch"]);
-const LANE_PREVIEW_ITEM_LIMIT = 12;
 
 export default function ThreadMultiSessionChatPage({
   project,
@@ -99,7 +95,6 @@ export default function ThreadMultiSessionChatPage({
   runtimeSessionAliases,
   pendingNewChats,
   dispatchLiveEvent,
-  onBackToOverview,
   onPendingSession,
   onError,
 }: {
@@ -112,18 +107,22 @@ export default function ThreadMultiSessionChatPage({
   runtimeSessionAliases: Record<string, string>;
   pendingNewChats: Record<string, PendingNewChatSession>;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
-  onBackToOverview: () => void;
   onPendingSession: (session: PendingNewChatSession) => void;
   onError: (error: string | null) => void;
 }) {
-  const { t, lang } = useI18n();
+  const { t } = useI18n();
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const timelineContentRef = useRef<HTMLDivElement>(null);
+  const laneRefs = useRef<Record<string, HTMLElement | null>>({});
+  const followTimelineBottomRef = useRef(true);
   const [thread, setThread] = useState<ThreadWorkState | null>(null);
   const [replay, setReplay] = useState<ThreadReplayInfo | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [stageTaskMode, setStageTaskMode] = useState(false);
   const [stageTaskBusy, setStageTaskBusy] = useState(false);
+  const [astraBusy, setAstraBusy] = useState<"start" | "cancel" | null>(null);
   const [astraRuns, setAstraRuns] = useState<AstraHandle[]>([]);
   const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
   const composer = useChatComposer({
@@ -167,7 +166,6 @@ export default function ThreadMultiSessionChatPage({
   }, [load, onError]);
 
   const refresh = useCallback(async () => {
-    setRefreshing(true);
     setLoadError(null);
     try {
       const { nextThread, nextReplay } = await load();
@@ -177,8 +175,6 @@ export default function ThreadMultiSessionChatPage({
       const message = String(err);
       setLoadError(message);
       onError(message);
-    } finally {
-      setRefreshing(false);
     }
   }, [load, onError]);
 
@@ -234,11 +230,31 @@ export default function ThreadMultiSessionChatPage({
   const activeStage = thread?.stageId
     ? sortedStages.find((stage) => stage.id === thread.stageId) ?? null
     : null;
-  const liveCount = lanes.filter((lane) => lane.status === "live").length;
-  const pendingCount = lanes.filter((lane) => lane.status === "pending").length;
   const timelineRows = useMemo(
     () => buildThreadTimelineRows(lanes, planRounds, astraRuns, thread?.kind ?? "teamwork"),
     [astraRuns, lanes, planRounds, thread?.kind],
+  );
+  const timelineScrollKey = useMemo(
+    () => timelineRows
+      .map((row) => row.lanes
+        .map((lane) => {
+          const latestLiveTurn = lane.liveSession?.turns.at(-1);
+          return [
+            row.key,
+            lane.laneId,
+            lane.status,
+            lane.session?.messageCount ?? 0,
+            lane.liveSession?.turns.length ?? 0,
+            latestLiveTurn?.updatedAt ?? latestLiveTurn?.startedAt ?? 0,
+          ].join(":");
+        })
+        .join(","))
+      .join("|"),
+    [timelineRows],
+  );
+  const timelineNavItems = useMemo(
+    () => thread ? threadTimelineNavItems(timelineRows, thread, t) : [],
+    [thread, timelineRows, t],
   );
   const threadChatSessions = useMemo(
     () => thread ? collectThreadChatSessions(thread, replay) : [],
@@ -246,6 +262,120 @@ export default function ThreadMultiSessionChatPage({
   );
   const canRunStageTask =
     Boolean(thread && thread.kind === "workflow" && activeStage && composer.selectedAgent);
+  const activeAstraRun = useMemo(
+    () => astraRuns.find((run) => isAstraActive(run.status)) ?? null,
+    [astraRuns],
+  );
+  const canStartAstra =
+    Boolean(thread && (thread.kind === "teamwork" || thread.kind === "brainstorm" || thread.kind === "debate"));
+
+  const updateScrollToBottomButton = useCallback((vp: HTMLDivElement | null = viewportRef.current) => {
+    if (!vp) return;
+    const bottomDistance = Math.max(0, vp.scrollHeight - vp.clientHeight - vp.scrollTop);
+    const visible = bottomDistance > 16;
+    setShowScrollToBottom(visible);
+    if (!visible) followTimelineBottomRef.current = true;
+  }, []);
+
+  const scrollTimelineToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    followTimelineBottomRef.current = true;
+    const scroll = () => {
+      const vp = viewportRef.current;
+      if (!vp) return;
+      vp.scrollTo({
+        top: Math.max(0, vp.scrollHeight - vp.clientHeight),
+        behavior,
+      });
+      setShowScrollToBottom(false);
+    };
+    scroll();
+    window.requestAnimationFrame(() => {
+      scroll();
+      window.requestAnimationFrame(scroll);
+    });
+    window.setTimeout(scroll, 80);
+  }, []);
+
+  const handleTimelineScroll = useCallback((vp: HTMLDivElement) => {
+    const bottomDistance = Math.max(0, vp.scrollHeight - vp.clientHeight - vp.scrollTop);
+    const awayFromBottom = bottomDistance > 16;
+    followTimelineBottomRef.current = !awayFromBottom;
+    setShowScrollToBottom(awayFromBottom);
+  }, []);
+
+  useEffect(() => {
+    followTimelineBottomRef.current = true;
+    setShowScrollToBottom(false);
+  }, [threadId]);
+
+  useLayoutEffect(() => {
+    if (loading || !thread) return;
+    if (followTimelineBottomRef.current) {
+      scrollTimelineToBottom();
+    } else {
+      updateScrollToBottomButton();
+    }
+  }, [loading, scrollTimelineToBottom, thread, timelineScrollKey, updateScrollToBottomButton]);
+
+  useLayoutEffect(() => {
+    const vp = viewportRef.current;
+    const content = timelineContentRef.current;
+    if (!vp || !content) return;
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        if (followTimelineBottomRef.current) {
+          scrollTimelineToBottom();
+        } else {
+          updateScrollToBottomButton(vp);
+        }
+      });
+    };
+    const ro = new ResizeObserver(schedule);
+    ro.observe(vp);
+    ro.observe(content);
+    schedule();
+    return () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      ro.disconnect();
+    };
+  }, [scrollTimelineToBottom, updateScrollToBottomButton, timelineRows.length]);
+
+  const handleStartAstra = async () => {
+    if (!thread || !canStartAstra) return;
+    setAstraBusy("start");
+    try {
+      const run = await createAstraRun(thread.id, composer.text.trim() || null);
+      setAstraRuns((prev) => upsertAstraRun(prev, run));
+      composer.setText("");
+      await reloadAstraState();
+      await refresh();
+    } catch (err) {
+      onError(String(err));
+      composer.setComposerError(String(err));
+    } finally {
+      setAstraBusy(null);
+    }
+  };
+
+  const handleCancelAstra = async () => {
+    if (!activeAstraRun) return;
+    setAstraBusy("cancel");
+    try {
+      const run = await cancelAstraRun(activeAstraRun.runId);
+      setAstraRuns((prev) => upsertAstraRun(prev, run));
+      await reloadAstraState();
+      await refresh();
+    } catch (err) {
+      onError(String(err));
+      composer.setComposerError(String(err));
+    } finally {
+      setAstraBusy(null);
+    }
+  };
+
   const handleSend = async () => {
     const prompt = composer.text.trim();
     if (!prompt) return;
@@ -331,152 +461,72 @@ export default function ThreadMultiSessionChatPage({
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
-      <div className="shrink-0 border-b border-ink/5 bg-surface-panel-alt px-5 py-3">
-        <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <button
-              type="button"
-              onClick={onBackToOverview}
-              title={t("thread.back_to_overview")}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-ink/12 bg-surface-panel text-ink/50 transition hover:bg-ink/[0.05] hover:text-ink/80"
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </button>
-            <div className="min-w-0">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <MessagesSquare className="h-4 w-4 shrink-0 text-[rgb(var(--color-emerald)/0.85)]" />
-                <h1 className="min-w-0 truncate text-body font-medium text-ink/85">
-                  {thread?.goal ?? t("thread.multi_session_chat")}
-                </h1>
-                {thread && (
-                  <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta font-medium text-ink/45">
-                    {t(`thread.kind.${thread.kind}`)}
-                  </span>
-                )}
-              </div>
-              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-caption text-ink/38">
-                <span className="truncate">{project.name}</span>
-                {thread && (
-                  <>
-                    <span>{t("thread.sessions")}: {lanes.length}</span>
-                    <span>{t("thread.live_lanes")}: {liveCount}</span>
-                    {pendingCount > 0 && <span>{t("thread.pending_lanes")}: {pendingCount}</span>}
-                    <span>{t("meta.updated")}: {formatDate(thread.updatedAt, lang) ?? "-"}</span>
-                  </>
-                )}
-              </div>
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <ScrollArea
+          ref={viewportRef}
+          className="min-h-0 flex-1"
+          viewportClassName="px-10 py-4 session-chat-scroll-viewport"
+          onScroll={handleTimelineScroll}
+        >
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-16 text-body-sm text-ink/45">
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+              {t("memory_search.searching")}
             </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void refresh()}
-              disabled={refreshing}
-              title={t("thread.refresh")}
-              className="flex h-8 w-8 items-center justify-center rounded border border-ink/12 bg-surface-panel text-ink/50 transition hover:bg-ink/[0.05] hover:text-ink/80 disabled:opacity-45"
-            >
-              {refreshing ? (
-                <LoaderCircle className="h-4 w-4 animate-spin" />
-              ) : (
-                <RefreshCw className="h-4 w-4" />
-              )}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <ScrollArea className="min-h-0 flex-1" viewportClassName="px-5 py-4">
-        {loading ? (
-          <div className="flex items-center justify-center gap-2 py-16 text-body-sm text-ink/45">
-            <LoaderCircle className="h-4 w-4 animate-spin" />
-            {t("memory_search.searching")}
-          </div>
-        ) : loadError && !thread ? (
-          <ThreadMultiSessionEmpty
-            icon={<AlertCircle className="h-5 w-5 text-status-error" />}
-            title={t("thread.multi_session_load_failed")}
-            detail={loadError}
-          />
-        ) : !thread ? (
-          <ThreadMultiSessionEmpty
-            icon={<HashIcon className="h-5 w-5 text-ink/35" />}
-            title={t("thread.not_found")}
-          />
-        ) : (
-          <div className="grid gap-4">
-            <section className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
-              <ThreadSummaryStat label={t("stage.project_stages")} value={String(sortedStages.length)} />
-              <ThreadSummaryStat label={t("assistant.title")} value={String(threadAssistantCount(thread))} />
-              <ThreadSummaryStat label={t("thread.sessions")} value={String(lanes.length)} />
-              <ThreadSummaryStat
-                label={t("thread.current_stage")}
-                value={activeStage ? projectStageLabel(activeStage, t) : "-"}
-              />
-            </section>
-
-            {thread.description && (
-              <p className="max-w-[860px] whitespace-pre-wrap text-body-sm leading-relaxed text-ink/55">
-                {thread.description}
-              </p>
-            )}
-
-            <ThreadOrchestrationPanel
-              thread={thread}
-              stages={sortedStages}
-              runs={astraRuns}
-              planRounds={planRounds}
-              onRunUpdated={(run) => setAstraRuns((prev) => upsertAstraRun(prev, run))}
-              onReloadAstraState={reloadAstraState}
-              onError={onError}
-              onReload={refresh}
+          ) : loadError && !thread ? (
+            <ThreadMultiSessionEmpty
+              icon={<AlertCircle className="h-5 w-5 text-status-error" />}
+              title={t("thread.multi_session_load_failed")}
+              detail={loadError}
             />
-
-            {sortedStages.length > 0 && (
-              <section className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
-                {sortedStages.map((stage) => {
-                  const visual = stageStatusVisual(stage.status);
-                  const Icon = visual.icon;
-                  return (
-                    <div
-                      key={stage.id}
-                      className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2.5 py-2"
-                    >
-                      <div className="flex min-w-0 items-center gap-2">
-                        <Icon className={"h-4 w-4 shrink-0 " + visual.textClass} />
-                        <span className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink/75">
-                          {projectStageLabel(stage, t)}
-                        </span>
-                        <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + visual.textClass}>
-                          {t(`stage.status.${stage.status}`)}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </section>
-            )}
-
-            {timelineRows.length === 0 ? (
-              <ThreadMultiSessionEmpty
-                icon={<MessagesSquare className="h-5 w-5 text-ink/35" />}
-                title={t("thread.multi_session_empty")}
-                detail={replay ? t("thread.no_chats") : t("thread.history_pending")}
-              />
-            ) : (
-              <ThreadTimeline
-                rows={timelineRows}
-                threadKind={thread.kind}
-                now={Date.now()}
-              />
-            )}
-          </div>
+          ) : !thread ? (
+            <ThreadMultiSessionEmpty
+              icon={<HashIcon className="h-5 w-5 text-ink/35" />}
+              title={t("thread.not_found")}
+            />
+          ) : (
+            <div ref={timelineContentRef} className="relative grid min-h-full gap-3">
+              {timelineRows.length === 0 ? (
+                <ThreadMultiSessionEmpty
+                  icon={<MessagesSquare className="h-5 w-5 text-ink/35" />}
+                  title={t("thread.multi_session_empty")}
+                  detail={replay ? t("thread.no_chats") : t("thread.history_pending")}
+                />
+              ) : (
+                <>
+                  <ThreadContextNav
+                    items={timelineNavItems}
+                    laneRefs={laneRefs}
+                    viewportRef={viewportRef}
+                  />
+                  <ThreadTimeline
+                    rows={timelineRows}
+                    thread={thread}
+                    laneRefs={laneRefs}
+                    now={Date.now()}
+                  />
+                </>
+              )}
+            </div>
+          )}
+        </ScrollArea>
+        {showScrollToBottom && (
+          <button
+            type="button"
+            onClick={() => scrollTimelineToBottom("smooth")}
+            className="absolute bottom-3 left-1/2 z-20 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-ink/15 bg-surface-panel/95 text-ink/85 shadow-sm transition hover:border-ink/25 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
+            aria-label="Scroll to bottom"
+          >
+            <ArrowDownToLine className="h-5 w-5" />
+          </button>
         )}
-      </ScrollArea>
-      <div className="shrink-0 border-t border-ink/[0.08] bg-surface-panel px-5 py-3">
-        <div className="mx-auto flex w-full max-w-[760px] justify-center">
+      </div>
+      <div className="shrink-0 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80 px-10 pb-4">
+        <div className="w-full">
           <ChatComposer
             composer={composer}
             title={null}
+            variant="chat"
             canSend={
               Boolean(thread) &&
               composer.canSendWithWorkspace(project.path) &&
@@ -484,34 +534,70 @@ export default function ThreadMultiSessionChatPage({
               !stageTaskBusy
             }
             onSend={() => void handleSend()}
-            bottomRow={
-              <div className="flex h-10 min-w-0 items-center gap-2 px-3 text-body-sm text-ink/55">
-                <span className="min-w-0 truncate rounded-md px-1.5 py-1 text-ink/55">
-                  {thread?.goal ?? t("thread.multi_session_chat")}
-                </span>
+            modeActions={
+              <>
                 {thread?.kind === "workflow" && (
+                  <Tooltip content={t("thread.stage_task_mode")} placement="top">
+                    <button
+                      type="button"
+                      onClick={() => setStageTaskMode((value) => !value)}
+                      disabled={!activeStage || !composer.selectedAgent || stageTaskBusy}
+                      className={
+                        "flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition disabled:opacity-40 " +
+                        (stageTaskMode
+                          ? "bg-[rgb(var(--color-emerald)/0.12)] text-[rgb(var(--color-emerald)/0.95)]"
+                          : "text-ink/55 hover:bg-ink/8 hover:text-ink")
+                      }
+                      aria-label={t("thread.stage_task_mode")}
+                    >
+                      {stageTaskBusy ? (
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <ListChecks className="h-4 w-4" />
+                      )}
+                    </button>
+                  </Tooltip>
+                )}
+              </>
+            }
+            sendActions={
+              activeAstraRun ? (
+                <Tooltip content={`${formatAstraStatus(activeAstraRun.status)} · ${t("astra.cancel")}`} placement="top">
                   <button
                     type="button"
-                    onClick={() => setStageTaskMode((value) => !value)}
-                    disabled={!activeStage || !composer.selectedAgent || stageTaskBusy}
+                    onClick={() => void handleCancelAstra()}
+                    disabled={astraBusy !== null}
                     className={
-                      "flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 transition disabled:opacity-40 " +
-                      (stageTaskMode
-                        ? "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]"
-                        : "text-ink/55 hover:bg-ink/8 hover:text-ink")
+                      "relative flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full transition before:pointer-events-none before:absolute before:inset-y-[-25%] before:left-[-55%] before:w-3 before:rotate-12 before:bg-white/65 before:opacity-0 before:blur-[1px] before:transition-all before:duration-500 hover:before:left-[130%] hover:before:opacity-80 disabled:opacity-40 " +
+                      astraStatusClass(activeAstraRun.status) +
+                      " hover:bg-red-500/[0.08] hover:text-red-500"
                     }
-                    title={t("thread.run_stage_task")}
+                    aria-label={t("astra.cancel")}
                   >
-                    {stageTaskBusy ? (
-                      <LoaderCircle className="h-4 w-4 animate-spin" />
+                    {astraBusy === "cancel" ? (
+                      <LoaderCircle className="relative z-10 h-4 w-4 animate-spin" />
                     ) : (
-                      <ListChecks className="h-4 w-4" />
+                      <Square className="relative z-10 h-4 w-4" />
                     )}
-                    <span className="truncate">{t("thread.stage_task_mode")}</span>
                   </button>
-                )}
-                <NewChatMenuButton icon={GitBranch} label="thread" text />
-              </div>
+                </Tooltip>
+              ) : canStartAstra ? (
+                <Tooltip content={t("astra.start")} placement="top">
+                  <button
+                    type="button"
+                    onClick={() => void handleStartAstra()}
+                    disabled={astraBusy !== null || !thread}
+                    className="relative flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink/[0.045] text-ink/55 transition before:pointer-events-none before:absolute before:inset-y-[-25%] before:left-[-55%] before:w-3 before:rotate-12 before:bg-white/65 before:opacity-0 before:blur-[1px] before:transition-all before:duration-500 hover:bg-[rgb(var(--color-emerald)/0.10)] hover:text-[rgb(var(--color-emerald)/0.95)] hover:before:left-[130%] hover:before:opacity-80 disabled:opacity-40"
+                    aria-label={t("astra.start")}
+                  >
+                    {astraBusy === "start" ? (
+                      <LoaderCircle className="relative z-10 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="relative z-10 h-4 w-4" />
+                    )}
+                  </button>
+                </Tooltip>
+              ) : null
             }
           />
         </div>
@@ -522,107 +608,232 @@ export default function ThreadMultiSessionChatPage({
 
 function ThreadSessionLaneCard({
   lane,
-  threadKind,
+  thread,
+  laneRefs,
   now,
+  content,
+  plannerRun,
 }: {
   lane: ThreadSessionLane;
-  threadKind: ThreadKind;
+  thread: ThreadWorkState;
+  laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
   now: number;
+  content?: ReactNode;
+  plannerRun?: AstraHandle | null;
 }) {
   const { t } = useI18n();
+  const meta = laneDisplayMeta(lane, thread, t);
   return (
-    <article className="flex min-h-[260px] min-w-0 flex-col overflow-hidden rounded-lg border border-card-border/[0.12] bg-card">
-      <header className="shrink-0 border-b border-card-border/[0.10] px-3 py-2.5">
-        <div className="flex min-w-0 items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <AgentGlyph agent={lane.agent} className="h-4 w-4 shrink-0" />
-              <h2 className="min-w-0 truncate text-body-sm font-medium text-ink/78">
-                {lane.session
-                  ? sessionDisplayTitle(lane.session) ?? t("list.no_user_message")
-                  : shortSessionId(lane.sessionId)}
-              </h2>
-            </div>
-            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
-              <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
-                {AGENT_LABEL[lane.agent]}
-              </span>
-              <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
-                {lane.groupLabel}
-              </span>
-              <LaneStatusBadge status={lane.status} />
-              <LiveSessionStatusBadge liveSession={lane.liveSession} now={now} />
-              {threadKind === "brainstorm" && (
-                <span className="rounded bg-sky-500/[0.08] px-1.5 py-0.5 text-meta text-sky-500">
-                  {t("thread.shared_board")}
-                </span>
-              )}
-              {threadKind === "debate" && (
-                <span className="rounded bg-amber-500/[0.08] px-1.5 py-0.5 text-meta text-amber-500">
-                  {t("thread.isolated_lane")}
-                </span>
-              )}
-            </div>
-          </div>
-        </div>
-        <div className="mt-2 flex min-w-0 flex-wrap gap-1">
-          {lane.sources.length === 0 ? (
-            <span className="rounded border border-dashed border-card-border/[0.12] px-1.5 py-0.5 text-meta text-ink/32">
-              {t("thread.pending_lane")}
-            </span>
-          ) : (
-            lane.sources.map((source) => (
-              <span
-                key={replaySourceKey(source)}
-                title={replaySourceTitle(source)}
-                className="max-w-full truncate rounded bg-ink/[0.055] px-1.5 py-0.5 text-meta text-ink/38"
-              >
-                {source.label ?? t(`thread.replay_source.${source.kind}`)}
-              </span>
-            ))
-          )}
-        </div>
+    <section
+      ref={(el) => {
+        laneRefs.current[lane.laneId] = el;
+      }}
+      className="min-w-0 scroll-mt-4"
+    >
+      <header
+        data-thread-lane-header="true"
+        className="mb-1.5 flex min-w-0 items-center gap-2 px-1"
+      >
+        <h2 className="min-w-0 truncate text-caption font-medium text-ink/48">
+          {meta.title}
+        </h2>
       </header>
-      <div className="flex min-h-0 flex-1 flex-col px-3 py-3">
-        <ThreadSessionLanePreview lane={lane} />
-        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-meta text-ink/32">
-          {lane.session && (
-            <span>{t("list.msgs", { count: lane.session.messageCount })}</span>
-          )}
-          <span className="min-w-0 truncate">{lane.sessionId}</span>
-          {lane.sessioRuntimeSessionId && (
-            <span className="min-w-0 truncate">{lane.sessioRuntimeSessionId}</span>
-          )}
-        </div>
-      </div>
-    </article>
+      {content ?? <ThreadSessionLatestMessage lane={lane} now={now} plannerRun={plannerRun} />}
+    </section>
   );
 }
 
-function LaneStatusBadge({ status }: { status: ThreadSessionLaneStatus }) {
-  const { t } = useI18n();
-  const klass =
-    status === "live"
-      ? "bg-[rgb(var(--color-emerald)/0.10)] text-[rgb(var(--color-emerald)/0.95)]"
-      : status === "pending"
-        ? "bg-sky-500/[0.10] text-sky-500"
-        : status === "missing" || status === "failed"
-          ? "bg-red-500/[0.10] text-red-500"
-          : "bg-ink/[0.06] text-ink/45";
-  return (
-    <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + klass}>
-      {t(`thread.lane_status.${status}`)}
-    </span>
-  );
+type ThreadContextNavItem = {
+  laneId: string;
+  context: LaneDisplayContext;
+};
+
+function threadTimelineNavItems(
+  rows: ThreadTimelineRow[],
+  thread: ThreadWorkState,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): ThreadContextNavItem[] {
+  const seen = new Set<string>();
+  const items: ThreadContextNavItem[] = [];
+  for (const row of rows) {
+    for (const lane of row.lanes) {
+      if (seen.has(lane.laneId)) continue;
+      seen.add(lane.laneId);
+      items.push({
+        laneId: lane.laneId,
+        context: laneDisplayMeta(lane, thread, t).context,
+      });
+    }
+  }
+  return items;
 }
 
-function ThreadSummaryStat({ label, value }: { label: string; value: string }) {
+function ThreadContextNav({
+  items,
+  laneRefs,
+  viewportRef,
+}: {
+  items: ThreadContextNavItem[];
+  laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
+  viewportRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const navRef = useRef<HTMLDivElement>(null);
+  const [positions, setPositions] = useState<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const vp = viewportRef.current;
+    const nav = navRef.current;
+    const root = nav?.parentElement ?? null;
+    if (!vp || !root || items.length === 0) {
+      setPositions(new Map());
+      return;
+    }
+
+    let frame: number | null = null;
+    const computePositions = () => {
+      const rootRect = root.getBoundingClientRect();
+      const next = new Map<string, number>();
+      for (const item of items) {
+        const el = laneRefs.current[item.laneId];
+        if (!el) continue;
+        const header = el.querySelector<HTMLElement>("[data-thread-lane-header='true']");
+        const rect = (header ?? el).getBoundingClientRect();
+        const center = header
+          ? rect.top - rootRect.top + rect.height / 2
+          : rect.top - rootRect.top + 8;
+        next.set(item.laneId, Math.max(0, center));
+      }
+      setPositions(next);
+    };
+    const scheduleMeasure = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        computePositions();
+      });
+    };
+
+    computePositions();
+    vp.addEventListener("scroll", scheduleMeasure, { passive: true });
+    const ro = new ResizeObserver(scheduleMeasure);
+    ro.observe(vp);
+    ro.observe(root);
+    for (const item of items) {
+      const el = laneRefs.current[item.laneId];
+      if (el) ro.observe(el);
+    }
+    return () => {
+      vp.removeEventListener("scroll", scheduleMeasure);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      ro.disconnect();
+    };
+  }, [items, laneRefs, viewportRef]);
+
+  if (items.length === 0) return null;
+
+  const jumpToLane = (laneId: string) => {
+    const vp = viewportRef.current;
+    const el = laneRefs.current[laneId];
+    if (!vp || !el) return;
+    const vpRect = vp.getBoundingClientRect();
+    const targetTop = el.getBoundingClientRect().top - vpRect.top + vp.scrollTop - 8;
+    const maxTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
+    vp.scrollTo({
+      top: Math.max(0, Math.min(targetTop, maxTop)),
+      behavior: "smooth",
+    });
+  };
+
   return (
-    <div className="min-w-0 rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5">
-      <div className="text-caption uppercase tracking-normal text-ink/35">{label}</div>
-      <div className="mt-1 truncate text-body font-medium text-ink/80">{value}</div>
+    <div
+      ref={navRef}
+      aria-hidden={items.length === 0}
+      className="pointer-events-none absolute top-0 bottom-0 -left-10 z-10 w-10"
+    >
+      {items.map((item) => {
+        const top = positions.get(item.laneId);
+        if (top === undefined) return null;
+        return (
+          <Tooltip
+            key={item.laneId}
+            content={<ThreadContextTooltip context={item.context} />}
+            placement="right"
+            offset={10}
+            delayMs={120}
+          >
+            <button
+              type="button"
+              onClick={() => jumpToLane(item.laneId)}
+              aria-label={item.context.label}
+              className="pointer-events-auto absolute left-2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-ink/38 transition hover:bg-ink/[0.06] hover:text-ink/75 focus-visible:bg-ink/[0.08] focus-visible:text-ink"
+              style={{ top }}
+            >
+              <ThreadContextIcon context={item.context} className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+        );
+      })}
     </div>
   );
+}
+
+function ThreadContextIcon({
+  context,
+  className,
+}: {
+  context: LaneDisplayContext;
+  className: string;
+}) {
+  const icon =
+    context.kind === "stage"
+      ? (context.stage
+        ? projectStageIcon(context.stage, className)
+        : <ListChecks className={className} />)
+      : context.kind === "assistant"
+        ? <AssistantBotIcon color={context.color} className={className} />
+        : <AgentGlyph agent={context.agent} className={className} />;
+  return icon;
+}
+
+function ThreadContextTooltip({ context }: { context: LaneDisplayContext }) {
+  const detail = tooltipDetailText(context.title);
+  return (
+    <div className="max-w-[260px]">
+      <div className="text-caption font-medium text-tooltip-fg">{context.label}</div>
+      {detail && (
+        <div className="mt-0.5 line-clamp-2 text-meta text-tooltip-fg/70">
+          {detail}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function tooltipDetailText(value: string | null): string | null {
+  const trimmed = readableTooltipText(value);
+  if (!trimmed) return null;
+  return trimmed.length > 160 ? `${trimmed.slice(0, 157)}...` : trimmed;
+}
+
+function readableTooltipText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  if (!trimmed || isJsonText(trimmed)) return null;
+  return trimmed;
+}
+
+function isJsonText(value: string): boolean {
+  const first = value[0];
+  const last = value[value.length - 1];
+  if (!((first === "{" && last === "}") || (first === "[" && last === "]"))) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return parsed !== null && typeof parsed === "object";
+  } catch {
+    return false;
+  }
 }
 
 function ThreadMultiSessionEmpty({
@@ -651,26 +862,49 @@ function ThreadMultiSessionEmpty({
 
 function ThreadTimeline({
   rows,
-  threadKind,
+  thread,
+  laneRefs,
   now,
 }: {
   rows: ThreadTimelineRow[];
-  threadKind: ThreadKind;
+  thread: ThreadWorkState;
+  laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
   now: number;
 }) {
   return (
     <section className="grid gap-3">
       {rows.map((row) => {
         if (row.kind === "orchestration") {
+          const summaryText = row.round ? planRoundSummaryText(row.round, row.run) : null;
+          if (row.lanes.length === 0) {
+            if (!row.round || !summaryText) return null;
+            return (
+              <ThreadTimelineStaticCard key={row.key} title="Astra planner">
+                <ThreadPlanRoundSummaryMessage
+                  round={row.round}
+                  text={summaryText}
+                  now={now}
+                />
+              </ThreadTimelineStaticCard>
+            );
+          }
           return (
             <div key={row.key} className="grid gap-2">
-              <ThreadOrchestrationTimelineCard row={row} />
               {row.lanes.map((lane) => (
                 <ThreadSessionLaneCard
                   key={lane.laneId}
                   lane={lane}
-                  threadKind={threadKind}
+                  thread={thread}
+                  laneRefs={laneRefs}
                   now={now}
+                  plannerRun={row.run}
+                  content={row.round && summaryText ? (
+                    <ThreadPlanRoundSummaryMessage
+                      round={row.round}
+                      text={summaryText}
+                      now={now}
+                    />
+                  ) : undefined}
                 />
               ))}
             </div>
@@ -685,7 +919,8 @@ function ThreadTimeline({
               <ThreadSessionLaneCard
                 key={lane.laneId}
                 lane={lane}
-                threadKind={threadKind}
+                thread={thread}
+                laneRefs={laneRefs}
                 now={now}
               />
             ))}
@@ -696,281 +931,118 @@ function ThreadTimeline({
   );
 }
 
-function ThreadOrchestrationTimelineCard({ row }: { row: ThreadTimelineRow }) {
-  const { t } = useI18n();
-  const title = row.round
-    ? t("astra.round", { index: row.round.roundIndex + 1 })
-    : row.run?.runId ?? t("thread.timeline_orchestration");
-  const status = row.round?.status ?? row.run?.status ?? null;
-  const statusClass = row.round
-    ? planRoundStatusClass(row.round.status)
-    : row.run
-      ? astraStatusClass(row.run.status)
-      : "bg-ink/[0.06] text-ink/45";
-  const summary = row.round?.summary ?? row.run?.lastErrorMessage ?? row.run?.error ?? null;
-  const backend = row.run?.plannerBackend ?? null;
-  return (
-    <article className="min-w-0 rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Sparkles className="h-4 w-4 shrink-0 text-[rgb(var(--color-emerald)/0.85)]" />
-        <span className="text-body-sm font-medium text-ink/78">
-          {t("thread.timeline_orchestration")}
-        </span>
-        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
-          {title}
-        </span>
-        {status && (
-          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + statusClass}>
-            {formatAstraStatus(status)}
-          </span>
-        )}
-        {backend && (
-          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
-            {backend}
-          </span>
-        )}
-      </div>
-      {summary && (
-        <p className="mt-1.5 whitespace-pre-wrap text-body-sm leading-relaxed text-ink/55">
-          {summary}
-        </p>
-      )}
-      {row.round && row.round.tasks.length > 0 && (
-        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-meta text-ink/38">
-          {row.round.tasks.map((task) => (
-            <span key={task.id} className="max-w-full truncate rounded bg-ink/[0.045] px-1.5 py-0.5">
-              {task.title}
-            </span>
-          ))}
-        </div>
-      )}
-    </article>
-  );
-}
-
-function ThreadOrchestrationPanel({
-  thread,
-  stages,
-  runs,
-  planRounds,
-  onRunUpdated,
-  onReloadAstraState,
-  onError,
-  onReload,
+function ThreadTimelineStaticCard({
+  title,
+  children,
 }: {
-  thread: ThreadInfo;
-  stages: StageInfo[];
-  runs: AstraHandle[];
-  planRounds: PlanRoundInfo[];
-  onRunUpdated: (run: AstraHandle) => void;
-  onReloadAstraState: () => Promise<void>;
-  onError: (error: string | null) => void;
-  onReload: () => Promise<void>;
+  title: string;
+  children: ReactNode;
 }) {
-  const { t } = useI18n();
-  const [prompt, setPrompt] = useState("");
-  const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
-  const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
-  const canStartAstra = thread.kind === "teamwork" || thread.kind === "brainstorm" || thread.kind === "debate";
-  const orderedPlanRounds = useMemo(
-    () => planRounds.slice().sort((a, b) => b.roundIndex - a.roundIndex || b.createdAt - a.createdAt),
-    [planRounds],
-  );
-
-  const start = async () => {
-    if (!canStartAstra) return;
-    setBusy("start");
-    try {
-      const run = await createAstraRun(thread.id, prompt.trim() || null);
-      onRunUpdated(run);
-      setPrompt("");
-      await onReloadAstraState();
-      await onReload();
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const cancel = async () => {
-    if (!activeRun) return;
-    setBusy("cancel");
-    try {
-      const run = await cancelAstraRun(activeRun.runId);
-      onRunUpdated(run);
-      await onReloadAstraState();
-      await onReload();
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   return (
-    <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2 text-body-sm font-medium text-ink/78">
-            <Sparkles className="h-4 w-4 text-[rgb(var(--color-emerald)/0.85)]" />
-            <span>Astra</span>
-            {activeRun && (
-              <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraStatusClass(activeRun.status)}>
-                {formatAstraStatus(activeRun.status)}
-              </span>
-            )}
-            {thread.kind === "workflow" && (
-              <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
-                {t("thread.workflow_manual_tasks")}
-              </span>
-            )}
-          </div>
-          <div className="mt-1 max-w-[760px] truncate text-caption text-ink/38">
-            {activeRun ? activeRun.runId : canStartAstra ? t("astra.idle") : t("astra.unsupported.workflow")}
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {activeRun && isAstraActive(activeRun.status) && (
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => void cancel()}
-              title={t("astra.cancel")}
-              className="flex h-8 w-8 items-center justify-center rounded border border-ink/15 bg-surface-panel text-ink/45 hover:bg-red-500/[0.08] hover:text-red-500 disabled:opacity-40"
-            >
-              {busy === "cancel" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
-            </button>
-          )}
-          {canStartAstra && (
-            <button
-              type="button"
-              disabled={busy !== null || Boolean(activeRun && isAstraActive(activeRun.status))}
-              onClick={() => void start()}
-              title={t("astra.start")}
-              className="flex h-8 items-center gap-1.5 rounded border border-ink/15 bg-surface-panel px-2 text-caption text-ink/55 hover:bg-ink/[0.05] hover:text-ink/80 disabled:opacity-40"
-            >
-              {busy === "start" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
-              {t("astra.start")}
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="mt-2 grid gap-2">
-        {canStartAstra && (
-          <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            rows={2}
-            placeholder={t("astra.prompt_placeholder")}
-            className="min-w-0 resize-none rounded-md border border-input-border/[0.16] bg-input px-3 py-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30"
-          />
-        )}
-        {orderedPlanRounds.length > 0 && (
-          <div className="grid gap-1.5">
-            {orderedPlanRounds.slice(0, 3).map((round) => (
-              <ThreadPlanRoundSummary key={round.id} round={round} stages={stages} thread={thread} />
-            ))}
-          </div>
-        )}
-        {activeRun?.error && (
-          <div className="rounded-md border border-status-error/20 bg-status-error/10 px-2.5 py-2 text-caption text-status-error">
-            {activeRun.error}
-          </div>
-        )}
-      </div>
+    <section className="min-w-0 scroll-mt-4">
+      <header
+        data-thread-lane-header="true"
+        className="mb-1.5 flex min-w-0 items-center gap-2 px-1"
+      >
+        <h2 className="min-w-0 truncate text-caption font-medium text-ink/48">
+          {title}
+        </h2>
+      </header>
+      {children}
     </section>
   );
 }
 
-function ThreadPlanRoundSummary({
+function ThreadPlanRoundSummaryMessage({
   round,
-  stages,
-  thread,
+  text,
+  now,
 }: {
   round: PlanRoundInfo;
-  stages: StageInfo[];
-  thread: ThreadInfo;
-}) {
-  const { t } = useI18n();
-  return (
-    <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="text-caption font-medium text-ink/65">
-          {t("astra.round", { index: round.roundIndex + 1 })}
-        </span>
-        <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + planRoundStatusClass(round.status)}>
-          {formatAstraStatus(round.status)}
-        </span>
-        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
-          {t(`astra.mode.${round.mode}`)}
-        </span>
-        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/42">
-          {round.tasks.length} {t("thread.tasks")}
-        </span>
-      </div>
-      {round.tasks.length > 0 && (
-        <div className="mt-1.5 grid gap-1">
-          {round.tasks.slice(0, 4).map((task) => (
-            <ThreadPlanTaskSummary
-              key={task.id}
-              task={task}
-              stage={stages.find((stage) => stage.id === task.threadStageId) ?? null}
-              assistantName={thread.assistants.find((assistant) => assistant.assistantId === task.assistantId)?.name ?? null}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ThreadPlanTaskSummary({
-  task,
-  stage,
-  assistantName,
-}: {
-  task: PlanTaskInfo;
-  stage: StageInfo | null;
-  assistantName: string | null;
-}) {
-  const { t } = useI18n();
-  return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 rounded bg-card px-2 py-1 text-caption text-ink/50">
-      <AgentGlyph agent={task.targetAgent} className="h-3.5 w-3.5 shrink-0" />
-      <span className="min-w-0 max-w-[320px] truncate font-medium text-ink/68">{task.title}</span>
-      <span className={"rounded px-1 py-0.5 text-meta font-medium " + astraTaskStatusClass(task.status)}>
-        {formatAstraStatus(task.status)}
-      </span>
-      {assistantName && <span className="truncate text-ink/35">{assistantName}</span>}
-      {stage && <span className="truncate text-ink/35">{projectStageLabel(stage, t)}</span>}
-      {task.sessions.length > 0 && (
-        <span className="rounded bg-ink/[0.045] px-1 py-0.5 text-meta text-ink/35">
-          {t("astra.task_sessions", { count: task.sessions.length })}
-        </span>
-      )}
-    </div>
-  );
-}
-
-type LanePreviewItem = {
-  key: string;
-  label: string;
   text: string;
-  markdown: boolean;
-  tone: "normal" | "muted" | "danger";
-  timestamp: number | null;
-  permission?: AcpPermissionRequest | null;
-};
+  now: number;
+}) {
+  return (
+    <ThreadPlannerSummaryMessage
+      id={round.id}
+      timestamp={round.updatedAt || round.createdAt}
+      text={text}
+      now={now}
+    />
+  );
+}
 
-function ThreadSessionLanePreview({ lane }: { lane: ThreadSessionLane }) {
+function ThreadPlannerSummaryMessage({
+  id,
+  timestamp,
+  text,
+  now,
+}: {
+  id: string;
+  timestamp: number;
+  text: string;
+  now: number;
+}) {
+  const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const onPreviewImage = useCallback((_image: MarkdownImage) => undefined, []);
+  const onPreviewFile = useCallback(() => undefined, []);
+  const onFilePreviewError = useCallback(() => undefined, []);
+  const onPermissionResponse = useCallback(() => Promise.resolve(), []);
+  const block = useMemo<AcpRenderBlock>(() => ({
+    kind: "assistant",
+    blocks: [{ type: "text", text }],
+    raw: { source: "thread_planner_summary", id },
+    timestamp,
+  }), [id, text, timestamp]);
+  const turn = useMemo<LiveTurn>(() => ({
+    turnId: `thread-planner-summary:${id}:${timestamp}`,
+    status: "completed",
+    blocks: [block],
+    tools: [],
+    permissions: [],
+    protocolMessages: [],
+    stopReason: null,
+    error: null,
+    startedAt: timestamp,
+    updatedAt: timestamp,
+  }), [block, id, timestamp]);
+  const items = useMemo<AcpRenderItem[]>(() => [{ kind: "block", turn, block }], [block, turn]);
+  const itemKeys = useMemo(() => renderItemKeys(items), [items]);
+
+  return (
+    <div className="grid min-w-0 gap-2">
+      <AcpRenderItems
+        items={items}
+        itemKeys={itemKeys}
+        bubbleRefs={bubbleRefs}
+        sessioRuntimeSessionId=""
+        now={now}
+        onPreviewImage={onPreviewImage}
+        onPreviewFile={onPreviewFile}
+        onFilePreviewError={onFilePreviewError}
+        onPermissionResponse={onPermissionResponse}
+      />
+    </div>
+  );
+}
+
+function ThreadSessionLatestMessage({
+  lane,
+  now,
+  plannerRun,
+}: {
+  lane: ThreadSessionLane;
+  now: number;
+  plannerRun?: AstraHandle | null;
+}) {
   const { t } = useI18n();
   const [historyTurns, setHistoryTurns] = useState<LiveTurn[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const previewScrollRef = useRef<HTMLDivElement>(null);
+  const bubbleRefs = useRef<(HTMLDivElement | null)[]>([]);
   const onPreviewImage = useCallback((_image: MarkdownImage) => undefined, []);
+  const onPreviewFile = useCallback(() => undefined, []);
+  const onFilePreviewError = useCallback(() => undefined, []);
 
   const sessionFilePath = lane.session?.filePath ?? "";
   const sessionPersisted = isPersistedSession(lane.session);
@@ -1004,219 +1076,95 @@ function ThreadSessionLanePreview({ lane }: { lane: ThreadSessionLane }) {
     };
   }, [
     lane.agent,
-    lane.session,
     lane.sessionId,
     sessionFilePath,
     sessionPersisted,
     sessionMessageCount,
   ]);
 
-  const livePreviewItems = useMemo(
-    () => lanePreviewItems(lane.liveSession?.turns ?? [], t),
-    [lane.liveSession?.turns, t],
+  const hasLiveTurns = Boolean(lane.liveSession?.turns.length);
+  const viewModel = useMemo<AcpViewModel>(
+    () => hasLiveTurns && lane.liveSession
+      ? liveSessionToAcpViewModel(lane.liveSession)
+      : historyTurnsToAcpViewModel(historyTurns),
+    [hasLiveTurns, historyTurns, lane.liveSession],
   );
-  const historyPreviewItems = useMemo(
-    () => lanePreviewItems(historyTurns, t),
-    [historyTurns, t],
+  const liveTurnIds = useMemo(
+    () => new Set(hasLiveTurns ? lane.liveSession?.turns.map((turn) => turn.turnId) ?? [] : []),
+    [hasLiveTurns, lane.liveSession?.turns],
   );
-  const previewItems = livePreviewItems.length > 0 ? livePreviewItems : historyPreviewItems;
-  const emptyText = lanePreviewEmptyText({
-    lane,
-    loading,
-    loadError,
-    t,
-  });
-  const visiblePreviewItems = previewItems.length > 0 ? previewItems : (
-    loadError
-      ? [{
-        key: `error:${loadError}`,
-        label: t("thread.preview_error"),
-        text: loadError,
-        markdown: false,
-        tone: "danger" as const,
-        timestamp: null,
-      }]
-      : []
+  const workingIndicatorTurnId = hasLiveTurns
+    ? liveWorkingIndicatorTurn(lane.liveSession)?.turnId ?? ""
+    : "";
+  const visibleItems = useMemo(
+    () => latestLaneRenderItems(
+      acpViewModelToRenderItems(viewModel, liveTurnIds, workingIndicatorTurnId),
+    ),
+    [liveTurnIds, viewModel, workingIndicatorTurnId],
   );
-  const latestPreview = visiblePreviewItems.at(-1) ?? null;
-  const previewFingerprint = visiblePreviewItems
-    .map((item) => `${item.key}:${item.text.length}:${item.timestamp ?? ""}`)
-    .join("|");
+  const plannerSummary = useMemo(
+    () => isPlannerLane(lane) ? plannerSummaryFromTurns(viewModel.turns, plannerRun ?? null) : null,
+    [lane, plannerRun, viewModel.turns],
+  );
+  const itemKeys = useMemo(() => renderItemKeys(visibleItems), [visibleItems]);
+  const permissionSessionId = lane.sessioRuntimeSessionId ?? "";
+  const handlePermissionResponse = useCallback(
+    (sessioRuntimeSessionId: string, requestId: string, optionId: string) => {
+      if (!lane.sessioRuntimeSessionId) {
+        return Promise.reject(new Error("Permission can only be handled while the session is live."));
+      }
+      return respondAgentPermission(sessioRuntimeSessionId, requestId, optionId);
+    },
+    [lane.sessioRuntimeSessionId],
+  );
 
-  useEffect(() => {
-    const viewport = previewScrollRef.current;
-    if (!viewport) return;
-    viewport.scrollTop = viewport.scrollHeight;
-  }, [previewFingerprint]);
+  const emptyText = laneMessageEmptyText({ lane, loading, loadError, t });
 
   return (
-    <div className="min-h-0 overflow-hidden rounded-md border border-card-border/[0.12] bg-card-panel">
-      <div className="flex h-8 items-center justify-between gap-2 border-b border-card-border/[0.10] px-2.5">
-        <div className="min-w-0 truncate text-caption font-medium text-ink/48">
-          {latestPreview?.label ?? t("thread.preview_latest")}
-        </div>
-        {loading ? (
-          <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-ink/32" />
-        ) : latestPreview?.timestamp ? (
-          <span className="shrink-0 text-meta text-ink/28">
-            {formatPreviewTime(latestPreview.timestamp)}
-          </span>
-        ) : null}
-      </div>
-      <ScrollArea
-        ref={previewScrollRef}
-        className="h-40 min-h-0"
-        viewportClassName="px-3 py-2.5"
-        persistScrollbars
-      >
-        {visiblePreviewItems.length > 0 ? (
-          <div className="grid gap-2">
-            {visiblePreviewItems.map((item) => (
-              <LanePreviewItemView
-                key={item.key}
-                item={item}
-                sessioRuntimeSessionId={lane.sessioRuntimeSessionId}
-                live={Boolean(lane.liveSession && !lane.liveSession.ended)}
-                onPreviewImage={onPreviewImage}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="flex h-full min-h-[136px] items-center justify-center px-2 text-center">
-            <div className="max-w-[300px]">
-              <Clock className="mx-auto h-5 w-5 text-ink/24" />
-              <div className="mt-2 text-body-sm font-medium text-ink/50">
-                {emptyText.title}
-              </div>
-              {emptyText.detail && (
-                <div className="mt-1 text-caption leading-relaxed text-ink/32">
-                  {emptyText.detail}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </ScrollArea>
-      {loadError && previewItems.length > 0 && (
-        <div className="border-t border-status-error/15 px-2.5 py-1.5 text-meta text-status-error/80">
-          {loadError}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LanePreviewItemView({
-  item,
-  sessioRuntimeSessionId,
-  live,
-  onPreviewImage,
-}: {
-  item: LanePreviewItem;
-  sessioRuntimeSessionId: string | null;
-  live: boolean;
-  onPreviewImage: (image: MarkdownImage) => void;
-}) {
-  return (
-    <div className="min-w-0 rounded-md bg-card/[0.72] px-2.5 py-2">
-      <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-meta font-medium text-ink/42">
-          {item.label}
-        </span>
-        {item.timestamp && (
-          <span className="shrink-0 text-meta text-ink/24">
-            {formatPreviewTime(item.timestamp)}
-          </span>
-        )}
-      </div>
-      {item.markdown ? (
-        <div className={lanePreviewTextClass(item.tone)}>
-          <MarkdownContent text={item.text} onPreviewImage={onPreviewImage} />
+    <div className="min-w-0">
+      {plannerSummary ? (
+        <ThreadPlannerSummaryMessage
+          id={lane.laneId}
+          timestamp={plannerSummary.timestamp}
+          text={plannerSummary.text}
+          now={now}
+        />
+      ) : visibleItems.length > 0 ? (
+        <div className="grid min-w-0 gap-2">
+          <AcpRenderItems
+            items={visibleItems}
+            itemKeys={itemKeys}
+            bubbleRefs={bubbleRefs}
+            sessioRuntimeSessionId={permissionSessionId}
+            now={now}
+            onPreviewImage={onPreviewImage}
+            onPreviewFile={onPreviewFile}
+            onFilePreviewError={onFilePreviewError}
+            onPermissionResponse={handlePermissionResponse}
+          />
         </div>
       ) : (
-        <pre className={lanePreviewPlainTextClass(item.tone)}>
-          {item.text}
-        </pre>
-      )}
-      {item.permission && sessioRuntimeSessionId && (
-        <LanePermissionActions
-          permission={item.permission}
-          sessioRuntimeSessionId={sessioRuntimeSessionId}
-          live={live}
-        />
-      )}
-    </div>
-  );
-}
-
-function LanePermissionActions({
-  permission,
-  sessioRuntimeSessionId,
-  live,
-}: {
-  permission: AcpPermissionRequest;
-  sessioRuntimeSessionId: string;
-  live: boolean;
-}) {
-  const [pendingChoice, setPendingChoice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const resolved = Boolean(permission.selectedOptionId || permission.cancelled);
-  const options = permission.options.length > 0
-    ? permission.options
-    : [
-        { optionId: "allow_once", name: "Allow once", kind: "allow_once", meta: null },
-        { optionId: "reject_once", name: "Reject once", kind: "reject_once", meta: null },
-      ];
-  const detail = permissionPreviewDetail(permission);
-  const canRespond = live && !resolved && !pendingChoice;
-  const respond = (optionId: string) => {
-    if (!canRespond) return;
-    setPendingChoice(optionId);
-    setError(null);
-    respondAgentPermission(sessioRuntimeSessionId, permission.requestId, optionId)
-      .catch((err) => {
-        setError(String(err));
-        setPendingChoice(null);
-      });
-  };
-
-  return (
-    <div className="mt-2 overflow-hidden rounded-md border border-status-warn/25 bg-status-warn/[0.055]">
-      <div className="border-b border-status-warn/20 px-2.5 py-1.5">
-        <div className="text-caption font-medium text-ink/65">
-          {permissionStatusText(permission, pendingChoice, live)}
-        </div>
-        {detail.reason && (
-          <div className="mt-0.5 truncate text-meta text-ink/42" title={detail.reason}>
-            {detail.reason}
+        <div className="flex min-h-[108px] items-center justify-center px-2 text-center">
+          <div className="max-w-[300px]">
+            {loading ? (
+              <LoaderCircle className="mx-auto h-5 w-5 animate-spin text-ink/24" />
+            ) : (
+              <MessagesSquare className="mx-auto h-5 w-5 text-ink/24" />
+            )}
+            <div className="mt-2 text-body-sm font-medium text-ink/50">
+              {emptyText.title}
+            </div>
+            {emptyText.detail && (
+              <div className="mt-1 text-caption leading-relaxed text-ink/32">
+                {emptyText.detail}
+              </div>
+            )}
           </div>
-        )}
-        {detail.command && (
-          <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap break-words rounded bg-ink/[0.05] px-2 py-1 font-mono text-meta leading-relaxed text-ink/62">
-            {detail.command}
-          </pre>
-        )}
-      </div>
-      {!resolved && (
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(120px,1fr))]">
-          {options.map((option) => (
-            <button
-              key={option.optionId}
-              type="button"
-              disabled={!canRespond}
-              onClick={() => respond(option.optionId)}
-              className="min-w-0 border-r border-status-warn/20 px-2.5 py-1.5 text-left text-caption font-medium text-ink/68 transition last:border-r-0 hover:bg-status-warn/[0.09] hover:text-ink/86 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <span className="block truncate">
-                {pendingChoice === option.optionId ? "Applying..." : option.name}
-              </span>
-            </button>
-          ))}
         </div>
       )}
-      {error && (
-        <div className="border-t border-status-error/20 px-2.5 py-1.5 text-meta text-status-error">
-          {error}
+      {loadError && visibleItems.length > 0 && (
+        <div className="mt-1.5 px-1 text-meta text-status-error/80">
+          {loadError}
         </div>
       )}
     </div>
@@ -1227,222 +1175,552 @@ function normalizeSessionHistoryTurns(turns: unknown[] | undefined): LiveTurn[] 
   return Array.isArray(turns) ? (turns as LiveTurn[]) : [];
 }
 
-function lanePreviewItems(
-  turns: LiveTurn[],
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): LanePreviewItem[] {
-  const primary: LanePreviewItem[] = [];
-  const userFallback: LanePreviewItem[] = [];
-  for (const turn of turns) {
-    turn.blocks.forEach((block, blockIndex) => {
-      const includeUser = block.kind === "user";
-      const item = previewItemForBlock(block, turn, blockIndex, t, includeUser);
-      if (!item) return;
-      if (block.kind === "user") userFallback.push(item);
-      else primary.push(item);
-    });
-    if (turn.error) {
-      primary.push({
-        key: `${turn.turnId}:turn-error`,
-        label: t("thread.preview_error"),
-        text: turn.error.message,
-        markdown: false,
-        tone: "danger",
-        timestamp: turn.updatedAt,
-      });
-    }
-  }
-  return limitLanePreviewItems(primary.length > 0 ? primary : userFallback);
-}
-
-function limitLanePreviewItems(items: LanePreviewItem[]): LanePreviewItem[] {
-  if (items.length <= LANE_PREVIEW_ITEM_LIMIT) return items;
-  const limited = items.slice(-LANE_PREVIEW_ITEM_LIMIT);
+function latestLaneRenderItems(items: AcpRenderItem[]): AcpRenderItem[] {
   const pendingPermission = items
     .slice()
     .reverse()
-    .find((item) => item.permission && !isPermissionResolved(item.permission));
-  if (!pendingPermission || limited.some((item) => item.key === pendingPermission.key)) {
-    return limited;
+    .find((item) =>
+      item.kind === "permission" &&
+      !item.permission.selectedOptionId &&
+      !item.permission.cancelled,
+    );
+  if (pendingPermission) return [pendingPermission];
+  const latestMessageIndex = findLastRenderItemIndex(items, (item) => item.kind !== "turnStatus");
+  if (latestMessageIndex < 0) return items.slice(-1);
+  const latestMessage = items[latestMessageIndex];
+  if (isFileEditRenderItem(latestMessage)) {
+    const previousMessageIndex = findLastRenderItemIndex(
+      items,
+      (item, index) =>
+        index < latestMessageIndex &&
+        item.kind !== "turnStatus" &&
+        !isFileEditRenderItem(item),
+    );
+    return previousMessageIndex >= 0
+      ? [items[previousMessageIndex], latestMessage]
+      : [latestMessage];
   }
-  return [
-    pendingPermission,
-    ...limited.slice(-(LANE_PREVIEW_ITEM_LIMIT - 1)),
-  ];
+  return [latestMessage];
 }
 
-function previewItemForBlock(
-  block: AcpRenderBlock,
-  turn: LiveTurn,
-  blockIndex: number,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-  includeUser: boolean,
-): LanePreviewItem | null {
-  if (block.kind === "assistant" || block.kind === "thought" || block.kind === "user") {
-    if (block.kind === "user" && !includeUser) return null;
-    const text = stripImagePlaceholders(contentBlocksText(block.blocks)).trim();
-    if (!text) return null;
-    return {
-      key: `${turn.turnId}:${block.kind}:${blockIndex}:${text.length}`,
-      label:
-        block.kind === "assistant"
-          ? t("thread.preview_latest_result")
-          : block.kind === "thought"
-            ? t("thread.preview_thought")
-            : t("thread.preview_last_user_message"),
-      text,
-      markdown: true,
-      tone: block.kind === "thought" ? "muted" : "normal",
-      timestamp: block.timestamp ?? turn.updatedAt,
-    };
+function findLastRenderItemIndex(
+  items: AcpRenderItem[],
+  predicate: (item: AcpRenderItem, index: number) => boolean,
+): number {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (predicate(items[index], index)) return index;
   }
-  if (block.kind === "error") {
-    return {
-      key: `${turn.turnId}:error:${blockIndex}`,
-      label: t("thread.preview_error"),
-      text: block.error.message,
-      markdown: false,
-      tone: "danger",
-      timestamp: block.timestamp ?? turn.updatedAt,
+  return -1;
+}
+
+function isFileEditRenderItem(item: AcpRenderItem): boolean {
+  return (
+    item.kind === "block" &&
+    item.block.kind === "sessionUpdate" &&
+    item.block.updateType === "file_edit"
+  );
+}
+
+type LaneDisplayContext =
+  | {
+      kind: "stage";
+      label: string;
+      title: string | null;
+      stage: Pick<StageInfo, "kind" | "icon"> | null;
+    }
+  | {
+      kind: "assistant";
+      label: string;
+      title: string | null;
+      color: string | null;
+    }
+  | {
+      kind: "agent";
+      label: string;
+      title: string | null;
+      agent: Agent;
     };
+
+type LaneDisplayMeta = {
+  title: string;
+  context: LaneDisplayContext;
+};
+
+function laneDisplayMeta(
+  lane: ThreadSessionLane,
+  thread: ThreadWorkState,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): LaneDisplayMeta {
+  const source = preferredLaneSource(lane);
+  const stageSnapshot = parseJsonObject(source?.stageSnapshotJson ?? null);
+  const assistantSnapshot = parseJsonObject(source?.assistantSnapshotJson ?? null);
+  const agentSnapshot = parseJsonObject(source?.agentSnapshotJson ?? null);
+  const fallbackStage =
+    (source?.stageId ? thread.stages.find((stage) => stage.id === source.stageId) ?? null : null)
+    ?? (thread.stageId ? thread.stages.find((stage) => stage.id === thread.stageId) ?? null : null)
+    ?? null;
+  const fallbackAssistant =
+    assistantFromSnapshot(assistantSnapshot)
+    ?? assistantFromThread(thread, source, lane.agent)
+    ?? null;
+  const agentInfo = objectField(agentSnapshot, "agentInfo");
+  const snapshotAgent = stringField(agentSnapshot, "agent");
+  const snapshotAgentLabel =
+    stringField(agentInfo, "displayName")
+    ?? stringField(agentInfo, "name")
+    ?? (snapshotAgent && snapshotAgent in AGENT_LABEL ? AGENT_LABEL[snapshotAgent as Agent] : snapshotAgent);
+  const stageLabel =
+    stringField(stageSnapshot, "name")
+    ?? stringField(stageSnapshot, "stageId")
+    ?? stringField(stageSnapshot, "id")
+    ?? (fallbackStage ? projectStageLabel(fallbackStage, t) : null);
+  const stageIcon = snapshotStageIcon(stageSnapshot) ?? fallbackStage;
+  const agentLabel = snapshotAgentLabel ?? AGENT_LABEL[lane.agent];
+  const sourceLabel = plannerDisplayLabel(source);
+  const title =
+    sourceLabel
+    || (lane.session ? sessionDisplayTitle(lane.session) ?? null : null)
+    || fallbackAssistant?.name
+    || lane.groupLabel
+    || shortSessionId(lane.sessionId);
+  const assistantLabel =
+    fallbackAssistant?.name
+    ?? (source?.role === "planner" ? "Astra planner" : null)
+    ?? source?.label?.trim()
+    ?? lane.groupLabel;
+  const context: LaneDisplayContext = stageLabel
+    ? {
+        kind: "stage",
+        label: stageLabel,
+        title: stageTooltipDetail(stageSnapshot, fallbackStage),
+        stage: stageIcon ? {
+          kind: stageIcon.kind ?? null,
+          icon: stageIcon.icon ?? null,
+        } : null,
+      }
+    : fallbackAssistant
+      ? {
+          kind: "assistant",
+          label: assistantLabel,
+          color: fallbackAssistant.color ?? null,
+          title: assistantTooltipDetail(assistantSnapshot, fallbackAssistant, source),
+        }
+      : {
+          kind: "agent",
+          label: agentLabel,
+          title: agentTooltipDetail(agentSnapshot),
+          agent: lane.agent,
+        };
+
+  return {
+    title,
+    context,
+  };
+}
+
+function planRoundSummaryText(round: PlanRoundInfo, run: AstraHandle | null): string | null {
+  const lines: string[] = [];
+  const summary = round.summary?.trim();
+  if (summary) lines.push(summary);
+  const tasks = round.tasks
+    .map(planTaskSummaryText)
+    .filter((value): value is string => Boolean(value));
+  if (tasks.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(tasks.join("\n\n"));
+  } else {
+    const reason = astraRunReasonText(run);
+    if (reason) {
+      if (lines.length > 0) lines.push("");
+      lines.push(reason);
+    }
+  }
+  return lines.join("\n").trim() || null;
+}
+
+function planTaskSummaryText(task: PlanTaskInfo): string | null {
+  const title = task.title.trim();
+  const prompt = task.prompt.trim();
+  if (!title && !prompt) return null;
+  if (!prompt) return `- ${title}`;
+  if (!title) return `- ${indentPlanTaskPrompt(prompt)}`;
+  return `- **${title}**\n  ${indentPlanTaskPrompt(prompt)}`;
+}
+
+function indentPlanTaskPrompt(prompt: string): string {
+  return prompt.replace(/\n+/g, "\n").replace(/\n/g, "\n  ");
+}
+
+function isPlannerLane(lane: ThreadSessionLane): boolean {
+  return lane.sources.some((source) =>
+    source.role === "planner" ||
+    (source.kind === "astra_internal" && Boolean(source.astraRunId)),
+  );
+}
+
+function plannerSummaryFromTurns(
+  turns: LiveTurn[],
+  run: AstraHandle | null,
+): { text: string; timestamp: number } | null {
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = turns[turnIndex];
+    for (let blockIndex = turn.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const output = parsePlannerOutputText(plannerBlockText(turn.blocks[blockIndex]));
+      if (!output) continue;
+      const text = plannerOutputSummaryText(output, astraRunReasonText(run));
+      if (!text) continue;
+      return {
+        text,
+        timestamp:
+          turn.blocks[blockIndex].timestamp ??
+          turn.updatedAt ??
+          turn.startedAt ??
+          run?.updatedAt ??
+          run?.createdAt ??
+          Date.now(),
+      };
+    }
+  }
+  return null;
+}
+
+type PlannerOutput = {
+  summary: string | null;
+  reason: string | null;
+  tasks: Array<{ title: string | null; prompt: string | null }>;
+};
+
+function plannerOutputSummaryText(output: PlannerOutput, fallbackReason: string | null): string | null {
+  const lines: string[] = [];
+  if (output.summary) lines.push(output.summary);
+  const tasks = output.tasks
+    .map((task) => planTaskTitlePromptText(task.title, task.prompt))
+    .filter((value): value is string => Boolean(value));
+  if (tasks.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(tasks.join("\n\n"));
+  } else {
+    const reason = output.reason ?? fallbackReason;
+    if (reason) {
+      if (lines.length > 0) lines.push("");
+      lines.push(reason);
+    }
+  }
+  return lines.join("\n").trim() || null;
+}
+
+function planTaskTitlePromptText(
+  titleValue: string | null | undefined,
+  promptValue: string | null | undefined,
+): string | null {
+  const title = titleValue?.trim() ?? "";
+  const prompt = promptValue?.trim() ?? "";
+  if (!title && !prompt) return null;
+  if (!prompt) return `- ${title}`;
+  if (!title) return `- ${indentPlanTaskPrompt(prompt)}`;
+  return `- **${title}**\n  ${indentPlanTaskPrompt(prompt)}`;
+}
+
+function astraRunReasonText(run: AstraHandle | null): string | null {
+  return readableTooltipText(run?.terminalReason)
+    ?? readableTooltipText(run?.lastErrorMessage)
+    ?? readableTooltipText(run?.error);
+}
+
+function plannerBlockText(block: AcpRenderBlock): string {
+  if (block.kind === "assistant" || block.kind === "thought" || block.kind === "user") {
+    return block.blocks
+      .map((item) => item.type === "text" ? item.text : "")
+      .filter(Boolean)
+      .join("\n")
+      .trim();
   }
   if (block.kind === "sessionUpdate") {
-    const text = sessionUpdatePreviewText(block);
-    if (!text) return null;
-    return {
-      key: `${turn.turnId}:session-update:${blockIndex}:${text.length}`,
-      label: block.updateType === "file_edit"
-        ? t("thread.preview_file_edit")
-        : t("thread.preview_latest_update"),
-      text,
-      markdown: false,
-      tone: "muted",
-      timestamp: block.timestamp ?? turn.updatedAt,
-    };
+    const data = block.data && typeof block.data === "object" && !Array.isArray(block.data)
+      ? block.data as Record<string, unknown>
+      : null;
+    for (const key of ["text", "content", "output", "message", "summary"]) {
+      const value = stringField(data, key);
+      if (value) return value;
+    }
   }
-  if (block.kind === "tool") {
-    const tool = turn.tools.find((item) => item.toolId === block.toolId);
-    return {
-      key: `${turn.turnId}:tool:${block.toolId}:${tool?.updatedAt ?? blockIndex}`,
-      label: t("thread.preview_tool"),
-      text: [tool?.title ?? block.toolId, tool?.status].filter(Boolean).join(" / "),
-      markdown: false,
-      tone: "muted",
-      timestamp: block.timestamp ?? tool?.updatedAt ?? turn.updatedAt,
-    };
-  }
-  if (block.kind === "permission") {
-    const permission = turn.permissions.find((item) => item.requestId === block.requestId);
-    return {
-      key: `${turn.turnId}:permission:${block.requestId}:${permission?.selectedOptionId ?? ""}`,
-      label: t("thread.preview_permission"),
-      text: permission?.toolName ?? block.requestId,
-      markdown: false,
-      tone: "muted",
-      timestamp: block.timestamp ?? turn.updatedAt,
-      permission,
-    };
+  return "";
+}
+
+function parsePlannerOutputText(text: string): PlannerOutput | null {
+  for (const candidate of plannerOutputCandidates(text)) {
+    const json = parsePlannerJsonOutput(candidate);
+    if (json) return json;
+    const fields = parsePlannerFieldOutput(candidate);
+    if (fields) return fields;
   }
   return null;
 }
 
-function isPermissionResolved(permission: AcpPermissionRequest): boolean {
-  return Boolean(permission.selectedOptionId || permission.cancelled);
-}
-
-function permissionStatusText(
-  permission: AcpPermissionRequest,
-  pendingChoice: string | null,
-  live: boolean,
-): string {
-  if (pendingChoice) return "Applying permission decision";
-  if (permission.cancelled) return "Cancelled";
-  if (permission.selectedOptionId) return `Resolved - ${permission.selectedOptionId}`;
-  if (!live) return "Waiting for live session";
-  return "Waiting for approval";
-}
-
-function permissionPreviewDetail(permission: AcpPermissionRequest): {
-  reason: string | null;
-  command: string | null;
-} {
-  const input = parseMaybeJsonObject(permission.input);
-  const raw = parseMaybeJsonObject(permission.raw);
-  const rawToolCall = parseMaybeJsonObject(permission.toolCall);
-  const toolFields = parseMaybeJsonObject(rawToolCall?.fields) ?? rawToolCall;
-  const reason =
-    pickString(input?.reason) ??
-    pickString(toolFields?.reason) ??
-    pickString(raw?.reason) ??
-    pickString(raw?.description) ??
-    permission.toolName;
-  const command =
-    pickPermissionCommand(input) ??
-    pickPermissionCommand(toolFields) ??
-    pickPermissionCommand(raw);
-  return { reason, command };
-}
-
-function pickPermissionCommand(record: Record<string, unknown> | null): string | null {
-  if (!record) return null;
-  const direct =
-    pickString(record.command) ??
-    pickString(record.cmd) ??
-    pickString(record.input);
-  if (direct) return direct;
-  for (const key of ["command", "cmd", "parsedCommand"]) {
-    const value = record[key];
-    if (!Array.isArray(value)) continue;
-    const parts = value
-      .map((item) => {
-        const parsed = parseMaybeJsonObject(item);
-        return parsed
-          ? pickString(parsed.cmd) ?? pickString(parsed.command)
-          : pickString(item);
-      })
-      .filter((item): item is string => Boolean(item));
-    if (parts.length > 0) return parts.join(key === "parsedCommand" ? "\n" : " ");
+function plannerOutputCandidates(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const candidates = [trimmed];
+  for (const match of trimmed.matchAll(/```(?:json|ya?ml)?\s*([\s\S]*?)```/gi)) {
+    const fenced = match[1]?.trim();
+    if (fenced) candidates.push(fenced);
   }
-  return null;
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) candidates.push(trimmed.slice(start, end + 1));
+  return Array.from(new Set(candidates));
 }
 
-function sessionUpdatePreviewText(
-  block: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>,
-): string {
-  if (block.updateType === "file_edit") {
-    const summary = fileEditPreviewText(block.data);
-    if (summary) return summary;
+function parsePlannerJsonOutput(text: string): PlannerOutput | null {
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return plannerOutputFromRecord(parsed as Record<string, unknown>);
+  } catch {
+    return null;
   }
-  const record = asRecord(block.data);
-  const text = typeof record?.text === "string" ? record.text.trim() : "";
-  if (text) return text;
-  return stablePreviewText(block.data, 900);
 }
 
-function fileEditPreviewText(value: unknown): string | null {
-  const parsed = parseMaybeJsonObject(value);
-  const nested = typeof parsed?.text === "string" ? parseMaybeJsonObject(parsed.text) : null;
-  const summary = nested ?? parsed;
-  const edits = Array.isArray(summary?.edits)
-    ? summary.edits.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+function plannerOutputFromRecord(record: Record<string, unknown>): PlannerOutput | null {
+  const tasks = Array.isArray(record.tasks)
+    ? record.tasks.map((item) => {
+      const task = item && typeof item === "object" && !Array.isArray(item)
+        ? item as Record<string, unknown>
+        : null;
+      return {
+        title: stringField(task, "title"),
+        prompt: stringField(task, "prompt"),
+      };
+    })
     : [];
-  if (edits.length === 0) return null;
-  const additions = numberField(summary, "additions") ?? sumEditField(edits, "additions");
-  const deletions = numberField(summary, "deletions") ?? sumEditField(edits, "deletions");
-  const files = numberField(summary, "files") ?? edits.length;
-  const paths = edits
-    .map((edit) => stringField(edit, "displayPath") ?? stringField(edit, "path"))
-    .filter((path): path is string => Boolean(path))
-    .slice(0, 5);
-  const more = Math.max(0, files - paths.length);
-  return [
-    `Edited ${files} ${files === 1 ? "file" : "files"} (+${additions} -${deletions})`,
-    paths.length > 0 ? paths.join("\n") : null,
-    more > 0 ? `+${more} more` : null,
-  ].filter(Boolean).join("\n");
+  const summary = stringField(record, "summary");
+  const reason = stringField(record, "reason");
+  return summary || reason || tasks.length > 0 ? { summary, reason, tasks } : null;
 }
 
-function lanePreviewEmptyText({
+function parsePlannerFieldOutput(text: string): PlannerOutput | null {
+  const summary = plannerFieldValue(text, "summary");
+  const reason = plannerFieldValue(text, "reason");
+  const tasks = plannerFieldTasks(text);
+  if (!summary && !reason && tasks.length === 0 && !/^\s*tasks\s*:/im.test(text)) return null;
+  return { summary, reason, tasks };
+}
+
+function plannerFieldValue(text: string, key: string): string | null {
+  const match = text.match(new RegExp(`^\\s*${key}\\s*:\\s*(.+?)\\s*$`, "im"));
+  const value = match?.[1]?.trim();
+  if (!value || value === "null") return null;
+  return unquotePlannerValue(value);
+}
+
+function plannerFieldTasks(text: string): PlannerOutput["tasks"] {
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^\s*tasks\s*:/i.test(line));
+  if (start < 0) return [];
+  const inline = lines[start].replace(/^\s*tasks\s*:\s*/i, "").trim();
+  if (inline && inline !== "[]") {
+    const parsed = parsePlannerJsonOutput(`{"tasks":${inline}}`);
+    if (parsed) return parsed.tasks;
+  }
+  const tasks: PlannerOutput["tasks"] = [];
+  let current: PlannerOutput["tasks"][number] | null = null;
+  for (const line of lines.slice(start + 1)) {
+    if (/^\S[\w-]*\s*:/i.test(line)) break;
+    const itemMatch = line.match(/^\s*-\s*(.*)$/);
+    if (itemMatch) {
+      current = { title: null, prompt: null };
+      tasks.push(current);
+      readPlannerTaskField(itemMatch[1], current);
+      continue;
+    }
+    if (current) readPlannerTaskField(line, current);
+  }
+  return tasks;
+}
+
+function readPlannerTaskField(line: string, task: PlannerOutput["tasks"][number]): void {
+  const match = line.match(/^\s*(title|prompt)\s*:\s*(.*?)\s*$/i);
+  if (!match) return;
+  const key = match[1].toLowerCase();
+  const value = unquotePlannerValue(match[2]);
+  if (key === "title") task.title = value;
+  if (key === "prompt") task.prompt = value;
+}
+
+function unquotePlannerValue(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "null") return null;
+  return trimmed.replace(/^["']|["']$/g, "").trim() || null;
+}
+
+function plannerDisplayLabel(source: ThreadReplaySessionSourceInfo | null): string | null {
+  const label = source?.label?.trim();
+  if (!label) return null;
+  if (source?.role !== "planner") return label;
+  return label.replace(/\s*[:：].*$/, "").trim() || label;
+}
+
+function stageTooltipDetail(
+  snapshot: Record<string, unknown> | null,
+  fallbackStage: StageInfo | null,
+): string | null {
+  return (
+    firstReadableSnapshotField(snapshot, ["summary", "description", "outcome"])
+    ?? readableTooltipText(fallbackStage?.summary)
+    ?? readableTooltipText(fallbackStage?.description)
+  );
+}
+
+function assistantTooltipDetail(
+  snapshot: Record<string, unknown> | null,
+  fallbackAssistant: { systemPrompt?: string | null } | null,
+  source: ThreadReplaySessionSourceInfo | null,
+): string | null {
+  return (
+    firstReadableSnapshotField(snapshot, [
+      "summary",
+      "description",
+      "intro",
+      "profile",
+      "systemPrompt",
+      "system_prompt",
+    ])
+    ?? readableTooltipText(fallbackAssistant?.systemPrompt)
+    ?? readableTooltipText(source?.role)
+  );
+}
+
+function agentTooltipDetail(snapshot: Record<string, unknown> | null): string | null {
+  const agentInfo = objectField(snapshot, "agentInfo");
+  const detail =
+    firstReadableSnapshotField(agentInfo, ["description", "summary"])
+    ?? [
+      stringField(agentInfo, "model"),
+      stringField(agentInfo, "mode"),
+      stringField(agentInfo, "effort"),
+    ].filter((item): item is string => Boolean(item)).join(" / ");
+  return readableTooltipText(detail);
+}
+
+function firstReadableSnapshotField(
+  snapshot: Record<string, unknown> | null,
+  fields: string[],
+): string | null {
+  for (const field of fields) {
+    const value = readableTooltipText(stringField(snapshot, field));
+    if (value) return value;
+  }
+  return null;
+}
+
+function preferredLaneSource(lane: ThreadSessionLane): ThreadReplaySessionSourceInfo | null {
+  return (
+    lane.sources.find((source) => source.kind === "plan_task")
+    ?? lane.sources.find((source) => source.kind === "stage")
+    ?? lane.sources.find((source) => source.kind === "astra_internal")
+    ?? lane.sources.find((source) => source.kind === "thread")
+    ?? lane.sources[0]
+    ?? null
+  );
+}
+
+function assistantFromSnapshot(snapshot: Record<string, unknown> | null): {
+  name: string;
+  color: string | null;
+  agent: { id: Agent | string; model: string | null };
+  systemPrompt?: string | null;
+} | null {
+  const name =
+    stringField(snapshot, "name")
+    ?? stringField(snapshot, "assistantId")
+    ?? stringField(snapshot, "id");
+  if (!name) return null;
+  const agent = objectField(snapshot, "agent");
+  return {
+    name,
+    color: stringField(snapshot, "color"),
+    agent: {
+      id: stringField(agent, "id") ?? "",
+      model: stringField(agent, "model"),
+    },
+    systemPrompt: stringField(snapshot, "systemPrompt"),
+  };
+}
+
+function assistantFromThread(
+  thread: ThreadWorkState,
+  source: ThreadReplaySessionSourceInfo | null,
+  agent: Agent,
+) {
+  const direct =
+    source?.planTaskId || source?.stageId
+      ? null
+      : thread.assistants.find((assistant) => assistant.agent.id === agent) ?? null;
+  if (direct) return direct;
+  if (source?.stageId) {
+    const stage = thread.stages.find((item) => item.id === source.stageId) ?? null;
+    const stageAssistant = stage?.assistants.find((assistant) => assistant.agent.id === agent) ?? null;
+    if (stageAssistant) return stageAssistant;
+  }
+  return thread.assistants.find((assistant) => assistant.agent.id === agent) ?? null;
+}
+
+function snapshotStageIcon(snapshot: Record<string, unknown> | null): Pick<StageInfo, "kind" | "icon"> | null {
+  if (!snapshot) return null;
+  return {
+    kind: stageKindField(snapshot, "kind"),
+    icon: stringField(snapshot, "icon"),
+  };
+}
+
+function stageKindField(record: Record<string, unknown> | null, key: string): StageInfo["kind"] {
+  const value = stringField(record, key);
+  if (
+    value === "research" ||
+    value === "plan" ||
+    value === "develop" ||
+    value === "build" ||
+    value === "writing" ||
+    value === "editing" ||
+    value === "review" ||
+    value === "proofreading" ||
+    value === "screenplay" ||
+    value === "storyboard" ||
+    value === "design" ||
+    value === "production" ||
+    value === "human" ||
+    value === "done"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function parseJsonObject(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function objectField(value: Record<string, unknown> | null, key: string): Record<string, unknown> | null {
+  const field = value?.[key];
+  return field && typeof field === "object" && !Array.isArray(field)
+    ? field as Record<string, unknown>
+    : null;
+}
+
+function stringField(value: Record<string, unknown> | null, key: string): string | null {
+  const field = value?.[key];
+  return typeof field === "string" && field.trim() ? field.trim() : null;
+}
+
+function laneMessageEmptyText({
   lane,
   loading,
   loadError,
@@ -1474,87 +1752,13 @@ function lanePreviewEmptyText({
   if (lane.session && !isPersistedSession(lane.session)) {
     return {
       title: t("thread.preview_history_unavailable"),
-      detail: t("thread.preview_open_detail_for_full"),
+      detail: t("thread.preview_waiting"),
     };
   }
   return {
     title: t("thread.preview_empty"),
     detail: t("thread.preview_waiting"),
   };
-}
-
-function lanePreviewTextClass(tone: LanePreviewItem["tone"]): string {
-  return "text-body-sm leading-relaxed break-words " + (
-    tone === "danger"
-      ? "text-status-error"
-      : tone === "muted"
-        ? "text-ink/55"
-        : "text-ink/72"
-  );
-}
-
-function lanePreviewPlainTextClass(tone: LanePreviewItem["tone"]): string {
-  return "whitespace-pre-wrap break-words text-body-sm leading-relaxed " + (
-    tone === "danger"
-      ? "text-status-error"
-      : tone === "muted"
-        ? "text-ink/55"
-        : "text-ink/72"
-  );
-}
-
-function formatPreviewTime(timestamp: number): string {
-  const ms = timestamp > 10_000_000_000 ? timestamp : timestamp * 1000;
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(ms));
-}
-
-function parseMaybeJsonObject(value: unknown): Record<string, unknown> | null {
-  let parsed = value;
-  if (typeof parsed === "string") {
-    try {
-      parsed = JSON.parse(parsed) as unknown;
-    } catch {
-      return null;
-    }
-  }
-  return asRecord(parsed);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function pickString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function stringField(value: Record<string, unknown>, key: string): string | null {
-  const field = value[key];
-  return typeof field === "string" && field.trim() ? field.trim() : null;
-}
-
-function numberField(value: Record<string, unknown> | null, key: string): number | null {
-  const field = value?.[key];
-  return typeof field === "number" && Number.isFinite(field) ? field : null;
-}
-
-function sumEditField(edits: Record<string, unknown>[], key: string): number {
-  return edits.reduce((sum, edit) => sum + (numberField(edit, key) ?? 0), 0);
-}
-
-function stablePreviewText(value: unknown, maxLength: number): string {
-  let text: string;
-  try {
-    text = typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "";
-  } catch {
-    text = String(value);
-  }
-  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
 }
 
 async function createManualStagePlanTask({
@@ -1619,19 +1823,4 @@ function manualStageTaskTitle(stage: StageInfo, prompt: string): string {
   const shortPrompt =
     compactPrompt.length > 72 ? `${compactPrompt.slice(0, 69)}...` : compactPrompt;
   return `${stageName}: ${shortPrompt || "Manual task"}`;
-}
-
-function threadAssistantCount(thread: ThreadInfo): number {
-  if (thread.kind !== "workflow") return thread.assistants.length;
-  return new Set(thread.stages.flatMap((stage) => stage.assistants.map((assistant) => assistant.assistantId))).size;
-}
-
-function formatDate(timestamp: number | null | undefined, lang: "en" | "zh"): string | null {
-  if (!timestamp) return null;
-  return new Intl.DateTimeFormat(localeTag(lang), {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(timestamp * 1000));
 }

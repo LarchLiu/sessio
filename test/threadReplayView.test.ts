@@ -321,6 +321,36 @@ describe("buildThreadTimelineRows", () => {
     expect(sessionRows[0].lanes.map((lane) => lane.sessionId)).toEqual(["session-1", "session-2"]);
     expect(sessionRows[1].lanes.map((lane) => lane.sessionId)).toEqual(["session-3"]);
   });
+
+  it("orders standalone session rows from oldest to newest", () => {
+    const replay: ThreadReplayInfo = {
+      threadId: "thread-1",
+      kind: "teamwork",
+      sessions: [
+        replaySession("codex", "session-new", sessionWithTimes("codex", "session-new", 10, 30), [
+          source({ kind: "thread", createdAt: 10 }),
+        ]),
+        replaySession("claude", "session-old", sessionWithTimes("claude", "session-old", 5, 20), [
+          source({ kind: "thread", createdAt: 5 }),
+        ]),
+      ],
+    };
+    const lanes = buildThreadSessionLanes({
+      thread: thread("teamwork"),
+      replay,
+      liveState: emptyLiveState(),
+      runtimeSessionAliases: {},
+      pendingNewChats: {},
+      t,
+    });
+
+    const rows = buildThreadTimelineRows(lanes, [], [], "teamwork");
+
+    expect(rows.flatMap((row) => row.lanes.map((lane) => lane.sessionId))).toEqual([
+      "session-old",
+      "session-new",
+    ]);
+  });
 });
 
 describe("replay sources", () => {
@@ -433,6 +463,10 @@ function debateReplaySession(
 }
 
 function session(agent: Agent, id: string): SessionInfo {
+  return sessionWithTimes(agent, id, 1, id.endsWith("2") ? 2 : 1);
+}
+
+function sessionWithTimes(agent: Agent, id: string, startedAt: number, updatedAt: number): SessionInfo {
   return {
     id,
     agent,
@@ -440,8 +474,8 @@ function session(agent: Agent, id: string): SessionInfo {
     forkedFromId: null,
     projectPath: "/tmp/project",
     projectName: "Project",
-    startedAt: 1,
-    updatedAt: id.endsWith("2") ? 2 : 1,
+    startedAt,
+    updatedAt,
     messageCount: 1,
     renameTitle: null,
     title: id,
