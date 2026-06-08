@@ -22,7 +22,7 @@ import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
 import type { LiveRuntimeAction, LiveRuntimeState } from "../runtimeChat";
-import { sessionDisplayTitle } from "../appUtils";
+import { isPersistedSession, sessionDisplayTitle } from "../appUtils";
 import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
 import { collectThreadHistorySnapshots, withThreadChatSessions } from "../threadWorkContext";
 import { collectThreadChatSessions, compareSessionTime } from "../threadChats";
@@ -40,10 +40,12 @@ export default function ThreadChatPage({
   onError,
   onPendingSession,
   onSelectSession,
+  initialHistoryTarget = null,
 }: {
   projects: ProjectGroup[];
   initialProjectKey: string | null;
   snapshotContext: { thread: ThreadInfo; stage: StageInfo | null };
+  initialHistoryTarget?: SessionInfo | null;
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
   rememberRuntimeAgentSelection: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -66,7 +68,7 @@ export default function ThreadChatPage({
   const workspacePath = projectGroup?.path ?? null;
   const [threads, setThreads] = useState<ThreadInfo[]>([snapshotContext.thread]);
   const [threadId, setThreadId] = useState(snapshotContext.thread.id);
-  const [historyTarget, setHistoryTarget] = useState<SessionInfo | null>(null);
+  const [historyTarget, setHistoryTarget] = useState<SessionInfo | null>(() => initialHistoryTarget);
   const [historyTurns, setHistoryTurns] = useState<SessionHistoryTurn[] | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [threadReplay, setThreadReplay] = useState<ThreadReplayInfo | null>(null);
@@ -113,8 +115,8 @@ export default function ThreadChatPage({
 
   useEffect(() => {
     let cancelled = false;
-    setThreads([]);
-    setHistoryTarget(null);
+    setThreads([snapshotContext.thread]);
+    setHistoryTarget(initialHistoryTarget);
     setHistoryTurns(null);
     setThreadReplay(null);
     if (!project?.id) return;
@@ -134,12 +136,17 @@ export default function ThreadChatPage({
     return () => {
       cancelled = true;
     };
-  }, [onError, project?.id, reloadToken, snapshotContext.thread]);
+  }, [initialHistoryTarget, onError, project?.id, reloadToken, snapshotContext.thread]);
 
   useEffect(() => {
-    if (!historyTarget) return;
-    if (!historyTarget.filePath) {
+    if (!historyTarget) {
       setHistoryTurns(null);
+      setHistoryLoading(false);
+      return;
+    }
+    if (!isPersistedSession(historyTarget)) {
+      setHistoryTurns(null);
+      setHistoryLoading(false);
       return;
     }
     let cancelled = false;
@@ -237,7 +244,7 @@ export default function ThreadChatPage({
               threadChatSessions={threadChatSessions}
               onSelectSession={(session) => {
                 setHistoryTarget(session);
-                if (!session.filePath) setHistoryTurns(null);
+                if (!isPersistedSession(session)) setHistoryTurns(null);
               }}
               onOpenFullSession={onSelectSession}
             />
@@ -265,7 +272,7 @@ export default function ThreadChatPage({
                   {t("thread.open_full_chat")}
                 </button>
               </div>
-              {!historyTarget.filePath ? (
+              {!isPersistedSession(historyTarget) ? (
                 <div className="rounded-md border border-dashed border-card-border/[0.12] px-3 py-4 text-body-sm text-ink/35">
                   {t("thread.history_pending")}
                 </div>

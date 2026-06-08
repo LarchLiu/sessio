@@ -47,8 +47,15 @@ export function sessionDisplayTitle(session: SessionInfo): string | null {
   return session.renameTitle ?? session.title ?? session.firstUserMessage ?? null;
 }
 
-function isRealSessionFilePath(filePath: string): boolean {
-  return filePath.trim() !== "" && !filePath.startsWith("astra://");
+export function isRealSessionFilePath(filePath: string | null | undefined): boolean {
+  const trimmed = filePath?.trim() ?? "";
+  return trimmed !== "" && !trimmed.startsWith("astra://");
+}
+
+export function isPersistedSession(
+  session: Pick<SessionInfo, "available" | "filePath"> | null | undefined,
+): boolean {
+  return Boolean(session?.available && isRealSessionFilePath(session.filePath));
 }
 
 export function sessionUnreadKeys(

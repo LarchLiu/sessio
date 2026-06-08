@@ -523,7 +523,7 @@ impl AstraService {
                 project_path: project.path.clone(),
                 status: AstraRunStatus::Planning,
                 mode: "rust_native".to_string(),
-                planner_backend: Some("deterministic".to_string()),
+                planner_backend: None,
                 round_index: None,
                 round_limit: RUST_NATIVE_ROUND_LIMIT,
                 terminal_reason: None,
@@ -1744,11 +1744,7 @@ fn record_ready_internal_planner_session(
         .map(|project| project.name)
         .unwrap_or_else(|| run.project_id.clone());
     let now = now_ms();
-    let title = run
-        .planner_backend
-        .as_ref()
-        .map(|backend| format!("Astra planner: {backend}"))
-        .unwrap_or_else(|| "Astra planner".to_string());
+    let title = "Astra planner".to_string();
     let session = SessionInfo {
         id: agent_session_id.to_string(),
         agent,

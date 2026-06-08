@@ -578,7 +578,7 @@ export default function App() {
   const headerContextTitle = selected
     ? { label: t("header.chat"), icon: MessageSquareText }
     : selectedThreadId
-      ? detailMode === "threadMultiSessionChat"
+      ? detailMode === "threadMultiSessionChat" || detailMode === "threadChat"
         ? { label: t("thread.multi_session_chat"), icon: MessagesSquare }
         : { label: t("thread.detail"), icon: Hash }
       : activeProject

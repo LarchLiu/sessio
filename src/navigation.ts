@@ -1,5 +1,5 @@
 export type ViewMode = "native" | "cross";
-export type DetailMode = "chat" | "project" | "threadMultiSessionChat";
+export type DetailMode = "chat" | "project" | "threadMultiSessionChat" | "threadChat";
 
 import type { Agent, KanbanStatus, PlanTaskSessionRole, ProjectInfo, SessionHistorySnapshotGroup, SessionInfo, ThreadWorkSnapshot } from "./api";
 
