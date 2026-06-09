@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -58,6 +58,7 @@ const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 const ENABLE_ASTRA_PI_SESSION_PERSISTENCE: bool = false;
 const MAX_ASTRA_RUN_DIAGNOSTICS: usize = 100;
+const ASTRA_PI_DELEGATED_RUNTIME_LIMIT: usize = 2;
 
 fn trim_astra_run_diagnostics(values: &mut Vec<Value>) {
     if values.len() > MAX_ASTRA_RUN_DIAGNOSTICS {
@@ -132,6 +133,7 @@ struct AstraServiceInner {
     runtime: RuntimeManager,
     astra_pi_acp_config: Option<AstraPiAcpConfig>,
     astra_preferences: Mutex<AstraBackendConfig>,
+    runtime_limiter: RuntimeResourceLimiter,
     delegated_sessions: Mutex<HashMap<String, DelegatedSessionState>>,
     task_waiters: Mutex<HashMap<String, mpsc::Sender<AstraTaskResult>>>,
     orchestrator_workers: Mutex<HashMap<String, AstraWorkerState>>,
@@ -156,6 +158,7 @@ struct DelegatedSessionState {
     agent_session_id: Option<String>,
     stage_task_context: Option<StageTaskContext>,
     session_recorded: bool,
+    runtime_resource_agent: Option<Agent>,
     attempt_count: u32,
     retry_limit_reached: bool,
     text: String,
@@ -183,6 +186,78 @@ struct OwnedAstraPlanTask {
 enum AstraWorkerState {
     Pending,
     Running,
+}
+
+struct RuntimeResourceLimiter {
+    active: Mutex<HashMap<Agent, usize>>,
+    waiters: Condvar,
+}
+
+impl RuntimeResourceLimiter {
+    fn new() -> Self {
+        Self {
+            active: Mutex::new(HashMap::new()),
+            waiters: Condvar::new(),
+        }
+    }
+
+    fn acquire(
+        &self,
+        agent: Agent,
+        mut is_still_active: impl FnMut() -> Result<bool>,
+    ) -> Result<Option<Agent>> {
+        let Some(limit) = delegated_runtime_limit(agent) else {
+            return Ok(None);
+        };
+
+        loop {
+            if !is_still_active()? {
+                bail!(
+                    "Astra run is no longer active while waiting for {} runtime capacity",
+                    agent.as_str()
+                );
+            }
+
+            let mut active = self
+                .active
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Astra runtime limiter lock poisoned"))?;
+            let active_count = *active.get(&agent).unwrap_or(&0);
+            if active_count < limit {
+                active.insert(agent, active_count + 1);
+                return Ok(Some(agent));
+            }
+
+            let (guard, _) = self
+                .waiters
+                .wait_timeout(active, Duration::from_millis(250))
+                .map_err(|_| anyhow::anyhow!("Astra runtime limiter lock poisoned"))?;
+            drop(guard);
+        }
+    }
+
+    fn release(&self, agent: Agent) {
+        if delegated_runtime_limit(agent).is_none() {
+            return;
+        }
+        if let Ok(mut active) = self.active.lock() {
+            match active.get_mut(&agent) {
+                Some(count) if *count > 1 => *count -= 1,
+                Some(_) => {
+                    active.remove(&agent);
+                }
+                None => {}
+            }
+        }
+        self.waiters.notify_all();
+    }
+}
+
+fn delegated_runtime_limit(agent: Agent) -> Option<usize> {
+    match agent {
+        Agent::AstraPi => Some(ASTRA_PI_DELEGATED_RUNTIME_LIMIT),
+        Agent::Codex | Agent::Claude | Agent::Gemini => None,
+    }
 }
 
 /// The stage/attempt coordinates that always travel together when dispatching
@@ -407,6 +482,7 @@ impl AstraService {
                 runtime,
                 astra_pi_acp_config,
                 astra_preferences: Mutex::new(astra_preferences),
+                runtime_limiter: RuntimeResourceLimiter::new(),
                 delegated_sessions: Mutex::new(HashMap::new()),
                 task_waiters: Mutex::new(HashMap::new()),
                 orchestrator_workers: Mutex::new(HashMap::new()),
@@ -676,6 +752,22 @@ impl AstraService {
         record_plan_task_result_in_store(self.inner.store.as_ref(), run, result)
     }
 
+    fn acquire_delegated_runtime_resource(
+        &self,
+        run: &AstraRun,
+        task: &AstraTaskProposal,
+    ) -> Result<Option<Agent>> {
+        self.inner.runtime_limiter.acquire(task.target_agent, || {
+            self.load_run(&run.run_id).map(|run| run.status.active())
+        })
+    }
+
+    fn release_delegated_runtime_resource(&self, runtime_resource_agent: Option<Agent>) {
+        if let Some(agent) = runtime_resource_agent {
+            self.inner.runtime_limiter.release(agent);
+        }
+    }
+
     fn dispatch_task(
         &self,
         run: &AstraRun,
@@ -764,18 +856,27 @@ impl AstraService {
             options,
         };
         hydrate_start_request_for_astra(&mut req, self.inner.store.as_ref())?;
-        let handle = self.inner.runtime.start_session(req)?;
+        let runtime_resource_agent = self.acquire_delegated_runtime_resource(run, task)?;
+        let handle = match self.inner.runtime.start_session(req) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.release_delegated_runtime_resource(runtime_resource_agent);
+                return Err(error);
+            }
+        };
         if let Err(error) = self.track_delegated_session(
             &run.run_id,
             task,
             attempt,
             &handle.sessio_runtime_session_id,
             stage_context,
+            runtime_resource_agent,
         ) {
             let _ = self
                 .inner
                 .runtime
                 .dispose_session_silent(&handle.sessio_runtime_session_id);
+            self.release_delegated_runtime_resource(runtime_resource_agent);
             return Err(error);
         }
         if is_persistable_agent_session_id(&handle.agent_runtime_session_id) {
@@ -1005,15 +1106,15 @@ impl AstraService {
     /// agent), disposes the runtime session, and drops the task waiter so a
     /// blocked batch dispatch wait is released.
     fn abort_delegated_session(&self, sessio_runtime_session_id: &str) {
-        let turn_id = match self.inner.delegated_sessions.lock() {
-            Ok(mut delegated) => match delegated.get_mut(sessio_runtime_session_id) {
-                Some(state) => {
+        let (turn_id, runtime_resource_agent) = match self.inner.delegated_sessions.lock() {
+            Ok(mut delegated) => match delegated.remove(sessio_runtime_session_id) {
+                Some(mut state) => {
                     state.finished = true;
-                    state.last_turn_id.clone()
+                    (state.last_turn_id, state.runtime_resource_agent.take())
                 }
-                None => None,
+                None => (None, None),
             },
-            Err(_) => None,
+            Err(_) => (None, None),
         };
         if let Some(turn_id) = turn_id.as_deref() {
             let _ = self
@@ -1025,6 +1126,7 @@ impl AstraService {
             .inner
             .runtime
             .dispose_session_silent(sessio_runtime_session_id);
+        self.release_delegated_runtime_resource(runtime_resource_agent);
         if let Ok(mut waiters) = self.inner.task_waiters.lock() {
             waiters.remove(sessio_runtime_session_id);
         }
@@ -1037,6 +1139,7 @@ impl AstraService {
         attempt: DelegatedAttempt<'_>,
         sessio_runtime_session_id: &str,
         stage_task_context: Option<StageTaskContext>,
+        runtime_resource_agent: Option<Agent>,
     ) -> Result<()> {
         let mut delegated = self
             .inner
@@ -1051,6 +1154,7 @@ impl AstraService {
                 state.thread_stage_id = attempt.thread_stage_id.map(ToString::to_string);
                 state.attempt_count = attempt.attempt_count;
                 state.retry_limit_reached = attempt.retry_limit_reached;
+                state.runtime_resource_agent = runtime_resource_agent;
                 if stage_task_context.is_some() {
                     state.stage_task_context = stage_task_context.clone();
                 }
@@ -1062,6 +1166,7 @@ impl AstraService {
                 agent_session_id: None,
                 stage_task_context,
                 session_recorded: false,
+                runtime_resource_agent,
                 attempt_count: attempt.attempt_count,
                 retry_limit_reached: attempt.retry_limit_reached,
                 text: String::new(),
@@ -1490,6 +1595,7 @@ impl AstraService {
                 "Astra delegated session lock poisoned",
             )),
         }
+        self.release_delegated_runtime_resource(state.runtime_resource_agent);
         if let Some(sender) = self
             .inner
             .task_waiters
@@ -3951,6 +4057,69 @@ mod tests {
             diagnostics[0]["idx"],
             Value::Number(serde_json::Number::from(3))
         );
+    }
+
+    #[test]
+    fn runtime_limiter_blocks_astrapi_without_limiting_other_agents() {
+        let limiter = Arc::new(RuntimeResourceLimiter::new());
+        assert_eq!(
+            limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap(),
+            Some(Agent::AstraPi)
+        );
+        assert_eq!(
+            limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap(),
+            Some(Agent::AstraPi)
+        );
+        assert_eq!(limiter.acquire(Agent::Codex, || Ok(true)).unwrap(), None);
+
+        let waiting = limiter.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let acquired = waiting.acquire(Agent::AstraPi, || Ok(true)).unwrap();
+            sender.send(acquired).unwrap();
+        });
+
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        limiter.release(Agent::AstraPi);
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Some(Agent::AstraPi)
+        );
+
+        limiter.release(Agent::AstraPi);
+        limiter.release(Agent::AstraPi);
+    }
+
+    #[test]
+    fn runtime_limiter_stops_waiting_when_run_is_inactive() {
+        let limiter = Arc::new(RuntimeResourceLimiter::new());
+        limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap();
+        limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap();
+
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let waiting = limiter.clone();
+        let waiting_active = active.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = waiting.acquire(Agent::AstraPi, || {
+                Ok(waiting_active.load(std::sync::atomic::Ordering::SeqCst))
+            });
+            sender.send(result.map(|value| value.is_some())).unwrap();
+        });
+
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        active.store(false, std::sync::atomic::Ordering::SeqCst);
+        let result = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(result.is_err());
+
+        limiter.release(Agent::AstraPi);
+        limiter.release(Agent::AstraPi);
     }
 
     pub(super) fn test_thread(stages: Vec<crate::models::StageInfo>) -> ThreadInfo {
