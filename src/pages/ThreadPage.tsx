@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, Bot, ExternalLink, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Square, Trash2 } from "lucide-react";
-import HashIcon from "@iconify-react/mynaui/hash";
 import type { Agent, AstraEvent, AstraHandle, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo } from "../api";
 import {
   AGENT_LABEL,
@@ -19,6 +18,7 @@ import {
 import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
+import { HashIcon } from "../components/IconifyIcon";
 import { localeTag, useI18n } from "../i18n";
 import { isPersistedSession, sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
 import {

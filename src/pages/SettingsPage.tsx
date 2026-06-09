@@ -1,8 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import AiGenerate2Icon from '@iconify-react/ri/ai-generate-2';
-import Robot3LineIcon from '@iconify-react/ri/robot-3-line';
 import {
   Anthropic,
   Aws,
@@ -60,6 +58,7 @@ import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
+import { AiGenerate2Icon, Robot3LineIcon } from "../components/IconifyIcon";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
 import { formatVersionLabel, type UpdateState } from "../updater";

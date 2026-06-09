@@ -1,6 +1,6 @@
 import { Hand, ScrollText, ShieldAlert, ShieldEllipsis } from "lucide-react";
-import CodeXmlIcon from '@iconify-react/material-symbols/code-xml';
 import type { Agent, RuntimeAgentOptionMetadata } from "../api";
+import { CodeXmlIcon } from "./IconifyIcon";
 import InlineMenuSelect, { type InlineMenuSelectOption } from "./InlineMenuSelect";
 
 export interface RuntimeMenuSelectProps {

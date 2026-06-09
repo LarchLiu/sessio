@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import HashIcon from "@iconify-react/mynaui/hash";
 import { Bot, Folder, GitBranch, LoaderCircle } from "lucide-react";
 import type {
   ProjectInfo,
@@ -18,6 +17,7 @@ import InlineMenuSelect, { type InlineMenuSelectOption } from "../components/Inl
 import { RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
 import ScrollArea from "../components/ScrollArea";
 import SessionHistoryReadonly from "../components/SessionHistoryReadonly";
+import { HashIcon } from "../components/IconifyIcon";
 import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";

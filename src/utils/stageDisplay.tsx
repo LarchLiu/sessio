@@ -1,32 +1,7 @@
-import SearchRoundedIcon from "@iconify-react/material-symbols/search-rounded";
-import ChecklistRoundedIcon from "@iconify-react/material-symbols/checklist-rounded";
-import CodeRoundedIcon from "@iconify-react/material-symbols/code-rounded";
-import ConstructionRoundedIcon from "@iconify-react/material-symbols/construction-rounded";
-import EditNoteOutlineRoundedIcon from "@iconify-react/material-symbols/edit-note-outline-rounded";
-import RateReviewOutlineRoundedIcon from "@iconify-react/material-symbols/rate-review-outline-rounded";
-import SpellcheckRoundedIcon from "@iconify-react/material-symbols/spellcheck-rounded";
-import MovieOutlineRoundedIcon from "@iconify-react/material-symbols/movie-outline-rounded";
-import DashboardCustomizeOutlineRoundedIcon from "@iconify-react/material-symbols/dashboard-customize-outline-rounded";
-import DesignServicesOutlineRoundedIcon from "@iconify-react/material-symbols/design-services-outline-rounded";
-import VideoLibraryOutlineRoundedIcon from "@iconify-react/material-symbols/video-library-outline-rounded";
-import PersonOutlineRoundedIcon from "@iconify-react/material-symbols/person-outline-rounded";
-import TaskAltOutlineIcon from "@iconify-react/material-symbols/task-alt-outline";
-import ScienceOutlineIcon from "@iconify-react/material-symbols/science-outline";
-import RouteOutlineIcon from "@iconify-react/material-symbols/route-outline";
-import TerminalRoundedIcon from "@iconify-react/material-symbols/terminal-rounded";
-import BuildOutlineRoundedIcon from "@iconify-react/material-symbols/build-outline-rounded";
-import DrawOutlineRoundedIcon from "@iconify-react/material-symbols/draw-outline-rounded";
-import FactCheckOutlineRoundedIcon from "@iconify-react/material-symbols/fact-check-outline-rounded";
-import DoneAllRoundedIcon from "@iconify-react/material-symbols/done-all-rounded";
-import AccountTreeOutlineRoundedIcon from "@iconify-react/material-symbols/account-tree-outline-rounded";
-import AutoAwesomeOutlineRoundedIcon from "@iconify-react/material-symbols/auto-awesome-outline-rounded";
-import BoltOutlineRoundedIcon from "@iconify-react/material-symbols/bolt-outline-rounded";
-import PsychologyOutlineRoundedIcon from "@iconify-react/material-symbols/psychology-outline-rounded";
-import RocketLaunchOutlineRoundedIcon from "@iconify-react/material-symbols/rocket-launch-outline-rounded";
-import SchemaOutlineRoundedIcon from "@iconify-react/material-symbols/schema-outline-rounded";
 import { Clapperboard, FilePenLine, GitBranch, ListChecks, Palette, Scissors, SpellCheck, Check, Circle, CircleAlert, CircleDot, CircleGauge, CircleUserRound, CircleCheck, MinusCircle, type LucideIcon } from "lucide-react";
-import type { ComponentType } from "react";
+import type { ReactElement } from "react";
 import type { ProjectStageInfo, StageInfo, StageStatus, StageType } from "../api";
+import IconifyIcon, { type IconifyIconClassName } from "../components/IconifyIcon";
 
 export const STAGE_TYPE_ICONS: Record<StageType, LucideIcon> = {
   research: CircleGauge,
@@ -45,35 +20,39 @@ export const STAGE_TYPE_ICONS: Record<StageType, LucideIcon> = {
   done: CircleCheck,
 };
 
-type IconComponent = ComponentType<{ className?: string }>;
+type IconComponent = (props: { className?: string }) => ReactElement;
+
+function iconifyStageIcon(iconClassName: IconifyIconClassName): IconComponent {
+  return ({ className }) => <IconifyIcon iconClassName={iconClassName} className={className} />;
+}
 
 export const STAGE_ICON_SET: Record<string, IconComponent> = {
-  "material-symbols:search-rounded": SearchRoundedIcon,
-  "material-symbols:checklist-rounded": ChecklistRoundedIcon,
-  "material-symbols:code-rounded": CodeRoundedIcon,
-  "material-symbols:construction-rounded": ConstructionRoundedIcon,
-  "material-symbols:edit-note-outline-rounded": EditNoteOutlineRoundedIcon,
-  "material-symbols:rate-review-outline-rounded": RateReviewOutlineRoundedIcon,
-  "material-symbols:spellcheck-rounded": SpellcheckRoundedIcon,
-  "material-symbols:movie-outline-rounded": MovieOutlineRoundedIcon,
-  "material-symbols:dashboard-customize-outline-rounded": DashboardCustomizeOutlineRoundedIcon,
-  "material-symbols:design-services-outline-rounded": DesignServicesOutlineRoundedIcon,
-  "material-symbols:video-library-outline-rounded": VideoLibraryOutlineRoundedIcon,
-  "material-symbols:person-outline-rounded": PersonOutlineRoundedIcon,
-  "material-symbols:task-alt-outline": TaskAltOutlineIcon,
-  "material-symbols:science-outline": ScienceOutlineIcon,
-  "material-symbols:route-outline": RouteOutlineIcon,
-  "material-symbols:terminal-rounded": TerminalRoundedIcon,
-  "material-symbols:build-outline-rounded": BuildOutlineRoundedIcon,
-  "material-symbols:draw-outline-rounded": DrawOutlineRoundedIcon,
-  "material-symbols:fact-check-outline-rounded": FactCheckOutlineRoundedIcon,
-  "material-symbols:done-all-rounded": DoneAllRoundedIcon,
-  "material-symbols:account-tree-outline-rounded": AccountTreeOutlineRoundedIcon,
-  "material-symbols:auto-awesome-outline-rounded": AutoAwesomeOutlineRoundedIcon,
-  "material-symbols:bolt-outline-rounded": BoltOutlineRoundedIcon,
-  "material-symbols:psychology-outline-rounded": PsychologyOutlineRoundedIcon,
-  "material-symbols:rocket-launch-outline-rounded": RocketLaunchOutlineRoundedIcon,
-  "material-symbols:schema-outline-rounded": SchemaOutlineRoundedIcon,
+  "material-symbols:search-rounded": iconifyStageIcon("icon-[material-symbols--search-rounded]"),
+  "material-symbols:checklist-rounded": iconifyStageIcon("icon-[material-symbols--checklist-rounded]"),
+  "material-symbols:code-rounded": iconifyStageIcon("icon-[material-symbols--code-rounded]"),
+  "material-symbols:construction-rounded": iconifyStageIcon("icon-[material-symbols--construction-rounded]"),
+  "material-symbols:edit-note-outline-rounded": iconifyStageIcon("icon-[material-symbols--edit-note-outline-rounded]"),
+  "material-symbols:rate-review-outline-rounded": iconifyStageIcon("icon-[material-symbols--rate-review-outline-rounded]"),
+  "material-symbols:spellcheck-rounded": iconifyStageIcon("icon-[material-symbols--spellcheck-rounded]"),
+  "material-symbols:movie-outline-rounded": iconifyStageIcon("icon-[material-symbols--movie-outline-rounded]"),
+  "material-symbols:dashboard-customize-outline-rounded": iconifyStageIcon("icon-[material-symbols--dashboard-customize-outline-rounded]"),
+  "material-symbols:design-services-outline-rounded": iconifyStageIcon("icon-[material-symbols--design-services-outline-rounded]"),
+  "material-symbols:video-library-outline-rounded": iconifyStageIcon("icon-[material-symbols--video-library-outline-rounded]"),
+  "material-symbols:person-outline-rounded": iconifyStageIcon("icon-[material-symbols--person-outline-rounded]"),
+  "material-symbols:task-alt-outline": iconifyStageIcon("icon-[material-symbols--task-alt-outline]"),
+  "material-symbols:science-outline": iconifyStageIcon("icon-[material-symbols--science-outline]"),
+  "material-symbols:route-outline": iconifyStageIcon("icon-[material-symbols--route-outline]"),
+  "material-symbols:terminal-rounded": iconifyStageIcon("icon-[material-symbols--terminal-rounded]"),
+  "material-symbols:build-outline-rounded": iconifyStageIcon("icon-[material-symbols--build-outline-rounded]"),
+  "material-symbols:draw-outline-rounded": iconifyStageIcon("icon-[material-symbols--draw-outline-rounded]"),
+  "material-symbols:fact-check-outline-rounded": iconifyStageIcon("icon-[material-symbols--fact-check-outline-rounded]"),
+  "material-symbols:done-all-rounded": iconifyStageIcon("icon-[material-symbols--done-all-rounded]"),
+  "material-symbols:account-tree-outline-rounded": iconifyStageIcon("icon-[material-symbols--account-tree-outline-rounded]"),
+  "material-symbols:auto-awesome-outline-rounded": iconifyStageIcon("icon-[material-symbols--auto-awesome-outline-rounded]"),
+  "material-symbols:bolt-outline-rounded": iconifyStageIcon("icon-[material-symbols--bolt-outline-rounded]"),
+  "material-symbols:psychology-outline-rounded": iconifyStageIcon("icon-[material-symbols--psychology-outline-rounded]"),
+  "material-symbols:rocket-launch-outline-rounded": iconifyStageIcon("icon-[material-symbols--rocket-launch-outline-rounded]"),
+  "material-symbols:schema-outline-rounded": iconifyStageIcon("icon-[material-symbols--schema-outline-rounded]"),
 };
 
 export const STAGE_ICON_OPTIONS = Object.entries(STAGE_ICON_SET).map(([id, Icon]) => ({ id, Icon }));

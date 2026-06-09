@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
 import {
   Brain,
   Check,
@@ -40,6 +39,7 @@ import InlineMenuSelect from "../components/InlineMenuSelect";
 import { RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
 import StageSelectChip from "../components/StageSelectChip";
 import Tooltip from "../components/Tooltip";
+import { Robot3LineIcon } from "../components/IconifyIcon";
 import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";

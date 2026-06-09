@@ -9,9 +9,6 @@ import {
 import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import HashIcon from "@iconify-react/mynaui/hash";
-import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
-import HashtagChatLinearIcon from "@iconify-react/solar/hashtag-chat-linear";
 import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
 import type { Agent, AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
 import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
@@ -24,6 +21,7 @@ import MultiPicker from "../components/MultiPicker";
 import StageList from "../components/StageList";
 import StageSelectChip from "../components/StageSelectChip";
 import Tooltip from "../components/Tooltip";
+import { HashIcon, HashtagChatLinearIcon, Robot3LineIcon } from "../components/IconifyIcon";
 import { localeTag, useI18n } from "../i18n";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTabs";

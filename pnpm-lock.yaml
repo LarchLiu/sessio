@@ -11,21 +11,6 @@ importers:
       '@dnd-kit/react':
         specifier: ^0.4.0
         version: 0.4.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
-      '@iconify-react/bitcoin-icons':
-        specifier: ^1.0.3
-        version: 1.0.3(react@19.2.6)
-      '@iconify-react/material-symbols':
-        specifier: ^1.0.16
-        version: 1.0.16(react@19.2.6)
-      '@iconify-react/mynaui':
-        specifier: ^1.0.2
-        version: 1.0.2(react@19.2.6)
-      '@iconify-react/ri':
-        specifier: ^1.0.2
-        version: 1.0.2(react@19.2.6)
-      '@iconify-react/solar':
-        specifier: ^1.0.2
-        version: 1.0.2(react@19.2.6)
       '@lobehub/icons':
         specifier: ^5.8.0
         version: 5.8.0(@lobehub/ui@5.12.0)(@types/react@19.2.14)(antd@6.4.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
@@ -84,6 +69,24 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
     devDependencies:
+      '@iconify-json/material-symbols':
+        specifier: ^1.2.76
+        version: 1.2.76
+      '@iconify-json/mynaui':
+        specifier: ^1.2.17
+        version: 1.2.17
+      '@iconify-json/ri':
+        specifier: ^1.2.10
+        version: 1.2.10
+      '@iconify-json/simple-icons':
+        specifier: ^1.2.86
+        version: 1.2.86
+      '@iconify-json/solar':
+        specifier: ^1.2.5
+        version: 1.2.5
+      '@iconify/tailwind':
+        specifier: ^1.2.0
+        version: 1.2.0
       '@tauri-apps/cli':
         specifier: ^2.4.0
         version: 2.11.1
@@ -570,25 +573,23 @@ packages:
       react: ^16 || ^17 || ^18 || ^19
       react-dom: ^16 || ^17 || ^18 || ^19
 
-  '@iconify-react/bitcoin-icons@1.0.3':
-    resolution: {integrity: sha512-GQ0g268AKbNkXkS+GFvC88BH483n3HNBpyAnCNyvn7O+cR5wJrOScaZPOjYUdN4M72uTUcJ7CTzVL834wigSKQ==}
+  '@iconify-json/material-symbols@1.2.76':
+    resolution: {integrity: sha512-xhhw+8qkh4s1JnJKa96wZtR2TejLiXU2JYxcALYNsBdw2f69C22MxG2O1zQbedBskeSPt1G66aSr9sr0UPVpbw==}
 
-  '@iconify-react/material-symbols@1.0.16':
-    resolution: {integrity: sha512-inyBSaLgwlF20L0AwENF/mjGKIXBRMlIa+o1GElxgTdUUL0ylIAhVmhGS0MmMi0f4n1EstgsgR9zltm9IBHmOQ==}
+  '@iconify-json/mynaui@1.2.17':
+    resolution: {integrity: sha512-2FU5KinDgppL8SmOimyxTWxKgC6MujmrOXW90z+331mE1UYkGBhdh+dlgKD6b45dHrN6ERzm5hIh4AadNzF4bw==}
 
-  '@iconify-react/mynaui@1.0.2':
-    resolution: {integrity: sha512-yDGEc/MAljI814UIOHTRRLYgojgqhLY5rZc09qiSQkIix62ZCfNDlClHVrqSDNUn+CjjEexNd2aMGTzOhalEZA==}
+  '@iconify-json/ri@1.2.10':
+    resolution: {integrity: sha512-WWMhoncVVM+Xmu9T5fgu2lhYRrKTEWhKk3Com0KiM111EeEsRLiASjpsFKnC/SrB6covhUp95r2mH8tGxhgd5Q==}
 
-  '@iconify-react/ri@1.0.2':
-    resolution: {integrity: sha512-I8UugTKMp5AggweGbaQEUZhfncr0n34sBp5N1RNN6pQUWDVJNMyaBaFrvN+b/xZXAO2y2TOJdWOvb5i8POf91w==}
+  '@iconify-json/simple-icons@1.2.86':
+    resolution: {integrity: sha512-t3jck5qPQuK1qy+bRn9eCoDQhIB7XSazKz1Fjp8hcan3XOAsTI5Mq/s3F0ekOKSvMQqkVORYK6ns6o6T9f5EMA==}
 
-  '@iconify-react/solar@1.0.2':
-    resolution: {integrity: sha512-5D7+IRlnN35GRfZj8F7X/XJXjIg3MBcJvqlRCBhkEQOFQxIjsF8inNa5rSnvxOi4BboQDtaRfqrJDNKCvkYBtw==}
+  '@iconify-json/solar@1.2.5':
+    resolution: {integrity: sha512-WMAiNwchU8zhfrySww6KQBRIBbsQ6SvgIu2yA+CHGyMima/0KQwT5MXogrZPJGoQF+1Ye3Qj6K+1CiyNn3YkoA==}
 
-  '@iconify/css-react@1.0.2':
-    resolution: {integrity: sha512-k33FKG4jGgd8odos+1HdSwCKZOQ5F1heQxwl/zDrA53tLg5IseDPMqsmQbcCEZ6E0Zgcrmfo4ceFSBmbuEvGtw==}
-    peerDependencies:
-      react: '>=18.0.0'
+  '@iconify/tailwind@1.2.0':
+    resolution: {integrity: sha512-KgpIHWOTcRYw1XcoUqyNSrmYyfLLqZYu3AmP8zdfLk0F5TqRO8YerhlvlQmGfn7rJXgPeZN569xPAJnJ53zZxA==}
 
   '@iconify/types@2.0.0':
     resolution: {integrity: sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==}
@@ -4056,40 +4057,29 @@ snapshots:
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
 
-  '@iconify-react/bitcoin-icons@1.0.3(react@19.2.6)':
-    dependencies:
-      '@iconify/css-react': 1.0.2(react@19.2.6)
-    transitivePeerDependencies:
-      - react
-
-  '@iconify-react/material-symbols@1.0.16(react@19.2.6)':
-    dependencies:
-      '@iconify/css-react': 1.0.2(react@19.2.6)
-    transitivePeerDependencies:
-      - react
-
-  '@iconify-react/mynaui@1.0.2(react@19.2.6)':
-    dependencies:
-      '@iconify/css-react': 1.0.2(react@19.2.6)
-    transitivePeerDependencies:
-      - react
-
-  '@iconify-react/ri@1.0.2(react@19.2.6)':
-    dependencies:
-      '@iconify/css-react': 1.0.2(react@19.2.6)
-    transitivePeerDependencies:
-      - react
-
-  '@iconify-react/solar@1.0.2(react@19.2.6)':
-    dependencies:
-      '@iconify/css-react': 1.0.2(react@19.2.6)
-    transitivePeerDependencies:
-      - react
-
-  '@iconify/css-react@1.0.2(react@19.2.6)':
+  '@iconify-json/material-symbols@1.2.76':
     dependencies:
       '@iconify/types': 2.0.0
-      react: 19.2.6
+
+  '@iconify-json/mynaui@1.2.17':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/ri@1.2.10':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/simple-icons@1.2.86':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/solar@1.2.5':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify/tailwind@1.2.0':
+    dependencies:
+      '@iconify/types': 2.0.0
 
   '@iconify/types@2.0.0': {}
 

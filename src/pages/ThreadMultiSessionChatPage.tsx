@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
-import HashIcon from "@iconify-react/mynaui/hash";
 import {
   AlertCircle,
   ArrowDownToLine,
@@ -45,6 +44,7 @@ import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
+import { HashIcon } from "../components/IconifyIcon";
 import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";

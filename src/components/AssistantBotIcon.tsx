@@ -1,4 +1,4 @@
-import Robot3FillIcon from '@iconify-react/ri/robot-3-fill';
+import { Robot3FillIcon } from "./IconifyIcon";
 
 export default function AssistantBotIcon({
   color,
