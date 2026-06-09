@@ -32,7 +32,7 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, Check, Circle, Download, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, Sun, Trash2, Workflow } from "lucide-react";
+import { ArrowLeft, Check, Circle, Download, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2, Workflow } from "lucide-react";
 import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
 import {
   createWorkflow,
@@ -408,23 +408,18 @@ function GeneralSettings({
 function AgentsSettings({ onError }: { onError: (error: string | null) => void }) {
   const { t } = useI18n();
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [selectedView, setSelectedView] = useState<"astra" | "agent">("astra");
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
-  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [astraConfig, setAstraConfig] = useState<AstraConfig | null>(null);
   const builtinAgents = useMemo(
     () => agents.filter((agent) => agent.type === "builtin" && isSettingsAgent(agent.id)),
     [agents],
   );
-  const filteredAgents = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    if (!query) return builtinAgents;
-    return builtinAgents.filter((agent) =>
-      `${agent.displayName} ${agent.name} ${agent.id} ${agent.model ?? ""}`.toLowerCase().includes(query),
-    );
-  }, [builtinAgents, search]);
   const selectedAgent =
-    builtinAgents.find((agent) => agent.id === selectedAgentId) ?? builtinAgents[0] ?? null;
+    selectedView === "agent"
+      ? builtinAgents.find((agent) => agent.id === selectedAgentId) ?? builtinAgents[0] ?? null
+      : null;
 
   const reload = async () => {
     setLoading(true);
@@ -470,7 +465,7 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
   };
 
   const handleAgentDragEnd = (event: DragEndEvent) => {
-    if (event.canceled || search.trim()) return;
+    if (event.canceled) return;
     const { source } = event.operation;
     if (!isSortable(source)) return;
     if (source.initialIndex === source.index) return;
@@ -479,72 +474,76 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
 
   return (
     <section>
-      {astraConfig && (
-        <SettingsGroup title={t("astra.config_title")}>
-          <AstraAgentSettings
-            title={t("astra.agent")}
-            agentValue={astraConfig.agent ?? ""}
-            modelValue={astraConfig.model ?? ""}
-            effortValue={astraConfig.effort ?? ""}
-            permissionValue={astraConfig.permissionMode ?? ""}
-            agents={agents}
-            onAgentChange={(value) => {
-              updateAstraConfig({ agent: value || null })
-                .then(setAstraConfig)
-                .catch((err) => onError(String(err)));
-            }}
-            onModelChange={(value) => {
-              updateAstraConfig({ model: value || null })
-                .then(setAstraConfig)
-                .catch((err) => onError(String(err)));
-            }}
-            onEffortChange={(value) => {
-              updateAstraConfig({ effort: value || null })
-                .then(setAstraConfig)
-                .catch((err) => onError(String(err)));
-            }}
-            onPermissionChange={(value) => {
-              updateAstraConfig({ permissionMode: value || null })
-                .then(setAstraConfig)
-                .catch((err) => onError(String(err)));
-            }}
-          />
-        </SettingsGroup>
-      )}
       <div className="grid grid-cols-[240px_minmax(0,1fr)] gap-5">
         <div className="min-w-0">
           <div className="mb-8">
             <h2 className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{t("agent.title")}</h2>
-            <label className="mb-3 flex h-9 items-center gap-2 rounded-md border border-input-border/[0.12] bg-input px-2 text-input-fg">
-              <Search className="h-3.5 w-3.5 shrink-0 text-input-placeholder/45" />
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder={t("agent.search")}
-                className="min-w-0 flex-1 bg-transparent text-body-sm outline-none placeholder:text-input-placeholder/35"
-              />
-            </label>
+            <button
+              type="button"
+              onClick={() => setSelectedView("astra")}
+              className={
+                "workflow-list-item mb-3 flex h-10 w-full min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-card-border/[0.12] bg-card px-3 text-left text-body-sm transition " +
+                (selectedView === "astra" ? "workflow-list-item-active" : "")
+              }
+            >
+              <Sparkles className="h-4 w-4 shrink-0 text-card-icon/60" />
+              <span className="min-w-0 flex-1 truncate font-medium text-card-fg/78">{t("astra.orchestrator")}</span>
+            </button>
             <div className="overflow-hidden rounded-lg border border-card-border/[0.12] bg-card">
               <DragDropProvider onDragEnd={handleAgentDragEnd}>
                 <div className="divide-y divide-card-border/10">
-                  {filteredAgents.map((agent, index) => (
+                  {builtinAgents.map((agent, index) => (
                     <AgentListRow
                       key={agent.id}
                       agent={agent}
                       index={index}
-                      active={agent.id === selectedAgent?.id}
-                      draggable={!search.trim()}
-                      onSelect={setSelectedAgentId}
+                      active={selectedView === "agent" && agent.id === selectedAgent?.id}
+                      draggable
+                      onSelect={(agentId) => {
+                        setSelectedAgentId(agentId);
+                        setSelectedView("agent");
+                      }}
                     />
                   ))}
-                  {!loading && filteredAgents.length === 0 && <div className="p-3"><EmptyState label={t("agent.empty")} /></div>}
+                  {!loading && builtinAgents.length === 0 && <div className="p-3"><EmptyState label={t("agent.empty")} /></div>}
                 </div>
               </DragDropProvider>
             </div>
           </div>
         </div>
         <div className="min-w-0">
-          {selectedAgent ? (
+          {selectedView === "astra" && astraConfig ? (
+            <SettingsGroup title={t("astra.config_title")}>
+              <AstraAgentSettings
+                title={t("astra.agent")}
+                agentValue={astraConfig.agent ?? ""}
+                modelValue={astraConfig.model ?? ""}
+                effortValue={astraConfig.effort ?? ""}
+                permissionValue={astraConfig.permissionMode ?? ""}
+                agents={agents}
+                onAgentChange={(value) => {
+                  updateAstraConfig({ agent: value || null })
+                    .then(setAstraConfig)
+                    .catch((err) => onError(String(err)));
+                }}
+                onModelChange={(value) => {
+                  updateAstraConfig({ model: value || null })
+                    .then(setAstraConfig)
+                    .catch((err) => onError(String(err)));
+                }}
+                onEffortChange={(value) => {
+                  updateAstraConfig({ effort: value || null })
+                    .then(setAstraConfig)
+                    .catch((err) => onError(String(err)));
+                }}
+                onPermissionChange={(value) => {
+                  updateAstraConfig({ permissionMode: value || null })
+                    .then(setAstraConfig)
+                    .catch((err) => onError(String(err)));
+                }}
+              />
+            </SettingsGroup>
+          ) : selectedAgent ? (
             <AgentEditor
               key={selectedAgent.id}
               agent={selectedAgent}
@@ -592,6 +591,7 @@ function AstraAgentSettings({
     () => selectableAgents.map((agent) => ({
       value: agent.id,
       label: agent.displayName,
+      icon: <SettingsAgentGlyph agentId={agent.id} className="h-4 w-4" />,
     })),
     [selectableAgents],
   );
@@ -620,9 +620,8 @@ function AstraAgentSettings({
   const showPermissionMode = selectedAgent?.id !== "astra-pi" && permissionOptions.length > 0;
 
   return (
-    <section className="grid grid-cols-[132px_minmax(0,1fr)] gap-x-4 gap-y-2">
-      <h3 className="flex min-h-8 items-center text-caption font-medium text-ink/60">{title}</h3>
-      <div className="min-w-0 self-center">
+    <section className="grid gap-3">
+      <div className="min-w-0">
         <AgentInlineSelect
           value={effectiveAgentValue}
           options={agentOptions}
@@ -630,8 +629,7 @@ function AstraAgentSettings({
           onChange={onAgentChange}
         />
       </div>
-      <div />
-      <div className="min-w-0 pt-3">
+      <div className="min-w-0">
         <div className="grid gap-2 rounded-lg border border-card-border/[0.12] p-3">
           <AgentPreferenceRow label={t("assistant.model")}>
             <AstraPreferenceSelect
@@ -1131,124 +1129,121 @@ function AgentEditor({
   return (
     <>
       <SettingsGroup title={agent.displayName}>
-        <div className="flex items-start gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-card-chip/[0.08]">
-            <SettingsAgentGlyph agentId={agent.id} className="h-5 w-5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <h2 className="flex min-w-0 items-center gap-2 text-title font-semibold text-card-fg/88">
-                <span className="truncate">{agent.displayName}</span>
+        <div className="grid gap-5">
+          <div className="flex items-start gap-3 rounded-md border border-card-border/[0.10] bg-card-chip/[0.025] p-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-card-chip/[0.08]">
+              <SettingsAgentGlyph agentId={agent.id} className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{agent.type}</span>
+                <span className={"rounded px-1.5 py-0.5 text-meta " + (agent.enabled ? "bg-ink/[0.09] text-ink/70" : "bg-card-chip/8 text-card-muted/50")}>
+                  {agent.enabled ? t("agent.active") : t("agent.disabled")}
+                </span>
                 {agent.transport === "acp" && <AcpLogo className="h-2.5 w-auto shrink-0 opacity-75" />}
-              </h2>
-              <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{agent.type}</span>
-              <span className={"rounded px-1.5 py-0.5 text-meta " + (agent.enabled ? "bg-ink/[0.09] text-ink/70" : "bg-card-chip/8 text-card-muted/50")}>
-                {agent.enabled ? t("agent.active") : t("agent.disabled")}
-              </span>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-card-muted/55">
+                <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{agent.transport}</span>
+                {sessionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{sessionCommand}</span>}
+                {versionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{versionCommand}</span>}
+              </div>
             </div>
-            <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-card-muted/55">
-              <span className="rounded bg-card-chip/[0.06] px-1.5 py-0.5">{agent.transport}</span>
-              {sessionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{sessionCommand}</span>}
-              {versionCommand && <span className="max-w-full truncate rounded bg-card-chip/[0.06] px-1.5 py-0.5">{versionCommand}</span>}
-            </div>
-          </div>
-          <SwitchControl
-            checked={agent.enabled}
-            tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
-            onToggle={() => void persist({ enabled: !agent.enabled })}
-          />
-        </div>
-      </SettingsGroup>
-      {isAstra && (
-        <SettingsGroup
-          title={t("agent.providers")}
-          action={
-            <button type="button" onClick={openAddProviderDialog} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-body-sm font-medium leading-none text-card-fg/75 transition hover:bg-card-action-hover/5 hover:text-card-fg/90">
-              <Plus className="h-4 w-4" />
-              {t("agent.add_provider")}
-            </button>
-          }
-          flush
-        >
-          <div className="m-3 overflow-hidden rounded-md border border-card-border/[0.12]">
-            {aiProviders.map((provider) => (
-              <AgentProviderRow
-                key={provider.id}
-                provider={provider}
-                selected={provider.id === selectedAiProvider?.id}
-                canDelete={aiProviders.length > 1}
-                onSelect={selectAiProviderForEditing}
-                onActivate={activateAiProvider}
-                onEdit={openEditProviderDialog}
-                onDelete={deleteProvider}
-              />
-            ))}
-            {aiProviders.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_providers")} /></div>}
-          </div>
-        </SettingsGroup>
-      )}
-      <SettingsGroup title={t("agent.preferences")}>
-        <div className="grid gap-2">
-          <AgentPreferenceRow label={t("assistant.model")}>
-            <AgentInlineSelect
-              value={effectiveModel}
-              options={modelOptions}
-              placeholder={t("agent.no_model")}
-              onChange={(value) => void selectModel(value)}
+            <SwitchControl
+              checked={agent.enabled}
+              tooltip={agent.enabled ? t("agent.disable") : t("agent.enable")}
+              onToggle={() => void persist({ enabled: !agent.enabled })}
             />
-          </AgentPreferenceRow>
-          {agent.efforts.length > 0 && (
-            <AgentPreferenceRow label={isAstra ? t("agent.thinking_level") : t("assistant.effort")}>
-              <AgentInlineSelect
-                value={effort}
-                options={effortOptions}
-                placeholder={isAstra ? t("agent.thinking_level") : t("assistant.effort")}
-                onChange={(value) => void selectEffort(value)}
-              />
-            </AgentPreferenceRow>
+          </div>
+          {isAstra && (
+            <div className="grid gap-2">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-caption font-semibold text-card-fg/72">{t("agent.providers")}</h3>
+                <button type="button" onClick={openAddProviderDialog} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-body-sm font-medium leading-none text-card-fg/75 transition hover:bg-card-action-hover/5 hover:text-card-fg/90">
+                  <Plus className="h-4 w-4" />
+                  {t("agent.add_provider")}
+                </button>
+              </div>
+              <div className="overflow-hidden rounded-md border border-card-border/[0.10] bg-card-chip/[0.025]">
+                {aiProviders.map((provider) => (
+                  <AgentProviderRow
+                    key={provider.id}
+                    provider={provider}
+                    selected={provider.id === selectedAiProvider?.id}
+                    canDelete={aiProviders.length > 1}
+                    onSelect={selectAiProviderForEditing}
+                    onActivate={activateAiProvider}
+                    onEdit={openEditProviderDialog}
+                    onDelete={deleteProvider}
+                  />
+                ))}
+                {aiProviders.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_providers")} /></div>}
+              </div>
+            </div>
           )}
-          {!isAstra && (
-            <>
-              <AgentPreferenceRow label={t("assistant.permission_mode")}>
+          <div className="grid gap-2">
+            <h3 className="text-caption font-semibold text-card-fg/72">{t("agent.preferences")}</h3>
+            <div className="grid gap-2 rounded-md border border-card-border/[0.10] bg-card-chip/[0.025] p-3">
+              <AgentPreferenceRow label={t("assistant.model")}>
                 <AgentInlineSelect
-                  value={permissionMode}
-                  options={permissionOptions}
-                  placeholder={t("assistant.permission_mode")}
-                  onChange={(value) => void selectPermissionMode(value)}
+                  value={effectiveModel}
+                  options={modelOptions}
+                  placeholder={t("agent.no_model")}
+                  onChange={(value) => void selectModel(value)}
                 />
               </AgentPreferenceRow>
-            </>
-          )}
-        </div>
-      </SettingsGroup>
-      <SettingsGroup title={isAstra ? t("agent.provider_models") : t("agent.models")}>
-        <div className="grid gap-3">
-          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_auto] gap-2">
-            <input value={newModelValue} onChange={(event) => setNewModelValue(event.target.value)} placeholder={t("agent.model_id")} className={inputClassName} />
-            <input value={newModelDisplayName} onChange={(event) => setNewModelDisplayName(event.target.value)} placeholder={t("agent.model_name")} className={inputClassName} />
-            <button type="button" onClick={() => void addModel()} disabled={!newModelValue.trim() || (isAstra && !selectedAiProvider)} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
-              <Plus className="h-4 w-4" />
-              {t("agent.add_model")}
-            </button>
-          </div>
-          <DragDropProvider onDragEnd={handleModelDragEnd}>
-            <div className="overflow-hidden rounded-md border border-card-border/[0.10]">
-              {activeModels.map((item, index) => (
-                <AgentModelRow
-                  key={item.value}
-                  item={item}
-                  index={index}
-                  defaultModel={item.value === effectiveModel}
-                  canSetDefault
-                  onSetDefault={setDefaultModel}
-                  onSave={saveModel}
-                  onToggleEnabled={toggleModelEnabled}
-                  onDelete={deleteModel}
-                />
-              ))}
-              {activeModels.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_models")} /></div>}
+              {agent.efforts.length > 0 && (
+                <AgentPreferenceRow label={isAstra ? t("agent.thinking_level") : t("assistant.effort")}>
+                  <AgentInlineSelect
+                    value={effort}
+                    options={effortOptions}
+                    placeholder={isAstra ? t("agent.thinking_level") : t("assistant.effort")}
+                    onChange={(value) => void selectEffort(value)}
+                  />
+                </AgentPreferenceRow>
+              )}
+              {!isAstra && (
+                <AgentPreferenceRow label={t("assistant.permission_mode")}>
+                  <AgentInlineSelect
+                    value={permissionMode}
+                    options={permissionOptions}
+                    placeholder={t("assistant.permission_mode")}
+                    onChange={(value) => void selectPermissionMode(value)}
+                  />
+                </AgentPreferenceRow>
+              )}
             </div>
-          </DragDropProvider>
+          </div>
+          <div className="grid gap-3">
+            <h3 className="text-caption font-semibold text-card-fg/72">{isAstra ? t("agent.provider_models") : t("agent.models")}</h3>
+            <div className="grid gap-3 rounded-md border border-card-border/[0.10] bg-card-chip/[0.025] p-3">
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_auto] gap-2">
+                <input value={newModelValue} onChange={(event) => setNewModelValue(event.target.value)} placeholder={t("agent.model_id")} className={inputClassName} />
+                <input value={newModelDisplayName} onChange={(event) => setNewModelDisplayName(event.target.value)} placeholder={t("agent.model_name")} className={inputClassName} />
+                <button type="button" onClick={() => void addModel()} disabled={!newModelValue.trim() || (isAstra && !selectedAiProvider)} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] disabled:opacity-35">
+                  <Plus className="h-4 w-4" />
+                  {t("agent.add_model")}
+                </button>
+              </div>
+              <DragDropProvider onDragEnd={handleModelDragEnd}>
+                <div className="overflow-hidden rounded-md border border-card-border/[0.10]">
+                  {activeModels.map((item, index) => (
+                    <AgentModelRow
+                      key={item.value}
+                      item={item}
+                      index={index}
+                      defaultModel={item.value === effectiveModel}
+                      canSetDefault
+                      onSetDefault={setDefaultModel}
+                      onSave={saveModel}
+                      onToggleEnabled={toggleModelEnabled}
+                      onDelete={deleteModel}
+                    />
+                  ))}
+                  {activeModels.length === 0 && <div className="p-3"><EmptyState label={t("agent.no_models")} /></div>}
+                </div>
+              </DragDropProvider>
+            </div>
+          </div>
         </div>
       </SettingsGroup>
       {providerDialog && (
