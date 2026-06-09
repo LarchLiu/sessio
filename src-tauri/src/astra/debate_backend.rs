@@ -5,7 +5,7 @@ use super::{
     final_task_output, short_hash, summarize_task_output, AstraOrchestration, AstraRun,
     AstraRunIntent, AstraTaskCompletion, AstraTaskProposal, AstraTaskResultStatus, AstraTaskRisk,
 };
-use crate::models::{Agent, PlanRoundMode, ThreadAssistantInfo, ThreadInfo, ThreadKind};
+use crate::models::{PlanRoundMode, ThreadAgentInfo, ThreadInfo, ThreadKind};
 
 const DEBATE_BACKEND_TYPE: &str = "debate_backend";
 const CROSS_CHECK_MARKER: &str = "## Cross-check artifacts";
@@ -73,7 +73,7 @@ fn debate_orchestration(
         let tasks = debate_lane_tasks(run, thread, user_prompt, round_index, None);
         return if tasks.len() < 2 {
             AstraOrchestration {
-                summary: "Debate requires at least two thread assistants.".to_string(),
+                summary: "Debate requires at least two agent participants.".to_string(),
                 run_intent: AstraRunIntent::WaitForHuman,
                 reason: "debate_needs_two_lanes".to_string(),
                 mode: None,
@@ -150,7 +150,7 @@ fn debate_orchestration(
         let tasks = debate_lane_tasks(run, thread, user_prompt, round_index, Some(&artifact_set));
         if tasks.is_empty() {
             return AstraOrchestration {
-                summary: "Debate cross-check needs another pass, but no assistants are available."
+                summary: "Debate cross-check needs another pass, but no participants are available."
                     .to_string(),
                 run_intent: AstraRunIntent::WaitForHuman,
                 reason: "debate_no_cross_check_lanes".to_string(),
@@ -206,7 +206,7 @@ fn debate_orchestration(
     if tasks.is_empty() {
         return AstraOrchestration {
             summary:
-                "Debate lane artifacts are ready, but no assistants are available for cross-check."
+                "Debate lane artifacts are ready, but no participants are available for cross-check."
                     .to_string(),
             run_intent: AstraRunIntent::WaitForHuman,
             reason: "debate_no_cross_check_lanes".to_string(),
@@ -238,37 +238,38 @@ fn debate_lane_tasks(
     round_index: u32,
     artifact_set: Option<&Value>,
 ) -> Vec<AstraTaskProposal> {
-    let mut assistants = thread.assistants.clone();
-    assistants.sort_by_key(|assistant| assistant.order);
-    assistants
+    let mut participants = thread.agent_participants.clone();
+    participants.sort_by_key(|participant| participant.order);
+    participants
         .iter()
-        .filter_map(|assistant| {
-            let target_agent = Agent::from_db_str(&assistant.agent.id)?;
+        .map(|participant| {
+            let target_agent = participant.agent;
             let cross_check_round = artifact_set.is_some();
-            let lane_id = lane_id(assistant);
+            let lane_id = lane_id(participant);
             let task_id = format!(
                 "task-{}",
                 short_hash(&format!(
                     "{}:{}:{}:{}:{}",
                     run.thread_id,
-                    assistant.assistant_id,
+                    participant.participant_id,
                     target_agent.as_str(),
                     round_index,
                     if cross_check_round { "cross-check" } else { "lane" }
                 ))
             );
-            Some(AstraTaskProposal {
+            let mut task = AstraTaskProposal {
                 id: task_id,
                 plan_task_id: None,
-                assistant_id: Some(assistant.assistant_id.clone()),
+                assistant_id: None,
+                agent_participant_id: Some(participant.participant_id.clone()),
                 title: if cross_check_round {
-                    format!("{} debate cross-check", assistant.name)
+                    format!("{} debate cross-check", participant_label(participant))
                 } else {
-                    format!("{} debate lane", assistant.name)
+                    format!("{} debate lane", participant_label(participant))
                 },
                 target_stage_id: None,
                 target_agent,
-                prompt: debate_task_prompt(thread, user_prompt, assistant, artifact_set),
+                prompt: debate_task_prompt(thread, user_prompt, participant, artifact_set),
                 expected_output: if cross_check_round {
                     "Cross-check report with challenged claims, agreement points, disagreements, and convergence recommendation."
                         .to_string()
@@ -277,11 +278,9 @@ fn debate_lane_tasks(
                         .to_string()
                 },
                 risk: AstraTaskRisk::Low,
-            })
-            .map(|mut task| {
-                task.prompt.push_str(&format!("\n\nLane id: {lane_id}"));
-                task
-            })
+            };
+            task.prompt.push_str(&format!("\n\nLane id: {lane_id}"));
+            task
         })
         .collect()
 }
@@ -289,7 +288,7 @@ fn debate_lane_tasks(
 fn debate_task_prompt(
     thread: &ThreadInfo,
     user_prompt: Option<&str>,
-    assistant: &ThreadAssistantInfo,
+    participant: &ThreadAgentInfo,
     artifact_set: Option<&Value>,
 ) -> String {
     let mut lines = Vec::new();
@@ -307,12 +306,24 @@ fn debate_task_prompt(
     if let Some(prompt) = user_prompt.map(str::trim).filter(|value| !value.is_empty()) {
         lines.push(format!("User debate instruction: {prompt}"));
     }
-    lines.push(format!("Lane assistant: {}", assistant.name));
-    lines.push(format!("Lane id: {}", lane_id(assistant)));
+    lines.push(format!("Lane participant: {}", participant_label(participant)));
+    lines.push(format!("Participant id: {}", participant.participant_id));
+    lines.push(format!("Runtime agent: {}", participant.agent.as_str()));
+    if !participant.model.trim().is_empty() {
+        lines.push(format!("Model: {}", participant.model));
+    }
+    if !participant.effort.trim().is_empty() {
+        lines.push(format!("Effort: {}", participant.effort));
+    }
+    if !participant.permission_mode.trim().is_empty() {
+        lines.push(format!("Permission mode: {}", participant.permission_mode));
+    }
+    lines.push(format!("Lane id: {}", lane_id(participant)));
     lines.push(String::new());
 
     if let Some(artifact_set) = artifact_set {
-        let visible = visible_artifacts_for_assistant(artifact_set, &assistant.assistant_id);
+        let visible =
+            visible_artifacts_for_participant(artifact_set, &participant.participant_id);
         lines.push(CROSS_CHECK_MARKER.to_string());
         lines.push(board_text(&json!({
             "visibleArtifacts": visible,
@@ -323,7 +334,7 @@ fn debate_task_prompt(
         lines.push("Cross-check the visible stage artifacts. Identify agreement, disagreement, unsupported assumptions, and what would be required to converge. Do not use hidden lane transcripts.".to_string());
     } else {
         lines.push("## Isolation rule".to_string());
-        lines.push("Work only from the initial thread goal, description, and user instruction. Treat this as an isolated lane: do not assume access to any other assistant's reasoning or transcript.".to_string());
+        lines.push("Work only from the initial thread goal, description, and user instruction. Treat this as an isolated lane: do not assume access to any other participant's reasoning or transcript.".to_string());
         lines.push(String::new());
         lines.push("## Task".to_string());
         lines.push("Produce your lane artifact: answer, evidence, assumptions, confidence, likely failure modes, and what evidence would change your view.".to_string());
@@ -340,9 +351,20 @@ fn lane_artifact_set(
         .iter()
         .map(|completion| {
             let assistant_id = completion.task.assistant_id.as_deref().unwrap_or("");
+            let participant_id = completion
+                .task
+                .agent_participant_id
+                .as_deref()
+                .unwrap_or("");
             json!({
-                "laneId": lane_id_for_assistant_id(assistant_id),
+                "laneId": if participant_id.is_empty() {
+                    lane_id_for_participant_id(assistant_id)
+                } else {
+                    lane_id_for_participant_id(participant_id)
+                },
+                "participantId": completion.task.agent_participant_id,
                 "assistantId": completion.task.assistant_id,
+                "agent": completion.task.target_agent.as_str(),
                 "taskId": completion.task.id,
                 "title": completion.task.title,
                 "status": completion.result.status.as_str(),
@@ -423,7 +445,7 @@ fn convergence_status(artifact_set: &Value) -> &'static str {
     "needs_review"
 }
 
-fn visible_artifacts_for_assistant(artifact_set: &Value, assistant_id: &str) -> Vec<Value> {
+fn visible_artifacts_for_participant(artifact_set: &Value, participant_id: &str) -> Vec<Value> {
     artifact_set
         .get("artifacts")
         .and_then(Value::as_array)
@@ -431,9 +453,9 @@ fn visible_artifacts_for_assistant(artifact_set: &Value, assistant_id: &str) -> 
         .flatten()
         .filter(|artifact| {
             artifact
-                .get("assistantId")
+                .get("participantId")
                 .and_then(Value::as_str)
-                .is_none_or(|value| value != assistant_id)
+                .is_none_or(|value| value != participant_id)
         })
         .cloned()
         .collect()
@@ -445,12 +467,20 @@ fn has_cross_check_marker(completions: &[AstraTaskCompletion]) -> bool {
         .any(|completion| completion.task.prompt.contains(CROSS_CHECK_MARKER))
 }
 
-fn lane_id(assistant: &ThreadAssistantInfo) -> String {
-    lane_id_for_assistant_id(&assistant.assistant_id)
+fn lane_id(participant: &ThreadAgentInfo) -> String {
+    lane_id_for_participant_id(&participant.participant_id)
 }
 
-fn lane_id_for_assistant_id(assistant_id: &str) -> String {
-    format!("lane-{}", short_hash(assistant_id))
+fn lane_id_for_participant_id(participant_id: &str) -> String {
+    format!("lane-{}", short_hash(participant_id))
+}
+
+fn participant_label(participant: &ThreadAgentInfo) -> String {
+    if participant.model.trim().is_empty() {
+        participant.agent.as_str().to_string()
+    } else {
+        format!("{} {}", participant.agent.as_str(), participant.model)
+    }
 }
 
 fn board_text(board: &Value) -> String {
@@ -461,7 +491,7 @@ fn board_text(board: &Value) -> String {
 mod tests {
     use super::*;
     use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
-    use crate::models::{AssistantAgentInfo, ThreadAssistantInfo};
+    use crate::models::{Agent, ThreadAgentInfo};
 
     fn thread() -> ThreadInfo {
         ThreadInfo {
@@ -474,34 +504,27 @@ mod tests {
             enabled: true,
             created_at: 1,
             updated_at: 1,
-            assistants: vec![
-                ThreadAssistantInfo {
-                    assistant_id: "assistant-a".to_string(),
-                    name: "Affirmative".to_string(),
-                    color: None,
-                    agent: AssistantAgentInfo {
-                        id: "codex".to_string(),
-                        name: "Codex".to_string(),
-                        model: "gpt-5.3-codex".to_string(),
-                        mode: "read-write".to_string(),
-                        effort: "medium".to_string(),
-                    },
-                    system_prompt: None,
+            assistants: Vec::new(),
+            agent_participants: vec![
+                ThreadAgentInfo {
+                    participant_id: "participant-a".to_string(),
+                    agent: Agent::Codex,
+                    model: "gpt-5.3-codex".to_string(),
+                    effort: "medium".to_string(),
+                    permission_mode: "read-write".to_string(),
                     order: 0,
+                    created_at: 1,
+                    updated_at: 1,
                 },
-                ThreadAssistantInfo {
-                    assistant_id: "assistant-b".to_string(),
-                    name: "Negative".to_string(),
-                    color: None,
-                    agent: AssistantAgentInfo {
-                        id: "claude".to_string(),
-                        name: "Claude".to_string(),
-                        model: "claude-sonnet-4-5".to_string(),
-                        mode: "read-only".to_string(),
-                        effort: "medium".to_string(),
-                    },
-                    system_prompt: None,
+                ThreadAgentInfo {
+                    participant_id: "participant-b".to_string(),
+                    agent: Agent::Claude,
+                    model: "claude-sonnet-4-5".to_string(),
+                    effort: "medium".to_string(),
+                    permission_mode: "read-only".to_string(),
                     order: 1,
+                    created_at: 1,
+                    updated_at: 1,
                 },
             ],
             stages: Vec::new(),
@@ -563,6 +586,11 @@ mod tests {
         assert_eq!(orchestration.run_intent, AstraRunIntent::Continue);
         assert_eq!(orchestration.mode, Some(PlanRoundMode::Parallel));
         assert_eq!(orchestration.tasks.len(), 2);
+        assert_eq!(
+            orchestration.tasks[0].agent_participant_id.as_deref(),
+            Some("participant-a")
+        );
+        assert!(orchestration.tasks[0].assistant_id.is_none());
         assert!(orchestration.tasks[0].prompt.contains("## Isolation rule"));
         assert!(!orchestration.tasks[0].prompt.contains(CROSS_CHECK_MARKER));
     }
@@ -599,13 +627,14 @@ mod tests {
             .tasks
             .iter()
             .all(|task| task.prompt.contains("stage_artifact_only")));
-        let visible_for_a = visible_artifacts_for_assistant(&next.diagnostics[0], "assistant-a");
+        let visible_for_a =
+            visible_artifacts_for_participant(&next.diagnostics[0], "participant-a");
         assert!(visible_for_a
             .iter()
-            .all(|artifact| artifact["assistantId"] != "assistant-a"));
+            .all(|artifact| artifact["participantId"] != "participant-a"));
         assert!(visible_for_a
             .iter()
-            .any(|artifact| artifact["assistantId"] == "assistant-b"));
+            .any(|artifact| artifact["participantId"] == "participant-b"));
     }
 
     #[test]

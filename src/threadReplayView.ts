@@ -651,6 +651,11 @@ function replaySourceSnapshotTitles(source: ThreadReplaySessionSourceInfo): stri
   }
 
   const agent = parseJsonObject(source.agentSnapshotJson);
+  const participant = objectField(agent, "participant");
+  const participantLabel = participantSnapshotLabel(participant);
+  if (participantLabel) {
+    titles.push(`Participant snapshot: ${participantLabel}`);
+  }
   const agentInfo = objectField(agent, "agentInfo");
   const agentLabel = stringField(agentInfo, "displayName")
     ?? stringField(agentInfo, "name")
@@ -660,6 +665,18 @@ function replaySourceSnapshotTitles(source: ThreadReplaySessionSourceInfo): stri
     titles.push(`Agent snapshot: ${model ? `${agentLabel} / ${model}` : agentLabel}`);
   }
   return titles;
+}
+
+function participantSnapshotLabel(participant: Record<string, unknown> | null): string | null {
+  if (!participant) return null;
+  const agent = stringField(participant, "agent");
+  const agentLabel = agent && agent in AGENT_LABEL ? AGENT_LABEL[agent as Agent] : agent;
+  const model = stringField(participant, "model");
+  const effort = stringField(participant, "effort");
+  const permissionMode = stringField(participant, "permissionMode");
+  return [agentLabel, model, effort, permissionMode]
+    .filter((item): item is string => Boolean(item))
+    .join(" / ") || null;
 }
 
 function parseJsonObject(value: string | null): Record<string, unknown> | null {

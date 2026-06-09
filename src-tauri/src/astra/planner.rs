@@ -46,6 +46,7 @@ pub(super) fn deterministic_plan(
                 id: task_id,
                 plan_task_id: None,
                 assistant_id: Some(assistant.assistant_id),
+                agent_participant_id: None,
                 title: format!("{} teamwork task", assistant.name),
                 target_stage_id: None,
                 target_agent,
@@ -89,6 +90,16 @@ pub(super) fn next_dispatchable_tasks(
                     .iter()
                     .any(|assistant| assistant.assistant_id == assistant_id)
             })
+        })
+        .filter(|task| {
+            task.agent_participant_id
+                .as_deref()
+                .is_none_or(|participant_id| {
+                    thread
+                        .agent_participants
+                        .iter()
+                        .any(|participant| participant.participant_id == participant_id)
+                })
         })
         .cloned()
         .collect()

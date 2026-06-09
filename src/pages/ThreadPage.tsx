@@ -1133,7 +1133,7 @@ function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
 }
 
 type SnapshotChip = {
-  kind: "stage" | "assistant" | "agent";
+  kind: "stage" | "assistant" | "participant" | "agent";
   label: string;
   title: string;
 };
@@ -1166,6 +1166,16 @@ function planTaskSnapshotLabels(task: PlanTaskInfo, t: (key: string, vars?: Reco
     });
   }
 
+  const participant = objectField(agent, "participant");
+  const participantLabel = participantSnapshotLabel(participant);
+  if (participantLabel) {
+    chips.push({
+      kind: "participant",
+      label: t("astra.snapshot.participant", { value: participantLabel }),
+      title: task.agentSnapshotJson,
+    });
+  }
+
   const agentInfo = objectField(agent, "agentInfo");
   const agentLabel = stringField(agentInfo, "displayName")
     ?? stringField(agentInfo, "name")
@@ -1181,6 +1191,18 @@ function planTaskSnapshotLabels(task: PlanTaskInfo, t: (key: string, vars?: Reco
   });
 
   return chips;
+}
+
+function participantSnapshotLabel(participant: Record<string, unknown> | null): string | null {
+  if (!participant) return null;
+  const agent = stringField(participant, "agent");
+  const agentLabel = agent && agent in AGENT_LABEL ? AGENT_LABEL[agent as Agent] : agent;
+  const model = stringField(participant, "model");
+  const effort = stringField(participant, "effort");
+  const permissionMode = stringField(participant, "permissionMode");
+  return [agentLabel, model, effort, permissionMode]
+    .filter((item): item is string => Boolean(item))
+    .join(" / ") || null;
 }
 
 function parseJsonObject(value: string | null): Record<string, unknown> | null {

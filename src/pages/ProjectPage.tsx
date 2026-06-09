@@ -13,7 +13,7 @@ import HashIcon from "@iconify-react/mynaui/hash";
 import Robot3LineIcon from "@iconify-react/ri/robot-3-line";
 import HashtagChatLinearIcon from "@iconify-react/solar/hashtag-chat-linear";
 import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
-import type { AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadInfo, ThreadKind } from "../api";
+import type { Agent, AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
 import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
@@ -33,6 +33,7 @@ import { sessionDisplayTitle } from "../appUtils";
 type ProjectView = "threads" | "stages" | "assistants";
 type ThreadPanelView = "threads" | "thread-chats";
 const THREAD_KINDS: ThreadKind[] = ["workflow", "teamwork", "brainstorm", "debate"];
+const AGENT_PARTICIPANT_KINDS = new Set<ThreadKind>(["brainstorm", "debate"]);
 
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
@@ -49,6 +50,62 @@ function assistantSwatch(color: string | null | undefined) {
       style={{ backgroundColor: color ?? "rgb(var(--color-brand))" }}
     />
   );
+}
+
+function threadAgentOptions(agents: AgentInfo[]) {
+  return agents
+    .filter((agent) => agent.enabled && isRuntimeAgentId(agent.id))
+    .sort((a, b) => a.order - b.order || a.displayName.localeCompare(b.displayName))
+    .map((agent) => ({
+      value: agent.id,
+      label: threadAgentLabel(agent),
+      icon: <AgentGlyph agent={agent.id as Agent} className="h-3.5 w-3.5" />,
+    }));
+}
+
+function selectedAgentParticipants(ids: string[], agents: AgentInfo[]): ThreadAgentInfo[] {
+  const byId = new Map(agents.map((agent) => [agent.id, agent]));
+  return ids
+    .map((id, index) => {
+      const agent = byId.get(id);
+      if (!agent || !isRuntimeAgentId(agent.id)) return null;
+      const model = agent.model ?? agent.models.find((option) => option.enabled && option.value.trim())?.value ?? "";
+      const effort = agent.effort ?? agent.efforts.find((option) => option.enabled && option.value.trim())?.value ?? "";
+      const permissionMode = agent.permissionMode ?? agent.permissionModes.find((option) => option.enabled && option.value.trim())?.value ?? "";
+      if (!model || !effort || !permissionMode) return null;
+      return {
+        participantId: "",
+        agent: agent.id,
+        model,
+        effort,
+        permissionMode,
+        order: index,
+      };
+    })
+    .filter((participant): participant is ThreadAgentInfo => Boolean(participant));
+}
+
+function threadCreateBlocked(kind: ThreadKind, assistantIds: string[], participantIds: string[], agents: AgentInfo[]): boolean {
+  if (kind === "teamwork") return assistantIds.length === 0;
+  const participants = selectedAgentParticipants(participantIds, agents);
+  if (kind === "brainstorm") return participants.length < 2;
+  if (kind === "debate") return participants.length !== 2;
+  return false;
+}
+
+function threadAgentLabel(agent: AgentInfo): string {
+  const model = agent.model ?? agent.models.find((option) => option.enabled && option.value.trim())?.displayName ?? "";
+  const base = agent.displayName || agent.name || agent.id;
+  return model ? `${base} · ${model}` : base;
+}
+
+function threadParticipantLabel(participant: ThreadAgentInfo): string {
+  const agentLabel = AGENT_LABEL[participant.agent] ?? participant.agent;
+  return participant.model ? `${agentLabel} · ${participant.model}` : agentLabel;
+}
+
+function isRuntimeAgentId(value: string): value is Agent {
+  return value === "astra-pi" || value === "codex" || value === "claude" || value === "gemini";
 }
 
 interface MetaRow {
@@ -319,6 +376,7 @@ export function ProjectWorkbenchPage({
               threads={threads}
               projectStages={projectStages}
               assistants={assistants}
+              agents={agents}
               loading={workflowLoading}
               onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
               onThreadUpdated={patchThread}
@@ -427,6 +485,7 @@ function ThreadWorkflowPanel({
   threads,
   projectStages,
   assistants,
+  agents,
   loading,
   onThreadCreated,
   onThreadUpdated,
@@ -442,6 +501,7 @@ function ThreadWorkflowPanel({
   threads: ThreadInfo[];
   projectStages: ProjectStageInfo[];
   assistants: AssistantInfo[];
+  agents: AgentInfo[];
   loading: boolean;
   onThreadCreated: (thread: ThreadInfo) => void;
   onThreadUpdated: (thread: ThreadInfo) => void;
@@ -458,6 +518,7 @@ function ThreadWorkflowPanel({
   const [description, setDescription] = useState("");
   const [createKind, setCreateKind] = useState<ThreadKind>("workflow");
   const [createAssistantIds, setCreateAssistantIds] = useState<string[]>([]);
+  const [createAgentParticipantIds, setCreateAgentParticipantIds] = useState<string[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [panelView, setPanelView] = useState<ThreadPanelView>("threads");
@@ -484,6 +545,10 @@ function ThreadWorkflowPanel({
         icon: assistantSwatch(assistant.color),
       })),
     [projectAssistants],
+  );
+  const agentParticipantOptions = useMemo(
+    () => threadAgentOptions(agents),
+    [agents],
   );
   const threadKindTabs = useMemo<SegmentedTabItem<ThreadKind>[]>(
     () => THREAD_KINDS.map((kind) => ({ value: kind, label: t(`thread.kind.${kind}`) })),
@@ -537,8 +602,25 @@ function ThreadWorkflowPanel({
   }, [selectedThreadChatThreadId, threads]);
 
   useEffect(() => {
-    if (createKind === "workflow") setCreateAssistantIds([]);
-  }, [createKind]);
+    if (createKind === "teamwork") {
+      setCreateAssistantIds((current) => {
+        const valid = new Set(assistantOptions.map((option) => option.value));
+        const existing = current.filter((id) => valid.has(id));
+        return existing.length > 0 ? existing : assistantOptions.map((option) => option.value);
+      });
+    } else {
+      setCreateAssistantIds([]);
+    }
+    if (AGENT_PARTICIPANT_KINDS.has(createKind)) {
+      setCreateAgentParticipantIds((current) => {
+        const valid = new Set(agentParticipantOptions.map((option) => option.value));
+        const existing = current.filter((id) => valid.has(id));
+        return createKind === "debate" ? existing.slice(0, 2) : existing;
+      });
+    } else {
+      setCreateAgentParticipantIds([]);
+    }
+  }, [agentParticipantOptions, assistantOptions, createKind]);
 
   const toggleCreateStage = (stageId: string) => {
     if (!selectableProjectStages.some((stage) => stage.id === stageId)) return;
@@ -583,7 +665,10 @@ function ThreadWorkflowPanel({
         nextGoal,
         description,
         createKind,
-        createKind === "workflow" ? [] : createAssistantIds,
+        createKind === "teamwork" ? createAssistantIds : [],
+        AGENT_PARTICIPANT_KINDS.has(createKind)
+          ? selectedAgentParticipants(createAgentParticipantIds, agents)
+          : [],
       );
       let nextThread = thread;
       const stageIds = createKind === "workflow"
@@ -602,6 +687,7 @@ function ThreadWorkflowPanel({
       setDescription("");
       setCreateKind("workflow");
       setCreateAssistantIds([]);
+      setCreateAgentParticipantIds([]);
       setCreateOpen(false);
     } catch (err) {
       onError(String(err));
@@ -677,13 +763,24 @@ function ThreadWorkflowPanel({
                     itemHeight={30}
                     className="w-max"
                   />
-                  {createKind !== "workflow" && assistantOptions.length > 0 && (
+                  {createKind === "teamwork" && assistantOptions.length > 0 && (
                     <div className="inline-flex h-8 w-max min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
                       <MultiPicker
                         selectedValues={createAssistantIds}
                         options={assistantOptions}
                         onChange={setCreateAssistantIds}
                         placeholder={t("thread.assistants_placeholder")}
+                        className="h-8 max-w-[340px]"
+                      />
+                    </div>
+                  )}
+                  {AGENT_PARTICIPANT_KINDS.has(createKind) && agentParticipantOptions.length > 0 && (
+                    <div className="inline-flex h-8 w-max min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
+                      <MultiPicker
+                        selectedValues={createAgentParticipantIds}
+                        options={agentParticipantOptions}
+                        onChange={(values) => setCreateAgentParticipantIds(createKind === "debate" ? values.slice(0, 2) : values)}
+                        placeholder={t("new_chat.add_participant")}
                         className="h-8 max-w-[340px]"
                       />
                     </div>
@@ -716,7 +813,7 @@ function ThreadWorkflowPanel({
                   <button
                     type="button"
                     onClick={() => void create()}
-                    disabled={creating || !goal.trim()}
+                    disabled={creating || !goal.trim() || threadCreateBlocked(createKind, createAssistantIds, createAgentParticipantIds, agents)}
                     className="inline-flex items-center gap-1.5 rounded-md bg-ink px-3 py-1.5 text-body-sm text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
                   >
                     {creating ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
@@ -746,6 +843,7 @@ function ThreadWorkflowPanel({
                 thread={thread}
                 projectStages={projectStages}
                 assistants={assistants}
+                agents={agents}
                 onThreadUpdated={onThreadUpdated}
                 onThreadDeleted={onThreadDeleted}
                 onStageAdded={onStageAdded}
@@ -959,6 +1057,7 @@ function ThreadCard({
   thread,
   projectStages,
   assistants,
+  agents,
   onThreadUpdated,
   onThreadDeleted,
   onStageAdded,
@@ -971,6 +1070,7 @@ function ThreadCard({
   thread: ThreadInfo;
   projectStages: ProjectStageInfo[];
   assistants: AssistantInfo[];
+  agents: AgentInfo[];
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
   onStageAdded: (stage: StageInfo) => void;
@@ -990,6 +1090,9 @@ function ThreadCard({
   const [editAssistantIds, setEditAssistantIds] = useState<string[]>(
     () => thread.assistants.map((assistant) => assistant.assistantId),
   );
+  const [editAgentParticipantIds, setEditAgentParticipantIds] = useState<string[]>(
+    () => thread.agentParticipants.map((participant) => participant.agent),
+  );
   const [selectedStageIds, setSelectedStageIds] = useState<string[]>([]);
   const goalRef = useRef<HTMLDivElement>(null);
   const descriptionRef = useRef<HTMLDivElement>(null);
@@ -1008,9 +1111,17 @@ function ThreadCard({
         })),
     [assistants, thread.projectId],
   );
+  const agentParticipantOptions = useMemo(
+    () => threadAgentOptions(agents),
+    [agents],
+  );
   const visibleAssistants = useMemo(
     () => [...thread.assistants].sort((a, b) => a.order - b.order),
     [thread.assistants],
+  );
+  const visibleAgentParticipants = useMemo(
+    () => [...thread.agentParticipants].sort((a, b) => a.order - b.order),
+    [thread.agentParticipants],
   );
 
   useEffect(() => {
@@ -1018,13 +1129,31 @@ function ThreadCard({
     setDescription(thread.description ?? "");
     setEditKind(thread.kind);
     setEditAssistantIds(thread.assistants.map((assistant) => assistant.assistantId));
+    setEditAgentParticipantIds(thread.agentParticipants.map((participant) => participant.agent));
     setExpandedText(false);
     setTextOverflowing(false);
-  }, [thread.assistants, thread.description, thread.goal, thread.kind]);
+  }, [thread.agentParticipants, thread.assistants, thread.description, thread.goal, thread.kind]);
 
   useEffect(() => {
-    if (editKind === "workflow") setEditAssistantIds([]);
-  }, [editKind]);
+    if (editKind === "teamwork") {
+      setEditAssistantIds((current) => {
+        const valid = new Set(assistantOptions.map((option) => option.value));
+        const existing = current.filter((id) => valid.has(id));
+        return existing.length > 0 ? existing : assistantOptions.map((option) => option.value);
+      });
+    } else {
+      setEditAssistantIds([]);
+    }
+    if (AGENT_PARTICIPANT_KINDS.has(editKind)) {
+      setEditAgentParticipantIds((current) => {
+        const valid = new Set(agentParticipantOptions.map((option) => option.value));
+        const existing = current.filter((id) => valid.has(id));
+        return editKind === "debate" ? existing.slice(0, 2) : existing;
+      });
+    } else {
+      setEditAgentParticipantIds([]);
+    }
+  }, [agentParticipantOptions, assistantOptions, editKind]);
 
   useLayoutEffect(() => {
     const measure = () => {
@@ -1050,7 +1179,10 @@ function ThreadCard({
         goal,
         description,
         kind: editKind,
-        assistantIds: editKind === "workflow" ? [] : editAssistantIds,
+        assistantIds: editKind === "teamwork" ? editAssistantIds : [],
+        agentParticipants: AGENT_PARTICIPANT_KINDS.has(editKind)
+          ? selectedAgentParticipants(editAgentParticipantIds, agents)
+          : [],
       }));
       setEditing(false);
     } catch (err) {
@@ -1150,7 +1282,14 @@ function ThreadCard({
             />
             <div className="flex shrink-0 items-center gap-1">
               <button type="button" onClick={() => setEditing(false)} className="rounded px-2 py-1 text-caption text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
-              <button type="button" onClick={() => void save()} className="rounded bg-ink px-2 py-1 text-caption text-[rgb(var(--color-bg-panel))]">{t("project.save")}</button>
+              <button
+                type="button"
+                disabled={threadCreateBlocked(editKind, editAssistantIds, editAgentParticipantIds, agents)}
+                onClick={() => void save()}
+                className="rounded bg-ink px-2 py-1 text-caption text-[rgb(var(--color-bg-panel))] disabled:opacity-35"
+              >
+                {t("project.save")}
+              </button>
             </div>
           </div>
           <textarea
@@ -1168,13 +1307,24 @@ function ThreadCard({
               itemHeight={28}
               className="w-max"
             />
-            {editKind !== "workflow" && assistantOptions.length > 0 && (
+            {editKind === "teamwork" && assistantOptions.length > 0 && (
               <div className="inline-flex h-7 min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
                 <MultiPicker
                   selectedValues={editAssistantIds}
                   options={assistantOptions}
                   onChange={setEditAssistantIds}
                   placeholder={t("thread.assistants_placeholder")}
+                  className="max-w-[300px]"
+                />
+              </div>
+            )}
+            {AGENT_PARTICIPANT_KINDS.has(editKind) && agentParticipantOptions.length > 0 && (
+              <div className="inline-flex h-7 min-w-0 items-center overflow-hidden rounded-md border border-ink/10 bg-ink/[0.035]">
+                <MultiPicker
+                  selectedValues={editAgentParticipantIds}
+                  options={agentParticipantOptions}
+                  onChange={(values) => setEditAgentParticipantIds(editKind === "debate" ? values.slice(0, 2) : values)}
+                  placeholder={t("new_chat.add_participant")}
                   className="max-w-[300px]"
                 />
               </div>
@@ -1250,18 +1400,33 @@ function ThreadCard({
             <span className="inline-flex h-6 items-center rounded-md border border-ink/10 bg-ink/[0.035] px-2 text-caption font-medium text-ink/55">
               {t(`thread.kind.${thread.kind}`)}
             </span>
-            {visibleAssistants.map((assistant) => (
-              <span
-                key={assistant.assistantId}
-                className="inline-flex h-6 max-w-[180px] items-center gap-1.5 rounded-md border border-ink/10 bg-ink/[0.025] px-2 text-caption text-ink/55"
-              >
-                {assistantSwatch(assistant.color)}
-                <span className="truncate">{assistant.name}</span>
-              </span>
-            ))}
-            {thread.kind !== "workflow" && visibleAssistants.length === 0 && (
+            {thread.kind === "teamwork" && visibleAssistants.map((assistant) => (
+                <span
+                  key={assistant.assistantId}
+                  className="inline-flex h-6 max-w-[180px] items-center gap-1.5 rounded-md border border-ink/10 bg-ink/[0.025] px-2 text-caption text-ink/55"
+                >
+                  {assistantSwatch(assistant.color)}
+                  <span className="truncate">{assistant.name}</span>
+                </span>
+              ))}
+            {AGENT_PARTICIPANT_KINDS.has(thread.kind) && visibleAgentParticipants.map((participant) => (
+                <span
+                  key={participant.participantId}
+                  className="inline-flex h-6 max-w-[180px] items-center gap-1.5 rounded-md border border-ink/10 bg-ink/[0.025] px-2 text-caption text-ink/55"
+                  title={[threadParticipantLabel(participant), participant.effort, participant.permissionMode].filter(Boolean).join(" / ")}
+                >
+                  <AgentGlyph agent={participant.agent} className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{threadParticipantLabel(participant)}</span>
+                </span>
+              ))}
+            {thread.kind === "teamwork" && visibleAssistants.length === 0 && (
               <span className="inline-flex h-6 items-center rounded-md border border-dashed border-ink/15 px-2 text-caption text-ink/35">
                 {t("thread.no_assistants")}
+              </span>
+            )}
+            {AGENT_PARTICIPANT_KINDS.has(thread.kind) && visibleAgentParticipants.length === 0 && (
+              <span className="inline-flex h-6 items-center rounded-md border border-dashed border-ink/15 px-2 text-caption text-ink/35">
+                {t("new_chat.no_participants")}
               </span>
             )}
           </div>

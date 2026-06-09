@@ -903,6 +903,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
+            agent_participants: Vec::new(),
             stages: vec![StageInfo {
                 id: "stage-1".to_string(),
                 thread_id: "thread-1".to_string(),
@@ -936,6 +937,7 @@ mod tests {
             id: "task-1".to_string(),
             plan_task_id: None,
             assistant_id: None,
+            agent_participant_id: None,
             title: "Research".to_string(),
             target_stage_id: Some("stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -987,6 +989,7 @@ mod tests {
             id: "task-teamwork-1".to_string(),
             plan_task_id: None,
             assistant_id: Some("assistant-codex".to_string()),
+            agent_participant_id: None,
             title: "Build shared task".to_string(),
             target_stage_id: None,
             target_agent: Agent::Codex,

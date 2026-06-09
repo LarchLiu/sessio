@@ -76,6 +76,8 @@ export interface ChatComposerController {
   canSendWithWorkspace: (workspacePath: string | null | undefined) => boolean;
   selectedAgent: Agent | null;
   selectedRuntimeAgent: RuntimeAgentMetadata | null;
+  selectedModel: string;
+  selectedEffort: string;
   selectedAgentModelValue: string;
   permissionMode: string;
   agentModelOptions: ReturnType<typeof agentModelSelectOptions>;
@@ -377,6 +379,8 @@ export function useChatComposer({
       text.trim().length > 0 && Boolean(workspacePath) && agentModelOptions.length > 0 && !sending,
     selectedAgent: agent || null,
     selectedRuntimeAgent,
+    selectedModel: model,
+    selectedEffort: effort,
     selectedAgentModelValue,
     permissionMode,
     agentModelOptions,

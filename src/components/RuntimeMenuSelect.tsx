@@ -27,11 +27,17 @@ export function RuntimeMenuSelect({
   portalZIndex,
 }: RuntimeMenuSelectProps) {
   return (
-    <div className={`flex min-w-0 ${maxWidthClassName} items-center rounded-md text-ink/55 transition hover:bg-ink/8 hover:text-ink`}>
+    <div
+      className={
+        `flex min-w-0 ${maxWidthClassName} items-center rounded-md text-ink/55 transition ` +
+        (disabled ? "opacity-60" : "hover:bg-ink/8 hover:text-ink")
+      }
+    >
       <InlineMenuSelect
         value={value}
         options={disabled ? options.map((option) => ({ ...option, disabled: true })) : options}
         onChange={onChange}
+        disabled={disabled}
         menuAlign="trigger"
         menuPlacement={menuPlacement}
         placeholder={ariaLabel}

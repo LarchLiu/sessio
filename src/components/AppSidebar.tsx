@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { createPortal } from "react-dom";
 import HashIcon from "@iconify-react/mynaui/hash";
 import HashesOutlineIcon from '@iconify-react/bitcoin-icons/hashes-outline';
+import HashtagChatLinearIcon from "@iconify-react/solar/hashtag-chat-linear";
 import {
   ChevronDown,
   CircleAlert,
@@ -889,6 +890,7 @@ function ProjectSidebarGroup({
                   <SidebarThreadItem
                     key={thread.id}
                     thread={threadRefFromThread(thread)}
+                    variant="thread"
                     active={selectedThreadId === thread.id}
                     onSelect={() => onSelectThread(threadRefFromThread(thread), "thread")}
                   />
@@ -901,9 +903,11 @@ function ProjectSidebarGroup({
                     <SidebarThreadItem
                       key={entry.summary.threadId}
                       thread={threadRefFromSummary(entry.summary)}
+                      variant="threadChat"
                       time={entry.time}
                       active={selectedThreadId === entry.summary.threadId}
                       onSelect={() => onSelectThread(threadRefFromSummary(entry.summary), "threadChat")}
+                      onOpenThread={() => onSelectThread(threadRefFromSummary(entry.summary), "thread")}
                     />
                   );
                 }
@@ -1010,34 +1014,69 @@ function SidebarSessionItem({
 
 function SidebarThreadItem({
   thread,
+  variant,
   time,
   active,
   onSelect,
+  onOpenThread,
 }: {
   thread: SidebarThreadRef;
+  variant: "thread" | "threadChat";
   time?: number;
   active: boolean;
   onSelect: () => void;
+  onOpenThread?: () => void;
 }) {
   const { t } = useI18n();
   const relativeTime = formatShortRelativeTime(time ?? thread.updatedAt ?? thread.createdAt, t);
+  const showThreadPageButton = variant === "threadChat" && Boolean(onOpenThread);
   return (
     <button
       type="button"
       onClick={onSelect}
       title={thread.goal}
       className={
-        "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
+        "group flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
         (active ? "bg-ink/10 text-ink" : "text-ink/65 hover:bg-ink/5 hover:text-ink")
       }
     >
-      <SidebarThreadStatusIcon />
+      <SidebarThreadStatusIcon variant={variant} />
       <span className="min-w-0 flex-1 truncate text-body-sm leading-snug">
         {thread.goal || <span className="text-ink/30">{t("thread.goal_placeholder")}</span>}
       </span>
-      <span className="shrink-0 text-meta tabular-nums text-ink/35">
-        {relativeTime}
-      </span>
+      {showThreadPageButton && onOpenThread ? (
+        <>
+          <span className="shrink-0 text-meta tabular-nums text-ink/35 group-hover:hidden">
+            {relativeTime}
+          </span>
+          <span className="ml-auto hidden shrink-0 items-center gap-0.5 group-hover:flex">
+            <Tooltip content={t("thread.open_detail_page")} placement="top">
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={t("thread.open_detail_page")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenThread();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onOpenThread();
+                }}
+                className="flex h-4 w-4 items-center justify-center rounded text-ink/35 transition hover:bg-ink/[0.08] hover:text-ink/75"
+              >
+                <HashIcon className="h-3 w-3" />
+              </span>
+            </Tooltip>
+          </span>
+        </>
+      ) : (
+        <span className="shrink-0 text-meta tabular-nums text-ink/35">
+          {relativeTime}
+        </span>
+      )}
     </button>
   );
 }
@@ -1060,10 +1099,11 @@ function threadRefFromSummary(summary: ThreadChatSummaryInfo): SidebarThreadRef 
   };
 }
 
-function SidebarThreadStatusIcon() {
+function SidebarThreadStatusIcon({ variant }: { variant: "thread" | "threadChat" }) {
+  const Icon = variant === "threadChat" ? HashtagChatLinearIcon : HashIcon;
   return (
     <span className="flex h-4 w-4 shrink-0 items-center justify-center text-current">
-      <HashIcon className="h-3.5 w-3.5" />
+      <Icon className="h-3.5 w-3.5" />
     </span>
   );
 }

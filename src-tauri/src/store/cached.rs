@@ -7,7 +7,7 @@ use crate::models::{
     KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo,
     PlanTaskSessionRole, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo,
     StageStatus, SubagentInfo,
-    ThreadInfo, ThreadKind, WorkflowInfo,
+    ThreadAgentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -341,9 +341,10 @@ impl SessionStore for CachedStore {
         description: Option<&str>,
         kind: ThreadKind,
         assistant_ids: &[String],
+        agent_participants: &[ThreadAgentInfo],
     ) -> Result<ThreadInfo> {
         self.inner
-            .create_thread_with_options(project_id, goal, description, kind, assistant_ids)
+            .create_thread_with_options(project_id, goal, description, kind, assistant_ids, agent_participants)
     }
 
     fn update_thread(
@@ -365,6 +366,7 @@ impl SessionStore for CachedStore {
         enabled: Option<bool>,
         kind: Option<ThreadKind>,
         assistant_ids: Option<&[String]>,
+        agent_participants: Option<&[ThreadAgentInfo]>,
     ) -> Result<ThreadInfo> {
         self.inner.update_thread_with_options(
             thread_id,
@@ -373,6 +375,7 @@ impl SessionStore for CachedStore {
             enabled,
             kind,
             assistant_ids,
+            agent_participants,
         )
     }
 

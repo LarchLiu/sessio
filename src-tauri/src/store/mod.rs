@@ -70,6 +70,7 @@ pub struct ProjectStagePatch<'a> {
 pub struct NewPlanTask<'a> {
     pub thread_stage_id: Option<&'a str>,
     pub assistant_id: Option<&'a str>,
+    pub agent_participant_id: Option<&'a str>,
     pub target_agent: Agent,
     pub stage_snapshot_json: Option<&'a str>,
     pub assistant_snapshot_json: Option<&'a str>,
@@ -440,8 +441,9 @@ pub trait SessionStore: Send + Sync {
         description: Option<&str>,
         kind: ThreadKind,
         assistant_ids: &[String],
+        agent_participants: &[crate::models::ThreadAgentInfo],
     ) -> Result<ThreadInfo> {
-        let _ = (kind, assistant_ids);
+        let _ = (kind, assistant_ids, agent_participants);
         self.create_thread(project_id, goal, description)
     }
     fn update_thread(
@@ -459,8 +461,9 @@ pub trait SessionStore: Send + Sync {
         enabled: Option<bool>,
         kind: Option<ThreadKind>,
         assistant_ids: Option<&[String]>,
+        agent_participants: Option<&[crate::models::ThreadAgentInfo]>,
     ) -> Result<ThreadInfo> {
-        let _ = (kind, assistant_ids);
+        let _ = (kind, assistant_ids, agent_participants);
         self.update_thread(thread_id, goal, description, enabled)
     }
     fn delete_thread(&self, thread_id: &str) -> Result<()>;

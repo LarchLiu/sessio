@@ -159,6 +159,7 @@ struct DelegatedSessionState {
 struct OwnedAstraPlanTask {
     thread_stage_id: Option<String>,
     assistant_id: Option<String>,
+    agent_participant_id: Option<String>,
     target_agent: Agent,
     stage_snapshot_json: Option<String>,
     assistant_snapshot_json: Option<String>,
@@ -720,6 +721,29 @@ impl AstraService {
             "astraRetryLimitReached".to_string(),
             Value::Bool(attempt.retry_limit_reached),
         );
+        if let Some(participant_id) = task.agent_participant_id.as_deref() {
+            if let Some(participant) = thread
+                .agent_participants
+                .iter()
+                .find(|participant| participant.participant_id == participant_id)
+            {
+                insert_option_if_missing(
+                    &mut options,
+                    "model",
+                    non_empty_option(participant.model.clone()),
+                );
+                insert_option_if_missing(
+                    &mut options,
+                    "effort",
+                    non_empty_option(participant.effort.clone()),
+                );
+                insert_option_if_missing(
+                    &mut options,
+                    "permissionMode",
+                    non_empty_option(participant.permission_mode.clone()),
+                );
+            }
+        }
         let initial_prompt = stage_context
             .as_ref()
             .map(|context| context.prompt.clone())
@@ -2019,6 +2043,11 @@ fn insert_option_if_missing(options: &mut RuntimeMetadata, key: &str, value: Opt
     }
 }
 
+fn non_empty_option(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn runtime_transport_option(
     transport: crate::agents::runtime::types::RuntimeTransportKind,
 ) -> String {
@@ -2116,6 +2145,7 @@ pub(crate) fn astra_task_from_plan_task(task: &PlanTaskInfo) -> AstraTaskProposa
         id: task.id.clone(),
         plan_task_id: Some(task.id.clone()),
         assistant_id: task.assistant_id.clone(),
+        agent_participant_id: task.agent_participant_id.clone(),
         title: task.title.clone(),
         target_stage_id: task.thread_stage_id.clone(),
         target_agent: task.target_agent,
@@ -2156,6 +2186,7 @@ fn create_plan_round_for_astra_tasks_in_store(
         .map(|task| NewPlanTask {
             thread_stage_id: task.thread_stage_id.as_deref(),
             assistant_id: task.assistant_id.as_deref(),
+            agent_participant_id: task.agent_participant_id.as_deref(),
             target_agent: task.target_agent,
             stage_snapshot_json: task.stage_snapshot_json.as_deref(),
             assistant_snapshot_json: task.assistant_snapshot_json.as_deref(),
@@ -2210,6 +2241,19 @@ fn astra_task_to_plan_task(
                 })
         })
         .transpose()?;
+    let agent_participant = task
+        .agent_participant_id
+        .as_deref()
+        .map(|participant_id| {
+            thread
+                .agent_participants
+                .iter()
+                .find(|participant| participant.participant_id == participant_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("agent participant does not belong to Astra run thread: {participant_id}")
+                })
+        })
+        .transpose()?;
     let stage = task.target_stage_id.as_deref().and_then(|stage_id| {
         thread
             .stages
@@ -2228,19 +2272,30 @@ fn astra_task_to_plan_task(
         .into_iter()
         .find(|agent| agent.id == task.target_agent.as_str());
 
+    let assistant_id = thread_assistant
+        .as_ref()
+        .map(|assistant| assistant.assistant_id.clone())
+        .or_else(|| stage_assistant.map(|assistant| assistant.assistant_id.clone()));
+    let assistant_snapshot_json = thread_assistant
+        .as_ref()
+        .map(serde_json::to_string)
+        .or_else(|| stage_assistant.map(serde_json::to_string))
+        .transpose()?;
+    let agent_participant_id = agent_participant
+        .as_ref()
+        .map(|participant| participant.participant_id.clone());
+    let participant_snapshot = agent_participant.cloned();
+
     Ok(OwnedAstraPlanTask {
         thread_stage_id: stage.map(|stage| stage.id.clone()),
-        assistant_id: thread_assistant
-            .map(|assistant| assistant.assistant_id.clone())
-            .or_else(|| stage_assistant.map(|assistant| assistant.assistant_id.clone())),
+        assistant_id,
+        agent_participant_id,
         target_agent: task.target_agent,
         stage_snapshot_json: stage.map(serde_json::to_string).transpose()?,
-        assistant_snapshot_json: thread_assistant
-            .map(serde_json::to_string)
-            .or_else(|| stage_assistant.map(serde_json::to_string))
-            .transpose()?,
+        assistant_snapshot_json,
         agent_snapshot_json: serde_json::to_string(&json!({
             "agent": task.target_agent,
+            "participant": participant_snapshot,
             "agentInfo": agent_snapshot,
         }))?,
         title: task.title.clone(),
@@ -2698,6 +2753,7 @@ mod tests {
                     id: "task-1".to_string(),
                     plan_task_id: None,
                     assistant_id: None,
+                    agent_participant_id: None,
                     title: "Build persistence bridge".to_string(),
                     target_stage_id: Some(stage.id.clone()),
                     target_agent: Agent::Codex,
@@ -2709,6 +2765,7 @@ mod tests {
                     id: "task-2".to_string(),
                     plan_task_id: None,
                     assistant_id: None,
+                    agent_participant_id: None,
                     title: "Review persistence bridge".to_string(),
                     target_stage_id: Some(stage.id.clone()),
                     target_agent: Agent::Codex,
@@ -2859,6 +2916,7 @@ mod tests {
                 Some("Use thread-level assistants."),
                 ThreadKind::Teamwork,
                 std::slice::from_ref(&assistant.id),
+                &[],
             )
             .unwrap();
         let thread = store.get_thread_work_state(&thread.id).unwrap();
@@ -2897,6 +2955,7 @@ mod tests {
                 id: "task-teamwork-1".to_string(),
                 plan_task_id: None,
                 assistant_id: Some(assistant.id.clone()),
+                agent_participant_id: None,
                 title: "Build teamwork persistence bridge".to_string(),
                 target_stage_id: None,
                 target_agent: Agent::Codex,
@@ -2967,6 +3026,7 @@ mod tests {
             id: "task-1".to_string(),
             plan_task_id: None,
             assistant_id: None,
+            agent_participant_id: None,
             title: "Build stage worker".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -3085,6 +3145,7 @@ mod tests {
             id: "task-1".to_string(),
             plan_task_id: None,
             assistant_id: None,
+            agent_participant_id: None,
             title: "Implement focused worker".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -3168,6 +3229,7 @@ mod tests {
             id: "task-1".to_string(),
             plan_task_id: None,
             assistant_id: None,
+            agent_participant_id: None,
             title: "Research stage".to_string(),
             target_stage_id: Some(stage.id.clone()),
             target_agent: Agent::Codex,
@@ -3409,6 +3471,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
+            agent_participants: Vec::new(),
             stages: vec![prior_stage, stage],
             sessions: Vec::new(),
         };
@@ -3416,6 +3479,7 @@ mod tests {
             id: "task-1".to_string(),
             plan_task_id: None,
             assistant_id: None,
+            agent_participant_id: None,
             title: "Advance Build API".to_string(),
             target_stage_id: Some("thread-stage-1".to_string()),
             target_agent: Agent::Codex,
@@ -3637,6 +3701,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
+            agent_participants: Vec::new(),
             stages,
             sessions: Vec::new(),
         }
@@ -3674,6 +3739,7 @@ mod tests {
             id: task_id.to_string(),
             plan_task_id: None,
             assistant_id: None,
+            agent_participant_id: None,
             title: "Advance stage".to_string(),
             target_stage_id: Some(stage_id.to_string()),
             target_agent: Agent::Codex,

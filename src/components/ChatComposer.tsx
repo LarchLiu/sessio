@@ -7,8 +7,10 @@ import {
 import {
   ArrowUp,
   ChevronDown,
+  LoaderCircle,
   Mic,
   Plus,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -28,7 +30,12 @@ export default function ChatComposer({
   variant = "default",
   modeActions,
   sendActions,
+  setupPanel,
+  sendButtonVariant = "chat",
+  sendButtonLabel,
+  sendButtonBusy,
   bottomRow,
+  runtimeControlsDisabled = false,
   canSend,
   onSend,
 }: {
@@ -37,12 +44,22 @@ export default function ChatComposer({
   variant?: "default" | "chat";
   modeActions?: ReactNode;
   sendActions?: ReactNode;
+  setupPanel?: ReactNode;
+  sendButtonVariant?: "chat" | "astra";
+  sendButtonLabel?: string;
+  sendButtonBusy?: boolean;
   bottomRow?: ReactNode;
+  runtimeControlsDisabled?: boolean;
   canSend?: boolean;
   onSend: () => void;
 }) {
   const { t } = useI18n();
+  const [astraSweep, setAstraSweep] = useState(false);
+  const previousSendButtonVariantRef = useRef(sendButtonVariant);
   const sendEnabled = canSend ?? composer.canSend;
+  const sendBusy = sendButtonBusy ?? composer.sending;
+  const sendLabel =
+    sendButtonLabel ?? (sendBusy ? t("new_chat.sending") : t("new_chat.send"));
   const attachmentOptions = attachmentMenuOptions({
     supportsImageAttachments: composer.supportsImageAttachments,
     supportsEmbeddedContext: composer.supportsEmbeddedContext,
@@ -52,7 +69,26 @@ export default function ChatComposer({
   const outerClassName = variant === "chat" ? "w-full" : "w-full max-w-[730px]";
   const controlsClassName =
     "flex h-12 items-center justify-between gap-3 px-3 pb-2 " +
-    (bottomRow ? "border-b border-ink/5" : "");
+    (bottomRow ? "border-b border-ink/10" : "");
+
+  useEffect(() => {
+    const previous = previousSendButtonVariantRef.current;
+    previousSendButtonVariantRef.current = sendButtonVariant;
+    if (previous === "astra" || sendButtonVariant !== "astra") return;
+    setAstraSweep(false);
+    const frame = window.requestAnimationFrame(() => setAstraSweep(true));
+    const timeout = window.setTimeout(() => setAstraSweep(false), 720);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [sendButtonVariant]);
+
+  useEffect(() => {
+    if (runtimeControlsDisabled && composer.attachmentMenuOpen) {
+      composer.setAttachmentMenuOpen(false);
+    }
+  }, [composer, runtimeControlsDisabled]);
 
   return (
     <div className={outerClassName}>
@@ -94,6 +130,11 @@ export default function ChatComposer({
           }}
           className="chat-composer-textarea block w-full resize-none bg-transparent px-3.5 py-3.5 text-body leading-5 text-ink/88 placeholder:text-ink/38 outline-none"
         />
+        {setupPanel && (
+          <div className="border-t border-ink/5 px-3 py-2">
+            {setupPanel}
+          </div>
+        )}
         <div className={controlsClassName}>
           <div className="flex min-w-0 items-center gap-3">
             {composer.supportsAttachments && (
@@ -101,8 +142,9 @@ export default function ChatComposer({
                 <button
                   ref={composer.attachmentButtonRef}
                   type="button"
+                  disabled={runtimeControlsDisabled}
                   onClick={() => composer.setAttachmentMenuOpen((open) => !open)}
-                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink/55 transition hover:bg-ink/8 hover:text-ink"
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:cursor-not-allowed disabled:text-ink/28 disabled:hover:bg-transparent disabled:hover:text-ink/28"
                   aria-label={t("new_chat.add_context")}
                   aria-expanded={composer.attachmentMenuOpen}
                   aria-haspopup="menu"
@@ -115,7 +157,7 @@ export default function ChatComposer({
               ariaLabel="Default permissions"
               value={composer.permissionMode}
               onChange={(value) => void composer.handlePermissionModeChange(value)}
-              disabled={!composer.selectedRuntimeAgent}
+              disabled={runtimeControlsDisabled || !composer.selectedRuntimeAgent}
               options={composer.permissionOptions}
             />
             {modeActions}
@@ -125,19 +167,30 @@ export default function ChatComposer({
               ariaLabel={t("new_chat.agent")}
               value={composer.selectedAgentModelValue}
               onChange={(value) => void composer.handleAgentModelChange(value)}
-              disabled={composer.agentModelOptions.length === 0}
+              disabled={runtimeControlsDisabled || composer.agentModelOptions.length === 0}
               options={composer.agentModelOptions}
             />
             <NewChatMenuButton icon={Mic} label={t("new_chat.voice")} />
-            <Tooltip content={composer.sending ? t("new_chat.sending") : t("new_chat.send")} placement="top">
+            <Tooltip content={sendLabel} placement="top">
               <button
                 type="button"
                 disabled={!sendEnabled}
                 onClick={onSend}
-                className="flex h-7 w-7 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
-                aria-label={composer.sending ? t("new_chat.sending") : t("new_chat.send")}
+                className={
+                  sendButtonVariant === "astra"
+                    ? "astra-send-button relative flex h-7 w-7 items-center justify-center overflow-hidden rounded-full " +
+                      (astraSweep ? "astra-send-button-sweep" : "")
+                    : "flex h-7 w-7 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
+                }
+                aria-label={sendLabel}
               >
-                <ArrowUp className="h-5 w-5" />
+                {sendBusy ? (
+                  <LoaderCircle className={(sendButtonVariant === "astra" ? "relative z-10 h-4 w-4" : "h-5 w-5") + " animate-spin"} />
+                ) : sendButtonVariant === "astra" ? (
+                  <Sparkles className="relative z-10 h-4 w-4" />
+                ) : (
+                  <ArrowUp className="h-5 w-5" />
+                )}
               </button>
             </Tooltip>
             {sendActions}
@@ -145,7 +198,7 @@ export default function ChatComposer({
         </div>
         {bottomRow}
       </div>
-      {composer.attachmentMenuOpen && composer.attachmentButtonRef.current && (
+      {!runtimeControlsDisabled && composer.attachmentMenuOpen && composer.attachmentButtonRef.current && (
         <ComposerAttachmentMenu
           anchor={composer.attachmentButtonRef.current}
           options={attachmentOptions}

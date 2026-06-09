@@ -30,7 +30,6 @@ import AppHeader from "./components/AppHeader";
 import AppMain from "./components/AppMain";
 import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
 import AppSidebar from "./components/AppSidebar";
-import MemoryBackendMissingButton from "./components/MemoryBackendMissingButton";
 import ToastStack from "./components/ToastStack";
 import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
@@ -100,7 +99,6 @@ export default function App() {
     projects,
     setProjects,
     indexPhase,
-    memoryBackendStatus,
     refreshSessions,
     refreshMemoryBackend,
   } = useAppData({ setError });
@@ -571,8 +569,6 @@ export default function App() {
     (selected ? sessionDisplayTitle(selected) : null) ??
     t("list.no_user_message");
 
-  const memoryBackendMissing =
-    memoryBackendStatus !== null && memoryBackendStatus.available === false;
   const projectSearchInitialKey = filter.kind === "project" ? filter.key : projects[0]?.path;
   const detailRoute: DetailMode = detailMode;
   const headerContextTitle = selected
@@ -713,14 +709,8 @@ export default function App() {
       projectContext={headerProjectContext}
       activeMessageMeta={activeMessageMeta}
       metaPopoverOpen={metaPopoverOpen}
-      memoryBackendStatus={memoryBackendStatus}
-      memoryBackendMissing={memoryBackendMissing}
-      projectCount={projectGroups.length}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => setMetaPopoverOpen((open) => !open)}
-      onOpenSearch={() => setMemorySearchOpen(true)}
-      onRefreshMemoryBackend={refreshMemoryBackend}
-      MemoryBackendMissingButton={MemoryBackendMissingButton}
     />
   );
 

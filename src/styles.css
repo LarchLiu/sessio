@@ -261,6 +261,42 @@ body {
   background: rgb(var(--color-fg) / 0.5);
 }
 
+.astra-send-button::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset-block: -25%;
+  left: -55%;
+  width: 0.75rem;
+  rotate: 12deg;
+  background: rgb(255 255 255 / 0.65);
+  opacity: 0;
+  filter: blur(1px);
+}
+
+.astra-send-button {
+  background: rgb(var(--color-fg) / 0.7);
+  color: rgb(var(--color-bg-panel));
+  transition:
+    background-color 150ms ease,
+    color 150ms ease,
+    opacity 150ms ease;
+}
+
+.astra-send-button:disabled {
+  cursor: not-allowed;
+  background: rgb(var(--color-fg) / 0.25);
+  color: rgb(var(--color-bg-panel) / 0.7);
+}
+
+.astra-send-button-sweep::before {
+  animation: astra-send-button-sweep 680ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
+.astra-send-button:not(:disabled):hover::before {
+  animation: astra-send-button-sweep 680ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+
 .sessio-diff-preview {
   background: rgb(var(--color-bg-panel-alt));
   color: rgb(var(--color-fg) / 0.82);
@@ -530,6 +566,23 @@ body {
   }
 }
 
+@keyframes astra-send-button-sweep {
+  0% {
+    left: -55%;
+    opacity: 0;
+  }
+  18% {
+    opacity: 0.85;
+  }
+  82% {
+    opacity: 0.85;
+  }
+  100% {
+    left: 130%;
+    opacity: 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root[data-theme-transition]::view-transition-new(root),
   :root[data-theme-transition]::view-transition-old(root) {
@@ -541,10 +594,11 @@ body {
   .project-memory-search-panel-in,
   .project-memory-search-panel-out,
   .update-confirm-dialog-in,
-  .update-confirm-dialog-out,
-  .update-confirm-panel-in,
-  .update-confirm-panel-out,
-  .update-progress-indeterminate {
+    .update-confirm-dialog-out,
+    .update-confirm-panel-in,
+    .update-confirm-panel-out,
+    .update-progress-indeterminate,
+    .astra-send-button-sweep::before {
     animation-duration: 1ms;
   }
 }

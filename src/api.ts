@@ -128,6 +128,17 @@ export interface ThreadAssistantInfo {
   order: number;
 }
 
+export interface ThreadAgentInfo {
+  participantId: string;
+  agent: Agent;
+  model: string;
+  effort: string;
+  permissionMode: string;
+  order: number;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
 export type StageType =
   | "research"
   | "plan"
@@ -222,6 +233,7 @@ export interface ThreadInfo {
   createdAt: number;
   updatedAt: number;
   assistants: ThreadAssistantInfo[];
+  agentParticipants: ThreadAgentInfo[];
   stages: StageInfo[];
   sessions: SessionInfo[];
 }
@@ -305,6 +317,7 @@ export interface PlanTaskInfo {
   roundId: string;
   threadStageId: string | null;
   assistantId: string | null;
+  agentParticipantId: string | null;
   targetAgent: Agent;
   stageSnapshotJson: string | null;
   assistantSnapshotJson: string | null;
@@ -341,6 +354,7 @@ export interface PlanRoundInfo {
 export interface CreatePlanTaskInput {
   threadStageId?: string | null;
   assistantId?: string | null;
+  agentParticipantId?: string | null;
   targetAgent: Agent;
   stageSnapshotJson?: string | null;
   assistantSnapshotJson?: string | null;
@@ -381,6 +395,7 @@ export interface AstraTaskProposal {
   id: string;
   planTaskId?: string | null;
   assistantId?: string | null;
+  agentParticipantId?: string | null;
   title: string;
   targetStageId: string | null;
   targetAgent: Agent;
@@ -1121,6 +1136,7 @@ export async function createThread(
   description?: string | null,
   kind?: ThreadKind,
   assistantIds?: string[],
+  agentParticipants?: ThreadAgentInfo[],
 ): Promise<ThreadInfo> {
   return invoke<ThreadInfo>("create_thread", {
     projectId,
@@ -1128,6 +1144,7 @@ export async function createThread(
     description: description ?? null,
     kind: kind ?? null,
     assistantIds: assistantIds ?? null,
+    agentParticipants: agentParticipants ?? null,
   });
 }
 
@@ -1139,6 +1156,7 @@ export async function updateThread(
     enabled?: boolean | null;
     kind?: ThreadKind | null;
     assistantIds?: string[] | null;
+    agentParticipants?: ThreadAgentInfo[] | null;
   },
 ): Promise<ThreadInfo> {
   return invoke<ThreadInfo>("update_thread", {
@@ -1149,6 +1167,10 @@ export async function updateThread(
     assistantIds:
       Object.prototype.hasOwnProperty.call(patch, "assistantIds")
         ? patch.assistantIds ?? []
+        : null,
+    agentParticipants:
+      Object.prototype.hasOwnProperty.call(patch, "agentParticipants")
+        ? patch.agentParticipants ?? []
         : null,
     description:
       Object.prototype.hasOwnProperty.call(patch, "description")
@@ -1176,6 +1198,7 @@ export async function createPlanRound(input: CreatePlanRoundInput): Promise<Plan
       tasks: input.tasks.map((task) => ({
         threadStageId: task.threadStageId ?? null,
         assistantId: task.assistantId ?? null,
+        agentParticipantId: task.agentParticipantId ?? null,
         targetAgent: task.targetAgent,
         stageSnapshotJson: task.stageSnapshotJson ?? null,
         assistantSnapshotJson: task.assistantSnapshotJson ?? null,

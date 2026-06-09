@@ -17,7 +17,8 @@ use crate::models::{
     PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo,
     ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
     SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus, StageType,
-    SubagentInfo, ThreadAssistantInfo, ThreadInfo, ThreadKind, WorkflowInfo, WorkflowType,
+    SubagentInfo, ThreadAgentInfo, ThreadAssistantInfo, ThreadInfo, ThreadKind, WorkflowInfo,
+    WorkflowType,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -424,6 +425,23 @@ CREATE TABLE IF NOT EXISTS thread_assistants (
 CREATE INDEX IF NOT EXISTS idx_thread_assistants_assistant
     ON thread_assistants(assistant_id);
 
+CREATE TABLE IF NOT EXISTS thread_agents (
+    thread_id       TEXT NOT NULL,
+    participant_id  TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    effort          TEXT NOT NULL,
+    permission_mode TEXT NOT NULL,
+    sort_order      INTEGER NOT NULL,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY(thread_id, participant_id),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_agents_thread_order
+    ON thread_agents(thread_id, sort_order);
+
 CREATE TABLE IF NOT EXISTS stages (
     id           TEXT PRIMARY KEY,
     project_id   TEXT,
@@ -674,6 +692,7 @@ CREATE TABLE IF NOT EXISTS thread_plan_tasks (
     round_id                TEXT NOT NULL,
     thread_stage_id         TEXT,
     assistant_id            TEXT,
+    agent_participant_id    TEXT,
     target_agent            TEXT NOT NULL,
     stage_snapshot_json     TEXT,
     assistant_snapshot_json TEXT,
@@ -705,6 +724,8 @@ CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_stage
     ON thread_plan_tasks(thread_stage_id);
 CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_assistant
     ON thread_plan_tasks(assistant_id);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_agent_participant
+    ON thread_plan_tasks(agent_participant_id);
 
 CREATE TABLE IF NOT EXISTS thread_plan_task_sessions (
     task_id    TEXT NOT NULL,
@@ -736,6 +757,32 @@ ALTER TABLE sessions ADD COLUMN rename_title TEXT;
 // fault-tolerantly without bumping schema_migrations.
 const SCHEMA_CURRENT_SESSION_SKIP: &str = r#"
 ALTER TABLE sessions ADD COLUMN skip INTEGER NOT NULL DEFAULT 0;
+"#;
+
+// v6: thread-level agent participants for brainstorm/debate threads, plus
+// persisted plan-task participant ids for replay and dispatch.
+const SCHEMA_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS thread_agents (
+    thread_id       TEXT NOT NULL,
+    participant_id  TEXT NOT NULL,
+    agent           TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    effort          TEXT NOT NULL,
+    permission_mode TEXT NOT NULL,
+    sort_order      INTEGER NOT NULL,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    PRIMARY KEY(thread_id, participant_id),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_agents_thread_order
+    ON thread_agents(thread_id, sort_order);
+
+ALTER TABLE thread_plan_tasks ADD COLUMN agent_participant_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_agent_participant
+    ON thread_plan_tasks(agent_participant_id);
 "#;
 
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
@@ -816,6 +863,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             [],
         )?;
         seed_builtins(conn)?;
+    }
+    if current < 6 {
+        let _ = conn.execute_batch(SCHEMA_V6);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
+            [],
+        )?;
     }
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SKIP);
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
@@ -2174,6 +2228,16 @@ fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
     format!("thread-{}", &hex::encode(hasher.finalize())[..16])
 }
 
+fn stable_thread_agent_participant_id(thread_id: &str, agent: Agent, model: &str, order: i64) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(thread_id.as_bytes());
+    hasher.update(agent.as_str().as_bytes());
+    hasher.update(model.as_bytes());
+    hasher.update(order.to_string().as_bytes());
+    format!("thread-agent-{}", &hex::encode(hasher.finalize())[..16])
+}
+
 fn stable_project_stage_id(
     workflow_id: Option<&str>,
     project_id: Option<&str>,
@@ -2444,6 +2508,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
         assistants: Vec::new(),
+        agent_participants: Vec::new(),
         stages: Vec::new(),
         sessions: Vec::new(),
     })
@@ -2469,30 +2534,31 @@ fn plan_round_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanRoundInf
 }
 
 fn plan_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanTaskInfo> {
-    let target_agent_raw: String = row.get(4)?;
-    let risk_raw: String = row.get(11)?;
-    let status_raw: String = row.get(13)?;
+    let target_agent_raw: String = row.get(5)?;
+    let risk_raw: String = row.get(12)?;
+    let status_raw: String = row.get(14)?;
     Ok(PlanTaskInfo {
         id: row.get(0)?,
         round_id: row.get(1)?,
         thread_stage_id: row.get(2)?,
         assistant_id: row.get(3)?,
+        agent_participant_id: row.get(4)?,
         target_agent: Agent::from_db_str(&target_agent_raw).unwrap_or(Agent::Codex),
-        stage_snapshot_json: row.get(5)?,
-        assistant_snapshot_json: row.get(6)?,
-        agent_snapshot_json: row.get(7)?,
-        title: row.get(8)?,
-        prompt: row.get(9)?,
-        expected_output: row.get(10)?,
+        stage_snapshot_json: row.get(6)?,
+        assistant_snapshot_json: row.get(7)?,
+        agent_snapshot_json: row.get(8)?,
+        title: row.get(9)?,
+        prompt: row.get(10)?,
+        expected_output: row.get(11)?,
         risk: PlanTaskRisk::from_db_str(&risk_raw).unwrap_or(PlanTaskRisk::Medium),
-        sort_order: row.get(12)?,
+        sort_order: row.get(13)?,
         status: PlanTaskStatus::from_db_str(&status_raw).unwrap_or(PlanTaskStatus::Planned),
-        result_summary: row.get(14)?,
-        error: row.get(15)?,
-        started_at: row.get(16)?,
-        completed_at: row.get(17)?,
-        created_at: row.get(18)?,
-        updated_at: row.get(19)?,
+        result_summary: row.get(15)?,
+        error: row.get(16)?,
+        started_at: row.get(17)?,
+        completed_at: row.get(18)?,
+        created_at: row.get(19)?,
+        updated_at: row.get(20)?,
         sessions: Vec::new(),
     })
 }
@@ -2639,6 +2705,7 @@ fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
         .optional()?
         .ok_or_else(|| anyhow::anyhow!("thread not found: {thread_id}"))?;
     thread.assistants = load_thread_assistants(conn, &thread.id)?;
+    thread.agent_participants = load_thread_agents(conn, &thread.id)?;
     thread.stages = load_thread_stages(conn, &thread.id)?;
     thread.sessions = load_thread_sessions(conn, &thread.id)?;
     Ok(thread)
@@ -2662,7 +2729,7 @@ fn load_plan_round_by_id(conn: &Connection, round_id: &str) -> Result<PlanRoundI
 fn load_plan_task_by_id(conn: &Connection, task_id: &str) -> Result<PlanTaskInfo> {
     let mut task = conn
         .query_row(
-            "SELECT id, round_id, thread_stage_id, assistant_id, target_agent,
+            "SELECT id, round_id, thread_stage_id, assistant_id, agent_participant_id, target_agent,
                     stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
                     title, prompt, expected_output, risk, sort_order, status,
                     result_summary, error, started_at, completed_at, created_at, updated_at
@@ -2679,7 +2746,7 @@ fn load_plan_task_by_id(conn: &Connection, task_id: &str) -> Result<PlanTaskInfo
 
 fn load_plan_tasks(conn: &Connection, round_id: &str) -> Result<Vec<PlanTaskInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, round_id, thread_stage_id, assistant_id, target_agent,
+        "SELECT id, round_id, thread_stage_id, assistant_id, agent_participant_id, target_agent,
                 stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
                 title, prompt, expected_output, risk, sort_order, status,
                 result_summary, error, started_at, completed_at, created_at, updated_at
@@ -2875,6 +2942,18 @@ fn ensure_plan_task_refs(conn: &Connection, thread_id: &str, task: &NewPlanTask<
     if let Some(assistant_id) = task.assistant_id {
         load_assistant_by_id(conn, assistant_id)?;
     }
+    if let Some(participant_id) = task.agent_participant_id {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM thread_agents WHERE thread_id = ? AND participant_id = ? LIMIT 1",
+                params![thread_id, participant_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            anyhow::bail!("thread agent participant does not belong to thread: {participant_id}");
+        }
+    }
     Ok(())
 }
 
@@ -2908,16 +2987,17 @@ fn insert_plan_task(
     let id = stable_plan_task_id(round_id, &title, task.sort_order, now, nonce);
     conn.execute(
         "INSERT INTO thread_plan_tasks (
-            id, round_id, thread_stage_id, assistant_id, target_agent,
+            id, round_id, thread_stage_id, assistant_id, agent_participant_id, target_agent,
             stage_snapshot_json, assistant_snapshot_json, agent_snapshot_json,
             title, prompt, expected_output, risk, sort_order, status,
             result_summary, error, started_at, completed_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)",
         params![
             id,
             round_id,
             task.thread_stage_id,
             task.assistant_id,
+            task.agent_participant_id,
             task.target_agent.as_str(),
             stage_snapshot_json,
             assistant_snapshot_json,
@@ -3577,6 +3657,29 @@ fn load_thread_assistants(conn: &Connection, thread_id: &str) -> Result<Vec<Thre
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+fn load_thread_agents(conn: &Connection, thread_id: &str) -> Result<Vec<ThreadAgentInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT participant_id, agent, model, effort, permission_mode, sort_order, created_at, updated_at
+         FROM thread_agents
+         WHERE thread_id = ?
+         ORDER BY sort_order ASC, created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![thread_id], |row| {
+        let agent_raw: String = row.get(1)?;
+        Ok(ThreadAgentInfo {
+            participant_id: row.get(0)?,
+            agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::Codex),
+            model: row.get(2)?,
+            effort: row.get(3)?,
+            permission_mode: row.get(4)?,
+            order: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn stage_assistant_from_assistant(assistant: AssistantInfo, order: i64) -> StageAssistantInfo {
     StageAssistantInfo {
         assistant_id: assistant.id,
@@ -3657,6 +3760,78 @@ fn replace_thread_assistants(
             "INSERT INTO thread_assistants (thread_id, assistant_id, sort_order, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?)",
             params![thread_id, assistant.id, index as i64, now, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn normalize_thread_agents(
+    conn: &Connection,
+    thread_id: &str,
+    participants: &[ThreadAgentInfo],
+) -> Result<Vec<ThreadAgentInfo>> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for (index, participant) in participants.iter().enumerate() {
+        load_agent_by_id(conn, participant.agent.as_str())?;
+        let model = participant.model.trim();
+        if model.is_empty() {
+            anyhow::bail!("thread agent model cannot be empty");
+        }
+        let effort = participant.effort.trim();
+        let permission_mode = participant.permission_mode.trim();
+        let order = participant.order;
+        let participant_id = participant.participant_id.trim();
+        let participant_id = if participant_id.is_empty() {
+            stable_thread_agent_participant_id(thread_id, participant.agent, model, index as i64)
+        } else {
+            participant_id.to_string()
+        };
+        if !seen.insert(participant_id.clone()) {
+            anyhow::bail!("duplicate thread agent participant id: {participant_id}");
+        }
+        normalized.push(ThreadAgentInfo {
+            participant_id,
+            agent: participant.agent,
+            model: model.to_string(),
+            effort: effort.to_string(),
+            permission_mode: permission_mode.to_string(),
+            order,
+            created_at: participant.created_at,
+            updated_at: participant.updated_at,
+        });
+    }
+    Ok(normalized)
+}
+
+fn replace_thread_agents(
+    conn: &Connection,
+    thread_id: &str,
+    participants: &[ThreadAgentInfo],
+    now: i64,
+) -> Result<()> {
+    let participants = normalize_thread_agents(conn, thread_id, participants)?;
+    conn.execute(
+        "DELETE FROM thread_agents WHERE thread_id = ?",
+        params![thread_id],
+    )?;
+    for (index, participant) in participants.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO thread_agents (
+                thread_id, participant_id, agent, model, effort, permission_mode,
+                sort_order, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                thread_id,
+                participant.participant_id,
+                participant.agent.as_str(),
+                participant.model,
+                participant.effort,
+                participant.permission_mode,
+                index as i64,
+                now,
+                now
+            ],
         )?;
     }
     Ok(())
@@ -5512,6 +5687,7 @@ impl SessionStore for SqliteStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for thread in threads.iter_mut() {
             thread.assistants = load_thread_assistants(&conn, &thread.id)?;
+            thread.agent_participants = load_thread_agents(&conn, &thread.id)?;
             thread.stages = load_thread_stages(&conn, &thread.id)?;
             thread.sessions = load_thread_sessions(&conn, &thread.id)?;
         }
@@ -5529,7 +5705,7 @@ impl SessionStore for SqliteStore {
         goal: &str,
         description: Option<&str>,
     ) -> Result<ThreadInfo> {
-        self.create_thread_with_options(project_id, goal, description, ThreadKind::Workflow, &[])
+        self.create_thread_with_options(project_id, goal, description, ThreadKind::Workflow, &[], &[])
     }
 
     fn create_thread_with_options(
@@ -5539,6 +5715,7 @@ impl SessionStore for SqliteStore {
         description: Option<&str>,
         kind: ThreadKind,
         assistant_ids: &[String],
+        agent_participants: &[ThreadAgentInfo],
     ) -> Result<ThreadInfo> {
         let goal = goal.trim();
         if goal.is_empty() {
@@ -5557,6 +5734,7 @@ impl SessionStore for SqliteStore {
             params![id, project_id, goal, description, kind.as_str(), now, now],
         )?;
         replace_thread_assistants(&tx, &id, &assistants, now)?;
+        replace_thread_agents(&tx, &id, agent_participants, now)?;
         let thread = load_thread_by_id(&tx, &id)?;
         tx.commit()?;
         Ok(thread)
@@ -5569,7 +5747,7 @@ impl SessionStore for SqliteStore {
         description: Option<Option<&str>>,
         enabled: Option<bool>,
     ) -> Result<ThreadInfo> {
-        self.update_thread_with_options(thread_id, goal, description, enabled, None, None)
+        self.update_thread_with_options(thread_id, goal, description, enabled, None, None, None)
     }
 
     fn update_thread_with_options(
@@ -5580,6 +5758,7 @@ impl SessionStore for SqliteStore {
         enabled: Option<bool>,
         kind: Option<ThreadKind>,
         assistant_ids: Option<&[String]>,
+        agent_participants: Option<&[ThreadAgentInfo]>,
     ) -> Result<ThreadInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -5626,6 +5805,9 @@ impl SessionStore for SqliteStore {
         )?;
         if let Some(assistants) = assistant_bindings.as_deref() {
             replace_thread_assistants(&tx, thread_id, assistants, now)?;
+        }
+        if let Some(participants) = agent_participants {
+            replace_thread_agents(&tx, thread_id, participants, now)?;
         }
         let thread = load_thread_by_id(&tx, thread_id)?;
         tx.commit()?;
@@ -8100,7 +8282,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 5);
+        assert_eq!(latest_schema_version, 6);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -8126,6 +8308,22 @@ mod migration_tests {
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
         assert!(thread_columns.contains(&"kind".to_string()));
+
+        let thread_agents_table: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='thread_agents'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_agents_table, 1);
+
+        let plan_task_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(thread_plan_tasks)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert!(plan_task_columns.contains(&"agent_participant_id".to_string()));
 
         let projects_count: i64 = conn
             .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
@@ -10072,6 +10270,7 @@ mod migration_tests {
                 None,
                 ThreadKind::Teamwork,
                 std::slice::from_ref(&assistant.id),
+                &[],
             )
             .unwrap();
         let stage_template = store
@@ -10101,6 +10300,7 @@ mod migration_tests {
                     NewPlanTask {
                         thread_stage_id: Some(&thread_stage.id),
                         assistant_id: Some(&assistant.id),
+                        agent_participant_id: None,
                         target_agent: Agent::Codex,
                         stage_snapshot_json: Some(r#"{"stage":"research-v1"}"#),
                         assistant_snapshot_json: Some(r#"{"assistant":"planner-v1"}"#),
@@ -10115,6 +10315,7 @@ mod migration_tests {
                     NewPlanTask {
                         thread_stage_id: None,
                         assistant_id: Some(&assistant.id),
+                        agent_participant_id: None,
                         target_agent: Agent::Claude,
                         stage_snapshot_json: None,
                         assistant_snapshot_json: Some(r#"{"assistant":"planner-v1"}"#),
@@ -10219,6 +10420,7 @@ mod migration_tests {
                     NewPlanTask {
                         thread_stage_id: None,
                         assistant_id: None,
+                        agent_participant_id: None,
                         target_agent: Agent::Codex,
                         stage_snapshot_json: None,
                         assistant_snapshot_json: None,
@@ -10233,6 +10435,7 @@ mod migration_tests {
                     NewPlanTask {
                         thread_stage_id: None,
                         assistant_id: None,
+                        agent_participant_id: None,
                         target_agent: Agent::Codex,
                         stage_snapshot_json: None,
                         assistant_snapshot_json: None,
@@ -10263,6 +10466,7 @@ mod migration_tests {
                     NewPlanTask {
                         thread_stage_id: None,
                         assistant_id: Some(&assistant.id),
+                        agent_participant_id: None,
                         target_agent: Agent::Codex,
                         stage_snapshot_json: None,
                         assistant_snapshot_json: Some(r#"{"assistant":"planner-v2"}"#),
@@ -10277,6 +10481,7 @@ mod migration_tests {
                     NewPlanTask {
                         thread_stage_id: None,
                         assistant_id: Some(&assistant.id),
+                        agent_participant_id: None,
                         target_agent: Agent::Codex,
                         stage_snapshot_json: None,
                         assistant_snapshot_json: Some(r#"{"assistant":"planner-v2"}"#),
@@ -10422,6 +10627,7 @@ mod migration_tests {
                 None,
                 ThreadKind::Teamwork,
                 std::slice::from_ref(&assistant.id),
+                &[],
             )
             .unwrap();
         let stage_template = store
@@ -10510,6 +10716,7 @@ mod migration_tests {
                 tasks: vec![NewPlanTask {
                     thread_stage_id: Some(&thread_stage.id),
                     assistant_id: Some(&assistant.id),
+                    agent_participant_id: None,
                     target_agent: Agent::Codex,
                     stage_snapshot_json: Some(r#"{"stage":"research"}"#),
                     assistant_snapshot_json: Some(r#"{"assistant":"replay"}"#),
@@ -10681,6 +10888,7 @@ mod migration_tests {
                 Some("shared context"),
                 ThreadKind::Teamwork,
                 &assistant_ids,
+                &[],
             )
             .unwrap();
         assert_eq!(teamwork.kind, ThreadKind::Teamwork);
@@ -10700,6 +10908,28 @@ mod migration_tests {
         );
         assert_eq!(teamwork.assistants[1].agent.id, "claude");
 
+        let brainstorm_participants = vec![
+            ThreadAgentInfo {
+                participant_id: String::new(),
+                agent: Agent::Codex,
+                model: "gpt-5.3-codex".to_string(),
+                effort: "medium".to_string(),
+                permission_mode: "read-only".to_string(),
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+            },
+            ThreadAgentInfo {
+                participant_id: "custom-participant".to_string(),
+                agent: Agent::Claude,
+                model: "claude-sonnet-4-5".to_string(),
+                effort: "high".to_string(),
+                permission_mode: "workspace-write".to_string(),
+                order: 1,
+                created_at: 0,
+                updated_at: 0,
+            },
+        ];
         let brainstorm = store
             .create_thread_with_options(
                 &project.id,
@@ -10707,24 +10937,60 @@ mod migration_tests {
                 None,
                 ThreadKind::Brainstorm,
                 &[],
+                &brainstorm_participants,
             )
             .unwrap();
         assert_eq!(brainstorm.kind, ThreadKind::Brainstorm);
         assert!(brainstorm.assistants.is_empty());
+        assert_eq!(brainstorm.agent_participants.len(), 2);
+        assert_eq!(brainstorm.agent_participants[0].agent, Agent::Codex);
+        assert_eq!(brainstorm.agent_participants[0].model, "gpt-5.3-codex");
+        assert_eq!(
+            brainstorm.agent_participants[1].participant_id,
+            "custom-participant"
+        );
 
-        let debate_assistants = vec![reviewer.id.clone()];
         let debate = store
             .create_thread_with_options(
                 &project.id,
                 "Debate lane",
                 None,
                 ThreadKind::Debate,
-                &debate_assistants,
+                &[],
+                &brainstorm_participants[0..1],
             )
             .unwrap();
         assert_eq!(debate.kind, ThreadKind::Debate);
-        assert_eq!(debate.assistants.len(), 1);
-        assert_eq!(debate.assistants[0].assistant_id, reviewer.id);
+        assert!(debate.assistants.is_empty());
+        assert_eq!(debate.agent_participants.len(), 1);
+        assert_eq!(debate.agent_participants[0].agent, Agent::Codex);
+
+        let empty_runtime_option_participants = vec![ThreadAgentInfo {
+            participant_id: String::new(),
+            agent: Agent::Codex,
+            model: "gpt-5.3-codex".to_string(),
+            effort: String::new(),
+            permission_mode: String::new(),
+            order: 0,
+            created_at: 0,
+            updated_at: 0,
+        }];
+        let empty_runtime_option_thread = store
+            .create_thread_with_options(
+                &project.id,
+                "Agent participant with defaults",
+                None,
+                ThreadKind::Brainstorm,
+                &[],
+                &empty_runtime_option_participants,
+            )
+            .unwrap();
+        assert_eq!(empty_runtime_option_thread.agent_participants.len(), 1);
+        assert_eq!(empty_runtime_option_thread.agent_participants[0].effort, "");
+        assert_eq!(
+            empty_runtime_option_thread.agent_participants[0].permission_mode,
+            ""
+        );
 
         let listed = store.list_threads(&project.id).unwrap();
         assert!(listed.iter().any(|thread| thread.id == legacy.id
@@ -10735,10 +11001,12 @@ mod migration_tests {
             && thread.assistants.len() == 2));
         assert!(listed.iter().any(|thread| thread.id == brainstorm.id
             && thread.kind == ThreadKind::Brainstorm
-            && thread.assistants.is_empty()));
+            && thread.assistants.is_empty()
+            && thread.agent_participants.len() == 2));
         assert!(listed.iter().any(|thread| thread.id == debate.id
             && thread.kind == ThreadKind::Debate
-            && thread.assistants.len() == 1));
+            && thread.assistants.is_empty()
+            && thread.agent_participants.len() == 1));
 
         let reordered = vec![reviewer.id.clone(), builder.id.clone()];
         let updated = store
@@ -10749,6 +11017,7 @@ mod migration_tests {
                 None,
                 Some(ThreadKind::Teamwork),
                 Some(&reordered),
+                None,
             )
             .unwrap();
         assert_eq!(updated.goal, "Teamwork lane updated");
@@ -10763,6 +11032,34 @@ mod migration_tests {
         );
         assert_eq!(updated.assistants[0].order, 0);
         assert_eq!(updated.assistants[1].order, 1);
+
+        let updated_participants = vec![ThreadAgentInfo {
+            participant_id: "updated-participant".to_string(),
+            agent: Agent::Gemini,
+            model: "gemini-2.5-pro".to_string(),
+            effort: "high".to_string(),
+            permission_mode: "default".to_string(),
+            order: 0,
+            created_at: 0,
+            updated_at: 0,
+        }];
+        let updated_brainstorm = store
+            .update_thread_with_options(
+                &brainstorm.id,
+                None,
+                None,
+                None,
+                Some(ThreadKind::Brainstorm),
+                None,
+                Some(&updated_participants),
+            )
+            .unwrap();
+        assert!(updated_brainstorm.assistants.is_empty());
+        assert_eq!(updated_brainstorm.agent_participants.len(), 1);
+        assert_eq!(
+            updated_brainstorm.agent_participants[0].participant_id,
+            "updated-participant"
+        );
 
         let disable_error = store
             .update_assistant(&builder.id, None, None, None, None, Some(false))

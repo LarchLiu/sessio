@@ -587,7 +587,7 @@ export default function ThreadMultiSessionChatPage({
                     type="button"
                     onClick={() => void handleStartAstra()}
                     disabled={astraBusy !== null || !thread}
-                    className="relative flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink/[0.045] text-ink/55 transition before:pointer-events-none before:absolute before:inset-y-[-25%] before:left-[-55%] before:w-3 before:rotate-12 before:bg-white/65 before:opacity-0 before:blur-[1px] before:transition-all before:duration-500 hover:bg-[rgb(var(--color-emerald)/0.10)] hover:text-[rgb(var(--color-emerald)/0.95)] hover:before:left-[130%] hover:before:opacity-80 disabled:opacity-40"
+                    className="astra-send-button relative flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full"
                     aria-label={t("astra.start")}
                   >
                     {astraBusy === "start" ? (
@@ -1255,14 +1255,19 @@ function laneDisplayMeta(
   const stageSnapshot = parseJsonObject(source?.stageSnapshotJson ?? null);
   const assistantSnapshot = parseJsonObject(source?.assistantSnapshotJson ?? null);
   const agentSnapshot = parseJsonObject(source?.agentSnapshotJson ?? null);
+  const participantSnapshot = objectField(agentSnapshot, "participant");
+  const participantLabel = participantSnapshotLabel(participantSnapshot);
   const fallbackStage =
     (source?.stageId ? thread.stages.find((stage) => stage.id === source.stageId) ?? null : null)
     ?? (thread.stageId ? thread.stages.find((stage) => stage.id === thread.stageId) ?? null : null)
     ?? null;
-  const fallbackAssistant =
-    assistantFromSnapshot(assistantSnapshot)
-    ?? assistantFromThread(thread, source, lane.agent)
-    ?? null;
+  const fallbackAssistant = participantSnapshot
+    ? null
+    : (
+        assistantFromSnapshot(assistantSnapshot)
+        ?? assistantFromThread(thread, source, lane.agent)
+        ?? null
+      );
   const agentInfo = objectField(agentSnapshot, "agentInfo");
   const snapshotAgent = stringField(agentSnapshot, "agent");
   const snapshotAgentLabel =
@@ -1275,7 +1280,7 @@ function laneDisplayMeta(
     ?? stringField(stageSnapshot, "id")
     ?? (fallbackStage ? projectStageLabel(fallbackStage, t) : null);
   const stageIcon = snapshotStageIcon(stageSnapshot) ?? fallbackStage;
-  const agentLabel = snapshotAgentLabel ?? AGENT_LABEL[lane.agent];
+  const agentLabel = participantLabel ?? snapshotAgentLabel ?? AGENT_LABEL[lane.agent];
   const sourceLabel = plannerDisplayLabel(source);
   const title =
     sourceLabel
@@ -1308,7 +1313,7 @@ function laneDisplayMeta(
       : {
           kind: "agent",
           label: agentLabel,
-          title: agentTooltipDetail(agentSnapshot),
+          title: participantTooltipDetail(participantSnapshot) ?? agentTooltipDetail(agentSnapshot),
           agent: lane.agent,
         };
 
@@ -1599,6 +1604,25 @@ function agentTooltipDetail(snapshot: Record<string, unknown> | null): string | 
       stringField(agentInfo, "mode"),
       stringField(agentInfo, "effort"),
     ].filter((item): item is string => Boolean(item)).join(" / ");
+  return readableTooltipText(detail);
+}
+
+function participantSnapshotLabel(participant: Record<string, unknown> | null): string | null {
+  if (!participant) return null;
+  const agent = stringField(participant, "agent");
+  const agentLabel = agent && agent in AGENT_LABEL ? AGENT_LABEL[agent as Agent] : agent;
+  const model = stringField(participant, "model");
+  return [agentLabel, model].filter((item): item is string => Boolean(item)).join(" / ") || null;
+}
+
+function participantTooltipDetail(participant: Record<string, unknown> | null): string | null {
+  if (!participant) return null;
+  const detail = [
+    stringField(participant, "model"),
+    stringField(participant, "effort"),
+    stringField(participant, "permissionMode"),
+    stringField(participant, "participantId"),
+  ].filter((item): item is string => Boolean(item)).join(" / ");
   return readableTooltipText(detail);
 }
 

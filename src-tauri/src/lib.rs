@@ -39,7 +39,7 @@ use models::{
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
     RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus,
-    ThreadChatSummaryInfo, ThreadInfo, ThreadKind, ThreadReplayInfo, WorkflowInfo,
+    ThreadAgentInfo, ThreadChatSummaryInfo, ThreadInfo, ThreadKind, ThreadReplayInfo, WorkflowInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -177,6 +177,7 @@ struct UpdateAssistantRequest {
 struct CreatePlanTaskRequest {
     thread_stage_id: Option<String>,
     assistant_id: Option<String>,
+    agent_participant_id: Option<String>,
     target_agent: Agent,
     stage_snapshot_json: Option<String>,
     assistant_snapshot_json: Option<String>,
@@ -773,6 +774,7 @@ fn create_thread(
     description: Option<String>,
     kind: Option<ThreadKind>,
     assistant_ids: Option<Vec<String>>,
+    agent_participants: Option<Vec<ThreadAgentInfo>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ThreadInfo, String> {
@@ -783,6 +785,7 @@ fn create_thread(
             description.as_deref(),
             kind.unwrap_or_default(),
             assistant_ids.as_deref().unwrap_or(&[]),
+            agent_participants.as_deref().unwrap_or(&[]),
         )
         .map_err(|e| e.to_string())?;
     emit_threads_updated(
@@ -801,6 +804,7 @@ fn update_thread(
     enabled: Option<bool>,
     kind: Option<ThreadKind>,
     assistant_ids: Option<Vec<String>>,
+    agent_participants: Option<Vec<ThreadAgentInfo>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ThreadInfo, String> {
@@ -813,6 +817,7 @@ fn update_thread(
             enabled,
             kind,
             assistant_ids.as_deref(),
+            agent_participants.as_deref(),
         )
         .map_err(|e| e.to_string())?;
     emit_threads_updated(
@@ -847,6 +852,7 @@ fn create_plan_round(
         .map(|task| NewPlanTask {
             thread_stage_id: task.thread_stage_id.as_deref(),
             assistant_id: task.assistant_id.as_deref(),
+            agent_participant_id: task.agent_participant_id.as_deref(),
             target_agent: task.target_agent,
             stage_snapshot_json: task.stage_snapshot_json.as_deref(),
             assistant_snapshot_json: task.assistant_snapshot_json.as_deref(),

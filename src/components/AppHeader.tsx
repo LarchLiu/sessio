@@ -1,6 +1,5 @@
-import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, Search, type LucideIcon } from "lucide-react";
-import type { ComponentType } from "react";
-import type { MemoryBackendStatus, ProjectInfo, SessionInfo } from "../api";
+import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, type LucideIcon } from "lucide-react";
+import type { ProjectInfo, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
 import { AgentGlyph } from "./AgentIcon";
 import Tooltip from "./Tooltip";
@@ -19,18 +18,8 @@ interface AppHeaderProps {
     partial: boolean;
   } | null;
   metaPopoverOpen: boolean;
-  memoryBackendStatus: MemoryBackendStatus | null;
-  memoryBackendMissing: boolean;
-  projectCount: number;
   onOpenSidebar: () => void;
   onToggleMetaPopover: () => void;
-  onOpenSearch: () => void;
-  onRefreshMemoryBackend: () => Promise<void> | void;
-  MemoryBackendMissingButton: ComponentType<{
-    status: MemoryBackendStatus;
-    placement: "bottom";
-    onRefresh: () => Promise<void> | void;
-  }>;
 }
 
 export default function AppHeader({
@@ -43,14 +32,8 @@ export default function AppHeader({
   projectContext,
   activeMessageMeta,
   metaPopoverOpen,
-  memoryBackendStatus,
-  memoryBackendMissing,
-  projectCount,
   onOpenSidebar,
   onToggleMetaPopover,
-  onOpenSearch,
-  onRefreshMemoryBackend,
-  MemoryBackendMissingButton,
 }: AppHeaderProps) {
   const { t } = useI18n();
 
@@ -132,27 +115,7 @@ export default function AppHeader({
           <HeaderContextTitle title={contextTitle} project={projectContext} />
         ) : null}
       </div>
-      <div className="flex h-full items-center justify-self-end" data-tauri-drag-region="false">
-        {memoryBackendMissing && memoryBackendStatus ? (
-          <MemoryBackendMissingButton
-            status={memoryBackendStatus}
-            placement="bottom"
-            onRefresh={onRefreshMemoryBackend}
-          />
-        ) : (
-          <Tooltip content={t("header.search")} placement="bottom">
-            <button
-              type="button"
-              aria-label={t("header.search")}
-              onClick={onOpenSearch}
-              disabled={projectCount === 0}
-              className="p-1 text-ink/55 hover:text-ink disabled:opacity-35 disabled:hover:text-ink/55 transition rounded-md"
-            >
-              <Search className="w-4 h-4" />
-            </button>
-          </Tooltip>
-        )}
-      </div>
+      <div className="flex h-full items-center justify-self-end" data-tauri-drag-region="false" />
       <div className="absolute top-0 right-0 z-20">
         <WindowControls />
       </div>

@@ -5,7 +5,7 @@ use super::{
     final_task_output, short_hash, summarize_task_output, AstraOrchestration, AstraRun,
     AstraRunIntent, AstraTaskCompletion, AstraTaskProposal, AstraTaskResultStatus, AstraTaskRisk,
 };
-use crate::models::{Agent, PlanRoundMode, ThreadInfo, ThreadKind};
+use crate::models::{PlanRoundMode, ThreadAgentInfo, ThreadInfo, ThreadKind};
 
 const BRAINSTORM_BACKEND_TYPE: &str = "brainstorm_backend";
 
@@ -72,9 +72,9 @@ fn brainstorm_orchestration(
         let tasks = brainstorm_divergence_tasks(run, thread, user_prompt, round_index, None, false);
         return if tasks.is_empty() {
             AstraOrchestration {
-                summary: "Brainstorm needs at least one thread assistant.".to_string(),
+                summary: "Brainstorm needs at least one agent participant.".to_string(),
                 run_intent: AstraRunIntent::WaitForHuman,
-                reason: "brainstorm_no_assistants".to_string(),
+                reason: "brainstorm_no_participants".to_string(),
                 mode: None,
                 tasks,
                 diagnostics: Vec::new(),
@@ -82,7 +82,7 @@ fn brainstorm_orchestration(
         } else {
             AstraOrchestration {
                 summary: format!(
-                    "Brainstorm round {} asks {} assistant{} for independent opinions.",
+                    "Brainstorm round {} asks {} participant{} for independent opinions.",
                     round_index + 1,
                     tasks.len(),
                     if tasks.len() == 1 { "" } else { "s" }
@@ -116,10 +116,10 @@ fn brainstorm_orchestration(
     if tasks.is_empty() {
         return AstraOrchestration {
             summary:
-                "Brainstorm shared board is ready, but no assistants are available for synthesis."
+                "Brainstorm shared board is ready, but no participants are available for synthesis."
                     .to_string(),
             run_intent: AstraRunIntent::WaitForHuman,
-            reason: "brainstorm_no_synthesis_assistants".to_string(),
+            reason: "brainstorm_no_synthesis_participants".to_string(),
             mode: None,
             tasks,
             diagnostics: vec![board],
@@ -145,18 +145,18 @@ fn brainstorm_divergence_tasks(
     shared_board: Option<&Value>,
     synthesis_round: bool,
 ) -> Vec<AstraTaskProposal> {
-    let mut assistants = thread.assistants.clone();
-    assistants.sort_by_key(|assistant| assistant.order);
-    assistants
+    let mut participants = thread.agent_participants.clone();
+    participants.sort_by_key(|participant| participant.order);
+    participants
         .into_iter()
-        .filter_map(|assistant| {
-            let target_agent = Agent::from_db_str(&assistant.agent.id)?;
+        .map(|participant| {
+            let target_agent = participant.agent;
             let task_id = format!(
                 "task-{}",
                 short_hash(&format!(
                     "{}:{}:{}:{}:{}",
                     run.thread_id,
-                    assistant.assistant_id,
+                    participant.participant_id,
                     target_agent.as_str(),
                     round_index,
                     if synthesis_round { "synthesis" } else { "diverge" }
@@ -165,18 +165,19 @@ fn brainstorm_divergence_tasks(
             let prompt = brainstorm_task_prompt(
                 thread,
                 user_prompt,
-                &assistant.name,
+                &participant,
                 shared_board,
                 synthesis_round,
             );
-            Some(AstraTaskProposal {
+            AstraTaskProposal {
                 id: task_id,
                 plan_task_id: None,
-                assistant_id: Some(assistant.assistant_id),
+                assistant_id: None,
+                agent_participant_id: Some(participant.participant_id.clone()),
                 title: if synthesis_round {
-                    format!("{} brainstorm synthesis", assistant.name)
+                    format!("{} brainstorm synthesis", participant_label(&participant))
                 } else {
-                    format!("{} brainstorm opinion", assistant.name)
+                    format!("{} brainstorm opinion", participant_label(&participant))
                 },
                 target_stage_id: None,
                 target_agent,
@@ -189,7 +190,7 @@ fn brainstorm_divergence_tasks(
                         .to_string()
                 },
                 risk: AstraTaskRisk::Low,
-            })
+            }
         })
         .collect()
 }
@@ -197,7 +198,7 @@ fn brainstorm_divergence_tasks(
 fn brainstorm_task_prompt(
     thread: &ThreadInfo,
     user_prompt: Option<&str>,
-    assistant_name: &str,
+    participant: &ThreadAgentInfo,
     shared_board: Option<&Value>,
     synthesis_round: bool,
 ) -> String {
@@ -216,7 +217,18 @@ fn brainstorm_task_prompt(
     if let Some(prompt) = user_prompt.map(str::trim).filter(|value| !value.is_empty()) {
         lines.push(format!("User brainstorm instruction: {prompt}"));
     }
-    lines.push(format!("Assistant perspective: {assistant_name}"));
+    lines.push(format!("Participant: {}", participant_label(participant)));
+    lines.push(format!("Participant id: {}", participant.participant_id));
+    lines.push(format!("Runtime agent: {}", participant.agent.as_str()));
+    if !participant.model.trim().is_empty() {
+        lines.push(format!("Model: {}", participant.model));
+    }
+    if !participant.effort.trim().is_empty() {
+        lines.push(format!("Effort: {}", participant.effort));
+    }
+    if !participant.permission_mode.trim().is_empty() {
+        lines.push(format!("Permission mode: {}", participant.permission_mode));
+    }
     lines.push(String::new());
     if let Some(board) = shared_board {
         lines.push("## Shared board from previous round".to_string());
@@ -227,9 +239,17 @@ fn brainstorm_task_prompt(
     if synthesis_round {
         lines.push("Use the shared board above as explicit context. Synthesize the candidates, consensus, disagreements, risks, and a recommendation. Extend or challenge the board where useful.".to_string());
     } else {
-        lines.push("Produce an independent opinion. Offer concrete ideas, rationale, risks, conflicts, and questions. Do not wait for other assistants.".to_string());
+        lines.push("Produce an independent opinion. Offer concrete ideas, rationale, risks, conflicts, and questions. Do not wait for other participants.".to_string());
     }
     lines.join("\n")
+}
+
+fn participant_label(participant: &ThreadAgentInfo) -> String {
+    if participant.model.trim().is_empty() {
+        participant.agent.as_str().to_string()
+    } else {
+        format!("{} {}", participant.agent.as_str(), participant.model)
+    }
 }
 
 fn shared_board_value(
@@ -243,7 +263,8 @@ fn shared_board_value(
             let output = summarize_task_output(&final_task_output(&completion.result.output));
             json!({
                 "taskId": completion.task.id,
-                "assistantId": completion.task.assistant_id,
+                "participantId": completion.task.agent_participant_id,
+                "agent": completion.task.target_agent.as_str(),
                 "title": completion.task.title,
                 "status": completion.result.status.as_str(),
                 "opinion": output,
@@ -299,7 +320,7 @@ fn has_board_injection(completions: &[AstraTaskCompletion]) -> bool {
 mod tests {
     use super::*;
     use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
-    use crate::models::{AssistantAgentInfo, ThreadAssistantInfo};
+    use crate::models::{Agent, ThreadAgentInfo};
 
     fn thread() -> ThreadInfo {
         ThreadInfo {
@@ -312,34 +333,27 @@ mod tests {
             enabled: true,
             created_at: 1,
             updated_at: 1,
-            assistants: vec![
-                ThreadAssistantInfo {
-                    assistant_id: "assistant-a".to_string(),
-                    name: "Alpha".to_string(),
-                    color: None,
-                    agent: AssistantAgentInfo {
-                        id: "codex".to_string(),
-                        name: "Codex".to_string(),
-                        model: "gpt-5.3-codex".to_string(),
-                        mode: "read-write".to_string(),
-                        effort: "medium".to_string(),
-                    },
-                    system_prompt: None,
+            assistants: Vec::new(),
+            agent_participants: vec![
+                ThreadAgentInfo {
+                    participant_id: "participant-a".to_string(),
+                    agent: Agent::Codex,
+                    model: "gpt-5.3-codex".to_string(),
+                    effort: "medium".to_string(),
+                    permission_mode: "read-write".to_string(),
                     order: 0,
+                    created_at: 1,
+                    updated_at: 1,
                 },
-                ThreadAssistantInfo {
-                    assistant_id: "assistant-b".to_string(),
-                    name: "Beta".to_string(),
-                    color: None,
-                    agent: AssistantAgentInfo {
-                        id: "claude".to_string(),
-                        name: "Claude".to_string(),
-                        model: "claude-sonnet-4-5".to_string(),
-                        mode: "read-only".to_string(),
-                        effort: "medium".to_string(),
-                    },
-                    system_prompt: None,
+                ThreadAgentInfo {
+                    participant_id: "participant-b".to_string(),
+                    agent: Agent::Claude,
+                    model: "claude-sonnet-4-5".to_string(),
+                    effort: "medium".to_string(),
+                    permission_mode: "read-only".to_string(),
                     order: 1,
+                    created_at: 1,
+                    updated_at: 1,
                 },
             ],
             stages: Vec::new(),
@@ -395,6 +409,11 @@ mod tests {
         assert_eq!(orchestration.run_intent, AstraRunIntent::Continue);
         assert_eq!(orchestration.mode, Some(PlanRoundMode::Parallel));
         assert_eq!(orchestration.tasks.len(), 2);
+        assert_eq!(
+            orchestration.tasks[0].agent_participant_id.as_deref(),
+            Some("participant-a")
+        );
+        assert!(orchestration.tasks[0].assistant_id.is_none());
         assert!(orchestration.diagnostics.is_empty());
         assert!(orchestration.tasks[0]
             .prompt
@@ -415,6 +434,7 @@ mod tests {
         assert_eq!(next.run_intent, AstraRunIntent::Continue);
         assert_eq!(next.reason, "brainstorm_shared_board_ready");
         assert_eq!(next.diagnostics[0]["kind"], "brainstorm_shared_board");
+        assert_eq!(next.diagnostics[0]["opinions"][0]["participantId"], "participant-a");
         assert!(next
             .tasks
             .iter()

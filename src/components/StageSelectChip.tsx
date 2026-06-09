@@ -38,7 +38,7 @@ const StageSelectChip = forwardRef<HTMLDivElement, StageSelectChipProps>(functio
         : !selectable
           ? "cursor-not-allowed border-ink/10 bg-surface-panel text-ink/25 opacity-55"
           : selected
-            ? "border-ink/25 bg-ink/10 text-ink/75"
+            ? "border-ink/18 bg-ink/[0.055] text-ink/70"
             : "border-ink/10 bg-surface-panel text-ink/45 hover:bg-ink/5 hover:text-ink/65";
 
   return (
@@ -59,7 +59,7 @@ const StageSelectChip = forwardRef<HTMLDivElement, StageSelectChipProps>(functio
       >
         {projectStageIcon(stage)}
         <span className="max-w-[140px] truncate">{label}</span>
-        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/55 bg-ink/8 text-ink/80">
+        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/50 bg-ink/[0.045] text-ink/75">
           {selected && <Check className="h-3 w-3" />}
         </span>
       </button>

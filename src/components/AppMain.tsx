@@ -202,6 +202,24 @@ export default function AppMain({
         dispatchLiveEvent={dispatchLiveEvent}
         onError={onError}
         onPendingSession={addPendingSession}
+        onThreadCreated={(projectGroup, thread) => {
+          setNewChatSnapshot(null);
+          setSelected(null);
+          setSelectedProject(null);
+          setSelectedThread({
+            projectId: projectGroup.project.id,
+            threadId: thread.id,
+            goal: thread.goal,
+          });
+          setNewChatProjectKey(projectGroup.key);
+          setDetailMode("threadMultiSessionChat");
+          setFilter({
+            kind: "project",
+            key: projectFilterKey(projectGroup.project),
+            label: projectGroup.label,
+          });
+          void refreshSessions();
+        }}
       />
     );
   }

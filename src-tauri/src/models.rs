@@ -559,6 +559,21 @@ pub struct ThreadAssistantInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThreadAgentInfo {
+    pub participant_id: String,
+    pub agent: Agent,
+    pub model: String,
+    pub effort: String,
+    pub permission_mode: String,
+    pub order: i64,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadInfo {
     pub id: String,
     pub project_id: String,
@@ -572,6 +587,8 @@ pub struct ThreadInfo {
     pub updated_at: i64,
     #[serde(default)]
     pub assistants: Vec<ThreadAssistantInfo>,
+    #[serde(default)]
+    pub agent_participants: Vec<ThreadAgentInfo>,
     #[serde(default)]
     pub stages: Vec<StageInfo>,
     #[serde(default)]
@@ -851,6 +868,7 @@ pub struct PlanTaskInfo {
     pub round_id: String,
     pub thread_stage_id: Option<String>,
     pub assistant_id: Option<String>,
+    pub agent_participant_id: Option<String>,
     pub target_agent: Agent,
     pub stage_snapshot_json: Option<String>,
     pub assistant_snapshot_json: Option<String>,

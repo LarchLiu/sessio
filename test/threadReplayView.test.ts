@@ -372,6 +372,30 @@ describe("replay sources", () => {
     expect(replaySourceTitle(item)).toContain("Assistant snapshot: Builder / gpt");
     expect(replaySourceTitle(item)).toContain("Agent snapshot: Codex / gpt-5");
   });
+
+  it("prefers agent participant snapshot detail for agent-based task sources", () => {
+    const item = source({
+      kind: "plan_task",
+      planRoundId: "round-1",
+      planTaskId: "task-1",
+      label: "Brainstorm opinion",
+      agentSnapshotJson: JSON.stringify({
+        agent: "codex",
+        participant: {
+          participantId: "participant-1",
+          agent: "codex",
+          model: "gpt-5.3-codex",
+          effort: "high",
+          permissionMode: "workspace-write",
+        },
+        agentInfo: { displayName: "Codex", model: "fallback-model" },
+      }),
+    });
+
+    expect(replaySourceTitle(item)).toContain(
+      "Participant snapshot: Codex / gpt-5.3-codex / high / workspace-write",
+    );
+  });
 });
 
 function thread(kind: ThreadInfo["kind"]): Pick<ThreadInfo, "id" | "kind"> {
@@ -401,6 +425,7 @@ function planTask(patch: Partial<PlanTaskInfo>): PlanTaskInfo {
     roundId: "round-1",
     threadStageId: null,
     assistantId: null,
+    agentParticipantId: null,
     targetAgent: "codex",
     stageSnapshotJson: null,
     assistantSnapshotJson: null,

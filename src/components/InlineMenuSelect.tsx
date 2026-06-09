@@ -49,6 +49,7 @@ export interface InlineMenuSelectProps {
   minMenuWidth?: number;
   emptyContent?: ReactNode;
   portalZIndex?: number;
+  disabled?: boolean;
 }
 
 export default function InlineMenuSelect({
@@ -64,6 +65,7 @@ export default function InlineMenuSelect({
   minMenuWidth = 180,
   emptyContent,
   portalZIndex = 80,
+  disabled = false,
 }: InlineMenuSelectProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<MenuPosition | null>(null);
@@ -171,6 +173,10 @@ export default function InlineMenuSelect({
     };
   }, [open, updatePosition]);
 
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
   useLayoutEffect(() => {
     if (!open || !pos) return;
     selectedItemRef.current?.scrollIntoView({ block: "center" });
@@ -187,9 +193,11 @@ export default function InlineMenuSelect({
         ref={anchorRef}
         type="button"
         aria-label={ariaLabel}
+        disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         className={
           "group inline-flex h-7 max-w-[128px] shrink-0 items-center gap-1 border-r border-ink/10 pr-2 text-body-sm text-ink/70 outline-none hover:text-ink transition " +
+          (disabled ? "cursor-not-allowed opacity-45 hover:text-ink/70 " : "") +
           className
         }
       >

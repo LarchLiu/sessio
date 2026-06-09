@@ -862,6 +862,7 @@ fn sanitize_astra_pi_acp_task(
         id,
         plan_task_id: None,
         assistant_id: Some(assistant_id),
+        agent_participant_id: None,
         title,
         target_stage_id: None,
         target_agent,
