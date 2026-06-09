@@ -2364,6 +2364,16 @@ fn delegated_runtime_cleanup_diagnostics(
             ),
         ));
     }
+    if report.force_detached {
+        diagnostics.push(delegated_lifecycle_diagnostic(
+            "runtime_force_detached",
+            task_id,
+            live_runtime_session_id,
+            session_id,
+            attempt_count,
+            "runtime session was detached from Astra coordination after cancellation; ACP worker termination is best-effort",
+        ));
+    }
     diagnostics
 }
 
@@ -4280,6 +4290,7 @@ mod tests {
             cancel_error: Some("cancel failed".to_string()),
             dispose_error: Some("dispose failed".to_string()),
             timed_out: true,
+            force_detached: true,
         };
 
         let diagnostics = delegated_runtime_cleanup_diagnostics(
@@ -4300,6 +4311,7 @@ mod tests {
                 "runtime_cancel_failed",
                 "runtime_dispose_failed",
                 "runtime_cleanup_timed_out",
+                "runtime_force_detached",
             ]
         );
     }

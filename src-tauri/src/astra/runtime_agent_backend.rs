@@ -222,14 +222,19 @@ fn cleanup_agent_session(runtime: &RuntimeManager, backend_type: &str, session_i
         session_id,
         Duration::from_millis(ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS),
     );
-    if report.cancel_error.is_some() || report.dispose_error.is_some() || report.timed_out {
+    if report.cancel_error.is_some()
+        || report.dispose_error.is_some()
+        || report.timed_out
+        || report.force_detached
+    {
         log::warn!(
-            "[astra:runtime-agent:cleanup] backend={} sessionId={} cancelError={:?} disposeError={:?} timedOut={}",
+            "[astra:runtime-agent:cleanup] backend={} sessionId={} cancelError={:?} disposeError={:?} timedOut={} forceDetached={}",
             backend_type,
             session_id,
             report.cancel_error,
             report.dispose_error,
-            report.timed_out
+            report.timed_out,
+            report.force_detached
         );
     }
 }

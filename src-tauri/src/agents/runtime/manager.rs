@@ -81,6 +81,7 @@ pub struct RuntimeCleanupReport {
     pub cancel_error: Option<String>,
     pub dispose_error: Option<String>,
     pub timed_out: bool,
+    pub force_detached: bool,
 }
 
 const LIVE_RUNTIME_SNAPSHOT_THROTTLE_MS: u64 = 160;
@@ -340,6 +341,7 @@ impl RuntimeManager {
                 report.cancel_error = Some(error.to_string());
             }
             report.cancelled_turn_id = Some(turn_id);
+            report.force_detached = true;
         }
 
         if let Err(error) = self.dispose_session_silent(sessio_runtime_session_id) {
