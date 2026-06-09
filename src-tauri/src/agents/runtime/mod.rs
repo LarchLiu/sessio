@@ -7,4 +7,4 @@ pub mod pi_session_store;
 pub mod registry;
 pub mod types;
 
-pub use manager::RuntimeManager;
+pub use manager::{RuntimeCleanupReport, RuntimeManager};

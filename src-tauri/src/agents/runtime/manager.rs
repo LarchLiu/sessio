@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use tauri::{AppHandle, Emitter};
@@ -72,6 +72,15 @@ struct PendingRuntimeSnapshot {
 pub(crate) enum RuntimePermissionDecision {
     Selected { option_id: String },
     Cancelled,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeCleanupReport {
+    pub session_existed: bool,
+    pub cancelled_turn_id: Option<String>,
+    pub cancel_error: Option<String>,
+    pub dispose_error: Option<String>,
+    pub timed_out: bool,
 }
 
 const LIVE_RUNTIME_SNAPSHOT_THROTTLE_MS: u64 = 160;
@@ -220,17 +229,124 @@ impl RuntimeManager {
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?
             .contains_key(sessio_runtime_session_id);
-        if should_emit {
+
+        let emit_error = if should_emit {
             self.emit(AgentRuntimeEventPayload::SessionEnded {
                 sessio_runtime_session_id: sessio_runtime_session_id.to_string(),
-            })?;
-        }
-        self.inner
+            })
+            .err()
+        } else {
+            None
+        };
+
+        let remove_error = self
+            .inner
             .sessions
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?
-            .remove(sessio_runtime_session_id);
+            .remove(sessio_runtime_session_id)
+            .map(|_| ())
+            .ok_or_else(|| anyhow::anyhow!("runtime session was already removed"))
+            .err();
+
+        if let Some(error) = emit_error {
+            return Err(error);
+        }
+        if should_emit {
+            if let Some(error) = remove_error {
+                return Err(error);
+            }
+        }
         Ok(())
+    }
+
+    pub fn wait_for_session_startup(
+        &self,
+        sessio_runtime_session_id: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let (status, startup_error) = {
+                let sessions = self
+                    .inner
+                    .sessions
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+                let state = sessions.get(sessio_runtime_session_id).with_context(|| {
+                    format!("unknown runtime session: {sessio_runtime_session_id}")
+                })?;
+                (state.handle.status, state.startup_error.clone())
+            };
+
+            match status {
+                RuntimeSessionStatus::Starting => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        bail!(
+                            "runtime session startup timed out after {}ms: {}",
+                            timeout.as_millis(),
+                            sessio_runtime_session_id
+                        );
+                    }
+                    let remaining = deadline.saturating_duration_since(now);
+                    std::thread::sleep(remaining.min(Duration::from_millis(50)));
+                }
+                RuntimeSessionStatus::Errored
+                | RuntimeSessionStatus::Disconnected
+                | RuntimeSessionStatus::Ended
+                | RuntimeSessionStatus::Completed => {
+                    let detail = startup_error
+                        .as_deref()
+                        .unwrap_or("runtime session is not active");
+                    bail!(
+                        "runtime session {} failed during startup while {:?}: {}",
+                        sessio_runtime_session_id,
+                        status,
+                        detail
+                    );
+                }
+                RuntimeSessionStatus::Active
+                | RuntimeSessionStatus::Idle
+                | RuntimeSessionStatus::Cancelling => return Ok(()),
+            }
+        }
+    }
+
+    pub fn cleanup_session_bounded(
+        &self,
+        sessio_runtime_session_id: &str,
+        timeout: Duration,
+    ) -> RuntimeCleanupReport {
+        let started = Instant::now();
+        let mut report = RuntimeCleanupReport::default();
+        let active_turn_id = match self.inner.sessions.lock() {
+            Ok(sessions) => match sessions.get(sessio_runtime_session_id) {
+                Some(state) => {
+                    report.session_existed = true;
+                    state.active_turn_id.clone()
+                }
+                None => None,
+            },
+            Err(_) => {
+                report.dispose_error = Some("runtime session lock poisoned".to_string());
+                report.timed_out = started.elapsed() >= timeout;
+                return report;
+            }
+        };
+
+        if let Some(turn_id) = active_turn_id {
+            if let Err(error) = self.cancel_turn(sessio_runtime_session_id, &turn_id) {
+                report.cancel_error = Some(error.to_string());
+            }
+            report.cancelled_turn_id = Some(turn_id);
+        }
+
+        if let Err(error) = self.dispose_session_silent(sessio_runtime_session_id) {
+            report.dispose_error = Some(error.to_string());
+        }
+        report.timed_out = started.elapsed() >= timeout;
+        report
     }
 
     pub fn start_session(&self, req: StartAgentSession) -> Result<AgentSessionHandle> {

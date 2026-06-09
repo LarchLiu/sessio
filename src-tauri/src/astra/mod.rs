@@ -14,7 +14,7 @@ use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, RuntimeMetadata,
     StartAgentSession,
 };
-use crate::agents::runtime::RuntimeManager;
+use crate::agents::runtime::{RuntimeCleanupReport, RuntimeManager};
 use crate::models::{
     Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo,
@@ -59,6 +59,11 @@ const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 const ENABLE_ASTRA_PI_SESSION_PERSISTENCE: bool = false;
 const MAX_ASTRA_RUN_DIAGNOSTICS: usize = 100;
 const ASTRA_PI_DELEGATED_RUNTIME_LIMIT: usize = 2;
+const ASTRA_DELEGATED_QUEUE_TIMEOUT_MS: u64 = 60_000;
+pub(crate) const ASTRA_RUNTIME_STARTUP_TIMEOUT_MS: u64 = 60_000;
+const ASTRA_DELEGATED_STARTUP_TIMEOUT_MS: u64 = ASTRA_RUNTIME_STARTUP_TIMEOUT_MS;
+const ASTRA_DELEGATED_EXECUTION_TIMEOUT_MS: u64 = 60 * 60 * 1_000;
+pub(crate) const ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS: u64 = 5_000;
 
 fn trim_astra_run_diagnostics(values: &mut Vec<Value>) {
     if values.len() > MAX_ASTRA_RUN_DIAGNOSTICS {
@@ -204,11 +209,14 @@ impl RuntimeResourceLimiter {
     fn acquire(
         &self,
         agent: Agent,
+        queue_timeout: Duration,
         mut is_still_active: impl FnMut() -> Result<bool>,
     ) -> Result<Option<Agent>> {
         let Some(limit) = delegated_runtime_limit(agent) else {
             return Ok(None);
         };
+        let queued_at = Instant::now();
+        let deadline = queued_at + queue_timeout;
 
         loop {
             if !is_still_active()? {
@@ -228,9 +236,18 @@ impl RuntimeResourceLimiter {
                 return Ok(Some(agent));
             }
 
+            let now = Instant::now();
+            if now >= deadline {
+                bail!(
+                    "Astra delegated runtime queue timed out after {}ms for {}",
+                    queue_timeout.as_millis(),
+                    agent.as_str()
+                );
+            }
+            let remaining = deadline.saturating_duration_since(now);
             let (guard, _) = self
                 .waiters
-                .wait_timeout(active, Duration::from_millis(250))
+                .wait_timeout(active, remaining.min(Duration::from_millis(250)))
                 .map_err(|_| anyhow::anyhow!("Astra runtime limiter lock poisoned"))?;
             drop(guard);
         }
@@ -663,7 +680,7 @@ impl AstraService {
             Err(_) => Vec::new(),
         };
         for session_id in &delegated_sessions {
-            self.abort_delegated_session(session_id);
+            self.abort_delegated_session(session_id, "Astra run was cancelled");
         }
         log::info!(
             "[astra:run:cancel] runId={} threadId={} delegatedSessions={}",
@@ -757,9 +774,11 @@ impl AstraService {
         run: &AstraRun,
         task: &AstraTaskProposal,
     ) -> Result<Option<Agent>> {
-        self.inner.runtime_limiter.acquire(task.target_agent, || {
-            self.load_run(&run.run_id).map(|run| run.status.active())
-        })
+        self.inner.runtime_limiter.acquire(
+            task.target_agent,
+            Duration::from_millis(ASTRA_DELEGATED_QUEUE_TIMEOUT_MS),
+            || self.load_run(&run.run_id).map(|run| run.status.active()),
+        )
     }
 
     fn release_delegated_runtime_resource(&self, runtime_resource_agent: Option<Agent>) {
@@ -856,11 +875,32 @@ impl AstraService {
             options,
         };
         hydrate_start_request_for_astra(&mut req, self.inner.store.as_ref())?;
-        let runtime_resource_agent = self.acquire_delegated_runtime_resource(run, task)?;
+        let runtime_resource_agent = match self.acquire_delegated_runtime_resource(run, task) {
+            Ok(agent) => agent,
+            Err(error) => {
+                let message = error.to_string();
+                self.record_dispatch_failure_result(
+                    run,
+                    task,
+                    attempt.attempt_count,
+                    delegated_dispatch_error_code(&message),
+                    &message,
+                );
+                return Err(error);
+            }
+        };
         let handle = match self.inner.runtime.start_session(req) {
             Ok(handle) => handle,
             Err(error) => {
+                let message = error.to_string();
                 self.release_delegated_runtime_resource(runtime_resource_agent);
+                self.record_dispatch_failure_result(
+                    run,
+                    task,
+                    attempt.attempt_count,
+                    "start_session_failed",
+                    &message,
+                );
                 return Err(error);
             }
         };
@@ -872,46 +912,16 @@ impl AstraService {
             stage_context,
             runtime_resource_agent,
         ) {
-            let _ = self
-                .inner
-                .runtime
-                .dispose_session_silent(&handle.sessio_runtime_session_id);
+            let _ = self.inner.runtime.cleanup_session_bounded(
+                &handle.sessio_runtime_session_id,
+                Duration::from_millis(ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS),
+            );
             self.release_delegated_runtime_resource(runtime_resource_agent);
             return Err(error);
         }
-        if is_persistable_agent_session_id(&handle.agent_runtime_session_id) {
-            if let Err(error) = self.record_ready_delegated_session(
-                &run.run_id,
-                task.target_agent,
-                &task.id,
-                attempt.thread_stage_id,
-                &handle.agent_runtime_session_id,
-                &handle.sessio_runtime_session_id,
-            ) {
-                let message = error.to_string();
-                log::warn!(
-                    "[astra:task:delegated-ready-failed] runId={} taskId={} runtimeSessionId={} message={}",
-                    run.run_id,
-                    task.id,
-                    handle.sessio_runtime_session_id,
-                    message
-                );
-                self.record_run_diagnostic(
-                    &run.run_id,
-                    delegated_lifecycle_diagnostic(
-                        "persisted_session_link_failed",
-                        &task.id,
-                        &handle.sessio_runtime_session_id,
-                        Some(&handle.agent_runtime_session_id),
-                        attempt.attempt_count,
-                        &message,
-                    ),
-                );
-            }
-        }
-        // Register the result waiter before sending the prompt: a fast (or
-        // synchronous fake) turn can reach a terminal state inside send_input,
-        // so the waiter must already be in place or its wakeup is lost.
+        // Register the result waiter before startup wait and before sending the
+        // prompt: fast failures and synchronous fake turns can otherwise reach
+        // a terminal state before the batch waiter exists.
         if let Some(waiter) = task_waiter {
             if let Err(error) = self
                 .inner
@@ -931,6 +941,55 @@ impl AstraService {
                     Some(format!("task waiter registration failed: {message}")),
                 )?;
                 return Err(error);
+            }
+        }
+        if let Err(error) = self.inner.runtime.wait_for_session_startup(
+            &handle.sessio_runtime_session_id,
+            Duration::from_millis(ASTRA_DELEGATED_STARTUP_TIMEOUT_MS),
+        ) {
+            let message = error.to_string();
+            self.finish_delegated_task(
+                &handle.sessio_runtime_session_id,
+                None,
+                AstraTaskResultStatus::Errored,
+                String::new(),
+                Some(format!("runtime startup failed: {message}")),
+            )?;
+            return Err(error);
+        }
+        let agent_runtime_session_id = self
+            .inner
+            .runtime
+            .agent_runtime_session_id_for_session(&handle.sessio_runtime_session_id)
+            .unwrap_or_else(|| handle.agent_runtime_session_id.clone());
+        if is_persistable_agent_session_id(&agent_runtime_session_id) {
+            if let Err(error) = self.record_ready_delegated_session(
+                &run.run_id,
+                task.target_agent,
+                &task.id,
+                attempt.thread_stage_id,
+                &agent_runtime_session_id,
+                &handle.sessio_runtime_session_id,
+            ) {
+                let message = error.to_string();
+                log::warn!(
+                    "[astra:task:delegated-ready-failed] runId={} taskId={} runtimeSessionId={} message={}",
+                    run.run_id,
+                    task.id,
+                    handle.sessio_runtime_session_id,
+                    message
+                );
+                self.record_run_diagnostic(
+                    &run.run_id,
+                    delegated_lifecycle_diagnostic(
+                        "persisted_session_link_failed",
+                        &task.id,
+                        &handle.sessio_runtime_session_id,
+                        Some(&agent_runtime_session_id),
+                        attempt.attempt_count,
+                        &message,
+                    ),
+                );
             }
         }
         if !initial_prompt.trim().is_empty() {
@@ -1029,7 +1088,10 @@ impl AstraService {
                 Ok(handle) => handle,
                 Err(error) => {
                     for handle in &handles {
-                        self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                        self.abort_delegated_session(
+                            &handle.sessio_runtime_session_id,
+                            "batch aborted after delegated dispatch failure",
+                        );
                     }
                     return Err(error);
                 }
@@ -1049,7 +1111,10 @@ impl AstraService {
                     Some(format!("runtime placeholder link failed: {message}")),
                 )?;
                 for handle in &handles {
-                    self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                    self.abort_delegated_session(
+                        &handle.sessio_runtime_session_id,
+                        "batch aborted after runtime placeholder link failure",
+                    );
                 }
                 return Err(error);
             }
@@ -1070,27 +1135,55 @@ impl AstraService {
                 handle.sessio_runtime_session_id,
                 attempt_count
             );
-            receivers.push((task.id.clone(), receiver));
+            receivers.push((
+                task.id.clone(),
+                handle.sessio_runtime_session_id.clone(),
+                receiver,
+            ));
             handles.push(handle);
         }
 
-        let deadline = Instant::now() + Duration::from_secs(60 * 60);
         let mut results = Vec::with_capacity(tasks.len());
-        for (task_id, receiver) in receivers {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or_else(|| Duration::from_secs(0));
-            match receiver.recv_timeout(remaining) {
+        for (task_id, sessio_runtime_session_id, receiver) in receivers {
+            match receiver.recv_timeout(Duration::from_millis(ASTRA_DELEGATED_EXECUTION_TIMEOUT_MS))
+            {
                 Ok(result) => results.push(result),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.finish_delegated_task(
+                        &sessio_runtime_session_id,
+                        None,
+                        AstraTaskResultStatus::Errored,
+                        String::new(),
+                        Some(format!(
+                            "delegated task execution timed out after {}ms",
+                            ASTRA_DELEGATED_EXECUTION_TIMEOUT_MS
+                        )),
+                    )?;
                     for handle in &handles {
-                        self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                        if handle.sessio_runtime_session_id != sessio_runtime_session_id {
+                            self.abort_delegated_session(
+                                &handle.sessio_runtime_session_id,
+                                "batch aborted after delegated task execution timeout",
+                            );
+                        }
                     }
                     bail!("delegated task timed out: {}", task_id)
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.finish_delegated_task(
+                        &sessio_runtime_session_id,
+                        None,
+                        AstraTaskResultStatus::Errored,
+                        String::new(),
+                        Some("delegated task waiter disconnected".to_string()),
+                    )?;
                     for handle in &handles {
-                        self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                        if handle.sessio_runtime_session_id != sessio_runtime_session_id {
+                            self.abort_delegated_session(
+                                &handle.sessio_runtime_session_id,
+                                "batch aborted after delegated task waiter disconnected",
+                            );
+                        }
                     }
                     bail!("delegated task waiter disconnected: {}", task_id)
                 }
@@ -1105,31 +1198,58 @@ impl AstraService {
     /// result, cancels any active turn (which also interrupts the real ACP
     /// agent), disposes the runtime session, and drops the task waiter so a
     /// blocked batch dispatch wait is released.
-    fn abort_delegated_session(&self, sessio_runtime_session_id: &str) {
-        let (turn_id, runtime_resource_agent) = match self.inner.delegated_sessions.lock() {
-            Ok(mut delegated) => match delegated.remove(sessio_runtime_session_id) {
-                Some(mut state) => {
-                    state.finished = true;
-                    (state.last_turn_id, state.runtime_resource_agent.take())
-                }
-                None => (None, None),
-            },
-            Err(_) => (None, None),
+    fn abort_delegated_session(&self, sessio_runtime_session_id: &str, reason: &str) {
+        if let Err(error) = self.finish_delegated_task(
+            sessio_runtime_session_id,
+            None,
+            AstraTaskResultStatus::Cancelled,
+            String::new(),
+            Some(reason.to_string()),
+        ) {
+            log::warn!(
+                "[astra:task:abort-failed] runtimeSessionId={} message={}",
+                sessio_runtime_session_id,
+                error
+            );
+            let _ = self.inner.runtime.cleanup_session_bounded(
+                sessio_runtime_session_id,
+                Duration::from_millis(ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS),
+            );
+        }
+    }
+
+    fn record_dispatch_failure_result(
+        &self,
+        run: &AstraRun,
+        task: &AstraTaskProposal,
+        attempt_count: u32,
+        code: &str,
+        message: &str,
+    ) {
+        let result = AstraTaskResult {
+            task_id: task.id.clone(),
+            thread_stage_id: task.target_stage_id.clone(),
+            sessio_runtime_session_id: String::new(),
+            turn_id: None,
+            status: AstraTaskResultStatus::Errored,
+            output: String::new(),
+            error: Some(message.to_string()),
+            attempt_count,
+            retry_limit_reached: false,
+            completed_at: now_ms(),
         };
-        if let Some(turn_id) = turn_id.as_deref() {
-            let _ = self
-                .inner
-                .runtime
-                .cancel_turn(sessio_runtime_session_id, turn_id);
+        if let Err(error) = self.record_task_result(&run.run_id, result) {
+            log::warn!(
+                "[astra:task:dispatch-result-failed] runId={} taskId={} message={}",
+                run.run_id,
+                task.id,
+                error
+            );
         }
-        let _ = self
-            .inner
-            .runtime
-            .dispose_session_silent(sessio_runtime_session_id);
-        self.release_delegated_runtime_resource(runtime_resource_agent);
-        if let Ok(mut waiters) = self.inner.task_waiters.lock() {
-            waiters.remove(sessio_runtime_session_id);
-        }
+        self.record_run_diagnostic(
+            &run.run_id,
+            delegated_dispatch_diagnostic(code, &task.id, attempt_count, message),
+        );
     }
 
     fn track_delegated_session(
@@ -1557,31 +1677,17 @@ impl AstraService {
                 self.load_run(&state.run_id).ok()
             }
         };
-        match self
-            .inner
-            .runtime
-            .dispose_session_silent(sessio_runtime_session_id)
-        {
-            Ok(()) => {}
-            Err(error) => {
-                let message = error.to_string();
-                log::warn!(
-                    "[astra:task:runtime-dispose-failed] runId={} taskId={} runtimeSessionId={} message={}",
-                    state.run_id,
-                    result.task_id,
-                    sessio_runtime_session_id,
-                    message
-                );
-                diagnostics.push(delegated_lifecycle_diagnostic(
-                    "runtime_dispose_failed",
-                    &result.task_id,
-                    sessio_runtime_session_id,
-                    Some(&result.sessio_runtime_session_id),
-                    result.attempt_count,
-                    &message,
-                ));
-            }
-        }
+        let cleanup_report = self.inner.runtime.cleanup_session_bounded(
+            sessio_runtime_session_id,
+            Duration::from_millis(ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS),
+        );
+        diagnostics.extend(delegated_runtime_cleanup_diagnostics(
+            &cleanup_report,
+            &result.task_id,
+            sessio_runtime_session_id,
+            Some(&result.sessio_runtime_session_id),
+            result.attempt_count,
+        ));
         match self.inner.delegated_sessions.lock() {
             Ok(mut delegated) => {
                 delegated.remove(sessio_runtime_session_id);
@@ -2170,6 +2276,78 @@ fn delegated_lifecycle_diagnostic(
         "message": message,
         "timestamp": now_ms(),
     })
+}
+
+fn delegated_dispatch_diagnostic(
+    code: &str,
+    task_id: &str,
+    attempt_count: u32,
+    message: &str,
+) -> Value {
+    json!({
+        "kind": "delegated_task_lifecycle",
+        "code": code,
+        "taskId": task_id,
+        "liveRuntimeSessionId": Value::Null,
+        "sessionId": Value::Null,
+        "attemptCount": attempt_count,
+        "message": message,
+        "timestamp": now_ms(),
+    })
+}
+
+fn delegated_dispatch_error_code(message: &str) -> &'static str {
+    if message.contains("runtime queue timed out") {
+        "queue_timeout"
+    } else if message.contains("no longer active") {
+        "dispatch_cancelled"
+    } else {
+        "dispatch_failed"
+    }
+}
+
+fn delegated_runtime_cleanup_diagnostics(
+    report: &RuntimeCleanupReport,
+    task_id: &str,
+    live_runtime_session_id: &str,
+    session_id: Option<&str>,
+    attempt_count: u32,
+) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    if let Some(message) = report.cancel_error.as_deref() {
+        diagnostics.push(delegated_lifecycle_diagnostic(
+            "runtime_cancel_failed",
+            task_id,
+            live_runtime_session_id,
+            session_id,
+            attempt_count,
+            message,
+        ));
+    }
+    if let Some(message) = report.dispose_error.as_deref() {
+        diagnostics.push(delegated_lifecycle_diagnostic(
+            "runtime_dispose_failed",
+            task_id,
+            live_runtime_session_id,
+            session_id,
+            attempt_count,
+            message,
+        ));
+    }
+    if report.timed_out {
+        diagnostics.push(delegated_lifecycle_diagnostic(
+            "runtime_cleanup_timed_out",
+            task_id,
+            live_runtime_session_id,
+            session_id,
+            attempt_count,
+            &format!(
+                "runtime cleanup exceeded {}ms",
+                ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS
+            ),
+        ));
+    }
+    diagnostics
 }
 
 fn dedupe_session_ref_values(values: Vec<Value>) -> Vec<Value> {
@@ -4045,6 +4223,59 @@ mod tests {
     }
 
     #[test]
+    fn delegated_dispatch_diagnostic_has_no_live_session_key() {
+        let diagnostic =
+            delegated_dispatch_diagnostic("dispatch_failed", "task-1", 1, "start failed");
+
+        assert_eq!(
+            diagnostic["kind"],
+            Value::String("delegated_task_lifecycle".to_string())
+        );
+        assert_eq!(
+            diagnostic["code"],
+            Value::String("dispatch_failed".to_string())
+        );
+        assert_eq!(diagnostic["liveRuntimeSessionId"], Value::Null);
+        assert_eq!(diagnostic["sessionId"], Value::Null);
+        assert_eq!(
+            diagnostic["message"],
+            Value::String("start failed".to_string())
+        );
+    }
+
+    #[test]
+    fn delegated_runtime_cleanup_diagnostics_record_failures() {
+        let report = RuntimeCleanupReport {
+            session_existed: true,
+            cancelled_turn_id: Some("turn-1".to_string()),
+            cancel_error: Some("cancel failed".to_string()),
+            dispose_error: Some("dispose failed".to_string()),
+            timed_out: true,
+        };
+
+        let diagnostics = delegated_runtime_cleanup_diagnostics(
+            &report,
+            "task-1",
+            "runtime-1",
+            Some("agent-session-1"),
+            3,
+        );
+        let codes = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic["code"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            codes,
+            vec![
+                "runtime_cancel_failed",
+                "runtime_dispose_failed",
+                "runtime_cleanup_timed_out",
+            ]
+        );
+    }
+
+    #[test]
     fn astra_run_diagnostics_keep_recent_entries() {
         let mut diagnostics = (0..(MAX_ASTRA_RUN_DIAGNOSTICS + 3))
             .map(|idx| json!({ "idx": idx }))
@@ -4063,19 +4294,30 @@ mod tests {
     fn runtime_limiter_blocks_astrapi_without_limiting_other_agents() {
         let limiter = Arc::new(RuntimeResourceLimiter::new());
         assert_eq!(
-            limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap(),
+            limiter
+                .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
+                .unwrap(),
             Some(Agent::AstraPi)
         );
         assert_eq!(
-            limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap(),
+            limiter
+                .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
+                .unwrap(),
             Some(Agent::AstraPi)
         );
-        assert_eq!(limiter.acquire(Agent::Codex, || Ok(true)).unwrap(), None);
+        assert_eq!(
+            limiter
+                .acquire(Agent::Codex, Duration::from_secs(1), || Ok(true))
+                .unwrap(),
+            None
+        );
 
         let waiting = limiter.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let acquired = waiting.acquire(Agent::AstraPi, || Ok(true)).unwrap();
+            let acquired = waiting
+                .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
+                .unwrap();
             sender.send(acquired).unwrap();
         });
 
@@ -4096,15 +4338,19 @@ mod tests {
     #[test]
     fn runtime_limiter_stops_waiting_when_run_is_inactive() {
         let limiter = Arc::new(RuntimeResourceLimiter::new());
-        limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap();
-        limiter.acquire(Agent::AstraPi, || Ok(true)).unwrap();
+        limiter
+            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
+            .unwrap();
+        limiter
+            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
+            .unwrap();
 
         let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let waiting = limiter.clone();
         let waiting_active = active.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = waiting.acquire(Agent::AstraPi, || {
+            let result = waiting.acquire(Agent::AstraPi, Duration::from_secs(1), || {
                 Ok(waiting_active.load(std::sync::atomic::Ordering::SeqCst))
             });
             sender.send(result.map(|value| value.is_some())).unwrap();
@@ -4117,6 +4363,28 @@ mod tests {
         active.store(false, std::sync::atomic::Ordering::SeqCst);
         let result = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(result.is_err());
+
+        limiter.release(Agent::AstraPi);
+        limiter.release(Agent::AstraPi);
+    }
+
+    #[test]
+    fn runtime_limiter_times_out_when_capacity_never_frees() {
+        let limiter = RuntimeResourceLimiter::new();
+        limiter
+            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
+            .unwrap();
+        limiter
+            .acquire(Agent::AstraPi, Duration::from_secs(1), || Ok(true))
+            .unwrap();
+
+        let result = limiter.acquire(Agent::AstraPi, Duration::from_millis(10), || Ok(true));
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("runtime queue timed out"));
 
         limiter.release(Agent::AstraPi);
         limiter.release(Agent::AstraPi);

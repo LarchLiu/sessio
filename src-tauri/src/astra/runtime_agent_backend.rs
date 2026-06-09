@@ -6,7 +6,10 @@ use serde_json::Value;
 use super::astra_pi_acp_adapter::parse_astra_pi_acp_orchestration_response;
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
 use super::prompt::build_astra_orchestration_prompt;
-use super::{AstraOrchestration, AstraRun, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS};
+use super::{
+    AstraOrchestration, AstraRun, AstraTaskCompletion, ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+    ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS, ASTRA_RUNTIME_STARTUP_TIMEOUT_MS,
+};
 use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEventPayload, RuntimeMetadata, StartAgentSession,
 };
@@ -151,45 +154,54 @@ fn execute_agent_session(
 
     let session_id = handle.sessio_runtime_session_id.clone();
 
-    let receiver = runtime.subscribe_events().map_err(|error| {
-        BackendFailure::new(
-            format!("runtime_agent_{}", config.agent.as_str()),
-            "transport_failure",
-            error.to_string(),
-        )
-    })?;
-
-    // Send prompt
-    runtime
-        .send_input(
-            &session_id,
-            AgentInput {
-                text: prompt.to_string(),
-                attachments: Vec::new(),
-                options: RuntimeMetadata::default(),
-            },
-        )
-        .map_err(|error| {
-            BackendFailure::new(
-                format!("runtime_agent_{}", config.agent.as_str()),
+    let backend_type = format!("runtime_agent_{}", config.agent.as_str());
+    let receiver = match runtime.subscribe_events() {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            cleanup_agent_session(runtime, &backend_type, &session_id);
+            return Err(BackendFailure::new(
+                backend_type,
                 "transport_failure",
                 error.to_string(),
-            )
-        })?;
-
-    let output = wait_for_agent_output(
-        receiver,
+            ));
+        }
+    };
+    if let Err(error) = runtime.wait_for_session_startup(
         &session_id,
-        config.timeout_ms,
-        &format!("runtime_agent_{}", config.agent.as_str()),
-    );
+        Duration::from_millis(ASTRA_RUNTIME_STARTUP_TIMEOUT_MS),
+    ) {
+        cleanup_agent_session(runtime, &backend_type, &session_id);
+        return Err(BackendFailure::new(
+            backend_type,
+            "startup_timeout",
+            error.to_string(),
+        ));
+    }
+
+    // Send prompt
+    if let Err(error) = runtime.send_input(
+        &session_id,
+        AgentInput {
+            text: prompt.to_string(),
+            attachments: Vec::new(),
+            options: RuntimeMetadata::default(),
+        },
+    ) {
+        cleanup_agent_session(runtime, &backend_type, &session_id);
+        return Err(BackendFailure::new(
+            backend_type,
+            "transport_failure",
+            error.to_string(),
+        ));
+    }
+
+    let output = wait_for_agent_output(receiver, &session_id, config.timeout_ms, &backend_type);
     let agent_session_id = runtime
         .agent_runtime_session_id_for_session(&session_id)
         .filter(|value| is_persistable_runtime_agent_session_id(value))
         .unwrap_or_else(|| session_id.clone());
 
-    // Clean up session
-    let _ = runtime.dispose_session_silent(&session_id);
+    cleanup_agent_session(runtime, &backend_type, &session_id);
 
     let output = output?.trim().to_string();
 
@@ -203,6 +215,23 @@ fn execute_agent_session(
     }
 
     Ok((output, agent_session_id))
+}
+
+fn cleanup_agent_session(runtime: &RuntimeManager, backend_type: &str, session_id: &str) {
+    let report = runtime.cleanup_session_bounded(
+        session_id,
+        Duration::from_millis(ASTRA_RUNTIME_CLEANUP_TIMEOUT_MS),
+    );
+    if report.cancel_error.is_some() || report.dispose_error.is_some() || report.timed_out {
+        log::warn!(
+            "[astra:runtime-agent:cleanup] backend={} sessionId={} cancelError={:?} disposeError={:?} timedOut={}",
+            backend_type,
+            session_id,
+            report.cancel_error,
+            report.dispose_error,
+            report.timed_out
+        );
+    }
 }
 
 fn is_persistable_runtime_agent_session_id(session_id: &str) -> bool {
