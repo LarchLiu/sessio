@@ -434,7 +434,10 @@ mod tests {
         assert_eq!(next.run_intent, AstraRunIntent::Continue);
         assert_eq!(next.reason, "brainstorm_shared_board_ready");
         assert_eq!(next.diagnostics[0]["kind"], "brainstorm_shared_board");
-        assert_eq!(next.diagnostics[0]["opinions"][0]["participantId"], "participant-a");
+        assert_eq!(
+            next.diagnostics[0]["opinions"][0]["participantId"],
+            "participant-a"
+        );
         assert!(next
             .tasks
             .iter()

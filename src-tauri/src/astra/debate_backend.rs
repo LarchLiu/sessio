@@ -150,8 +150,9 @@ fn debate_orchestration(
         let tasks = debate_lane_tasks(run, thread, user_prompt, round_index, Some(&artifact_set));
         if tasks.is_empty() {
             return AstraOrchestration {
-                summary: "Debate cross-check needs another pass, but no participants are available."
-                    .to_string(),
+                summary:
+                    "Debate cross-check needs another pass, but no participants are available."
+                        .to_string(),
                 run_intent: AstraRunIntent::WaitForHuman,
                 reason: "debate_no_cross_check_lanes".to_string(),
                 mode: None,
@@ -306,7 +307,10 @@ fn debate_task_prompt(
     if let Some(prompt) = user_prompt.map(str::trim).filter(|value| !value.is_empty()) {
         lines.push(format!("User debate instruction: {prompt}"));
     }
-    lines.push(format!("Lane participant: {}", participant_label(participant)));
+    lines.push(format!(
+        "Lane participant: {}",
+        participant_label(participant)
+    ));
     lines.push(format!("Participant id: {}", participant.participant_id));
     lines.push(format!("Runtime agent: {}", participant.agent.as_str()));
     if !participant.model.trim().is_empty() {
@@ -322,8 +326,7 @@ fn debate_task_prompt(
     lines.push(String::new());
 
     if let Some(artifact_set) = artifact_set {
-        let visible =
-            visible_artifacts_for_participant(artifact_set, &participant.participant_id);
+        let visible = visible_artifacts_for_participant(artifact_set, &participant.participant_id);
         lines.push(CROSS_CHECK_MARKER.to_string());
         lines.push(board_text(&json!({
             "visibleArtifacts": visible,

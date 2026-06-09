@@ -6,8 +6,7 @@ use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
     KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo,
     PlanTaskSessionRole, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo,
-    StageStatus, SubagentInfo,
-    ThreadAgentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
+    StageStatus, SubagentInfo, ThreadAgentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -343,8 +342,14 @@ impl SessionStore for CachedStore {
         assistant_ids: &[String],
         agent_participants: &[ThreadAgentInfo],
     ) -> Result<ThreadInfo> {
-        self.inner
-            .create_thread_with_options(project_id, goal, description, kind, assistant_ids, agent_participants)
+        self.inner.create_thread_with_options(
+            project_id,
+            goal,
+            description,
+            kind,
+            assistant_ids,
+            agent_participants,
+        )
     }
 
     fn update_thread(
