@@ -4,7 +4,7 @@
 
 新增独立页面 `ThreadMultiSessionChatPage`，用于在同一个 thread 中同时展示多个 sessions 的 history message 和 live message。页面默认采用分容器 lanes：每个 session 一个独立 panel、独立滚动、独立 live 数据源，避免多个 agent/session 同时流入时显示串流。
 
-当前代码里 `ThreadKind = workflow | teamwork | brainstorm | debate`、plan rounds/tasks、`getThreadReplay`、Astra run、brainstorm/debate dedicated backend 都已存在；新页面 v1 直接基于这些事实源实现。现有 `ThreadChatPage` 保留，新的页面作为独立入口加入，不替换旧页。
+当前代码里 `ThreadKind = process | teamwork | brainstorm | debate`、plan rounds/tasks、`getThreadReplay`、Astra run、brainstorm/debate dedicated backend 都已存在；新页面 v1 直接基于这些事实源实现。现有 `ThreadChatPage` 保留，新的页面作为独立入口加入，不替换旧页。
 
 ## 核心设计
 
@@ -36,7 +36,7 @@ interface ThreadSessionLane {
   - body：先加载 history turns，再 merge 对应 live turns。
   - scroll controller 每个 lane 独立，不能共享 cache key。
 - 分组规则沿用现有 replay 语义：
-  - `workflow`：优先按 stage 分组。
+  - `process`：优先按 stage 分组。
   - `teamwork` / `brainstorm`：优先按 plan round 分组。
   - `debate`：优先按 round + lane/task 分组。
   - fallback：按 thread direct / astra internal / agent 分组。
@@ -48,7 +48,7 @@ interface ThreadSessionLane {
 - live event 必须只通过 `sessioRuntimeSessionId` 路由到对应 lane，不做全局消息拼接。
 - `SessionHistoryReadonly` 只能作为静态历史临时空壳；支持 streaming/tool/permission 时必须复用或抽出 `ChatPage` 的 ACP transcript renderer。
 - `brainstorm` / `debate` 当前已有 dedicated backend，可接入 Astra run；UI 文案要表达其 shared-board / isolated-lane 语义，而不是置灰为未支持。
-- `workflow` 不走 Astra automatic scheduling；如果提供 stage task 运行，必须通过 manual plan round/task 明确管理 task/session/status 生命周期。
+- `process` 不走 teamwork 的 LLM automatic scheduling；process Astra run 由 deterministic backend 按 stage 顺序执行，页面仍保留手动 stage task 入口。
 
 ## 实施阶段
 
@@ -79,7 +79,7 @@ type DetailMode = "chat" | "project" | "threadMultiSessionChat";
 - 从 `ThreadPage` 可打开新页面，也能返回 thread overview。
 - 选择普通 session、打开项目 workbench、打开原 `ThreadChatPage` 都不被新 route 误切。
 - header/sidebar 中 thread 选择态仍正确。
-- `workflow`、`teamwork`、`brainstorm`、`debate` thread 都能进入页面并显示正确 kind。
+- `process`、`teamwork`、`brainstorm`、`debate` thread 都能进入页面并显示正确 kind。
 
 ### Phase 2: Transcript Renderer 最小抽取
 
@@ -135,11 +135,11 @@ type DetailMode = "chat" | "project" | "threadMultiSessionChat";
 - 在页面底部放置 composer，默认单 agent 选择，复用 `useChatComposer` 或抽取其可复用部分。
 - 发送时注入 thread context：
   - thread goal / kind / description。
-  - workflow 当前 stage、teamwork assistants 摘要，或 brainstorm/debate agent participants 摘要。
+  - process 当前 stage、teamwork assistants 摘要，或 brainstorm/debate agent participants 摘要。
   - 最近 plan round/task 摘要。
 - pending session 写入：
   - `threadLink: { threadId, stageId: null }`。
-  - workflow 若用户选定 stage，则 `stageId` 使用该 stage。
+  - process 若用户选定 stage，则 `stageId` 使用该 stage。
   - `suppressAutoSelect: true`，避免新 session 创建后自动跳离 multi-session page。
   - `origin: "thread_multi_session"`，便于 debug 和后续筛选。
 - `PendingNewChatSession` 增加 `suppressAutoSelect` 和 `origin`。
@@ -179,9 +179,9 @@ type DetailMode = "chat" | "project" | "threadMultiSessionChat";
   - 接入现有 Astra run。
   - UI 文案体现 isolated lane / cross-check：lane artifacts、visibility policy、convergence diagnostics。
   - 按 round + lane/task 分组展示 sessions。
-- `workflow`：
-  - 不接入 Astra automatic scheduling。
-  - 可提供 "Run selected stage task"。
+- `process`：
+  - 接入现有 `createAstraRun(threadId, prompt?)` / `cancelAstraRun(runId)`，但 run 必须走 deterministic process backend。
+  - 可继续提供 "Run selected stage task" 作为显式单 stage 手动任务。
   - v1 使用 manual plan round/task + runtime session 执行：创建 `PlanRound(source="manual")`，task 绑定 `threadStageId`，保存 stage/assistant/agent snapshot，启动 session 后 `linkPlanTaskSession(role="runtime")`。
   - 明确 task 生命周期：
     - session 启动成功后 task 标记 `running`。
@@ -194,9 +194,9 @@ type DetailMode = "chat" | "project" | "threadMultiSessionChat";
 
 - teamwork/brainstorm/debate 未完成 run 可在页面继续观察、取消、刷新。
 - teamwork/brainstorm/debate 的 plan task session 出现在对应 lane。
-- workflow 可从页面启动一个确定性 stage task，并进入对应 live lane。
+- process 可从页面启动或恢复 deterministic run，也可启动一个手动 stage task 并进入对应 live lane。
 - running tasks reload 后能按 plan task 状态恢复展示。
-- workflow 不误报支持 Astra automatic orchestration。
+- process 不误报支持 teamwork LLM orchestration。
 
 ### Phase 6: 清理与回归
 
@@ -239,7 +239,7 @@ type ThreadSessionLaneStatus =
   | "failed";
 ```
 
-- workflow stage task v1 不新增后端 schema，复用：
+- process stage task v1 不新增后端 schema，复用：
   - `createPlanRound`
   - `updatePlanTaskStatus`
   - `linkPlanTaskSession`
@@ -255,14 +255,14 @@ Unit：
 - pending session 能在真实 id 出现前生成 lane。
 - live alias 能正确映射到 lane。
 - `suppressAutoSelect` 时 pending session 不切走页面，也不触发 `pendingSelectSession`。
-- workflow manual task status 能根据 live session terminal 状态更新。
+- process manual task status 能根据 live session terminal 状态更新。
 
 Frontend integration：
 
 - 同 thread 多个 history sessions 同屏展示。
 - 两个 live sessions 同时 streaming，各自 panel 更新。
 - permission request 只出现在对应 lane，响应时使用正确 runtime session id。
-- workflow stage task 创建后出现在 replay/lane。
+- process stage task 创建后出现在 replay/lane。
 - teamwork/brainstorm/debate Astra run 产生 plan task session 后出现在对应 lane。
 
 Regression：
@@ -274,7 +274,7 @@ Regression：
 
 Manual：
 
-- `workflow`、`teamwork`、`brainstorm`、`debate` 四种 thread 都打开新页面。
+- `process`、`teamwork`、`brainstorm`、`debate` 四种 thread 都打开新页面。
 - reload 后 history/live/pending 状态合理。
 - mobile 下 lanes 用 tabs/stack 切换不混流，desktop 下多列不重叠。
 - 长输出、tool group、permission pending、history file missing 都能读懂状态。
@@ -285,5 +285,5 @@ Manual：
 - 默认布局是分容器 lanes，不提供全局混排作为主视图。
 - v1 支持用户级 thread session 单起。
 - v1 支持 teamwork/brainstorm/debate 通过现有 Astra run 继续执行或观察。
-- v1 支持 workflow 通过 manual plan round/task 执行 stage task。
+- v1 支持 process 通过 manual plan round/task 执行 stage task。
 - transcript renderer 抽取是多 lane live 的前置条件，不放到最后清理阶段。

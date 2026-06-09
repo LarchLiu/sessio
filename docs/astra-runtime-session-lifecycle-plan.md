@@ -28,7 +28,7 @@ task 完成、报错、取消或超时后，都必须走同一条 cleanup 路径
 不同 thread kind 的 runtime session 边界如下：
 
 - `teamwork`: 每个 assistant task 独立 session。
-- `workflow`: 每个 stage task 独立 session。
+- `process`: 每个 stage task 独立 session。
 - `brainstorm`: 每个 participant task 独立 session。
 - `debate`: 每个 participant/lane task 独立 session。
 - `planner`: 独立 internal planner session/call。
@@ -148,7 +148,7 @@ v1 不新增 turn-level schema。只有未来引入 process pool、长期 ACP se
 - `cargo test --manifest-path src-tauri/Cargo.toml astra::`
 - Debate 两个 lane 独立显示。
 - Brainstorm 每个 participant 独立 lane。
-- Workflow stage task 可按 stage/plan task 回放。
+- Process stage task 可按 stage/plan task 回放。
 - Teamwork assistant task 可按 round/task 回放。
 - Brainstorm/Debate 在 resource limiter 下仍能按预期并发显示 lane，不被 per-thread single-flight 串行化。
 - AstraPi 连续多轮后不会残留多个高 CPU live runtime，且全局 runtime 资源预算生效。

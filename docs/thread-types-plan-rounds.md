@@ -6,7 +6,7 @@
 
 目标是把 thread 从单一的“项目下工作项”扩展为几种协作模式：
 
-- `workflow`：人为定制 stages，分阶段顺序执行，无需 Astra 自动编排。
+- `process`：人为定制 stages，由 deterministic backend 分阶段顺序执行。
 - `teamwork`：人为配置 assistants，由 Astra agent 按 task-centric 流程编排执行。
 - `brainstorm`：多个不同模型共享上下文，各抒己见，再逐轮汇总发散。
 - `debate`：PK mode 的正式命名，两个或多个模型上下文隔离，交叉验证直到收敛。
@@ -21,18 +21,18 @@ plan task 还必须保存执行时的 stage / assistant / agent participant 配�
 
 ### 1. thread 当前没有类型
 
-当前 `threads` 表主要包含 `project_id`、`goal`、`description`、`stage_id`、`enabled` 等字段。现有 `workflow` 概念属于 project/stage 模板体系，而不是 thread 自身的协作模式。
+当前 `threads` 表主要包含 `project_id`、`goal`、`description`、`stage_id`、`enabled` 等字段。现有 `process` 概念属于 project/stage 模板体系，而不是 thread 自身的协作模式。
 
 这导致所有 thread 在产品语义上都被当成同一类对象处理。实际上用户需要几种不同的工作方式：
 
-- 人为定制 stages，并按顺序推进的 workflow。
+- 人为定制 stages，并按顺序推进的 process。
 - 人为配置 assistants，交给 Astra 拆 task、调度和执行的 teamwork。
 - 多模型共享上下文、并行发散再汇总的 brainstorm。
 - 多模型上下文隔离、交叉验证、直到统一的 debate。
 
 ### 2. assistant 和 agent participant 需要分开建模
 
-`workflow` 类型可以继续通过 stage assistants 分配任务；`teamwork` 需要 thread-level assistants 作为稳定团队成员和路由对象。
+`process` 类型可以继续通过 stage assistants 分配任务；`teamwork` 需要 thread-level assistants 作为稳定团队成员和路由对象。
 
 但 `brainstorm`、`debate` 的参与者更像一次 thread 内的临时运行席位：用户通常只想选择几个 agent/model/effort/permission 组合，不应该为了开一次发散或辩论创建一批长期 assistant。因此需要同时保留两种绑定：
 
@@ -52,7 +52,7 @@ plan task 还必须保存执行时的 stage / assistant / agent participant 配�
 
 ### 4. thread 与 sessions 的关系还不够完整
 
-当前 thread 可以有直接 `thread_sessions`，workflow stage 也可以有 `stage_sessions`。但如果后续引入 plan round/task、teamwork、brainstorm、debate，只靠直接挂在 thread 上的 sessions 不足以重放全过程。
+当前 thread 可以有直接 `thread_sessions`，process stage 也可以有 `stage_sessions`。但如果后续引入 plan round/task、teamwork、brainstorm、debate，只靠直接挂在 thread 上的 sessions 不足以重放全过程。
 
 需要明确：thread 是所有相关 sessions 的根容器。任何由 thread 触发的 session，即使它归档在 stage、plan task、Astra internal diagnostic 或 debate lane 下，也必须能通过 thread 查询出来。
 
@@ -70,11 +70,11 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`agent_participan
 
 ## Thread 类型定义
 
-### `workflow`
+### `process`
 
-`workflow` 是带 stages 的阶段式工作流。
+`process` 是带 stages 的阶段式工作流。
 
-它可以理解为当前产品里 deterministic 工作模式的正式 thread kind：流程由人预先定义，系统按确定的 stage 顺序记录和推进。注意这里的 deterministic 是产品语义，不等同于代码里的 `DeterministicOrchestratorBackend` fallback；workflow 不由 Astra 自动调度。
+它可以理解为当前产品里 deterministic 工作模式的正式 thread kind：流程由人预先定义，系统按确定的 stage 顺序记录和推进。process Astra run 由 deterministic backend 执行，不由 LLM planner 决定下一步。
 
 适用场景：
 
@@ -88,8 +88,8 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`agent_participan
 - task 可以绑定 `thread_stage_id`。
 - stage 主要作为路由、上下文和 session 归档。
 - stage 顺序由人定义，默认按阶段顺序执行。
-- 无 Astra scheduling：workflow 的下一步由用户、UI 或显式人工规则推进，不由 Astra planner 决定。
-- workflow thread 可以同时拥有 thread-level assistants，但 v1 不要求使用。
+- deterministic Astra run：process 的下一步由 stage order、assistant order 和 resume rules 决定，不由 LLM planner 决定。
+- process thread 可以同时拥有 thread-level assistants，但 v1 不要求使用。
 
 ### `teamwork`
 
@@ -108,7 +108,7 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`agent_participan
 - plan mode 可以是 `parallel` 或 `sequential`。
 - 适合持续多轮推进。
 - 复用 `docs/astra-task-centric-refactor-plan.md` 的 task-centric 编排模型。
-- `docs/astra-task-centric-refactor-plan.md` 是 teamwork 的编排标准；它不是 workflow 的 Astra 调度方案，而是把现有 Astra task routing 从 stages 迁移为 thread-level assistants。
+- `docs/astra-task-centric-refactor-plan.md` 是 teamwork 的编排标准；它不是 process 的 Astra 调度方案，而是把现有 Astra task routing 从 stages 迁移为 thread-level assistants。
 - Astra task-centric 的标准路由对象是 `assistantId` 或 thread-level assistant。
 - teamwork 不读取 stage status，也不需要 stage/issue mutation。
 
@@ -162,22 +162,23 @@ plan task 如果只保存 `thread_stage_id`、`assistant_id`、`agent_participan
 
 ## 工作模式目标与编排实现
 
-### Workflow: 人为流程控制
+### Process: 人为流程控制
 
-workflow 的目标是让用户可以手工定制阶段和顺序。系统记录阶段、任务和结果，但不让 Astra 决定下一步。
+process 的目标是让用户可以手工定制阶段和顺序。系统记录阶段、任务和结果，但不让 LLM planner 决定下一步。
 
 执行方式：
 
 1. 用户配置 stages 和每个 stage 的 assistants。
-2. 用户或 UI 按顺序启动某个 stage 的工作。
-3. stage task 可写入 plan round/task，便于统一历史回看。
-4. stage 完成后由用户推进到下一 stage。
+2. 用户或 UI 启动 process Astra run。
+3. deterministic backend 按 stage 顺序和 stage assistant 顺序创建 sequential plan round/tasks。
+4. assistant stage 自动执行；空 assistant stage 标记为 `needs_review` 并作为人工 checkpoint。
+5. task completion/blocking 回写 stage status，后续 run 从第一个未完成且未跳过的 stage 恢复。
 
 实现重点：
 
-- 保留现有 workflow/project/stage 能力。
-- plan round 在 workflow 中主要作为记录和 replay 层，不作为调度状态机。
-- workflow task 优先绑定 `thread_stage_id`。
+- 保留现有 process-template/project/stage 能力。
+- plan round 在 process 中表达 deterministic sequential execution，并同时服务记录和 replay。
+- process task 优先绑定 `thread_stage_id`。
 
 ### Teamwork: Assistant 路由的 Astra Task-Centric 编排
 
@@ -191,7 +192,7 @@ task      = 执行事实 / 生命周期状态 / 结果记录
 run       = 编排进度 / cursor / 终态
 ```
 
-这次重构不是把 workflow 变成自动调度器，而是把当前 Astra stage-routed task-centric 流程改成 assistant-routed task-centric 流程：旧实现里的 stage route、stage status 和 stage issue mutation 被 `assistant_id`、plan task lifecycle 和 task result 取代。
+这次重构不是把 process 变成 LLM task planner，而是把 teamwork 的 Astra stage-routed task-centric 流程改成 assistant-routed task-centric 流程：旧实现里的 stage route、stage status 和 stage issue mutation 被 `assistant_id`、plan task lifecycle 和 task result 取代。
 
 执行方式：
 
@@ -307,7 +308,7 @@ thread 必须是全过程容器。无论是哪种 thread 类型，所有与该 t
 一个 thread 的可重放过程包含：
 
 - 直接挂在 thread 上的 sessions。
-- workflow stage 下的 `stage_sessions`。
+- process stage 下的 `stage_sessions`。
 - plan task dispatch 产生的 delegated sessions。
 - Astra internal planning / synthesis / decision sessions 的可诊断引用。
 - brainstorm 的 shared-board / synthesis 生成 session。
@@ -347,7 +348,7 @@ thread replay 应按统一时间线展示全过程：
 - plan task 的 `sort_order`。
 - session / task / event timestamps。
 
-workflow replay 可以按 stage 分组；teamwork/brainstorm/debate replay 可以按 round 分组；debate 还需要按 lane 分组。
+process replay 可以按 stage 分组；teamwork/brainstorm/debate replay 可以按 round 分组；debate 还需要按 lane 分组。
 
 ### 存储原则
 
@@ -360,7 +361,7 @@ plan task 的 session 引用必须包含 agent 和 session id，因为 session �
 写入原则：
 
 - 直接打开或继续的普通会话写入 `thread_sessions`。
-- workflow stage 产生的会话写入 `stage_sessions`，并可通过 `thread_stages.thread_id` 回连 thread。
+- process stage 产生的会话写入 `stage_sessions`，并可通过 `thread_stages.thread_id` 回连 thread。
 - plan task 派发产生的会话写入 `thread_plan_task_sessions`，并可通过 `thread_plan_rounds.thread_id` 回连 thread。
 - Astra 内部 planner / synthesis / diagnostic session 至少保留在 run diagnostics 中；进入 replay API 时按 `(agent, session_id)` 合并展示。
 
@@ -371,16 +372,16 @@ plan task 的 session 引用必须包含 agent 和 session id，因为 session �
 在 `threads` 表新增：
 
 ```sql
-kind TEXT NOT NULL DEFAULT 'workflow'
+kind TEXT NOT NULL DEFAULT 'process'
 ```
 
 允许值：
 
 ```text
-workflow | teamwork | brainstorm | debate
+process | teamwork | brainstorm | debate
 ```
 
-当前 schema 直接把未指定 kind 的 thread 默认定义为 `workflow`。这只是产品语义默认值，不表示旧 Astra stage-decision 自动调度路径需要继续兼容，也不要求为未发布的旧 SQLite 表形状写兼容迁移。
+当前 schema 直接把未指定 kind 的 thread 默认定义为 `process`。这只是产品语义默认值，不表示旧 Astra stage-decision 自动调度路径需要继续兼容，也不要求为未发布的旧 SQLite 表形状写兼容迁移。
 
 ### `thread_assistants`
 
@@ -403,7 +404,7 @@ thread_assistants(
 
 - `teamwork` 的团队成员。
 
-`workflow` 可以保留为空，继续优先使用 stage assistants。
+`process` 可以保留为空，继续优先使用 stage assistants。
 
 `brainstorm`、`debate` 不使用 `thread_assistants` 表达参与者，避免为了临时模型席位创建一次性 assistants。
 
@@ -519,7 +520,7 @@ thread_plan_tasks(
 
 字段说明：
 
-- `thread_stage_id`：workflow task 可绑定 stage。
+- `thread_stage_id`：process task 可绑定 stage。
 - `assistant_id`：teamwork task 可绑定 thread assistant。
 - `agent_participant_id`：brainstorm/debate task 可绑定 thread-level agent participant；历史解释仍以 `agent_snapshot_json` 为准。
 - `target_agent`：实际 runtime agent。
@@ -595,7 +596,7 @@ thread_plan_task_sessions(
 
 默认：
 
-- `kind = workflow`
+- `kind = process`
 - `assistantIds = []`
 
 如果 `kind == teamwork`，UI 应鼓励选择至少一个 assistant；如果 `kind == brainstorm`，UI 应鼓励选择至少一个 agent participant；如果 `kind == debate`，UI 应要求至少两个 agent participants。后端 v1 可以先做宽松校验，避免阻塞创建、编辑和测试。
@@ -610,16 +611,16 @@ thread_plan_task_sessions(
 - kind
 - assistantIds
 
-如果从 `workflow` 切换到非 workflow：
+如果从 `process` 切换到非 process：
 
 - 不删除已有 stages。
 - stages 保留为历史和可回退结构。
 - teamwork 的新 plan 默认使用 thread assistants；brainstorm/debate 的新 plan 默认使用 agent participants。
 
-如果从非 workflow 切换到 `workflow`：
+如果从非 process 切换到 `process`：
 
 - 不删除 thread assistants，也不把 brainstorm/debate participants 写进 thread assistants。
-- workflow 仍优先使用 stage assistants。
+- process 仍优先使用 stage assistants。
 
 ### Plan round 创建
 
@@ -663,9 +664,9 @@ Astra run 只保留编排元数据、backend、diagnostics、round cursor 和终
 - teamwork 是 Astra task-centric 流程的 assistant-routed 版本：没有 stages，Astra 根据 assistants 生成和派发 tasks。
 - brainstorm/debate 在通用 plan round/task 之上增加不同的上下文策略：brainstorm 共享 shared board，debate 使用 isolated lanes；二者的参与者来自 agent participants。
 
-### 与 workflow stages 的关系
+### 与 process stages 的关系
 
-`workflow` thread 的 plan task 可以绑定 `thread_stage_id`。
+`process` thread 的 plan task 可以绑定 `thread_stage_id`。
 
 stage 仍然负责：
 
@@ -676,7 +677,7 @@ stage 仍然负责：
 
 stage 不负责表达 task lifecycle。task 状态由 `thread_plan_tasks.status` 表达。
 
-workflow task 的 `thread_stage_id` 用于导航和分组，执行和 replay 使用 `stage_snapshot_json`。如果 stage 后续被重命名、改 prompt 或换 assistant，旧 task 仍显示和使用当时的 stage 快照。
+process task 的 `thread_stage_id` 用于导航和分组，执行和 replay 使用 `stage_snapshot_json`。如果 stage 后续被重命名、改 prompt 或换 assistant，旧 task 仍显示和使用当时的 stage 快照。
 
 ### 与 assistants 的关系
 
@@ -715,7 +716,7 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 
 - Rust 新增 `ThreadKind` enum。
 - `ThreadInfo` 新增 `kind` 和 `assistants`。
-- `threads` 表新增 `kind`，旧数据默认 `workflow`。
+- `threads` 表新增 `kind`，旧数据默认 `process`。
 - 新增 `thread_assistants` 表，用于 teamwork。
 - 新增 `thread_agents` 表，用于 brainstorm/debate。
 - store trait / sqlite / cached / Tauri command / TS API 支持创建和更新 thread kind + assistant ids + agent participants。
@@ -723,11 +724,11 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 
 验收：
 
-- 未指定 kind 的 thread 按当前 schema 默认读取为 `workflow`。
+- 未指定 kind 的 thread 按当前 schema 默认读取为 `process`。
 - 新建四种 thread 类型后 reload 仍正确。
 - teamwork 可绑定 thread assistants。
 - brainstorm/debate 可绑定 agent participants，且不要求创建 assistants。
-- workflow 现有 stage 行为不变。
+- process 现有 stage 行为不变。
 
 ### Phase 2: 新增 plan rounds/tasks 持久化
 
@@ -861,7 +862,7 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 - task card 状态从 `thread_plan_tasks.status` 恢复。
 - task detail 展示当时执行快照，并可跳转到当前 stage / assistant / agent participant / agent。
 - parallel/sequential 用清晰标签展示。
-- Replay 视图按 thread kind 分组：workflow 按 stage，teamwork/brainstorm 按 round，debate 按 round + lane。
+- Replay 视图按 thread kind 分组：process 按 stage，teamwork/brainstorm 按 round，debate 按 round + lane。
 - Replay 聚合结果按 `(agent, session_id)` 去重，同时保留来源标签。
 
 验收：
@@ -870,7 +871,7 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 - 用户能看到每轮 plan 的 summary、mode、tasks。
 - 用户能从 thread 入口看到所有相关 sessions，并打开对应 transcript。
 - 用户能看到 task 执行时的 stage / assistant / agent participant 配置，即使当前配置已变化。
-- workflow task 显示绑定 stage。
+- process task 显示绑定 stage。
 - teamwork task 显示绑定 assistant；brainstorm/debate task 显示绑定 agent participant。
 - Brainstorm 展示 shared board / synthesis。
 - Debate 展示 lane、交叉验证和最终收敛状态。
@@ -899,14 +900,14 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 
 ### Schema
 
-- 当前 DDL 中 `threads.kind` 默认值为 `workflow`。
+- 当前 DDL 中 `threads.kind` 默认值为 `process`。
 - 当前 DDL 不包含旧 Astra run lifecycle 列。
 - 新表创建幂等。
 - 删除 thread cascade 删除 thread assistants、thread agents、plan rounds、plan tasks、plan task sessions。
 
 ### Thread 类型
 
-- 创建/读取/更新 `workflow`。
+- 创建/读取/更新 `process`。
 - 创建/读取/更新 `teamwork`。
 - 创建/读取/更新 `brainstorm`。
 - 创建/读取/更新 `debate`。
@@ -925,7 +926,7 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 
 ### 绑定关系
 
-- workflow plan task 可绑定 `thread_stage_id`。
+- process plan task 可绑定 `thread_stage_id`。
 - teamwork plan task 可绑定 `assistant_id`。
 - brainstorm/debate plan task 可绑定 `agent_participant_id`。
 - task 无 assistant/participant 但有 target agent 时可保存和展示。
@@ -943,11 +944,11 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 ### Thread Replay
 
 - thread replay 聚合直接 `thread_sessions`。
-- thread replay 聚合 workflow stage 下的 `stage_sessions`。
+- thread replay 聚合 process stage 下的 `stage_sessions`。
 - thread replay 聚合 plan task 下的 `thread_plan_task_sessions`。
 - thread replay 聚合 Astra planner/synthesis/diagnostic session refs。
 - replay 结果按 `(agent, session_id)` 去重，不按裸 `session_id` 去重。
-- workflow replay 可按 stage 分组。
+- process replay 可按 stage 分组。
 - teamwork/brainstorm replay 可按 round 分组。
 - debate replay 可按 round + lane 分组。
 - 同一个 session 同时来自 thread/stage/task 时只展示一次，但保留多个来源标签。
@@ -955,16 +956,16 @@ brainstorm/debate 不把 participant 偷偷写成 assistant；它们优先使用
 
 ## 风险与取舍
 
-### 风险 1: thread kind 与 project workflow 命名容易混淆
+### 风险 1: thread kind 与 process template 命名容易混淆
 
-`workflow` 既是 project/stage 模板概念，也是 thread kind。实现时要在代码命名中区分：
+`process` 是 thread kind，`process template` 是 project/stage 模板概念。实现时要在代码命名中区分：
 
-- `WorkflowInfo`：项目/阶段模板。
-- `ThreadKind::Workflow`：thread 协作模式。
+- `ProcessTemplateInfo`：项目/阶段模板。
+- `ThreadKind::Process`：thread 协作模式。
 
-同时，`ThreadKind::Workflow` 可以被理解为当前 deterministic 产品流程，但不能直接等同于代码里的 `DeterministicOrchestratorBackend` fallback。后续实现应把 deterministic backend 当作过渡或测试能力，而不是 workflow thread 的产品定义。
+`ThreadKind::Process` 使用 deterministic backend 按 stage 顺序执行；`ProcessTemplateInfo` 只描述项目初始化和可复用 stage 模板。
 
-UI 文案可以解释为“Workflow thread”或“阶段式工作流”。
+UI 文案可以解释为“Process thread”或“阶段式工作流”。
 
 ### 风险 2: 一轮只能 parallel 或 sequential
 
@@ -1000,8 +1001,8 @@ stage、assistant、agent participant 都是可配置对象。历史 task 如果
 ## 明确不做
 
 - v1 不做一轮内复杂 DAG。
-- v1 不删除现有 workflow/project/stage 模型。
+- v1 不删除现有 process-template/project/stage 模型。
 - v1 不保留旧 Astra run lifecycle 字段或旧 stage-decision 调度兼容逻辑；未发布 SQLite 旧表形状直接按新 schema 修改。
-- v1 不要求 workflow thread 必须使用 thread-level assistants。
-- v1 不删除 workflow/project/stage 人工流程模型和人工 stage/issue API。
+- v1 不要求 process thread 必须使用 thread-level assistants。
+- v1 不删除 process-template/project/stage 人工流程模型和人工 stage/issue API。
 - 如果不实现 `brainstorm_backend` / `debate_backend` 或等价专用策略，v1 不宣称完整支持 brainstorm/debate 自动编排。
