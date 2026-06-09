@@ -253,7 +253,7 @@ CREATE TABLE IF NOT EXISTS runtime_agent_selections (
     updated_at      INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS workflows (
+CREATE TABLE IF NOT EXISTS process_templates (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
     description TEXT,
@@ -263,18 +263,18 @@ CREATE TABLE IF NOT EXISTS workflows (
     CHECK(type IN ('builtin', 'custom'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_workflows_type_name
-    ON workflows(type, name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_process_templates_type_name
+    ON process_templates(type, name COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS projects (
     id         TEXT PRIMARY KEY,
     path       TEXT NOT NULL UNIQUE,
     name       TEXT NOT NULL,
-    workflow_id TEXT NOT NULL DEFAULT 'code',
+    process_template_id TEXT NOT NULL DEFAULT 'code',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     archived   INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY(workflow_id) REFERENCES workflows(id)
+    FOREIGN KEY(process_template_id) REFERENCES process_templates(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_archived_updated ON projects(archived, updated_at DESC);
@@ -379,18 +379,18 @@ CREATE TABLE IF NOT EXISTS assistants (
     system_prompt   TEXT,
     color           TEXT,
     type            TEXT NOT NULL,
-    workflow_id    TEXT,
+    process_template_id    TEXT,
     project_id      TEXT,
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     CHECK(type IN ('builtin', 'custom')),
-    FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+    FOREIGN KEY(process_template_id) REFERENCES process_templates(id) ON DELETE CASCADE,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_assistants_project
-    ON assistants(workflow_id, project_id, updated_at DESC);
+    ON assistants(process_template_id, project_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS threads (
     id          TEXT PRIMARY KEY,
@@ -398,7 +398,7 @@ CREATE TABLE IF NOT EXISTS threads (
     goal        TEXT NOT NULL,
     description TEXT,
     stage_id    TEXT,
-    kind        TEXT NOT NULL DEFAULT 'workflow' CHECK(kind IN ('workflow', 'teamwork', 'brainstorm', 'debate')),
+    kind        TEXT NOT NULL DEFAULT 'process' CHECK(kind IN ('process', 'teamwork', 'brainstorm', 'debate')),
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
@@ -446,7 +446,7 @@ CREATE TABLE IF NOT EXISTS stages (
     id           TEXT PRIMARY KEY,
     project_id   TEXT,
     type         TEXT NOT NULL,
-    workflow_id  TEXT,
+    process_template_id  TEXT,
     kind         TEXT,
     name         TEXT,
     description  TEXT,
@@ -473,15 +473,15 @@ CREATE TABLE IF NOT EXISTS stages (
         'human',
         'done'
     )),
-    CHECK((type = 'builtin' AND workflow_id IS NOT NULL AND kind IS NOT NULL AND name IS NULL)
-       OR (type = 'custom' AND (workflow_id IS NOT NULL OR project_id IS NOT NULL) AND kind IS NULL AND name IS NOT NULL)),
-    UNIQUE(workflow_id, project_id, sort_order),
-    FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+    CHECK((type = 'builtin' AND process_template_id IS NOT NULL AND kind IS NOT NULL AND name IS NULL)
+       OR (type = 'custom' AND (process_template_id IS NOT NULL OR project_id IS NOT NULL) AND kind IS NULL AND name IS NOT NULL)),
+    UNIQUE(process_template_id, project_id, sort_order),
+    FOREIGN KEY(process_template_id) REFERENCES process_templates(id) ON DELETE CASCADE,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_stages_project
-    ON stages(workflow_id, project_id, type, sort_order, kind, name);
+    ON stages(process_template_id, project_id, type, sort_order, kind, name);
 
 CREATE TABLE IF NOT EXISTS stage_assistants (
     stage_id     TEXT NOT NULL,
@@ -764,42 +764,6 @@ const SCHEMA_CURRENT_SESSION_SKIP: &str = r#"
 ALTER TABLE sessions ADD COLUMN skip INTEGER NOT NULL DEFAULT 0;
 "#;
 
-// v6: thread-level agent participants for brainstorm/debate threads, plus
-// persisted plan-task participant ids for replay and dispatch.
-const SCHEMA_V6: &str = r#"
-CREATE TABLE IF NOT EXISTS thread_agents (
-    thread_id       TEXT NOT NULL,
-    participant_id  TEXT NOT NULL,
-    agent           TEXT NOT NULL,
-    model           TEXT NOT NULL,
-    effort          TEXT NOT NULL,
-    permission_mode TEXT NOT NULL,
-    sort_order      INTEGER NOT NULL,
-    created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL,
-    PRIMARY KEY(thread_id, participant_id),
-    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_thread_agents_thread_order
-    ON thread_agents(thread_id, sort_order);
-
-ALTER TABLE thread_plan_tasks ADD COLUMN agent_participant_id TEXT;
-
-CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_agent_participant
-    ON thread_plan_tasks(agent_participant_id);
-"#;
-
-// v7: persist Astra delegated attempt identity on plan-task session refs and
-// keep superseded runtime placeholders instead of deleting them.
-const SCHEMA_V7: &str = r#"
-ALTER TABLE thread_plan_task_sessions ADD COLUMN attempt_id TEXT;
-ALTER TABLE thread_plan_task_sessions ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE thread_plan_task_sessions ADD COLUMN superseded_at INTEGER;
-CREATE INDEX IF NOT EXISTS idx_thread_plan_task_sessions_attempt
-    ON thread_plan_task_sessions(task_id, attempt_count, created_at);
-"#;
-
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
     planner_backend, round_index, round_limit, terminal_reason,
     last_error_code, last_error_message, internal_planner_session_ids_json,
@@ -881,20 +845,6 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         seed_builtins(conn)?;
     }
-    if current < 6 {
-        let _ = conn.execute_batch(SCHEMA_V6);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
-            [],
-        )?;
-    }
-    if current < 7 {
-        let _ = conn.execute_batch(SCHEMA_V7);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
-            [],
-        )?;
-    }
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SKIP);
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
@@ -917,7 +867,7 @@ fn seed_builtins(conn: &Connection) -> Result<()> {
 fn seed_builtin_workflows(conn: &Connection, now: i64) -> Result<()> {
     for (id, name, description) in BUILTIN_WORKFLOW_SEEDS {
         conn.execute(
-            "INSERT OR IGNORE INTO workflows (id, name, description, type, created_at, updated_at)
+            "INSERT OR IGNORE INTO process_templates (id, name, description, type, created_at, updated_at)
              VALUES (?, ?, ?, 'builtin', ?, ?)",
             params![id, name, description, now, now],
         )?;
@@ -935,7 +885,7 @@ fn seed_builtin_workflow_stages(conn: &Connection, now: i64) -> Result<()> {
             let id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
             let allow_empty_assistants = matches!(kind, StageType::Human | StageType::Done);
             conn.execute(
-                "INSERT OR IGNORE INTO stages (id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
+                "INSERT OR IGNORE INTO stages (id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
                  VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, NULL, ?, 1, ?, ?, ?)",
                 params![
                     id,
@@ -2610,7 +2560,7 @@ fn plan_task_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanT
 
 fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo> {
     conn.query_row(
-        "SELECT p.id, p.path, p.name, p.workflow_id, p.created_at, p.updated_at,
+        "SELECT p.id, p.path, p.name, p.process_template_id, p.created_at, p.updated_at,
                 COUNT(s.session_id) AS session_count
          FROM projects p
          LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.skip = 0
@@ -2626,7 +2576,7 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
 fn ensure_workflow_exists(conn: &Connection, workflow_id: &str) -> Result<()> {
     let exists: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM workflows WHERE id = ? LIMIT 1",
+            "SELECT 1 FROM process_templates WHERE id = ? LIMIT 1",
             params![workflow_id],
             |row| row.get(0),
         )
@@ -2640,7 +2590,7 @@ fn ensure_workflow_exists(conn: &Connection, workflow_id: &str) -> Result<()> {
 fn load_workflow_by_id(conn: &Connection, workflow_id: &str) -> Result<WorkflowInfo> {
     conn.query_row(
         "SELECT id, name, description, type, created_at, updated_at
-         FROM workflows
+         FROM process_templates
          WHERE id = ?",
         params![workflow_id],
         workflow_from_row,
@@ -2715,7 +2665,7 @@ fn astra_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunRecor
 
 fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
     conn.query_row(
-        "SELECT id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+        "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
          FROM assistants
          WHERE id = ?",
         params![assistant_id],
@@ -3104,7 +3054,7 @@ fn apply_plan_task_status_patch(
 
 fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<ProjectStageInfo> {
     let mut stage = conn.query_row(
-        "SELECT id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+        "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
          FROM stages
          WHERE id = ?",
         params![stage_id],
@@ -3123,12 +3073,12 @@ fn instantiate_project_assistants(
     now: i64,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+        "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
          FROM assistants
          WHERE project_id IS NULL
            AND enabled = 1
-           AND (workflow_id = ? OR (workflow_id IS NULL AND type = 'custom'))
-         ORDER BY CASE WHEN workflow_id = ? THEN 0 ELSE 1 END, type ASC, updated_at DESC, name COLLATE NOCASE ASC",
+           AND (process_template_id = ? OR (process_template_id IS NULL AND type = 'custom'))
+         ORDER BY CASE WHEN process_template_id = ? THEN 0 ELSE 1 END, type ASC, updated_at DESC, name COLLATE NOCASE ASC",
     )?;
     let templates = stmt
         .query_map(params![workflow_id, workflow_id], assistant_from_row)?
@@ -3137,9 +3087,9 @@ fn instantiate_project_assistants(
         let id = stable_project_assistant_id(project_id, &template.id);
         conn.execute(
             "INSERT OR IGNORE INTO assistants (
-                id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+                id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
              )
-             SELECT ?, name, agent_json, system_prompt, color, type, workflow_id, ?, 1, ?, ?
+             SELECT ?, name, agent_json, system_prompt, color, type, process_template_id, ?, 1, ?, ?
              FROM assistants
              WHERE id = ?",
             params![id, project_id, now, now, template.id],
@@ -3162,9 +3112,9 @@ fn instantiate_project_builtin_stages(
             .collect::<HashSet<_>>()
     });
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+        "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
          FROM stages
-         WHERE project_id IS NULL AND workflow_id = ? AND type = 'builtin'
+         WHERE project_id IS NULL AND process_template_id = ? AND type = 'builtin'
          ORDER BY sort_order ASC, created_at ASC",
     )?;
     let templates = stmt
@@ -3184,7 +3134,7 @@ fn instantiate_project_builtin_stages(
         let id = stable_project_builtin_stage_id(project_id, &template.id);
         conn.execute(
             "INSERT OR IGNORE INTO stages (
-                id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+                id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
              ) VALUES (?, ?, 'builtin', ?, ?, NULL, ?, ?, ?, 1, ?, ?, ?)",
             params![
                 id,
@@ -3212,7 +3162,7 @@ fn link_project_stage_assistants(
     let mut stmt = conn.prepare(
         "SELECT id
          FROM stages
-         WHERE project_id IS NULL AND workflow_id = ? AND type = 'builtin'
+         WHERE project_id IS NULL AND process_template_id = ? AND type = 'builtin'
          ORDER BY sort_order ASC, created_at ASC",
     )?;
     let template_stage_ids = stmt
@@ -3295,7 +3245,7 @@ fn copy_project_stage_assistants(
 fn load_thread_stage_by_id(conn: &Connection, thread_stage_id: &str) -> Result<StageInfo> {
     let mut stage = conn
         .query_row(
-            "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description, s.icon,
+            "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.process_template_id, s.kind, s.name, s.description, s.icon,
                     ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at,
                     tss.status, tss.summary, tss.outcome
              FROM thread_stages ts
@@ -3453,10 +3403,10 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
                 COALESCE(s.name, s.kind, s.id)
              FROM stage_assistants sa
              INNER JOIN stages s ON s.id = sa.stage_id
-             LEFT JOIN workflows w ON w.id = s.workflow_id
+             LEFT JOIN process_templates w ON w.id = s.process_template_id
              WHERE sa.assistant_id = ?
                AND s.project_id IS NULL
-               AND s.workflow_id IS NOT NULL
+               AND s.process_template_id IS NOT NULL
              ORDER BY w.name COLLATE NOCASE ASC, s.sort_order ASC",
         )?;
         let rows = stmt.query_map(params![assistant_id], |row| {
@@ -3935,7 +3885,7 @@ fn seed_workflow_builtin_assistant(
         stable_workflow_builtin_assistant_id(workflow_id, source_assistant_id);
     conn.execute(
         "INSERT INTO assistants (
-            id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+            id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
          )
          SELECT ?, name, agent_json, system_prompt, color, type, ?, NULL, enabled, ?, ?
          FROM assistants
@@ -4069,7 +4019,7 @@ fn upsert_builtin_assistant(
     let agent_json = serde_json::to_string(&assistant_agent)?;
     conn.execute(
         "INSERT INTO assistants (
-            id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+            id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, 'builtin', NULL, NULL, 1, ?, ?)
          ON CONFLICT(id) DO NOTHING",
         params![
@@ -4130,7 +4080,7 @@ fn reorder_project_stage_scope(
         let mut stmt = conn.prepare(
             "SELECT id, sort_order
              FROM stages
-             WHERE workflow_id = ?
+             WHERE process_template_id = ?
                AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
              ORDER BY sort_order ASC, type ASC, project_id IS NOT NULL ASC, created_at ASC",
         )?;
@@ -4365,7 +4315,7 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
 
 fn load_thread_stages(conn: &Connection, thread_id: &str) -> Result<Vec<StageInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.workflow_id, s.kind, s.name, s.description, s.icon,
+        "SELECT ts.id, ts.thread_id, ts.stage_id, t.project_id, s.type, s.process_template_id, s.kind, s.name, s.description, s.icon,
                 ts.sort_order, s.enabled, s.allow_empty_assistants, ts.created_at, ts.updated_at,
                 tss.status, tss.summary, tss.outcome
          FROM thread_stages ts
@@ -5046,7 +4996,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, description, type, created_at, updated_at
-             FROM workflows
+             FROM process_templates
              ORDER BY type ASC, name COLLATE NOCASE ASC",
         )?;
         let rows = stmt.query_map([], workflow_from_row)?;
@@ -5063,7 +5013,7 @@ impl SessionStore for SqliteStore {
         let id = stable_workflow_id(name, now);
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO workflows (id, name, description, type, created_at, updated_at)
+            "INSERT INTO process_templates (id, name, description, type, created_at, updated_at)
              VALUES (?, ?, ?, 'custom', ?, ?)",
             params![id, name, description, now, now],
         )?;
@@ -5103,7 +5053,7 @@ impl SessionStore for SqliteStore {
             None => current.description,
         };
         conn.execute(
-            "UPDATE workflows SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+            "UPDATE process_templates SET name = ?, description = ?, updated_at = ? WHERE id = ?",
             params![next_name, next_description, now_ms(), workflow_id],
         )?;
         load_workflow_by_id(&conn, workflow_id)
@@ -5116,7 +5066,7 @@ impl SessionStore for SqliteStore {
             anyhow::bail!("builtin workflow cannot be deleted");
         }
         let project_count: i64 = conn.query_row(
-            "SELECT count(*) FROM projects WHERE workflow_id = ? AND archived = 0",
+            "SELECT count(*) FROM projects WHERE process_template_id = ? AND archived = 0",
             params![workflow_id],
             |row| row.get(0),
         )?;
@@ -5124,7 +5074,7 @@ impl SessionStore for SqliteStore {
             anyhow::bail!("workflow is used by projects");
         }
         let assistant_count: i64 = conn.query_row(
-            "SELECT count(*) FROM assistants WHERE workflow_id = ?",
+            "SELECT count(*) FROM assistants WHERE process_template_id = ?",
             params![workflow_id],
             |row| row.get(0),
         )?;
@@ -5132,14 +5082,17 @@ impl SessionStore for SqliteStore {
             anyhow::bail!("workflow is used by assistants");
         }
         let stage_count: i64 = conn.query_row(
-            "SELECT count(*) FROM stages WHERE workflow_id = ?",
+            "SELECT count(*) FROM stages WHERE process_template_id = ?",
             params![workflow_id],
             |row| row.get(0),
         )?;
         if stage_count > 0 {
             anyhow::bail!("workflow is used by stages");
         }
-        let changed = conn.execute("DELETE FROM workflows WHERE id = ?", params![workflow_id])?;
+        let changed = conn.execute(
+            "DELETE FROM process_templates WHERE id = ?",
+            params![workflow_id],
+        )?;
         if changed == 0 {
             anyhow::bail!("workflow not found: {workflow_id}");
         }
@@ -5149,7 +5102,7 @@ impl SessionStore for SqliteStore {
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT p.id, p.path, p.name, p.workflow_id, p.created_at, p.updated_at,
+            "SELECT p.id, p.path, p.name, p.process_template_id, p.created_at, p.updated_at,
                     COUNT(s.session_id) AS session_count
              FROM projects p
              LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.skip = 0
@@ -5176,7 +5129,7 @@ impl SessionStore for SqliteStore {
         let tx = conn.transaction()?;
         ensure_workflow_exists(&tx, &workflow_id)?;
         tx.execute(
-            "INSERT INTO projects (id, path, name, workflow_id, created_at, updated_at, archived)
+            "INSERT INTO projects (id, path, name, process_template_id, created_at, updated_at, archived)
              VALUES (?, ?, ?, ?, ?, ?, 0)",
             params![id, canonical, name, workflow_id.as_str(), now, now],
         )
@@ -5230,7 +5183,7 @@ impl SessionStore for SqliteStore {
         let workflow_changed = next_workflow_id != current_workflow_id;
         tx.execute(
             "UPDATE projects
-             SET name = ?, workflow_id = ?, updated_at = ?
+             SET name = ?, process_template_id = ?, updated_at = ?
              WHERE id = ? AND archived = 0",
             params![next_name, next_workflow_id.as_str(), now_ms(), project_id],
         )?;
@@ -5492,7 +5445,7 @@ impl SessionStore for SqliteStore {
         let assistants = if let Some(project_id) = project_id {
             load_project_by_id(&conn, project_id)?;
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
                  FROM assistants
                  WHERE project_id = ?
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
@@ -5501,7 +5454,7 @@ impl SessionStore for SqliteStore {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+                "SELECT id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
                  FROM assistants
                  ORDER BY type ASC, updated_at DESC, name COLLATE NOCASE ASC",
             )?;
@@ -5579,7 +5532,7 @@ impl SessionStore for SqliteStore {
         let agent_json = serde_json::to_string(&agent)?;
         conn.execute(
             "INSERT INTO assistants (
-                id, name, agent_json, system_prompt, color, type, workflow_id, project_id, enabled, created_at, updated_at
+                id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             params![
                 id,
@@ -6222,7 +6175,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         load_project_by_id(&conn, project_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+            "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
              FROM stages
              WHERE project_id = ?
              ORDER BY sort_order ASC, type ASC, created_at ASC",
@@ -6239,9 +6192,9 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         ensure_workflow_exists(&conn, workflow_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
+            "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
              FROM stages
-             WHERE project_id IS NULL AND workflow_id = ?
+             WHERE project_id IS NULL AND process_template_id = ?
              ORDER BY sort_order ASC, type ASC, created_at ASC",
         )?;
         let rows = stmt.query_map(params![workflow_id], project_stage_from_row)?;
@@ -6288,7 +6241,7 @@ impl SessionStore for SqliteStore {
         let next_order: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM stages
-                 WHERE workflow_id = ?
+                 WHERE process_template_id = ?
                    AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)",
                 params![
                     resolved_workflow_id,
@@ -6307,7 +6260,7 @@ impl SessionStore for SqliteStore {
             now,
         );
         conn.execute(
-            "INSERT INTO stages (id, project_id, type, workflow_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
+            "INSERT INTO stages (id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
              VALUES (?, ?, 'custom', ?, NULL, ?, ?, ?, ?, 1, 0, ?, ?)",
             params![
                 id,
@@ -8442,6 +8395,90 @@ mod migration_tests {
         }
     }
 
+    fn assert_revised_v5_process_template_schema(conn: &Connection) {
+        let latest_schema_version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(latest_schema_version, 5);
+
+        let process_templates: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='process_templates'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(process_templates, 1);
+
+        let workflows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='workflows'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(workflows, 0);
+
+        for (table, expected_column, legacy_column) in [
+            ("projects", "process_template_id", "workflow_id"),
+            ("assistants", "process_template_id", "workflow_id"),
+            ("stages", "process_template_id", "workflow_id"),
+        ] {
+            let columns: Vec<String> = {
+                let mut stmt = conn
+                    .prepare(&format!("PRAGMA table_info({table})"))
+                    .unwrap();
+                let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+                rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+            };
+            assert!(
+                columns.contains(&expected_column.to_string()),
+                "{table}.{expected_column} should exist"
+            );
+            assert!(
+                !columns.contains(&legacy_column.to_string()),
+                "{table}.{legacy_column} should not exist"
+            );
+        }
+
+        let schema_sql: String = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT COALESCE(group_concat(sql, '\n'), '')
+                     FROM sqlite_master
+                     WHERE sql IS NOT NULL",
+                )
+                .unwrap();
+            stmt.query_row([], |row| row.get(0)).unwrap()
+        };
+        assert!(
+            !schema_sql.contains("workflows"),
+            "schema should not contain legacy workflows table references"
+        );
+        assert!(
+            !schema_sql.contains("workflow_id"),
+            "schema should not contain legacy workflow_id columns"
+        );
+        assert!(
+            !schema_sql.contains("'workflow'"),
+            "schema should not contain legacy workflow thread kind values"
+        );
+        assert!(
+            schema_sql.contains("process_templates"),
+            "schema should contain process_templates"
+        );
+        assert!(
+            schema_sql.contains("process_template_id"),
+            "schema should contain process_template_id"
+        );
+        assert!(
+            schema_sql.contains("'process'"),
+            "schema should contain process thread kind values"
+        );
+    }
+
     // Verify a synthetic v0.3.2-era schema migrates cleanly into the current
     // shape.
     #[test]
@@ -8483,12 +8520,7 @@ mod migration_tests {
         store.init().unwrap();
 
         let conn = store.conn.lock().unwrap();
-        let latest_schema_version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(latest_schema_version, 7);
+        assert_revised_v5_process_template_schema(&conn);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -8622,6 +8654,8 @@ mod migration_tests {
         store.init().unwrap();
 
         let conn = store.conn.lock().unwrap();
+        assert_revised_v5_process_template_schema(&conn);
+
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
             let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
@@ -11289,6 +11323,16 @@ mod migration_tests {
             .unwrap();
         assert_eq!(legacy.kind, ThreadKind::Workflow);
         assert!(legacy.assistants.is_empty());
+        let persisted_kind: String = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT kind FROM threads WHERE id = ?",
+                params![legacy.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(persisted_kind, "process");
 
         let assistant_ids = vec![builder.id.clone(), reviewer.id.clone()];
         let teamwork = store

@@ -527,7 +527,7 @@ pub enum ThreadKind {
 impl ThreadKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ThreadKind::Workflow => "workflow",
+            ThreadKind::Workflow => "process",
             ThreadKind::Teamwork => "teamwork",
             ThreadKind::Brainstorm => "brainstorm",
             ThreadKind::Debate => "debate",
@@ -536,7 +536,7 @@ impl ThreadKind {
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "workflow" => Some(ThreadKind::Workflow),
+            "process" => Some(ThreadKind::Workflow),
             "teamwork" => Some(ThreadKind::Teamwork),
             "brainstorm" => Some(ThreadKind::Brainstorm),
             "debate" => Some(ThreadKind::Debate),
