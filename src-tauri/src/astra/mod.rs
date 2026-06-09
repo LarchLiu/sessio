@@ -931,6 +931,42 @@ impl AstraService {
             self.release_delegated_runtime_resource(runtime_resource_agent);
             return Err(error);
         }
+        if let Err(error) = self.link_astra_plan_task_session(
+            task,
+            task.target_agent,
+            &handle.sessio_runtime_session_id,
+            PlanTaskSessionRole::Runtime,
+            attempt.attempt_count,
+        ) {
+            let message = error.to_string();
+            self.finish_delegated_task(
+                &handle.sessio_runtime_session_id,
+                None,
+                AstraTaskResultStatus::Errored,
+                String::new(),
+                Some(format!("runtime placeholder link failed: {message}")),
+            )?;
+            return Err(error);
+        }
+        let attempt_id = delegated_attempt_id(&task.id, attempt.attempt_count);
+        self.emit(
+            run,
+            "task_dispatch",
+            json!({
+                "taskId": task.id,
+                "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
+                "attemptCount": attempt.attempt_count,
+                "attemptId": attempt_id,
+            }),
+        );
+        log::info!(
+            "[astra:task:dispatch] runId={} threadId={} taskId={} runtimeSessionId={} attemptCount={}",
+            run.run_id,
+            run.thread_id,
+            task.id,
+            handle.sessio_runtime_session_id,
+            attempt.attempt_count
+        );
         // Register the result waiter before startup wait and before sending the
         // prompt: fast failures and synchronous fake turns can otherwise reach
         // a terminal state before the batch waiter exists.
@@ -1108,48 +1144,6 @@ impl AstraService {
                     return Err(error);
                 }
             };
-            if let Err(error) = self.link_astra_plan_task_session(
-                task,
-                task.target_agent,
-                &handle.sessio_runtime_session_id,
-                PlanTaskSessionRole::Runtime,
-                attempt_count,
-            ) {
-                let message = error.to_string();
-                self.finish_delegated_task(
-                    &handle.sessio_runtime_session_id,
-                    None,
-                    AstraTaskResultStatus::Errored,
-                    String::new(),
-                    Some(format!("runtime placeholder link failed: {message}")),
-                )?;
-                for handle in &handles {
-                    self.abort_delegated_session(
-                        &handle.sessio_runtime_session_id,
-                        "batch aborted after runtime placeholder link failure",
-                    );
-                }
-                return Err(error);
-            }
-            let attempt_id = delegated_attempt_id(&task.id, attempt_count);
-            self.emit(
-                &next,
-                "task_dispatch",
-                json!({
-                    "taskId": task.id,
-                    "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
-                    "attemptCount": attempt_count,
-                    "attemptId": attempt_id,
-                }),
-            );
-            log::info!(
-                "[astra:task:dispatch] runId={} threadId={} taskId={} runtimeSessionId={} attemptCount={}",
-                next.run_id,
-                next.thread_id,
-                task.id,
-                handle.sessio_runtime_session_id,
-                attempt_count
-            );
             receivers.push((
                 task.id.clone(),
                 handle.sessio_runtime_session_id.clone(),

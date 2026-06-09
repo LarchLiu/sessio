@@ -9,6 +9,7 @@ import {
   MessagesSquare,
   Sparkles,
   Square,
+  Swords,
 } from "lucide-react";
 import type {
   Agent,
@@ -256,6 +257,7 @@ export default function ThreadMultiSessionChatPage({
     () => thread ? threadTimelineNavItems(timelineRows, thread, t) : [],
     [thread, timelineRows, t],
   );
+  const showTimelineNav = !loading && Boolean(thread) && timelineRows.length > 0;
   const threadChatSessions = useMemo(
     () => thread ? collectThreadChatSessions(thread, replay) : [],
     [replay, thread],
@@ -493,23 +495,23 @@ export default function ThreadMultiSessionChatPage({
                   detail={replay ? t("thread.no_chats") : t("thread.history_pending")}
                 />
               ) : (
-                <>
-                  <ThreadContextNav
-                    items={timelineNavItems}
-                    laneRefs={laneRefs}
-                    viewportRef={viewportRef}
-                  />
-                  <ThreadTimeline
-                    rows={timelineRows}
-                    thread={thread}
-                    laneRefs={laneRefs}
-                    now={Date.now()}
-                  />
-                </>
+                <ThreadTimeline
+                  rows={timelineRows}
+                  thread={thread}
+                  laneRefs={laneRefs}
+                  now={Date.now()}
+                />
               )}
             </div>
           )}
         </ScrollArea>
+        {showTimelineNav && (
+          <ThreadContextNav
+            items={timelineNavItems}
+            laneRefs={laneRefs}
+            viewportRef={viewportRef}
+          />
+        )}
         {showScrollToBottom && (
           <button
             type="button"
@@ -634,6 +636,9 @@ function ThreadSessionLaneCard({
         data-thread-lane-header="true"
         className="mb-1.5 flex min-w-0 items-center gap-2 px-1"
       >
+        {thread.kind === "debate" && (
+          <AgentGlyph agent={lane.agent} className="h-3.5 w-3.5 shrink-0" />
+        )}
         <h2 className="min-w-0 truncate text-caption font-medium text-ink/48">
           {meta.title}
         </h2>
@@ -644,6 +649,7 @@ function ThreadSessionLaneCard({
 }
 
 type ThreadContextNavItem = {
+  key: string;
   laneId: string;
   context: LaneDisplayContext;
 };
@@ -656,10 +662,44 @@ function threadTimelineNavItems(
   const seen = new Set<string>();
   const items: ThreadContextNavItem[] = [];
   for (const row of rows) {
+    if (row.kind === "orchestration") {
+      const visibleStaticPlanner = row.round
+        ? Boolean(planRoundSummaryText(row.round, row.run))
+        : false;
+      if (row.lanes.length > 0 || visibleStaticPlanner) {
+        row.lanes.forEach((lane) => seen.add(lane.laneId));
+        items.push({
+          key: `planner:${row.key}`,
+          laneId: row.lanes[0]?.laneId ?? row.key,
+          context: {
+            kind: "planner",
+            label: "Astra planner",
+            title: readableTooltipText(row.round?.summary) ?? null,
+          },
+        });
+      }
+      continue;
+    }
+    if (row.debatePair && row.lanes.length > 0) {
+      row.lanes.forEach((lane) => seen.add(lane.laneId));
+      const participants = row.lanes.map((lane) => battleParticipantFromLane(lane, thread, t));
+      items.push({
+        key: `battle:${row.key}`,
+        laneId: row.lanes[0].laneId,
+        context: {
+          kind: "battle",
+          label: participants.map((participant) => participant.label).join(" vs ") || "Battle",
+          title: null,
+          participants,
+        },
+      });
+      continue;
+    }
     for (const lane of row.lanes) {
       if (seen.has(lane.laneId)) continue;
       seen.add(lane.laneId);
       items.push({
+        key: lane.laneId,
         laneId: lane.laneId,
         context: laneDisplayMeta(lane, thread, t).context,
       });
@@ -677,31 +717,29 @@ function ThreadContextNav({
   laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
-  const navRef = useRef<HTMLDivElement>(null);
   const [positions, setPositions] = useState<Map<string, number>>(new Map());
 
   useEffect(() => {
     const vp = viewportRef.current;
-    const nav = navRef.current;
-    const root = nav?.parentElement ?? null;
-    if (!vp || !root || items.length === 0) {
+    if (!vp || items.length === 0) {
       setPositions(new Map());
       return;
     }
 
     let frame: number | null = null;
     const computePositions = () => {
-      const rootRect = root.getBoundingClientRect();
+      const contentHeight = Math.max(1, vp.scrollHeight);
+      const vpRect = vp.getBoundingClientRect();
       const next = new Map<string, number>();
       for (const item of items) {
         const el = laneRefs.current[item.laneId];
         if (!el) continue;
         const header = el.querySelector<HTMLElement>("[data-thread-lane-header='true']");
         const rect = (header ?? el).getBoundingClientRect();
-        const center = header
-          ? rect.top - rootRect.top + rect.height / 2
-          : rect.top - rootRect.top + 8;
-        next.set(item.laneId, Math.max(0, center));
+        const contentCenter = header
+          ? rect.top - vpRect.top + vp.scrollTop + rect.height / 2
+          : rect.top - vpRect.top + vp.scrollTop + 8;
+        next.set(item.key, Math.max(0, Math.min(1, contentCenter / contentHeight)));
       }
       setPositions(next);
     };
@@ -714,22 +752,34 @@ function ThreadContextNav({
     };
 
     computePositions();
-    vp.addEventListener("scroll", scheduleMeasure, { passive: true });
     const ro = new ResizeObserver(scheduleMeasure);
     ro.observe(vp);
-    ro.observe(root);
+    for (const child of Array.from(vp.children)) ro.observe(child);
     for (const item of items) {
       const el = laneRefs.current[item.laneId];
       if (el) ro.observe(el);
     }
     return () => {
-      vp.removeEventListener("scroll", scheduleMeasure);
       if (frame !== null) window.cancelAnimationFrame(frame);
       ro.disconnect();
     };
   }, [items, laneRefs, viewportRef]);
 
   if (items.length === 0) return null;
+
+  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    event.preventDefault();
+    const unit =
+      event.deltaMode === 1
+        ? 16
+        : event.deltaMode === 2
+          ? vp.clientHeight
+          : 1;
+    vp.scrollTop += event.deltaY * unit;
+    vp.scrollLeft += event.deltaX * unit;
+  };
 
   const jumpToLane = (laneId: string) => {
     const vp = viewportRef.current;
@@ -746,16 +796,15 @@ function ThreadContextNav({
 
   return (
     <div
-      ref={navRef}
-      aria-hidden={items.length === 0}
-      className="pointer-events-none absolute top-0 bottom-0 -left-10 z-10 w-10"
+      onWheel={handleWheel}
+      className="absolute top-2 bottom-2 left-0 z-10 w-10"
     >
       {items.map((item) => {
-        const top = positions.get(item.laneId);
-        if (top === undefined) return null;
+        const ratio = positions.get(item.key);
+        if (ratio === undefined) return null;
         return (
           <Tooltip
-            key={item.laneId}
+            key={item.key}
             content={<ThreadContextTooltip context={item.context} />}
             placement="right"
             offset={10}
@@ -766,7 +815,7 @@ function ThreadContextNav({
               onClick={() => jumpToLane(item.laneId)}
               aria-label={item.context.label}
               className="pointer-events-auto absolute left-2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-ink/38 transition hover:bg-ink/[0.06] hover:text-ink/75 focus-visible:bg-ink/[0.08] focus-visible:text-ink"
-              style={{ top }}
+              style={{ top: `${ratio * 100}%` }}
             >
               <ThreadContextIcon context={item.context} className="h-3.5 w-3.5" />
             </button>
@@ -791,11 +840,40 @@ function ThreadContextIcon({
         : <ListChecks className={className} />)
       : context.kind === "assistant"
         ? <AssistantBotIcon color={context.color} className={className} />
+        : context.kind === "planner"
+          ? <Sparkles className={className} />
+          : context.kind === "battle"
+            ? <Swords className={className} />
         : <AgentGlyph agent={context.agent} className={className} />;
   return icon;
 }
 
 function ThreadContextTooltip({ context }: { context: LaneDisplayContext }) {
+  if (context.kind === "battle") {
+    return (
+      <div className="max-w-[300px]">
+        <div className="text-caption font-medium text-tooltip-fg">{context.label}</div>
+        <div className="mt-1 grid gap-1">
+          {context.participants.map((participant, index) => {
+            const detail = tooltipDetailText(participant.title);
+            return (
+              <div key={`${participant.label}:${index}`} className="min-w-0">
+                <div className="flex min-w-0 items-center gap-1.5 text-meta font-medium text-tooltip-fg/85">
+                  <AgentGlyph agent={participant.agent} className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{participant.label}</span>
+                </div>
+                {detail && (
+                  <div className="mt-0.5 line-clamp-2 pl-5 text-meta text-tooltip-fg/62">
+                    {detail}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
   const detail = tooltipDetailText(context.title);
   return (
     <div className="max-w-[260px]">
@@ -872,14 +950,19 @@ function ThreadTimeline({
   now: number;
 }) {
   return (
-    <section className="grid gap-3">
+    <section className="grid gap-4">
       {rows.map((row) => {
         if (row.kind === "orchestration") {
           const summaryText = row.round ? planRoundSummaryText(row.round, row.run) : null;
           if (row.lanes.length === 0) {
             if (!row.round || !summaryText) return null;
             return (
-              <ThreadTimelineStaticCard key={row.key} title="Astra planner">
+              <ThreadTimelineStaticCard
+                key={row.key}
+                laneId={row.key}
+                laneRefs={laneRefs}
+                title="Astra planner"
+              >
                 <ThreadPlanRoundSummaryMessage
                   round={row.round}
                   text={summaryText}
@@ -889,7 +972,7 @@ function ThreadTimeline({
             );
           }
           return (
-            <div key={row.key} className="grid gap-2">
+            <div key={row.key} className="grid gap-5">
               {row.lanes.map((lane) => (
                 <ThreadSessionLaneCard
                   key={lane.laneId}
@@ -913,7 +996,7 @@ function ThreadTimeline({
         return (
           <div
             key={row.key}
-            className={row.debatePair ? "grid gap-3 md:grid-cols-2" : "grid gap-3"}
+            className={row.debatePair ? "grid gap-5 md:grid-cols-2" : "grid gap-4"}
           >
             {row.lanes.map((lane) => (
               <ThreadSessionLaneCard
@@ -932,14 +1015,23 @@ function ThreadTimeline({
 }
 
 function ThreadTimelineStaticCard({
+  laneId,
+  laneRefs,
   title,
   children,
 }: {
+  laneId: string;
+  laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
   title: string;
   children: ReactNode;
 }) {
   return (
-    <section className="min-w-0 scroll-mt-4">
+    <section
+      ref={(el) => {
+        laneRefs.current[laneId] = el;
+      }}
+      className="min-w-0 scroll-mt-4"
+    >
       <header
         data-thread-lane-header="true"
         className="mb-1.5 flex min-w-0 items-center gap-2 px-1"
@@ -1017,6 +1109,7 @@ function ThreadPlannerSummaryMessage({
         bubbleRefs={bubbleRefs}
         sessioRuntimeSessionId=""
         now={now}
+        defaultMessageExpanded={false}
         onPreviewImage={onPreviewImage}
         onPreviewFile={onPreviewFile}
         onFilePreviewError={onFilePreviewError}
@@ -1137,6 +1230,7 @@ function ThreadSessionLatestMessage({
             bubbleRefs={bubbleRefs}
             sessioRuntimeSessionId={permissionSessionId}
             now={now}
+            defaultMessageExpanded={false}
             onPreviewImage={onPreviewImage}
             onPreviewFile={onPreviewFile}
             onFilePreviewError={onFilePreviewError}
@@ -1185,7 +1279,7 @@ function latestLaneRenderItems(items: AcpRenderItem[]): AcpRenderItem[] {
       !item.permission.cancelled,
     );
   if (pendingPermission) return [pendingPermission];
-  const latestMessageIndex = findLastRenderItemIndex(items, (item) => item.kind !== "turnStatus");
+  const latestMessageIndex = findLastRenderItemIndex(items, isLanePreviewRenderItem);
   if (latestMessageIndex < 0) return items.slice(-1);
   const latestMessage = items[latestMessageIndex];
   if (isFileEditRenderItem(latestMessage)) {
@@ -1193,7 +1287,7 @@ function latestLaneRenderItems(items: AcpRenderItem[]): AcpRenderItem[] {
       items,
       (item, index) =>
         index < latestMessageIndex &&
-        item.kind !== "turnStatus" &&
+        isLanePreviewRenderItem(item) &&
         !isFileEditRenderItem(item),
     );
     return previousMessageIndex >= 0
@@ -1201,6 +1295,32 @@ function latestLaneRenderItems(items: AcpRenderItem[]): AcpRenderItem[] {
       : [latestMessage];
   }
   return [latestMessage];
+}
+
+function isLanePreviewRenderItem(item: AcpRenderItem): boolean {
+  if (item.kind === "turnStatus" || item.kind === "workingIndicator") return false;
+  if (item.kind !== "block") return true;
+  if (item.block.kind === "user") return !isDelegatedTaskPromptBlock(item.block);
+  return item.block.kind === "assistant" ||
+    item.block.kind === "thought" ||
+    isFileEditRenderItem(item);
+}
+
+function isDelegatedTaskPromptBlock(block: AcpRenderBlock): boolean {
+  if (block.kind !== "user") return false;
+  const text = acpTextBlockText(block).trimStart();
+  return text.startsWith("# Sessio plan task") ||
+    text.includes("You are working on a delegated Astra plan task.");
+}
+
+function acpTextBlockText(block: AcpRenderBlock): string {
+  if (block.kind !== "user" && block.kind !== "assistant" && block.kind !== "thought") {
+    return "";
+  }
+  return block.blocks
+    .map((item) => item.type === "text" ? item.text : "")
+    .filter(Boolean)
+    .join("\n");
 }
 
 function findLastRenderItemIndex(
@@ -1235,6 +1355,17 @@ type LaneDisplayContext =
       color: string | null;
     }
   | {
+      kind: "planner";
+      label: string;
+      title: string | null;
+    }
+  | {
+      kind: "battle";
+      label: string;
+      title: string | null;
+      participants: BattleParticipant[];
+    }
+  | {
       kind: "agent";
       label: string;
       title: string | null;
@@ -1246,12 +1377,42 @@ type LaneDisplayMeta = {
   context: LaneDisplayContext;
 };
 
+type BattleParticipant = {
+  label: string;
+  title: string | null;
+  agent: Agent;
+};
+
+function battleParticipantFromLane(
+  lane: ThreadSessionLane,
+  thread: ThreadWorkState,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): BattleParticipant {
+  const context = laneDisplayMeta(lane, thread, t).context;
+  return {
+    label: context.label,
+    title: context.title,
+    agent: lane.agent,
+  };
+}
+
 function laneDisplayMeta(
   lane: ThreadSessionLane,
   thread: ThreadWorkState,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): LaneDisplayMeta {
   const source = preferredLaneSource(lane);
+  const sourceLabel = plannerDisplayLabel(source);
+  if (source?.kind === "astra_internal") {
+    return {
+      title: sourceLabel || lane.groupLabel || "Astra planner",
+      context: {
+        kind: "planner",
+        label: sourceLabel || "Astra planner",
+        title: readableTooltipText(source?.label) ?? null,
+      },
+    };
+  }
   const stageSnapshot = parseJsonObject(source?.stageSnapshotJson ?? null);
   const assistantSnapshot = parseJsonObject(source?.assistantSnapshotJson ?? null);
   const agentSnapshot = parseJsonObject(source?.agentSnapshotJson ?? null);
@@ -1281,7 +1442,6 @@ function laneDisplayMeta(
     ?? (fallbackStage ? projectStageLabel(fallbackStage, t) : null);
   const stageIcon = snapshotStageIcon(stageSnapshot) ?? fallbackStage;
   const agentLabel = participantLabel ?? snapshotAgentLabel ?? AGENT_LABEL[lane.agent];
-  const sourceLabel = plannerDisplayLabel(source);
   const title =
     sourceLabel
     || (lane.session ? sessionDisplayTitle(lane.session) ?? null : null)
@@ -1290,9 +1450,9 @@ function laneDisplayMeta(
     || shortSessionId(lane.sessionId);
   const assistantLabel =
     fallbackAssistant?.name
-    ?? (source?.role === "planner" ? "Astra planner" : null)
     ?? source?.label?.trim()
     ?? lane.groupLabel;
+  const agentDetail = participantTooltipDetail(participantSnapshot) ?? agentTooltipDetail(agentSnapshot);
   const context: LaneDisplayContext = stageLabel
     ? {
         kind: "stage",
@@ -1310,10 +1470,21 @@ function laneDisplayMeta(
           color: fallbackAssistant.color ?? null,
           title: assistantTooltipDetail(assistantSnapshot, fallbackAssistant, source),
         }
+      : thread.kind === "debate"
+        ? {
+            kind: "battle",
+            label: agentLabel,
+            title: agentDetail,
+            participants: [{
+              label: agentLabel,
+              title: agentDetail,
+              agent: lane.agent,
+            }],
+          }
       : {
           kind: "agent",
           label: agentLabel,
-          title: participantTooltipDetail(participantSnapshot) ?? agentTooltipDetail(agentSnapshot),
+          title: agentDetail,
           agent: lane.agent,
         };
 

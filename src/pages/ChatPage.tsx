@@ -2434,6 +2434,7 @@ export function AcpRenderItems({
   bubbleRefs,
   sessioRuntimeSessionId,
   now,
+  defaultMessageExpanded,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2444,6 +2445,7 @@ export function AcpRenderItems({
   bubbleRefs: React.RefObject<(HTMLDivElement | null)[]>;
   sessioRuntimeSessionId: string;
   now: number;
+  defaultMessageExpanded?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2467,6 +2469,7 @@ export function AcpRenderItems({
             item={item}
             sessioRuntimeSessionId={sessioRuntimeSessionId}
             now={now}
+            defaultMessageExpanded={defaultMessageExpanded}
             onPreviewImage={onPreviewImage}
             onPreviewFile={onPreviewFile}
             onFilePreviewError={onFilePreviewError}
@@ -2482,6 +2485,7 @@ function AcpLiveItem({
   item,
   sessioRuntimeSessionId,
   now,
+  defaultMessageExpanded,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2490,6 +2494,7 @@ function AcpLiveItem({
   item: AcpRenderItem;
   sessioRuntimeSessionId: string;
   now: number;
+  defaultMessageExpanded: boolean | undefined;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2552,6 +2557,7 @@ function AcpLiveItem({
       }
       typewriterKey={`${item.turn.turnId}:${item.block.kind}`}
       messageFinished={isAcpMessageBlockFinished(item.turn, item.block)}
+      defaultMessageExpanded={defaultMessageExpanded}
       onPreviewImage={onPreviewImage}
       onPreviewFile={onPreviewFile}
       onFilePreviewError={onFilePreviewError}
@@ -2620,6 +2626,7 @@ function AcpContentBlockGroup({
   typewriterActive = false,
   typewriterKey,
   messageFinished = true,
+  defaultMessageExpanded,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2629,6 +2636,7 @@ function AcpContentBlockGroup({
   typewriterActive?: boolean;
   typewriterKey?: string;
   messageFinished?: boolean;
+  defaultMessageExpanded?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2639,7 +2647,9 @@ function AcpContentBlockGroup({
   const isUser = block.kind === "user";
   const isThought = block.kind === "thought";
   const [thoughtExpanded, setThoughtExpanded] = useState(() => isThought && typewriterActive);
-  const [messageExpanded, setMessageExpanded] = useState(() => !isThought && !isUser && typewriterActive);
+  const [messageExpanded, setMessageExpanded] = useState(
+    () => defaultMessageExpanded ?? (!isThought && !isUser && typewriterActive),
+  );
   const [messageOverflowing, setMessageOverflowing] = useState(false);
   const messageGroupRef = useRef<HTMLDivElement>(null);
   const messageBodyRef = useRef<HTMLDivElement>(null);

@@ -6045,6 +6045,23 @@ impl SessionStore for SqliteStore {
             .attempt_id
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let superseded_at = if session.role == PlanTaskSessionRole::Runtime {
+            let delegated_exists = conn
+                .query_row(
+                    "SELECT 1
+                     FROM thread_plan_task_sessions
+                     WHERE task_id = ? AND agent = ? AND role = 'delegated' AND attempt_count = ?
+                       AND superseded_at IS NULL
+                     LIMIT 1",
+                    params![session.task_id, session.agent.as_str(), attempt_count],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            delegated_exists.then_some(now)
+        } else {
+            None
+        };
         conn.execute(
             "UPDATE thread_plan_task_sessions
              SET superseded_at = COALESCE(superseded_at, ?), updated_at = ?
@@ -6064,7 +6081,7 @@ impl SessionStore for SqliteStore {
             "INSERT INTO thread_plan_task_sessions (
                 task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
              )
-             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(task_id, agent, session_id, role) DO UPDATE SET
                 attempt_id = excluded.attempt_id,
                 attempt_count = excluded.attempt_count,
@@ -6077,6 +6094,7 @@ impl SessionStore for SqliteStore {
                 session.role.as_str(),
                 attempt_id,
                 attempt_count,
+                superseded_at,
                 now,
                 now,
             ],
@@ -10760,6 +10778,23 @@ mod migration_tests {
         }));
         assert!(parallel.tasks[0].sessions.iter().any(|session| {
             session.session_id == "runtime-session-1"
+                && session.role == PlanTaskSessionRole::Runtime
+                && session.superseded_at.is_some()
+        }));
+        let late_runtime = store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &parallel.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: "runtime-session-late",
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: Some("attempt-1"),
+                attempt_count: 1,
+            })
+            .unwrap();
+        assert!(late_runtime.superseded_at.is_some());
+        let parallel = store.get_plan_round(&parallel.id).unwrap().unwrap();
+        assert!(parallel.tasks[0].sessions.iter().any(|session| {
+            session.session_id == "runtime-session-late"
                 && session.role == PlanTaskSessionRole::Runtime
                 && session.superseded_at.is_some()
         }));
