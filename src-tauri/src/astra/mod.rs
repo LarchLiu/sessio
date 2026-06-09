@@ -57,6 +57,13 @@ const RUST_NATIVE_ROUND_LIMIT: u32 = 12;
 const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 const ENABLE_ASTRA_PI_SESSION_PERSISTENCE: bool = false;
+const MAX_ASTRA_RUN_DIAGNOSTICS: usize = 100;
+
+fn trim_astra_run_diagnostics(values: &mut Vec<Value>) {
+    if values.len() > MAX_ASTRA_RUN_DIAGNOSTICS {
+        values.drain(0..values.len() - MAX_ASTRA_RUN_DIAGNOSTICS);
+    }
+}
 
 fn validate_assistant_routed_astra_tasks(tasks: &[AstraTaskProposal]) -> Result<()> {
     if let Some(task) = tasks.iter().find(|task| task.target_stage_id.is_some()) {
@@ -758,32 +765,72 @@ impl AstraService {
         };
         hydrate_start_request_for_astra(&mut req, self.inner.store.as_ref())?;
         let handle = self.inner.runtime.start_session(req)?;
-        self.track_delegated_session(
+        if let Err(error) = self.track_delegated_session(
             &run.run_id,
             task,
             attempt,
             &handle.sessio_runtime_session_id,
             stage_context,
-        )?;
+        ) {
+            let _ = self
+                .inner
+                .runtime
+                .dispose_session_silent(&handle.sessio_runtime_session_id);
+            return Err(error);
+        }
         if is_persistable_agent_session_id(&handle.agent_runtime_session_id) {
-            self.record_ready_delegated_session(
+            if let Err(error) = self.record_ready_delegated_session(
                 &run.run_id,
                 task.target_agent,
                 &task.id,
                 attempt.thread_stage_id,
                 &handle.agent_runtime_session_id,
                 &handle.sessio_runtime_session_id,
-            )?;
+            ) {
+                let message = error.to_string();
+                log::warn!(
+                    "[astra:task:delegated-ready-failed] runId={} taskId={} runtimeSessionId={} message={}",
+                    run.run_id,
+                    task.id,
+                    handle.sessio_runtime_session_id,
+                    message
+                );
+                self.record_run_diagnostic(
+                    &run.run_id,
+                    delegated_lifecycle_diagnostic(
+                        "persisted_session_link_failed",
+                        &task.id,
+                        &handle.sessio_runtime_session_id,
+                        Some(&handle.agent_runtime_session_id),
+                        attempt.attempt_count,
+                        &message,
+                    ),
+                );
+            }
         }
         // Register the result waiter before sending the prompt: a fast (or
         // synchronous fake) turn can reach a terminal state inside send_input,
         // so the waiter must already be in place or its wakeup is lost.
         if let Some(waiter) = task_waiter {
-            self.inner
+            if let Err(error) = self
+                .inner
                 .task_waiters
                 .lock()
-                .map_err(|_| anyhow::anyhow!("Astra task waiter lock poisoned"))?
-                .insert(handle.sessio_runtime_session_id.clone(), waiter);
+                .map_err(|_| anyhow::anyhow!("Astra task waiter lock poisoned"))
+                .map(|mut waiters| {
+                    waiters.insert(handle.sessio_runtime_session_id.clone(), waiter);
+                })
+            {
+                let message = error.to_string();
+                self.finish_delegated_task(
+                    &handle.sessio_runtime_session_id,
+                    None,
+                    AstraTaskResultStatus::Errored,
+                    String::new(),
+                    Some(format!("task waiter registration failed: {message}")),
+                )?;
+                return Err(error);
+            }
         }
         if !initial_prompt.trim().is_empty() {
             if let Err(error) = self.inner.runtime.send_input(
@@ -794,7 +841,14 @@ impl AstraService {
                     options: RuntimeMetadata::default(),
                 },
             ) {
-                self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                let message = error.to_string();
+                self.finish_delegated_task(
+                    &handle.sessio_runtime_session_id,
+                    None,
+                    AstraTaskResultStatus::Errored,
+                    String::new(),
+                    Some(format!("send_input failed: {message}")),
+                )?;
                 return Err(error);
             }
         }
@@ -879,12 +933,25 @@ impl AstraService {
                     return Err(error);
                 }
             };
-            self.link_astra_plan_task_session(
+            if let Err(error) = self.link_astra_plan_task_session(
                 task,
                 task.target_agent,
                 &handle.sessio_runtime_session_id,
                 PlanTaskSessionRole::Runtime,
-            )?;
+            ) {
+                let message = error.to_string();
+                self.finish_delegated_task(
+                    &handle.sessio_runtime_session_id,
+                    None,
+                    AstraTaskResultStatus::Errored,
+                    String::new(),
+                    Some(format!("runtime placeholder link failed: {message}")),
+                )?;
+                for handle in &handles {
+                    self.abort_delegated_session(&handle.sessio_runtime_session_id);
+                }
+                return Err(error);
+            }
             self.emit(
                 &next,
                 "task_dispatch",
@@ -1177,12 +1244,7 @@ impl AstraService {
     ) -> Result<()> {
         let store = self.inner.store.clone();
         let (run, ()) = self.mutate_run(run_id, move |run| {
-            record_ready_internal_planner_session(
-                store.as_ref(),
-                run,
-                agent,
-                agent_session_id,
-            )?;
+            record_ready_internal_planner_session(store.as_ref(), run, agent, agent_session_id)?;
             push_internal_planner_session_id(
                 &mut run.internal_planner_session_ids,
                 agent_session_id.to_string(),
@@ -1367,7 +1429,67 @@ impl AstraService {
             retry_limit_reached: state.retry_limit_reached,
             completed_at: now_ms(),
         };
-        let run = self.record_task_result(&state.run_id, result.clone())?;
+        let mut diagnostics = Vec::new();
+        let run = match self.record_task_result(&state.run_id, result.clone()) {
+            Ok(run) => Some(run),
+            Err(error) => {
+                let message = error.to_string();
+                log::warn!(
+                    "[astra:task:result-persist-failed] runId={} taskId={} runtimeSessionId={} message={}",
+                    state.run_id,
+                    result.task_id,
+                    sessio_runtime_session_id,
+                    message
+                );
+                diagnostics.push(delegated_lifecycle_diagnostic(
+                    "result_persist_failed",
+                    &result.task_id,
+                    sessio_runtime_session_id,
+                    Some(&result.sessio_runtime_session_id),
+                    result.attempt_count,
+                    &message,
+                ));
+                self.load_run(&state.run_id).ok()
+            }
+        };
+        match self
+            .inner
+            .runtime
+            .dispose_session_silent(sessio_runtime_session_id)
+        {
+            Ok(()) => {}
+            Err(error) => {
+                let message = error.to_string();
+                log::warn!(
+                    "[astra:task:runtime-dispose-failed] runId={} taskId={} runtimeSessionId={} message={}",
+                    state.run_id,
+                    result.task_id,
+                    sessio_runtime_session_id,
+                    message
+                );
+                diagnostics.push(delegated_lifecycle_diagnostic(
+                    "runtime_dispose_failed",
+                    &result.task_id,
+                    sessio_runtime_session_id,
+                    Some(&result.sessio_runtime_session_id),
+                    result.attempt_count,
+                    &message,
+                ));
+            }
+        }
+        match self.inner.delegated_sessions.lock() {
+            Ok(mut delegated) => {
+                delegated.remove(sessio_runtime_session_id);
+            }
+            Err(_) => diagnostics.push(delegated_lifecycle_diagnostic(
+                "delegated_tracking_remove_failed",
+                &result.task_id,
+                sessio_runtime_session_id,
+                Some(&result.sessio_runtime_session_id),
+                result.attempt_count,
+                "Astra delegated session lock poisoned",
+            )),
+        }
         if let Some(sender) = self
             .inner
             .task_waiters
@@ -1375,17 +1497,62 @@ impl AstraService {
             .ok()
             .and_then(|mut waiters| waiters.remove(sessio_runtime_session_id))
         {
-            let _ = sender.send(result.clone());
+            if sender.send(result.clone()).is_err() {
+                diagnostics.push(delegated_lifecycle_diagnostic(
+                    "task_waiter_wake_failed",
+                    &result.task_id,
+                    sessio_runtime_session_id,
+                    Some(&result.sessio_runtime_session_id),
+                    result.attempt_count,
+                    "task waiter receiver dropped",
+                ));
+            }
         }
-        self.emit(&run, "task_result", serde_json::to_value(&result)?);
-        log::info!(
-            "[astra:task:result] runId={} threadId={} taskId={} sessioRuntimeSessionId={} status={}",
-            run.run_id,
-            run.thread_id,
-            result.task_id,
-            result.sessio_runtime_session_id,
-            result.status.as_str()
-        );
+        if let Some(run) = run.as_ref() {
+            let emit_result = match serde_json::to_value(&result) {
+                Ok(value) => self.try_emit(run, "task_result", value),
+                Err(error) => Err(error.into()),
+            };
+            match emit_result {
+                Ok(()) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    log::warn!(
+                        "[astra:task:result-emit-failed] runId={} taskId={} runtimeSessionId={} message={}",
+                        state.run_id,
+                        result.task_id,
+                        sessio_runtime_session_id,
+                        message
+                    );
+                    diagnostics.push(delegated_lifecycle_diagnostic(
+                        "task_result_emit_failed",
+                        &result.task_id,
+                        sessio_runtime_session_id,
+                        Some(&result.sessio_runtime_session_id),
+                        result.attempt_count,
+                        &message,
+                    ));
+                }
+            }
+            log::info!(
+                "[astra:task:result] runId={} threadId={} taskId={} sessioRuntimeSessionId={} status={}",
+                run.run_id,
+                run.thread_id,
+                result.task_id,
+                result.sessio_runtime_session_id,
+                result.status.as_str()
+            );
+        } else {
+            diagnostics.push(delegated_lifecycle_diagnostic(
+                "task_result_emit_skipped",
+                &result.task_id,
+                sessio_runtime_session_id,
+                Some(&result.sessio_runtime_session_id),
+                result.attempt_count,
+                "Astra run could not be loaded for task_result emit",
+            ));
+        }
+        self.record_run_diagnostics(&state.run_id, diagnostics);
         Ok(())
     }
 
@@ -1394,6 +1561,27 @@ impl AstraService {
         let run = self.load_run(run_id)?;
         self.record_plan_task_result(&run, &result_for_plan)?;
         Ok(run)
+    }
+
+    fn record_run_diagnostic(&self, run_id: &str, diagnostic: Value) {
+        self.record_run_diagnostics(run_id, vec![diagnostic]);
+    }
+
+    fn record_run_diagnostics(&self, run_id: &str, diagnostics: Vec<Value>) {
+        if diagnostics.is_empty() {
+            return;
+        }
+        if let Err(error) = self.mutate_run(run_id, move |run| {
+            run.run_diagnostics.extend(diagnostics);
+            trim_astra_run_diagnostics(&mut run.run_diagnostics);
+            Ok(())
+        }) {
+            log::warn!(
+                "[astra:run:diagnostic-write-failed] runId={} message={}",
+                run_id,
+                error
+            );
+        }
     }
 
     fn update_active_terminal_status(
@@ -1534,7 +1722,11 @@ impl AstraService {
     }
 
     fn emit(&self, run: &AstraRun, event_type: &str, data: Value) {
-        let _ = self.inner.app.emit(
+        let _ = self.try_emit(run, event_type, data);
+    }
+
+    fn try_emit(&self, run: &AstraRun, event_type: &str, data: Value) -> Result<()> {
+        self.inner.app.emit(
             ASTRA_EVENT_NAME,
             AstraEvent {
                 run_id: run.run_id.clone(),
@@ -1544,7 +1736,8 @@ impl AstraService {
                 data,
                 timestamp: now_ms(),
             },
-        );
+        )?;
+        Ok(())
     }
 
     fn emit_threads_updated(&self, run: &AstraRun) {
@@ -1851,6 +2044,26 @@ fn is_internal_planner_metadata(metadata: &RuntimeMetadata) -> bool {
             metadata.get("astraInternalPurpose").and_then(Value::as_str),
             Some("orchestration" | "planner")
         )
+}
+
+fn delegated_lifecycle_diagnostic(
+    code: &str,
+    task_id: &str,
+    live_runtime_session_id: &str,
+    session_id: Option<&str>,
+    attempt_count: u32,
+    message: &str,
+) -> Value {
+    json!({
+        "kind": "delegated_task_lifecycle",
+        "code": code,
+        "taskId": task_id,
+        "liveRuntimeSessionId": live_runtime_session_id,
+        "sessionId": session_id,
+        "attemptCount": attempt_count,
+        "message": message,
+        "timestamp": now_ms(),
+    })
 }
 
 fn dedupe_session_ref_values(values: Vec<Value>) -> Vec<Value> {
@@ -2250,7 +2463,9 @@ fn astra_task_to_plan_task(
                 .iter()
                 .find(|participant| participant.participant_id == participant_id)
                 .ok_or_else(|| {
-                    anyhow::anyhow!("agent participant does not belong to Astra run thread: {participant_id}")
+                    anyhow::anyhow!(
+                        "agent participant does not belong to Astra run thread: {participant_id}"
+                    )
                 })
         })
         .transpose()?;
@@ -2403,9 +2618,10 @@ fn record_plan_task_result_in_store(
         store.update_plan_task_status(plan_task_id, patch)?;
     }
     let session_id = result.sessio_runtime_session_id.trim();
-    let result_session_already_linked = task.sessions.iter().any(|session| {
-        session.agent == task.target_agent && session.session_id == session_id
-    });
+    let result_session_already_linked = task
+        .sessions
+        .iter()
+        .any(|session| session.agent == task.target_agent && session.session_id == session_id);
     if !session_id.is_empty()
         && !is_runtime_placeholder_session_id(session_id)
         && !result_session_already_linked
@@ -2531,19 +2747,14 @@ mod tests {
 
     #[test]
     fn internal_planner_session_stays_skipped_after_indexed_file_update() {
-        let db_path = std::env::temp_dir()
-            .join(format!("sessio-astra-internal-planner-{}.db", now_ms()));
+        let db_path =
+            std::env::temp_dir().join(format!("sessio-astra-internal-planner-{}.db", now_ms()));
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
         let run = test_run("run-planner-skip");
 
-        record_ready_internal_planner_session(
-            &store,
-            &run,
-            Agent::Codex,
-            "planner-session-1",
-        )
-        .unwrap();
+        record_ready_internal_planner_session(&store, &run, Agent::Codex, "planner-session-1")
+            .unwrap();
 
         assert!(store.list_sessions().unwrap().is_empty());
         let placeholder = store
@@ -3687,6 +3898,59 @@ mod tests {
         ));
         assert_eq!(interrupted.status, AstraRunStatus::Interrupted);
         assert_eq!(interrupted.error, None);
+    }
+
+    #[test]
+    fn delegated_lifecycle_diagnostic_records_cleanup_context() {
+        let diagnostic = delegated_lifecycle_diagnostic(
+            "result_persist_failed",
+            "task-1",
+            "runtime-1",
+            Some("agent-session-1"),
+            2,
+            "write failed",
+        );
+
+        assert_eq!(
+            diagnostic["kind"],
+            Value::String("delegated_task_lifecycle".to_string())
+        );
+        assert_eq!(
+            diagnostic["code"],
+            Value::String("result_persist_failed".to_string())
+        );
+        assert_eq!(diagnostic["taskId"], Value::String("task-1".to_string()));
+        assert_eq!(
+            diagnostic["liveRuntimeSessionId"],
+            Value::String("runtime-1".to_string())
+        );
+        assert_eq!(
+            diagnostic["sessionId"],
+            Value::String("agent-session-1".to_string())
+        );
+        assert_eq!(
+            diagnostic["attemptCount"],
+            Value::Number(serde_json::Number::from(2))
+        );
+        assert_eq!(
+            diagnostic["message"],
+            Value::String("write failed".to_string())
+        );
+    }
+
+    #[test]
+    fn astra_run_diagnostics_keep_recent_entries() {
+        let mut diagnostics = (0..(MAX_ASTRA_RUN_DIAGNOSTICS + 3))
+            .map(|idx| json!({ "idx": idx }))
+            .collect::<Vec<_>>();
+
+        trim_astra_run_diagnostics(&mut diagnostics);
+
+        assert_eq!(diagnostics.len(), MAX_ASTRA_RUN_DIAGNOSTICS);
+        assert_eq!(
+            diagnostics[0]["idx"],
+            Value::Number(serde_json::Number::from(3))
+        );
     }
 
     pub(super) fn test_thread(stages: Vec<crate::models::StageInfo>) -> ThreadInfo {
