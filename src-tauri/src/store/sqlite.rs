@@ -2801,12 +2801,6 @@ fn aggregate_round_status(statuses: &[PlanTaskStatus]) -> PlanRoundStatus {
     }
     if statuses
         .iter()
-        .any(|status| *status == PlanTaskStatus::Planned)
-    {
-        return PlanRoundStatus::Planned;
-    }
-    if statuses
-        .iter()
         .any(|status| matches!(status, PlanTaskStatus::Failed | PlanTaskStatus::Errored))
     {
         return PlanRoundStatus::Errored;
@@ -2816,6 +2810,12 @@ fn aggregate_round_status(statuses: &[PlanTaskStatus]) -> PlanRoundStatus {
         .all(|status| *status == PlanTaskStatus::Cancelled)
     {
         return PlanRoundStatus::Cancelled;
+    }
+    if statuses
+        .iter()
+        .any(|status| *status == PlanTaskStatus::Planned)
+    {
+        return PlanRoundStatus::Planned;
     }
     PlanRoundStatus::Completed
 }

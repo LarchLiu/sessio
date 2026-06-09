@@ -17,7 +17,7 @@ use crate::agents::runtime::types::{
 use crate::agents::runtime::{RuntimeCleanupReport, RuntimeManager};
 use crate::models::{
     Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
-    PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo,
+    PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind,
 };
 use crate::store::{
     AstraRunRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch,
@@ -71,7 +71,16 @@ fn trim_astra_run_diagnostics(values: &mut Vec<Value>) {
     }
 }
 
-fn validate_assistant_routed_astra_tasks(tasks: &[AstraTaskProposal]) -> Result<()> {
+fn validate_astra_tasks_for_thread(thread: &ThreadInfo, tasks: &[AstraTaskProposal]) -> Result<()> {
+    if thread.kind == ThreadKind::Process {
+        if let Some(task) = tasks.iter().find(|task| task.target_stage_id.is_none()) {
+            bail!(
+                "Process Astra orchestration requires stage-routed plan tasks; task {} has no targetStageId",
+                task.id
+            );
+        }
+        return Ok(());
+    }
     if let Some(task) = tasks.iter().find(|task| task.target_stage_id.is_some()) {
         bail!(
             "Astra automatic orchestration only supports assistant-routed plan tasks; task {} includes targetStageId",
@@ -1104,9 +1113,9 @@ impl AstraService {
         if tasks.is_empty() {
             return Ok(Vec::new());
         }
-        validate_assistant_routed_astra_tasks(tasks)?;
 
         let thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
+        validate_astra_tasks_for_thread(&thread, tasks)?;
         let (next, ()) = self.mutate_run(&run.run_id, move |next| {
             if !next.status.active() {
                 bail!("Astra run is not active: {}", next.run_id);
@@ -1127,7 +1136,7 @@ impl AstraService {
                 &thread,
                 task,
                 DelegatedAttempt {
-                    thread_stage_id: None,
+                    thread_stage_id: task.target_stage_id.as_deref(),
                     attempt_count,
                     retry_limit_reached: false,
                 },
@@ -1612,7 +1621,10 @@ impl AstraService {
         else {
             return Ok(thread);
         };
-        if stage.status == StageStatus::NotStarted {
+        if matches!(
+            stage.status,
+            StageStatus::NotStarted | StageStatus::Blocked | StageStatus::NeedsReview
+        ) {
             self.inner.store.update_thread_stage_state(
                 thread_stage_id,
                 Some(StageStatus::InProgress),
@@ -1783,7 +1795,20 @@ impl AstraService {
         let result_for_plan = result.clone();
         let run = self.load_run(run_id)?;
         self.record_plan_task_result(&run, &result_for_plan)?;
+        self.update_process_stage_after_task_result(&run, &result_for_plan)?;
         Ok(run)
+    }
+
+    fn update_process_stage_after_task_result(
+        &self,
+        run: &AstraRun,
+        result: &AstraTaskResult,
+    ) -> Result<()> {
+        if update_process_stage_after_task_result_in_store(self.inner.store.as_ref(), run, result)?
+        {
+            self.emit_threads_updated(run);
+        }
+        Ok(())
     }
 
     fn record_run_diagnostic(&self, run_id: &str, diagnostic: Value) {
@@ -2746,19 +2771,24 @@ fn astra_task_to_plan_task(
     task: &AstraTaskProposal,
     idx: usize,
 ) -> Result<OwnedAstraPlanTask> {
-    let thread_assistant = task
-        .assistant_id
-        .as_deref()
-        .map(|assistant_id| {
-            thread
-                .assistants
-                .iter()
-                .find(|assistant| assistant.assistant_id == assistant_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("assistant does not belong to Astra run thread: {assistant_id}")
-                })
-        })
-        .transpose()?;
+    let thread_assistant = if task.target_stage_id.is_none() {
+        task.assistant_id
+            .as_deref()
+            .map(|assistant_id| {
+                thread
+                    .assistants
+                    .iter()
+                    .find(|assistant| assistant.assistant_id == assistant_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "assistant does not belong to Astra run thread: {assistant_id}"
+                        )
+                    })
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let agent_participant = task
         .agent_participant_id
         .as_deref()
@@ -2781,10 +2811,20 @@ fn astra_task_to_plan_task(
             .find(|stage| stage.id == stage_id || stage.stage_id == stage_id)
     });
     let stage_assistant = stage.and_then(|stage| {
-        stage
-            .assistants
-            .iter()
-            .find(|assistant| assistant.agent.id == task.target_agent.as_str())
+        task.assistant_id
+            .as_deref()
+            .and_then(|assistant_id| {
+                stage
+                    .assistants
+                    .iter()
+                    .find(|assistant| assistant.assistant_id == assistant_id)
+            })
+            .or_else(|| {
+                stage
+                    .assistants
+                    .iter()
+                    .find(|assistant| assistant.agent.id == task.target_agent.as_str())
+            })
             .or_else(|| stage.assistants.first())
     });
     let agent_snapshot = store
@@ -2925,7 +2965,9 @@ fn record_plan_task_result_in_store(
     else {
         return Ok(());
     };
-    if round.is_some_and(|round| round.mode == PlanRoundMode::Sequential) {
+    if round.is_some_and(|round| round.mode == PlanRoundMode::Sequential)
+        && patch.status == PlanTaskStatus::Completed
+    {
         store.complete_plan_task_and_start_next(plan_task_id, patch)?;
     } else {
         store.update_plan_task_status(plan_task_id, patch)?;
@@ -2950,6 +2992,79 @@ fn record_plan_task_result_in_store(
         })?;
     }
     Ok(())
+}
+
+fn update_process_stage_after_task_result_in_store(
+    store: &dyn SessionStore,
+    run: &AstraRun,
+    result: &AstraTaskResult,
+) -> Result<bool> {
+    let thread = store.get_thread_work_state(&run.thread_id)?;
+    if thread.kind != ThreadKind::Process {
+        return Ok(false);
+    }
+    let rounds = store.list_plan_rounds(&run.thread_id)?;
+    let stage_id = result
+        .thread_stage_id
+        .as_deref()
+        .map(str::to_string)
+        .or_else(|| {
+            rounds
+                .iter()
+                .flat_map(|round| round.tasks.iter())
+                .find(|task| task.id == result.task_id)
+                .and_then(|task| task.thread_stage_id.clone())
+        });
+    let Some(stage_id) = stage_id else {
+        return Ok(false);
+    };
+
+    if matches!(
+        result.status,
+        AstraTaskResultStatus::Failed
+            | AstraTaskResultStatus::Errored
+            | AstraTaskResultStatus::Cancelled
+    ) {
+        store.update_thread_stage_state(
+            &stage_id,
+            Some(StageStatus::Blocked),
+            None,
+            result.error.clone().map(Some),
+        )?;
+        return Ok(true);
+    }
+
+    let stage_tasks = rounds
+        .iter()
+        .filter(|round| round.astra_run_id.as_deref() == Some(run.run_id.as_str()))
+        .flat_map(|round| round.tasks.iter())
+        .filter(|task| task.thread_stage_id.as_deref() == Some(stage_id.as_str()))
+        .collect::<Vec<_>>();
+    if stage_tasks.is_empty()
+        || !stage_tasks
+            .iter()
+            .all(|task| task.status == PlanTaskStatus::Completed)
+    {
+        return Ok(false);
+    }
+
+    let summary = stage_tasks
+        .iter()
+        .filter_map(|task| task.result_summary.as_deref())
+        .filter(|summary| !summary.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    store.update_thread_stage_state(
+        &stage_id,
+        Some(StageStatus::Completed),
+        Some(if summary.trim().is_empty() {
+            None
+        } else {
+            Some(summary)
+        }),
+        None,
+    )?;
+    Ok(true)
 }
 
 fn extract_result_text(value: &Value) -> Option<String> {
@@ -2997,6 +3112,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::planner::deterministic_plan;
     use super::*;
+    use crate::astra::orchestrator::mark_process_manual_checkpoint_in_store;
     use crate::models::{
         AssistantAgentInfo, AssistantType, IssueSeverity, IssueStatus, StageAssistantInfo,
         StageIssueInfo, ThreadKind,
@@ -3047,18 +3163,28 @@ mod tests {
     }
 
     #[test]
-    fn automatic_astra_tasks_reject_legacy_stage_routing() {
+    fn astra_task_routing_matches_thread_kind() {
         let stage_task = test_task("task-legacy-stage", "stage-1");
+        let mut teamwork = test_thread(Vec::new());
+        teamwork.kind = ThreadKind::Teamwork;
 
-        let error = validate_assistant_routed_astra_tasks(&[stage_task]).unwrap_err();
+        let error = validate_astra_tasks_for_thread(&teamwork, &[stage_task.clone()]).unwrap_err();
 
         assert!(error.to_string().contains("targetStageId"));
+        validate_astra_tasks_for_thread(
+            &test_thread(vec![test_stage("stage-1", StageStatus::NotStarted)]),
+            &[stage_task],
+        )
+        .unwrap();
 
         let mut teamwork_task = test_task("task-teamwork", "stage-1");
         teamwork_task.target_stage_id = None;
         teamwork_task.assistant_id = Some("assistant-codex".to_string());
 
-        validate_assistant_routed_astra_tasks(&[teamwork_task]).unwrap();
+        validate_astra_tasks_for_thread(&teamwork, &[teamwork_task.clone()]).unwrap();
+        let error = validate_astra_tasks_for_thread(&test_thread(Vec::new()), &[teamwork_task])
+            .unwrap_err();
+        assert!(error.to_string().contains("no targetStageId"));
     }
 
     #[test]
@@ -3393,6 +3519,255 @@ mod tests {
             .find(|task| task.id == tasks[1].id)
             .unwrap();
         assert_eq!(still_running.status, PlanTaskStatus::Running);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    #[test]
+    fn process_stage_result_updates_stage_state_and_stops_on_failure() {
+        let db_path = std::env::temp_dir().join(format!(
+            "astra-process-stage-result-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "astra-process-stage-result-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Process Stage Result",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let assistant = store
+            .create_assistant(NewAssistant {
+                name: "Builder",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "read-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: Some("Build carefully."),
+                color: Some("#3366ff"),
+                assistant_type: AssistantType::Custom,
+                process_template_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let build_option = store
+            .create_project_stage(&project.id, None, "Build", None, None)
+            .unwrap();
+        let review_option = store
+            .create_project_stage(&project.id, None, "Review", None, None)
+            .unwrap();
+        store
+            .update_project_stage_assistants(&build_option.id, std::slice::from_ref(&assistant.id))
+            .unwrap();
+        store
+            .update_project_stage_assistants(&review_option.id, std::slice::from_ref(&assistant.id))
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Run process stages", None)
+            .unwrap();
+        let build = store
+            .add_thread_stage(
+                &thread.id,
+                &build_option.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+        let review = store
+            .add_thread_stage(
+                &thread.id,
+                &review_option.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+        let thread = store.get_thread_work_state(&thread.id).unwrap();
+        let run = AstraRun {
+            run_id: "astra-run-process-stage-result".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: AstraRunStatus::Running,
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.upsert_astra_run(&run_to_record(&run)).unwrap();
+
+        let tasks = create_plan_round_for_astra_tasks_in_store(
+            &store,
+            &run,
+            &thread,
+            "Run process stages.",
+            PlanRoundMode::Sequential,
+            0,
+            vec![
+                AstraTaskProposal {
+                    id: "task-build".to_string(),
+                    plan_task_id: None,
+                    assistant_id: Some(assistant.id.clone()),
+                    agent_participant_id: None,
+                    title: "Build / Builder".to_string(),
+                    target_stage_id: Some(build.id.clone()),
+                    target_agent: Agent::Codex,
+                    prompt: "Build the feature.".to_string(),
+                    expected_output: "Build result.".to_string(),
+                    risk: AstraTaskRisk::Low,
+                },
+                AstraTaskProposal {
+                    id: "task-review".to_string(),
+                    plan_task_id: None,
+                    assistant_id: Some(assistant.id.clone()),
+                    agent_participant_id: None,
+                    title: "Review / Builder".to_string(),
+                    target_stage_id: Some(review.id.clone()),
+                    target_agent: Agent::Codex,
+                    prompt: "Review the feature.".to_string(),
+                    expected_output: "Review result.".to_string(),
+                    risk: AstraTaskRisk::Low,
+                },
+            ],
+        )
+        .unwrap();
+        let round = store.list_plan_rounds(&thread.id).unwrap().pop().unwrap();
+        assert_eq!(round.mode, PlanRoundMode::Sequential);
+        assert_eq!(round.tasks[0].status, PlanTaskStatus::Running);
+        assert_eq!(round.tasks[1].status, PlanTaskStatus::Planned);
+
+        let mut completed = test_task_result(
+            &tasks[0].id,
+            "runtime-build",
+            "notes\nFinal result: build completed",
+        );
+        completed.thread_stage_id = Some(build.id.clone());
+        record_plan_task_result_in_store(&store, &run, &completed).unwrap();
+        assert!(update_process_stage_after_task_result_in_store(&store, &run, &completed).unwrap());
+        let updated = store.get_thread_work_state(&thread.id).unwrap();
+        let build_stage = updated
+            .stages
+            .iter()
+            .find(|stage| stage.id == build.id)
+            .unwrap();
+        assert_eq!(build_stage.status, StageStatus::Completed);
+        assert_eq!(build_stage.summary.as_deref(), Some("build completed"));
+        let running_round = store.get_plan_round(&round.id).unwrap().unwrap();
+        assert_eq!(running_round.status, PlanRoundStatus::Running);
+        assert_eq!(running_round.tasks[1].status, PlanTaskStatus::Running);
+
+        let mut failed = test_task_result(&tasks[1].id, "runtime-review", "");
+        failed.thread_stage_id = Some(review.id.clone());
+        failed.status = AstraTaskResultStatus::Errored;
+        failed.error = Some("review failed".to_string());
+        record_plan_task_result_in_store(&store, &run, &failed).unwrap();
+        assert!(update_process_stage_after_task_result_in_store(&store, &run, &failed).unwrap());
+        let updated = store.get_thread_work_state(&thread.id).unwrap();
+        let review_stage = updated
+            .stages
+            .iter()
+            .find(|stage| stage.id == review.id)
+            .unwrap();
+        assert_eq!(review_stage.status, StageStatus::Blocked);
+        assert_eq!(review_stage.outcome.as_deref(), Some("review failed"));
+        let failed_round = store.get_plan_round(&round.id).unwrap().unwrap();
+        assert_eq!(failed_round.status, PlanRoundStatus::Errored);
+        assert!(failed_round
+            .tasks
+            .iter()
+            .all(|task| task.status != PlanTaskStatus::Planned));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(Path::new(&project.path));
+    }
+
+    #[test]
+    fn process_manual_checkpoint_marks_next_empty_stage_for_review() {
+        let db_path = std::env::temp_dir().join(format!(
+            "astra-process-checkpoint-{}.sqlite",
+            short_hash(&now_ms().to_string())
+        ));
+        let store = SqliteStore::open(&db_path).unwrap();
+        store.init().unwrap();
+
+        let parent = std::env::temp_dir().join(format!(
+            "astra-process-checkpoint-project-{}",
+            short_hash(&db_path.to_string_lossy())
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "Astra Process Checkpoint",
+                "general".to_string(),
+                None,
+            )
+            .unwrap();
+        let stage_option = store
+            .create_project_stage(&project.id, None, "Manual Review", None, None)
+            .unwrap();
+        store
+            .update_project_stage(
+                &stage_option.id,
+                crate::store::ProjectStagePatch {
+                    allow_empty_assistants: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Pause for human", None)
+            .unwrap();
+        let stage = store
+            .add_thread_stage(&thread.id, &stage_option.id, &[])
+            .unwrap();
+        let run = AstraRun {
+            run_id: "astra-run-process-checkpoint".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: AstraRunStatus::Running,
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: None,
+            round_limit: RUST_NATIVE_ROUND_LIMIT,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_session_ids: Vec::new(),
+            run_diagnostics: Vec::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.upsert_astra_run(&run_to_record(&run)).unwrap();
+
+        assert!(mark_process_manual_checkpoint_in_store(&store, &run).unwrap());
+        let updated = store.get_thread_work_state(&thread.id).unwrap();
+        let stage = updated
+            .stages
+            .iter()
+            .find(|item| item.id == stage.id)
+            .unwrap();
+        assert_eq!(stage.status, StageStatus::NeedsReview);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));
@@ -4071,7 +4446,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_plan_does_not_schedule_process_stages() {
+    fn deterministic_plan_schedules_process_stages_sequentially() {
         let mut thread = test_thread(vec![
             test_stage("stage-1", StageStatus::NotStarted),
             test_stage("stage-2", StageStatus::Blocked),
@@ -4096,10 +4471,14 @@ mod tests {
 
         let plan = deterministic_plan(&run, &thread, Some("Focus the API"), 0);
 
-        assert!(plan.tasks.is_empty());
-        assert!(plan
-            .summary
-            .contains("only plans assistant-routed teamwork"));
+        assert_eq!(plan.tasks.len(), 2);
+        assert_eq!(plan.tasks[0].target_stage_id.as_deref(), Some("stage-1"));
+        assert_eq!(plan.tasks[1].target_stage_id.as_deref(), Some("stage-2"));
+        assert_eq!(
+            plan.tasks[0].assistant_id.as_deref(),
+            Some("assistant-codex")
+        );
+        assert!(plan.tasks[0].prompt.contains("Focus the API"));
     }
 
     #[test]

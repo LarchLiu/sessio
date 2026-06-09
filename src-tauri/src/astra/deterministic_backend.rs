@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
-use super::planner::deterministic_plan;
+use super::planner::{deterministic_plan, remaining_process_stages};
 use super::{AstraOrchestration, AstraRun, AstraRunIntent, AstraTaskCompletion};
 use crate::models::{PlanRoundMode, ThreadInfo, ThreadKind};
 
@@ -35,6 +35,16 @@ fn deterministic_orchestration(
     round_index: u32,
     completions: &[AstraTaskCompletion],
 ) -> Result<AstraOrchestration, BackendFailure> {
+    if thread.kind == ThreadKind::Process {
+        return Ok(deterministic_process_orchestration(
+            run,
+            thread,
+            user_prompt,
+            round_index,
+            completions,
+        ));
+    }
+
     if thread.kind != ThreadKind::Teamwork {
         return Ok(AstraOrchestration {
             summary: "Astra automatic orchestration is only supported for teamwork threads."
@@ -102,4 +112,66 @@ fn deterministic_orchestration(
         tasks: plan.tasks,
         diagnostics: Vec::new(),
     })
+}
+
+fn deterministic_process_orchestration(
+    run: &AstraRun,
+    thread: &ThreadInfo,
+    user_prompt: Option<&str>,
+    round_index: u32,
+    completions: &[AstraTaskCompletion],
+) -> AstraOrchestration {
+    if let Some(completion) = completions.iter().find(|completion| {
+        matches!(
+            completion.result.status,
+            super::AstraTaskResultStatus::Failed
+                | super::AstraTaskResultStatus::Errored
+                | super::AstraTaskResultStatus::Cancelled
+        )
+    }) {
+        return AstraOrchestration {
+            summary: completion
+                .result
+                .error
+                .clone()
+                .unwrap_or_else(|| format!("Process task failed: {}", completion.task.title)),
+            run_intent: AstraRunIntent::Error,
+            reason: "process_task_failed".to_string(),
+            mode: None,
+            tasks: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+    }
+
+    if remaining_process_stages(thread).is_empty() {
+        return AstraOrchestration {
+            summary: format!("Process completed for \"{}\".", thread.goal),
+            run_intent: AstraRunIntent::Complete,
+            reason: "process_completed".to_string(),
+            mode: None,
+            tasks: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+    }
+
+    let plan = deterministic_plan(run, thread, user_prompt, round_index);
+    if plan.tasks.is_empty() {
+        return AstraOrchestration {
+            summary: plan.summary,
+            run_intent: AstraRunIntent::WaitForHuman,
+            reason: "process_manual_checkpoint".to_string(),
+            mode: None,
+            tasks: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+    }
+
+    AstraOrchestration {
+        summary: plan.summary,
+        run_intent: AstraRunIntent::Continue,
+        reason: "continue_with_process_tasks".to_string(),
+        mode: Some(PlanRoundMode::Sequential),
+        tasks: plan.tasks,
+        diagnostics: Vec::new(),
+    }
 }

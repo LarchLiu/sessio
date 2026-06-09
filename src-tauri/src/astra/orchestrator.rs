@@ -3,7 +3,7 @@ use serde_json::json;
 
 use super::{
     astra_task_from_plan_task, is_runtime_placeholder_session_id, next_dispatchable_tasks, now_ms,
-    validate_assistant_routed_astra_tasks, AstraBackendConfig, AstraOrchestration, AstraRun,
+    validate_astra_tasks_for_thread, AstraBackendConfig, AstraOrchestration, AstraRun,
     AstraRunIntent, AstraRunStatus, AstraService, AstraTaskCompletion,
     ASTRA_ORCHESTRATOR_TIMEOUT_MS,
 };
@@ -13,7 +13,8 @@ use crate::astra::brainstorm_backend::BrainstormBackend;
 use crate::astra::debate_backend::DebateBackend;
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
-use crate::models::{PlanRoundMode, PlanTaskStatus, ThreadInfo, ThreadKind};
+use crate::models::{PlanRoundMode, PlanTaskStatus, StageStatus, ThreadInfo, ThreadKind};
+use crate::store::SessionStore;
 
 pub(super) const MAX_INTERNAL_ASTRA_PI_ACP_SESSION_IDS: usize = 50;
 const MAX_RUN_DIAGNOSTICS: usize = 100;
@@ -245,6 +246,10 @@ impl AstraService {
             log::info!("[astra:orchestrator:backend] using debate_backend");
             return Box::new(DebateBackend);
         }
+        if thread.kind == ThreadKind::Process {
+            log::info!("[astra:orchestrator:backend] using deterministic backend for process");
+            return Box::new(DeterministicOrchestratorBackend);
+        }
 
         if let Some(agent) = config.agent {
             log::info!(
@@ -297,6 +302,7 @@ impl AstraService {
                 Ok((self.load_run(&run.run_id)?, Vec::new()))
             }
             AstraRunIntent::WaitForHuman => {
+                self.mark_process_manual_checkpoint(run)?;
                 self.complete_run(&run.run_id, &orchestration.reason)?;
                 Ok((self.load_run(&run.run_id)?, Vec::new()))
             }
@@ -347,7 +353,7 @@ impl AstraService {
         let tasks = orchestration.tasks;
         let summary = orchestration.summary;
         let latest_thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
-        if let Err(error) = validate_assistant_routed_astra_tasks(&tasks) {
+        if let Err(error) = validate_astra_tasks_for_thread(&latest_thread, &tasks) {
             let _ = self.error_run(
                 &run.run_id,
                 "orchestrator_unsupported_stage_task",
@@ -401,6 +407,13 @@ impl AstraService {
             PlanRoundMode::Sequential => tasks.into_iter().take(1).collect(),
         };
         Ok((planned, dispatch_batch))
+    }
+
+    fn mark_process_manual_checkpoint(&self, run: &AstraRun) -> Result<()> {
+        if mark_process_manual_checkpoint_in_store(self.inner.store.as_ref(), run)? {
+            self.emit_threads_updated(run);
+        }
+        Ok(())
     }
 
     fn complete_run(&self, run_id: &str, reason: &str) -> Result<()> {
@@ -575,17 +588,39 @@ impl Drop for AstraWorkerGuard {
     }
 }
 
+pub(super) fn mark_process_manual_checkpoint_in_store(
+    store: &dyn SessionStore,
+    run: &AstraRun,
+) -> Result<bool> {
+    let thread = store.get_thread_work_state(&run.thread_id)?;
+    if thread.kind != ThreadKind::Process {
+        return Ok(false);
+    }
+    let mut stages = thread
+        .stages
+        .iter()
+        .filter(|stage| stage.enabled)
+        .filter(|stage| !matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
+        .collect::<Vec<_>>();
+    stages.sort_by_key(|stage| stage.order);
+    let Some(stage) = stages.first() else {
+        return Ok(false);
+    };
+    if !stage.assistants.is_empty() {
+        return Ok(false);
+    }
+    store.update_thread_stage_state(&stage.id, Some(StageStatus::NeedsReview), None, None)?;
+    Ok(true)
+}
+
 pub(super) fn dedicated_backend_required_error(
     thread: &crate::models::ThreadInfo,
 ) -> Option<(&'static str, &'static str, String)> {
     match thread.kind {
-        ThreadKind::Process => Some((
-            "astra_orchestration_unsupported_for_process",
-            "astra_orchestration_unsupported_for_process",
-            "Process threads are human-defined stages and do not use Astra automatic scheduling"
-                .to_string(),
-        )),
-        ThreadKind::Teamwork | ThreadKind::Brainstorm | ThreadKind::Debate => None,
+        ThreadKind::Process
+        | ThreadKind::Teamwork
+        | ThreadKind::Brainstorm
+        | ThreadKind::Debate => None,
     }
 }
 
@@ -598,16 +633,10 @@ mod tests {
     use crate::models::{Agent, StageStatus};
 
     #[test]
-    fn process_requires_human_defined_stage_path_before_planning() {
+    fn process_uses_dedicated_deterministic_backend_path() {
         let thread = test_thread(Vec::new());
 
-        let Some((reason, code, message)) = dedicated_backend_required_error(&thread) else {
-            panic!("expected process orchestration guard");
-        };
-
-        assert_eq!(reason, "astra_orchestration_unsupported_for_process");
-        assert_eq!(code, "astra_orchestration_unsupported_for_process");
-        assert!(message.contains("human-defined stages"));
+        assert!(dedicated_backend_required_error(&thread).is_none());
     }
 
     #[test]
