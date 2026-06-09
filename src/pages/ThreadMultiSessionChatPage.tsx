@@ -85,6 +85,7 @@ import {
 } from "./ChatPage";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result", "task_dispatch"]);
+const THREAD_CONTEXT_NAV_SETTLE_MS = 140;
 
 export default function ThreadMultiSessionChatPage({
   project,
@@ -467,7 +468,7 @@ export default function ThreadMultiSessionChatPage({
         <ScrollArea
           ref={viewportRef}
           className="min-h-0 flex-1"
-          viewportClassName="px-10 py-4 session-chat-scroll-viewport"
+          viewportClassName="px-14 py-4 session-chat-scroll-viewport"
           onScroll={handleTimelineScroll}
         >
           {loading ? (
@@ -523,7 +524,7 @@ export default function ThreadMultiSessionChatPage({
           </button>
         )}
       </div>
-      <div className="shrink-0 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80 px-10 pb-4">
+      <div className="shrink-0 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80 px-14 pb-4">
         <div className="w-full">
           <ChatComposer
             composer={composer}
@@ -718,40 +719,114 @@ function ThreadContextNav({
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const [positions, setPositions] = useState<Map<string, number>>(new Map());
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [positionsReady, setPositionsReady] = useState(false);
+  const activeKeyRef = useRef<string | null>(null);
+  const settleTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const vp = viewportRef.current;
     if (!vp || items.length === 0) {
       setPositions(new Map());
+      setActiveKey(null);
+      setPositionsReady(false);
+      activeKeyRef.current = null;
       return;
     }
 
     let frame: number | null = null;
-    const computePositions = () => {
+    const itemAnchor = (item: ThreadContextNavItem) => {
+      const el = laneRefs.current[item.laneId];
+      return el?.querySelector<HTMLElement>("[data-thread-lane-header='true']") ?? el;
+    };
+    const clearSettleTimer = () => {
+      if (settleTimerRef.current === null) return;
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    };
+    const markPositionsPending = () => {
+      setPositionsReady(false);
+      clearSettleTimer();
+    };
+    const markPositionsReadySoon = () => {
+      clearSettleTimer();
+      settleTimerRef.current = window.setTimeout(() => {
+        settleTimerRef.current = null;
+        setPositionsReady(true);
+      }, THREAD_CONTEXT_NAV_SETTLE_MS);
+    };
+    const computePositions = (): boolean => {
       const contentHeight = Math.max(1, vp.scrollHeight);
       const vpRect = vp.getBoundingClientRect();
       const next = new Map<string, number>();
       for (const item of items) {
-        const el = laneRefs.current[item.laneId];
-        if (!el) continue;
-        const header = el.querySelector<HTMLElement>("[data-thread-lane-header='true']");
-        const rect = (header ?? el).getBoundingClientRect();
-        const contentCenter = header
-          ? rect.top - vpRect.top + vp.scrollTop + rect.height / 2
-          : rect.top - vpRect.top + vp.scrollTop + 8;
+        const anchor = itemAnchor(item);
+        if (!anchor) continue;
+        const rect = anchor.getBoundingClientRect();
+        const contentCenter = rect.top - vpRect.top + vp.scrollTop + rect.height / 2;
         next.set(item.key, Math.max(0, Math.min(1, contentCenter / contentHeight)));
       }
       setPositions(next);
+      return next.size === items.length;
+    };
+    const computeActive = () => {
+      const vpRect = vp.getBoundingClientRect();
+      const enter = vpRect.top + vpRect.height * 0.25;
+      const exit = vpRect.top + vpRect.height * 0.75;
+      const atBottom = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 1;
+      const atTop = vp.scrollTop <= 0;
+
+      let active = activeKeyRef.current;
+      let activeIndex = active ? items.findIndex((item) => item.key === active) : -1;
+      if (activeIndex < 0) {
+        activeIndex = 0;
+        for (let index = 0; index < items.length; index += 1) {
+          const anchor = itemAnchor(items[index]);
+          if (!anchor) continue;
+          if (anchor.getBoundingClientRect().top <= enter) activeIndex = index;
+          else break;
+        }
+        active = items[activeIndex]?.key ?? null;
+      } else {
+        for (let index = activeIndex + 1; index < items.length; index += 1) {
+          const anchor = itemAnchor(items[index]);
+          if (!anchor) continue;
+          if (anchor.getBoundingClientRect().top <= enter) {
+            active = items[index].key;
+            activeIndex = index;
+          } else {
+            break;
+          }
+        }
+        while (activeIndex > 0) {
+          const activeItem = items[activeIndex];
+          const anchor = itemAnchor(activeItem);
+          if (!anchor || anchor.getBoundingClientRect().top <= exit) break;
+          activeIndex -= 1;
+          active = items[activeIndex].key;
+        }
+      }
+
+      if (atBottom) active = items[items.length - 1]?.key ?? active;
+      if (atTop) active = items[0]?.key ?? active;
+      activeKeyRef.current = active;
+      setActiveKey(active);
     };
     const scheduleMeasure = () => {
+      markPositionsPending();
       if (frame !== null) return;
       frame = window.requestAnimationFrame(() => {
         frame = null;
-        computePositions();
+        const complete = computePositions();
+        computeActive();
+        if (complete) markPositionsReadySoon();
       });
     };
 
-    computePositions();
+    markPositionsPending();
+    if (computePositions()) markPositionsReadySoon();
+    computeActive();
+    vp.addEventListener("scroll", computeActive, { passive: true });
     const ro = new ResizeObserver(scheduleMeasure);
     ro.observe(vp);
     for (const child of Array.from(vp.children)) ro.observe(child);
@@ -760,12 +835,15 @@ function ThreadContextNav({
       if (el) ro.observe(el);
     }
     return () => {
+      vp.removeEventListener("scroll", computeActive);
       if (frame !== null) window.cancelAnimationFrame(frame);
+      clearSettleTimer();
       ro.disconnect();
     };
   }, [items, laneRefs, viewportRef]);
 
   if (items.length === 0) return null;
+  const canRenderPositions = positionsReady && positions.size === items.length;
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     const vp = viewportRef.current;
@@ -781,10 +859,12 @@ function ThreadContextNav({
     vp.scrollLeft += event.deltaX * unit;
   };
 
-  const jumpToLane = (laneId: string) => {
+  const jumpToLane = (item: ThreadContextNavItem) => {
     const vp = viewportRef.current;
-    const el = laneRefs.current[laneId];
+    const el = laneRefs.current[item.laneId];
     if (!vp || !el) return;
+    activeKeyRef.current = item.key;
+    setActiveKey(item.key);
     const vpRect = vp.getBoundingClientRect();
     const targetTop = el.getBoundingClientRect().top - vpRect.top + vp.scrollTop - 8;
     const maxTop = Math.max(0, vp.scrollHeight - vp.clientHeight);
@@ -799,7 +879,7 @@ function ThreadContextNav({
       onWheel={handleWheel}
       className="absolute top-2 bottom-2 left-0 z-10 w-10"
     >
-      {items.map((item) => {
+      {canRenderPositions && items.map((item) => {
         const ratio = positions.get(item.key);
         if (ratio === undefined) return null;
         return (
@@ -812,12 +892,26 @@ function ThreadContextNav({
           >
             <button
               type="button"
-              onClick={() => jumpToLane(item.laneId)}
+              onClick={() => jumpToLane(item)}
               aria-label={item.context.label}
-              className="pointer-events-auto absolute left-2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-ink/38 transition hover:bg-ink/[0.06] hover:text-ink/75 focus-visible:bg-ink/[0.08] focus-visible:text-ink"
+              className={
+                "group pointer-events-auto absolute left-2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full transition-[background-color,color,transform] duration-150 focus-visible:bg-ink/[0.08] focus-visible:text-ink " +
+                (item.key === activeKey
+                  ? "scale-110 bg-ink/[0.08] text-ink shadow-sm "
+                  : "scale-100 text-ink/24 hover:bg-ink/[0.06] hover:text-ink/72")
+              }
               style={{ top: `${ratio * 100}%` }}
             >
-              <ThreadContextIcon context={item.context} className="h-3.5 w-3.5" />
+              <span
+                className={
+                  "flex h-3.5 w-3.5 items-center justify-center transition-opacity duration-150 " +
+                  (item.key === activeKey
+                    ? "opacity-100"
+                    : "opacity-40 group-hover:opacity-75 group-focus-visible:opacity-100")
+                }
+              >
+                <ThreadContextIcon context={item.context} className="h-3.5 w-3.5" />
+              </span>
             </button>
           </Tooltip>
         );
@@ -850,27 +944,29 @@ function ThreadContextIcon({
 
 function ThreadContextTooltip({ context }: { context: LaneDisplayContext }) {
   if (context.kind === "battle") {
+    const details = context.participants
+      .map((participant) => tooltipDetailText(participant.title))
+      .filter((detail): detail is string => Boolean(detail));
     return (
       <div className="max-w-[300px]">
-        <div className="text-caption font-medium text-tooltip-fg">{context.label}</div>
-        <div className="mt-1 grid gap-1">
-          {context.participants.map((participant, index) => {
-            const detail = tooltipDetailText(participant.title);
-            return (
-              <div key={`${participant.label}:${index}`} className="min-w-0">
-                <div className="flex min-w-0 items-center gap-1.5 text-meta font-medium text-tooltip-fg/85">
-                  <AgentGlyph agent={participant.agent} className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">{participant.label}</span>
-                </div>
-                {detail && (
-                  <div className="mt-0.5 line-clamp-2 pl-5 text-meta text-tooltip-fg/62">
-                    {detail}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption font-medium text-tooltip-fg">
+          {context.participants.map((participant, index) => (
+            <div key={`${participant.label}:${index}`} className="flex min-w-0 items-center gap-1.5">
+              {index > 0 && <span className="text-tooltip-fg/45">vs</span>}
+              <AgentGlyph agent={participant.agent} className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">{participant.label}</span>
+            </div>
+          ))}
         </div>
+        {details.length > 0 && (
+          <div className="mt-1 grid gap-0.5">
+            {details.map((detail, index) => (
+              <div key={`${detail}:${index}`} className="truncate text-meta text-tooltip-fg/62">
+                {detail}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -1419,8 +1515,8 @@ function laneDisplayMeta(
   const participantSnapshot = objectField(agentSnapshot, "participant");
   const participantLabel = participantSnapshotLabel(participantSnapshot);
   const fallbackStage =
-    (source?.stageId ? thread.stages.find((stage) => stage.id === source.stageId) ?? null : null)
-    ?? (thread.stageId ? thread.stages.find((stage) => stage.id === thread.stageId) ?? null : null)
+    (source?.stageId ? thread.stages.find((stage) => stage.id === source.stageId) : null)
+    ?? (thread.stageId ? thread.stages.find((stage) => stage.id === thread.stageId) : null)
     ?? null;
   const fallbackAssistant = participantSnapshot
     ? null
@@ -1781,9 +1877,7 @@ function agentTooltipDetail(snapshot: Record<string, unknown> | null): string | 
 function participantSnapshotLabel(participant: Record<string, unknown> | null): string | null {
   if (!participant) return null;
   const agent = stringField(participant, "agent");
-  const agentLabel = agent && agent in AGENT_LABEL ? AGENT_LABEL[agent as Agent] : agent;
-  const model = stringField(participant, "model");
-  return [agentLabel, model].filter((item): item is string => Boolean(item)).join(" / ") || null;
+  return agent && agent in AGENT_LABEL ? AGENT_LABEL[agent as Agent] : agent;
 }
 
 function participantTooltipDetail(participant: Record<string, unknown> | null): string | null {
@@ -1792,7 +1886,6 @@ function participantTooltipDetail(participant: Record<string, unknown> | null): 
     stringField(participant, "model"),
     stringField(participant, "effort"),
     stringField(participant, "permissionMode"),
-    stringField(participant, "participantId"),
   ].filter((item): item is string => Boolean(item)).join(" / ");
   return readableTooltipText(detail);
 }
