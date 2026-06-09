@@ -669,7 +669,7 @@ function threadSnapshotKindLabel(
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   switch (kind) {
-    case "workflow":
+    case "process":
     case "teamwork":
     case "brainstorm":
     case "debate":

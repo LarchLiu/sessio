@@ -12,13 +12,13 @@ const actionButtonClassName = "inline-flex h-8 items-center gap-1.5 rounded-md b
 
 export default function CreateStageDialog({
   projectId = "",
-  workflowId = null,
+  processTemplateId = null,
   onCreated,
   onClose,
   onError,
 }: {
   projectId?: string;
-  workflowId?: string | null;
+  processTemplateId?: string | null;
   onCreated: (stage: ProjectStageInfo) => void;
   onClose: () => void;
   onError: (error: string | null) => void;
@@ -33,7 +33,7 @@ export default function CreateStageDialog({
     const nextDescription = description.trim();
     if (!nextName) return;
     try {
-      onCreated(await createProjectStage(projectId, nextName, nextDescription || null, workflowId, icon));
+      onCreated(await createProjectStage(projectId, nextName, nextDescription || null, processTemplateId, icon));
       onClose();
     } catch (err) {
       onError(String(err));

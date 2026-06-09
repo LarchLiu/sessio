@@ -583,7 +583,7 @@ export default function App() {
   const headerEntityTitle = selectedThread
     ? { kind: "thread" as const, title: selectedThread.goal, icon: Goal }
     : activeProject
-      ? { kind: "project" as const, title: activeProject.name, icon: Folder, pill: activeProject.workflowId }
+      ? { kind: "project" as const, title: activeProject.name, icon: Folder, pill: activeProject.processTemplateId }
       : null;
   const headerProjectContext =
     selectedSessionProject ??

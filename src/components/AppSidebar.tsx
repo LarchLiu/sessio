@@ -22,12 +22,12 @@ import {
 import {
   ProjectInfo,
   SessionInfo,
-  WorkflowInfo,
+  ProcessTemplateInfo,
   addExistingProject,
   createDefaultProject,
   listThreadChatSummaries,
-  listWorkflowStages,
-  listWorkflows,
+  listProcessTemplateStages,
+  listProcessTemplates,
   refreshThreadChatSummaries,
   type ProjectStageInfo,
   type ThreadChatSummaryInfo,
@@ -408,10 +408,10 @@ function Chevron({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-function workflowOptions(workflows: WorkflowInfo[]) {
-  return workflows.map((workflow) => ({
-    value: workflow.id,
-    label: workflow.name,
+function processOptions(processTemplates: ProcessTemplateInfo[]) {
+  return processTemplates.map((process) => ({
+    value: process.id,
+    label: process.name,
   }));
 }
 
@@ -424,9 +424,9 @@ function ProjectActionsButton({
 }) {
   const { t } = useI18n();
   const [openMenu, setOpenMenu] = useState(false);
-  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; workflowId: string; enabledStageIds: string[] }>(null);
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
-  const [workflowStages, setWorkflowStages] = useState<Record<string, ProjectStageInfo[]>>({});
+  const [form, setForm] = useState<null | { mode: "existing" | "new"; basePath: string | null; name: string; processTemplateId: string; enabledStageIds: string[] }>(null);
+  const [processTemplates, setProcessTemplates] = useState<ProcessTemplateInfo[]>([]);
+  const [processStages, setProcessTemplateStages] = useState<Record<string, ProjectStageInfo[]>>({});
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -446,18 +446,18 @@ function ProjectActionsButton({
   const defaultEnabledStageIds = (stages: ProjectStageInfo[]) =>
     stages.filter((stage) => stage.type === "builtin" && stage.enabled).map((stage) => stage.id);
 
-  const loadWorkflowStages = async (workflowId: string) => {
-    if (workflowStages[workflowId]) return workflowStages[workflowId];
-    const stages = await listWorkflowStages(workflowId);
-    setWorkflowStages((prev) => ({ ...prev, [workflowId]: stages }));
+  const loadProcessTemplateStages = async (processTemplateId: string) => {
+    if (processStages[processTemplateId]) return processStages[processTemplateId];
+    const stages = await listProcessTemplateStages(processTemplateId);
+    setProcessTemplateStages((prev) => ({ ...prev, [processTemplateId]: stages }));
     return stages;
   };
 
-  const updateWorkflow = async (workflowId: string) => {
-    const stages = await loadWorkflowStages(workflowId);
+  const updateProcessTemplate = async (processTemplateId: string) => {
+    const stages = await loadProcessTemplateStages(processTemplateId);
     setForm((current) =>
       current
-        ? { ...current, workflowId, enabledStageIds: defaultEnabledStageIds(stages) }
+        ? { ...current, processTemplateId, enabledStageIds: defaultEnabledStageIds(stages) }
         : current,
     );
   };
@@ -478,12 +478,12 @@ function ProjectActionsButton({
     try {
       const selection = await open({ directory: true, multiple: false });
       if (typeof selection !== "string") return;
-      const workflowRows = workflows.length > 0 ? workflows : await listWorkflows();
-      setWorkflows(workflowRows);
-      const workflowId = workflowRows[0]?.id ?? "code";
-      const stages = await loadWorkflowStages(workflowId);
+      const processRows = processTemplates.length > 0 ? processTemplates : await listProcessTemplates();
+      setProcessTemplates(processRows);
+      const processTemplateId = processRows[0]?.id ?? "code";
+      const stages = await loadProcessTemplateStages(processTemplateId);
       const defaultName = selection.split(/[\\/]/).filter(Boolean).pop() ?? "";
-      setForm({ mode: "existing", basePath: selection, name: defaultName, workflowId, enabledStageIds: defaultEnabledStageIds(stages) });
+      setForm({ mode: "existing", basePath: selection, name: defaultName, processTemplateId, enabledStageIds: defaultEnabledStageIds(stages) });
     } catch (err) {
       onError(String(err));
     }
@@ -493,11 +493,11 @@ function ProjectActionsButton({
     setOpenMenu(false);
     setFormError(null);
     try {
-      const workflowRows = workflows.length > 0 ? workflows : await listWorkflows();
-      setWorkflows(workflowRows);
-      const workflowId = workflowRows[0]?.id ?? "code";
-      const stages = await loadWorkflowStages(workflowId);
-      setForm({ mode: "new", basePath: null, name: "", workflowId, enabledStageIds: defaultEnabledStageIds(stages) });
+      const processRows = processTemplates.length > 0 ? processTemplates : await listProcessTemplates();
+      setProcessTemplates(processRows);
+      const processTemplateId = processRows[0]?.id ?? "code";
+      const stages = await loadProcessTemplateStages(processTemplateId);
+      setForm({ mode: "new", basePath: null, name: "", processTemplateId, enabledStageIds: defaultEnabledStageIds(stages) });
     } catch (err) {
       onError(String(err));
     }
@@ -516,8 +516,8 @@ function ProjectActionsButton({
     try {
       const project =
         form.mode === "existing"
-          ? await addExistingProject(form.basePath ?? "", name, form.workflowId, form.enabledStageIds)
-          : await createDefaultProject(name, form.workflowId, form.enabledStageIds);
+          ? await addExistingProject(form.basePath ?? "", name, form.processTemplateId, form.enabledStageIds)
+          : await createDefaultProject(name, form.processTemplateId, form.enabledStageIds);
       onProjectAdded(project);
       setForm(null);
     } catch (err) {
@@ -587,19 +587,19 @@ function ProjectActionsButton({
               </div>
             )}
             <div className="mb-4 flex items-center justify-between gap-3">
-              <span className="text-body-sm text-ink/55">{t("project.workflowId")}</span>
+              <span className="text-body-sm text-ink/55">{t("project.processTemplateId")}</span>
               <RuntimeMenuSelect
-                ariaLabel={t("project.workflowId")}
-                value={form.workflowId}
-                options={workflowOptions(workflows)}
-                onChange={(value) => void updateWorkflow(value)}
+                ariaLabel={t("project.processTemplateId")}
+                value={form.processTemplateId}
+                options={processOptions(processTemplates)}
+                onChange={(value) => void updateProcessTemplate(value)}
                 portalZIndex={100}
               />
             </div>
             <div className="mb-4">
               <div className="mb-2 text-body-sm text-ink/55">{t("stage.project_stages")}</div>
               <div className="flex flex-wrap gap-1.5">
-                {(workflowStages[form.workflowId] ?? []).filter((stage) => stage.type === "builtin").map((stage) => {
+                {(processStages[form.processTemplateId] ?? []).filter((stage) => stage.type === "builtin").map((stage) => {
                   const selected = form.enabledStageIds.includes(stage.id);
                   return (
                     <StageSelectChip

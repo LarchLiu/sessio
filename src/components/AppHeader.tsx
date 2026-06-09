@@ -12,7 +12,7 @@ interface AppHeaderProps {
   detailTitle: string;
   contextTitle: { label: string; icon: LucideIcon } | null;
   entityTitle: { kind: "thread" | "project"; title: string; icon: LucideIcon; pill?: string } | null;
-  projectContext: Pick<ProjectInfo, "name" | "workflowId"> | null;
+  projectContext: Pick<ProjectInfo, "name" | "processTemplateId"> | null;
   activeMessageMeta: {
     count: number;
     partial: boolean;
@@ -152,7 +152,7 @@ function HeaderContextTitle({
   project,
 }: {
   title: { label: string; icon: LucideIcon };
-  project: Pick<ProjectInfo, "name" | "workflowId"> | null;
+  project: Pick<ProjectInfo, "name" | "processTemplateId"> | null;
 }) {
   const Icon = title.icon;
   return (
@@ -171,7 +171,7 @@ function HeaderContextTitle({
             {project.name}
           </span>
           <span data-tauri-drag-region className="shrink-0 rounded-full border border-card-border/[0.14] bg-card-chip/[0.08] px-1.5 py-0.5 text-meta leading-none tracking-normal first-letter:uppercase text-card-fg/55">
-            {project.workflowId}
+            {project.processTemplateId}
           </span>
         </>
       )}

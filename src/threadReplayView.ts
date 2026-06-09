@@ -372,7 +372,7 @@ export function replayGroupForSession(
   session: ThreadReplaySessionInfo,
   t: TFn,
 ): Omit<ReplaySessionGroup, "sessions"> {
-  if (kind === "workflow") {
+  if (kind === "process") {
     const stageSource = session.sources.find((source) => source.kind === "stage" || source.stageId);
     if (stageSource) {
       const label = stageSource.label ?? stageSource.stageId ?? t("thread.replay_source.stage");

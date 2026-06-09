@@ -34,7 +34,7 @@ describe("buildThreadSessionLanes", () => {
   it("keeps one lane per replay session while preserving multiple sources", () => {
     const replay: ThreadReplayInfo = {
       threadId: "thread-1",
-      kind: "workflow",
+      kind: "process",
       sessions: [
         replaySession("codex", "session-1", session("codex", "session-1"), [
           source({ kind: "thread", label: "Thread", createdAt: 1 }),
@@ -44,7 +44,7 @@ describe("buildThreadSessionLanes", () => {
     };
 
     const lanes = buildThreadSessionLanes({
-      thread: thread("workflow"),
+      thread: thread("process"),
       replay,
       liveState: emptyLiveState(),
       runtimeSessionAliases: {},
@@ -206,10 +206,10 @@ describe("buildThreadSessionLanes", () => {
 });
 
 describe("groupReplaySessionsByThreadKind", () => {
-  it("groups workflow sessions by stage and debate sessions by round lane", () => {
-    const workflow = groupReplaySessionsByThreadKind({
+  it("groups process sessions by stage and debate sessions by round lane", () => {
+    const process = groupReplaySessionsByThreadKind({
       threadId: "thread-1",
-      kind: "workflow",
+      kind: "process",
       sessions: [
         replaySession("codex", "session-1", null, [source({ kind: "stage", stageId: "stage-1", label: "Build" })]),
         replaySession("claude", "session-2", null, [source({ kind: "stage", stageId: "stage-1", label: "Build" })]),
@@ -225,8 +225,8 @@ describe("groupReplaySessionsByThreadKind", () => {
       ],
     }, t);
 
-    expect(workflow).toHaveLength(1);
-    expect(workflow[0].sessions.map((item) => item.sessionId)).toEqual(["session-2", "session-1"]);
+    expect(process).toHaveLength(1);
+    expect(process[0].sessions.map((item) => item.sessionId)).toEqual(["session-2", "session-1"]);
     expect(debate[0].key).toBe("debate:round-123456789:task-1");
     expect(debate[0].label).toContain("Pro");
   });

@@ -2,13 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type Agent = "astra-pi" | "codex" | "claude" | "gemini";
 
-export type WorkflowType = "builtin" | "custom";
+export type ProcessTemplateType = "builtin" | "custom";
 
-export interface WorkflowInfo {
+export interface ProcessTemplateInfo {
   id: string;
   name: string;
   description: string | null;
-  type: WorkflowType;
+  type: ProcessTemplateType;
   createdAt: number;
   updatedAt: number;
 }
@@ -17,7 +17,7 @@ export interface ProjectInfo {
   id: string;
   path: string;
   name: string;
-  workflowId: string;
+  processTemplateId: string;
   createdAt: number;
   updatedAt: number;
   sessionCount: number;
@@ -101,7 +101,7 @@ export interface AssistantInfo {
   systemPrompt: string | null;
   color: string | null;
   type: AssistantType;
-  workflowId: string | null;
+  processTemplateId: string | null;
   projectId: string | null;
   enabled: boolean;
   createdAt: number;
@@ -117,7 +117,7 @@ export interface StageAssistantInfo {
   order: number;
 }
 
-export type ThreadKind = "workflow" | "teamwork" | "brainstorm" | "debate";
+export type ThreadKind = "process" | "teamwork" | "brainstorm" | "debate";
 
 export interface ThreadAssistantInfo {
   assistantId: string;
@@ -188,7 +188,7 @@ export interface StageInfo {
   assistantIds: string[];
   assistants: StageAssistantInfo[];
   type: ProjectStageType;
-  workflowId: string | null;
+  processTemplateId: string | null;
   kind: StageType | null;
   name: string | null;
   description: string | null;
@@ -209,7 +209,7 @@ export interface ProjectStageInfo {
   id: string;
   projectId: string | null;
   type: ProjectStageType;
-  workflowId: string | null;
+  processTemplateId: string | null;
   kind: StageType | null;
   name: string | null;
   description: string | null;
@@ -957,39 +957,39 @@ export async function listProjects(): Promise<ProjectInfo[]> {
   return invoke<ProjectInfo[]>("list_projects");
 }
 
-export async function listWorkflows(): Promise<WorkflowInfo[]> {
-  return invoke<WorkflowInfo[]>("list_workflows");
+export async function listProcessTemplates(): Promise<ProcessTemplateInfo[]> {
+  return invoke<ProcessTemplateInfo[]>("list_process_templates");
 }
 
-export async function createWorkflow(name: string, description?: string | null): Promise<WorkflowInfo> {
-  return invoke<WorkflowInfo>("create_workflow", { name, description: description ?? null });
+export async function createProcessTemplate(name: string, description?: string | null): Promise<ProcessTemplateInfo> {
+  return invoke<ProcessTemplateInfo>("create_process_template", { name, description: description ?? null });
 }
 
-export async function updateWorkflow(
-  workflowId: string,
+export async function updateProcessTemplate(
+  processTemplateId: string,
   patch: { name?: string | null; description?: string | null },
-): Promise<WorkflowInfo> {
-  return invoke<WorkflowInfo>("update_workflow", {
-    workflowId,
+): Promise<ProcessTemplateInfo> {
+  return invoke<ProcessTemplateInfo>("update_process_template", {
+    processTemplateId,
     name: patch.name ?? null,
     description: patch.description === undefined ? undefined : patch.description,
   });
 }
 
-export async function deleteWorkflow(workflowId: string): Promise<void> {
-  return invoke<void>("delete_workflow", { workflowId });
+export async function deleteProcessTemplate(processTemplateId: string): Promise<void> {
+  return invoke<void>("delete_process_template", { processTemplateId });
 }
 
 export async function addExistingProject(
   path: string,
   name?: string | null,
-  workflowId?: string | null,
+  processTemplateId?: string | null,
   enabledStageIds?: string[] | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("add_existing_project", {
     path,
     name: name ?? null,
-    workflowId: workflowId ?? null,
+    processTemplateId: processTemplateId ?? null,
     enabledStageIds: enabledStageIds ?? null,
   });
 }
@@ -997,37 +997,37 @@ export async function addExistingProject(
 export async function createProject(
   parentPath: string,
   name: string,
-  workflowId?: string | null,
+  processTemplateId?: string | null,
   enabledStageIds?: string[] | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("create_project", {
     parentPath,
     name,
-    workflowId: workflowId ?? null,
+    processTemplateId: processTemplateId ?? null,
     enabledStageIds: enabledStageIds ?? null,
   });
 }
 
 export async function createDefaultProject(
   name: string,
-  workflowId?: string | null,
+  processTemplateId?: string | null,
   enabledStageIds?: string[] | null,
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("create_default_project", {
     name,
-    workflowId: workflowId ?? null,
+    processTemplateId: processTemplateId ?? null,
     enabledStageIds: enabledStageIds ?? null,
   });
 }
 
 export async function updateProject(
   projectId: string,
-  patch: { name?: string | null; workflowId?: string | null },
+  patch: { name?: string | null; processTemplateId?: string | null },
 ): Promise<ProjectInfo> {
   return invoke<ProjectInfo>("update_project", {
     projectId,
     name: patch.name ?? null,
-    workflowId: patch.workflowId ?? null,
+    processTemplateId: patch.processTemplateId ?? null,
   });
 }
 
@@ -1057,7 +1057,7 @@ export async function createAssistant(input: {
   systemPrompt?: string | null;
   color?: string | null;
   type: AssistantType;
-  workflowId?: string | null;
+  processTemplateId?: string | null;
   projectId?: string | null;
 }): Promise<AssistantInfo> {
   return invoke<AssistantInfo>("create_assistant", {
@@ -1067,7 +1067,7 @@ export async function createAssistant(input: {
       systemPrompt: input.systemPrompt ?? null,
       color: input.color ?? null,
       assistantType: input.type,
-      workflowId: input.workflowId ?? null,
+      processTemplateId: input.processTemplateId ?? null,
       projectId: input.projectId ?? null,
     },
   });
@@ -1309,20 +1309,20 @@ export async function listProjectStages(projectId: string): Promise<ProjectStage
   return invoke<ProjectStageInfo[]>("list_project_stages", { projectId });
 }
 
-export async function listWorkflowStages(workflowId: string): Promise<ProjectStageInfo[]> {
-  return invoke<ProjectStageInfo[]>("list_workflow_stages", { workflowId });
+export async function listProcessTemplateStages(processTemplateId: string): Promise<ProjectStageInfo[]> {
+  return invoke<ProjectStageInfo[]>("list_process_template_stages", { processTemplateId });
 }
 
 export async function createProjectStage(
   projectId: string,
   name: string,
   description?: string | null,
-  workflowId?: string | null,
+  processTemplateId?: string | null,
   icon?: string | null,
 ): Promise<ProjectStageInfo> {
   return invoke<ProjectStageInfo>("create_project_stage", {
     projectId,
-    workflowId: workflowId ?? null,
+    processTemplateId: processTemplateId ?? null,
     name,
     description: description ?? null,
     icon: icon ?? null,

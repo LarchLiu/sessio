@@ -32,16 +32,16 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, Check, Circle, Download, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2, Workflow } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, WorkflowInfo } from "../api";
+import { ArrowLeft, Check, Circle, Download, GitBranch, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2 } from "lucide-react";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, ProcessTemplateInfo } from "../api";
 import {
-  createWorkflow,
+  createProcessTemplate,
   getAstraConfig,
   getNetworkConfig,
   listAgents,
   listAssistants,
-  listWorkflowStages,
-  listWorkflows,
+  listProcessTemplateStages,
+  listProcessTemplates,
   updateAgentPreferences,
   updateAstraConfig,
   updateNetworkConfig,
@@ -65,7 +65,7 @@ import { formatVersionLabel, type UpdateState } from "../updater";
 import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
 import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
-type SettingsSection = "general" | "agents" | "assistants" | "workflows";
+type SettingsSection = "general" | "agents" | "assistants" | "processTemplates";
 
 type AgentPreferencePatch = {
   displayName?: string | null;
@@ -113,7 +113,7 @@ export default function SettingsPage({
     { id: "general" as const, label: t("settings.general"), icon: Settings2 },
     { id: "agents" as const, label: t("agent.title"), icon: AiGenerate2Icon },
     { id: "assistants" as const, label: t("assistant.title"), icon: Robot3LineIcon },
-    { id: "workflows" as const, label: t("settings.workflows"), icon: Workflow },
+    { id: "processTemplates" as const, label: t("settings.process_templates"), icon: GitBranch },
   ];
   const sectionTitle = navItems.find((item) => item.id === section)?.label ?? t("settings.general");
 
@@ -156,7 +156,7 @@ export default function SettingsPage({
         <header data-tauri-drag-region className="grid h-12 shrink-0 select-none grid-cols-3 items-center border-b border-ink/[0.12] bg-surface px-5">
           <h1 data-tauri-drag-region className="col-start-2 justify-self-center truncate text-title font-semibold text-ink/85">{sectionTitle}</h1>
         </header>
-        <ScrollArea className="min-h-0 flex-1 bg-surface-panel" viewportClassName={"px-10 pt-6 " + (section === "workflows" ? "pb-6" : "pb-16")}>
+        <ScrollArea className="min-h-0 flex-1 bg-surface-panel" viewportClassName={"px-10 pt-6 " + (section === "processTemplates" ? "pb-6" : "pb-16")}>
           <div className="mx-auto max-w-[840px]">
             {section === "general" && (
               <GeneralSettings
@@ -175,7 +175,7 @@ export default function SettingsPage({
             )}
             {section === "agents" && <AgentsSettings onError={onError} />}
             {section === "assistants" && <AssistantsSettings onError={onError} />}
-            {section === "workflows" && <WorkflowsSettings onError={onError} />}
+            {section === "processTemplates" && <ProcessTemplatesSettings onError={onError} />}
           </div>
         </ScrollArea>
       </main>
@@ -482,8 +482,8 @@ function AgentsSettings({ onError }: { onError: (error: string | null) => void }
               type="button"
               onClick={() => setSelectedView("astra")}
               className={
-                "workflow-list-item mb-3 flex h-10 w-full min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-card-border/[0.12] bg-card px-3 text-left text-body-sm transition " +
-                (selectedView === "astra" ? "workflow-list-item-active" : "")
+                "process-template-list-item mb-3 flex h-10 w-full min-w-0 items-center gap-2 overflow-hidden rounded-lg border border-card-border/[0.12] bg-card px-3 text-left text-body-sm transition " +
+                (selectedView === "astra" ? "process-template-list-item-active" : "")
               }
             >
               <Sparkles className="h-4 w-4 shrink-0 text-card-icon/60" />
@@ -743,8 +743,8 @@ function AgentListRow({
     <div
       ref={ref}
       className={
-        "workflow-list-item flex h-12 w-full min-w-0 items-center gap-2 px-2 text-left text-body-sm transition " +
-        (active ? "workflow-list-item-active " : "") +
+        "process-template-list-item flex h-12 w-full min-w-0 items-center gap-2 px-2 text-left text-body-sm transition " +
+        (active ? "process-template-list-item-active " : "") +
         (isDragSource ? "z-20 cursor-grabbing bg-card shadow-[0_12px_28px_rgba(0,0,0,0.22)] " : "") +
         (isDropTarget ? "bg-card-active shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.32)] " : "")
       }
@@ -1937,7 +1937,7 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
     void reload();
   }, []);
 
-  const sharedAssistants = assistants.filter((assistant) => assistant.projectId === null && assistant.workflowId === null);
+  const sharedAssistants = assistants.filter((assistant) => assistant.projectId === null && assistant.processTemplateId === null);
   const builtin = sharedAssistants.filter((assistant) => assistant.type === "builtin");
   const custom = sharedAssistants.filter((assistant) => assistant.type === "custom");
   const visible = tab === "builtin" ? builtin : custom;
@@ -1988,30 +1988,30 @@ function AssistantsSettings({ onError }: { onError: (error: string | null) => vo
   );
 }
 
-function WorkflowsSettings({ onError }: { onError: (error: string | null) => void }) {
+function ProcessTemplatesSettings({ onError }: { onError: (error: string | null) => void }) {
   const { t } = useI18n();
-  const [workflows, setWorkflows] = useState<WorkflowInfo[]>([]);
-  const [selectedWorkflowId, setSelectedWorkflowId] = useState("code");
+  const [processTemplates, setProcessTemplates] = useState<ProcessTemplateInfo[]>([]);
+  const [selectedProcessTemplateId, setSelectedProcessTemplateId] = useState("code");
   const [stages, setStages] = useState<ProjectStageInfo[]>([]);
   const [assistants, setAssistants] = useState<AssistantInfo[]>([]);
-  const [newWorkflowName, setNewWorkflowName] = useState("");
-  const [newWorkflowDescription, setNewWorkflowDescription] = useState("");
-  const [showCreateWorkflow, setShowCreateWorkflow] = useState(false);
+  const [newProcessTemplateName, setNewProcessTemplateName] = useState("");
+  const [newProcessTemplateDescription, setNewProcessTemplateDescription] = useState("");
+  const [showCreateProcessTemplate, setShowCreateProcessTemplate] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  const selectedWorkflow = workflows.find((workflow) => workflow.id === selectedWorkflowId) ?? workflows[0] ?? null;
+  const selectedProcessTemplate = processTemplates.find((process) => process.id === selectedProcessTemplateId) ?? processTemplates[0] ?? null;
   const availableAssistants = assistants.filter((assistant) => assistant.enabled && assistant.projectId === null && (
-    assistant.workflowId === selectedWorkflowId ||
-    (assistant.workflowId === null && assistant.type === "custom")
+    assistant.processTemplateId === selectedProcessTemplateId ||
+    (assistant.processTemplateId === null && assistant.type === "custom")
   ));
 
   const reloadAll = async () => {
     setLoading(true);
     try {
-      const [workflowRows, assistantRows] = await Promise.all([listWorkflows(), listAssistants(null)]);
-      setWorkflows(workflowRows);
+      const [processRows, assistantRows] = await Promise.all([listProcessTemplates(), listAssistants(null)]);
+      setProcessTemplates(processRows);
       setAssistants(assistantRows);
-      setSelectedWorkflowId((current) => workflowRows.some((workflow) => workflow.id === current) ? current : workflowRows[0]?.id ?? "code");
+      setSelectedProcessTemplateId((current) => processRows.some((process) => process.id === current) ? current : processRows[0]?.id ?? "code");
     } catch (err) {
       onError(String(err));
     } finally {
@@ -2019,9 +2019,9 @@ function WorkflowsSettings({ onError }: { onError: (error: string | null) => voi
     }
   };
 
-  const reloadStages = async (workflowId: string) => {
+  const reloadStages = async (processTemplateId: string) => {
     try {
-      setStages(await listWorkflowStages(workflowId));
+      setStages(await listProcessTemplateStages(processTemplateId));
     } catch (err) {
       onError(String(err));
     }
@@ -2032,31 +2032,31 @@ function WorkflowsSettings({ onError }: { onError: (error: string | null) => voi
   }, []);
 
   useEffect(() => {
-    if (selectedWorkflowId) void reloadStages(selectedWorkflowId);
-  }, [selectedWorkflowId]);
+    if (selectedProcessTemplateId) void reloadStages(selectedProcessTemplateId);
+  }, [selectedProcessTemplateId]);
 
-  const createNewWorkflow = async () => {
-    const name = newWorkflowName.trim();
+  const createNewProcessTemplate = async () => {
+    const name = newProcessTemplateName.trim();
     if (!name) return;
     try {
-      const workflow = await createWorkflow(name, newWorkflowDescription);
-      setWorkflows((prev) => [...prev, workflow]);
-      setSelectedWorkflowId(workflow.id);
-      setNewWorkflowName("");
-      setNewWorkflowDescription("");
-      setShowCreateWorkflow(false);
+      const process = await createProcessTemplate(name, newProcessTemplateDescription);
+      setProcessTemplates((prev) => [...prev, process]);
+      setSelectedProcessTemplateId(process.id);
+      setNewProcessTemplateName("");
+      setNewProcessTemplateDescription("");
+      setShowCreateProcessTemplate(false);
     } catch (err) {
       onError(String(err));
     }
   };
 
   const refreshStages = async () => {
-    if (selectedWorkflowId) await reloadStages(selectedWorkflowId);
+    if (selectedProcessTemplateId) await reloadStages(selectedProcessTemplateId);
   };
 
-  const workflowDescription = (workflow: WorkflowInfo) => {
-    if (!workflow.description) return t("settings.workflow_no_description");
-    return workflow.type === "builtin" ? t(workflow.description) : workflow.description;
+  const processDescription = (process: ProcessTemplateInfo) => {
+    if (!process.description) return t("settings.process_template_no_description");
+    return process.type === "builtin" ? t(process.description) : process.description;
   };
 
   return (
@@ -2064,25 +2064,25 @@ function WorkflowsSettings({ onError }: { onError: (error: string | null) => voi
       <div className="grid grid-cols-[240px_minmax(0,1fr)] gap-5">
         <div className="min-w-0">
           <SettingsGroup
-            title={t("settings.workflows")}
+            title={t("settings.process_templates")}
             flush
             action={
-              <button type="button" onClick={() => setShowCreateWorkflow(true)} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 text-body-sm font-medium leading-none text-card-fg/75 transition hover:text-card-fg/90">
+              <button type="button" onClick={() => setShowCreateProcessTemplate(true)} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 text-body-sm font-medium leading-none text-card-fg/75 transition hover:text-card-fg/90">
                 <Plus className="h-3.5 w-3.5" />
-                {t("settings.add_workflow")}
+                {t("settings.add_process_template")}
               </button>
             }
           >
             <div className="divide-y divide-card-border/10">
-              {workflows.map((workflow) => (
-                <Tooltip key={workflow.id} content={workflowDescription(workflow)} placement="right">
+              {processTemplates.map((process) => (
+                <Tooltip key={process.id} content={processDescription(process)} placement="right">
                   <button
                     type="button"
-                    onClick={() => setSelectedWorkflowId(workflow.id)}
-                    className={"workflow-list-item flex h-10 w-full min-w-0 items-center justify-between px-3 text-left text-body-sm transition " + (workflow.id === selectedWorkflowId ? "workflow-list-item-active" : "")}
+                    onClick={() => setSelectedProcessTemplateId(process.id)}
+                    className={"process-template-list-item flex h-10 w-full min-w-0 items-center justify-between px-3 text-left text-body-sm transition " + (process.id === selectedProcessTemplateId ? "process-template-list-item-active" : "")}
                   >
-                    <span className="truncate">{workflow.name}</span>
-                    <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{workflow.type}</span>
+                    <span className="truncate">{process.name}</span>
+                    <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{process.type}</span>
                   </button>
                 </Tooltip>
               ))}
@@ -2090,12 +2090,12 @@ function WorkflowsSettings({ onError }: { onError: (error: string | null) => voi
           </SettingsGroup>
         </div>
         <div className="min-w-0">
-          {selectedWorkflow && (
-            <WorkflowEditor
+          {selectedProcessTemplate && (
+            <ProcessTemplateEditor
               stages={stages}
               assistants={availableAssistants}
               loading={loading}
-              workflowId={selectedWorkflowId}
+              processTemplateId={selectedProcessTemplateId}
               onStageCreated={(stage) => setStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
               onStageUpdated={(stage) => setStages((prev) => prev.map((item) => item.id === stage.id ? stage : item).sort((a, b) => a.order - b.order))}
               onStagesReload={refreshStages}
@@ -2105,21 +2105,21 @@ function WorkflowsSettings({ onError }: { onError: (error: string | null) => voi
           )}
         </div>
       </div>
-      {showCreateWorkflow && (
-        <CreateWorkflowDialog
-          name={newWorkflowName}
-          description={newWorkflowDescription}
-          onNameChange={setNewWorkflowName}
-          onDescriptionChange={setNewWorkflowDescription}
-          onCreate={() => void createNewWorkflow()}
-          onClose={() => setShowCreateWorkflow(false)}
+      {showCreateProcessTemplate && (
+        <CreateProcessTemplateDialog
+          name={newProcessTemplateName}
+          description={newProcessTemplateDescription}
+          onNameChange={setNewProcessTemplateName}
+          onDescriptionChange={setNewProcessTemplateDescription}
+          onCreate={() => void createNewProcessTemplate()}
+          onClose={() => setShowCreateProcessTemplate(false)}
         />
       )}
     </section>
   );
 }
 
-function CreateWorkflowDialog({
+function CreateProcessTemplateDialog({
   name,
   description,
   onNameChange,
@@ -2138,15 +2138,15 @@ function CreateWorkflowDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 px-4" onClick={onClose}>
       <div className="w-full max-w-[520px] rounded-lg border border-card-border/[0.12] bg-surface-panel p-4 shadow-[0_24px_80px_rgba(0,0,0,0.22)]" onClick={(event) => event.stopPropagation()}>
-        <div className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{t("settings.add_workflow")}</div>
+        <div className="mb-3 text-body-sm font-semibold text-ink/[0.88]">{t("settings.add_process_template")}</div>
         <div className="grid gap-2">
-          <input value={name} onChange={(event) => onNameChange(event.target.value)} placeholder={t("settings.workflow_name")} className={inputClassName} />
-          <textarea value={description} onChange={(event) => onDescriptionChange(event.target.value)} placeholder={t("settings.workflow_description")} rows={3} className={textareaClassName} />
+          <input value={name} onChange={(event) => onNameChange(event.target.value)} placeholder={t("settings.process_template_name")} className={inputClassName} />
+          <textarea value={description} onChange={(event) => onDescriptionChange(event.target.value)} placeholder={t("settings.process_template_description")} rows={3} className={textareaClassName} />
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-body-sm text-ink/45 hover:bg-ink/5">{t("delete.cancel")}</button>
             <button type="button" onClick={onCreate} disabled={!name.trim()} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] hover:text-card-fg/90 disabled:opacity-35">
               <Plus className="h-4 w-4" />
-              {t("settings.add_workflow")}
+              {t("settings.add_process_template")}
             </button>
           </div>
         </div>
@@ -2155,11 +2155,11 @@ function CreateWorkflowDialog({
   );
 }
 
-function WorkflowEditor({
+function ProcessTemplateEditor({
   stages,
   assistants,
   loading,
-  workflowId,
+  processTemplateId,
   onStageCreated,
   onStageUpdated,
   onStagesReload,
@@ -2169,7 +2169,7 @@ function WorkflowEditor({
   stages: ProjectStageInfo[];
   assistants: AssistantInfo[];
   loading: boolean;
-  workflowId: string;
+  processTemplateId: string;
   onStageCreated: (stage: ProjectStageInfo) => void;
   onStageUpdated: (stage: ProjectStageInfo) => void;
   onStagesReload: () => Promise<void>;
@@ -2194,7 +2194,7 @@ function WorkflowEditor({
           stages={stages}
           assistants={assistants}
           loading={loading}
-          dragGroup="workflow-stages"
+          dragGroup="process-stages"
           onUpdated={onStageUpdated}
           onDeleted={onStageDeleted}
           onReload={onStagesReload}
@@ -2203,7 +2203,7 @@ function WorkflowEditor({
       </SettingsGroup>
       {showCreateStage && (
         <CreateStageDialog
-          workflowId={workflowId}
+          processTemplateId={processTemplateId}
           onCreated={onStageCreated}
           onClose={() => setShowCreateStage(false)}
           onError={onError}

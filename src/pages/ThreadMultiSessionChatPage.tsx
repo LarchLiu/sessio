@@ -264,7 +264,7 @@ export default function ThreadMultiSessionChatPage({
     [replay, thread],
   );
   const canRunStageTask =
-    Boolean(thread && thread.kind === "workflow" && activeStage && composer.selectedAgent);
+    Boolean(thread && thread.kind === "process" && activeStage && composer.selectedAgent);
   const activeAstraRun = useMemo(
     () => astraRuns.find((run) => isAstraActive(run.status)) ?? null,
     [astraRuns],
@@ -396,7 +396,7 @@ export default function ThreadMultiSessionChatPage({
       threadChatSessions,
     );
     const { snapshot: snapshotWithSources, historySnapshots } = await collectThreadHistorySnapshots(baseSnapshot);
-    const stageId = thread.kind === "workflow" ? activeStage?.id ?? null : null;
+    const stageId = thread.kind === "process" ? activeStage?.id ?? null : null;
     if (stageTaskMode && !stageId) {
       composer.setComposerError(t("thread.stage_task_requires_stage"));
       return;
@@ -539,7 +539,7 @@ export default function ThreadMultiSessionChatPage({
             onSend={() => void handleSend()}
             modeActions={
               <>
-                {thread?.kind === "workflow" && (
+                {thread?.kind === "process" && (
                   <Tooltip content={t("thread.stage_task_mode")} placement="top">
                     <button
                       type="button"

@@ -9,7 +9,7 @@ import {
 import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
+import { Check, ChevronDown, Copy, GitBranch, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, X } from "lucide-react";
 import type { Agent, AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
 import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
@@ -30,7 +30,7 @@ import { sessionDisplayTitle } from "../appUtils";
 
 type ProjectView = "threads" | "stages" | "assistants";
 type ThreadPanelView = "threads" | "thread-chats";
-const THREAD_KINDS: ThreadKind[] = ["workflow", "teamwork", "brainstorm", "debate"];
+const THREAD_KINDS: ThreadKind[] = ["process", "teamwork", "brainstorm", "debate"];
 const AGENT_PARTICIPANT_KINDS = new Set<ThreadKind>(["brainstorm", "debate"]);
 
 function sessionIdentityKey(s: SessionInfo): string {
@@ -282,7 +282,7 @@ export function ProjectWorkbenchPage({
   const projectViewTabs = useMemo<SegmentedTabItem<ProjectView>[]>(
     () => [
       { value: "threads", label: t("thread.title"), icon: HashIcon },
-      { value: "stages", label: t("project.workflowId"), icon: Workflow },
+      { value: "stages", label: t("project.processTemplateId"), icon: GitBranch },
       { value: "assistants", label: t("assistant.title"), icon: Robot3LineIcon },
     ],
     [t],
@@ -291,12 +291,12 @@ export function ProjectWorkbenchPage({
   const [projectStages, setProjectStages] = useState<ProjectStageInfo[]>([]);
   const [assistants, setAssistants] = useState<AssistantInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  const [workflowLoading, setWorkflowLoading] = useState(true);
+  const [processLoading, setProcessTemplateLoading] = useState(true);
   const [activeView, setActiveView] = useState<ProjectView>("threads");
 
   useEffect(() => {
     let cancelled = false;
-    setWorkflowLoading(true);
+    setProcessTemplateLoading(true);
     Promise.all([listThreads(project.id), listProjectStages(project.id), listAssistants(project.id), listAgents()])
       .then(([threadRows, projectStageRows, assistantRows, agentRows]) => {
         if (cancelled) return;
@@ -309,7 +309,7 @@ export function ProjectWorkbenchPage({
         if (!cancelled) onError(String(err));
       })
       .finally(() => {
-        if (!cancelled) setWorkflowLoading(false);
+        if (!cancelled) setProcessTemplateLoading(false);
       });
     return () => {
       cancelled = true;
@@ -369,13 +369,13 @@ export function ProjectWorkbenchPage({
           viewportClassName="px-5 pb-5 pt-4"
         >
           {activeView === "threads" && (
-            <ThreadWorkflowPanel
+            <ThreadProcessTemplatePanel
               project={project}
               threads={threads}
               projectStages={projectStages}
               assistants={assistants}
               agents={agents}
-              loading={workflowLoading}
+              loading={processLoading}
               onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
               onThreadUpdated={patchThread}
               onThreadDeleted={(threadId) => setThreads((prev) => prev.filter((thread) => thread.id !== threadId))}
@@ -423,7 +423,7 @@ export function ProjectWorkbenchPage({
               project={project}
               assistants={assistants}
               agents={agents}
-              loading={workflowLoading}
+              loading={processLoading}
               onAssistantCreated={(assistant) => setAssistants((prev) => [...prev, assistant])}
               onAssistantUpdated={patchAssistant}
               onAssistantDeleted={(assistantId) => setAssistants((prev) => prev.filter((assistant) => assistant.id !== assistantId))}
@@ -478,7 +478,7 @@ function threadStageChipStatusClass(stage: StageInfo): string {
   }
 }
 
-function ThreadWorkflowPanel({
+function ThreadProcessTemplatePanel({
   project,
   threads,
   projectStages,
@@ -514,7 +514,7 @@ function ThreadWorkflowPanel({
   const { t } = useI18n();
   const [goal, setGoal] = useState("");
   const [description, setDescription] = useState("");
-  const [createKind, setCreateKind] = useState<ThreadKind>("workflow");
+  const [createKind, setCreateKind] = useState<ThreadKind>("process");
   const [createAssistantIds, setCreateAssistantIds] = useState<string[]>([]);
   const [createAgentParticipantIds, setCreateAgentParticipantIds] = useState<string[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
@@ -669,7 +669,7 @@ function ThreadWorkflowPanel({
           : [],
       );
       let nextThread = thread;
-      const stageIds = createKind === "workflow"
+      const stageIds = createKind === "process"
         ? createStageOrder.filter((id) => selectedStageIds.includes(id))
         : [];
       for (const stageId of stageIds) {
@@ -683,7 +683,7 @@ function ThreadWorkflowPanel({
       onThreadCreated(nextThread);
       setGoal("");
       setDescription("");
-      setCreateKind("workflow");
+      setCreateKind("process");
       setCreateAssistantIds([]);
       setCreateAgentParticipantIds([]);
       setCreateOpen(false);
@@ -783,7 +783,7 @@ function ThreadWorkflowPanel({
                       />
                     </div>
                   )}
-                  {createKind === "workflow" && orderedCreateStages.length > 0 && (
+                  {createKind === "process" && orderedCreateStages.length > 0 && (
                     <DragDropProvider onDragEnd={handleCreateStageDragEnd}>
                       <div className="flex flex-wrap gap-1.5 border-t border-ink/10 pt-3">
                         {orderedCreateStages.map((stage, index) => (
@@ -1441,7 +1441,7 @@ function ThreadCard({
               </button>
             </Tooltip>
           )}
-          {thread.kind === "workflow" && (orderedThreadStages.length > 0 || availableProjectStages.length > 0) && (
+          {thread.kind === "process" && (orderedThreadStages.length > 0 || availableProjectStages.length > 0) && (
             <DragDropProvider onDragEnd={handleThreadStageDragEnd}>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {orderedThreadStages.map((stage, index) => {

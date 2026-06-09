@@ -170,7 +170,7 @@ export default function ThreadPage({
               <ThreadReplaySessions replay={replay} onSelectSession={onSelectSession} />
             )}
 
-            {sortedStages.length === 0 && thread.kind !== "workflow" ? (
+            {sortedStages.length === 0 && thread.kind !== "process" ? (
               thread.assistants.length > 0 ? (
                 <div className="grid gap-2">
                   {thread.assistants.map((assistant) => {
@@ -1123,7 +1123,7 @@ function issueSeverityTextClass(severity: IssueSeverity): string {
 }
 
 function threadAssistantCount(thread: ThreadInfo, stages: StageInfo[]): number {
-  if (thread.kind !== "workflow") return thread.assistants.length;
+  if (thread.kind !== "process") return thread.assistants.length;
   return new Set(stages.flatMap((stage) => stage.assistants.map((assistant) => assistant.assistantId))).size;
 }
 

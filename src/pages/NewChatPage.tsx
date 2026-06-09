@@ -8,7 +8,6 @@ import {
   MessageSquare,
   Swords,
   Trash2,
-  Workflow,
 } from "lucide-react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
@@ -54,7 +53,7 @@ type ParticipantDraft = {
   permissionMode: string;
 };
 
-const THREAD_MODES: ThreadKind[] = ["teamwork", "workflow", "brainstorm", "debate"];
+const THREAD_MODES: ThreadKind[] = ["teamwork", "process", "brainstorm", "debate"];
 const AGENT_PARTICIPANT_MODES = new Set<NewChatMode>(["brainstorm", "debate"]);
 const ASTRA_THREAD_MODES = new Set<NewChatMode>(["teamwork", "brainstorm", "debate"]);
 
@@ -295,7 +294,7 @@ export default function NewChatPage({
         mode === "teamwork" ? selectedAssistantIds : [],
         agentParticipants,
       );
-      if (mode === "workflow") {
+      if (mode === "process") {
         const selected = new Set(selectedStageIds);
         const stages: StageInfo[] = [];
         for (const stageId of stageOrder.filter((id) => selected.has(id))) {
@@ -474,7 +473,7 @@ function ThreadSetupPanel({
       )}
     </div>
   );
-  if (mode === "workflow") {
+  if (mode === "process") {
     return withValidation(
       <DragDropProvider onDragEnd={onStageDragEnd}>
         <div className="flex flex-wrap items-center gap-1.5">
@@ -701,8 +700,8 @@ function AssistantSelectChip({
 
 function threadKindIcon(kind: ThreadKind, className: string) {
   switch (kind) {
-    case "workflow":
-      return <Workflow className={className} />;
+    case "process":
+      return <GitBranch className={className} />;
     case "teamwork":
       return <Robot3LineIcon className={className} />;
     case "brainstorm":
@@ -742,7 +741,7 @@ function validateThreadMode({
   participantDrafts: ParticipantDraft[];
   t: (key: string) => string;
 }): string | null {
-  if (mode === "workflow" && selectedStageIds.length === 0) return t("new_chat.thread_requires_stage");
+  if (mode === "process" && selectedStageIds.length === 0) return t("new_chat.thread_requires_stage");
   if (mode === "teamwork" && selectedAssistantIds.length === 0) return t("new_chat.thread_requires_assistant");
   if (mode === "brainstorm" && participantDrafts.length < 2) return t("new_chat.thread_requires_two_participants");
   if (mode === "debate" && participantDrafts.length !== 2) return t("new_chat.thread_requires_exactly_two_participants");
