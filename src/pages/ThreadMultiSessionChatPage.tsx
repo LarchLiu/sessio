@@ -718,18 +718,27 @@ function ThreadContextNav({
   laneRefs: React.RefObject<Record<string, HTMLElement | null>>;
   viewportRef: React.RefObject<HTMLDivElement | null>;
 }) {
+  const itemSignature = useMemo(
+    () => items.map((item) => `${item.key}:${item.laneId}`).join("|"),
+    [items],
+  );
+  const itemsRef = useRef(items);
   const [positions, setPositions] = useState<Map<string, number>>(new Map());
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [positionsReady, setPositionsReady] = useState(false);
+  const positionsReadyRef = useRef(false);
   const activeKeyRef = useRef<string | null>(null);
   const settleTimerRef = useRef<number | null>(null);
+  itemsRef.current = items;
 
   useEffect(() => {
     const vp = viewportRef.current;
-    if (!vp || items.length === 0) {
-      setPositions(new Map());
+    if (!vp || itemSignature.length === 0) {
+      const empty = new Map<string, number>();
+      setPositions(empty);
       setActiveKey(null);
       setPositionsReady(false);
+      positionsReadyRef.current = false;
       activeKeyRef.current = null;
       return;
     }
@@ -744,32 +753,31 @@ function ThreadContextNav({
       window.clearTimeout(settleTimerRef.current);
       settleTimerRef.current = null;
     };
-    const markPositionsPending = () => {
-      setPositionsReady(false);
-      clearSettleTimer();
+    const setReady = (ready: boolean) => {
+      positionsReadyRef.current = ready;
+      setPositionsReady(ready);
     };
-    const markPositionsReadySoon = () => {
-      clearSettleTimer();
-      settleTimerRef.current = window.setTimeout(() => {
-        settleTimerRef.current = null;
-        setPositionsReady(true);
-      }, THREAD_CONTEXT_NAV_SETTLE_MS);
+    const setMeasuredPositions = (next: Map<string, number>) => {
+      setPositions(next);
     };
-    const computePositions = (): boolean => {
+    const measurePositions = (): Map<string, number> | null => {
+      const currentItems = itemsRef.current;
+      if (currentItems.length === 0) return null;
       const contentHeight = Math.max(1, vp.scrollHeight);
       const vpRect = vp.getBoundingClientRect();
       const next = new Map<string, number>();
-      for (const item of items) {
+      for (const item of currentItems) {
         const anchor = itemAnchor(item);
         if (!anchor) continue;
         const rect = anchor.getBoundingClientRect();
         const contentCenter = rect.top - vpRect.top + vp.scrollTop + rect.height / 2;
         next.set(item.key, Math.max(0, Math.min(1, contentCenter / contentHeight)));
       }
-      setPositions(next);
-      return next.size === items.length;
+      return next.size === currentItems.length ? next : null;
     };
     const computeActive = () => {
+      const currentItems = itemsRef.current;
+      if (currentItems.length === 0) return;
       const vpRect = vp.getBoundingClientRect();
       const enter = vpRect.top + vpRect.height * 0.25;
       const exit = vpRect.top + vpRect.height * 0.75;
@@ -777,55 +785,71 @@ function ThreadContextNav({
       const atTop = vp.scrollTop <= 0;
 
       let active = activeKeyRef.current;
-      let activeIndex = active ? items.findIndex((item) => item.key === active) : -1;
+      let activeIndex = active ? currentItems.findIndex((item) => item.key === active) : -1;
       if (activeIndex < 0) {
         activeIndex = 0;
-        for (let index = 0; index < items.length; index += 1) {
-          const anchor = itemAnchor(items[index]);
+        for (let index = 0; index < currentItems.length; index += 1) {
+          const anchor = itemAnchor(currentItems[index]);
           if (!anchor) continue;
           if (anchor.getBoundingClientRect().top <= enter) activeIndex = index;
           else break;
         }
-        active = items[activeIndex]?.key ?? null;
+        active = currentItems[activeIndex]?.key ?? null;
       } else {
-        for (let index = activeIndex + 1; index < items.length; index += 1) {
-          const anchor = itemAnchor(items[index]);
+        for (let index = activeIndex + 1; index < currentItems.length; index += 1) {
+          const anchor = itemAnchor(currentItems[index]);
           if (!anchor) continue;
           if (anchor.getBoundingClientRect().top <= enter) {
-            active = items[index].key;
+            active = currentItems[index].key;
             activeIndex = index;
           } else {
             break;
           }
         }
         while (activeIndex > 0) {
-          const activeItem = items[activeIndex];
+          const activeItem = currentItems[activeIndex];
           const anchor = itemAnchor(activeItem);
           if (!anchor || anchor.getBoundingClientRect().top <= exit) break;
           activeIndex -= 1;
-          active = items[activeIndex].key;
+          active = currentItems[activeIndex].key;
         }
       }
 
-      if (atBottom) active = items[items.length - 1]?.key ?? active;
-      if (atTop) active = items[0]?.key ?? active;
+      if (atBottom) active = currentItems[currentItems.length - 1]?.key ?? active;
+      if (atTop) active = currentItems[0]?.key ?? active;
       activeKeyRef.current = active;
       setActiveKey(active);
     };
     const scheduleMeasure = () => {
-      markPositionsPending();
+      clearSettleTimer();
+      settleTimerRef.current = window.setTimeout(() => {
+        settleTimerRef.current = null;
+        const next = measurePositions();
+        if (!next) {
+          if (!positionsReadyRef.current) setReady(false);
+          return;
+        }
+        setMeasuredPositions(next);
+        setReady(true);
+        computeActive();
+      }, THREAD_CONTEXT_NAV_SETTLE_MS);
+    };
+    const commitInitialMeasure = () => {
       if (frame !== null) return;
       frame = window.requestAnimationFrame(() => {
         frame = null;
-        const complete = computePositions();
+        const next = measurePositions();
+        if (next) setMeasuredPositions(next);
         computeActive();
-        if (complete) markPositionsReadySoon();
+        scheduleMeasure();
       });
     };
 
-    markPositionsPending();
-    if (computePositions()) markPositionsReadySoon();
-    computeActive();
+    const empty = new Map<string, number>();
+    setPositions(empty);
+    setReady(false);
+    activeKeyRef.current = null;
+    commitInitialMeasure();
     vp.addEventListener("scroll", computeActive, { passive: true });
     const ro = new ResizeObserver(scheduleMeasure);
     ro.observe(vp);
@@ -840,7 +864,7 @@ function ThreadContextNav({
       clearSettleTimer();
       ro.disconnect();
     };
-  }, [items, laneRefs, viewportRef]);
+  }, [itemSignature, laneRefs, viewportRef]);
 
   if (items.length === 0) return null;
   const canRenderPositions = positionsReady && positions.size === items.length;
