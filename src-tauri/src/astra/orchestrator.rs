@@ -579,10 +579,10 @@ pub(super) fn dedicated_backend_required_error(
     thread: &crate::models::ThreadInfo,
 ) -> Option<(&'static str, &'static str, String)> {
     match thread.kind {
-        ThreadKind::Workflow => Some((
-            "astra_orchestration_unsupported_for_workflow",
-            "astra_orchestration_unsupported_for_workflow",
-            "Workflow threads are human-defined stages and do not use Astra automatic scheduling"
+        ThreadKind::Process => Some((
+            "astra_orchestration_unsupported_for_process",
+            "astra_orchestration_unsupported_for_process",
+            "Process threads are human-defined stages and do not use Astra automatic scheduling"
                 .to_string(),
         )),
         ThreadKind::Teamwork | ThreadKind::Brainstorm | ThreadKind::Debate => None,
@@ -598,15 +598,15 @@ mod tests {
     use crate::models::{Agent, StageStatus};
 
     #[test]
-    fn workflow_requires_human_defined_stage_path_before_planning() {
+    fn process_requires_human_defined_stage_path_before_planning() {
         let thread = test_thread(Vec::new());
 
         let Some((reason, code, message)) = dedicated_backend_required_error(&thread) else {
-            panic!("expected workflow orchestration guard");
+            panic!("expected process orchestration guard");
         };
 
-        assert_eq!(reason, "astra_orchestration_unsupported_for_workflow");
-        assert_eq!(code, "astra_orchestration_unsupported_for_workflow");
+        assert_eq!(reason, "astra_orchestration_unsupported_for_process");
+        assert_eq!(code, "astra_orchestration_unsupported_for_process");
         assert!(message.contains("human-defined stages"));
     }
 
@@ -722,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_stage_tasks_are_not_automatically_dispatchable() {
+    fn process_stage_tasks_are_not_automatically_dispatchable() {
         let mut research = test_stage("research", StageStatus::NeedsReview);
         let mut plan = test_stage("plan", StageStatus::InProgress);
         research.assistants.push(stage_assistant());
@@ -761,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_blocked_stage_tasks_are_not_automatically_dispatchable() {
+    fn process_blocked_stage_tasks_are_not_automatically_dispatchable() {
         let mut blocked = test_stage("blocked", StageStatus::Blocked);
         let mut plan = test_stage("plan", StageStatus::InProgress);
         blocked.assistants.push(stage_assistant());

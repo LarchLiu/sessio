@@ -80,23 +80,23 @@ pub struct SubagentInfo {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
-pub enum WorkflowType {
+pub enum ProcessTemplateType {
     Builtin,
     Custom,
 }
 
-impl WorkflowType {
+impl ProcessTemplateType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            WorkflowType::Builtin => "builtin",
-            WorkflowType::Custom => "custom",
+            ProcessTemplateType::Builtin => "builtin",
+            ProcessTemplateType::Custom => "custom",
         }
     }
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "builtin" => Some(WorkflowType::Builtin),
-            "custom" => Some(WorkflowType::Custom),
+            "builtin" => Some(ProcessTemplateType::Builtin),
+            "custom" => Some(ProcessTemplateType::Custom),
             _ => None,
         }
     }
@@ -104,12 +104,12 @@ impl WorkflowType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkflowInfo {
+pub struct ProcessTemplateInfo {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
     #[serde(rename = "type")]
-    pub workflow_type: WorkflowType,
+    pub process_template_type: ProcessTemplateType,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -120,7 +120,7 @@ pub struct ProjectInfo {
     pub id: String,
     pub path: String,
     pub name: String,
-    pub workflow_id: String,
+    pub process_template_id: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub session_count: usize,
@@ -253,7 +253,7 @@ pub struct AssistantInfo {
     pub color: Option<String>,
     #[serde(rename = "type")]
     pub assistant_type: AssistantType,
-    pub workflow_id: Option<String>,
+    pub process_template_id: Option<String>,
     pub project_id: Option<String>,
     pub enabled: bool,
     pub created_at: i64,
@@ -399,7 +399,7 @@ pub struct ProjectStageInfo {
     pub project_id: Option<String>,
     #[serde(rename = "type")]
     pub stage_type: ProjectStageType,
-    pub workflow_id: Option<String>,
+    pub process_template_id: Option<String>,
     pub kind: Option<StageType>,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -425,7 +425,7 @@ pub struct StageInfo {
     pub assistants: Vec<StageAssistantInfo>,
     #[serde(rename = "type")]
     pub stage_type: ProjectStageType,
-    pub workflow_id: Option<String>,
+    pub process_template_id: Option<String>,
     pub kind: Option<StageType>,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -518,7 +518,7 @@ pub struct StageIssueInfo {
 #[serde(rename_all = "lowercase")]
 pub enum ThreadKind {
     #[default]
-    Workflow,
+    Process,
     Teamwork,
     Brainstorm,
     Debate,
@@ -527,7 +527,7 @@ pub enum ThreadKind {
 impl ThreadKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ThreadKind::Workflow => "process",
+            ThreadKind::Process => "process",
             ThreadKind::Teamwork => "teamwork",
             ThreadKind::Brainstorm => "brainstorm",
             ThreadKind::Debate => "debate",
@@ -536,7 +536,7 @@ impl ThreadKind {
 
     pub fn from_db_str(value: &str) -> Option<Self> {
         match value {
-            "process" => Some(ThreadKind::Workflow),
+            "process" => Some(ThreadKind::Process),
             "teamwork" => Some(ThreadKind::Teamwork),
             "brainstorm" => Some(ThreadKind::Brainstorm),
             "debate" => Some(ThreadKind::Debate),

@@ -37,9 +37,10 @@ use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
-    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
-    RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo, StageStatus,
-    ThreadAgentInfo, ThreadChatSummaryInfo, ThreadInfo, ThreadKind, ThreadReplayInfo, WorkflowInfo,
+    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
+    ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
+    StageIssueInfo, StageStatus, ThreadAgentInfo, ThreadChatSummaryInfo, ThreadInfo, ThreadKind,
+    ThreadReplayInfo,
 };
 use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
@@ -89,7 +90,7 @@ fn thread_project_id(store: &dyn SessionStore, thread_id: &str) -> Option<String
         .ok()
 }
 
-fn default_workflow_id() -> String {
+fn default_process_template_id() -> String {
     "code".to_string()
 }
 
@@ -145,7 +146,7 @@ struct CreateAssistantRequest {
     system_prompt: Option<String>,
     color: Option<String>,
     assistant_type: AssistantType,
-    workflow_id: Option<String>,
+    process_template_id: Option<String>,
     project_id: Option<String>,
 }
 
@@ -286,55 +287,57 @@ fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionI
 }
 
 #[tauri::command]
-fn list_workflows(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<WorkflowInfo>, String> {
-    store.list_workflows().map_err(|e| e.to_string())
+fn list_process_templates(
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<ProcessTemplateInfo>, String> {
+    store.list_process_templates().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn create_workflow(
+fn create_process_template(
     name: String,
     description: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<WorkflowInfo, String> {
-    let workflow = store
-        .create_workflow(&name, description.as_deref())
+) -> Result<ProcessTemplateInfo, String> {
+    let process_template = store
+        .create_process_template(&name, description.as_deref())
         .map_err(|e| e.to_string())?;
-    app.emit("workflows_updated", ())
+    app.emit("process_templates_updated", ())
         .map_err(|e| e.to_string())?;
-    Ok(workflow)
+    Ok(process_template)
 }
 
 #[tauri::command]
-fn update_workflow(
-    workflow_id: String,
+fn update_process_template(
+    process_template_id: String,
     name: Option<String>,
     description: Option<Option<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
-) -> Result<WorkflowInfo, String> {
-    let workflow = store
-        .update_workflow(
-            &workflow_id,
+) -> Result<ProcessTemplateInfo, String> {
+    let process_template = store
+        .update_process_template(
+            &process_template_id,
             name.as_deref(),
             description.as_ref().map(|value| value.as_deref()),
         )
         .map_err(|e| e.to_string())?;
-    app.emit("workflows_updated", ())
+    app.emit("process_templates_updated", ())
         .map_err(|e| e.to_string())?;
-    Ok(workflow)
+    Ok(process_template)
 }
 
 #[tauri::command]
-fn delete_workflow(
-    workflow_id: String,
+fn delete_process_template(
+    process_template_id: String,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<(), String> {
     store
-        .delete_workflow(&workflow_id)
+        .delete_process_template(&process_template_id)
         .map_err(|e| e.to_string())?;
-    app.emit("workflows_updated", ())
+    app.emit("process_templates_updated", ())
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -348,7 +351,7 @@ fn list_projects(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<ProjectI
 fn add_existing_project(
     path: String,
     name: Option<String>,
-    workflow_id: Option<String>,
+    process_template_id: Option<String>,
     enabled_stage_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -357,7 +360,7 @@ fn add_existing_project(
         .add_project(
             &path,
             name.as_deref(),
-            workflow_id.unwrap_or_else(default_workflow_id),
+            process_template_id.unwrap_or_else(default_process_template_id),
             enabled_stage_ids.as_deref(),
         )
         .map_err(|e| e.to_string())?;
@@ -370,7 +373,7 @@ fn add_existing_project(
 fn create_project(
     parent_path: String,
     name: String,
-    workflow_id: Option<String>,
+    process_template_id: Option<String>,
     enabled_stage_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -379,7 +382,7 @@ fn create_project(
         .create_project(
             &parent_path,
             &name,
-            workflow_id.unwrap_or_else(default_workflow_id),
+            process_template_id.unwrap_or_else(default_process_template_id),
             enabled_stage_ids.as_deref(),
         )
         .map_err(|e| e.to_string())?;
@@ -391,7 +394,7 @@ fn create_project(
 #[tauri::command]
 fn create_default_project(
     name: String,
-    workflow_id: Option<String>,
+    process_template_id: Option<String>,
     enabled_stage_ids: Option<Vec<String>>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -405,7 +408,7 @@ fn create_default_project(
         .create_project(
             &parent.to_string_lossy(),
             &name,
-            workflow_id.unwrap_or_else(default_workflow_id),
+            process_template_id.unwrap_or_else(default_process_template_id),
             enabled_stage_ids.as_deref(),
         )
         .map_err(|e| e.to_string())?;
@@ -418,12 +421,12 @@ fn create_default_project(
 fn update_project(
     project_id: String,
     name: Option<String>,
-    workflow_id: Option<String>,
+    process_template_id: Option<String>,
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
     let project = store
-        .update_project(&project_id, name.as_deref(), workflow_id)
+        .update_project(&project_id, name.as_deref(), process_template_id)
         .map_err(|e| e.to_string())?;
     app.emit("projects_updated", ())
         .map_err(|e| e.to_string())?;
@@ -643,7 +646,7 @@ fn create_assistant(
         system_prompt,
         color,
         assistant_type,
-        workflow_id,
+        process_template_id,
         project_id,
     } = req;
     let assistant = store
@@ -653,7 +656,7 @@ fn create_assistant(
             system_prompt: system_prompt.as_deref(),
             color: color.as_deref(),
             assistant_type,
-            workflow_id,
+            process_template_id,
             project_id: project_id.as_deref(),
         })
         .map_err(|e| e.to_string())?;
@@ -1000,19 +1003,19 @@ fn list_project_stages(
 }
 
 #[tauri::command]
-fn list_workflow_stages(
-    workflow_id: String,
+fn list_process_template_stages(
+    process_template_id: String,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Vec<ProjectStageInfo>, String> {
     store
-        .list_workflow_stages(&workflow_id)
+        .list_process_template_stages(&process_template_id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn create_project_stage(
     project_id: String,
-    workflow_id: Option<String>,
+    process_template_id: Option<String>,
     name: String,
     description: Option<String>,
     icon: Option<String>,
@@ -1022,7 +1025,7 @@ fn create_project_stage(
     let stage = store
         .create_project_stage(
             &project_id,
-            workflow_id,
+            process_template_id,
             &name,
             description.as_deref(),
             icon.as_deref(),
@@ -3588,10 +3591,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
-            list_workflows,
-            create_workflow,
-            update_workflow,
-            delete_workflow,
+            list_process_templates,
+            create_process_template,
+            update_process_template,
+            delete_process_template,
             list_projects,
             add_existing_project,
             create_project,
@@ -3622,7 +3625,7 @@ pub fn run() {
             link_plan_task_session,
             list_plan_task_sessions,
             list_project_stages,
-            list_workflow_stages,
+            list_process_template_stages,
             create_project_stage,
             update_project_stage,
             update_project_stage_assistants,

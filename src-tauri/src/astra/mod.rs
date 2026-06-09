@@ -3226,7 +3226,7 @@ mod tests {
                 system_prompt: Some("Build carefully."),
                 color: Some("#3366ff"),
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
@@ -3433,7 +3433,7 @@ mod tests {
                 system_prompt: Some("Build from shared teamwork context."),
                 color: Some("#3366ff"),
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
@@ -3951,7 +3951,7 @@ mod tests {
                 },
             ],
             stage_type: crate::models::ProjectStageType::Custom,
-            workflow_id: None,
+            process_template_id: None,
             kind: None,
             name: Some("Build API".to_string()),
             description: Some("Implement the API surface.".to_string()),
@@ -3994,7 +3994,7 @@ mod tests {
             goal: "Ship Astra".to_string(),
             description: Some("Close the orchestration loop.".to_string()),
             stage_id: Some(stage.id.clone()),
-            kind: crate::models::ThreadKind::Workflow,
+            kind: crate::models::ThreadKind::Process,
             enabled: true,
             created_at: 1,
             updated_at: 1,
@@ -4071,7 +4071,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_plan_does_not_schedule_workflow_stages() {
+    fn deterministic_plan_does_not_schedule_process_stages() {
         let mut thread = test_thread(vec![
             test_stage("stage-1", StageStatus::NotStarted),
             test_stage("stage-2", StageStatus::Blocked),
@@ -4432,7 +4432,7 @@ mod tests {
             goal: "Ship the thread".to_string(),
             description: None,
             stage_id: None,
-            kind: crate::models::ThreadKind::Workflow,
+            kind: crate::models::ThreadKind::Process,
             enabled: true,
             created_at: 1,
             updated_at: 1,
@@ -4452,7 +4452,7 @@ mod tests {
             assistant_ids: Vec::new(),
             assistants: Vec::new(),
             stage_type: crate::models::ProjectStageType::Custom,
-            workflow_id: None,
+            process_template_id: None,
             kind: None,
             name: Some(id.to_string()),
             description: None,

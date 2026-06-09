@@ -14,11 +14,11 @@ use crate::models::{
     Agent, AgentAiProviderInfo, AgentCommandsInfo, AgentInfo, AgentType, AssistantAgentInfo,
     AssistantInfo, AssistantType, AstraConfig, IssueSeverity, IssueStatus, KanbanItem,
     KanbanStatus, PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo,
-    PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo,
-    ProjectStageInfo, ProjectStageType, RuntimeAgentOptionMetadata, SessionHistoryTurn,
-    SessionInfo, StageAssistantInfo, StageInfo, StageIssueInfo, StageStatus, StageType,
-    SubagentInfo, ThreadAgentInfo, ThreadAssistantInfo, ThreadInfo, ThreadKind, WorkflowInfo,
-    WorkflowType,
+    PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo,
+    ProcessTemplateType, ProjectInfo, ProjectStageInfo, ProjectStageType,
+    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo,
+    StageIssueInfo, StageStatus, StageType, SubagentInfo, ThreadAgentInfo, ThreadAssistantInfo,
+    ThreadInfo, ThreadKind,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -850,22 +850,22 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Seed all builtin data in dependency order: workflows, their stages,
-/// runtime agents and assistants, then the workflow stage assistant
+/// Seed all builtin data in dependency order: process templates, their stages,
+/// runtime agents and assistants, then the process-template stage assistant
 /// bindings. Idempotent -- every insert uses INSERT OR IGNORE / ON CONFLICT
 /// DO NOTHING, so re-running never clobbers user edits.
 fn seed_builtins(conn: &Connection) -> Result<()> {
     let now = now_ms();
-    seed_builtin_workflows(conn, now)?;
-    seed_builtin_workflow_stages(conn, now)?;
+    seed_builtin_process_templates(conn, now)?;
+    seed_builtin_process_template_stages(conn, now)?;
     seed_builtin_agents(conn, now)?;
     seed_astra_config(conn, now)?;
-    seed_builtin_workflow_stage_assistants(conn, now)?;
+    seed_builtin_process_template_stage_assistants(conn, now)?;
     Ok(())
 }
 
-fn seed_builtin_workflows(conn: &Connection, now: i64) -> Result<()> {
-    for (id, name, description) in BUILTIN_WORKFLOW_SEEDS {
+fn seed_builtin_process_templates(conn: &Connection, now: i64) -> Result<()> {
+    for (id, name, description) in BUILTIN_PROCESS_TEMPLATE_SEEDS {
         conn.execute(
             "INSERT OR IGNORE INTO process_templates (id, name, description, type, created_at, updated_at)
              VALUES (?, ?, ?, 'builtin', ?, ?)",
@@ -875,21 +875,22 @@ fn seed_builtin_workflows(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn seed_builtin_workflow_stages(conn: &Connection, now: i64) -> Result<()> {
-    for (workflow_id, _, _) in BUILTIN_WORKFLOW_SEEDS {
-        for (index, (kind, description)) in builtin_workflow_stage_seeds(workflow_id)
-            .iter()
-            .copied()
-            .enumerate()
+fn seed_builtin_process_template_stages(conn: &Connection, now: i64) -> Result<()> {
+    for (process_template_id, _, _) in BUILTIN_PROCESS_TEMPLATE_SEEDS {
+        for (index, (kind, description)) in
+            builtin_process_template_stage_seeds(process_template_id)
+                .iter()
+                .copied()
+                .enumerate()
         {
-            let id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
+            let id = format!("stage-builtin-{}-{}", process_template_id, kind.as_str());
             let allow_empty_assistants = matches!(kind, StageType::Human | StageType::Done);
             conn.execute(
                 "INSERT OR IGNORE INTO stages (id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at)
                  VALUES (?, NULL, 'builtin', ?, ?, NULL, ?, NULL, ?, 1, ?, ?, ?)",
                 params![
                     id,
-                    workflow_id,
+                    process_template_id,
                     kind.as_str(),
                     description,
                     (index as i64 + 1) * 1000,
@@ -903,19 +904,27 @@ fn seed_builtin_workflow_stages(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn seed_builtin_workflow_stage_assistants(conn: &Connection, now: i64) -> Result<()> {
-    for (workflow_id, _, _) in BUILTIN_WORKFLOW_SEEDS {
-        for (kind, _) in builtin_workflow_stage_seeds(workflow_id) {
+fn seed_builtin_process_template_stage_assistants(conn: &Connection, now: i64) -> Result<()> {
+    for (process_template_id, _, _) in BUILTIN_PROCESS_TEMPLATE_SEEDS {
+        for (kind, _) in builtin_process_template_stage_seeds(process_template_id) {
             if matches!(kind, StageType::Human | StageType::Done) {
                 continue;
             }
-            let stage_id = format!("stage-builtin-{}-{}", workflow_id, kind.as_str());
+            let stage_id = format!("stage-builtin-{}-{}", process_template_id, kind.as_str());
             if stage_has_assistants(conn, &stage_id)? {
                 continue;
             }
             let assistant_seed = builtin_assistant_seed_for_kind(kind);
-            let assistant_id = stable_workflow_builtin_assistant_id(workflow_id, assistant_seed.id);
-            seed_workflow_builtin_assistant(conn, workflow_id, assistant_seed.id, now)?;
+            let assistant_id = stable_process_template_builtin_assistant_id(
+                process_template_id,
+                assistant_seed.id,
+            );
+            seed_process_template_builtin_assistant(
+                conn,
+                process_template_id,
+                assistant_seed.id,
+                now,
+            )?;
             conn.execute(
                 "INSERT OR IGNORE INTO stage_assistants (stage_id, assistant_id, sort_order, created_at, updated_at)
                  VALUES (?, ?, 0, ?, ?)",
@@ -926,20 +935,26 @@ fn seed_builtin_workflow_stage_assistants(conn: &Connection, now: i64) -> Result
     Ok(())
 }
 
-const BUILTIN_WORKFLOW_SEEDS: [(&str, &str, &str); 5] = [
-    ("code", "Code", "workflow.description.code"),
-    ("writing", "Writing", "workflow.description.writing"),
-    ("research", "Research", "workflow.description.research"),
-    ("general", "General", "workflow.description.general"),
+const BUILTIN_PROCESS_TEMPLATE_SEEDS: [(&str, &str, &str); 5] = [
+    ("code", "Code", "process_template.description.code"),
+    ("writing", "Writing", "process_template.description.writing"),
+    (
+        "research",
+        "Research",
+        "process_template.description.research",
+    ),
+    ("general", "General", "process_template.description.general"),
     (
         "video_production",
         "Video production",
-        "workflow.description.video_production",
+        "process_template.description.video_production",
     ),
 ];
 
-fn builtin_workflow_stage_seeds(workflow_id: &str) -> Vec<(StageType, &'static str)> {
-    match workflow_id {
+fn builtin_process_template_stage_seeds(
+    process_template_id: &str,
+) -> Vec<(StageType, &'static str)> {
+    match process_template_id {
         "code" => vec![
             (
                 StageType::Research,
@@ -2150,17 +2165,17 @@ fn stable_issue_id(thread_stage_id: &str, title: &str, now: i64, nonce: &str) ->
     format!("issue-{}", &hex::encode(hasher.finalize())[..16])
 }
 
-fn stable_workflow_id(name: &str, now: i64) -> String {
+fn stable_process_template_id(name: &str, now: i64) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     hasher.update(now.to_string().as_bytes());
-    format!("workflow-{}", &hex::encode(hasher.finalize())[..16])
+    format!("process-template-{}", &hex::encode(hasher.finalize())[..16])
 }
 
 fn stable_assistant_id(
     assistant_type: AssistantType,
-    workflow_id: Option<&str>,
+    process_template_id: Option<&str>,
     project_id: Option<&str>,
     name: &str,
     model: &str,
@@ -2169,7 +2184,7 @@ fn stable_assistant_id(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(assistant_type.as_str().as_bytes());
-    hasher.update(workflow_id.unwrap_or("").as_bytes());
+    hasher.update(process_template_id.unwrap_or("").as_bytes());
     hasher.update(project_id.unwrap_or("").as_bytes());
     hasher.update(name.as_bytes());
     hasher.update(model.as_bytes());
@@ -2189,8 +2204,11 @@ fn stable_project_assistant_id(project_id: &str, template_assistant_id: &str) ->
     stable_project_builtin_assistant_id(project_id, template_assistant_id)
 }
 
-fn stable_workflow_builtin_assistant_id(workflow_id: &str, source_assistant_id: &str) -> String {
-    format!("assistant-workflow-{workflow_id}-{source_assistant_id}")
+fn stable_process_template_builtin_assistant_id(
+    process_template_id: &str,
+    source_assistant_id: &str,
+) -> String {
+    format!("assistant-process-template-{process_template_id}-{source_assistant_id}")
 }
 
 fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
@@ -2218,7 +2236,7 @@ fn stable_thread_agent_participant_id(
 }
 
 fn stable_project_stage_id(
-    workflow_id: Option<&str>,
+    process_template_id: Option<&str>,
     project_id: Option<&str>,
     stage_name: &str,
     order: i64,
@@ -2226,7 +2244,7 @@ fn stable_project_stage_id(
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(workflow_id.unwrap_or("").as_bytes());
+    hasher.update(process_template_id.unwrap_or("").as_bytes());
     hasher.update(project_id.unwrap_or("").as_bytes());
     hasher.update(stage_name.as_bytes());
     hasher.update(order.to_string().as_bytes());
@@ -2294,21 +2312,21 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectInfo> {
         id: row.get(0)?,
         path: row.get(1)?,
         name: row.get(2)?,
-        workflow_id: row.get(3)?,
+        process_template_id: row.get(3)?,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         session_count: row.get::<_, i64>(6)? as usize,
     })
 }
 
-fn workflow_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowInfo> {
-    let workflow_type_raw: String = row.get(3)?;
-    Ok(WorkflowInfo {
+fn process_template_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessTemplateInfo> {
+    let process_template_type_raw: String = row.get(3)?;
+    Ok(ProcessTemplateInfo {
         id: row.get(0)?,
         name: row.get(1)?,
         description: row.get(2)?,
-        workflow_type: WorkflowType::from_db_str(&workflow_type_raw)
-            .unwrap_or(WorkflowType::Custom),
+        process_template_type: ProcessTemplateType::from_db_str(&process_template_type_raw)
+            .unwrap_or(ProcessTemplateType::Custom),
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
     })
@@ -2391,7 +2409,7 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
 fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo> {
     let agent_json: String = row.get(2)?;
     let assistant_type_raw: String = row.get(5)?;
-    let workflow_id_raw: Option<String> = row.get(6)?;
+    let process_template_id_raw: Option<String> = row.get(6)?;
     Ok(AssistantInfo {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -2408,7 +2426,7 @@ fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo
         color: row.get(4)?,
         assistant_type: AssistantType::from_db_str(&assistant_type_raw)
             .unwrap_or(AssistantType::Custom),
-        workflow_id: workflow_id_raw,
+        process_template_id: process_template_id_raw,
         project_id: row.get(7)?,
         enabled: row.get::<_, i64>(8)? != 0,
         created_at: row.get(9)?,
@@ -2418,14 +2436,14 @@ fn assistant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssistantInfo
 
 fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectStageInfo> {
     let stage_type_raw: String = row.get(2)?;
-    let workflow_id_raw: Option<String> = row.get(3)?;
+    let process_template_id_raw: Option<String> = row.get(3)?;
     let stage_kind_raw: Option<String> = row.get(4)?;
     Ok(ProjectStageInfo {
         id: row.get(0)?,
         project_id: row.get(1)?,
         stage_type: ProjectStageType::from_db_str(&stage_type_raw)
             .unwrap_or(ProjectStageType::Custom),
-        workflow_id: workflow_id_raw,
+        process_template_id: process_template_id_raw,
         kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
         name: row.get(5)?,
         description: row.get(6)?,
@@ -2441,7 +2459,7 @@ fn project_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectSt
 
 fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo> {
     let stage_type_raw: String = row.get(4)?;
-    let workflow_id_raw: Option<String> = row.get(5)?;
+    let process_template_id_raw: Option<String> = row.get(5)?;
     let stage_kind_raw: Option<String> = row.get(6)?;
     let status_raw: Option<String> = row.get(15)?;
     Ok(StageInfo {
@@ -2453,7 +2471,7 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
         assistants: Vec::new(),
         stage_type: ProjectStageType::from_db_str(&stage_type_raw)
             .unwrap_or(ProjectStageType::Custom),
-        workflow_id: workflow_id_raw,
+        process_template_id: process_template_id_raw,
         kind: stage_kind_raw.and_then(|value| StageType::from_db_str(&value)),
         name: row.get(7)?,
         description: row.get(8)?,
@@ -2573,30 +2591,33 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
     .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))
 }
 
-fn ensure_workflow_exists(conn: &Connection, workflow_id: &str) -> Result<()> {
+fn ensure_process_template_exists(conn: &Connection, process_template_id: &str) -> Result<()> {
     let exists: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM process_templates WHERE id = ? LIMIT 1",
-            params![workflow_id],
+            params![process_template_id],
             |row| row.get(0),
         )
         .optional()?;
     if exists.is_none() {
-        anyhow::bail!("workflow not found: {workflow_id}");
+        anyhow::bail!("process template not found: {process_template_id}");
     }
     Ok(())
 }
 
-fn load_workflow_by_id(conn: &Connection, workflow_id: &str) -> Result<WorkflowInfo> {
+fn load_process_template_by_id(
+    conn: &Connection,
+    process_template_id: &str,
+) -> Result<ProcessTemplateInfo> {
     conn.query_row(
         "SELECT id, name, description, type, created_at, updated_at
          FROM process_templates
          WHERE id = ?",
-        params![workflow_id],
-        workflow_from_row,
+        params![process_template_id],
+        process_template_from_row,
     )
     .optional()?
-    .ok_or_else(|| anyhow::anyhow!("workflow not found: {workflow_id}"))
+    .ok_or_else(|| anyhow::anyhow!("process template not found: {process_template_id}"))
 }
 
 fn load_agent_by_id(conn: &Connection, agent_id: &str) -> Result<AgentInfo> {
@@ -3069,7 +3090,7 @@ fn load_project_stage_by_id(conn: &Connection, stage_id: &str) -> Result<Project
 fn instantiate_project_assistants(
     conn: &Connection,
     project_id: &str,
-    workflow_id: &str,
+    process_template_id: &str,
     now: i64,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -3081,7 +3102,10 @@ fn instantiate_project_assistants(
          ORDER BY CASE WHEN process_template_id = ? THEN 0 ELSE 1 END, type ASC, updated_at DESC, name COLLATE NOCASE ASC",
     )?;
     let templates = stmt
-        .query_map(params![workflow_id, workflow_id], assistant_from_row)?
+        .query_map(
+            params![process_template_id, process_template_id],
+            assistant_from_row,
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for template in templates {
         let id = stable_project_assistant_id(project_id, &template.id);
@@ -3101,7 +3125,7 @@ fn instantiate_project_assistants(
 fn instantiate_project_builtin_stages(
     conn: &Connection,
     project_id: &str,
-    workflow_id: &str,
+    process_template_id: &str,
     enabled_stage_ids: Option<&[String]>,
     now: i64,
 ) -> Result<()> {
@@ -3118,7 +3142,7 @@ fn instantiate_project_builtin_stages(
          ORDER BY sort_order ASC, created_at ASC",
     )?;
     let templates = stmt
-        .query_map(params![workflow_id], project_stage_from_row)?
+        .query_map(params![process_template_id], project_stage_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for template in templates {
         let selected = selected_template_ids
@@ -3139,7 +3163,7 @@ fn instantiate_project_builtin_stages(
             params![
                 id,
                 project_id,
-                workflow_id,
+                process_template_id,
                 kind.as_str(),
                 template.description,
                 template.icon,
@@ -3156,7 +3180,7 @@ fn instantiate_project_builtin_stages(
 fn link_project_stage_assistants(
     conn: &Connection,
     project_id: &str,
-    workflow_id: &str,
+    process_template_id: &str,
     now: i64,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
@@ -3166,7 +3190,7 @@ fn link_project_stage_assistants(
          ORDER BY sort_order ASC, created_at ASC",
     )?;
     let template_stage_ids = stmt
-        .query_map(params![workflow_id], |row| row.get::<_, String>(0))?
+        .query_map(params![process_template_id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for template_stage_id in template_stage_ids {
         let project_stage_id = stable_project_builtin_stage_id(project_id, &template_stage_id);
@@ -3331,16 +3355,16 @@ fn validate_assistant_for_stage(
         return Ok(assistant);
     }
     if stage.project_id.is_none()
-        && stage.workflow_id.is_some()
+        && stage.process_template_id.is_some()
         && assistant.project_id.is_none()
-        && assistant.workflow_id == stage.workflow_id
+        && assistant.process_template_id == stage.process_template_id
     {
         return Ok(assistant);
     }
     if stage.project_id.is_none()
-        && stage.workflow_id.is_some()
+        && stage.process_template_id.is_some()
         && assistant.project_id.is_none()
-        && assistant.workflow_id.is_none()
+        && assistant.process_template_id.is_none()
         && assistant.assistant_type == AssistantType::Custom
     {
         return Ok(assistant);
@@ -3396,7 +3420,7 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
-    let workflow_stage_usages = {
+    let process_template_stage_usages = {
         let mut stmt = conn.prepare(
             "SELECT
                 COALESCE(w.name, 'Unknown'),
@@ -3410,10 +3434,10 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
              ORDER BY w.name COLLATE NOCASE ASC, s.sort_order ASC",
         )?;
         let rows = stmt.query_map(params![assistant_id], |row| {
-            let workflow_name: String = row.get(0)?;
+            let process_template_name: String = row.get(0)?;
             let stage_name: String = row.get(1)?;
             Ok(format!(
-                "workflow \"{workflow_name}\" stage \"{stage_name}\""
+                "process template \"{process_template_name}\" stage \"{stage_name}\""
             ))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -3465,7 +3489,7 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     if !project_stage_usages.is_empty()
-        || !workflow_stage_usages.is_empty()
+        || !process_template_stage_usages.is_empty()
         || !thread_stage_usages.is_empty()
         || !thread_usages.is_empty()
     {
@@ -3477,11 +3501,11 @@ fn ensure_assistant_can_be_disabled(conn: &Connection, assistant_id: &str) -> Re
                 usage_list(&project_stage_usages)
             ));
         }
-        if !workflow_stage_usages.is_empty() {
+        if !process_template_stage_usages.is_empty() {
             parts.push(format!(
-                "{} workflow stage assistant binding(s): {}",
-                workflow_stage_usages.len(),
-                usage_list(&workflow_stage_usages)
+                "{} process template stage assistant binding(s): {}",
+                process_template_stage_usages.len(),
+                usage_list(&process_template_stage_usages)
             ));
         }
         if !thread_stage_usages.is_empty() {
@@ -3875,14 +3899,14 @@ fn seed_builtin_assistants(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-fn seed_workflow_builtin_assistant(
+fn seed_process_template_builtin_assistant(
     conn: &Connection,
-    workflow_id: &str,
+    process_template_id: &str,
     source_assistant_id: &str,
     now: i64,
 ) -> Result<()> {
-    let workflow_assistant_id =
-        stable_workflow_builtin_assistant_id(workflow_id, source_assistant_id);
+    let process_template_assistant_id =
+        stable_process_template_builtin_assistant_id(process_template_id, source_assistant_id);
     conn.execute(
         "INSERT INTO assistants (
             id, name, agent_json, system_prompt, color, type, process_template_id, project_id, enabled, created_at, updated_at
@@ -3892,8 +3916,8 @@ fn seed_workflow_builtin_assistant(
          WHERE id = ?
          ON CONFLICT(id) DO NOTHING",
         params![
-            workflow_assistant_id,
-            workflow_id,
+            process_template_assistant_id,
+            process_template_id,
             now,
             now,
             source_assistant_id
@@ -3918,9 +3942,11 @@ fn builtin_assistant_seeds() -> Vec<BuiltinAssistantSeed> {
 
 fn builtin_assistant_kinds() -> Vec<StageType> {
     let mut seen = HashSet::new();
-    BUILTIN_WORKFLOW_SEEDS
+    BUILTIN_PROCESS_TEMPLATE_SEEDS
         .iter()
-        .flat_map(|(workflow_id, _, _)| builtin_workflow_stage_seeds(workflow_id))
+        .flat_map(|(process_template_id, _, _)| {
+            builtin_process_template_stage_seeds(process_template_id)
+        })
         .map(|(kind, _)| kind)
         .filter(|kind| !matches!(kind, StageType::Human | StageType::Done))
         .filter(|kind| seen.insert(*kind))
@@ -4072,7 +4098,7 @@ fn compact_stage_order(conn: &Connection, thread_id: &str) -> Result<()> {
 fn reorder_project_stage_scope(
     conn: &Connection,
     stage_id: &str,
-    workflow_id: &str,
+    process_template_id: &str,
     project_id: Option<&str>,
     target_order: i64,
 ) -> Result<i64> {
@@ -4084,9 +4110,10 @@ fn reorder_project_stage_scope(
                AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)
              ORDER BY sort_order ASC, type ASC, project_id IS NOT NULL ASC, created_at ASC",
         )?;
-        let rows = stmt.query_map(params![workflow_id, project_id, project_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![process_template_id, project_id, project_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let Some(current_index) = rows.iter().position(|(id, _)| id == stage_id) else {
@@ -4452,7 +4479,7 @@ fn session_project_path(
     .map_err(Into::into)
 }
 
-fn ensure_session_not_linked_to_thread_workflow(
+fn ensure_session_not_linked_to_thread_process(
     conn: &Connection,
     agent: Agent,
     session_id: &str,
@@ -4992,50 +5019,54 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
-    fn list_workflows(&self) -> Result<Vec<WorkflowInfo>> {
+    fn list_process_templates(&self) -> Result<Vec<ProcessTemplateInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, description, type, created_at, updated_at
              FROM process_templates
              ORDER BY type ASC, name COLLATE NOCASE ASC",
         )?;
-        let rows = stmt.query_map([], workflow_from_row)?;
+        let rows = stmt.query_map([], process_template_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    fn create_workflow(&self, name: &str, description: Option<&str>) -> Result<WorkflowInfo> {
+    fn create_process_template(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProcessTemplateInfo> {
         let name = name.trim();
         if name.is_empty() {
-            anyhow::bail!("workflow name cannot be empty");
+            anyhow::bail!("process template name cannot be empty");
         }
         let description = description.map(str::trim).filter(|value| !value.is_empty());
         let now = now_ms();
-        let id = stable_workflow_id(name, now);
+        let id = stable_process_template_id(name, now);
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO process_templates (id, name, description, type, created_at, updated_at)
              VALUES (?, ?, ?, 'custom', ?, ?)",
             params![id, name, description, now, now],
         )?;
-        load_workflow_by_id(&conn, &id)
+        load_process_template_by_id(&conn, &id)
     }
 
-    fn update_workflow(
+    fn update_process_template(
         &self,
-        workflow_id: &str,
+        process_template_id: &str,
         name: Option<&str>,
         description: Option<Option<&str>>,
-    ) -> Result<WorkflowInfo> {
+    ) -> Result<ProcessTemplateInfo> {
         let conn = self.conn.lock().unwrap();
-        let current = load_workflow_by_id(&conn, workflow_id)?;
-        if current.workflow_type == WorkflowType::Builtin {
-            anyhow::bail!("builtin workflow cannot be updated");
+        let current = load_process_template_by_id(&conn, process_template_id)?;
+        if current.process_template_type == ProcessTemplateType::Builtin {
+            anyhow::bail!("builtin process template cannot be updated");
         }
         let next_name = match name {
             Some(value) => {
                 let value = value.trim();
                 if value.is_empty() {
-                    anyhow::bail!("workflow name cannot be empty");
+                    anyhow::bail!("process template name cannot be empty");
                 }
                 value.to_string()
             }
@@ -5054,47 +5085,47 @@ impl SessionStore for SqliteStore {
         };
         conn.execute(
             "UPDATE process_templates SET name = ?, description = ?, updated_at = ? WHERE id = ?",
-            params![next_name, next_description, now_ms(), workflow_id],
+            params![next_name, next_description, now_ms(), process_template_id],
         )?;
-        load_workflow_by_id(&conn, workflow_id)
+        load_process_template_by_id(&conn, process_template_id)
     }
 
-    fn delete_workflow(&self, workflow_id: &str) -> Result<()> {
+    fn delete_process_template(&self, process_template_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let current = load_workflow_by_id(&conn, workflow_id)?;
-        if current.workflow_type == WorkflowType::Builtin {
-            anyhow::bail!("builtin workflow cannot be deleted");
+        let current = load_process_template_by_id(&conn, process_template_id)?;
+        if current.process_template_type == ProcessTemplateType::Builtin {
+            anyhow::bail!("builtin process template cannot be deleted");
         }
         let project_count: i64 = conn.query_row(
             "SELECT count(*) FROM projects WHERE process_template_id = ? AND archived = 0",
-            params![workflow_id],
+            params![process_template_id],
             |row| row.get(0),
         )?;
         if project_count > 0 {
-            anyhow::bail!("workflow is used by projects");
+            anyhow::bail!("process template is used by projects");
         }
         let assistant_count: i64 = conn.query_row(
             "SELECT count(*) FROM assistants WHERE process_template_id = ?",
-            params![workflow_id],
+            params![process_template_id],
             |row| row.get(0),
         )?;
         if assistant_count > 0 {
-            anyhow::bail!("workflow is used by assistants");
+            anyhow::bail!("process template is used by assistants");
         }
         let stage_count: i64 = conn.query_row(
             "SELECT count(*) FROM stages WHERE process_template_id = ?",
-            params![workflow_id],
+            params![process_template_id],
             |row| row.get(0),
         )?;
         if stage_count > 0 {
-            anyhow::bail!("workflow is used by stages");
+            anyhow::bail!("process template is used by stages");
         }
         let changed = conn.execute(
             "DELETE FROM process_templates WHERE id = ?",
-            params![workflow_id],
+            params![process_template_id],
         )?;
         if changed == 0 {
-            anyhow::bail!("workflow not found: {workflow_id}");
+            anyhow::bail!("process template not found: {process_template_id}");
         }
         Ok(())
     }
@@ -5118,7 +5149,7 @@ impl SessionStore for SqliteStore {
         &self,
         path: &str,
         name: Option<&str>,
-        workflow_id: String,
+        process_template_id: String,
         enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
         let canonical = canonical_project_path(path)?;
@@ -5127,16 +5158,16 @@ impl SessionStore for SqliteStore {
         let now = now_ms();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        ensure_workflow_exists(&tx, &workflow_id)?;
+        ensure_process_template_exists(&tx, &process_template_id)?;
         tx.execute(
             "INSERT INTO projects (id, path, name, process_template_id, created_at, updated_at, archived)
              VALUES (?, ?, ?, ?, ?, ?, 0)",
-            params![id, canonical, name, workflow_id.as_str(), now, now],
+            params![id, canonical, name, process_template_id.as_str(), now, now],
         )
         .with_context(|| "add project")?;
-        instantiate_project_builtin_stages(&tx, &id, &workflow_id, enabled_stage_ids, now)?;
-        instantiate_project_assistants(&tx, &id, &workflow_id, now)?;
-        link_project_stage_assistants(&tx, &id, &workflow_id, now)?;
+        instantiate_project_builtin_stages(&tx, &id, &process_template_id, enabled_stage_ids, now)?;
+        instantiate_project_assistants(&tx, &id, &process_template_id, now)?;
+        link_project_stage_assistants(&tx, &id, &process_template_id, now)?;
         let project = load_project_by_id(&tx, &id)?;
         tx.commit()?;
         Ok(project)
@@ -5146,7 +5177,7 @@ impl SessionStore for SqliteStore {
         &self,
         parent_path: &str,
         name: &str,
-        workflow_id: String,
+        process_template_id: String,
         enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
         let parent = canonical_project_path(parent_path)?;
@@ -5161,14 +5192,19 @@ impl SessionStore for SqliteStore {
         std::fs::create_dir(&project_path)
             .with_context(|| format!("create project directory {}", project_path.display()))?;
         let path = canonical_project_path(&project_path.to_string_lossy())?;
-        self.add_project(&path, Some(&clean_name), workflow_id, enabled_stage_ids)
+        self.add_project(
+            &path,
+            Some(&clean_name),
+            process_template_id,
+            enabled_stage_ids,
+        )
     }
 
     fn update_project(
         &self,
         project_id: &str,
         name: Option<&str>,
-        workflow_id: Option<String>,
+        process_template_id: Option<String>,
     ) -> Result<ProjectInfo> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
@@ -5177,24 +5213,36 @@ impl SessionStore for SqliteStore {
             Some(value) => clean_project_name(Some(value), &current.path)?,
             None => current.name,
         };
-        let current_workflow_id = current.workflow_id.clone();
-        let next_workflow_id = workflow_id.unwrap_or_else(|| current_workflow_id.clone());
-        ensure_workflow_exists(&tx, &next_workflow_id)?;
-        let workflow_changed = next_workflow_id != current_workflow_id;
+        let current_process_template_id = current.process_template_id.clone();
+        let next_process_template_id =
+            process_template_id.unwrap_or_else(|| current_process_template_id.clone());
+        ensure_process_template_exists(&tx, &next_process_template_id)?;
+        let process_template_changed = next_process_template_id != current_process_template_id;
         tx.execute(
             "UPDATE projects
              SET name = ?, process_template_id = ?, updated_at = ?
              WHERE id = ? AND archived = 0",
-            params![next_name, next_workflow_id.as_str(), now_ms(), project_id],
+            params![
+                next_name,
+                next_process_template_id.as_str(),
+                now_ms(),
+                project_id
+            ],
         )?;
-        if workflow_changed {
+        if process_template_changed {
             tx.execute(
                 "DELETE FROM stages WHERE project_id = ? AND type = 'builtin'",
                 params![project_id],
             )?;
-            instantiate_project_builtin_stages(&tx, project_id, &next_workflow_id, None, now_ms())?;
-            instantiate_project_assistants(&tx, project_id, &next_workflow_id, now_ms())?;
-            link_project_stage_assistants(&tx, project_id, &next_workflow_id, now_ms())?;
+            instantiate_project_builtin_stages(
+                &tx,
+                project_id,
+                &next_process_template_id,
+                None,
+                now_ms(),
+            )?;
+            instantiate_project_assistants(&tx, project_id, &next_process_template_id, now_ms())?;
+            link_project_stage_assistants(&tx, project_id, &next_process_template_id, now_ms())?;
         }
         let project = load_project_by_id(&tx, project_id)?;
         tx.commit()?;
@@ -5471,7 +5519,7 @@ impl SessionStore for SqliteStore {
             system_prompt,
             color,
             assistant_type,
-            workflow_id,
+            process_template_id,
             project_id,
         } = assistant;
         let name = name.trim();
@@ -5507,8 +5555,11 @@ impl SessionStore for SqliteStore {
         let project = project_id
             .map(|project_id| load_project_by_id(&conn, project_id))
             .transpose()?;
-        let resolved_workflow_id =
-            workflow_id.or_else(|| project.as_ref().map(|project| project.workflow_id.clone()));
+        let resolved_process_template_id = process_template_id.or_else(|| {
+            project
+                .as_ref()
+                .map(|project| project.process_template_id.clone())
+        });
         match assistant_type {
             AssistantType::Builtin => {
                 if project_id.is_some() {
@@ -5517,13 +5568,13 @@ impl SessionStore for SqliteStore {
             }
             AssistantType::Custom => {}
         }
-        if let Some(workflow_id) = resolved_workflow_id.as_deref() {
-            ensure_workflow_exists(&conn, workflow_id)?;
+        if let Some(process_template_id) = resolved_process_template_id.as_deref() {
+            ensure_process_template_exists(&conn, process_template_id)?;
         }
         let now = now_ms();
         let id = stable_assistant_id(
             assistant_type,
-            resolved_workflow_id.as_deref(),
+            resolved_process_template_id.as_deref(),
             project_id,
             name,
             &agent.model,
@@ -5541,7 +5592,7 @@ impl SessionStore for SqliteStore {
                 system_prompt,
                 color,
                 assistant_type.as_str(),
-                resolved_workflow_id.as_deref(),
+                resolved_process_template_id.as_deref(),
                 project_id,
                 now,
                 now,
@@ -5694,7 +5745,7 @@ impl SessionStore for SqliteStore {
             project_id,
             goal,
             description,
-            ThreadKind::Workflow,
+            ThreadKind::Process,
             &[],
             &[],
         )
@@ -6188,16 +6239,19 @@ impl SessionStore for SqliteStore {
         Ok(stages)
     }
 
-    fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>> {
+    fn list_process_template_stages(
+        &self,
+        process_template_id: &str,
+    ) -> Result<Vec<ProjectStageInfo>> {
         let conn = self.conn.lock().unwrap();
-        ensure_workflow_exists(&conn, workflow_id)?;
+        ensure_process_template_exists(&conn, process_template_id)?;
         let mut stmt = conn.prepare(
             "SELECT id, project_id, type, process_template_id, kind, name, description, icon, sort_order, enabled, allow_empty_assistants, created_at, updated_at
              FROM stages
              WHERE project_id IS NULL AND process_template_id = ?
              ORDER BY sort_order ASC, type ASC, created_at ASC",
         )?;
-        let rows = stmt.query_map(params![workflow_id], project_stage_from_row)?;
+        let rows = stmt.query_map(params![process_template_id], project_stage_from_row)?;
         let mut stages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for stage in stages.iter_mut() {
             stage.assistants = load_project_stage_assistants(&conn, &stage.id)?;
@@ -6208,7 +6262,7 @@ impl SessionStore for SqliteStore {
     fn create_project_stage(
         &self,
         project_id: &str,
-        workflow_id: Option<String>,
+        process_template_id: Option<String>,
         name: &str,
         description: Option<&str>,
         icon: Option<&str>,
@@ -6220,20 +6274,26 @@ impl SessionStore for SqliteStore {
         let description = description.map(str::trim).filter(|value| !value.is_empty());
         let icon = icon.map(str::trim).filter(|value| !value.is_empty());
         let conn = self.conn.lock().unwrap();
-        let requested_workflow_id = workflow_id;
-        let project = if requested_workflow_id.is_none() {
+        let requested_process_template_id = process_template_id;
+        let project = if requested_process_template_id.is_none() {
             Some(load_project_by_id(&conn, project_id)?)
         } else if project_id.trim().is_empty() {
             None
         } else {
             Some(load_project_by_id(&conn, project_id)?)
         };
-        let resolved_workflow_id = requested_workflow_id
+        let resolved_process_template_id = requested_process_template_id
             .as_deref()
-            .or_else(|| project.as_ref().map(|project| project.workflow_id.as_str()))
-            .ok_or_else(|| anyhow::anyhow!("project stage requires a project or workflow"))?;
-        ensure_workflow_exists(&conn, resolved_workflow_id)?;
-        let template_project_id = if requested_workflow_id.is_some() {
+            .or_else(|| {
+                project
+                    .as_ref()
+                    .map(|project| project.process_template_id.as_str())
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("project stage requires a project or process template")
+            })?;
+        ensure_process_template_exists(&conn, resolved_process_template_id)?;
+        let template_project_id = if requested_process_template_id.is_some() {
             None
         } else {
             Some(project_id)
@@ -6244,7 +6304,7 @@ impl SessionStore for SqliteStore {
                  WHERE process_template_id = ?
                    AND ((project_id IS NULL AND ? IS NULL) OR project_id = ?)",
                 params![
-                    resolved_workflow_id,
+                    resolved_process_template_id,
                     template_project_id,
                     template_project_id
                 ],
@@ -6253,7 +6313,7 @@ impl SessionStore for SqliteStore {
             .unwrap_or(0);
         let now = now_ms();
         let id = stable_project_stage_id(
-            Some(resolved_workflow_id),
+            Some(resolved_process_template_id),
             template_project_id,
             name,
             next_order,
@@ -6265,7 +6325,7 @@ impl SessionStore for SqliteStore {
             params![
                 id,
                 template_project_id,
-                resolved_workflow_id,
+                resolved_process_template_id,
                 name,
                 description,
                 icon,
@@ -6298,8 +6358,8 @@ impl SessionStore for SqliteStore {
         {
             anyhow::bail!("builtin project stage details cannot be updated");
         }
-        let Some(scope_workflow_id) = current.workflow_id else {
-            anyhow::bail!("project stage requires a workflow");
+        let Some(scope_process_template_id) = current.process_template_id else {
+            anyhow::bail!("project stage requires a process template");
         };
         let scope_project_id = current.project_id.as_deref();
         let next_name = match name {
@@ -6338,7 +6398,7 @@ impl SessionStore for SqliteStore {
             Some(target_order) if target_order != current.order => reorder_project_stage_scope(
                 &tx,
                 stage_id,
-                scope_workflow_id.as_str(),
+                scope_process_template_id.as_str(),
                 scope_project_id,
                 target_order,
             )?,
@@ -6434,7 +6494,8 @@ impl SessionStore for SqliteStore {
             anyhow::bail!("project stage is disabled");
         }
         if project_stage.project_id.as_deref() != Some(thread.project_id.as_str())
-            || project_stage.workflow_id.as_deref() != Some(project.workflow_id.as_str())
+            || project_stage.process_template_id.as_deref()
+                != Some(project.process_template_id.as_str())
         {
             anyhow::bail!("project stage does not belong to this thread's project");
         }
@@ -6842,7 +6903,7 @@ impl SessionStore for SqliteStore {
         if session_project_path != project.path {
             anyhow::bail!("session does not belong to this thread's project");
         }
-        ensure_session_not_linked_to_thread_workflow(&tx, agent, session_id)?;
+        ensure_session_not_linked_to_thread_process(&tx, agent, session_id)?;
         let now = now_ms();
         tx.execute(
             "INSERT OR IGNORE INTO thread_sessions (thread_id, agent, session_id, created_at)
@@ -6903,7 +6964,7 @@ impl SessionStore for SqliteStore {
         if session_project_path != project.path {
             anyhow::bail!("session does not belong to this stage's project");
         }
-        ensure_session_not_linked_to_thread_workflow(&tx, agent, session_id)?;
+        ensure_session_not_linked_to_thread_process(&tx, agent, session_id)?;
         let now = now_ms();
         tx.execute(
             "INSERT OR IGNORE INTO stage_sessions (thread_stage_id, agent, session_id, created_at)
@@ -9782,7 +9843,7 @@ mod migration_tests {
         let project = store
             .add_project(&project_path, Some("Visible"), "research".to_string(), None)
             .unwrap();
-        assert_eq!(project.workflow_id, "research");
+        assert_eq!(project.process_template_id, "research");
         assert_eq!(store.list_sessions().unwrap().len(), 1);
 
         let _ = std::fs::remove_file(&path);
@@ -9806,14 +9867,14 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(created.name, "video-plan");
-        assert_eq!(created.workflow_id, "video_production");
+        assert_eq!(created.process_template_id, "video_production");
         assert!(Path::new(&created.path).exists());
 
         let updated = store
             .update_project(&created.id, Some("Video Plan"), Some("general".to_string()))
             .unwrap();
         assert_eq!(updated.name, "Video Plan");
-        assert_eq!(updated.workflow_id, "general");
+        assert_eq!(updated.process_template_id, "general");
 
         let item = store
             .create_kanban_item(&created.id, "Draft outline", Some("scene beats"))
@@ -9849,11 +9910,14 @@ mod migration_tests {
     }
 
     #[test]
-    fn builtin_workflow_stage_kinds_are_workflow_specific() {
-        let path = unique_db("sessio-workflow-stage-kinds");
+    fn builtin_process_template_stage_kinds_are_process_template_specific() {
+        let path = unique_db("sessio-process-template-stage-kinds");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
-        let parent = temp_child_path(&std::env::temp_dir(), "sessio-workflow-stage-parent");
+        let parent = temp_child_path(
+            &std::env::temp_dir(),
+            "sessio-process-template-stage-parent",
+        );
         std::fs::create_dir(&parent).unwrap();
 
         let code = store
@@ -9908,7 +9972,8 @@ mod migration_tests {
             .all(|item| item.project_id.as_deref() == Some(code.id.as_str())));
         assert!(code_assistants
             .iter()
-            .all(|item| item.workflow_id.as_deref() == Some(code.workflow_id.as_str())));
+            .all(|item| item.process_template_id.as_deref()
+                == Some(code.process_template_id.as_str())));
 
         let writing_kinds = stage_kinds(store.list_project_stages(&writing.id).unwrap());
         assert_eq!(
@@ -10040,7 +10105,7 @@ mod migration_tests {
         let parent = temp_child_path(&std::env::temp_dir(), "sessio-stage-selection-parent");
         std::fs::create_dir(&parent).unwrap();
 
-        let templates = store.list_workflow_stages("code").unwrap();
+        let templates = store.list_process_template_stages("code").unwrap();
         let research_template = templates
             .iter()
             .find(|stage| stage.kind == Some(StageType::Research))
@@ -10048,7 +10113,7 @@ mod migration_tests {
         assert_eq!(research_template.assistants.len(), 1);
         assert_eq!(
             research_template.assistants[0].assistant_id,
-            stable_workflow_builtin_assistant_id("code", "assistant-builtin-research")
+            stable_process_template_builtin_assistant_id("code", "assistant-builtin-research")
         );
         let selected_template_ids = templates
             .iter()
@@ -10089,7 +10154,7 @@ mod migration_tests {
             project_research.assistants[0].assistant_id,
             stable_project_builtin_assistant_id(
                 &project.id,
-                &stable_workflow_builtin_assistant_id("code", "assistant-builtin-research")
+                &stable_process_template_builtin_assistant_id("code", "assistant-builtin-research")
             )
         );
 
@@ -10109,7 +10174,7 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
@@ -10273,16 +10338,19 @@ mod migration_tests {
             .unwrap();
         assert_eq!(global_research.color.as_deref(), Some("#0ea5e9"));
 
-        let workflow_research = store
+        let process_template_research = store
             .list_assistants(None)
             .unwrap()
             .into_iter()
             .find(|assistant| {
                 assistant.id
-                    == stable_workflow_builtin_assistant_id("code", "assistant-builtin-research")
+                    == stable_process_template_builtin_assistant_id(
+                        "code",
+                        "assistant-builtin-research",
+                    )
             })
             .unwrap();
-        assert_eq!(workflow_research.color.as_deref(), Some("#0ea5e9"));
+        assert_eq!(process_template_research.color.as_deref(), Some("#0ea5e9"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -10305,7 +10373,7 @@ mod migration_tests {
             .unwrap();
         let project_research_id = stable_project_assistant_id(
             &project.id,
-            &stable_workflow_builtin_assistant_id("code", "assistant-builtin-research"),
+            &stable_process_template_builtin_assistant_id("code", "assistant-builtin-research"),
         );
         let project_research = store
             .list_assistants(Some(&project.id))
@@ -10320,13 +10388,13 @@ mod migration_tests {
     }
 
     #[test]
-    fn seed_does_not_recreate_deleted_workflow_stage_assistant_bindings() {
-        let path = unique_db("sessio-workflow-stage-assistant-seed");
+    fn seed_does_not_recreate_deleted_process_template_stage_assistant_bindings() {
+        let path = unique_db("sessio-process-template-stage-assistant-seed");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 
         let research = store
-            .list_workflow_stages("code")
+            .list_process_template_stages("code")
             .unwrap()
             .into_iter()
             .find(|stage| stage.kind == Some(StageType::Research))
@@ -10339,7 +10407,7 @@ mod migration_tests {
         store.init().unwrap();
 
         let research = store
-            .list_workflow_stages("code")
+            .list_process_template_stages("code")
             .unwrap()
             .into_iter()
             .find(|stage| stage.kind == Some(StageType::Research))
@@ -10350,13 +10418,13 @@ mod migration_tests {
     }
 
     #[test]
-    fn workflow_stage_templates_accept_only_same_workflow_assistants() {
-        let path = unique_db("sessio-workflow-stage-assistant-scope");
+    fn process_template_stage_templates_accept_only_same_process_template_assistants() {
+        let path = unique_db("sessio-process-template-stage-assistant-scope");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 
         let research = store
-            .list_workflow_stages("code")
+            .list_process_template_stages("code")
             .unwrap()
             .into_iter()
             .find(|stage| stage.kind == Some(StageType::Research))
@@ -10374,7 +10442,7 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: Some("code".to_string()),
+                process_template_id: Some("code".to_string()),
                 project_id: None,
             })
             .unwrap();
@@ -10391,7 +10459,7 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: Some("writing".to_string()),
+                process_template_id: Some("writing".to_string()),
                 project_id: None,
             })
             .unwrap();
@@ -10408,7 +10476,7 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: None,
             })
             .unwrap();
@@ -10423,11 +10491,11 @@ mod migration_tests {
         assert_eq!(updated.assistants[0].assistant_id, code_assistant.id);
         assert_eq!(updated.assistants[1].assistant_id, shared_assistant.id);
 
-        let wrong_workflow_error = store
+        let wrong_process_template_error = store
             .update_project_stage_assistants(&research.id, &[writing_assistant.id])
             .unwrap_err()
             .to_string();
-        assert!(wrong_workflow_error.contains("assistant is not available for this stage"));
+        assert!(wrong_process_template_error.contains("assistant is not available for this stage"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -10451,11 +10519,11 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: None,
             })
             .unwrap();
-        assert_eq!(assistant.workflow_id, None);
+        assert_eq!(assistant.process_template_id, None);
         assert_eq!(assistant.project_id, None);
         assert_eq!(assistant.assistant_type, AssistantType::Custom);
 
@@ -10486,12 +10554,12 @@ mod migration_tests {
                 system_prompt: Some("Review from global context"),
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: None,
             })
             .unwrap();
         let research_template = store
-            .list_workflow_stages("code")
+            .list_process_template_stages("code")
             .unwrap()
             .into_iter()
             .find(|stage| stage.kind == Some(StageType::Research))
@@ -10667,7 +10735,7 @@ mod migration_tests {
                 system_prompt: Some("Plan carefully"),
                 color: Some("#22c55e"),
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
@@ -11058,7 +11126,7 @@ mod migration_tests {
                 system_prompt: Some("Keep traceable notes"),
                 color: Some("#22c55e"),
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
@@ -11296,7 +11364,7 @@ mod migration_tests {
                 system_prompt: Some("Build carefully"),
                 color: Some("#22c55e"),
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
@@ -11313,15 +11381,15 @@ mod migration_tests {
                 system_prompt: None,
                 color: Some("#60a5fa"),
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
 
         let legacy = store
-            .create_thread(&project.id, "Legacy workflow", None)
+            .create_thread(&project.id, "Legacy process", None)
             .unwrap();
-        assert_eq!(legacy.kind, ThreadKind::Workflow);
+        assert_eq!(legacy.kind, ThreadKind::Process);
         assert!(legacy.assistants.is_empty());
         let persisted_kind: String = {
             let conn = store.conn.lock().unwrap();
@@ -11448,7 +11516,7 @@ mod migration_tests {
 
         let listed = store.list_threads(&project.id).unwrap();
         assert!(listed.iter().any(|thread| thread.id == legacy.id
-            && thread.kind == ThreadKind::Workflow
+            && thread.kind == ThreadKind::Process
             && thread.assistants.is_empty()));
         assert!(listed.iter().any(|thread| thread.id == teamwork.id
             && thread.kind == ThreadKind::Teamwork
@@ -11638,7 +11706,7 @@ mod migration_tests {
                 system_prompt: Some("Build carefully"),
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
@@ -11676,13 +11744,13 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .unwrap();
 
         let thread = store
-            .create_thread(&project.id, "Ship thread workflow", Some("first pass"))
+            .create_thread(&project.id, "Ship thread process", Some("first pass"))
             .unwrap();
         assert_eq!(thread.project_id, project.id);
         assert!(thread.stage_id.is_none());
@@ -11711,7 +11779,7 @@ mod migration_tests {
             builtin_research_assistant_id,
             stable_project_builtin_assistant_id(
                 &project.id,
-                &stable_workflow_builtin_assistant_id("code", "assistant-builtin-research")
+                &stable_process_template_builtin_assistant_id("code", "assistant-builtin-research")
             )
         );
         let default_stage = store
@@ -11728,7 +11796,7 @@ mod migration_tests {
             .to_string();
         assert!(assistant_stage_binding_error.contains("project stage assistant binding(s)"));
         assert!(assistant_stage_binding_error.contains("stage \"research\""));
-        assert!(!assistant_stage_binding_error.contains("workflow \""));
+        assert!(!assistant_stage_binding_error.contains("process template \""));
         let default_thread = store
             .create_thread(&project.id, "Default stage assistants", None)
             .unwrap();
@@ -11751,47 +11819,56 @@ mod migration_tests {
             .to_string();
         assert!(assistant_disable_error.contains("project stage assistant binding(s)"));
         assert!(assistant_disable_error.contains("thread stage assistant binding(s)"));
-        assert!(!assistant_disable_error.contains("workflow \""));
+        assert!(!assistant_disable_error.contains("process template \""));
         assert!(assistant_disable_error.contains("thread \"Default stage assistants\""));
-        let custom_workflow = store
-            .create_workflow("Custom Flow", Some("Custom workflow description"))
+        let custom_process_template = store
+            .create_process_template("Custom Flow", Some("Custom process template description"))
             .unwrap();
-        assert_eq!(custom_workflow.workflow_type, WorkflowType::Custom);
         assert_eq!(
-            custom_workflow.description.as_deref(),
-            Some("Custom workflow description")
+            custom_process_template.process_template_type,
+            ProcessTemplateType::Custom
         );
-        let renamed_workflow = store
-            .update_workflow(
-                &custom_workflow.id,
+        assert_eq!(
+            custom_process_template.description.as_deref(),
+            Some("Custom process template description")
+        );
+        let renamed_process_template = store
+            .update_process_template(
+                &custom_process_template.id,
                 Some("Custom Flow Prime"),
-                Some(Some("Updated custom workflow description")),
+                Some(Some("Updated custom process template description")),
             )
             .unwrap();
-        assert_eq!(renamed_workflow.name, "Custom Flow Prime");
+        assert_eq!(renamed_process_template.name, "Custom Flow Prime");
         assert_eq!(
-            renamed_workflow.description.as_deref(),
-            Some("Updated custom workflow description")
+            renamed_process_template.description.as_deref(),
+            Some("Updated custom process template description")
         );
-        let workflow_stage = store
+        let process_template_stage = store
             .create_project_stage(
                 "",
-                Some(custom_workflow.id.clone()),
-                "Workflow Custom Stage",
+                Some(custom_process_template.id.clone()),
+                "Process Custom Stage",
                 Some("Template stage"),
                 None,
             )
             .unwrap();
         assert_eq!(
-            workflow_stage.workflow_id.as_deref(),
-            Some(custom_workflow.id.as_str())
+            process_template_stage.process_template_id.as_deref(),
+            Some(custom_process_template.id.as_str())
         );
-        assert_eq!(workflow_stage.project_id, None);
-        let workflow_stages = store.list_workflow_stages(&custom_workflow.id).unwrap();
-        assert_eq!(workflow_stages.len(), 1);
-        assert_eq!(workflow_stages[0].id, workflow_stage.id);
-        store.delete_project_stage(&workflow_stage.id).unwrap();
-        store.delete_workflow(&custom_workflow.id).unwrap();
+        assert_eq!(process_template_stage.project_id, None);
+        let process_template_stages = store
+            .list_process_template_stages(&custom_process_template.id)
+            .unwrap();
+        assert_eq!(process_template_stages.len(), 1);
+        assert_eq!(process_template_stages[0].id, process_template_stage.id);
+        store
+            .delete_project_stage(&process_template_stage.id)
+            .unwrap();
+        store
+            .delete_process_template(&custom_process_template.id)
+            .unwrap();
         let build_option = store
             .create_project_stage(
                 &project.id,
@@ -11912,7 +11989,7 @@ mod migration_tests {
             .unwrap()
             .clone();
         let review_thread = store
-            .create_thread(&project.id, "Review thread workflow", Some("second lane"))
+            .create_thread(&project.id, "Review thread process", Some("second lane"))
             .unwrap();
         let review_stage_assistant_ids = vec![assistant.id.clone(), reviewer.id.clone()];
         let review_stage = store
@@ -12009,7 +12086,7 @@ mod migration_tests {
             .update_thread_stage(&research.id, None, None, Some(false))
             .unwrap_err()
             .to_string();
-        assert!(stage_disable_error.contains("thread \"Ship thread workflow\""));
+        assert!(stage_disable_error.contains("thread \"Ship thread process\""));
         assert!(stage_disable_error.contains("thread \"Default stage assistants\""));
         store.delete_thread_stage(&default_research.id).unwrap();
         store.delete_thread_stage(&research.id).unwrap();
@@ -12029,7 +12106,7 @@ mod migration_tests {
             .into_iter()
             .any(|stage| stage.id == research.stage_id && !stage.enabled));
         assert!(store
-            .list_workflow_stages(&project.workflow_id)
+            .list_process_template_stages(&project.process_template_id)
             .unwrap()
             .into_iter()
             .any(|stage| stage.kind == Some(StageType::Research) && stage.project_id.is_none()));
@@ -12151,12 +12228,12 @@ mod migration_tests {
         let edited_thread = store
             .update_thread(
                 &thread.id,
-                Some("Ship edited workflow"),
+                Some("Ship edited process"),
                 Some(Some("")),
                 None,
             )
             .unwrap();
-        assert_eq!(edited_thread.goal, "Ship edited workflow");
+        assert_eq!(edited_thread.goal, "Ship edited process");
         assert_eq!(edited_thread.description, None);
         let edited_assistant = store
             .update_assistant(
@@ -12222,7 +12299,7 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&other_project.id),
             })
             .unwrap();
@@ -12281,7 +12358,7 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .is_err());
@@ -12298,7 +12375,7 @@ mod migration_tests {
                 system_prompt: None,
                 color: None,
                 assistant_type: AssistantType::Builtin,
-                workflow_id: None,
+                process_template_id: None,
                 project_id: Some(&project.id),
             })
             .is_err());

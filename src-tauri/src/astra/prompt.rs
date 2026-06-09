@@ -6,16 +6,16 @@ use super::{
 };
 use crate::models::{IssueStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind};
 
-const ASTRA_WORKFLOW_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Orchestrator.
+const ASTRA_PROCESS_ORCHESTRATION_RESPONSE_CONTRACT: &str = r#"You are Astra Orchestrator.
 
-Workflow threads are human-defined stages and do not use Astra automatic scheduling. Return an error terminal response if invoked for workflow.
+Process threads are human-defined stages and do not use Astra automatic scheduling. Return an error terminal response if invoked for process.
 
 Return only one complete YAML mapping. Do not return JSON, markdown, code fences, comments, prose, or multiple YAML documents.
 
 Required top-level YAML response:
 summary: string
 runIntent: error
-reason: workflow_astra_orchestration_unsupported
+reason: process_astra_orchestration_unsupported
 mode: null
 tasks: []"#;
 
@@ -54,9 +54,9 @@ Plan the next useful batch from the shared thread goal, userPrompt, thread.assis
 fn astra_orchestration_response_contract(kind: ThreadKind) -> &'static str {
     match kind {
         ThreadKind::Teamwork => ASTRA_TEAMWORK_ORCHESTRATION_RESPONSE_CONTRACT,
-        ThreadKind::Workflow => ASTRA_WORKFLOW_ORCHESTRATION_RESPONSE_CONTRACT,
+        ThreadKind::Process => ASTRA_PROCESS_ORCHESTRATION_RESPONSE_CONTRACT,
         ThreadKind::Brainstorm | ThreadKind::Debate => {
-            ASTRA_WORKFLOW_ORCHESTRATION_RESPONSE_CONTRACT
+            ASTRA_PROCESS_ORCHESTRATION_RESPONSE_CONTRACT
         }
     }
 }
@@ -167,7 +167,7 @@ pub(super) fn build_thread_assistant_task_context(
         ThreadKind::Teamwork => render_teamwork_task_prompt(thread, assistant, &snapshot, task),
         ThreadKind::Brainstorm => render_brainstorm_task_prompt(thread, assistant, task),
         ThreadKind::Debate => render_debate_task_prompt(thread, assistant, task),
-        ThreadKind::Workflow => render_teamwork_task_prompt(thread, assistant, &snapshot, task),
+        ThreadKind::Process => render_teamwork_task_prompt(thread, assistant, &snapshot, task),
     };
     Ok(StageTaskContext {
         thread_id: thread.id.clone(),
@@ -284,8 +284,8 @@ fn build_thread_assistant_task_snapshot(thread: &ThreadInfo, focused_assistant_i
         ThreadKind::Teamwork => json!({
             "mode": "shared_context_teamwork",
         }),
-        ThreadKind::Workflow => json!({
-            "mode": "workflow_stage",
+        ThreadKind::Process => json!({
+            "mode": "process_stage",
         }),
     };
     let related_session_refs = if thread.kind == ThreadKind::Debate {
@@ -375,7 +375,7 @@ fn render_plan_task_snapshot_prompt(
     lines.push(task.prompt.clone());
     lines.push(String::new());
     lines.push("## Reporting".to_string());
-    lines.push("Return a concise final result for Astra. Do not mutate workflow stages or issues unless this task explicitly asks for a separate manual action.".to_string());
+    lines.push("Return a concise final result for Astra. Do not mutate process stages or issues unless this task explicitly asks for a separate manual action.".to_string());
     lines.join("\n")
 }
 
@@ -388,7 +388,7 @@ fn render_teamwork_task_prompt(
     let mut lines = Vec::new();
     lines.push("# Sessio teamwork task".to_string());
     lines.push(String::new());
-    lines.push("You are working as a thread-level assistant delegated by Astra. Treat this as shared-context teamwork, not a workflow stage chat.".to_string());
+    lines.push("You are working as a thread-level assistant delegated by Astra. Treat this as shared-context teamwork, not a process stage chat.".to_string());
     lines.push(format!("Thread goal: {}", thread.goal));
     if let Some(description) = thread
         .description
@@ -445,7 +445,7 @@ fn render_teamwork_task_prompt(
     lines.push("## Reporting".to_string());
     lines.push("Return a concise final result for Astra with concrete progress, decisions, blockers, and verification notes.".to_string());
     lines.push(
-        "Do not update workflow stage state or create stage issues from this teamwork task."
+        "Do not update process stage state or create stage issues from this teamwork task."
             .to_string(),
     );
     lines.join("\n")
@@ -492,7 +492,7 @@ fn render_brainstorm_task_prompt(
     lines.push("## Reporting".to_string());
     lines.push("Return a concise final result for Astra. Preserve concrete candidates, agreements, disagreements, risks, and questions.".to_string());
     lines.push(
-        "Do not update workflow stage state or create stage issues from this brainstorm task."
+        "Do not update process stage state or create stage issues from this brainstorm task."
             .to_string(),
     );
     lines.join("\n")
@@ -539,7 +539,7 @@ fn render_debate_task_prompt(
     lines.push("## Reporting".to_string());
     lines.push("Return a concise final result for Astra with answer, evidence, assumptions, confidence, disagreements, and convergence notes.".to_string());
     lines.push(
-        "Do not update workflow stage state or create stage issues from this debate task."
+        "Do not update process stage state or create stage issues from this debate task."
             .to_string(),
     );
     lines.join("\n")
@@ -898,7 +898,7 @@ mod tests {
             goal: "Ship the thread".to_string(),
             description: None,
             stage_id: None,
-            kind: crate::models::ThreadKind::Workflow,
+            kind: crate::models::ThreadKind::Process,
             enabled: true,
             created_at: 1,
             updated_at: 1,
@@ -912,7 +912,7 @@ mod tests {
                 assistant_ids: Vec::new(),
                 assistants: vec![assistant],
                 stage_type: ProjectStageType::Custom,
-                workflow_id: None,
+                process_template_id: None,
                 kind: None,
                 name: Some("Research".to_string()),
                 description: None,
@@ -1036,11 +1036,11 @@ mod tests {
         assert!(instruction.contains("Do not return JSON"));
         assert!(instruction.contains("summary: string"));
         assert!(instruction.contains("runIntent: error"));
-        assert!(instruction.contains("reason: workflow_astra_orchestration_unsupported"));
+        assert!(instruction.contains("reason: process_astra_orchestration_unsupported"));
         assert!(instruction.contains("mode: null"));
         assert!(instruction.contains("tasks: []"));
         assert!(instruction.contains(
-            "Workflow threads are human-defined stages and do not use Astra automatic scheduling"
+            "Process threads are human-defined stages and do not use Astra automatic scheduling"
         ));
         assert!(!instruction.contains(r#""decisions": []"#));
         assert!(!instruction.contains(r#""stage": {"#));
@@ -1125,7 +1125,7 @@ mod tests {
         );
         assert!(context
             .prompt
-            .contains("Treat this as shared-context teamwork, not a workflow stage chat."));
+            .contains("Treat this as shared-context teamwork, not a process stage chat."));
         assert!(context.prompt.contains("## Assistant instructions"));
         assert!(context
             .prompt
@@ -1136,7 +1136,7 @@ mod tests {
             .contains("Implement the shared-context task."));
         assert!(context
             .prompt
-            .contains("Do not update workflow stage state or create stage issues"));
+            .contains("Do not update process stage state or create stage issues"));
     }
 
     #[test]

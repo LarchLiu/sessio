@@ -9,10 +9,10 @@ use crate::models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
-    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProjectInfo, ProjectStageInfo,
-    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo, StageIssueInfo,
-    StageStatus, SubagentInfo, ThreadInfo, ThreadKind, ThreadReplayInfo, ThreadReplaySessionInfo,
-    ThreadReplaySessionSourceInfo, ThreadReplaySessionSourceKind, WorkflowInfo,
+    PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
+    ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, ThreadKind, ThreadReplayInfo,
+    ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo, ThreadReplaySessionSourceKind,
 };
 
 /// Optional patch fields shared by the agent-preference update methods. Every
@@ -51,7 +51,7 @@ pub struct NewAssistant<'a> {
     pub system_prompt: Option<&'a str>,
     pub color: Option<&'a str>,
     pub assistant_type: AssistantType,
-    pub workflow_id: Option<String>,
+    pub process_template_id: Option<String>,
     pub project_id: Option<&'a str>,
 }
 
@@ -226,35 +226,39 @@ pub trait SessionStore: Send + Sync {
         session_id: &str,
         rename_title: Option<&str>,
     ) -> Result<()>;
-    fn list_workflows(&self) -> Result<Vec<WorkflowInfo>>;
-    fn create_workflow(&self, name: &str, description: Option<&str>) -> Result<WorkflowInfo>;
-    fn update_workflow(
+    fn list_process_templates(&self) -> Result<Vec<ProcessTemplateInfo>>;
+    fn create_process_template(
         &self,
-        workflow_id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProcessTemplateInfo>;
+    fn update_process_template(
+        &self,
+        process_template_id: &str,
         name: Option<&str>,
         description: Option<Option<&str>>,
-    ) -> Result<WorkflowInfo>;
-    fn delete_workflow(&self, workflow_id: &str) -> Result<()>;
+    ) -> Result<ProcessTemplateInfo>;
+    fn delete_process_template(&self, process_template_id: &str) -> Result<()>;
     fn list_projects(&self) -> Result<Vec<ProjectInfo>>;
     fn add_project(
         &self,
         path: &str,
         name: Option<&str>,
-        workflow_id: String,
+        process_template_id: String,
         enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo>;
     fn create_project(
         &self,
         parent_path: &str,
         name: &str,
-        workflow_id: String,
+        process_template_id: String,
         enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo>;
     fn update_project(
         &self,
         project_id: &str,
         name: Option<&str>,
-        workflow_id: Option<String>,
+        process_template_id: Option<String>,
     ) -> Result<ProjectInfo>;
     fn archive_project(&self, project_id: &str) -> Result<()>;
     fn list_agents(&self) -> Result<Vec<AgentInfo>>;
@@ -498,11 +502,14 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<PlanTaskSessionInfo>;
     fn list_plan_task_sessions(&self, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>>;
     fn list_project_stages(&self, project_id: &str) -> Result<Vec<ProjectStageInfo>>;
-    fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>>;
+    fn list_process_template_stages(
+        &self,
+        process_template_id: &str,
+    ) -> Result<Vec<ProjectStageInfo>>;
     fn create_project_stage(
         &self,
         project_id: &str,
-        workflow_id: Option<String>,
+        process_template_id: Option<String>,
         name: &str,
         description: Option<&str>,
         icon: Option<&str>,

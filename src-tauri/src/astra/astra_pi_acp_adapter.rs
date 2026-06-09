@@ -1126,12 +1126,12 @@ tasks: []
     }
 
     #[test]
-    fn rejects_continue_for_workflow_thread() {
+    fn rejects_continue_for_process_thread() {
         let error = parse_astra_pi_acp_orchestration_response(
             r#"
 summary: bad
 runIntent: continue
-reason: workflow
+reason: process
 mode: parallel
 tasks:
   - title: Thread task

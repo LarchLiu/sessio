@@ -5,8 +5,8 @@ use std::sync::{Arc, RwLock};
 use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
     KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo,
-    PlanTaskSessionRole, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, StageIssueInfo,
-    StageStatus, SubagentInfo, ThreadAgentInfo, ThreadInfo, ThreadKind, WorkflowInfo,
+    PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo, SessionInfo,
+    StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadAgentInfo, ThreadInfo, ThreadKind,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -188,25 +188,30 @@ impl SessionStore for CachedStore {
         self.refresh_from_inner()
     }
 
-    fn list_workflows(&self) -> Result<Vec<WorkflowInfo>> {
-        self.inner.list_workflows()
+    fn list_process_templates(&self) -> Result<Vec<ProcessTemplateInfo>> {
+        self.inner.list_process_templates()
     }
 
-    fn create_workflow(&self, name: &str, description: Option<&str>) -> Result<WorkflowInfo> {
-        self.inner.create_workflow(name, description)
-    }
-
-    fn update_workflow(
+    fn create_process_template(
         &self,
-        workflow_id: &str,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<ProcessTemplateInfo> {
+        self.inner.create_process_template(name, description)
+    }
+
+    fn update_process_template(
+        &self,
+        process_template_id: &str,
         name: Option<&str>,
         description: Option<Option<&str>>,
-    ) -> Result<WorkflowInfo> {
-        self.inner.update_workflow(workflow_id, name, description)
+    ) -> Result<ProcessTemplateInfo> {
+        self.inner
+            .update_process_template(process_template_id, name, description)
     }
 
-    fn delete_workflow(&self, workflow_id: &str) -> Result<()> {
-        self.inner.delete_workflow(workflow_id)
+    fn delete_process_template(&self, process_template_id: &str) -> Result<()> {
+        self.inner.delete_process_template(process_template_id)
     }
 
     fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
@@ -217,31 +222,32 @@ impl SessionStore for CachedStore {
         &self,
         path: &str,
         name: Option<&str>,
-        workflow_id: String,
+        process_template_id: String,
         enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
         self.inner
-            .add_project(path, name, workflow_id, enabled_stage_ids)
+            .add_project(path, name, process_template_id, enabled_stage_ids)
     }
 
     fn create_project(
         &self,
         parent_path: &str,
         name: &str,
-        workflow_id: String,
+        process_template_id: String,
         enabled_stage_ids: Option<&[String]>,
     ) -> Result<ProjectInfo> {
         self.inner
-            .create_project(parent_path, name, workflow_id, enabled_stage_ids)
+            .create_project(parent_path, name, process_template_id, enabled_stage_ids)
     }
 
     fn update_project(
         &self,
         project_id: &str,
         name: Option<&str>,
-        workflow_id: Option<String>,
+        process_template_id: Option<String>,
     ) -> Result<ProjectInfo> {
-        self.inner.update_project(project_id, name, workflow_id)
+        self.inner
+            .update_project(project_id, name, process_template_id)
     }
 
     fn archive_project(&self, project_id: &str) -> Result<()> {
@@ -445,20 +451,23 @@ impl SessionStore for CachedStore {
         self.inner.list_project_stages(project_id)
     }
 
-    fn list_workflow_stages(&self, workflow_id: &str) -> Result<Vec<ProjectStageInfo>> {
-        self.inner.list_workflow_stages(workflow_id)
+    fn list_process_template_stages(
+        &self,
+        process_template_id: &str,
+    ) -> Result<Vec<ProjectStageInfo>> {
+        self.inner.list_process_template_stages(process_template_id)
     }
 
     fn create_project_stage(
         &self,
         project_id: &str,
-        workflow_id: Option<String>,
+        process_template_id: Option<String>,
         name: &str,
         description: Option<&str>,
         icon: Option<&str>,
     ) -> Result<ProjectStageInfo> {
         self.inner
-            .create_project_stage(project_id, workflow_id, name, description, icon)
+            .create_project_stage(project_id, process_template_id, name, description, icon)
     }
 
     fn update_project_stage(
