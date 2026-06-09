@@ -55,7 +55,7 @@ type ParticipantDraft = {
 
 const THREAD_MODES: ThreadKind[] = ["teamwork", "process", "brainstorm", "debate"];
 const AGENT_PARTICIPANT_MODES = new Set<NewChatMode>(["brainstorm", "debate"]);
-const ASTRA_THREAD_MODES = new Set<NewChatMode>(["teamwork", "brainstorm", "debate"]);
+const ASTRA_THREAD_MODES = new Set<NewChatMode>(["teamwork", "process", "brainstorm", "debate"]);
 
 interface NewChatPageProps {
   projects: ProjectGroup[];

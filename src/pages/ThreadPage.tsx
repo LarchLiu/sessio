@@ -246,7 +246,12 @@ function ThreadAstraPanel({
   const [prompt, setPrompt] = useState("");
   const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
   const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
-  const canStartAstra = thread.kind === "teamwork" || thread.kind === "brainstorm" || thread.kind === "debate";
+  const hasActiveRun = Boolean(activeRun && isAstraActive(activeRun.status));
+  const canStartAstra =
+    thread.kind === "teamwork"
+    || thread.kind === "process"
+    || thread.kind === "brainstorm"
+    || thread.kind === "debate";
   const astraBoundary = canStartAstra ? null : t(`astra.unsupported.${thread.kind}`);
   const orderedPlanRounds = useMemo(
     () => planRounds.slice().sort((a, b) => b.roundIndex - a.roundIndex || b.createdAt - a.createdAt),
@@ -284,7 +289,7 @@ function ThreadAstraPanel({
   }, [onError, onReload, reloadAstraState, thread.id]);
 
   const start = async () => {
-    if (!canStartAstra) return;
+    if (!canStartAstra || hasActiveRun) return;
     setBusy("start");
     try {
       const run = await createAstraRun(thread.id, prompt.trim() || null);
@@ -330,7 +335,7 @@ function ThreadAstraPanel({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {activeRun && isAstraActive(activeRun.status) && (
+          {hasActiveRun && (
             <button
               type="button"
               disabled={busy !== null}
@@ -344,7 +349,7 @@ function ThreadAstraPanel({
           {canStartAstra && (
             <button
               type="button"
-              disabled={busy !== null || Boolean(activeRun && isAstraActive(activeRun.status))}
+              disabled={busy !== null || hasActiveRun}
               onClick={() => void start()}
               title={t("astra.start")}
               className="flex h-8 items-center gap-1.5 rounded border border-ink/15 bg-surface-panel px-2 text-caption text-ink/55 hover:bg-ink/[0.05] hover:text-ink/80 disabled:opacity-40"

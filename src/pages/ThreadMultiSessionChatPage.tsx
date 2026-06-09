@@ -270,7 +270,12 @@ export default function ThreadMultiSessionChatPage({
     [astraRuns],
   );
   const canStartAstra =
-    Boolean(thread && (thread.kind === "teamwork" || thread.kind === "brainstorm" || thread.kind === "debate"));
+    Boolean(thread && (
+      thread.kind === "teamwork"
+      || thread.kind === "process"
+      || thread.kind === "brainstorm"
+      || thread.kind === "debate"
+    ));
 
   const updateScrollToBottomButton = useCallback((vp: HTMLDivElement | null = viewportRef.current) => {
     if (!vp) return;
@@ -347,7 +352,7 @@ export default function ThreadMultiSessionChatPage({
   }, [scrollTimelineToBottom, updateScrollToBottomButton, timelineRows.length]);
 
   const handleStartAstra = async () => {
-    if (!thread || !canStartAstra) return;
+    if (!thread || !canStartAstra || activeAstraRun) return;
     setAstraBusy("start");
     try {
       const run = await createAstraRun(thread.id, composer.text.trim() || null);
