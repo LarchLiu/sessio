@@ -789,6 +789,8 @@ const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, sta
     planner_backend, round_index, round_limit, terminal_reason,
     last_error_code, last_error_message, internal_planner_session_ids_json,
     run_diagnostics_json, error, created_at, updated_at";
+const ACTIVE_ASTRA_RUN_STATUS_SQL: &str =
+    "'planning', 'thinking', 'awaiting_approval', 'dispatching', 'running'";
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -7252,7 +7254,7 @@ impl SessionStore for SqliteStore {
             "SELECT {ASTRA_RUN_SELECT}
              FROM astra_runs
              WHERE thread_id = ?
-               AND status IN ('planning', 'awaiting_approval', 'dispatching', 'running')
+               AND status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL})
              ORDER BY updated_at DESC
              LIMIT 1"
         );
@@ -7275,19 +7277,44 @@ impl SessionStore for SqliteStore {
     }
 
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         let now = now_ms();
         let mut active: Vec<AstraRunRecord> = {
             let sql = format!(
                 "SELECT {ASTRA_RUN_SELECT}
                  FROM astra_runs
-                 WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')"
+                 WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL})"
             );
-            let mut stmt = conn.prepare(&sql)?;
+            let mut stmt = tx.prepare(&sql)?;
             let rows = stmt.query_map([], astra_run_from_row)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        conn.execute(
+        let mut placeholder_session_ids = HashSet::new();
+        for run in &active {
+            for session_id in
+                serde_json::from_str::<Vec<String>>(&run.internal_planner_session_ids_json)
+                    .unwrap_or_default()
+            {
+                if !session_id.trim().is_empty() {
+                    placeholder_session_ids.insert(session_id);
+                }
+            }
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT s.session_id
+                 FROM thread_plan_task_sessions s
+                 INNER JOIN thread_plan_tasks t ON t.id = s.task_id
+                 INNER JOIN thread_plan_rounds r ON r.id = t.round_id
+                 WHERE r.astra_run_id = ?",
+            )?;
+            let rows = stmt.query_map(params![run.run_id], |row| row.get::<_, String>(0))?;
+            for session_id in rows.collect::<rusqlite::Result<Vec<_>>>()? {
+                if !session_id.trim().is_empty() {
+                    placeholder_session_ids.insert(session_id);
+                }
+            }
+        }
+        let update_active_runs_sql = format!(
             "UPDATE astra_runs
              SET status = 'interrupted',
                  terminal_reason = COALESCE(terminal_reason, 'process_recovered_active_run'),
@@ -7295,9 +7322,46 @@ impl SessionStore for SqliteStore {
                  last_error_message = COALESCE(last_error_message, 'Astra run was active during startup recovery'),
                  error = COALESCE(error, 'Astra run was active during startup recovery'),
                  updated_at = ?
-             WHERE status IN ('planning', 'awaiting_approval', 'dispatching', 'running')",
-            params![now],
-        )?;
+             WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL})"
+        );
+        tx.execute(&update_active_runs_sql, params![now])?;
+        for run in &active {
+            tx.execute(
+                "UPDATE thread_plan_tasks
+                 SET status = 'errored',
+                     error = COALESCE(error, 'Astra task was active during startup recovery'),
+                     result_summary = COALESCE(result_summary, 'Interrupted during startup recovery'),
+                     completed_at = COALESCE(completed_at, ?),
+                     updated_at = ?
+                 WHERE status = 'running'
+                   AND round_id IN (
+                       SELECT id
+                       FROM thread_plan_rounds
+                       WHERE astra_run_id = ?
+                   )",
+                params![now, now, run.run_id],
+            )?;
+            tx.execute(
+                "UPDATE thread_plan_rounds
+                 SET status = 'errored',
+                     updated_at = ?
+                 WHERE astra_run_id = ?
+                   AND status IN ('planned', 'running')",
+                params![now, run.run_id],
+            )?;
+        }
+        for session_id in &placeholder_session_ids {
+            tx.execute(
+                "UPDATE sessions
+                 SET available = 0, archived = 1, last_indexed_at = ?
+                 WHERE session_id = ?
+                   AND partial = 1
+                   AND file_size = 0
+                   AND available = 1",
+                params![now, session_id],
+            )?;
+        }
+        tx.commit()?;
         for run in &mut active {
             run.status = "interrupted".to_string();
             if run.terminal_reason.is_none() {
@@ -8623,6 +8687,167 @@ mod migration_tests {
 
         let runs = store.list_astra_runs(&thread.id).unwrap();
         assert_eq!(runs.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_path);
+    }
+
+    #[test]
+    fn startup_recovery_closes_thinking_run_tasks_and_placeholders() {
+        let path = unique_db("astra-recovery-task-sessions");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let project_path = std::env::temp_dir().join(format!(
+            "astra-recovery-task-sessions-project-{}",
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&project_path).unwrap();
+        let project = store
+            .add_project(
+                &project_path.to_string_lossy(),
+                Some("Astra Recovery Project"),
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Recover Astra thinking run", None)
+            .unwrap();
+        let run = AstraRunRecord {
+            run_id: "astra-run-thinking".to_string(),
+            thread_id: thread.id.clone(),
+            project_id: project.id.clone(),
+            project_path: project.path.clone(),
+            status: "thinking".to_string(),
+            mode: "auto".to_string(),
+            planner_backend: Some("deterministic".to_string()),
+            round_index: Some(0),
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_session_ids_json: r#"["planner-placeholder"]"#.to_string(),
+            run_diagnostics_json: "[]".to_string(),
+            error: None,
+            created_at: 10,
+            updated_at: 20,
+        };
+        store.upsert_astra_run(&run).unwrap();
+        assert_eq!(
+            store
+                .get_active_astra_run(&thread.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "thinking"
+        );
+        let round = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: Some(&run.run_id),
+                round_index: Some(0),
+                summary: Some("recovery round"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Astra,
+                status: PlanRoundStatus::Running,
+                tasks: vec![NewPlanTask {
+                    thread_stage_id: None,
+                    assistant_id: None,
+                    agent_participant_id: None,
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Recover running task",
+                    prompt: "This task was running when the app quit.",
+                    expected_output: None,
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Running,
+                }],
+            })
+            .unwrap();
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: "delegated-placeholder",
+                role: PlanTaskSessionRole::Delegated,
+            })
+            .unwrap();
+
+        let placeholder = SessionInfo {
+            agent: Agent::Codex,
+            id: "delegated-placeholder".to_string(),
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(1),
+            updated_at: Some(1),
+            message_count: 0,
+            rename_title: Some("Astra delegated placeholder".to_string()),
+            title: None,
+            first_user_message: Some("placeholder".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            forked_from_agent: None,
+            forked_from_id: None,
+            subagents: Vec::new(),
+        };
+        let planner_placeholder = SessionInfo {
+            id: "planner-placeholder".to_string(),
+            agent: Agent::AstraPi,
+            rename_title: Some("Astra planner placeholder".to_string()),
+            ..placeholder.clone()
+        };
+        let real = SessionInfo {
+            id: "real-session".to_string(),
+            file_path: project_path
+                .join("real-session.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            file_size: 42,
+            partial: false,
+            ..placeholder.clone()
+        };
+        store.upsert_session("", &placeholder).unwrap();
+        store.upsert_session("", &planner_placeholder).unwrap();
+        store.upsert_session(&real.file_path, &real).unwrap();
+
+        let interrupted_rows = store.interrupt_active_astra_runs().unwrap();
+        assert_eq!(interrupted_rows.len(), 1);
+        assert_eq!(interrupted_rows[0].status, "interrupted");
+        assert!(store.get_active_astra_run(&thread.id).unwrap().is_none());
+
+        let recovered_round = store.get_plan_round(&round.id).unwrap().unwrap();
+        assert_eq!(recovered_round.status, PlanRoundStatus::Errored);
+        assert_eq!(recovered_round.tasks[0].status, PlanTaskStatus::Errored);
+        assert_eq!(
+            recovered_round.tasks[0].error.as_deref(),
+            Some("Astra task was active during startup recovery")
+        );
+
+        let sessions = store.list_all_sessions().unwrap();
+        let delegated = sessions
+            .iter()
+            .find(|session| session.id == "delegated-placeholder")
+            .unwrap();
+        let planner = sessions
+            .iter()
+            .find(|session| session.id == "planner-placeholder")
+            .unwrap();
+        let real = sessions
+            .iter()
+            .find(|session| session.id == "real-session")
+            .unwrap();
+        assert!(!delegated.available);
+        assert!(delegated.archived);
+        assert!(!planner.available);
+        assert!(planner.archived);
+        assert!(real.available);
+        assert!(!real.archived);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_path);
