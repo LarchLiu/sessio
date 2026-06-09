@@ -277,6 +277,10 @@ fn delegated_runtime_limit(agent: Agent) -> Option<usize> {
     }
 }
 
+fn delegated_attempt_id(plan_task_id: &str, attempt_count: u32) -> String {
+    format!("{plan_task_id}:attempt-{attempt_count}")
+}
+
 /// The stage/attempt coordinates that always travel together when dispatching
 /// or tracking a delegated session.
 #[derive(Clone, Copy)]
@@ -735,6 +739,7 @@ impl AstraService {
         agent: Agent,
         session_id: &str,
         role: PlanTaskSessionRole,
+        attempt_count: u32,
     ) -> Result<()> {
         link_astra_plan_task_session_in_store(
             self.inner.store.as_ref(),
@@ -742,6 +747,7 @@ impl AstraService {
             agent,
             session_id,
             role,
+            attempt_count,
         )
     }
 
@@ -753,6 +759,7 @@ impl AstraService {
         from_role: PlanTaskSessionRole,
         to_session_id: &str,
         to_role: PlanTaskSessionRole,
+        attempt_count: u32,
     ) -> Result<()> {
         relink_astra_plan_task_session_in_store(
             self.inner.store.as_ref(),
@@ -762,6 +769,7 @@ impl AstraService {
             from_role,
             to_session_id,
             to_role,
+            attempt_count,
         )
     }
 
@@ -834,6 +842,10 @@ impl AstraService {
         options.insert(
             "astraAttemptCount".to_string(),
             Value::Number(serde_json::Number::from(attempt.attempt_count)),
+        );
+        options.insert(
+            "astraAttemptId".to_string(),
+            Value::String(delegated_attempt_id(&task.id, attempt.attempt_count)),
         );
         options.insert(
             "astraRetryLimitReached".to_string(),
@@ -1101,6 +1113,7 @@ impl AstraService {
                 task.target_agent,
                 &handle.sessio_runtime_session_id,
                 PlanTaskSessionRole::Runtime,
+                attempt_count,
             ) {
                 let message = error.to_string();
                 self.finish_delegated_task(
@@ -1118,6 +1131,7 @@ impl AstraService {
                 }
                 return Err(error);
             }
+            let attempt_id = delegated_attempt_id(&task.id, attempt_count);
             self.emit(
                 &next,
                 "task_dispatch",
@@ -1125,6 +1139,7 @@ impl AstraService {
                     "taskId": task.id,
                     "sessioRuntimeSessionId": handle.sessio_runtime_session_id,
                     "attemptCount": attempt_count,
+                    "attemptId": attempt_id,
                 }),
             );
             log::info!(
@@ -1496,7 +1511,7 @@ impl AstraService {
         agent_session_id: &str,
         sessio_runtime_session_id: &str,
     ) -> Result<()> {
-        let (state_context, state_task, already_recorded, already_finished) = {
+        let (state_context, state_task, already_recorded, already_finished, attempt_count) = {
             let delegated = self
                 .inner
                 .delegated_sessions
@@ -1512,7 +1527,8 @@ impl AstraService {
                 })
                 .unwrap_or(false);
             let finished = state.map(|state| state.finished).unwrap_or(true);
-            (context, task, recorded, finished)
+            let attempt_count = state.map(|state| state.attempt_count).unwrap_or(1);
+            (context, task, recorded, finished, attempt_count)
         };
         if already_recorded || already_finished {
             return Ok(());
@@ -1553,6 +1569,7 @@ impl AstraService {
                 PlanTaskSessionRole::Runtime,
                 agent_session_id,
                 PlanTaskSessionRole::Delegated,
+                attempt_count,
             )?;
             run.updated_at = now_ms();
             self.inner.store.upsert_astra_run(&run_to_record(&run))?;
@@ -2831,13 +2848,17 @@ fn link_astra_plan_task_session_in_store(
     agent: Agent,
     session_id: &str,
     role: PlanTaskSessionRole,
+    attempt_count: u32,
 ) -> Result<()> {
     if let Some(plan_task_id) = task.plan_task_id.as_deref() {
+        let attempt_id = delegated_attempt_id(plan_task_id, attempt_count);
         store.link_plan_task_session(NewPlanTaskSession {
             task_id: plan_task_id,
             agent,
             session_id,
             role,
+            attempt_id: Some(&attempt_id),
+            attempt_count: i64::from(attempt_count),
         })?;
     }
     Ok(())
@@ -2851,14 +2872,18 @@ fn relink_astra_plan_task_session_in_store(
     from_role: PlanTaskSessionRole,
     to_session_id: &str,
     to_role: PlanTaskSessionRole,
+    attempt_count: u32,
 ) -> Result<()> {
     if let Some(plan_task_id) = task.plan_task_id.as_deref() {
+        let attempt_id = delegated_attempt_id(plan_task_id, attempt_count);
         store.relink_plan_task_session(
             NewPlanTaskSession {
                 task_id: plan_task_id,
                 agent,
                 session_id: from_session_id,
                 role: from_role,
+                attempt_id: Some(&attempt_id),
+                attempt_count: i64::from(attempt_count),
             },
             to_session_id,
             to_role,
@@ -2910,11 +2935,14 @@ fn record_plan_task_result_in_store(
         && !is_runtime_placeholder_session_id(session_id)
         && !result_session_already_linked
     {
+        let attempt_id = delegated_attempt_id(plan_task_id, result.attempt_count);
         store.link_plan_task_session(NewPlanTaskSession {
             task_id: plan_task_id,
             agent: task.target_agent,
             session_id,
             role: PlanTaskSessionRole::Runtime,
+            attempt_id: Some(&attempt_id),
+            attempt_count: i64::from(result.attempt_count),
         })?;
     }
     Ok(())
@@ -3325,6 +3353,7 @@ mod tests {
             Agent::Codex,
             "delegated-session-1",
             PlanTaskSessionRole::Delegated,
+            1,
         )
         .unwrap();
         let result = test_task_result(

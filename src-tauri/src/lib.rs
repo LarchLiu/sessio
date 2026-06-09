@@ -968,6 +968,8 @@ fn link_plan_task_session(
             agent: req.agent,
             session_id: &req.session_id,
             role: req.role,
+            attempt_id: None,
+            attempt_count: 1,
         })
         .map_err(|e| e.to_string())?;
     let project_id = thread_id

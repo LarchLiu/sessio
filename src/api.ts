@@ -308,6 +308,9 @@ export interface PlanTaskSessionInfo {
   agent: Agent;
   sessionId: string;
   role: PlanTaskSessionRole;
+  attemptId?: string;
+  attemptCount: number;
+  supersededAt?: number;
   createdAt: number;
   updatedAt: number;
 }

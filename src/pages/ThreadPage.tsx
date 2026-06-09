@@ -512,15 +512,22 @@ function AstraPlanTaskRow({
 
 function AstraPlanTaskSessions({ sessions }: { sessions: PlanTaskSessionInfo[] }) {
   const { t } = useI18n();
-  const visible = sessions.slice(0, 3);
+  const ordered = [...sessions].sort((a, b) => {
+    const superseded = Number(Boolean(a.supersededAt)) - Number(Boolean(b.supersededAt));
+    if (superseded !== 0) return superseded;
+    return (a.attemptCount || 1) - (b.attemptCount || 1);
+  });
+  const visible = ordered.slice(0, 3);
   const hiddenCount = sessions.length - visible.length;
   return (
     <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
       {visible.map((session) => (
         <span
-          key={`${session.agent}:${session.sessionId}:${session.role}`}
-          title={`${t(`astra.session_role.${session.role}`)}\n${AGENT_LABEL[session.agent]}\n${session.sessionId}`}
-          className="inline-flex max-w-full items-center gap-1 rounded bg-ink/[0.045] px-1.5 py-0.5 text-meta text-ink/40"
+          key={`${session.agent}:${session.sessionId}:${session.role}:${session.attemptCount || 1}`}
+          title={`${t(`astra.session_role.${session.role}`)}\n${AGENT_LABEL[session.agent]}\n${session.sessionId}\n${session.attemptId || `attempt-${session.attemptCount || 1}`}`}
+          className={`inline-flex max-w-full items-center gap-1 rounded bg-ink/[0.045] px-1.5 py-0.5 text-meta text-ink/40${
+            session.supersededAt ? " opacity-60" : ""
+          }`}
         >
           <AgentGlyph agent={session.agent} className="h-3 w-3 shrink-0" />
           <span className="shrink-0">{t(`astra.session_role.${session.role}`)}</span>

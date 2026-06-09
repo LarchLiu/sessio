@@ -105,6 +105,8 @@ pub struct NewPlanTaskSession<'a> {
     pub agent: Agent,
     pub session_id: &'a str,
     pub role: PlanTaskSessionRole,
+    pub attempt_id: Option<&'a str>,
+    pub attempt_count: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +354,9 @@ pub trait SessionStore: Send + Sync {
         for round in &plan_rounds {
             for task in &round.tasks {
                 for task_session in &task.sessions {
+                    if task_session.superseded_at.is_some() {
+                        continue;
+                    }
                     let session = session_lookup
                         .get(&(task_session.agent, task_session.session_id.clone()))
                         .cloned();

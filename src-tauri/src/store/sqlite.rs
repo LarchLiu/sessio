@@ -728,12 +728,15 @@ CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_agent_participant
     ON thread_plan_tasks(agent_participant_id);
 
 CREATE TABLE IF NOT EXISTS thread_plan_task_sessions (
-    task_id    TEXT NOT NULL,
-    agent      TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    role       TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
+    task_id       TEXT NOT NULL,
+    agent         TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    attempt_id    TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 1,
+    superseded_at INTEGER,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
     PRIMARY KEY(task_id, agent, session_id, role),
     CHECK(role IN ('primary', 'delegated', 'runtime', 'planner', 'synthesis', 'cross_check', 'diagnostic')),
     FOREIGN KEY(task_id) REFERENCES thread_plan_tasks(id) ON DELETE CASCADE
@@ -743,6 +746,8 @@ CREATE INDEX IF NOT EXISTS idx_thread_plan_task_sessions_task
     ON thread_plan_task_sessions(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_thread_plan_task_sessions_session
     ON thread_plan_task_sessions(agent, session_id);
+CREATE INDEX IF NOT EXISTS idx_thread_plan_task_sessions_attempt
+    ON thread_plan_task_sessions(task_id, attempt_count, created_at);
 "#;
 
 // Backfill for pre-v1 (v0.3.2) databases whose sessions table predates the
@@ -783,6 +788,16 @@ ALTER TABLE thread_plan_tasks ADD COLUMN agent_participant_id TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_thread_plan_tasks_agent_participant
     ON thread_plan_tasks(agent_participant_id);
+"#;
+
+// v7: persist Astra delegated attempt identity on plan-task session refs and
+// keep superseded runtime placeholders instead of deleting them.
+const SCHEMA_V7: &str = r#"
+ALTER TABLE thread_plan_task_sessions ADD COLUMN attempt_id TEXT;
+ALTER TABLE thread_plan_task_sessions ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE thread_plan_task_sessions ADD COLUMN superseded_at INTEGER;
+CREATE INDEX IF NOT EXISTS idx_thread_plan_task_sessions_attempt
+    ON thread_plan_task_sessions(task_id, attempt_count, created_at);
 "#;
 
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
@@ -870,6 +885,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         let _ = conn.execute_batch(SCHEMA_V6);
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)",
+            [],
+        )?;
+    }
+    if current < 7 {
+        let _ = conn.execute_batch(SCHEMA_V7);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)",
             [],
         )?;
     }
@@ -2230,7 +2252,12 @@ fn stable_thread_id(project_id: &str, goal: &str, now: i64) -> String {
     format!("thread-{}", &hex::encode(hasher.finalize())[..16])
 }
 
-fn stable_thread_agent_participant_id(thread_id: &str, agent: Agent, model: &str, order: i64) -> String {
+fn stable_thread_agent_participant_id(
+    thread_id: &str,
+    agent: Agent,
+    model: &str,
+    order: i64,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(thread_id.as_bytes());
@@ -2573,8 +2600,11 @@ fn plan_task_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanT
         agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::Codex),
         session_id: row.get(2)?,
         role: PlanTaskSessionRole::from_db_str(&role_raw).unwrap_or(PlanTaskSessionRole::Runtime),
-        created_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        attempt_id: row.get(4)?,
+        attempt_count: row.get(5)?,
+        superseded_at: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -2767,10 +2797,10 @@ fn load_plan_tasks(conn: &Connection, round_id: &str) -> Result<Vec<PlanTaskInfo
 
 fn load_plan_task_sessions(conn: &Connection, task_id: &str) -> Result<Vec<PlanTaskSessionInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT task_id, agent, session_id, role, created_at, updated_at
+        "SELECT task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
          FROM thread_plan_task_sessions
          WHERE task_id = ?
-         ORDER BY created_at ASC, role ASC, agent ASC, session_id ASC",
+         ORDER BY attempt_count ASC, created_at ASC, role ASC, agent ASC, session_id ASC",
     )?;
     let rows = stmt.query_map(params![task_id], plan_task_session_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -5707,7 +5737,14 @@ impl SessionStore for SqliteStore {
         goal: &str,
         description: Option<&str>,
     ) -> Result<ThreadInfo> {
-        self.create_thread_with_options(project_id, goal, description, ThreadKind::Workflow, &[], &[])
+        self.create_thread_with_options(
+            project_id,
+            goal,
+            description,
+            ThreadKind::Workflow,
+            &[],
+            &[],
+        )
     }
 
     fn create_thread_with_options(
@@ -6003,22 +6040,49 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         load_plan_task_by_id(&conn, session.task_id)?;
         let now = now_ms();
+        let attempt_count = session.attempt_count.max(1);
+        let attempt_id = session
+            .attempt_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         conn.execute(
-            "INSERT INTO thread_plan_task_sessions (task_id, agent, session_id, role, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "UPDATE thread_plan_task_sessions
+             SET superseded_at = COALESCE(superseded_at, ?), updated_at = ?
+             WHERE task_id = ? AND agent = ? AND role = ? AND attempt_count = ?
+               AND session_id != ? AND superseded_at IS NULL",
+            params![
+                now,
+                now,
+                session.task_id,
+                session.agent.as_str(),
+                session.role.as_str(),
+                attempt_count,
+                session.session_id,
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO thread_plan_task_sessions (
+                task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
              ON CONFLICT(task_id, agent, session_id, role) DO UPDATE SET
+                attempt_id = excluded.attempt_id,
+                attempt_count = excluded.attempt_count,
+                superseded_at = excluded.superseded_at,
                 updated_at = excluded.updated_at",
             params![
                 session.task_id,
                 session.agent.as_str(),
                 session.session_id,
                 session.role.as_str(),
+                attempt_id,
+                attempt_count,
                 now,
                 now,
             ],
         )?;
         conn.query_row(
-            "SELECT task_id, agent, session_id, role, created_at, updated_at
+            "SELECT task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
              FROM thread_plan_task_sessions
              WHERE task_id = ? AND agent = ? AND session_id = ? AND role = ?",
             params![
@@ -6042,46 +6106,80 @@ impl SessionStore for SqliteStore {
         let tx = conn.transaction()?;
         load_plan_task_by_id(&tx, from.task_id)?;
         let now = now_ms();
-        let existing_created_at = tx
+        let existing_attempt = tx
             .query_row(
-                "SELECT MIN(created_at)
+                "SELECT attempt_id, attempt_count, created_at
                  FROM thread_plan_task_sessions
-                 WHERE task_id = ? AND agent = ? AND role = ?",
+                 WHERE task_id = ? AND agent = ? AND session_id = ? AND role = ?",
                 params![
                     from.task_id,
                     from.agent.as_str(),
+                    from.session_id,
                     from.role.as_str(),
                 ],
-                |row| row.get::<_, Option<i64>>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
-            .optional()?
-            .flatten();
+            .optional()?;
+        let attempt_id = existing_attempt
+            .as_ref()
+            .and_then(|(attempt_id, _, _)| attempt_id.as_deref())
+            .or_else(|| {
+                from.attempt_id
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            });
+        let attempt_count = existing_attempt
+            .as_ref()
+            .map(|(_, attempt_count, _)| *attempt_count)
+            .unwrap_or_else(|| from.attempt_count.max(1));
+        let existing_created_at = existing_attempt
+            .as_ref()
+            .map(|(_, _, created_at)| *created_at)
+            .unwrap_or(now);
         tx.execute(
-            "DELETE FROM thread_plan_task_sessions
-             WHERE task_id = ? AND agent = ? AND role = ? AND session_id != ?",
+            "UPDATE thread_plan_task_sessions
+             SET superseded_at = COALESCE(superseded_at, ?), updated_at = ?
+             WHERE task_id = ? AND agent = ? AND role = ? AND attempt_count = ?
+               AND session_id != ? AND superseded_at IS NULL",
             params![
+                now,
+                now,
                 from.task_id,
                 from.agent.as_str(),
                 from.role.as_str(),
+                attempt_count,
                 to_session_id,
             ],
         )?;
         tx.execute(
-            "INSERT INTO thread_plan_task_sessions (task_id, agent, session_id, role, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO thread_plan_task_sessions (
+                task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
              ON CONFLICT(task_id, agent, session_id, role) DO UPDATE SET
+                attempt_id = excluded.attempt_id,
+                attempt_count = excluded.attempt_count,
+                superseded_at = excluded.superseded_at,
                 updated_at = excluded.updated_at",
             params![
                 from.task_id,
                 from.agent.as_str(),
                 to_session_id,
                 to_role.as_str(),
-                existing_created_at.unwrap_or(now),
+                attempt_id,
+                attempt_count,
+                existing_created_at,
                 now,
             ],
         )?;
         let linked = tx.query_row(
-            "SELECT task_id, agent, session_id, role, created_at, updated_at
+            "SELECT task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
              FROM thread_plan_task_sessions
              WHERE task_id = ? AND agent = ? AND session_id = ? AND role = ?",
             params![
@@ -8300,6 +8398,32 @@ mod migration_tests {
         }
     }
 
+    fn assert_current_plan_task_session_columns(conn: &Connection) {
+        let columns: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(thread_plan_task_sessions)")
+                .unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        for column in [
+            "task_id",
+            "agent",
+            "session_id",
+            "role",
+            "attempt_id",
+            "attempt_count",
+            "superseded_at",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                columns.contains(&column.to_string()),
+                "{column} should exist"
+            );
+        }
+    }
+
     // Verify a synthetic v0.3.2-era schema migrates cleanly into the current
     // shape.
     #[test]
@@ -8346,7 +8470,7 @@ mod migration_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_schema_version, 6);
+        assert_eq!(latest_schema_version, 7);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -8383,7 +8507,9 @@ mod migration_tests {
         assert_eq!(thread_agents_table, 1);
 
         let plan_task_columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(thread_plan_tasks)").unwrap();
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(thread_plan_tasks)")
+                .unwrap();
             let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
@@ -8440,6 +8566,7 @@ mod migration_tests {
         assert_eq!(astra_table, 1);
 
         assert_current_astra_run_columns(&conn);
+        assert_current_plan_task_session_columns(&conn);
 
         let thread_assistants_table: i64 = conn
             .query_row(
@@ -8540,6 +8667,7 @@ mod migration_tests {
         assert!(snapshot_columns.contains(&"history_cache_version".to_string()));
 
         assert_current_astra_run_columns(&conn);
+        assert_current_plan_task_session_columns(&conn);
 
         for table in [
             "agents",
@@ -8575,6 +8703,7 @@ mod migration_tests {
             "idx_thread_plan_tasks_assistant",
             "idx_thread_plan_task_sessions_task",
             "idx_thread_plan_task_sessions_session",
+            "idx_thread_plan_task_sessions_attempt",
         ] {
             let exists: i64 = conn
                 .query_row(
@@ -8773,6 +8902,8 @@ mod migration_tests {
                 agent: Agent::Codex,
                 session_id: "delegated-placeholder",
                 role: PlanTaskSessionRole::Delegated,
+                attempt_id: None,
+                attempt_count: 1,
             })
             .unwrap();
 
@@ -10573,27 +10704,36 @@ mod migration_tests {
                 agent: Agent::Codex,
                 session_id: "runtime-session-1",
                 role: PlanTaskSessionRole::Runtime,
+                attempt_id: Some("attempt-1"),
+                attempt_count: 1,
             })
             .unwrap();
         assert_eq!(session_ref.role, PlanTaskSessionRole::Runtime);
+        assert_eq!(session_ref.attempt_id.as_deref(), Some("attempt-1"));
+        assert_eq!(session_ref.attempt_count, 1);
         store
             .link_plan_task_session(NewPlanTaskSession {
                 task_id: &parallel.tasks[0].id,
                 agent: Agent::Codex,
                 session_id: "runtime-session-stale",
                 role: PlanTaskSessionRole::Runtime,
+                attempt_id: Some("attempt-1"),
+                attempt_count: 1,
             })
             .unwrap();
         let parallel = store.get_plan_round(&parallel.id).unwrap().unwrap();
         assert_eq!(parallel.tasks[0].sessions.len(), 2);
+        let first_runtime = parallel.tasks[0]
+            .sessions
+            .iter()
+            .find(|session| session.session_id == "runtime-session-1")
+            .unwrap();
+        assert!(first_runtime.superseded_at.is_some());
         assert!(parallel.tasks[0]
             .sessions
             .iter()
-            .any(|session| session.session_id == "runtime-session-1"));
-        assert!(parallel.tasks[0]
-            .sessions
-            .iter()
-            .any(|session| session.session_id == "runtime-session-stale"));
+            .any(|session| session.session_id == "runtime-session-stale"
+                && session.superseded_at.is_none()));
         let relinked = store
             .relink_plan_task_session(
                 NewPlanTaskSession {
@@ -10601,6 +10741,8 @@ mod migration_tests {
                     agent: Agent::Codex,
                     session_id: "runtime-session-1",
                     role: PlanTaskSessionRole::Runtime,
+                    attempt_id: Some("attempt-1"),
+                    attempt_count: 1,
                 },
                 "agent-session-1",
                 PlanTaskSessionRole::Delegated,
@@ -10608,13 +10750,19 @@ mod migration_tests {
             .unwrap();
         assert_eq!(relinked.session_id, "agent-session-1");
         assert_eq!(relinked.role, PlanTaskSessionRole::Delegated);
+        assert_eq!(relinked.attempt_id.as_deref(), Some("attempt-1"));
         let parallel = store.get_plan_round(&parallel.id).unwrap().unwrap();
-        assert_eq!(parallel.tasks[0].sessions.len(), 1);
-        assert_eq!(parallel.tasks[0].sessions[0].session_id, "agent-session-1");
-        assert_eq!(
-            parallel.tasks[0].sessions[0].role,
-            PlanTaskSessionRole::Delegated
-        );
+        assert_eq!(parallel.tasks[0].sessions.len(), 3);
+        assert!(parallel.tasks[0].sessions.iter().any(|session| {
+            session.session_id == "agent-session-1"
+                && session.role == PlanTaskSessionRole::Delegated
+                && session.superseded_at.is_none()
+        }));
+        assert!(parallel.tasks[0].sessions.iter().any(|session| {
+            session.session_id == "runtime-session-1"
+                && session.role == PlanTaskSessionRole::Runtime
+                && session.superseded_at.is_some()
+        }));
 
         store
             .update_assistant(
@@ -10961,6 +11109,8 @@ mod migration_tests {
                 agent: Agent::Codex,
                 session_id: &stage_task_session.id,
                 role: PlanTaskSessionRole::Runtime,
+                attempt_id: None,
+                attempt_count: 1,
             })
             .unwrap();
 

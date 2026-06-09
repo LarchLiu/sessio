@@ -857,8 +857,18 @@ pub struct PlanTaskSessionInfo {
     pub agent: Agent,
     pub session_id: String,
     pub role: PlanTaskSessionRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default = "default_plan_task_session_attempt_count")]
+    pub attempt_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+fn default_plan_task_session_attempt_count() -> i64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
