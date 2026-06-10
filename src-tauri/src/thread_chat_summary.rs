@@ -364,6 +364,235 @@ mod tests {
     }
 
     #[test]
+    fn summary_resolves_direct_stage_plan_and_astra_sessions() {
+        let path = temp_db_path("sessio-thread-chat-summary-sources");
+        let store = Arc::new(SqliteStore::open(&path).unwrap());
+        store.init().unwrap();
+        let project_dir = temp_project_path("sessio-thread-chat-summary-sources-project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project = store
+            .create_project(
+                &project_dir.to_string_lossy(),
+                "thread-chat-summary-sources",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let assistant = store
+            .create_assistant(crate::store::NewAssistant {
+                name: "Summary Assistant",
+                agent: crate::models::AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "workspace-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: None,
+                color: None,
+                assistant_type: crate::models::AssistantType::Custom,
+                process_template_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Summarize every source", None)
+            .unwrap();
+        let stage_template = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let thread_stage = store
+            .add_thread_stage(
+                &thread.id,
+                &stage_template.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+
+        let direct_session = SessionInfo {
+            id: "direct-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 2,
+            rename_title: None,
+            title: Some("Direct thread chat".to_string()),
+            first_user_message: Some("Thread note".to_string()),
+            file_path: project_dir.join("direct.jsonl").to_string_lossy().to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        let stage_runtime_session = SessionInfo {
+            id: "stage-runtime-session".to_string(),
+            started_at: Some(30),
+            updated_at: Some(40),
+            message_count: 4,
+            title: Some("Stage runtime".to_string()),
+            first_user_message: Some("Stage note".to_string()),
+            file_path: project_dir
+                .join("stage-runtime.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            ..direct_session.clone()
+        };
+        let planner_session = SessionInfo {
+            id: "planner-session".to_string(),
+            agent: Agent::AstraPi,
+            started_at: Some(50),
+            updated_at: Some(60),
+            message_count: 1,
+            title: Some("Planner trace".to_string()),
+            first_user_message: Some("Plan note".to_string()),
+            file_path: project_dir.join("planner.jsonl").to_string_lossy().to_string(),
+            ..direct_session.clone()
+        };
+        for session in [&direct_session, &stage_runtime_session, &planner_session] {
+            store.upsert_session(&session.file_path, session).unwrap();
+        }
+        store
+            .link_thread_session(&thread.id, Agent::Codex, &direct_session.id)
+            .unwrap();
+        store
+            .link_stage_session(&thread_stage.id, Agent::Codex, &stage_runtime_session.id)
+            .unwrap();
+
+        let round = store
+            .create_plan_round(crate::store::NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: None,
+                round_index: None,
+                summary: Some("Summary round"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Astra,
+                status: PlanRoundStatus::Running,
+                tasks: vec![crate::store::NewPlanTask {
+                    thread_stage_id: Some(&thread_stage.id),
+                    assistant_id: Some(&assistant.id),
+                    agent_participant_id: None,
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Runtime task",
+                    prompt: "Do runtime work",
+                    expected_output: None,
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Running,
+                }],
+            })
+            .unwrap();
+        store
+            .link_plan_task_session(crate::store::NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: &stage_runtime_session.id,
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: None,
+                attempt_count: 1,
+            })
+            .unwrap();
+        store
+            .link_plan_task_session(crate::store::NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Gemini,
+                session_id: "missing-runtime-session",
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: None,
+                attempt_count: 1,
+            })
+            .unwrap();
+
+        store
+            .upsert_astra_run(&AstraRunRecord {
+                run_id: "summary-run".to_string(),
+                thread_id: thread.id.clone(),
+                project_id: project.id.clone(),
+                project_path: project.path.clone(),
+                status: "completed".to_string(),
+                mode: "auto".to_string(),
+                planner_backend: Some("astra_pi_acp".to_string()),
+                round_index: Some(0),
+                round_limit: 3,
+                terminal_reason: None,
+                last_error_code: None,
+                last_error_message: None,
+                internal_planner_sessions: vec![
+                    AstraRunSessionRecord {
+                        run_id: "summary-run".to_string(),
+                        agent: Agent::AstraPi,
+                        session_id: planner_session.id.clone(),
+                        role: PlanTaskSessionRole::Planner,
+                        sort_order: 0,
+                        created_at: 70,
+                        updated_at: 80,
+                    },
+                    AstraRunSessionRecord {
+                        run_id: "summary-run".to_string(),
+                        agent: Agent::AstraPi,
+                        session_id: "missing-planner-session".to_string(),
+                        role: PlanTaskSessionRole::Planner,
+                        sort_order: 1,
+                        created_at: 81,
+                        updated_at: 82,
+                    },
+                ],
+                run_diagnostics_json: "[]".to_string(),
+                error: None,
+                created_at: 70,
+                updated_at: 82,
+            })
+            .unwrap();
+
+        let cache = ThreadChatSummaryCache::new(store.clone());
+        let summaries = cache.list_project(&project.id).unwrap();
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.thread_id == thread.id)
+            .unwrap();
+
+        assert_eq!(summary.goal, thread.goal);
+        assert!(summary.time >= 82);
+        assert!(summary.time >= summary.updated_at);
+        assert_eq!(summary.sessions.len(), 3);
+        assert_eq!(
+            summary
+                .sessions
+                .iter()
+                .map(|session| (session.agent, session.id.as_str()))
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([
+                (Agent::Codex, "direct-session"),
+                (Agent::Codex, "stage-runtime-session"),
+                (Agent::AstraPi, "planner-session"),
+            ])
+        );
+        assert_eq!(
+            summary.session_keys.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([
+                session_identity(Agent::Codex, "direct-session"),
+                session_identity(Agent::Codex, "stage-runtime-session"),
+                session_identity(Agent::Gemini, "missing-runtime-session"),
+                session_identity(Agent::AstraPi, "planner-session"),
+                session_identity(Agent::AstraPi, "missing-planner-session"),
+            ])
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
     fn collect_referenced_session_keys_skips_loaded_and_superseded_sessions() {
         let loaded = HashMap::from([(
             (Agent::Claude, "loaded-session".to_string()),
