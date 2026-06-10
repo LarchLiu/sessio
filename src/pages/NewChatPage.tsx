@@ -3,11 +3,11 @@ import {
   Brain,
   Check,
   Folder,
-  GitBranch,
   GripVertical,
   MessageSquare,
   Swords,
   Trash2,
+  Workflow,
 } from "lucide-react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
@@ -365,7 +365,7 @@ export default function NewChatPage({
                     minMenuWidth={180}
                   />
                 </div>
-                <NewChatMenuButton icon={GitBranch} label="main" text />
+                <NewChatMenuButton icon={Workflow} label="main" text />
               </BottomRow>
             }
           />
@@ -701,7 +701,7 @@ function AssistantSelectChip({
 function threadKindIcon(kind: ThreadKind, className: string) {
   switch (kind) {
     case "process":
-      return <GitBranch className={className} />;
+      return <Workflow className={className} />;
     case "teamwork":
       return <Robot3LineIcon className={className} />;
     case "brainstorm":

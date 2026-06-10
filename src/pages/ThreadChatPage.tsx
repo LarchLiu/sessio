@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bot, Folder, GitBranch, LoaderCircle } from "lucide-react";
+import { Bot, Folder, LoaderCircle, Workflow } from "lucide-react";
 import type {
   ProjectInfo,
   RuntimeAgentMetadata,
@@ -321,7 +321,7 @@ export default function ThreadChatPage({
                     emptyContent={t("thread.empty")}
                   />
                 </div>
-                <NewChatMenuButton icon={GitBranch} label="main" text />
+                <NewChatMenuButton icon={Workflow} label="main" text />
               </div>
             }
           />

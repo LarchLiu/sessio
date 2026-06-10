@@ -9,7 +9,7 @@ import {
 import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { Check, ChevronDown, Copy, GitBranch, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
 import type { Agent, AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
 import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
@@ -282,7 +282,7 @@ export function ProjectWorkbenchPage({
   const projectViewTabs = useMemo<SegmentedTabItem<ProjectView>[]>(
     () => [
       { value: "threads", label: t("thread.title"), icon: HashIcon },
-      { value: "stages", label: t("project.processTemplateId"), icon: GitBranch },
+      { value: "stages", label: t("project.processTemplateId"), icon: Workflow },
       { value: "assistants", label: t("assistant.title"), icon: Robot3LineIcon },
     ],
     [t],

@@ -32,7 +32,7 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, Check, Circle, Download, GitBranch, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, Circle, Download, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2, Workflow } from "lucide-react";
 import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, ProcessTemplateInfo } from "../api";
 import {
   createProcessTemplate,
@@ -113,7 +113,7 @@ export default function SettingsPage({
     { id: "general" as const, label: t("settings.general"), icon: Settings2 },
     { id: "agents" as const, label: t("agent.title"), icon: AiGenerate2Icon },
     { id: "assistants" as const, label: t("assistant.title"), icon: Robot3LineIcon },
-    { id: "processTemplates" as const, label: t("settings.process_templates"), icon: GitBranch },
+    { id: "processTemplates" as const, label: t("settings.process_templates"), icon: Workflow },
   ];
   const sectionTitle = navItems.find((item) => item.id === section)?.label ?? t("settings.general");
 
