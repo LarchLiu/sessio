@@ -3,6 +3,7 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -76,6 +77,7 @@ function readViewMode(): ViewMode {
 
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+const THREAD_SUMMARY_REFRESH_DEBOUNCE_MS = 250;
 
 async function revealMainWindow(): Promise<void> {
   try {
@@ -132,6 +134,7 @@ export default function App() {
   const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
   const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
   const [threadChatSummaries, setThreadChatSummaries] = useState<ThreadChatSummaryInfo[]>([]);
+  const threadSummaryRefreshTimeoutRef = useRef<number | null>(null);
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
@@ -327,6 +330,26 @@ export default function App() {
     });
   }, []);
 
+  const scheduleThreadSummaryRefresh = useCallback(() => {
+    if (threadSummaryRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(threadSummaryRefreshTimeoutRef.current);
+    }
+    threadSummaryRefreshTimeoutRef.current = window.setTimeout(() => {
+      threadSummaryRefreshTimeoutRef.current = null;
+      refreshThreadSummaries(null).catch((err) => {
+        console.warn("refresh thread chat summaries failed", err);
+      });
+    }, THREAD_SUMMARY_REFRESH_DEBOUNCE_MS);
+  }, [refreshThreadSummaries]);
+
+  useEffect(() => {
+    return () => {
+      if (threadSummaryRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(threadSummaryRefreshTimeoutRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (projects.length === 0) {
       setThreadChatSummaries([]);
@@ -353,16 +376,14 @@ export default function App() {
       });
     });
     const unlistenSessions = listen("sessions_index_updated", () => {
-      refreshThreadSummaries(null).catch((err) => {
-        if (!cancelled) console.warn("refresh thread chat summaries failed", err);
-      });
+      scheduleThreadSummaryRefresh();
     });
     return () => {
       cancelled = true;
       unlistenThreads.then((f) => f()).catch(() => {});
       unlistenSessions.then((f) => f()).catch(() => {});
     };
-  }, [projects.length, refreshThreadSummaries]);
+  }, [projects.length, refreshThreadSummaries, scheduleThreadSummaryRefresh]);
 
   const recentForMenu = useMemo<TrayRecentEntry[]>(() => {
     const linkedSessionKeys = new Set<string>();
@@ -607,6 +628,7 @@ export default function App() {
       projectGroups={projectGroups}
       expandedProjects={expandedProjects}
       expandedProjectSessions={expandedProjectSessions}
+      threadChatSummaries={threadChatSummaries}
       selectedKey={selectedKey}
       selectedIdentityKey={selectedIdentityKey}
       selectedProjectId={selectedProjectId}

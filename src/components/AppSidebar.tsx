@@ -1,6 +1,5 @@
-import { type MouseEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type MouseEvent, type ReactNode, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { listen } from "@tauri-apps/api/event";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
@@ -25,10 +24,8 @@ import {
   ProcessTemplateInfo,
   addExistingProject,
   createDefaultProject,
-  listThreadChatSummaries,
   listProcessTemplateStages,
   listProcessTemplates,
-  refreshThreadChatSummaries,
   type ProjectStageInfo,
   type ThreadChatSummaryInfo,
 } from "../api";
@@ -77,6 +74,7 @@ type AppSidebarProps = {
   projectGroups: ProjectGroup[];
   expandedProjects: Set<string>;
   expandedProjectSessions: Set<string>;
+  threadChatSummaries: ThreadChatSummaryInfo[];
   selectedKey: string | null;
   selectedIdentityKey: string | null;
   selectedProjectId: string | null;
@@ -116,6 +114,7 @@ export default function AppSidebar({
   projectGroups,
   expandedProjects,
   expandedProjectSessions,
+  threadChatSummaries,
   selectedKey,
   selectedIdentityKey,
   selectedProjectId,
@@ -142,54 +141,15 @@ export default function AppSidebar({
   onError,
 }: AppSidebarProps) {
   const { t } = useI18n();
-  const [threadChatSummaries, setThreadChatSummaries] = useState<Record<string, ThreadChatSummaryInfo[]>>({});
-
-  const refreshProjectThreadSummaries = (project: ProjectGroup, force = false) => {
-    const load = force
-      ? refreshThreadChatSummaries(project.project.id)
-      : listThreadChatSummaries(project.project.id);
-    load
-      .then((summaries) => {
-        setThreadChatSummaries((prev) => ({ ...prev, [project.key]: summaries }));
-      })
-      .catch((err) => onError(String(err)));
-  };
-
-  useEffect(() => {
-    const unlisten = listen<{
-      projectId?: string | null;
-      threadId?: string | null;
-    }>("threads_updated", (event) => {
-      const changedProjectId = event.payload?.projectId ?? null;
-      for (const project of projectGroups) {
-        const shouldRefreshSummaries =
-          changedProjectId === project.project.id ||
-          (!changedProjectId && (expandedProjects.has(project.key) || Boolean(threadChatSummaries[project.key])));
-        if (shouldRefreshSummaries) {
-          refreshProjectThreadSummaries(project, true);
-        }
-      }
-    });
-    const sessionsUnlisten = listen("sessions_index_updated", () => {
-      for (const project of projectGroups) {
-        if (expandedProjects.has(project.key) || threadChatSummaries[project.key]) {
-          refreshProjectThreadSummaries(project, true);
-        }
-      }
-    });
-    return () => {
-      unlisten.then((f) => f()).catch(() => {});
-      sessionsUnlisten.then((f) => f()).catch(() => {});
-    };
-  }, [expandedProjects, projectGroups, threadChatSummaries]);
-
-  useEffect(() => {
-    for (const project of projectGroups) {
-      if (!expandedProjects.has(project.key)) continue;
-      if (threadChatSummaries[project.key]) continue;
-      refreshProjectThreadSummaries(project);
+  const threadChatSummariesByProject = useMemo(() => {
+    const grouped = new Map<string, ThreadChatSummaryInfo[]>();
+    for (const summary of threadChatSummaries) {
+      const current = grouped.get(summary.projectId);
+      if (current) current.push(summary);
+      else grouped.set(summary.projectId, [summary]);
     }
-  }, [expandedProjects, projectGroups, threadChatSummaries]);
+    return grouped;
+  }, [threadChatSummaries]);
 
   return (
     <aside
@@ -262,7 +222,7 @@ export default function AppSidebar({
                 liveState={liveState}
                 runtimeSessionAliases={runtimeSessionAliases}
                 unreadSessionIds={unreadSessionIds}
-                threadChatSummaries={threadChatSummaries[project.key] ?? []}
+                threadChatSummaries={threadChatSummariesByProject.get(project.project.id) ?? []}
                 onSelectProject={() => onToggleProjectExpanded(project.key)}
                 onOpenKanban={() => onOpenKanban(project)}
                 onNewChat={() => onNewProjectChat(project)}
