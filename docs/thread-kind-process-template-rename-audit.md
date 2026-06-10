@@ -63,3 +63,18 @@ All product schema references are in `src-tauri/src/store/sqlite.rs`.
 - Historical/planning docs may keep quoted old terms where they explain migration history.
 - The implementation plan itself intentionally mentions old terms while describing the rename.
 - Test titles and fixture strings may mention old terms only when they are historical free text, not product identifiers or persisted schema names.
+
+## Phase 7 Verification
+
+Completed verification after the process-template rename and process execution phases:
+
+- Residual product identifier search:
+  - `WorkflowInfo`, `WorkflowType`, `workflowId`, `listWorkflows`, `listWorkflowStages`, `ThreadKind::Workflow`, and `kind === "workflow"` no longer appear in product source.
+  - Remaining `workflows` / `workflow_id` source matches are confined to SQLite regression assertions that prove legacy persisted names are absent from the revised v5 schema.
+  - Remaining old workflow terms in docs are intentional rename-plan/audit references.
+- Frontend verification:
+  - `pnpm run check` passed.
+  - `pnpm run build` passed with only existing Vite chunk-size/dynamic-import warnings.
+- Rust verification:
+  - `cargo test --manifest-path src-tauri/Cargo.toml process --lib` passed.
+  - `cargo test --manifest-path src-tauri/Cargo.toml --lib` passed: 273 tests.
