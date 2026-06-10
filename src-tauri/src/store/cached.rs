@@ -720,6 +720,28 @@ impl SessionStore for CachedStore {
             .get_thread_work_snapshot(child_agent, child_session_id)
     }
 
+    fn replace_astra_run_sessions(
+        &self,
+        run_id: &str,
+        sessions: &[crate::store::AstraRunSessionRecord],
+    ) -> Result<()> {
+        self.inner.replace_astra_run_sessions(run_id, sessions)
+    }
+
+    fn list_astra_run_sessions(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::store::AstraRunSessionRecord>> {
+        self.inner.list_astra_run_sessions(run_id)
+    }
+
+    fn list_astra_run_sessions_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<crate::store::AstraRunSessionRecord>> {
+        self.inner.list_astra_run_sessions_for_thread(thread_id)
+    }
+
     fn upsert_astra_run(&self, run: &AstraRunRecord) -> Result<()> {
         self.inner.upsert_astra_run(run)
     }

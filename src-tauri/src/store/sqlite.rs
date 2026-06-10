@@ -23,11 +23,11 @@ use crate::models::{
     ThreadInfo, ThreadKind,
 };
 use crate::store::{
-    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
-    IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTask, NewPlanTaskSession,
-    PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
-    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
-    ThreadWorkSnapshotRecord,
+    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
+    IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTask,
+    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
+    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionRef,
+    SessionStore, ThreadWorkSnapshotRecord,
 };
 
 pub struct SqliteStore {
@@ -650,7 +650,6 @@ CREATE TABLE IF NOT EXISTS astra_runs (
     terminal_reason            TEXT,
     last_error_code            TEXT,
     last_error_message         TEXT,
-    internal_planner_session_ids_json  TEXT NOT NULL DEFAULT '[]',
     run_diagnostics_json               TEXT NOT NULL DEFAULT '[]',
     error                      TEXT,
     created_at                 INTEGER NOT NULL,
@@ -663,6 +662,25 @@ CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_updated
 
 CREATE INDEX IF NOT EXISTS idx_astra_runs_thread_active
     ON astra_runs(thread_id, status);
+
+CREATE TABLE IF NOT EXISTS astra_run_sessions (
+    run_id        TEXT NOT NULL,
+    agent         TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'planner',
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    PRIMARY KEY(run_id, agent, session_id, role),
+    CHECK(role IN ('planner')),
+    FOREIGN KEY(run_id) REFERENCES astra_runs(run_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_run
+    ON astra_run_sessions(run_id, sort_order, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_session
+    ON astra_run_sessions(agent, session_id);
 
 CREATE TABLE IF NOT EXISTS thread_plan_rounds (
     id           TEXT PRIMARY KEY,
@@ -767,10 +785,30 @@ const SCHEMA_CURRENT_SESSION_SKIP: &str = r#"
 ALTER TABLE sessions ADD COLUMN skip INTEGER NOT NULL DEFAULT 0;
 "#;
 
+const SCHEMA_CURRENT_ASTRA_RUN_SESSIONS: &str = r#"
+CREATE TABLE IF NOT EXISTS astra_run_sessions (
+    run_id        TEXT NOT NULL,
+    agent         TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'planner',
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    PRIMARY KEY(run_id, agent, session_id, role),
+    CHECK(role IN ('planner')),
+    FOREIGN KEY(run_id) REFERENCES astra_runs(run_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_run
+    ON astra_run_sessions(run_id, sort_order, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_session
+    ON astra_run_sessions(agent, session_id);
+"#;
+
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
     planner_backend, round_index, round_limit, terminal_reason,
-    last_error_code, last_error_message, internal_planner_session_ids_json,
-    run_diagnostics_json, error, created_at, updated_at";
+    last_error_code, last_error_message, run_diagnostics_json, error, created_at, updated_at";
 const ACTIVE_ASTRA_RUN_STATUS_SQL: &str =
     "'planning', 'thinking', 'awaiting_approval', 'dispatching', 'running'";
 
@@ -849,8 +887,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         seed_builtins(conn)?;
     }
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SKIP);
+    ensure_current_astra_run_sessions(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
+}
+
+fn ensure_current_astra_run_sessions(conn: &Connection) -> Result<()> {
+    Ok(conn.execute_batch(SCHEMA_CURRENT_ASTRA_RUN_SESSIONS)?)
 }
 
 /// Seed all builtin data in dependency order: process templates, their stages,
@@ -2665,7 +2708,9 @@ fn runtime_agent_selection_from_row(
     })
 }
 
-fn astra_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunRecord> {
+fn astra_run_from_row_without_sessions(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<AstraRunRecord> {
     Ok(AstraRunRecord {
         run_id: row.get(0)?,
         thread_id: row.get(1)?,
@@ -2679,12 +2724,106 @@ fn astra_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunRecor
         terminal_reason: row.get(9)?,
         last_error_code: row.get(10)?,
         last_error_message: row.get(11)?,
-        internal_planner_session_ids_json: row.get(12)?,
-        run_diagnostics_json: row.get(13)?,
-        error: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        internal_planner_sessions: Vec::new(),
+        run_diagnostics_json: row.get(12)?,
+        error: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
+}
+
+fn astra_run_session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AstraRunSessionRecord> {
+    let agent_raw: String = row.get(1)?;
+    let role_raw: String = row.get(3)?;
+    Ok(AstraRunSessionRecord {
+        run_id: row.get(0)?,
+        agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::AstraPi),
+        session_id: row.get(2)?,
+        role: PlanTaskSessionRole::from_db_str(&role_raw).unwrap_or(PlanTaskSessionRole::Planner),
+        sort_order: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+fn list_astra_run_sessions(conn: &Connection, run_id: &str) -> Result<Vec<AstraRunSessionRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT run_id, agent, session_id, role, sort_order, created_at, updated_at
+         FROM astra_run_sessions
+         WHERE run_id = ?
+         ORDER BY sort_order ASC, created_at ASC, session_id ASC",
+    )?;
+    let rows = stmt.query_map(params![run_id], astra_run_session_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn hydrate_astra_run_sessions(conn: &Connection, runs: &mut [AstraRunRecord]) -> Result<()> {
+    if runs.is_empty() {
+        return Ok(());
+    }
+    let run_ids = runs
+        .iter()
+        .map(|run| run.run_id.clone())
+        .collect::<Vec<_>>();
+    let mut sql = String::from(
+        "SELECT run_id, agent, session_id, role, sort_order, created_at, updated_at
+         FROM astra_run_sessions
+         WHERE run_id IN (",
+    );
+    let mut values = Vec::<SqlValue>::with_capacity(run_ids.len());
+    for (index, run_id) in run_ids.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('?');
+        values.push(SqlValue::from(run_id.clone()));
+    }
+    sql.push_str(") ORDER BY run_id ASC, sort_order ASC, created_at ASC, session_id ASC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), astra_run_session_from_row)?;
+    let mut grouped = HashMap::<String, Vec<AstraRunSessionRecord>>::new();
+    for row in rows {
+        let record = row?;
+        grouped
+            .entry(record.run_id.clone())
+            .or_default()
+            .push(record);
+    }
+    for run in runs {
+        run.internal_planner_sessions = grouped.remove(&run.run_id).unwrap_or_default();
+    }
+    Ok(())
+}
+
+fn replace_astra_run_sessions(
+    conn: &Connection,
+    run_id: &str,
+    sessions: &[AstraRunSessionRecord],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM astra_run_sessions WHERE run_id = ?",
+        params![run_id],
+    )?;
+    if sessions.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "INSERT INTO astra_run_sessions (
+            run_id, agent, session_id, role, sort_order, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )?;
+    for session in sessions {
+        stmt.execute(params![
+            run_id,
+            session.agent.as_str(),
+            session.session_id,
+            session.role.as_str(),
+            session.sort_order,
+            session.created_at,
+            session.updated_at,
+        ])?;
+    }
+    Ok(())
 }
 
 fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<AssistantInfo> {
@@ -7447,15 +7586,46 @@ impl SessionStore for SqliteStore {
         .map_err(Into::into)
     }
 
-    fn upsert_astra_run(&self, run: &AstraRunRecord) -> Result<()> {
+    fn replace_astra_run_sessions(
+        &self,
+        run_id: &str,
+        sessions: &[AstraRunSessionRecord],
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        replace_astra_run_sessions(&conn, run_id, sessions)
+    }
+
+    fn list_astra_run_sessions(&self, run_id: &str) -> Result<Vec<AstraRunSessionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        list_astra_run_sessions(&conn, run_id)
+    }
+
+    fn list_astra_run_sessions_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<AstraRunSessionRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.run_id, s.agent, s.session_id, s.role, s.sort_order, s.created_at, s.updated_at
+             FROM astra_run_sessions s
+             INNER JOIN astra_runs r ON r.run_id = s.run_id
+             WHERE r.thread_id = ?
+             ORDER BY r.updated_at DESC, r.created_at DESC, s.sort_order ASC, s.created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![thread_id], astra_run_session_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn upsert_astra_run(&self, run: &AstraRunRecord) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO astra_runs (
                 run_id, thread_id, project_id, project_path, status, mode,
                 planner_backend, round_index, round_limit, terminal_reason,
-                last_error_code, last_error_message, internal_planner_session_ids_json,
-                run_diagnostics_json, error, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                last_error_code, last_error_message, run_diagnostics_json,
+                error, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(run_id) DO UPDATE SET
                 thread_id = excluded.thread_id,
                 project_id = excluded.project_id,
@@ -7468,7 +7638,6 @@ impl SessionStore for SqliteStore {
                 terminal_reason = excluded.terminal_reason,
                 last_error_code = excluded.last_error_code,
                 last_error_message = excluded.last_error_message,
-                internal_planner_session_ids_json = excluded.internal_planner_session_ids_json,
                 run_diagnostics_json = excluded.run_diagnostics_json,
                 error = excluded.error,
                 updated_at = excluded.updated_at",
@@ -7485,22 +7654,28 @@ impl SessionStore for SqliteStore {
                 run.terminal_reason,
                 run.last_error_code,
                 run.last_error_message,
-                run.internal_planner_session_ids_json,
                 run.run_diagnostics_json,
                 run.error,
                 run.created_at,
                 run.updated_at,
             ],
         )?;
+        replace_astra_run_sessions(&tx, &run.run_id, &run.internal_planner_sessions)?;
+        tx.commit()?;
         Ok(())
     }
 
     fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>> {
         let conn = self.conn.lock().unwrap();
         let sql = format!("SELECT {ASTRA_RUN_SELECT} FROM astra_runs WHERE run_id = ?");
-        conn.query_row(&sql, params![run_id], astra_run_from_row)
+        let mut run = conn
+            .query_row(&sql, params![run_id], astra_run_from_row_without_sessions)
             .optional()
-            .map_err(Into::into)
+            .map_err(anyhow::Error::from)?;
+        if let Some(run) = run.as_mut() {
+            run.internal_planner_sessions = list_astra_run_sessions(&conn, &run.run_id)?;
+        }
+        Ok(run)
     }
 
     fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>> {
@@ -7513,9 +7688,18 @@ impl SessionStore for SqliteStore {
              ORDER BY updated_at DESC
              LIMIT 1"
         );
-        conn.query_row(&sql, params![thread_id], astra_run_from_row)
+        let mut run = conn
+            .query_row(
+                &sql,
+                params![thread_id],
+                astra_run_from_row_without_sessions,
+            )
             .optional()
-            .map_err(Into::into)
+            .map_err(anyhow::Error::from)?;
+        if let Some(run) = run.as_mut() {
+            run.internal_planner_sessions = list_astra_run_sessions(&conn, &run.run_id)?;
+        }
+        Ok(run)
     }
 
     fn list_astra_runs(&self, thread_id: &str) -> Result<Vec<AstraRunRecord>> {
@@ -7527,8 +7711,10 @@ impl SessionStore for SqliteStore {
              ORDER BY updated_at DESC, created_at DESC"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![thread_id], astra_run_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let rows = stmt.query_map(params![thread_id], astra_run_from_row_without_sessions)?;
+        let mut runs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        hydrate_astra_run_sessions(&conn, &mut runs)?;
+        Ok(runs)
     }
 
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>> {
@@ -7542,17 +7728,20 @@ impl SessionStore for SqliteStore {
                  WHERE status IN ({ACTIVE_ASTRA_RUN_STATUS_SQL})"
             );
             let mut stmt = tx.prepare(&sql)?;
-            let rows = stmt.query_map([], astra_run_from_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
+            let rows = stmt.query_map([], astra_run_from_row_without_sessions)?;
+            let mut runs = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            hydrate_astra_run_sessions(&tx, &mut runs)?;
+            runs
         };
         let mut placeholder_session_ids = HashSet::new();
         for run in &active {
-            for session_id in
-                serde_json::from_str::<Vec<String>>(&run.internal_planner_session_ids_json)
-                    .unwrap_or_default()
+            for session_id in run
+                .internal_planner_sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
             {
                 if !session_id.trim().is_empty() {
-                    placeholder_session_ids.insert(session_id);
+                    placeholder_session_ids.insert(session_id.to_string());
                 }
             }
             let mut stmt = tx.prepare(
@@ -8525,7 +8714,6 @@ mod migration_tests {
             "terminal_reason",
             "last_error_code",
             "last_error_message",
-            "internal_planner_session_ids_json",
             "run_diagnostics_json",
             "error",
             "created_at",
@@ -8536,6 +8724,10 @@ mod migration_tests {
                 "{column} should exist"
             );
         }
+        assert!(
+            !astra_columns.contains(&"internal_planner_session_ids_json".to_string()),
+            "internal_planner_session_ids_json should not exist"
+        );
         for legacy_column in [
             "proposed_tasks_json",
             "approved_task_ids_json",
@@ -8917,6 +9109,7 @@ mod migration_tests {
             "thread_plan_rounds",
             "thread_plan_tasks",
             "thread_plan_task_sessions",
+            "astra_run_sessions",
             "stage_sessions",
             "thread_stage_issues",
             "astra_runs",
@@ -8942,6 +9135,8 @@ mod migration_tests {
             "idx_thread_plan_task_sessions_task",
             "idx_thread_plan_task_sessions_session",
             "idx_thread_plan_task_sessions_attempt",
+            "idx_astra_run_sessions_run",
+            "idx_astra_run_sessions_session",
         ] {
             let exists: i64 = conn
                 .query_row(
@@ -8989,7 +9184,15 @@ mod migration_tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
-            internal_planner_session_ids_json: r#"["planner-session-1"]"#.to_string(),
+            internal_planner_sessions: vec![AstraRunSessionRecord {
+                run_id: "astra-run-1".to_string(),
+                agent: Agent::AstraPi,
+                session_id: "planner-session-1".to_string(),
+                role: PlanTaskSessionRole::Planner,
+                sort_order: 0,
+                created_at: 10,
+                updated_at: 20,
+            }],
             run_diagnostics_json: r#"[{"kind":"planner_failure","code":"timeout"}]"#.to_string(),
             error: None,
             created_at: 10,
@@ -9000,8 +9203,12 @@ mod migration_tests {
         assert_eq!(active.run_id, "astra-run-1");
         assert_eq!(active.status, "running");
         assert_eq!(
-            active.internal_planner_session_ids_json,
-            r#"["planner-session-1"]"#
+            active
+                .internal_planner_sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["planner-session-1"]
         );
         assert_eq!(
             active.run_diagnostics_json,
@@ -9093,7 +9300,15 @@ mod migration_tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
-            internal_planner_session_ids_json: r#"["planner-placeholder"]"#.to_string(),
+            internal_planner_sessions: vec![AstraRunSessionRecord {
+                run_id: "astra-run-thinking".to_string(),
+                agent: Agent::AstraPi,
+                session_id: "planner-placeholder".to_string(),
+                role: PlanTaskSessionRole::Planner,
+                sort_order: 0,
+                created_at: 10,
+                updated_at: 20,
+            }],
             run_diagnostics_json: "[]".to_string(),
             error: None,
             created_at: 10,
@@ -11390,7 +11605,15 @@ mod migration_tests {
                 terminal_reason: None,
                 last_error_code: None,
                 last_error_message: None,
-                internal_planner_session_ids_json: r#"["planner-session"]"#.to_string(),
+                internal_planner_sessions: vec![AstraRunSessionRecord {
+                    run_id: "replay-run".to_string(),
+                    agent: Agent::AstraPi,
+                    session_id: "planner-session".to_string(),
+                    role: PlanTaskSessionRole::Planner,
+                    sort_order: 0,
+                    created_at: 70,
+                    updated_at: 80,
+                }],
                 run_diagnostics_json: "[]".to_string(),
                 error: None,
                 created_at: 70,

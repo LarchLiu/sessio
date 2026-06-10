@@ -129,9 +129,20 @@ pub struct AstraRunRecord {
     pub terminal_reason: Option<String>,
     pub last_error_code: Option<String>,
     pub last_error_message: Option<String>,
-    pub internal_planner_session_ids_json: String,
+    pub internal_planner_sessions: Vec<AstraRunSessionRecord>,
     pub run_diagnostics_json: String,
     pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AstraRunSessionRecord {
+    pub run_id: String,
+    pub agent: Agent,
+    pub session_id: String,
+    pub role: PlanTaskSessionRole,
+    pub sort_order: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -409,16 +420,14 @@ pub trait SessionStore: Send + Sync {
         }
 
         for run in &astra_runs {
-            let planner_agent =
-                replay_agent_for_backend(run.planner_backend.as_deref()).unwrap_or(Agent::AstraPi);
-            for session_id in parse_session_id_vec(&run.internal_planner_session_ids_json) {
+            for session_ref in &run.internal_planner_sessions {
                 let session = session_lookup
-                    .get(&(planner_agent, session_id.clone()))
+                    .get(&(session_ref.agent, session_ref.session_id.clone()))
                     .cloned();
                 add_replay_session_source(
                     &mut sessions,
-                    planner_agent,
-                    &session_id,
+                    session_ref.agent,
+                    &session_ref.session_id,
                     session,
                     ThreadReplaySessionSourceInfo {
                         kind: ThreadReplaySessionSourceKind::AstraInternal,
@@ -670,6 +679,16 @@ pub trait SessionStore: Send + Sync {
         child_agent: Agent,
         child_session_id: &str,
     ) -> Result<Option<ThreadWorkSnapshotRecord>>;
+    fn replace_astra_run_sessions(
+        &self,
+        run_id: &str,
+        sessions: &[AstraRunSessionRecord],
+    ) -> Result<()>;
+    fn list_astra_run_sessions(&self, run_id: &str) -> Result<Vec<AstraRunSessionRecord>>;
+    fn list_astra_run_sessions_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<AstraRunSessionRecord>>;
     fn upsert_astra_run(&self, run: &AstraRunRecord) -> Result<()>;
     fn get_astra_run(&self, run_id: &str) -> Result<Option<AstraRunRecord>>;
     fn get_active_astra_run(&self, thread_id: &str) -> Result<Option<AstraRunRecord>>;
@@ -725,10 +744,8 @@ pub(crate) fn collect_referenced_session_keys(
         }
     }
     for run in astra_runs {
-        let planner_agent =
-            replay_agent_for_backend(run.planner_backend.as_deref()).unwrap_or(Agent::AstraPi);
-        for session_id in parse_session_id_vec(&run.internal_planner_session_ids_json) {
-            let key = (planner_agent, session_id);
+        for session in &run.internal_planner_sessions {
+            let key = (session.agent, session.session_id.clone());
             if !existing_sessions.contains_key(&key) {
                 refs.insert(key);
             }
@@ -829,22 +846,4 @@ fn add_replay_session_source(
     }) {
         entry.sources.push(source);
     }
-}
-
-pub(crate) fn parse_session_id_vec(value: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
-}
-
-pub(crate) fn replay_agent_for_backend(backend: Option<&str>) -> Option<Agent> {
-    let backend = backend?.trim();
-    if backend.is_empty() {
-        return None;
-    }
-    if backend == "astra_pi_acp" || backend == Agent::AstraPi.as_str() {
-        return Some(Agent::AstraPi);
-    }
-    if let Some(agent) = backend.strip_prefix("runtime_agent_") {
-        return Agent::from_db_str(agent);
-    }
-    Agent::from_db_str(backend)
 }

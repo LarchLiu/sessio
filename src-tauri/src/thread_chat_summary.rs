@@ -6,8 +6,7 @@ use anyhow::Result;
 use crate::models::{Agent, PlanRoundInfo, SessionInfo, ThreadChatSummaryInfo, ThreadInfo};
 use crate::store::{
     better_session_candidate, collect_referenced_session_keys, insert_best_session,
-    parse_session_id_vec, replay_agent_for_backend, session_identity, session_time, AstraRunRecord,
-    SessionRef, SessionStore,
+    session_identity, session_time, AstraRunRecord, SessionRef, SessionStore,
 };
 
 #[derive(Clone)]
@@ -245,15 +244,13 @@ fn build_thread_summary(
 
     for run in astra_runs {
         latest = latest.max(run.updated_at.max(run.created_at));
-        let planner_agent =
-            replay_agent_for_backend(run.planner_backend.as_deref()).unwrap_or(Agent::AstraPi);
-        for session_id in parse_session_id_vec(&run.internal_planner_session_ids_json) {
+        for session_ref in run.internal_planner_sessions {
             add_session_ref(
                 &mut sessions_by_key,
                 &mut session_keys,
                 session_lookup,
-                planner_agent,
-                &session_id,
+                session_ref.agent,
+                &session_ref.session_id,
             );
         }
     }
@@ -331,7 +328,7 @@ mod tests {
         PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus,
     };
     use crate::store::sqlite::SqliteStore;
-    use crate::store::{collect_referenced_session_keys, AstraRunRecord};
+    use crate::store::{collect_referenced_session_keys, AstraRunRecord, AstraRunSessionRecord};
 
     #[test]
     fn summary_keeps_thread_chat_entry_without_sessions() {
@@ -474,7 +471,15 @@ mod tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
-            internal_planner_session_ids_json: r#"["planner-session"]"#.to_string(),
+            internal_planner_sessions: vec![AstraRunSessionRecord {
+                run_id: "run-1".to_string(),
+                agent: Agent::AstraPi,
+                session_id: "planner-session".to_string(),
+                role: PlanTaskSessionRole::Planner,
+                sort_order: 0,
+                created_at: 15,
+                updated_at: 16,
+            }],
             run_diagnostics_json: "[]".to_string(),
             error: None,
             created_at: 15,

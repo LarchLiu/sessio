@@ -20,8 +20,8 @@ use crate::models::{
     PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind,
 };
 use crate::store::{
-    AstraRunRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch,
-    SessionStore, ThreadWorkSnapshotRecord,
+    AstraRunRecord, AstraRunSessionRecord, NewPlanRound, NewPlanTask, NewPlanTaskSession,
+    PlanTaskStatusPatch, SessionStore, ThreadWorkSnapshotRecord,
 };
 
 mod astra_pi_acp_adapter;
@@ -2605,6 +2605,11 @@ fn runtime_transport_option(
 }
 
 fn run_to_record(run: &AstraRun) -> AstraRunRecord {
+    let planner_agent = run
+        .planner_backend
+        .as_deref()
+        .and_then(record_agent_for_backend)
+        .unwrap_or(Agent::AstraPi);
     AstraRunRecord {
         run_id: run.run_id.clone(),
         thread_id: run.thread_id.clone(),
@@ -2618,8 +2623,20 @@ fn run_to_record(run: &AstraRun) -> AstraRunRecord {
         terminal_reason: run.terminal_reason.clone(),
         last_error_code: run.last_error_code.clone(),
         last_error_message: run.last_error_message.clone(),
-        internal_planner_session_ids_json: serde_json::to_string(&run.internal_planner_session_ids)
-            .unwrap_or_else(|_| "[]".to_string()),
+        internal_planner_sessions: run
+            .internal_planner_session_ids
+            .iter()
+            .enumerate()
+            .map(|(index, session_id)| AstraRunSessionRecord {
+                run_id: run.run_id.clone(),
+                agent: planner_agent,
+                session_id: session_id.clone(),
+                role: PlanTaskSessionRole::Planner,
+                sort_order: index as i64,
+                created_at: run.created_at,
+                updated_at: run.updated_at,
+            })
+            .collect(),
         run_diagnostics_json: serde_json::to_string(&run.run_diagnostics)
             .unwrap_or_else(|_| "[]".to_string()),
         error: run.error.clone(),
@@ -2647,15 +2664,30 @@ fn record_to_run(record: AstraRunRecord) -> Result<AstraRun> {
         terminal_reason: record.terminal_reason,
         last_error_code: record.last_error_code,
         last_error_message: record.last_error_message,
-        internal_planner_session_ids: serde_json::from_str(
-            &record.internal_planner_session_ids_json,
-        )
-        .unwrap_or_default(),
+        internal_planner_session_ids: record
+            .internal_planner_sessions
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect(),
         run_diagnostics: serde_json::from_str(&record.run_diagnostics_json).unwrap_or_default(),
         error: record.error,
         created_at: record.created_at,
         updated_at: record.updated_at,
     })
+}
+
+fn record_agent_for_backend(backend: &str) -> Option<Agent> {
+    let backend = backend.trim();
+    if backend.is_empty() {
+        return None;
+    }
+    if backend == "astra_pi_acp" || backend == Agent::AstraPi.as_str() {
+        return Some(Agent::AstraPi);
+    }
+    if let Some(agent) = backend.strip_prefix("runtime_agent_") {
+        return Agent::from_db_str(agent);
+    }
+    Agent::from_db_str(backend)
 }
 
 fn plan_task_risk_from_astra(risk: AstraTaskRisk) -> PlanTaskRisk {
