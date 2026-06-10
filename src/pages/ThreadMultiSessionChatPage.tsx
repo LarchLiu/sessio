@@ -1543,10 +1543,11 @@ function laneDisplayMeta(
   const agentSnapshot = parseJsonObject(source?.agentSnapshotJson ?? null);
   const participantSnapshot = objectField(agentSnapshot, "participant");
   const participantLabel = participantSnapshotLabel(participantSnapshot);
+  const hasStageContext = Boolean(source?.stageId || stageSnapshot);
   const fallbackStage =
-    (source?.stageId ? thread.stages.find((stage) => stage.id === source.stageId) : null)
-    ?? (thread.stageId ? thread.stages.find((stage) => stage.id === thread.stageId) : null)
-    ?? null;
+    hasStageContext && source?.stageId
+      ? thread.stages.find((stage) => stage.id === source.stageId) ?? null
+      : null;
   const fallbackAssistant = participantSnapshot
     ? null
     : (
@@ -1560,12 +1561,13 @@ function laneDisplayMeta(
     stringField(agentInfo, "displayName")
     ?? stringField(agentInfo, "name")
     ?? (snapshotAgent && snapshotAgent in AGENT_LABEL ? AGENT_LABEL[snapshotAgent as Agent] : snapshotAgent);
-  const stageLabel =
-    stringField(stageSnapshot, "name")
-    ?? stringField(stageSnapshot, "stageId")
-    ?? stringField(stageSnapshot, "id")
-    ?? (fallbackStage ? projectStageLabel(fallbackStage, t) : null);
-  const stageIcon = snapshotStageIcon(stageSnapshot) ?? fallbackStage;
+  const stageLabel = hasStageContext
+    ? (
+        stringField(stageSnapshot, "name")
+        ?? (fallbackStage ? projectStageLabel(fallbackStage, t) : t("thread.replay_source.stage"))
+      )
+    : null;
+  const stageIcon = hasStageContext ? snapshotStageIcon(stageSnapshot) ?? fallbackStage : null;
   const agentLabel = participantLabel ?? snapshotAgentLabel ?? AGENT_LABEL[lane.agent];
   const title =
     sourceLabel
