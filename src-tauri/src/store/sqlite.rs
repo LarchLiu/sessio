@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, ToSql};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, ToSql,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
@@ -24,7 +26,8 @@ use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
     IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTask, NewPlanTaskSession,
     PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
-    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
+    SessionHistoryRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
+    ThreadWorkSnapshotRecord,
 };
 
 pub struct SqliteStore {
@@ -4821,6 +4824,64 @@ fn load_all_subagents_grouped(
     Ok(grouped)
 }
 
+fn load_subagents_for_refs(
+    conn: &Connection,
+    refs: &[(Agent, String)],
+) -> Result<HashMap<(Agent, String), Vec<SubagentInfo>>> {
+    if refs.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut sql = String::from(
+        "SELECT parent_agent, parent_session_id,
+                subagent_id, file_path, agent_type, description,
+                started_at, updated_at, message_count, first_user_message,
+                file_size, partial, available
+         FROM subagents
+         WHERE (parent_agent, parent_session_id) IN (",
+    );
+    let mut values = Vec::<SqlValue>::with_capacity(refs.len() * 2);
+    for (index, (agent, session_id)) in refs.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str("(?, ?)");
+        values.push(SqlValue::from(agent.as_str().to_string()));
+        values.push(SqlValue::from(session_id.clone()));
+    }
+    sql.push_str(") ORDER BY started_at ASC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+        let agent_str: String = row.get(0)?;
+        let parent_session_id: String = row.get(1)?;
+        let sub = SubagentInfo {
+            id: row.get(2)?,
+            file_path: row.get(3)?,
+            agent_type: row.get(4)?,
+            description: row.get(5)?,
+            started_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            message_count: row.get::<_, i64>(8)? as usize,
+            first_user_message: row.get(9)?,
+            file_size: row.get::<_, i64>(10)? as u64,
+            partial: row.get::<_, i64>(11)? != 0,
+            available: row.get::<_, i64>(12)? != 0,
+        };
+        Ok((agent_str, parent_session_id, sub))
+    })?;
+    let mut grouped = HashMap::<(Agent, String), Vec<SubagentInfo>>::new();
+    for row in rows {
+        let (agent_str, parent_session_id, sub) = row?;
+        let Some(agent) = Agent::from_db_str(&agent_str) else {
+            continue;
+        };
+        grouped
+            .entry((agent, parent_session_id))
+            .or_default()
+            .push(sub);
+    }
+    Ok(grouped)
+}
+
 fn load_all_indexed_subagents_grouped(
     conn: &Connection,
 ) -> Result<HashMap<(Agent, String), Vec<IndexedSubagentRecord>>> {
@@ -4879,6 +4940,90 @@ fn load_all_indexed_subagents_grouped(
     Ok(grouped)
 }
 
+fn session_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionInfo> {
+    let agent_str: String = row.get(0)?;
+    let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+    Ok(SessionInfo {
+        id: row.get(1)?,
+        agent,
+        forked_from_agent: row
+            .get::<_, Option<String>>(15)?
+            .and_then(|value| Agent::from_db_str(&value)),
+        forked_from_id: row.get(16)?,
+        file_path: row.get(2)?,
+        project_path: row.get(3)?,
+        project_name: row.get(4)?,
+        started_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        message_count: row.get::<_, i64>(7)? as usize,
+        rename_title: row.get(8)?,
+        title: row.get(9)?,
+        first_user_message: row.get(10)?,
+        file_size: row.get::<_, i64>(11)? as u64,
+        partial: row.get::<_, i64>(12)? != 0,
+        available: row.get::<_, i64>(13)? != 0,
+        archived: row.get::<_, i64>(14)? != 0,
+        subagents: Vec::new(),
+    })
+}
+
+fn load_sessions_by_refs(conn: &Connection, refs: &[SessionRef<'_>]) -> Result<Vec<SessionInfo>> {
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let unique_refs = refs
+        .iter()
+        .map(|session_ref| (session_ref.agent, session_ref.session_id.to_string()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut sql = String::from(
+        "SELECT agent, session_id, file_path, project_path, project_name,
+                started_at, updated_at, message_count, rename_title, title, first_user_message,
+                file_size, partial, available, archived, forked_from_agent, forked_from_id
+         FROM sessions
+         WHERE skip = 0
+           AND (agent, session_id) IN (",
+    );
+    let mut values = Vec::<SqlValue>::with_capacity(unique_refs.len() * 2);
+    for (index, (agent, session_id)) in unique_refs.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str("(?, ?)");
+        values.push(SqlValue::from(agent.as_str().to_string()));
+        values.push(SqlValue::from(session_id.clone()));
+    }
+    sql.push_str(
+        ")
+         ORDER BY available DESC,
+                  partial ASC,
+                  CASE
+                      WHEN trim(file_path) = '' OR file_path LIKE 'astra://%' THEN 0
+                      ELSE 1
+                  END DESC,
+                  CASE WHEN trim(file_path) = '' THEN 0 ELSE 1 END DESC,
+                  updated_at DESC,
+                  started_at DESC",
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut sessions: Vec<SessionInfo> = stmt
+        .query_map(params_from_iter(values.iter()), session_info_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    dedupe_sessions(&mut sessions);
+    let requested = sessions
+        .iter()
+        .map(|session| (session.agent, session.id.clone()))
+        .collect::<Vec<_>>();
+    let mut subs_by_parent = load_subagents_for_refs(conn, &requested)?;
+    for session in &mut sessions {
+        session.subagents = subs_by_parent
+            .remove(&(session.agent, session.id.clone()))
+            .unwrap_or_default();
+    }
+    Ok(sessions)
+}
+
 fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
     let sql = if user_projects_only {
@@ -4898,32 +5043,7 @@ fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<Sess
     };
     let mut stmt = conn.prepare(sql)?;
     let mut sessions: Vec<SessionInfo> = stmt
-        .query_map([], |row| {
-            let agent_str: String = row.get(0)?;
-            let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
-            Ok(SessionInfo {
-                id: row.get(1)?,
-                agent,
-                forked_from_agent: row
-                    .get::<_, Option<String>>(15)?
-                    .and_then(|value| Agent::from_db_str(&value)),
-                forked_from_id: row.get(16)?,
-                file_path: row.get(2)?,
-                project_path: row.get(3)?,
-                project_name: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get::<_, i64>(7)? as usize,
-                rename_title: row.get(8)?,
-                title: row.get(9)?,
-                first_user_message: row.get(10)?,
-                file_size: row.get::<_, i64>(11)? as u64,
-                partial: row.get::<_, i64>(12)? != 0,
-                available: row.get::<_, i64>(13)? != 0,
-                archived: row.get::<_, i64>(14)? != 0,
-                subagents: Vec::new(),
-            })
-        })?
+        .query_map([], session_info_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     sessions.retain(|s| !is_codex_guardian_index_row(s));
     dedupe_sessions(&mut sessions);
@@ -4949,6 +5069,11 @@ impl SessionStore for SqliteStore {
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>> {
         let conn = self.conn.lock().unwrap();
         load_sessions(&conn, false)
+    }
+
+    fn list_sessions_by_refs(&self, refs: &[SessionRef<'_>]) -> Result<Vec<SessionInfo>> {
+        let conn = self.conn.lock().unwrap();
+        load_sessions_by_refs(&conn, refs)
     }
 
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {
@@ -11607,6 +11732,110 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(binding_count, 0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn list_sessions_by_refs_returns_best_requested_rows_only() {
+        let path = unique_db("sessio-list-sessions-by-refs");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-list-sessions-by-refs-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "list-sessions-by-refs",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let placeholder = SessionInfo {
+            id: "shared-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 0,
+            rename_title: Some("Placeholder".to_string()),
+            title: None,
+            first_user_message: Some("placeholder".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session("", &placeholder).unwrap();
+
+        let real_path = parent.join("shared-session.jsonl");
+        std::fs::write(&real_path, "{}").unwrap();
+        let indexed = SessionInfo {
+            file_path: real_path.to_string_lossy().to_string(),
+            file_size: 42,
+            partial: false,
+            message_count: 5,
+            title: Some("Indexed".to_string()),
+            updated_at: Some(30),
+            ..placeholder.clone()
+        };
+        store.upsert_session(&indexed.file_path, &indexed).unwrap();
+
+        let other_path = parent.join("other-session.jsonl");
+        std::fs::write(&other_path, "{}").unwrap();
+        let other = SessionInfo {
+            id: "other-session".to_string(),
+            file_path: other_path.to_string_lossy().to_string(),
+            title: Some("Other".to_string()),
+            ..indexed.clone()
+        };
+        store.upsert_session(&other.file_path, &other).unwrap();
+
+        let subagent = SubagentInfo {
+            id: "sub-1".to_string(),
+            agent_type: Some("reviewer".to_string()),
+            description: Some("Attached subagent".to_string()),
+            started_at: Some(31),
+            updated_at: Some(32),
+            message_count: 2,
+            first_user_message: Some("subagent".to_string()),
+            file_path: parent.join("sub-1.jsonl").to_string_lossy().to_string(),
+            file_size: 9,
+            partial: false,
+            available: true,
+        };
+        store
+            .upsert_subagent(Agent::Codex, &indexed.file_path, &indexed.id, &subagent)
+            .unwrap();
+
+        let sessions = store
+            .list_sessions_by_refs(&[
+                SessionRef {
+                    agent: Agent::Codex,
+                    session_id: "shared-session",
+                },
+                SessionRef {
+                    agent: Agent::Gemini,
+                    session_id: "missing-session",
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.id, "shared-session");
+        assert_eq!(session.file_path, indexed.file_path);
+        assert!(!session.partial);
+        assert_eq!(session.title.as_deref(), Some("Indexed"));
+        assert_eq!(session.subagents.len(), 1);
+        assert_eq!(session.subagents[0].id, "sub-1");
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);

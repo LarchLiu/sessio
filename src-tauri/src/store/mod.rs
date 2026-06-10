@@ -109,6 +109,12 @@ pub struct NewPlanTaskSession<'a> {
     pub attempt_count: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionRef<'a> {
+    pub agent: Agent,
+    pub session_id: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub struct AstraRunRecord {
     pub run_id: String,
@@ -219,6 +225,7 @@ pub trait SessionStore: Send + Sync {
     fn init(&self) -> Result<()>;
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>>;
+    fn list_sessions_by_refs(&self, refs: &[SessionRef<'_>]) -> Result<Vec<SessionInfo>>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
     fn update_session_rename_title(
         &self,
@@ -300,14 +307,11 @@ pub trait SessionStore: Send + Sync {
         let thread = self.get_thread_work_state(thread_id)?;
         let plan_rounds = self.list_plan_rounds(thread_id)?;
         let astra_runs = self.list_astra_runs(thread_id)?;
-        let session_lookup = self
-            .list_all_sessions()?
-            .into_iter()
-            .map(|session| ((session.agent, session.id.clone()), session))
-            .collect::<HashMap<_, _>>();
+        let mut session_lookup = HashMap::<(Agent, String), SessionInfo>::new();
         let mut sessions = HashMap::<(Agent, String), ThreadReplaySessionInfo>::new();
 
         for session in &thread.sessions {
+            insert_best_session(&mut session_lookup, session.clone());
             add_replay_session_source(
                 &mut sessions,
                 session.agent,
@@ -332,6 +336,7 @@ pub trait SessionStore: Send + Sync {
 
         for stage in &thread.stages {
             for session in &stage.sessions {
+                insert_best_session(&mut session_lookup, session.clone());
                 add_replay_session_source(
                     &mut sessions,
                     session.agent,
@@ -352,6 +357,21 @@ pub trait SessionStore: Send + Sync {
                         created_at: session.started_at.or(session.updated_at),
                     },
                 );
+            }
+        }
+
+        let referenced_keys =
+            collect_referenced_session_keys(&plan_rounds, &astra_runs, &session_lookup);
+        if !referenced_keys.is_empty() {
+            let refs = referenced_keys
+                .iter()
+                .map(|(agent, session_id)| SessionRef {
+                    agent: *agent,
+                    session_id: session_id.as_str(),
+                })
+                .collect::<Vec<_>>();
+            for session in self.list_sessions_by_refs(&refs)? {
+                insert_best_session(&mut session_lookup, session);
             }
         }
 
@@ -685,6 +705,83 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<()>;
 }
 
+pub(crate) fn collect_referenced_session_keys(
+    plan_rounds: &[PlanRoundInfo],
+    astra_runs: &[AstraRunRecord],
+    existing_sessions: &HashMap<(Agent, String), SessionInfo>,
+) -> Vec<(Agent, String)> {
+    let mut refs = HashSet::<(Agent, String)>::new();
+    for round in plan_rounds {
+        for task in &round.tasks {
+            for task_session in &task.sessions {
+                if task_session.superseded_at.is_some() {
+                    continue;
+                }
+                let key = (task_session.agent, task_session.session_id.clone());
+                if !existing_sessions.contains_key(&key) {
+                    refs.insert(key);
+                }
+            }
+        }
+    }
+    for run in astra_runs {
+        let planner_agent =
+            replay_agent_for_backend(run.planner_backend.as_deref()).unwrap_or(Agent::AstraPi);
+        for session_id in parse_session_id_vec(&run.internal_planner_session_ids_json) {
+            let key = (planner_agent, session_id);
+            if !existing_sessions.contains_key(&key) {
+                refs.insert(key);
+            }
+        }
+    }
+    refs.into_iter().collect()
+}
+
+pub(crate) fn insert_best_session(
+    sessions: &mut HashMap<(Agent, String), SessionInfo>,
+    session: SessionInfo,
+) {
+    let key = (session.agent, session.id.clone());
+    let replace = sessions
+        .get(&key)
+        .map(|current| better_session_candidate(&session, current))
+        .unwrap_or(true);
+    if replace {
+        sessions.insert(key, session);
+    }
+}
+
+pub(crate) fn is_real_session_file_path(file_path: &str) -> bool {
+    let trimmed = file_path.trim();
+    !trimmed.is_empty() && !trimmed.starts_with("astra://")
+}
+
+pub(crate) fn better_session_candidate(candidate: &SessionInfo, current: &SessionInfo) -> bool {
+    if candidate.available != current.available {
+        return candidate.available;
+    }
+    if candidate.partial != current.partial {
+        return !candidate.partial;
+    }
+    let candidate_real_path = is_real_session_file_path(&candidate.file_path);
+    let current_real_path = is_real_session_file_path(&current.file_path);
+    if candidate_real_path != current_real_path {
+        return candidate_real_path;
+    }
+    if candidate.file_path.is_empty() != current.file_path.is_empty() {
+        return !candidate.file_path.is_empty();
+    }
+    session_time(candidate) > session_time(current)
+}
+
+pub(crate) fn session_time(session: &SessionInfo) -> i64 {
+    session.updated_at.or(session.started_at).unwrap_or(0)
+}
+
+pub(crate) fn session_identity(agent: Agent, session_id: &str) -> String {
+    format!("{}:{session_id}", agent.as_str())
+}
+
 fn add_replay_session_source(
     sessions: &mut HashMap<(Agent, String), ThreadReplaySessionInfo>,
     agent: Agent,
@@ -734,11 +831,11 @@ fn add_replay_session_source(
     }
 }
 
-fn parse_session_id_vec(value: &str) -> Vec<String> {
+pub(crate) fn parse_session_id_vec(value: &str) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
 }
 
-fn replay_agent_for_backend(backend: Option<&str>) -> Option<Agent> {
+pub(crate) fn replay_agent_for_backend(backend: Option<&str>) -> Option<Agent> {
     let backend = backend?.trim();
     if backend.is_empty() {
         return None;

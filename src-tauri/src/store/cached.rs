@@ -12,7 +12,7 @@ use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
     IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTaskSession, PlanTaskStatusPatch,
     ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection, SessionHistoryRecord,
-    SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
+    SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -171,6 +171,10 @@ impl SessionStore for CachedStore {
 
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>> {
         self.inner.list_all_sessions()
+    }
+
+    fn list_sessions_by_refs(&self, refs: &[SessionRef<'_>]) -> Result<Vec<SessionInfo>> {
+        self.inner.list_sessions_by_refs(refs)
     }
 
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {

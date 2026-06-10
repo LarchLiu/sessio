@@ -4,7 +4,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 
 use crate::models::{Agent, PlanRoundInfo, SessionInfo, ThreadChatSummaryInfo, ThreadInfo};
-use crate::store::{AstraRunRecord, SessionStore};
+use crate::store::{
+    better_session_candidate, collect_referenced_session_keys, insert_best_session,
+    parse_session_id_vec, replay_agent_for_backend, session_identity, session_time, AstraRunRecord,
+    SessionRef, SessionStore,
+};
 
 #[derive(Clone)]
 pub struct ThreadChatSummaryCache {
@@ -140,14 +144,9 @@ impl ThreadChatSummaryCache {
 }
 
 fn build_all_summaries(store: &dyn SessionStore) -> Result<Vec<ThreadChatSummaryInfo>> {
-    let session_lookup = session_lookup(store)?;
     let mut summaries = Vec::new();
     for project in store.list_projects()? {
-        summaries.extend(build_project_summaries_with_lookup(
-            store,
-            &project.id,
-            &session_lookup,
-        )?);
+        summaries.extend(build_project_summaries(store, &project.id)?);
     }
     Ok(summaries)
 }
@@ -156,24 +155,43 @@ fn build_project_summaries(
     store: &dyn SessionStore,
     project_id: &str,
 ) -> Result<Vec<ThreadChatSummaryInfo>> {
-    let session_lookup = session_lookup(store)?;
-    build_project_summaries_with_lookup(store, project_id, &session_lookup)
-}
-
-fn project_missing_error(error: &anyhow::Error) -> bool {
-    error.to_string().starts_with("project not found:")
-}
-
-fn build_project_summaries_with_lookup(
-    store: &dyn SessionStore,
-    project_id: &str,
-    session_lookup: &HashMap<(Agent, String), SessionInfo>,
-) -> Result<Vec<ThreadChatSummaryInfo>> {
-    let mut summaries = Vec::new();
+    let mut session_lookup = HashMap::<(Agent, String), SessionInfo>::new();
+    let mut inputs = Vec::new();
+    let mut unresolved = HashSet::<(Agent, String)>::new();
     for thread in store.list_threads(project_id)? {
         let plan_rounds = store.list_plan_rounds(&thread.id)?;
         let astra_runs = store.list_astra_runs(&thread.id)?;
-        if let Some(summary) = build_thread_summary(thread, plan_rounds, astra_runs, session_lookup)
+        for session in &thread.sessions {
+            insert_best_session(&mut session_lookup, session.clone());
+        }
+        for stage in &thread.stages {
+            for session in &stage.sessions {
+                insert_best_session(&mut session_lookup, session.clone());
+            }
+        }
+        unresolved.extend(collect_referenced_session_keys(
+            &plan_rounds,
+            &astra_runs,
+            &session_lookup,
+        ));
+        inputs.push((thread, plan_rounds, astra_runs));
+    }
+    if !unresolved.is_empty() {
+        let refs = unresolved
+            .iter()
+            .map(|(agent, session_id)| SessionRef {
+                agent: *agent,
+                session_id: session_id.as_str(),
+            })
+            .collect::<Vec<_>>();
+        for session in store.list_sessions_by_refs(&refs)? {
+            insert_best_session(&mut session_lookup, session);
+        }
+    }
+    let mut summaries = Vec::new();
+    for (thread, plan_rounds, astra_runs) in inputs {
+        if let Some(summary) =
+            build_thread_summary(thread, plan_rounds, astra_runs, &session_lookup)
         {
             summaries.push(summary);
         }
@@ -182,12 +200,8 @@ fn build_project_summaries_with_lookup(
     Ok(summaries)
 }
 
-fn session_lookup(store: &dyn SessionStore) -> Result<HashMap<(Agent, String), SessionInfo>> {
-    Ok(store
-        .list_all_sessions()?
-        .into_iter()
-        .map(|session| ((session.agent, session.id.clone()), session))
-        .collect())
+fn project_missing_error(error: &anyhow::Error) -> bool {
+    error.to_string().starts_with("project not found:")
 }
 
 fn build_thread_summary(
@@ -290,55 +304,6 @@ fn add_session(
     }
 }
 
-fn better_session_candidate(candidate: &SessionInfo, current: &SessionInfo) -> bool {
-    if candidate.available != current.available {
-        return candidate.available;
-    }
-    if candidate.partial != current.partial {
-        return !candidate.partial;
-    }
-    let candidate_real_path = is_real_session_file_path(&candidate.file_path);
-    let current_real_path = is_real_session_file_path(&current.file_path);
-    if candidate_real_path != current_real_path {
-        return candidate_real_path;
-    }
-    if candidate.file_path.is_empty() != current.file_path.is_empty() {
-        return !candidate.file_path.is_empty();
-    }
-    session_time(candidate) > session_time(current)
-}
-
-fn is_real_session_file_path(file_path: &str) -> bool {
-    let trimmed = file_path.trim();
-    !trimmed.is_empty() && !trimmed.starts_with("astra://")
-}
-
-fn session_time(session: &SessionInfo) -> i64 {
-    session.updated_at.or(session.started_at).unwrap_or(0)
-}
-
-fn session_identity(agent: Agent, session_id: &str) -> String {
-    format!("{}:{session_id}", agent.as_str())
-}
-
-fn parse_session_id_vec(value: &str) -> Vec<String> {
-    serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
-}
-
-fn replay_agent_for_backend(backend: Option<&str>) -> Option<Agent> {
-    let backend = backend?.trim();
-    if backend.is_empty() {
-        return None;
-    }
-    if backend == "astra_pi_acp" || backend == Agent::AstraPi.as_str() {
-        return Some(Agent::AstraPi);
-    }
-    if let Some(agent) = backend.strip_prefix("runtime_agent_") {
-        return Agent::from_db_str(agent);
-    }
-    Agent::from_db_str(backend)
-}
-
 fn sort_project_threads(
     by_project: &mut HashMap<String, Vec<String>>,
     by_thread: &HashMap<String, ThreadChatSummaryInfo>,
@@ -357,10 +322,16 @@ fn summary_sort_time(by_thread: &HashMap<String, ThreadChatSummaryInfo>, thread_
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::models::{
+        PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
+        PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus,
+    };
     use crate::store::sqlite::SqliteStore;
+    use crate::store::{collect_referenced_session_keys, AstraRunRecord};
 
     #[test]
     fn summary_keeps_thread_chat_entry_without_sessions() {
@@ -393,6 +364,131 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[test]
+    fn collect_referenced_session_keys_skips_loaded_and_superseded_sessions() {
+        let loaded = HashMap::from([(
+            (Agent::Claude, "loaded-session".to_string()),
+            SessionInfo {
+                id: "loaded-session".to_string(),
+                agent: Agent::Claude,
+                forked_from_agent: None,
+                forked_from_id: None,
+                project_path: None,
+                project_name: None,
+                started_at: None,
+                updated_at: None,
+                message_count: 0,
+                rename_title: None,
+                title: None,
+                first_user_message: None,
+                file_path: "/tmp/loaded.jsonl".to_string(),
+                file_size: 1,
+                partial: false,
+                available: true,
+                archived: false,
+                subagents: Vec::new(),
+            },
+        )]);
+        let plan_rounds = vec![PlanRoundInfo {
+            id: "round-1".to_string(),
+            thread_id: "thread-1".to_string(),
+            astra_run_id: Some("run-1".to_string()),
+            round_index: 0,
+            summary: None,
+            mode: PlanRoundMode::Parallel,
+            source: PlanRoundSource::Astra,
+            status: PlanRoundStatus::Running,
+            tasks: vec![PlanTaskInfo {
+                id: "task-1".to_string(),
+                round_id: "round-1".to_string(),
+                thread_stage_id: None,
+                assistant_id: None,
+                agent_participant_id: None,
+                target_agent: Agent::Claude,
+                stage_snapshot_json: None,
+                assistant_snapshot_json: None,
+                agent_snapshot_json: "{}".to_string(),
+                title: "Task".to_string(),
+                prompt: "Prompt".to_string(),
+                expected_output: None,
+                risk: PlanTaskRisk::Low,
+                sort_order: 0,
+                status: PlanTaskStatus::Running,
+                result_summary: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                created_at: 10,
+                updated_at: 10,
+                sessions: vec![
+                    PlanTaskSessionInfo {
+                        task_id: "task-1".to_string(),
+                        agent: Agent::Claude,
+                        session_id: "loaded-session".to_string(),
+                        role: PlanTaskSessionRole::Runtime,
+                        attempt_id: None,
+                        attempt_count: 1,
+                        superseded_at: None,
+                        created_at: 11,
+                        updated_at: 11,
+                    },
+                    PlanTaskSessionInfo {
+                        task_id: "task-1".to_string(),
+                        agent: Agent::Gemini,
+                        session_id: "missing-session".to_string(),
+                        role: PlanTaskSessionRole::Runtime,
+                        attempt_id: None,
+                        attempt_count: 1,
+                        superseded_at: None,
+                        created_at: 12,
+                        updated_at: 12,
+                    },
+                    PlanTaskSessionInfo {
+                        task_id: "task-1".to_string(),
+                        agent: Agent::Codex,
+                        session_id: "superseded-session".to_string(),
+                        role: PlanTaskSessionRole::Runtime,
+                        attempt_id: None,
+                        attempt_count: 1,
+                        superseded_at: Some(13),
+                        created_at: 13,
+                        updated_at: 13,
+                    },
+                ],
+            }],
+            created_at: 9,
+            updated_at: 14,
+        }];
+        let astra_runs = vec![AstraRunRecord {
+            run_id: "run-1".to_string(),
+            thread_id: "thread-1".to_string(),
+            project_id: "project-1".to_string(),
+            project_path: "/tmp/project".to_string(),
+            status: "running".to_string(),
+            mode: "auto".to_string(),
+            planner_backend: Some("astra_pi_acp".to_string()),
+            round_index: Some(0),
+            round_limit: 3,
+            terminal_reason: None,
+            last_error_code: None,
+            last_error_message: None,
+            internal_planner_session_ids_json: r#"["planner-session"]"#.to_string(),
+            run_diagnostics_json: "[]".to_string(),
+            error: None,
+            created_at: 15,
+            updated_at: 16,
+        }];
+
+        let refs = collect_referenced_session_keys(&plan_rounds, &astra_runs, &loaded)
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(refs.contains(&(Agent::Gemini, "missing-session".to_string())));
+        assert!(refs.contains(&(Agent::AstraPi, "planner-session".to_string())));
+        assert!(!refs.contains(&(Agent::Claude, "loaded-session".to_string())));
+        assert!(!refs.contains(&(Agent::Codex, "superseded-session".to_string())));
     }
 
     fn temp_db_path(prefix: &str) -> std::path::PathBuf {
