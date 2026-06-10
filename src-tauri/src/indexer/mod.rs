@@ -503,15 +503,20 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
     let mut affected_projects = HashMap::new();
     if enabled_agents.contains(&Agent::Codex) {
         let mut codex_scopes: HashSet<String> = HashSet::new();
-        match crate::agents::sources::codex::parser::list_sessions() {
-            Ok(sessions) => {
-                for info in sessions {
+        match crate::agents::sources::codex::parser::list_index_snapshot() {
+            Ok(snapshot) => {
+                for info in snapshot.sessions {
                     insert_session_project(&mut affected_projects, &info);
                     let scope = info.file_path.clone();
                     store.replace_by_scope(&scope, Agent::Codex, std::slice::from_ref(&info))?;
                     for sub in &info.subagents {
                         store.upsert_subagent(Agent::Codex, &scope, &info.id, sub)?;
                     }
+                    codex_scopes.insert(scope);
+                }
+                for guardian in snapshot.guardians {
+                    let scope = guardian.file_path.clone();
+                    store.upsert_skipped_session(&scope, &guardian)?;
                     codex_scopes.insert(scope);
                 }
             }
@@ -607,8 +612,8 @@ fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutco
     let (_, archived_root) = crate::agents::sources::codex::parser::roots()?;
     let archived = path.starts_with(&archived_root);
     let mut outcome = TaskOutcome::default();
-    match crate::agents::sources::codex::parser::parse_one_file_with_relation(path, archived)? {
-        Some(parsed) => {
+    match crate::agents::sources::codex::parser::parse_one_file_for_index(path, archived)? {
+        Some(crate::agents::sources::codex::parser::CodexParsedFile::Session(parsed)) => {
             if let Some(parent_thread_id) = parsed.parent_thread_id.clone() {
                 let path_str = path.to_string_lossy();
                 store.mark_file_path_unavailable(&path_str)?;
@@ -637,6 +642,9 @@ fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutco
                     store.upsert_subagent(Agent::Codex, &scope, &info.id, sub)?;
                 }
             }
+        }
+        Some(crate::agents::sources::codex::parser::CodexParsedFile::Guardian(info)) => {
+            store.upsert_skipped_session(&info.file_path, &info)?;
         }
         None => {
             let path_str = path.to_string_lossy();

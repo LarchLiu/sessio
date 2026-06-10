@@ -22,12 +22,20 @@ use serde_json::Value;
 const REVERSE_TIMESTAMP_CHUNK_SIZE: u64 = 16 * 1024;
 
 pub fn list_sessions() -> Result<Vec<SessionInfo>> {
+    Ok(list_index_snapshot()?.sessions)
+}
+
+pub fn list_index_snapshot() -> Result<CodexIndexSnapshot> {
     let mut parsed = Vec::new();
+    let mut guardians = Vec::new();
     let (live, archived) = roots()?;
     let titles = load_session_index_titles();
-    scan_dir(&live, false, &titles, &mut parsed);
-    scan_dir(&archived, true, &titles, &mut parsed);
-    Ok(group_codex_sessions(parsed))
+    scan_dir(&live, false, &titles, &mut parsed, &mut guardians);
+    scan_dir(&archived, true, &titles, &mut parsed, &mut guardians);
+    Ok(CodexIndexSnapshot {
+        sessions: group_codex_sessions(parsed),
+        guardians,
+    })
 }
 
 pub fn roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
@@ -40,13 +48,24 @@ pub fn roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
 
 pub fn parse_one_file(path: &Path, archived: bool) -> Result<Option<SessionInfo>> {
     let titles = load_session_index_titles();
-    Ok(parse_session(path, archived, &titles)?.map(|p| p.info))
+    Ok(match parse_session(path, archived, &titles)? {
+        Some(CodexParsedFile::Session(parsed)) => Some(parsed.info),
+        Some(CodexParsedFile::Guardian(_)) | None => None,
+    })
 }
 
 pub fn parse_one_file_with_relation(
     path: &Path,
     archived: bool,
 ) -> Result<Option<CodexParsedSession>> {
+    let titles = load_session_index_titles();
+    Ok(match parse_session(path, archived, &titles)? {
+        Some(CodexParsedFile::Session(parsed)) => Some(parsed),
+        Some(CodexParsedFile::Guardian(_)) | None => None,
+    })
+}
+
+pub fn parse_one_file_for_index(path: &Path, archived: bool) -> Result<Option<CodexParsedFile>> {
     let titles = load_session_index_titles();
     parse_session(path, archived, &titles)
 }
@@ -83,7 +102,7 @@ pub fn find_session_file_by_id(session_id: &str) -> Result<Option<(std::path::Pa
                 continue;
             }
             match parse_session(path, is_archived, &titles) {
-                Ok(Some(parsed))
+                Ok(Some(CodexParsedFile::Session(parsed)))
                     if parsed.parent_thread_id.is_none() && parsed.info.id == session_id =>
                 {
                     return Ok(Some((path.to_path_buf(), is_archived)));
@@ -105,6 +124,7 @@ fn scan_dir(
     archived: bool,
     titles: &HashMap<String, String>,
     out: &mut Vec<CodexParsedSession>,
+    guardians: &mut Vec<SessionInfo>,
 ) {
     if !root.exists() {
         return;
@@ -121,7 +141,8 @@ fn scan_dir(
             continue;
         }
         match parse_session(path, archived, titles) {
-            Ok(Some(info)) => out.push(info),
+            Ok(Some(CodexParsedFile::Session(info))) => out.push(info),
+            Ok(Some(CodexParsedFile::Guardian(info))) => guardians.push(info),
             Ok(None) => {}
             Err(e) => log::warn!("codex parse {} failed: {e}", path.display()),
         }
@@ -137,9 +158,21 @@ pub struct CodexParsedSession {
 }
 
 #[derive(Debug, Clone)]
+pub enum CodexParsedFile {
+    Session(CodexParsedSession),
+    Guardian(SessionInfo),
+}
+
+#[derive(Debug, Clone)]
 pub struct CodexParsedSubagent {
     pub parent_thread_id: String,
     pub info: SubagentInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexIndexSnapshot {
+    pub sessions: Vec<SessionInfo>,
+    pub guardians: Vec<SessionInfo>,
 }
 
 impl CodexParsedSession {
@@ -493,7 +526,7 @@ fn parse_session(
     path: &Path,
     archived: bool,
     session_index_titles: &HashMap<String, String>,
-) -> Result<Option<CodexParsedSession>> {
+) -> Result<Option<CodexParsedFile>> {
     let mut id: Option<String> = None;
     let mut forked_from_agent: Option<Agent> = None;
     let mut forked_from_id: Option<String> = None;
@@ -632,10 +665,6 @@ fn parse_session(
         }
     }
 
-    if internal_guardian_session {
-        return Ok(None);
-    }
-
     let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let updated_at = reverse_ts.or_else(|| {
         fs::metadata(path)
@@ -680,12 +709,16 @@ fn parse_session(
         archived,
         subagents: Vec::new(),
     };
-    Ok(Some(CodexParsedSession {
+    if internal_guardian_session {
+        return Ok(Some(CodexParsedFile::Guardian(info)));
+    }
+
+    Ok(Some(CodexParsedFile::Session(CodexParsedSession {
         info,
         parent_thread_id,
         agent_nickname,
         agent_role,
-    }))
+    })))
 }
 
 fn codex_parent_thread_id(payload: &serde_json::Value) -> Option<String> {

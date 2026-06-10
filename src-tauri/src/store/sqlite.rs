@@ -4343,7 +4343,7 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM kanban_item_sessions kis
          INNER JOIN sessions s ON s.agent = kis.agent AND s.session_id = kis.session_id
-         WHERE kis.item_id = ? AND s.available = 1
+         WHERE kis.item_id = ? AND s.available = 1 AND s.skip = 0
          ORDER BY s.updated_at DESC, s.started_at DESC",
     )?;
     let mut sessions: Vec<SessionInfo> = stmt
@@ -4374,7 +4374,6 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    sessions.retain(|s| !is_codex_guardian_index_row(s));
     dedupe_sessions(&mut sessions);
     for session in sessions.iter_mut() {
         session.subagents = subs_by_parent
@@ -4392,7 +4391,7 @@ fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<Sessio
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM thread_sessions ts
          INNER JOIN sessions s ON s.agent = ts.agent AND s.session_id = ts.session_id
-         WHERE ts.thread_id = ? AND s.available = 1
+         WHERE ts.thread_id = ? AND s.available = 1 AND s.skip = 0
          ORDER BY ts.created_at ASC, s.updated_at DESC, s.started_at DESC",
     )?;
     let mut sessions: Vec<SessionInfo> = stmt
@@ -4423,7 +4422,6 @@ fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<Sessio
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    sessions.retain(|s| !is_codex_guardian_index_row(s));
     dedupe_sessions(&mut sessions);
     for session in sessions.iter_mut() {
         session.subagents = subs_by_parent
@@ -4441,7 +4439,7 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM stage_sessions ss
          INNER JOIN sessions s ON s.agent = ss.agent AND s.session_id = ss.session_id
-         WHERE ss.thread_stage_id = ? AND s.available = 1
+         WHERE ss.thread_stage_id = ? AND s.available = 1 AND s.skip = 0
          ORDER BY ss.created_at ASC, s.updated_at DESC, s.started_at DESC",
     )?;
     let mut sessions: Vec<SessionInfo> = stmt
@@ -4472,7 +4470,6 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    sessions.retain(|s| !is_codex_guardian_index_row(s));
     dedupe_sessions(&mut sessions);
     for session in sessions.iter_mut() {
         session.subagents = subs_by_parent
@@ -5178,13 +5175,13 @@ fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<Sess
                 started_at, updated_at, message_count, rename_title, title, first_user_message,
                 file_size, partial, available, archived, forked_from_agent, forked_from_id
          FROM sessions
+         WHERE skip = 0
          ORDER BY updated_at DESC"
     };
     let mut stmt = conn.prepare(sql)?;
     let mut sessions: Vec<SessionInfo> = stmt
         .query_map([], session_info_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    sessions.retain(|s| !is_codex_guardian_index_row(s));
     dedupe_sessions(&mut sessions);
     for s in sessions.iter_mut() {
         s.subagents = subs_by_parent
@@ -8045,32 +8042,6 @@ impl SessionStore for SqliteStore {
     }
 }
 
-fn is_codex_guardian_index_row(session: &SessionInfo) -> bool {
-    if session.agent != Agent::Codex {
-        return false;
-    }
-    let Ok(file) = std::fs::File::open(&session.file_path) else {
-        return false;
-    };
-    let reader = std::io::BufReader::new(file);
-    for line in std::io::BufRead::lines(reader).map_while(|line| line.ok()) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if v.get("type").and_then(|x| x.as_str()) != Some("session_meta") {
-            continue;
-        }
-        return v
-            .get("payload")
-            .and_then(|x| x.get("source"))
-            .and_then(|x| x.get("subagent"))
-            .and_then(|x| x.get("other"))
-            .and_then(|x| x.as_str())
-            == Some("guardian");
-    }
-    false
-}
-
 fn is_virtual_session_ref(value: &str) -> bool {
     value.trim_start().starts_with("astra://")
 }
@@ -9832,6 +9803,7 @@ mod migration_tests {
         };
         store.upsert_skipped_session("", &placeholder).unwrap();
         assert!(store.list_sessions().unwrap().is_empty());
+        assert!(store.list_all_sessions().unwrap().is_empty());
 
         let real_path = project_dir
             .join("pi-live-session.jsonl")
@@ -9848,15 +9820,7 @@ mod migration_tests {
         store.upsert_session(&project_path, &real).unwrap();
 
         assert!(store.list_sessions().unwrap().is_empty());
-        let row = store
-            .list_all_sessions()
-            .unwrap()
-            .into_iter()
-            .find(|session| session.agent == Agent::AstraPi && session.id == "pi-live-session")
-            .unwrap();
-        assert_eq!(row.file_path, real_path);
-        assert!(!row.partial);
-        assert_eq!(row.message_count, 4);
+        assert!(store.list_all_sessions().unwrap().is_empty());
 
         let skip: i64 = store
             .conn
@@ -9869,6 +9833,26 @@ mod migration_tests {
             )
             .unwrap();
         assert_eq!(skip, 1);
+        let stored = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT file_path, partial, message_count FROM sessions
+                 WHERE agent = ? AND session_id = ?",
+                params![Agent::AstraPi.as_str(), "pi-live-session"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored.0, real_path);
+        assert_eq!(stored.1, 0);
+        assert_eq!(stored.2, 4);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_dir);
