@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { AlertCircle, Bot, ExternalLink, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Square, Trash2 } from "lucide-react";
+import { AlertCircle, ExternalLink, LoaderCircle, MessageSquarePlus, MessagesSquare, Plus, Sparkles, Trash2 } from "lucide-react";
 import type { Agent, AstraEvent, AstraHandle, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo } from "../api";
 import {
   AGENT_LABEL,
-  cancelAstraRun,
-  createAstraRun,
   createThreadStageIssue,
   deleteThreadStageIssue,
   getThreadReplay,
@@ -35,7 +33,6 @@ import {
   formatAstraStatus,
   isAstraActive,
   planRoundStatusClass,
-  upsertAstraRun,
 } from "../threadAstraView";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
@@ -243,10 +240,7 @@ function ThreadAstraPanel({
   const { t } = useI18n();
   const [runs, setRuns] = useState<AstraHandle[]>([]);
   const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
-  const [prompt, setPrompt] = useState("");
-  const [busy, setBusy] = useState<"start" | "cancel" | null>(null);
   const activeRun = runs.find((run) => isAstraActive(run.status)) ?? runs[0] ?? null;
-  const hasActiveRun = Boolean(activeRun && isAstraActive(activeRun.status));
   const canStartAstra =
     thread.kind === "teamwork"
     || thread.kind === "process"
@@ -288,35 +282,6 @@ function ThreadAstraPanel({
     };
   }, [onError, onReload, reloadAstraState, thread.id]);
 
-  const start = async () => {
-    if (!canStartAstra || hasActiveRun) return;
-    setBusy("start");
-    try {
-      const run = await createAstraRun(thread.id, prompt.trim() || null);
-      setRuns((prev) => upsertAstraRun(prev, run));
-      setPrompt("");
-      await reloadAstraState();
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const cancel = async () => {
-    if (!activeRun) return;
-    setBusy("cancel");
-    try {
-      const run = await cancelAstraRun(activeRun.runId);
-      setRuns((prev) => upsertAstraRun(prev, run));
-      await reloadAstraState();
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   return (
     <section className="rounded-lg border border-card-border/[0.12] bg-card p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -334,43 +299,10 @@ function ThreadAstraPanel({
             {activeRun ? activeRun.runId : astraBoundary ?? t("astra.idle")}
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {hasActiveRun && (
-            <button
-              type="button"
-              disabled={busy !== null}
-              onClick={() => void cancel()}
-              title={t("astra.cancel")}
-              className="flex h-8 w-8 items-center justify-center rounded border border-ink/15 bg-surface-panel text-ink/45 hover:bg-red-500/[0.08] hover:text-red-500 disabled:opacity-40"
-            >
-              {busy === "cancel" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />}
-            </button>
-          )}
-          {canStartAstra && (
-            <button
-              type="button"
-              disabled={busy !== null || hasActiveRun}
-              onClick={() => void start()}
-              title={t("astra.start")}
-              className="flex h-8 items-center gap-1.5 rounded border border-ink/15 bg-surface-panel px-2 text-caption text-ink/55 hover:bg-ink/[0.05] hover:text-ink/80 disabled:opacity-40"
-            >
-              {busy === "start" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
-              {t("astra.start")}
-            </button>
-          )}
-        </div>
       </div>
 
       <div className="mt-3 grid gap-2">
-        {canStartAstra ? (
-          <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            rows={2}
-            placeholder={t("astra.prompt_placeholder")}
-            className="min-w-0 resize-none rounded-md border border-input-border/[0.16] bg-input px-3 py-2 text-body-sm text-input-fg outline-none placeholder:text-input-placeholder/35 focus:border-input-focus/30"
-          />
-        ) : (
+        {!canStartAstra && (
           <div className="flex items-start gap-2 rounded-md border border-dashed border-card-border/[0.14] px-3 py-2 text-caption leading-relaxed text-ink/38">
             <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink/32" />
             <span>{astraBoundary}</span>
