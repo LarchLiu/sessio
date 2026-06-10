@@ -14,6 +14,7 @@ Date: 2026-06-10
 - `pnpm test`
 - `pnpm run typecheck`
 - `pnpm run build`
+- `cargo run --example thread_summary_perf --manifest-path src-tauri/Cargo.toml -- --iterations 5`
 
 All commands passed locally.
 
@@ -25,6 +26,23 @@ All commands passed locally.
 - Astra run persistence still round-trips structured internal planner session links.
 - Guardian sessions stay hidden from session lists while their skipped rows remain persisted in SQLite.
 - Frontend summary consumers build successfully after removing duplicate sidebar refreshes.
+
+## Local benchmark snapshot
+
+`thread_summary_perf` now measures summary refresh and replay against a temporary copy of the
+current Sessio DB so the benchmark does not mutate the real database.
+
+Current local sample on the default DB:
+
+- project: `project-b7442013f87c27bc`
+- thread count in project: `2`
+- replay thread: `thread-5cb9a7a6c6367fbb`
+- iterations: `5`
+- `cache.warm`: avg `1 ms`, best `0 ms`, worst `5 ms`
+- `refresh_all`: avg `3 ms`, best `3 ms`, worst `4 ms`
+- `refresh_project`: avg `3 ms`, best `3 ms`, worst `4 ms`
+- `list_project`: avg `0 ms`, best `0 ms`, worst `0 ms`
+- `get_thread_replay`: avg `0 ms`, best `0 ms`, worst `0 ms`
 
 ## Manual profiling follow-up
 
