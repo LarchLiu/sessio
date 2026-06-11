@@ -724,6 +724,9 @@ pub(crate) fn collect_referenced_session_keys(
     }
     for run in astra_runs {
         for session in &run.internal_planner_sessions {
+            if is_virtual_orchestrator_session_id(&session.session_id) {
+                continue;
+            }
             let key = (session.agent, session.session_id.clone());
             if !existing_sessions.contains_key(&key) {
                 refs.insert(key);
@@ -750,6 +753,10 @@ pub(crate) fn insert_best_session(
 pub(crate) fn is_real_session_file_path(file_path: &str) -> bool {
     let trimmed = file_path.trim();
     !trimmed.is_empty() && !trimmed.starts_with("astra://")
+}
+
+pub(crate) fn is_virtual_orchestrator_session_id(session_id: &str) -> bool {
+    session_id.trim().starts_with("deterministic-orchestrator-")
 }
 
 pub(crate) fn better_session_candidate(candidate: &SessionInfo, current: &SessionInfo) -> bool {

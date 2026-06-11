@@ -165,6 +165,73 @@ describe("buildThreadSessionLanes", () => {
     expect(lanes[0].sessioRuntimeSessionId).toBe("runtime-planner");
   });
 
+  it("keeps deterministic orchestrator pseudo sessions in lanes for orchestration summaries", () => {
+    const replay: ThreadReplayInfo = {
+      threadId: "thread-1",
+      kind: "process",
+      sessions: [
+        replaySession("astra-pi", "deterministic-orchestrator-astra-run-1-0", null, [
+          source({
+            kind: "astra_internal",
+            astraRunId: "run-1",
+            role: "planner",
+            label: "Astra planner: deterministic",
+            createdAt: 20,
+          }),
+        ]),
+        replaySession("astra-pi", "deterministic-orchestrator-astra-run-1-1", null, [
+          source({
+            kind: "astra_internal",
+            astraRunId: "run-1",
+            role: "planner",
+            label: "Astra planner: deterministic",
+            createdAt: 40,
+          }),
+        ]),
+        replaySession("codex", "stage-session-1", session("codex", "stage-session-1"), [
+          source({ kind: "stage", stageId: "stage-1", label: "Writing", createdAt: 30 }),
+        ]),
+      ],
+    };
+
+    const lanes = buildThreadSessionLanes({
+      thread: thread("process"),
+      replay,
+      liveState: emptyLiveState(),
+      runtimeSessionAliases: {},
+      pendingNewChats: {},
+      t,
+    });
+
+    expect(new Set(lanes.map((lane) => lane.sessionId))).toEqual(new Set([
+      "deterministic-orchestrator-astra-run-1-0",
+      "deterministic-orchestrator-astra-run-1-1",
+      "stage-session-1",
+    ]));
+    const rows = buildThreadTimelineRows(
+      lanes,
+      [planRound({
+        id: "round-1",
+        astraRunId: "run-1",
+        createdAt: 20,
+        updatedAt: 30,
+        tasks: [planTask({ id: "task-1", roundId: "round-1", threadStageId: "stage-1" })],
+      })],
+      [astraRun({
+        runId: "run-1",
+        plannerBackend: "deterministic",
+        status: "completed",
+        terminalReason: "done",
+      })],
+      "process",
+    );
+
+    expect(rows.map((row) => row.kind)).toEqual(["orchestration", "sessions", "orchestration"]);
+    expect(rows[0].lanes).toHaveLength(0);
+    expect(rows[1].lanes.map((lane) => lane.sessionId)).toEqual(["stage-session-1"]);
+    expect(rows[2].run?.terminalReason).toBe("done");
+  });
+
   it("adds a pending lane before the real agent session id is known", () => {
     const pending: PendingNewChatSession = {
       sessioRuntimeSessionId: "runtime-pending",
@@ -254,6 +321,30 @@ describe("groupReplaySessionsByThreadKind", () => {
     expect(process[0].sessions.map((item) => item.sessionId)).toEqual(["session-2", "session-1"]);
     expect(debate[0].key).toBe("debate:round-123456789:task-1");
     expect(debate[0].label).toContain("Pro");
+  });
+
+  it("filters deterministic orchestrator pseudo sessions from replay groups", () => {
+    const groups = groupReplaySessionsByThreadKind({
+      threadId: "thread-1",
+      kind: "process",
+      sessions: [
+        replaySession("astra-pi", "deterministic-orchestrator-astra-run-1-0", null, [
+          source({
+            kind: "astra_internal",
+            astraRunId: "run-1",
+            role: "planner",
+            label: "Astra planner: deterministic",
+            createdAt: 20,
+          }),
+        ]),
+        replaySession("codex", "stage-session-1", session("codex", "stage-session-1"), [
+          source({ kind: "stage", stageId: "stage-1", label: "Writing", createdAt: 30 }),
+        ]),
+      ],
+    }, t);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].sessions.map((item) => item.sessionId)).toEqual(["stage-session-1"]);
   });
 });
 

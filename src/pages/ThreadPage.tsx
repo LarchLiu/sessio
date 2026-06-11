@@ -845,6 +845,7 @@ function ThreadReplaySessions({
 }) {
   const { t } = useI18n();
   const groups = groupReplaySessionsByThreadKind(replay, t);
+  if (groups.length === 0) return null;
   return (
     <section className="rounded-lg border border-card-border/[0.12] bg-card p-3">
       <div className="mb-3 flex items-center gap-2 text-body-sm font-medium text-ink/75">

@@ -74,7 +74,6 @@ import { collectThreadChatSessions } from "../threadChats";
 import { collectThreadHistorySnapshots, withThreadChatSessions } from "../threadWorkContext";
 import { sessioThreadPromptBlockMetas, stripSessioThreadPromptBlocks } from "../historyMerge";
 import {
-  astraStatusClass,
   formatAstraStatus,
   isAstraActive,
   upsertAstraRun,
@@ -589,9 +588,7 @@ export default function ThreadMultiSessionChatPage({
                     onClick={() => void handleCancelAstra()}
                     disabled={astraBusy !== null}
                     className={
-                      "relative flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full transition before:pointer-events-none before:absolute before:inset-y-[-25%] before:left-[-55%] before:w-3 before:rotate-12 before:bg-white/65 before:opacity-0 before:blur-[1px] before:transition-all before:duration-500 hover:before:left-[130%] hover:before:opacity-80 disabled:opacity-40 " +
-                      astraStatusClass(activeAstraRun.status) +
-                      " hover:bg-red-500/[0.08] hover:text-red-500"
+                      "astra-send-button relative flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full"
                     }
                     aria-label={t("astra.cancel")}
                   >
@@ -704,7 +701,7 @@ function threadTimelineNavItems(
     if (row.kind === "orchestration") {
       const visibleStaticPlanner = row.round
         ? Boolean(planRoundSummaryText(row.round, row.run))
-        : false;
+        : Boolean(astraRunReasonText(row.run));
       if (row.lanes.length > 0 || visibleStaticPlanner) {
         row.lanes.forEach((lane) => seen.add(lane.laneId));
         items.push({
@@ -1111,9 +1108,14 @@ function ThreadTimeline({
     <section className="grid content-start gap-4">
       {rows.map((row) => {
         if (row.kind === "orchestration") {
-          const summaryText = row.round ? planRoundSummaryText(row.round, row.run) : null;
+          const summaryText = row.round
+            ? planRoundSummaryText(row.round, row.run)
+            : astraRunReasonText(row.run);
           if (row.lanes.length === 0) {
-            if (!row.round || !summaryText) return null;
+            if (!summaryText) return null;
+            const timestamp = row.round
+              ? row.round.updatedAt || row.round.createdAt
+              : row.time || row.run?.updatedAt || row.run?.createdAt || Date.now();
             return (
               <ThreadTimelineStaticCard
                 key={row.key}
@@ -1121,8 +1123,9 @@ function ThreadTimeline({
                 laneRefs={laneRefs}
                 title="Astra planner"
               >
-                <ThreadPlanRoundSummaryMessage
-                  round={row.round}
+                <ThreadPlannerSummaryMessage
+                  id={row.round?.id ?? row.key}
+                  timestamp={timestamp}
                   text={summaryText}
                   now={now}
                 />

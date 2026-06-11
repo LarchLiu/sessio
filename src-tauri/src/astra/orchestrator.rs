@@ -739,12 +739,17 @@ mod tests {
 
         values.push("runtime-2".to_string());
         values.push("planner-session-old".to_string());
+        push_internal_planner_session_id(
+            &mut values,
+            "deterministic-orchestrator-astra-run-1-0".to_string(),
+        );
         push_internal_planner_session_id(&mut values, "planner-session-real".to_string());
 
         assert_eq!(
             values,
             vec![
                 "planner-session-old".to_string(),
+                "deterministic-orchestrator-astra-run-1-0".to_string(),
                 "planner-session-real".to_string()
             ]
         );

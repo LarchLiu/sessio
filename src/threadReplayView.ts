@@ -170,6 +170,11 @@ export function buildThreadSessionLanes({
   return lanes.sort(compareLanes);
 }
 
+function isDeterministicOrchestratorReplaySession(session: ThreadReplaySessionInfo): boolean {
+  return session.sessionId.startsWith("deterministic-orchestrator-")
+    && session.sources.some((source) => source.kind === "astra_internal");
+}
+
 function pendingReplaySources(pending: PendingNewChatSession): ThreadReplaySessionSourceInfo[] {
   const threadId = pending.threadLink?.threadId ?? pending.workSnapshot?.threadId ?? null;
   if (!threadId) return [];
@@ -221,19 +226,22 @@ export function buildThreadTimelineRows(
   }
 
   const plannerQueues = new Map<string, ThreadSessionLane[]>();
+  const staticPlannerQueues = new Map<string, ThreadSessionLane[]>();
   for (const lane of lanes) {
     const source = plannerSourceForLane(lane);
     if (!source) continue;
+    const runKey = source.astraRunId ?? `lane:${lane.laneId}`;
     if (!plannerLaneHasTranscript(lane)) {
-      consumed.add(lane.laneId);
+      const queue = staticPlannerQueues.get(runKey) ?? [];
+      queue.push(lane);
+      staticPlannerQueues.set(runKey, queue);
       continue;
     }
-    const runKey = source.astraRunId ?? `lane:${lane.laneId}`;
     const queue = plannerQueues.get(runKey) ?? [];
     queue.push(lane);
     plannerQueues.set(runKey, queue);
   }
-  for (const queue of plannerQueues.values()) {
+  for (const queue of [...plannerQueues.values(), ...staticPlannerQueues.values()]) {
     queue.sort(compareTimelineLanesAsc);
   }
 
@@ -245,6 +253,10 @@ export function buildThreadTimelineRows(
       ? (plannerQueues.get(round.astraRunId)?.splice(0, 1) ?? [])
       : [];
     for (const lane of plannerLanes) consumed.add(lane.laneId);
+    const staticPlannerLane = round.astraRunId
+      ? staticPlannerQueues.get(round.astraRunId)?.shift() ?? null
+      : null;
+    if (staticPlannerLane) consumed.add(staticPlannerLane.laneId);
     groupRows.push({
       key: `orchestration:${round.id}`,
       kind: "orchestration",
@@ -301,6 +313,30 @@ export function buildThreadTimelineRows(
       order: 1000 + round.roundIndex,
       rows: groupRows,
     });
+  }
+
+  for (const [runKey, queue] of staticPlannerQueues.entries()) {
+    for (const lane of queue) {
+      if (consumed.has(lane.laneId)) continue;
+      const run = runById.get(runKey) ?? null;
+      consumed.add(lane.laneId);
+      const time = laneTimelineTime(lane) || run?.updatedAt || run?.createdAt || 0;
+      groups.push({
+        key: `orchestration-static:${lane.laneId}`,
+        time,
+        order: 500,
+        rows: [{
+          key: `orchestration-static:${lane.laneId}`,
+          kind: "orchestration",
+          time,
+          order: 0,
+          round: null,
+          run,
+          lanes: [],
+          debatePair: false,
+        }],
+      });
+    }
   }
 
   for (const [runKey, queue] of plannerQueues.entries()) {
@@ -383,6 +419,7 @@ export function groupReplaySessionsByThreadKind(
 ): ReplaySessionGroup[] {
   const groups = new Map<string, ReplaySessionGroup>();
   for (const session of replay.sessions) {
+    if (isDeterministicOrchestratorReplaySession(session)) continue;
     const seed = replayGroupForSession(replay.kind, session, t);
     const group = groups.get(seed.key) ?? { ...seed, sessions: [] };
     group.sessions.push(session);

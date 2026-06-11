@@ -263,33 +263,57 @@ pub(super) fn build_plan_task_snapshot_context(
     let assistant_snapshot = parse_task_snapshot(assistant_snapshot_json, "assistant")?;
     let agent_snapshot = parse_task_snapshot(agent_snapshot_json, "agent")?;
     let stage_name = task_snapshot_label(&stage_snapshot)
+        .or_else(|| {
+            task.target_stage_id.as_deref().and_then(|stage_id| {
+                thread
+                    .stages
+                    .iter()
+                    .find(|stage| stage.id == stage_id)
+                    .map(stage_label)
+            })
+        })
         .or_else(|| task_snapshot_label(&assistant_snapshot))
         .unwrap_or_else(|| task.title.clone());
-    let snapshot = json!({
-        "threadId": thread.id,
-        "projectId": thread.project_id,
-        "kind": thread.kind,
-        "goal": thread.goal,
-        "description": thread.description,
-        "task": {
-            "id": task.id,
-            "planTaskId": task.plan_task_id,
-            "title": task.title,
-            "assistantId": task.assistant_id,
-            "threadStageId": task.target_stage_id,
-            "targetAgent": task.target_agent,
-            "expectedOutput": task.expected_output,
-            "risk": task.risk,
-        },
-        "stageSnapshot": stage_snapshot,
-        "assistantSnapshot": assistant_snapshot,
-        "agentSnapshot": agent_snapshot,
-        "contextPolicy": {
-            "mode": "persisted_plan_task_snapshot",
-            "source": "thread_plan_tasks",
-        },
-        "capturedAt": super::now_ms(),
-    });
+    let captured_at = super::now_ms();
+    let mut snapshot = if thread.kind == ThreadKind::Process {
+        build_process_thread_work_snapshot(thread, task.target_stage_id.as_deref(), captured_at)
+    } else {
+        json!({
+            "threadId": thread.id,
+            "projectId": thread.project_id,
+            "kind": thread.kind,
+            "goal": thread.goal,
+            "description": thread.description,
+            "capturedAt": captured_at,
+        })
+    };
+    if let Some(snapshot_object) = snapshot.as_object_mut() {
+        snapshot_object.insert("kind".to_string(), json!(thread.kind));
+        snapshot_object.insert(
+            "task".to_string(),
+            json!({
+                "id": task.id,
+                "planTaskId": task.plan_task_id,
+                "title": task.title,
+                "assistantId": task.assistant_id,
+                "threadStageId": task.target_stage_id,
+                "targetAgent": task.target_agent,
+                "expectedOutput": task.expected_output,
+                "risk": task.risk,
+            }),
+        );
+        snapshot_object.insert("stageSnapshot".to_string(), json!(stage_snapshot));
+        snapshot_object.insert("assistantSnapshot".to_string(), json!(assistant_snapshot));
+        snapshot_object.insert("agentSnapshot".to_string(), json!(agent_snapshot));
+        snapshot_object.insert(
+            "contextPolicy".to_string(),
+            json!({
+                "mode": "persisted_plan_task_snapshot",
+                "source": "thread_plan_tasks",
+            }),
+        );
+        snapshot_object.insert("capturedAt".to_string(), json!(captured_at));
+    }
     let prompt = render_plan_task_snapshot_prompt(thread, &snapshot, task);
     Ok(Some(StageTaskContext {
         thread_id: thread.id.clone(),
@@ -307,6 +331,115 @@ fn parse_task_snapshot(value: Option<&str>, label: &str) -> anyhow::Result<Optio
                 .map_err(|err| anyhow::anyhow!("invalid plan task {label} snapshot json: {err}"))
         })
         .transpose()
+}
+
+fn build_process_thread_work_snapshot(
+    thread: &ThreadInfo,
+    focused_stage_id: Option<&str>,
+    captured_at: i64,
+) -> Value {
+    let mut stages = thread.stages.clone();
+    stages.sort_by_key(|stage| stage.order);
+    let current_stage_label = focused_stage_id
+        .and_then(|stage_id| stages.iter().find(|stage| stage.id == stage_id))
+        .map(stage_label);
+    let completed = stages
+        .iter()
+        .filter(|stage| matches!(stage.status, StageStatus::Completed | StageStatus::Skipped))
+        .count();
+    let blocked = stages
+        .iter()
+        .filter(|stage| stage.status == StageStatus::Blocked)
+        .count();
+    let open_issues = stages
+        .iter()
+        .map(|stage| {
+            stage
+                .issues
+                .iter()
+                .filter(|issue| issue.status == IssueStatus::Open)
+                .count()
+        })
+        .sum::<usize>();
+    let thread_session_refs = thread
+        .sessions
+        .iter()
+        .map(|session| session_ref_json(session, "thread"))
+        .collect::<Vec<_>>();
+    let stage_values = stages
+        .iter()
+        .map(|stage| {
+            json!({
+                "threadStageId": stage.id,
+                "projectStageId": stage.stage_id,
+                "name": stage_label(stage),
+                "kind": stage.kind,
+                "icon": stage.icon,
+                "status": stage.status,
+                "summary": stage.summary,
+                "outcome": stage.outcome,
+                "assistants": stage.assistants,
+                "issues": stage.issues,
+                "sessionRefs": stage
+                    .sessions
+                    .iter()
+                    .map(|session| session_ref_json(session, "stage"))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let stage_session_refs = stages
+        .iter()
+        .flat_map(|stage| {
+            stage
+                .sessions
+                .iter()
+                .map(|session| session_ref_json(session, "stage"))
+        })
+        .collect::<Vec<_>>();
+    let all_session_refs = dedupe_session_ref_values(
+        thread_session_refs
+            .iter()
+            .cloned()
+            .chain(stage_session_refs.iter().cloned())
+            .collect(),
+    );
+    json!({
+        "threadId": thread.id,
+        "projectId": thread.project_id,
+        "kind": thread.kind,
+        "goal": thread.goal,
+        "description": thread.description,
+        "activeStageId": thread.stage_id,
+        "focusedStageId": focused_stage_id,
+        "stages": stage_values,
+        "threadSessionRefs": thread_session_refs,
+        "relatedContext": {
+            "sessionExcerptRefs": all_session_refs,
+        },
+        "detailRefs": {
+            "threadId": thread.id,
+            "focusedStageId": focused_stage_id,
+            "stageIds": stage_values
+                .iter()
+                .filter_map(|stage| stage.get("threadStageId").and_then(Value::as_str).map(str::to_string))
+                .collect::<Vec<_>>(),
+            "issueIds": stages
+                .iter()
+                .flat_map(|stage| stage.issues.iter().map(|issue| issue.id.clone()))
+                .collect::<Vec<_>>(),
+            "sessionRefs": all_session_refs,
+        },
+        "rollup": {
+            "completed": completed,
+            "incomplete": stages.len().saturating_sub(completed),
+            "blocked": blocked,
+            "openIssues": open_issues,
+            "currentStage": current_stage_label,
+            "total": stages.len(),
+        },
+        "capturedAt": captured_at,
+    })
 }
 
 fn task_snapshot_label(value: &Option<Value>) -> Option<String> {
@@ -1375,5 +1508,44 @@ mod tests {
         assert!(!context
             .prompt
             .contains("Current instructions should not win."));
+    }
+
+    #[test]
+    fn process_plan_task_snapshot_context_keeps_stage_rollup() {
+        let thread = thread();
+        let mut task = task();
+        task.plan_task_id = Some("plan-task-1".to_string());
+        task.title = "writing / Writer".to_string();
+        let context = build_plan_task_snapshot_context(
+            &thread,
+            &task,
+            Some(r#"{"id":"project-stage-1","name":"Writing"}"#),
+            Some(r#"{"assistantId":"assistant-1","name":"Writer"}"#),
+            Some(r#"{"agent":"codex","agentInfo":{"displayName":"Codex CLI"}}"#),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            context.snapshot["contextPolicy"]["mode"],
+            Value::String("persisted_plan_task_snapshot".to_string())
+        );
+        assert_eq!(
+            context.snapshot["focusedStageId"],
+            Value::String("stage-1".to_string())
+        );
+        assert_eq!(context.snapshot["rollup"]["total"], Value::from(1));
+        assert_eq!(
+            context.snapshot["rollup"]["currentStage"],
+            Value::String("Research".to_string())
+        );
+        assert_eq!(
+            context.snapshot["stages"][0]["threadStageId"],
+            Value::String("stage-1".to_string())
+        );
+        assert_eq!(
+            context.snapshot["task"]["title"],
+            Value::String("writing / Writer".to_string())
+        );
     }
 }

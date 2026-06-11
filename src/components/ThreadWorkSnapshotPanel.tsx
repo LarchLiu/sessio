@@ -66,6 +66,7 @@ export default function ThreadWorkSnapshotPanel({
     (total, stage) => total + (stage.issues ?? []).filter((issue) => issue.status === "open").length,
     0,
   );
+  const taskChips = astraTaskSnapshotChips(workRecord, t);
   return (
     <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5 text-body-sm">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -90,6 +91,9 @@ export default function ThreadWorkSnapshotPanel({
           </div>
         )}
       </div>
+      {taskChips.length > 0 && (
+        <SnapshotChips chips={taskChips} />
+      )}
       {hasStages && (
         <div className="mt-2 grid gap-1.5">
           {stages.map((stage) => (
@@ -139,11 +143,40 @@ function AstraTaskSnapshotPanel({
   workRecord: Record<string, unknown>;
 }) {
   const { t } = useI18n();
+  const chips = astraTaskSnapshotChips(workRecord, t);
+
+  return (
+    <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5 text-body-sm">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-caption uppercase text-ink/35">{t("thread.snapshot")}</div>
+          <div className="truncate font-medium text-ink/80">{pickString(workRecord.goal) ?? snapshot.threadId}</div>
+        </div>
+      </div>
+      {chips.length > 0 && (
+        <SnapshotChips chips={chips} />
+      )}
+      <ThreadWorkSnapshotSources sources={sources} />
+    </section>
+  );
+}
+
+function astraTaskSnapshotChips(
+  workRecord: Record<string, unknown>,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string[] {
   const task = asRecord(workRecord.task);
   const contextPolicy = asRecord(workRecord.contextPolicy);
   const assistantSnapshot = asRecord(workRecord.assistantSnapshot);
   const agentSnapshot = asRecord(workRecord.agentSnapshot);
   const agentInfo = asRecord(agentSnapshot.agentInfo);
+  const hasTaskContext =
+    Object.keys(task).length > 0 ||
+    Object.keys(contextPolicy).length > 0 ||
+    Object.keys(assistantSnapshot).length > 0 ||
+    Object.keys(agentSnapshot).length > 0 ||
+    pickString(workRecord.focusedAssistantId) != null;
+  if (!hasTaskContext) return [];
   const kind = pickString(workRecord.kind);
   const taskTitle = pickString(task.title) ?? pickString(task.id);
   const assistantLabel = pickString(assistantSnapshot.name)
@@ -156,34 +189,25 @@ function AstraTaskSnapshotPanel({
     ?? pickString(task.targetAgent);
   const policyMode = pickString(contextPolicy.mode);
   const laneId = pickString(contextPolicy.laneId);
-  const chips = [
+  return [
     kind ? threadSnapshotKindLabel(kind, t) : null,
     taskTitle ? t("thread.snapshot_task", { value: taskTitle }) : null,
     assistantLabel ? t("thread.snapshot_assistant", { value: assistantLabel }) : null,
     agentLabel ? t("thread.snapshot_agent", { value: agentLabel }) : null,
     policyMode ? t("thread.snapshot_policy", { value: policyMode.replace(/_/g, " ") }) : null,
     laneId ? t("thread.snapshot_lane", { value: laneId }) : null,
-  ].filter(Boolean);
+  ].filter((chip): chip is string => Boolean(chip));
+}
 
+function SnapshotChips({ chips }: { chips: string[] }) {
   return (
-    <section className="rounded-lg border border-card-border/[0.12] bg-card px-3 py-2.5 text-body-sm">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-caption uppercase text-ink/35">{t("thread.snapshot")}</div>
-          <div className="truncate font-medium text-ink/80">{pickString(workRecord.goal) ?? snapshot.threadId}</div>
-        </div>
-      </div>
-      {chips.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-ink/45">
-          {chips.map((chip) => (
-            <span key={chip} className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5">
-              {chip}
-            </span>
-          ))}
-        </div>
-      )}
-      <ThreadWorkSnapshotSources sources={sources} />
-    </section>
+    <div className="mt-2 flex flex-wrap gap-1.5 text-caption text-ink/45">
+      {chips.map((chip) => (
+        <span key={chip} className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5">
+          {chip}
+        </span>
+      ))}
+    </div>
   );
 }
 

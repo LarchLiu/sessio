@@ -723,15 +723,26 @@ mod tests {
             terminal_reason: None,
             last_error_code: None,
             last_error_message: None,
-            internal_planner_sessions: vec![AstraRunSessionRecord {
-                run_id: "run-1".to_string(),
-                agent: Agent::AstraPi,
-                session_id: "planner-session".to_string(),
-                role: PlanTaskSessionRole::Planner,
-                sort_order: 0,
-                created_at: 15,
-                updated_at: 16,
-            }],
+            internal_planner_sessions: vec![
+                AstraRunSessionRecord {
+                    run_id: "run-1".to_string(),
+                    agent: Agent::AstraPi,
+                    session_id: "planner-session".to_string(),
+                    role: PlanTaskSessionRole::Planner,
+                    sort_order: 0,
+                    created_at: 15,
+                    updated_at: 16,
+                },
+                AstraRunSessionRecord {
+                    run_id: "run-1".to_string(),
+                    agent: Agent::AstraPi,
+                    session_id: "deterministic-orchestrator-run-1-0".to_string(),
+                    role: PlanTaskSessionRole::Planner,
+                    sort_order: 1,
+                    created_at: 15,
+                    updated_at: 16,
+                },
+            ],
             run_diagnostics_json: "[]".to_string(),
             error: None,
             created_at: 15,
@@ -744,6 +755,10 @@ mod tests {
 
         assert!(refs.contains(&(Agent::Gemini, "missing-session".to_string())));
         assert!(refs.contains(&(Agent::AstraPi, "planner-session".to_string())));
+        assert!(!refs.contains(&(
+            Agent::AstraPi,
+            "deterministic-orchestrator-run-1-0".to_string()
+        )));
         assert!(!refs.contains(&(Agent::Claude, "loaded-session".to_string())));
         assert!(!refs.contains(&(Agent::Codex, "superseded-session".to_string())));
     }
