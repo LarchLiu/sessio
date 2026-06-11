@@ -3,7 +3,6 @@ import {
   useEffect,
   useMemo,
   useReducer,
-  useRef,
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -77,7 +76,6 @@ function readViewMode(): ViewMode {
 
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
-const THREAD_SUMMARY_REFRESH_DEBOUNCE_MS = 250;
 
 async function revealMainWindow(): Promise<void> {
   try {
@@ -135,7 +133,6 @@ export default function App() {
   const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
   const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
   const [threadChatSummaries, setThreadChatSummaries] = useState<ThreadChatSummaryInfo[]>([]);
-  const threadSummaryRefreshTimeoutRef = useRef<number | null>(null);
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
@@ -332,26 +329,6 @@ export default function App() {
     });
   }, []);
 
-  const scheduleThreadSummaryRefresh = useCallback(() => {
-    if (threadSummaryRefreshTimeoutRef.current !== null) {
-      window.clearTimeout(threadSummaryRefreshTimeoutRef.current);
-    }
-    threadSummaryRefreshTimeoutRef.current = window.setTimeout(() => {
-      threadSummaryRefreshTimeoutRef.current = null;
-      refreshThreadSummaries(null).catch((err) => {
-        console.warn("refresh thread chat summaries failed", err);
-      });
-    }, THREAD_SUMMARY_REFRESH_DEBOUNCE_MS);
-  }, [refreshThreadSummaries]);
-
-  useEffect(() => {
-    return () => {
-      if (threadSummaryRefreshTimeoutRef.current !== null) {
-        window.clearTimeout(threadSummaryRefreshTimeoutRef.current);
-      }
-    };
-  }, []);
-
   useEffect(() => {
     if (projects.length === 0) {
       setThreadChatSummaries([]);
@@ -377,15 +354,11 @@ export default function App() {
         if (!cancelled) console.warn("refresh thread chat summaries failed", err);
       });
     });
-    const unlistenSessions = listen("sessions_index_updated", () => {
-      scheduleThreadSummaryRefresh();
-    });
     return () => {
       cancelled = true;
       unlistenThreads.then((f) => f()).catch(() => {});
-      unlistenSessions.then((f) => f()).catch(() => {});
     };
-  }, [projects.length, refreshThreadSummaries, scheduleThreadSummaryRefresh]);
+  }, [projects.length, refreshThreadSummaries]);
 
   const recentForMenu = useMemo<TrayRecentEntry[]>(() => {
     const linkedSessionKeys = new Set<string>();
@@ -395,7 +368,6 @@ export default function App() {
       entries.push({
         kind: "thread",
         thread: summary,
-        sessions: summary.sessions,
         time: summary.time,
       });
     }
@@ -453,9 +425,6 @@ export default function App() {
       quit: t("menubar.quit"),
       noSessions: t("menubar.no_sessions"),
       noMessage: t("list.no_user_message"),
-      resumeCommand: t("menubar.resume_command"),
-      crossCommand: t("menubar.cross_command"),
-      crossPromptPlaceholder: t("list.cross_prompt_placeholder"),
       updateAvailable: t("menubar.update_available"),
       updateInstalling: t("sidebar.update_installing"),
     }, systemAppearance, {
@@ -463,6 +432,33 @@ export default function App() {
       latestVersion: update.latestVersion,
       installing: update.installing,
       install: openUpdateConfirm,
+    }, {
+      onSelectSession: (session) => {
+        const project = session.projectPath
+          ? projects.find((item) => item.path === session.projectPath) ?? null
+          : null;
+        if (project) {
+          setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+        }
+        setSelectedProject(null);
+        setSelectedThread(null);
+        setNewChatProjectKey(null);
+        setSelected(session);
+        setDetailMode("chat");
+        void revealMainWindow();
+      },
+      onSelectThread: (thread) => {
+        const project = projects.find((item) => item.id === thread.projectId) ?? null;
+        if (project) {
+          setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
+        }
+        setSelected(null);
+        setSelectedProject(null);
+        setSelectedThread({ projectId: thread.projectId, threadId: thread.threadId, goal: thread.goal });
+        setNewChatProjectKey(null);
+        setDetailMode("threadMultiSessionChat");
+        void revealMainWindow();
+      },
     });
   }, [
     recentForMenu,
@@ -472,6 +468,8 @@ export default function App() {
     update.latestVersion,
     update.installing,
     openUpdateConfirm,
+    projects,
+    setFilter,
   ]);
 
   const removeSessionsInScope = async (scope: SessionScope) => {

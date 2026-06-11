@@ -4,7 +4,6 @@ import { Menu } from "@tauri-apps/api/menu/menu";
 import { MenuItem } from "@tauri-apps/api/menu/menuItem";
 import { PredefinedMenuItem } from "@tauri-apps/api/menu/predefinedMenuItem";
 import { IconMenuItem } from "@tauri-apps/api/menu/iconMenuItem";
-import { Submenu } from "@tauri-apps/api/menu/submenu";
 import { TrayIcon } from "@tauri-apps/api/tray";
 import { Image } from "@tauri-apps/api/image";
 import {
@@ -13,10 +12,6 @@ import {
   ThreadChatSummaryInfo,
 } from "./api";
 import { getMenuIconBytes, type MenuIconComponent } from "./menuIcon";
-import {
-  RESUME_CMD,
-  buildCrossCommandForSession,
-} from "./cross";
 import { sessionDisplayTitle } from "./appUtils";
 
 const AGENT_ICONS: Record<Agent, MenuIconComponent> = {
@@ -39,7 +34,7 @@ type TrayTheme = "light" | "dark";
 
 export type TrayRecentEntry =
   | { kind: "session"; session: SessionInfo; time: number }
-  | { kind: "thread"; thread: ThreadChatSummaryInfo; sessions: SessionInfo[]; time: number };
+  | { kind: "thread"; thread: ThreadChatSummaryInfo; time: number };
 
 function themedAgentIconColor(agent: Agent, theme: TrayTheme): string | undefined {
   if (agent !== "codex" && agent !== "astra-pi") return undefined;
@@ -91,9 +86,6 @@ export interface TrayTexts {
   quit: string;
   noSessions: string;
   noMessage: string;
-  resumeCommand: string;
-  crossCommand: string;
-  crossPromptPlaceholder: string;
   updateAvailable: string;
   updateInstalling: string;
 }
@@ -109,91 +101,50 @@ type ItemHandle =
   | MenuItem
   | PredefinedMenuItem
   | IconMenuItem
-  | Submenu;
+  ;
+
+export interface TrayRecentActions {
+  onSelectSession: (session: SessionInfo) => void;
+  onSelectThread: (thread: ThreadChatSummaryInfo) => void;
+}
 
 let currentMenu: Menu | null = null;
 let currentToken = 0;
 let pendingPromise: Promise<void> = Promise.resolve();
 
-async function buildSessionSubmenu(
+async function buildSessionItem(
   s: SessionInfo,
   texts: TrayTexts,
   iconBytes: Record<Agent, Uint8Array>,
-  idScope = "session",
-): Promise<Submenu> {
-  const orderedAgents: Agent[] = ["codex", "claude", "gemini"];
-  const subItems: IconMenuItem[] = [];
-  for (const a of orderedAgents) {
-    const label = a === s.agent ? texts.resumeCommand : texts.crossCommand;
-    const icon = await Image.fromBytes(iconBytes[a]);
-    const item = await IconMenuItem.new({
-      id: `tray-${idScope}-${s.agent}-${s.id}-${a}`,
-      text: label,
-      icon,
-      action: async () => {
-        try {
-          if (a === s.agent) {
-            await navigator.clipboard.writeText(RESUME_CMD[a](s.id));
-            return;
-          }
-          const cmd = await buildCrossCommandForSession(
-            s.agent,
-            a,
-            s.id,
-            s.filePath,
-            texts.crossPromptPlaceholder,
-          );
-          if (cmd) await navigator.clipboard.writeText(cmd);
-        } catch (err) {
-          console.error("tray submenu action failed", err);
-        }
-      },
-    });
-    subItems.push(item);
-  }
+  actions: TrayRecentActions,
+): Promise<IconMenuItem> {
   const titleSource = sessionDisplayTitle(s) ?? texts.noMessage;
   const text = fitTitle(titleSource) || texts.noMessage;
   const icon = await Image.fromBytes(iconBytes[s.agent]);
-  return Submenu.new({
-    id: `tray-${idScope}-${s.agent}-${s.id}`,
+  return IconMenuItem.new({
+    id: `tray-session-${s.agent}-${s.id}`,
     text,
     icon,
-    items: subItems,
+    action: () => {
+      actions.onSelectSession(s);
+    },
   });
 }
 
-async function buildThreadSubmenu(
+async function buildThreadItem(
   entry: Extract<TrayRecentEntry, { kind: "thread" }>,
   texts: TrayTexts,
-  iconBytes: Record<Agent, Uint8Array>,
   threadIconBytes: Uint8Array,
-): Promise<Submenu> {
-  const subItems: ItemHandle[] = [];
-  for (const session of entry.sessions) {
-    subItems.push(
-      await buildSessionSubmenu(
-        session,
-        texts,
-        iconBytes,
-        `thread-${entry.thread.threadId}`,
-      ),
-    );
-  }
-  if (subItems.length === 0) {
-    subItems.push(
-      await MenuItem.new({
-        id: `tray-thread-${entry.thread.threadId}-empty`,
-        text: texts.noSessions,
-        enabled: false,
-      }),
-    );
-  }
+  actions: TrayRecentActions,
+): Promise<IconMenuItem> {
   const icon = await Image.fromBytes(threadIconBytes);
-  return Submenu.new({
+  return IconMenuItem.new({
     id: `tray-thread-${entry.thread.threadId}`,
     text: fitTitle(entry.thread.goal) || texts.noMessage,
     icon,
-    items: subItems,
+    action: () => {
+      actions.onSelectThread(entry.thread);
+    },
   });
 }
 
@@ -202,6 +153,7 @@ async function buildMenu(
   texts: TrayTexts,
   theme: TrayTheme,
   update: TrayUpdateState,
+  actions: TrayRecentActions,
 ): Promise<Menu> {
   const iconBytes: Record<Agent, Uint8Array> = {
     "astra-pi": await getAgentIcon("astra-pi", theme),
@@ -224,8 +176,8 @@ async function buildMenu(
     for (const entry of recent) {
       items.push(
         entry.kind === "thread"
-          ? await buildThreadSubmenu(entry, texts, iconBytes, threadIconBytes)
-          : await buildSessionSubmenu(entry.session, texts, iconBytes),
+          ? await buildThreadItem(entry, texts, threadIconBytes, actions)
+          : await buildSessionItem(entry.session, texts, iconBytes, actions),
       );
     }
   }
@@ -257,6 +209,7 @@ export async function syncTrayMenu(
   texts: TrayTexts,
   theme: TrayTheme,
   update: TrayUpdateState,
+  actions: TrayRecentActions,
 ): Promise<void> {
   const token = ++currentToken;
   // Serialize against any in-flight sync so we never race two setMenu calls.
@@ -265,7 +218,7 @@ export async function syncTrayMenu(
     try {
       const tray = await TrayIcon.getById(TRAY_ID);
       if (!tray) return;
-      const menu = await buildMenu(recent, texts, theme, update);
+      const menu = await buildMenu(recent, texts, theme, update, actions);
       if (token !== currentToken) {
         await menu.close();
         return;
