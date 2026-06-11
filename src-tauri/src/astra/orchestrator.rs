@@ -61,6 +61,9 @@ impl AstraService {
         }
         let mut dispatch_batch = Vec::new();
         let mut completions = Vec::new();
+        // Round index and planner summary of the last dispatched teamwork
+        // round, journaled once its completions arrive at the next planning.
+        let mut pending_journal: Option<(u32, String)> = None;
 
         loop {
             if dispatch_batch.is_empty() {
@@ -88,6 +91,17 @@ impl AstraService {
                     .inner
                     .store
                     .get_thread_work_state(&current_run.thread_id)?;
+                if latest_thread.kind == ThreadKind::Teamwork && !completions.is_empty() {
+                    if let Some((journal_round_index, planner_summary)) = pending_journal.take() {
+                        let entry = super::teamwork_round_journal_entry(
+                            journal_round_index,
+                            &planner_summary,
+                            &completions,
+                            now_ms(),
+                        );
+                        current_run = self.record_round_journal(&current_run.run_id, entry)?;
+                    }
+                }
                 let (orchestration, orchestrator_backend) = match self.orchestrate_astra_round(
                     &current_run,
                     &latest_thread,
@@ -106,6 +120,7 @@ impl AstraService {
                         return Ok(RustNativeWorkerOutcome::Claimed);
                     }
                 };
+                let plan_summary = orchestration.summary.clone();
                 let (next_run, next_batch) = self.apply_orchestration_intent(
                     &current_run,
                     orchestration,
@@ -117,6 +132,9 @@ impl AstraService {
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
                 dispatch_batch = next_batch;
+                if !dispatch_batch.is_empty() {
+                    pending_journal = Some((current_round_index, plan_summary));
+                }
                 completions.clear();
                 if dispatch_batch.is_empty() {
                     let _ = self.error_run(
@@ -141,7 +159,7 @@ impl AstraService {
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
             };
-            completions = results
+            let batch_completions = results
                 .into_iter()
                 .map(|result| {
                     let task = dispatch_batch
@@ -154,6 +172,9 @@ impl AstraService {
                     Ok(AstraTaskCompletion { task, result })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            // Accumulate across sequential batches: the whole round's results
+            // must reach the next planning, not just the last task's.
+            completions.extend(batch_completions);
             current_run = self.mark_run_status(
                 run_id,
                 AstraRunStatus::Thinking,
@@ -527,6 +548,19 @@ impl AstraService {
             Ok(())
         })?;
         Ok(())
+    }
+
+    fn record_round_journal(
+        &self,
+        run_id: &str,
+        entry: serde_json::Value,
+    ) -> Result<AstraRun> {
+        let (run, ()) = self.mutate_run(run_id, move |next| {
+            next.run_diagnostics.push(entry);
+            trim_vec_front(&mut next.run_diagnostics, MAX_RUN_DIAGNOSTICS);
+            Ok(())
+        })?;
+        Ok(run)
     }
 
     fn record_orchestration_diagnostics(

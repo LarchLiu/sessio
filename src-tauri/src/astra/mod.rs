@@ -61,6 +61,12 @@ const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 const ENABLE_ASTRA_PI_SESSION_PERSISTENCE: bool = false;
 const MAX_ASTRA_RUN_DIAGNOSTICS: usize = 100;
+pub(crate) const TEAMWORK_ROUND_JOURNAL_KIND: &str = "teamwork_round_journal";
+const TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT: usize = 6000;
+const TEAMWORK_JOURNAL_SUMMARY_CHAR_LIMIT: usize = 600;
+const TEAMWORK_JOURNAL_TASK_EXCERPT_CHAR_LIMIT: usize = 400;
+const TEAMWORK_JOURNAL_TASK_ERROR_CHAR_LIMIT: usize = 240;
+const TEAMWORK_JOURNAL_PROMPT_ROUNDS: usize = 8;
 const ASTRA_PI_DELEGATED_RUNTIME_LIMIT: usize = 2;
 const ASTRA_DELEGATED_QUEUE_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const ASTRA_RUNTIME_STARTUP_TIMEOUT_MS: u64 = 60_000;
@@ -93,7 +99,13 @@ fn validate_astra_tasks_for_thread(thread: &ThreadInfo, tasks: &[AstraTaskPropos
     Ok(())
 }
 
-fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
+fn task_completion_value(completion: &AstraTaskCompletion, output_char_limit: usize) -> Value {
+    let output = final_task_output(&completion.result.output);
+    let final_output = if output.trim().is_empty() {
+        "Astra delegated task completed.".to_string()
+    } else {
+        structured_response::truncate_chars(&output, output_char_limit)
+    };
     json!({
         "task": {
             "id": completion.task.id,
@@ -106,13 +118,109 @@ fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
         "result": {
             "taskId": completion.result.task_id,
             "status": completion.result.status,
-            "finalOutput": summarize_task_output(&final_task_output(&completion.result.output)),
+            "finalOutput": final_output,
             "error": completion.result.error,
             "attemptCount": completion.result.attempt_count,
             "retryLimitReached": completion.result.retry_limit_reached,
             "completedAt": completion.result.completed_at,
         },
     })
+}
+
+fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
+    task_completion_value(completion, 1000)
+}
+
+/// Teamwork planner variant: keeps far more of each task output than the
+/// generic 1000-char excerpt so the planner can reason about prior work.
+fn planner_task_completion_value(completion: &AstraTaskCompletion) -> Value {
+    task_completion_value(completion, TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT)
+}
+
+/// Compact per-round journal entry persisted into run diagnostics so the next
+/// planning rounds keep memory of earlier work after `completions` is cleared.
+pub(super) fn teamwork_round_journal_entry(
+    round_index: u32,
+    planner_summary: &str,
+    completions: &[AstraTaskCompletion],
+    recorded_at: i64,
+) -> Value {
+    let tasks = completions
+        .iter()
+        .map(|completion| {
+            let mut task = json!({
+                "title": completion.task.title,
+                "assistantId": completion.task.assistant_id,
+                "risk": completion.task.risk,
+                "status": completion.result.status,
+                "outputExcerpt": structured_response::truncate_chars(
+                    &final_task_output(&completion.result.output),
+                    TEAMWORK_JOURNAL_TASK_EXCERPT_CHAR_LIMIT,
+                ),
+            });
+            if let Some(error) = completion
+                .result
+                .error
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(record) = task.as_object_mut() {
+                    record.insert(
+                        "error".to_string(),
+                        json!(structured_response::truncate_chars(
+                            error,
+                            TEAMWORK_JOURNAL_TASK_ERROR_CHAR_LIMIT,
+                        )),
+                    );
+                }
+            }
+            task
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "kind": TEAMWORK_ROUND_JOURNAL_KIND,
+        "roundIndex": round_index,
+        "plannerSummary": structured_response::truncate_chars(
+            planner_summary,
+            TEAMWORK_JOURNAL_SUMMARY_CHAR_LIMIT,
+        ),
+        "tasks": tasks,
+        "recordedAt": recorded_at,
+    })
+}
+
+/// Extracts journal entries for the teamwork planner prompt. The round whose
+/// completions are already passed verbatim as `completedTasks` is excluded by
+/// equality (`roundIndex + 1 == current_round_index`) rather than a range so
+/// that history survives worker restarts, where round indices start over.
+pub(super) fn previous_rounds_from_diagnostics(
+    diagnostics: &[Value],
+    current_round_index: u32,
+) -> Vec<Value> {
+    let rounds = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.get("kind").and_then(Value::as_str) == Some(TEAMWORK_ROUND_JOURNAL_KIND)
+        })
+        .filter(|diagnostic| {
+            diagnostic
+                .get("roundIndex")
+                .and_then(Value::as_u64)
+                .is_none_or(|round_index| {
+                    round_index.saturating_add(1) != u64::from(current_round_index)
+                })
+        })
+        .map(|diagnostic| {
+            json!({
+                "roundIndex": diagnostic.get("roundIndex"),
+                "plannerSummary": diagnostic.get("plannerSummary"),
+                "tasks": diagnostic.get("tasks"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let skip = rounds.len().saturating_sub(TEAMWORK_JOURNAL_PROMPT_ROUNDS);
+    rounds.into_iter().skip(skip).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3195,6 +3303,131 @@ mod tests {
         let value = filtered_task_completion_value(&AstraTaskCompletion { task, result });
 
         assert_eq!(value["result"]["finalOutput"], "implemented and verified");
+    }
+
+    #[test]
+    fn planner_completion_keeps_long_outputs_up_to_planner_limit() {
+        let task = test_task("task-1", "stage-1");
+        let long_output = "结论细节".repeat(750); // 3000 chars, beyond the 1000-char generic cut
+        let completion = AstraTaskCompletion {
+            result: test_task_result("task-1", "session-1", &long_output),
+            task,
+        };
+
+        let planner_value = planner_task_completion_value(&completion);
+        let filtered_value = filtered_task_completion_value(&completion);
+
+        assert_eq!(planner_value["result"]["finalOutput"], long_output);
+        let filtered_output = filtered_value["result"]["finalOutput"].as_str().unwrap();
+        assert_eq!(filtered_output.chars().count(), 1000);
+        assert!(filtered_output.ends_with("..."));
+
+        let oversized = "x".repeat(TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT + 500);
+        let oversized_completion = AstraTaskCompletion {
+            result: test_task_result("task-1", "session-1", &oversized),
+            task: test_task("task-1", "stage-1"),
+        };
+        let oversized_value = planner_task_completion_value(&oversized_completion);
+        let oversized_output = oversized_value["result"]["finalOutput"].as_str().unwrap();
+        assert_eq!(
+            oversized_output.chars().count(),
+            TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT
+        );
+        assert!(oversized_output.ends_with("..."));
+
+        let empty_completion = AstraTaskCompletion {
+            result: test_task_result("task-1", "session-1", "   "),
+            task: test_task("task-1", "stage-1"),
+        };
+        assert_eq!(
+            planner_task_completion_value(&empty_completion)["result"]["finalOutput"],
+            "Astra delegated task completed."
+        );
+    }
+
+    #[test]
+    fn teamwork_round_journal_entry_truncates_and_records_failures() {
+        let mut ok_task = test_task("task-ok", "stage-1");
+        ok_task.title = "实现登录接口".to_string();
+        ok_task.assistant_id = Some("assistant-codex".to_string());
+        ok_task.risk = AstraTaskRisk::High;
+        let long_output = format!("Final result: {}", "实现要点 ".repeat(200));
+        let ok_completion = AstraTaskCompletion {
+            result: test_task_result("task-ok", "session-1", &long_output),
+            task: ok_task,
+        };
+
+        let mut failed_result = test_task_result("task-bad", "session-2", "");
+        failed_result.status = AstraTaskResultStatus::Failed;
+        failed_result.error = Some(format!("依赖缺失：{}", "包名 ".repeat(120)));
+        let failed_completion = AstraTaskCompletion {
+            result: failed_result,
+            task: test_task("task-bad", "stage-1"),
+        };
+
+        let entry = teamwork_round_journal_entry(
+            3,
+            &format!("第 3 轮总结 {}", "决定 ".repeat(300)),
+            &[ok_completion, failed_completion],
+            42,
+        );
+
+        assert_eq!(entry["kind"], TEAMWORK_ROUND_JOURNAL_KIND);
+        assert_eq!(entry["roundIndex"], 3);
+        assert_eq!(entry["recordedAt"], 42);
+        let summary = entry["plannerSummary"].as_str().unwrap();
+        assert_eq!(summary.chars().count(), TEAMWORK_JOURNAL_SUMMARY_CHAR_LIMIT);
+        let tasks = entry["tasks"].as_array().unwrap();
+        assert_eq!(tasks[0]["title"], "实现登录接口");
+        assert_eq!(tasks[0]["assistantId"], "assistant-codex");
+        assert_eq!(tasks[0]["risk"], "high");
+        assert_eq!(tasks[0]["status"], "completed");
+        let excerpt = tasks[0]["outputExcerpt"].as_str().unwrap();
+        assert_eq!(
+            excerpt.chars().count(),
+            TEAMWORK_JOURNAL_TASK_EXCERPT_CHAR_LIMIT
+        );
+        assert!(!excerpt.contains("Final result:"));
+        assert_eq!(tasks[1]["status"], "failed");
+        assert!(tasks[0].get("error").is_none());
+        let error = tasks[1]["error"].as_str().unwrap();
+        assert_eq!(error.chars().count(), TEAMWORK_JOURNAL_TASK_ERROR_CHAR_LIMIT);
+        assert!(error.starts_with("依赖缺失"));
+    }
+
+    #[test]
+    fn previous_rounds_filter_excludes_latest_and_caps_history() {
+        let mut diagnostics = vec![json!({
+            "kind": "orchestrator_backend_failure",
+            "code": "timeout",
+        })];
+        for round_index in 0..10 {
+            diagnostics.push(json!({
+                "kind": TEAMWORK_ROUND_JOURNAL_KIND,
+                "roundIndex": round_index,
+                "plannerSummary": format!("第 {round_index} 轮"),
+                "tasks": [],
+                "recordedAt": round_index,
+            }));
+        }
+
+        let rounds = previous_rounds_from_diagnostics(&diagnostics, 10);
+
+        assert_eq!(rounds.len(), TEAMWORK_JOURNAL_PROMPT_ROUNDS);
+        // Round 9 is excluded (its completions are the prompt's completedTasks),
+        // leaving 0..=8; the cap keeps the most recent eight: 1..=8.
+        assert_eq!(rounds[0]["roundIndex"], 1);
+        assert_eq!(rounds.last().unwrap()["roundIndex"], 8);
+        assert!(rounds
+            .iter()
+            .all(|round| round.get("kind").is_none() && round.get("recordedAt").is_none()));
+        assert_eq!(rounds[0]["plannerSummary"], "第 1 轮");
+
+        // After a worker restart the in-memory round counter starts over at 0;
+        // equality-based exclusion must keep the whole persisted history.
+        let restarted = previous_rounds_from_diagnostics(&diagnostics, 0);
+        assert_eq!(restarted.len(), TEAMWORK_JOURNAL_PROMPT_ROUNDS);
+        assert_eq!(restarted.last().unwrap()["roundIndex"], 9);
     }
 
     #[test]

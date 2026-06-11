@@ -50,7 +50,17 @@ tasks:
 
 assistantId must reference one of thread.assistants. targetAgent should match that assistant's runtime agent. If you create an agent-level task without assistantId, targetAgent is required, but prefer assistantId so Sessio can preserve team-member history and assistant snapshots.
 
-Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants when independent. Use sequential when task order matters within the same round."#;
+Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants when independent. Use sequential when task order matters within the same round.
+
+previousRounds is the run journal: one entry per earlier completed round, with the planner summary and each task's title, assistantId, risk, status, and outputExcerpt. completedTasks carries the full outputs of the most recent round only; the round already covered by completedTasks is not repeated in previousRounds. Use previousRounds to recall earlier results and decisions, avoid re-running finished work, and keep new tasks consistent with what was already built.
+
+Write each expectedOutput as concrete acceptance criteria: the artifacts, behaviors, or checks a reviewer could verify, not a restatement of the prompt.
+
+Review gate: when a completed task has risk medium|high, or later work depends on its output, schedule a review/verification task for a different assistant in a following round before building on it. If the review finds problems, re-dispatch the original work with the reviewer's concrete feedback included in the new task prompt. Do not re-review work that already passed review.
+
+Synthesis gate: before returning complete, dispatch one final round containing a single synthesis task that consolidates the whole run's outputs into one deliverable satisfying the thread goal; the complete summary must then reference that deliverable's key points. If the run produced only a single completed task whose output already is the deliverable, you may skip the synthesis round.
+
+Language: write summary and every task title, prompt, and expectedOutput in the language of the thread goal and userPrompt (for example, a Chinese-language thread gets Chinese tasks)."#;
 
 const SESSIO_THREAD_PROMPT_START: &str = "<!-- sessio-thread-prompt:start";
 const SESSIO_THREAD_PROMPT_END: &str = "<!-- sessio-thread-prompt:end";
@@ -156,12 +166,18 @@ pub(super) fn build_astra_orchestration_prompt(
             })
         })
         .collect::<Vec<_>>();
+    let completion_value: fn(&AstraTaskCompletion) -> Value = if thread.kind == ThreadKind::Teamwork
+    {
+        super::planner_task_completion_value
+    } else {
+        super::filtered_task_completion_value
+    };
     let completed_tasks = completions
         .iter()
-        .map(super::filtered_task_completion_value)
+        .map(completion_value)
         .collect::<Vec<_>>();
 
-    let body = json!({
+    let mut body = json!({
         "instruction": astra_orchestration_response_contract(thread.kind),
         "thread": {
             "id": thread.id,
@@ -177,8 +193,19 @@ pub(super) fn build_astra_orchestration_prompt(
         },
         "userPrompt": user_prompt.unwrap_or(""),
         "completedTasks": completed_tasks,
-    })
-    .to_string();
+    });
+    if thread.kind == ThreadKind::Teamwork {
+        if let Some(record) = body.as_object_mut() {
+            record.insert(
+                "previousRounds".to_string(),
+                Value::Array(super::previous_rounds_from_diagnostics(
+                    &run.run_diagnostics,
+                    round_index,
+                )),
+            );
+        }
+    }
+    let body = body.to_string();
     wrap_thread_prompt(
         "astra_planner",
         thread,
@@ -1330,6 +1357,7 @@ mod tests {
         assert_eq!(value["run"]["roundIndex"], 2);
         assert_eq!(value["userPrompt"], "user request");
         assert_eq!(value["completedTasks"][0]["task"]["id"], "task-1");
+        assert!(value.get("previousRounds").is_none());
     }
 
     #[test]
@@ -1359,6 +1387,11 @@ mod tests {
         assert!(instruction.contains("mode: parallel|sequential|null"));
         assert!(instruction.contains("assistantId: thread-assistant-id"));
         assert!(instruction.contains("response schema is closed"));
+        assert!(instruction.contains("previousRounds is the run journal"));
+        assert!(instruction.contains("acceptance criteria"));
+        assert!(instruction.contains("Review gate:"));
+        assert!(instruction.contains("Synthesis gate:"));
+        assert!(instruction.contains("Language: write summary and every task title"));
         assert!(!instruction.contains("targetStageId"));
         assert!(!instruction.contains(r#""stage": {"#));
         assert!(!prompt.contains("targetStageId"));
@@ -1383,6 +1416,59 @@ mod tests {
             value["completedTasks"][0]["result"]["taskId"],
             "task-teamwork-1"
         );
+    }
+
+    #[test]
+    fn teamwork_orchestration_prompt_injects_previous_rounds_and_full_outputs() {
+        let mut task = teamwork_task();
+        task.target_stage_id = None;
+        let mut result = task_result();
+        result.task_id = task.id.clone();
+        result.output = format!("Final result: {}", "结论 ".repeat(700));
+        let completion = AstraTaskCompletion { task, result };
+
+        let mut run = run();
+        run.run_diagnostics = vec![
+            json!({
+                "kind": "orchestrator_backend_failure",
+                "code": "timeout",
+            }),
+            json!({
+                "kind": crate::astra::TEAMWORK_ROUND_JOURNAL_KIND,
+                "roundIndex": 0,
+                "plannerSummary": "第 1 轮：完成需求分析。",
+                "tasks": [{ "title": "需求分析", "status": "completed" }],
+                "recordedAt": 1,
+            }),
+            json!({
+                "kind": crate::astra::TEAMWORK_ROUND_JOURNAL_KIND,
+                "roundIndex": 1,
+                "plannerSummary": "第 2 轮：实现核心接口。",
+                "tasks": [],
+                "recordedAt": 2,
+            }),
+        ];
+
+        let prompt =
+            build_astra_orchestration_prompt(&run, &teamwork_thread(), None, 2, &[completion]);
+        let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
+
+        // Round 1 feeds completedTasks and is excluded; the failure diagnostic
+        // never leaks into the journal view.
+        let rounds = value["previousRounds"].as_array().unwrap();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0]["roundIndex"], 0);
+        assert_eq!(rounds[0]["plannerSummary"], "第 1 轮：完成需求分析。");
+        assert_eq!(rounds[0]["tasks"][0]["title"], "需求分析");
+        assert!(rounds[0].get("kind").is_none());
+        assert!(rounds[0].get("code").is_none());
+
+        let final_output = value["completedTasks"][0]["result"]["finalOutput"]
+            .as_str()
+            .unwrap();
+        assert!(final_output.chars().count() > 1000);
+        assert!(final_output.contains("结论"));
+        assert!(!final_output.contains("Final result:"));
     }
 
     #[test]

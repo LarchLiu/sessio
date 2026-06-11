@@ -10,6 +10,16 @@ export function isAstraActive(status: AstraRunStatus): boolean {
   );
 }
 
+const HIDDEN_RUN_DIAGNOSTIC_KINDS = new Set(["teamwork_round_journal"]);
+
+export function visibleAstraRunDiagnostics(diagnostics: unknown[]): unknown[] {
+  return diagnostics.filter((diagnostic) => {
+    if (!diagnostic || typeof diagnostic !== "object" || Array.isArray(diagnostic)) return true;
+    const kind = (diagnostic as Record<string, unknown>).kind;
+    return typeof kind !== "string" || !HIDDEN_RUN_DIAGNOSTIC_KINDS.has(kind);
+  });
+}
+
 export function upsertAstraRun(runs: AstraHandle[], run: AstraHandle): AstraHandle[] {
   const next = runs.some((item) => item.runId === run.runId)
     ? runs.map((item) => item.runId === run.runId ? run : item)

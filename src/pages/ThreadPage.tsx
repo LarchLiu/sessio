@@ -26,6 +26,7 @@ import {
   formatAstraStatus,
   isAstraActive,
   planRoundStatusClass,
+  visibleAstraRunDiagnostics,
 } from "../threadAstraView";
 import { projectStageIcon, projectStageLabel, STAGE_STATUS_ORDER, stageStatusVisual } from "../utils/stageDisplay";
 
@@ -483,7 +484,7 @@ function AstraRunDiagnostics({
   onSelectSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
-  const diagnostics = run.runDiagnostics.slice(-3).reverse().map((diagnostic, index) => {
+  const diagnostics = visibleAstraRunDiagnostics(run.runDiagnostics).slice(-3).reverse().map((diagnostic, index) => {
     return describeAstraDiagnostic(diagnostic, index, t);
   });
   const hasSummary = Boolean(run.terminalReason || run.lastErrorCode || run.lastErrorMessage || diagnostics.length > 0);

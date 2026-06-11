@@ -6,6 +6,7 @@ import {
   formatAstraStatus,
   isAstraActive,
   upsertAstraRun,
+  visibleAstraRunDiagnostics,
 } from "../src/threadAstraView";
 
 describe("threadAstraView", () => {
@@ -30,6 +31,16 @@ describe("threadAstraView", () => {
     expect(astraStatusClass("errored")).toContain("red");
     expect(astraTaskStatusClass("planned")).toContain("ink");
     expect(astraTaskStatusClass("completed")).toContain("emerald");
+  });
+
+  it("hides teamwork round journal entries from visible diagnostics", () => {
+    const journal = { kind: "teamwork_round_journal", roundIndex: 0, tasks: [] };
+    const failure = { kind: "orchestrator_backend_failure", code: "timeout" };
+    const convergence = { kind: "debate_convergence", status: "diverged" };
+
+    const visible = visibleAstraRunDiagnostics([journal, failure, null, "raw", 7, convergence]);
+
+    expect(visible).toEqual([failure, null, "raw", 7, convergence]);
   });
 });
 
