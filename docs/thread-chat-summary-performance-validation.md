@@ -15,6 +15,9 @@ Date: 2026-06-10
 - `pnpm run typecheck`
 - `pnpm run build`
 - `cargo run --example thread_summary_perf --manifest-path src-tauri/Cargo.toml -- --iterations 5`
+- `sample` against `thread_summary_perf --operation refresh_all --seconds 15`
+- `sample` against `thread_summary_perf --operation refresh_project --seconds 15`
+- `sample` against `thread_summary_perf --operation get_thread_replay --seconds 15`
 
 All commands passed locally.
 
@@ -30,7 +33,13 @@ All commands passed locally.
 ## Local benchmark snapshot
 
 `thread_summary_perf` now measures summary refresh and replay against a temporary copy of the
-current Sessio DB so the benchmark does not mutate the real database.
+current Sessio DB so the benchmark does not mutate the real database. It also supports
+single-operation duration runs for external sampling:
+
+- `--operation refresh_all`
+- `--operation refresh_project`
+- `--operation get_thread_replay`
+- `--seconds <n>`
 
 Current local sample on the default DB:
 
@@ -44,8 +53,30 @@ Current local sample on the default DB:
 - `list_project`: avg `0 ms`, best `0 ms`, worst `0 ms`
 - `get_thread_replay`: avg `0 ms`, best `0 ms`, worst `0 ms`
 
-## Manual profiling follow-up
+## Runtime sample snapshot
 
-The desktop CPU sampling steps from the plan were not captured in this terminal session.
-They still need a manual run against a real app session for startup, `sessions_index_updated`,
-and thread chat open flows.
+To approximate the plan's CPU-sample requirement in this terminal session, I ran the benchmark
+helper for 15-second single-operation loops and sampled each process with macOS `sample`.
+
+Observed hot frames:
+
+- `refresh_all`: `ThreadChatSummaryCache::refresh_all_inner -> build_all_summaries -> build_project_summaries -> load_sessions_by_refs`
+- `refresh_project`: `ThreadChatSummaryCache::refresh_project_inner -> build_project_summaries -> load_sessions_by_refs`
+- `get_thread_replay`: `SessionStore::get_thread_replay -> load_sessions_by_refs`
+
+Forbidden legacy frames were absent from all three samples:
+
+- `SessionStore::list_all_sessions`
+- `is_codex_guardian_index_row`
+- `serde_json::from_str`
+
+This does not replace a full Instruments capture of the desktop app, but it does provide
+runtime stack evidence on the current DB that the sampled hot path now flows through scoped
+session lookup instead of the removed global scan and guardian JSON parse path.
+
+## Remaining manual follow-up
+
+The only remaining gap versus the original Phase 5 wording is a full desktop-app CPU sample
+during startup, `sessions_index_updated`, and thread chat UI open flows. The current terminal
+session captured equivalent backend/runtime stack evidence, but not a GUI-driven Instruments
+trace.
