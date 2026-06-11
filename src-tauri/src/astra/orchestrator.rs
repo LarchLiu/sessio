@@ -11,6 +11,7 @@ use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::brainstorm_backend::BrainstormBackend;
 use crate::astra::debate_backend::DebateBackend;
+use crate::astra::debate_judge::{DebateJudge, HeuristicJudge, RuntimeAgentJudge};
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
 use crate::models::{PlanRoundMode, PlanTaskStatus, StageStatus, ThreadInfo, ThreadKind};
@@ -243,8 +244,26 @@ impl AstraService {
             return Box::new(BrainstormBackend);
         }
         if thread.kind == ThreadKind::Debate {
-            log::info!("[astra:orchestrator:backend] using debate_backend");
-            return Box::new(DebateBackend);
+            let judge: Box<dyn DebateJudge> = if let Some(agent) = config.agent {
+                log::info!(
+                    "[astra:orchestrator:backend] using debate_backend with runtime_agent judge agent={}",
+                    agent.as_str()
+                );
+                Box::new(RuntimeAgentJudge::new(
+                    self.inner.runtime.clone(),
+                    RuntimeAgentBackendConfig {
+                        agent,
+                        timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+                        model: config.model.clone(),
+                        effort: config.effort.clone(),
+                        permission_mode: config.permission_mode.clone(),
+                    },
+                ))
+            } else {
+                log::info!("[astra:orchestrator:backend] using debate_backend with heuristic judge");
+                Box::new(HeuristicJudge)
+            };
+            return Box::new(DebateBackend::new(judge));
         }
         if thread.kind == ThreadKind::Process {
             log::info!("[astra:orchestrator:backend] using deterministic backend for process");

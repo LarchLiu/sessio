@@ -1200,11 +1200,19 @@ function describeDomainAstraDiagnostic(
   if (kind === "debate_convergence") {
     const status = diagnosticString(record, "status") ?? "needs_review";
     const count = numberField(record, "artifactCount") ?? 0;
+    const disagreements = arrayField(record, "disagreements");
+    const codeParts = [`${status} / ${t("astra.diagnostic.artifacts", { count })}`];
+    if (disagreements.length > 0) {
+      codeParts.push(t("astra.diagnostic.disagreements", { count: disagreements.length }));
+    }
     return {
       key: `${kind}:${status}:${index}`,
       label: t("astra.diagnostic.debate_convergence"),
-      code: `${status} / ${t("astra.diagnostic.artifacts", { count })}`,
-      detail: diagnosticString(record, "decision"),
+      code: codeParts.join(" · "),
+      detail: firstNonEmpty([
+        diagnosticString(record, "rationale"),
+        diagnosticString(record, "decision"),
+      ]),
       raw,
     };
   }

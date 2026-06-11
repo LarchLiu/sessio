@@ -97,7 +97,7 @@ impl OrchestratorBackend for RuntimeAgentOrchestrator {
     }
 }
 
-fn execute_agent_session(
+pub(super) fn execute_agent_session(
     runtime: &RuntimeManager,
     config: &RuntimeAgentBackendConfig,
     run: &AstraRun,

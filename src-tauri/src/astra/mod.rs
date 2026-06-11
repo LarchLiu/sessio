@@ -28,6 +28,7 @@ mod astra_pi_acp_adapter;
 mod backend;
 mod brainstorm_backend;
 mod debate_backend;
+mod debate_judge;
 mod deterministic_backend;
 mod orchestrator;
 mod planner;
