@@ -130,6 +130,7 @@ export default function App() {
   const [pendingSelectSession, setPendingSelectSession] = useState<{
     agent: Agent;
     sessionId: string;
+    detailMode?: DetailMode;
   } | null>(null);
   const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
   const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
@@ -309,6 +310,7 @@ export default function App() {
   useSelectedSessionSync({
     availableSessions,
     selected,
+    detailMode,
     pendingSelectSession,
     projects,
     setSelected,
@@ -593,7 +595,9 @@ export default function App() {
   const projectSearchInitialKey = filter.kind === "project" ? filter.key : projects[0]?.path;
   const detailRoute: DetailMode = detailMode;
   const headerContextTitle = selected
-    ? { label: t("header.chat"), icon: MessageSquareText }
+    ? detailMode === "threadChat"
+      ? { label: t("thread.chat"), icon: MessageSquareText }
+      : { label: t("header.chat"), icon: MessageSquareText }
     : selectedThreadId
       ? detailMode === "threadMultiSessionChat"
         ? { label: t("thread.multi_session_chat"), icon: MessagesSquare }

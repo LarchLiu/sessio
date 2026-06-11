@@ -42,6 +42,7 @@ export function usePendingNewChats({
   setPendingSelectSession: React.Dispatch<React.SetStateAction<{
     agent: Agent;
     sessionId: string;
+    detailMode?: DetailMode;
   } | null>>;
   setPendingNewChats: React.Dispatch<React.SetStateAction<Record<string, PendingNewChatSession>>>;
   setError: (error: string | null) => void;
@@ -97,10 +98,11 @@ export function usePendingNewChats({
       setSessions((prev) => mergePendingSession(prev, pendingSession));
       const autoSelect = shouldAutoSelectPendingSession(pending);
       if (autoSelect) {
+        const detailMode = pending.origin === "thread_chat" ? "threadChat" : "chat";
         setSelected(pendingSession);
         setSelectedThread(null);
-        setDetailMode("chat");
-        setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId });
+        setDetailMode(detailMode);
+        setPendingSelectSession({ agent: pending.agent, sessionId: agentSessionId, detailMode });
       }
       if (autoSelect) {
         setPendingNewChats((prev) => {

@@ -14,6 +14,7 @@ import {
 export function useSelectedSessionSync({
   availableSessions,
   selected,
+  detailMode,
   pendingSelectSession,
   projects,
   setSelected,
@@ -26,7 +27,8 @@ export function useSelectedSessionSync({
 }: {
   availableSessions: SessionInfo[];
   selected: SessionInfo | null;
-  pendingSelectSession: { agent: Agent; sessionId: string } | null;
+  detailMode: DetailMode;
+  pendingSelectSession: { agent: Agent; sessionId: string; detailMode?: DetailMode } | null;
   projects: ProjectInfo[];
   setSelected: Dispatch<SetStateAction<SessionInfo | null>>;
   setDetailMode: Dispatch<SetStateAction<DetailMode>>;
@@ -37,6 +39,7 @@ export function useSelectedSessionSync({
   setPendingSelectSession: Dispatch<SetStateAction<{
     agent: Agent;
     sessionId: string;
+    detailMode?: DetailMode;
   } | null>>;
 }) {
   useEffect(() => {
@@ -50,13 +53,14 @@ export function useSelectedSessionSync({
       return betterSessionCandidate(session, best) ? session : best;
     }, exact ?? null);
     if (!next) {
+      if (detailMode === "threadChat") return;
       setSelected(null);
       return;
     }
     if (next !== selected) {
       setSelected(next);
     }
-  }, [availableSessions, selected, setSelected]);
+  }, [availableSessions, detailMode, selected, setSelected]);
 
   useEffect(() => {
     if (!pendingSelectSession) return;
@@ -72,7 +76,7 @@ export function useSelectedSessionSync({
     if (!next) return;
     setSelected(next);
     setSelectedThread(null);
-    setDetailMode("chat");
+    setDetailMode(pendingSelectSession.detailMode ?? "chat");
     const project = projects.find((item) => item.path === next.projectPath);
     if (project) {
       setSelectedProject(null);

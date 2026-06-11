@@ -37,6 +37,19 @@ function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
 }
 
+function collectThreadLinkedSessions(thread: ThreadInfo): SessionInfo[] {
+  const byKey = new Map<string, SessionInfo>();
+  for (const session of thread.sessions) {
+    byKey.set(sessionIdentityKey(session), session);
+  }
+  for (const stage of thread.stages) {
+    for (const session of stage.sessions) {
+      byKey.set(sessionIdentityKey(session), session);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
 function stageAllowsThreadAddition(stage: ProjectStageInfo): boolean {
   return stage.assistants.length > 0 || stage.allowEmptyAssistants;
 }
@@ -270,12 +283,12 @@ function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Reco
 export function ProjectWorkbenchPage({
   project,
   onNewThreadChat,
-  onSelectSession,
+  onSelectThreadChatSession,
   onError,
 }: {
   project: ProjectInfo;
   onNewThreadChat: (thread: ThreadInfo) => void;
-  onSelectSession: (session: SessionInfo) => void;
+  onSelectThreadChatSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
@@ -399,7 +412,7 @@ export function ProjectWorkbenchPage({
                   ),
                 )
               }
-              onSelectSession={onSelectSession}
+              onSelectThreadChatSession={onSelectThreadChatSession}
               onNewThreadChat={onNewThreadChat}
               onError={onError}
             />
@@ -491,7 +504,7 @@ function ThreadProcessTemplatePanel({
   onStageAdded,
   onStageUpdated,
   onStageDeleted,
-  onSelectSession,
+  onSelectThreadChatSession,
   onNewThreadChat,
   onError,
 }: {
@@ -507,7 +520,7 @@ function ThreadProcessTemplatePanel({
   onStageAdded: (stage: StageInfo) => void;
   onStageUpdated: (stage: StageInfo) => void;
   onStageDeleted: (threadId: string, stageId: string) => void;
-  onSelectSession: (session: SessionInfo) => void;
+  onSelectThreadChatSession: (session: SessionInfo) => void;
   onNewThreadChat: (thread: ThreadInfo) => void;
   onError: (error: string | null) => void;
 }) {
@@ -555,7 +568,9 @@ function ThreadProcessTemplatePanel({
   const linkedSessionKeys = useMemo(() => {
     const keys = new Set<string>();
     for (const thread of threads) {
-      for (const session of thread.sessions) keys.add(sessionIdentityKey(session));
+      for (const session of collectThreadLinkedSessions(thread)) {
+        keys.add(sessionIdentityKey(session));
+      }
     }
     return keys;
   }, [threads]);
@@ -572,7 +587,9 @@ function ThreadProcessTemplatePanel({
       ? threads.filter((thread) => thread.id === selectedThreadChatThreadId)
       : threads;
     for (const thread of sourceThreads) {
-      for (const session of thread.sessions) byKey.set(sessionIdentityKey(session), session);
+      for (const session of collectThreadLinkedSessions(thread)) {
+        byKey.set(sessionIdentityKey(session), session);
+      }
     }
     return Array.from(byKey.values()).sort((a, b) => (b.updatedAt ?? b.startedAt ?? 0) - (a.updatedAt ?? a.startedAt ?? 0));
   }, [selectedThreadChatThreadId, threads]);
@@ -827,7 +844,7 @@ function ThreadProcessTemplatePanel({
         ) : panelView === "thread-chats" ? (
           <ThreadChatList
             sessions={threadChatSessions}
-            onSelectSession={onSelectSession}
+            onSelectThreadChatSession={onSelectThreadChatSession}
           />
         ) : threads.length === 0 ? (
           <div className="rounded-lg border border-dashed border-ink/15 py-12 text-center text-body-sm text-ink/40">
@@ -863,10 +880,10 @@ function ThreadProcessTemplatePanel({
 
 function ThreadChatList({
   sessions,
-  onSelectSession,
+  onSelectThreadChatSession,
 }: {
   sessions: SessionInfo[];
-  onSelectSession: (session: SessionInfo) => void;
+  onSelectThreadChatSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
   if (sessions.length === 0) {
@@ -882,7 +899,7 @@ function ThreadChatList({
         <button
           key={sessionIdentityKey(session)}
           type="button"
-          onClick={() => onSelectSession(session)}
+          onClick={() => onSelectThreadChatSession(session)}
           className="flex min-w-0 items-center gap-3 rounded-lg border border-ink/10 bg-surface-panel px-3 py-2 text-left transition hover:bg-ink/[0.035]"
         >
           <AgentGlyph agent={session.agent} className="h-4 w-4 shrink-0" />
@@ -1261,7 +1278,7 @@ function ThreadCard({
       })),
     [availableProjectStages, t],
   );
-  const linkedSessionCount = thread.sessions.length;
+  const linkedSessionCount = collectThreadLinkedSessions(thread).length;
 
   useEffect(() => {
     const availableIds = new Set(availableProjectStages.map((stage) => stage.id));

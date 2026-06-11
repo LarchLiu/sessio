@@ -7,6 +7,7 @@ import { ProjectWorkbenchPage } from "../pages/ProjectPage";
 import ThreadPage from "../pages/ThreadPage";
 import ThreadChatPage from "../pages/ThreadChatPage";
 import ThreadMultiSessionChatPage from "../pages/ThreadMultiSessionChatPage";
+import ThreadNewChatPage from "../pages/ThreadNewChatPage";
 import { projectFilterKey, type Filter } from "../appUtils";
 import type { DetailMode, PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
 import type {
@@ -121,6 +122,13 @@ export default function AppMain({
       setSelected(session);
       setDetailMode("chat");
     },
+    onSelectThreadChatSession: (session: SessionInfo) => {
+      setNewChatSnapshot(null);
+      setSelectedProject(null);
+      setSelectedThread(null);
+      setSelected(session);
+      setDetailMode("threadChat");
+    },
     onNewThreadChat: (thread: ThreadInfo) => {
       const projectGroup = projectGroups.find((group) => group.project.id === project.id);
       setNewChatSnapshot({ thread, stage: null });
@@ -155,7 +163,7 @@ export default function AppMain({
           <ThreadPage
             project={activeProject}
             threadId={selectedThreadId}
-            onSelectSession={projectWorkbenchProps(activeProject).onSelectSession}
+            onSelectSession={projectWorkbenchProps(activeProject).onSelectThreadChatSession}
             onNewStageChat={openNewChatForStage}
             onOpenMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
             onError={onError}
@@ -170,7 +178,7 @@ export default function AppMain({
   if (!selected) {
     if (newChatSnapshot) {
       return (
-        <ThreadChatPage
+        <ThreadNewChatPage
           projects={projectGroups}
           initialProjectKey={newChatProjectKey}
           snapshotContext={newChatSnapshot}
@@ -181,13 +189,6 @@ export default function AppMain({
           dispatchLiveEvent={dispatchLiveEvent}
           onError={onError}
           onPendingSession={addPendingSession}
-          onSelectSession={(session) => {
-            setNewChatSnapshot(null);
-            setSelectedProject(null);
-            setSelectedThread(null);
-            setSelected(session);
-            setDetailMode("chat");
-          }}
         />
       );
     }
@@ -233,20 +234,46 @@ export default function AppMain({
         }
         aria-hidden={detailRoute !== "chat"}
       >
-        <ChatPage
-          session={selected}
-          viewMode={viewMode}
-          liveState={liveState}
-          runtimeAgents={runtimeAgents}
-          rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
-          debugAcpConfig={debugAcpConfig}
-          runtimeSessionAliases={runtimeSessionAliases}
-          ancestorSessions={selectedAncestorSessions}
-          dispatchLiveEvent={dispatchLiveEvent}
-          onPendingSession={addPendingSession}
-          onMessageCount={onMessageCount}
-          onActiveMessageMeta={onActiveMessageMeta}
-        />
+        {detailRoute !== "threadChat" && (
+          <ChatPage
+            session={selected}
+            viewMode={viewMode}
+            liveState={liveState}
+            runtimeAgents={runtimeAgents}
+            rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
+            debugAcpConfig={debugAcpConfig}
+            runtimeSessionAliases={runtimeSessionAliases}
+            ancestorSessions={selectedAncestorSessions}
+            dispatchLiveEvent={dispatchLiveEvent}
+            onPendingSession={addPendingSession}
+            onMessageCount={onMessageCount}
+            onActiveMessageMeta={onActiveMessageMeta}
+          />
+        )}
+      </div>
+      <div
+        className={
+          "absolute inset-0 " +
+          (detailRoute === "threadChat" ? "visible" : "invisible pointer-events-none")
+        }
+        aria-hidden={detailRoute !== "threadChat"}
+      >
+        {detailRoute === "threadChat" && (
+          <ThreadChatPage
+            session={selected}
+            viewMode={viewMode}
+            liveState={liveState}
+            runtimeAgents={runtimeAgents}
+            rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
+            debugAcpConfig={debugAcpConfig}
+            runtimeSessionAliases={runtimeSessionAliases}
+            ancestorSessions={selectedAncestorSessions}
+            dispatchLiveEvent={dispatchLiveEvent}
+            onPendingSession={addPendingSession}
+            onMessageCount={onMessageCount}
+            onActiveMessageMeta={onActiveMessageMeta}
+          />
+        )}
       </div>
       <div
         className={
