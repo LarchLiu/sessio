@@ -34,7 +34,7 @@ struct PersistedPiSession {
     last_updated_at: i64,
     message_count: usize,
     transcript_lines: Vec<String>,
-    skipped: bool,
+    hidden_from_sidebar: bool,
 }
 
 const ENABLE_PI_ACP_TRANSCRIPT_PERSISTENCE: bool = true;
@@ -190,7 +190,7 @@ impl PiAcpSessionStore {
                 &entry.workspace_path,
             )?);
             entry.message_count += 1;
-            entry.skipped
+            entry.hidden_from_sidebar
                 && !is_fake_agent_session_id(&entry.agent_session_id)
                 && (!had_first_user_message && entry.first_user_message.is_some()
                     || is_turn_terminal_message(message))
@@ -207,7 +207,7 @@ impl PiAcpSessionStore {
         agent_session_id: &str,
         workspace_path: &str,
         timestamp: i64,
-        skipped: bool,
+        hidden_from_sidebar: bool,
     ) -> Result<()> {
         let should_upsert = {
             let mut sessions = self
@@ -226,18 +226,18 @@ impl PiAcpSessionStore {
                     last_updated_at: timestamp,
                     message_count: 0,
                     transcript_lines: Vec::new(),
-                    skipped,
+                    hidden_from_sidebar,
                 });
             if !is_fake_agent_session_id(agent_session_id) {
                 entry.agent_session_id = agent_session_id.to_string();
             }
-            entry.skipped |= skipped;
+            entry.hidden_from_sidebar |= hidden_from_sidebar;
             if !workspace_path.trim().is_empty() {
                 entry.workspace_path = workspace_path.to_string();
             }
             entry.started_at = entry.started_at.min(timestamp);
             entry.last_updated_at = timestamp.max(entry.last_updated_at);
-            entry.skipped && !is_fake_agent_session_id(&entry.agent_session_id)
+            entry.hidden_from_sidebar && !is_fake_agent_session_id(&entry.agent_session_id)
         };
         if should_upsert {
             self.upsert_session_row(sessio_runtime_session_id)?;
@@ -321,8 +321,10 @@ impl PiAcpSessionStore {
             .parent()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| session.file_path.clone());
-        if persisted.skipped {
-            self.inner.store.upsert_skipped_session(&scope, &session)?;
+        if persisted.hidden_from_sidebar {
+            self.inner
+                .store
+                .upsert_session_hidden_from_sidebar(&scope, &session)?;
         } else {
             self.inner.store.upsert_session(&scope, &session)?;
         }
@@ -380,8 +382,8 @@ fn upsert_finished_session_file(
         .parent()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or(file_path);
-    if persisted.skipped {
-        store.upsert_skipped_session(&scope, &session)
+    if persisted.hidden_from_sidebar {
+        store.upsert_session_hidden_from_sidebar(&scope, &session)
     } else {
         store.upsert_session(&scope, &session)
     }

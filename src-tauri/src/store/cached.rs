@@ -775,8 +775,9 @@ impl SessionStore for CachedStore {
         self.upsert_session_snapshot(scope, session)
     }
 
-    fn upsert_skipped_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
-        self.inner.upsert_skipped_session(scope, session)?;
+    fn upsert_session_hidden_from_sidebar(&self, scope: &str, session: &SessionInfo) -> Result<()> {
+        self.inner
+            .upsert_session_hidden_from_sidebar(scope, session)?;
         self.upsert_session_snapshot(scope, session)
     }
 

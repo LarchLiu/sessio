@@ -197,11 +197,19 @@ fn parse_args(args: Vec<String>) -> Result<Args> {
             }
             "--project-id" => {
                 i += 1;
-                project_id = Some(args.get(i).context("missing value for --project-id")?.clone());
+                project_id = Some(
+                    args.get(i)
+                        .context("missing value for --project-id")?
+                        .clone(),
+                );
             }
             "--thread-id" => {
                 i += 1;
-                thread_id = Some(args.get(i).context("missing value for --thread-id")?.clone());
+                thread_id = Some(
+                    args.get(i)
+                        .context("missing value for --thread-id")?
+                        .clone(),
+                );
             }
             "--iterations" => {
                 i += 1;
@@ -228,9 +236,8 @@ fn parse_args(args: Vec<String>) -> Result<Args> {
             }
             "--operation" => {
                 i += 1;
-                operation = Operation::parse(
-                    args.get(i).context("missing value for --operation")?,
-                )?;
+                operation =
+                    Operation::parse(args.get(i).context("missing value for --operation")?)?;
             }
             "--help" | "-h" => {
                 print_help();

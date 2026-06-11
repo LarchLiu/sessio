@@ -230,6 +230,9 @@ fn build_thread_summary(
         for task in round.tasks {
             latest = latest.max(task.updated_at.max(task.created_at));
             for task_session in task.sessions {
+                if task_session.superseded_at.is_some() {
+                    continue;
+                }
                 latest = latest.max(task_session.updated_at.max(task_session.created_at));
                 add_session_ref(
                     &mut sessions_by_key,
@@ -425,7 +428,10 @@ mod tests {
             rename_title: None,
             title: Some("Direct thread chat".to_string()),
             first_user_message: Some("Thread note".to_string()),
-            file_path: project_dir.join("direct.jsonl").to_string_lossy().to_string(),
+            file_path: project_dir
+                .join("direct.jsonl")
+                .to_string_lossy()
+                .to_string(),
             file_size: 1,
             partial: false,
             available: true,
@@ -453,7 +459,10 @@ mod tests {
             message_count: 1,
             title: Some("Planner trace".to_string()),
             first_user_message: Some("Plan note".to_string()),
-            file_path: project_dir.join("planner.jsonl").to_string_lossy().to_string(),
+            file_path: project_dir
+                .join("planner.jsonl")
+                .to_string_lossy()
+                .to_string(),
             ..direct_session.clone()
         };
         for session in [&direct_session, &stage_runtime_session, &planner_session] {
@@ -490,6 +499,16 @@ mod tests {
                     sort_order: 0,
                     status: PlanTaskStatus::Running,
                 }],
+            })
+            .unwrap();
+        store
+            .link_plan_task_session(crate::store::NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: "superseded-runtime-session",
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: None,
+                attempt_count: 1,
             })
             .unwrap();
         store
@@ -587,6 +606,10 @@ mod tests {
                 session_identity(Agent::AstraPi, "missing-planner-session"),
             ])
         );
+        assert!(!summary.session_keys.contains(&session_identity(
+            Agent::Codex,
+            "superseded-runtime-session"
+        )));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_dir);

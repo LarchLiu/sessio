@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     partial            INTEGER NOT NULL DEFAULT 0,
     available          INTEGER NOT NULL DEFAULT 1,
     archived           INTEGER NOT NULL DEFAULT 0,
-    skip               INTEGER NOT NULL DEFAULT 0,
+    hidden_from_sidebar INTEGER NOT NULL DEFAULT 0,
     last_indexed_at    INTEGER NOT NULL,
     PRIMARY KEY (agent, session_id, scope)
 );
@@ -781,8 +781,8 @@ ALTER TABLE sessions ADD COLUMN rename_title TEXT;
 // Current-schema backfill for databases created before thread live sessions
 // gained an internal "hide from ordinary session list" flag. This is applied
 // fault-tolerantly without bumping schema_migrations.
-const SCHEMA_CURRENT_SESSION_SKIP: &str = r#"
-ALTER TABLE sessions ADD COLUMN skip INTEGER NOT NULL DEFAULT 0;
+const SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR: &str = r#"
+ALTER TABLE sessions ADD COLUMN hidden_from_sidebar INTEGER NOT NULL DEFAULT 0;
 "#;
 
 const SCHEMA_CURRENT_ASTRA_RUN_SESSIONS: &str = r#"
@@ -886,7 +886,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         seed_builtins(conn)?;
     }
-    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SKIP);
+    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR);
     ensure_current_astra_run_sessions(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
@@ -1586,6 +1586,7 @@ fn runtime_agent_order(agent: Agent) -> i64 {
 struct ExistingSessionRow {
     scope: String,
     file_path: String,
+    hidden_from_sidebar: i64,
     partial: i64,
     available: i64,
     archived: i64,
@@ -1603,7 +1604,7 @@ fn load_identity_session_rows(
     session_id: &str,
 ) -> Result<Vec<ExistingSessionRow>> {
     let mut stmt = conn.prepare(
-        "SELECT scope, file_path, partial, available, archived,
+        "SELECT scope, file_path, hidden_from_sidebar, partial, available, archived,
                 message_count, rename_title, title, first_user_message, forked_from_agent, forked_from_id
          FROM sessions
          WHERE agent = ? AND session_id = ?
@@ -1616,20 +1617,21 @@ fn load_identity_session_rows(
     let rows = stmt
         .query_map(params![agent.as_str(), session_id], |row| {
             let forked_agent = row
-                .get::<_, Option<String>>(9)?
+                .get::<_, Option<String>>(10)?
                 .and_then(|value| Agent::from_db_str(&value));
             Ok(ExistingSessionRow {
                 scope: row.get(0)?,
                 file_path: row.get(1)?,
-                partial: row.get(2)?,
-                available: row.get(3)?,
-                archived: row.get(4)?,
-                message_count: row.get(5)?,
-                rename_title: row.get(6)?,
-                title: row.get(7)?,
-                first_user_message: row.get(8)?,
+                hidden_from_sidebar: row.get(2)?,
+                partial: row.get(3)?,
+                available: row.get(4)?,
+                archived: row.get(5)?,
+                message_count: row.get(6)?,
+                rename_title: row.get(7)?,
+                title: row.get(8)?,
+                first_user_message: row.get(9)?,
                 forked_from_agent: forked_agent,
-                forked_from_id: row.get(10)?,
+                forked_from_id: row.get(11)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1718,9 +1720,9 @@ fn delete_duplicate_session_rows(
     agent: Agent,
     session_id: &str,
     keep_scope: &str,
-    force_skip: bool,
+    hide_from_sidebar: bool,
 ) -> Result<()> {
-    preserve_session_skip(conn, agent, session_id, keep_scope, force_skip)?;
+    preserve_session_hidden_from_sidebar(conn, agent, session_id, keep_scope, hide_from_sidebar)?;
     conn.execute(
         "DELETE FROM sessions
          WHERE agent = ? AND session_id = ? AND scope != ?",
@@ -1729,29 +1731,33 @@ fn delete_duplicate_session_rows(
     Ok(())
 }
 
-fn preserve_session_skip(
+fn preserve_session_hidden_from_sidebar(
     conn: &Connection,
     agent: Agent,
     session_id: &str,
     scope: &str,
-    force_skip: bool,
+    hide_from_sidebar: bool,
 ) -> Result<()> {
-    let existing_skip: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(skip), 0)
+    let existing_hidden: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(hidden_from_sidebar), 0)
          FROM sessions
          WHERE agent = ? AND session_id = ?",
         params![agent.as_str(), session_id],
         |row| row.get(0),
     )?;
-    if force_skip || existing_skip != 0 {
+    if hide_from_sidebar || existing_hidden != 0 {
         conn.execute(
             "UPDATE sessions
-             SET skip = 1
+             SET hidden_from_sidebar = 1
              WHERE agent = ? AND session_id = ? AND scope = ?",
             params![agent.as_str(), session_id, scope],
         )?;
     }
     Ok(())
+}
+
+fn merged_hidden_from_sidebar(rows: &[ExistingSessionRow], hide_from_sidebar: bool) -> i64 {
+    (hide_from_sidebar || rows.iter().any(|row| row.hidden_from_sidebar != 0)) as i64
 }
 
 fn merge_session_lineage(
@@ -1799,7 +1805,12 @@ struct ExistingPlaceholder {
     scope: String,
 }
 
-fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: bool) -> Result<()> {
+fn insert_session(
+    conn: &Connection,
+    scope: &str,
+    s: &SessionInfo,
+    hide_from_sidebar: bool,
+) -> Result<()> {
     let identity_rows = load_identity_session_rows(conn, s.agent, &s.id)?;
     let incoming_real = is_real_session_file_path(&s.file_path);
     let existing_real = identity_rows
@@ -1855,7 +1866,13 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, &existing.scope, force_skip)?;
+            delete_duplicate_session_rows(
+                conn,
+                s.agent,
+                &s.id,
+                &existing.scope,
+                hide_from_sidebar,
+            )?;
             return Ok(());
         }
     }
@@ -1896,7 +1913,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
             return Ok(());
         }
         if let Some(existing) = existing_real.clone().filter(|row| row.scope != scope) {
@@ -1935,7 +1952,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
             return Ok(());
         }
         if let Some(existing) = existing_placeholder(conn, s.agent, &s.id, scope, s)? {
@@ -1948,7 +1965,13 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
                 params![s.agent.as_str(), s.id, scope],
                 |_| Ok(()),
             ).optional()?.is_some() {
-                preserve_session_skip(conn, s.agent, &s.id, scope, force_skip)?;
+                preserve_session_hidden_from_sidebar(
+                    conn,
+                    s.agent,
+                    &s.id,
+                    scope,
+                    hide_from_sidebar,
+                )?;
                 conn.execute(
                     "DELETE FROM sessions
                      WHERE agent = ? AND session_id = ? AND scope = ?",
@@ -1987,7 +2010,13 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
                         existing.scope,
                     ],
                 )?;
-                delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
+                delete_duplicate_session_rows(
+                    conn,
+                    s.agent,
+                    &s.id,
+                    scope,
+                    hide_from_sidebar,
+                )?;
                 return Ok(());
             }
         }
@@ -2038,7 +2067,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
                 existing_same_scope.scope,
             ],
         )?;
-        delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
+        delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
         return Ok(());
     }
     let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
@@ -2050,8 +2079,8 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
             message_count, rename_title, title, first_user_message,
             file_size, file_mtime,
             partial, available, archived,
-            last_indexed_at, forked_from_agent, forked_from_id
-        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?, ?,?,?, ?,?,?)",
+            hidden_from_sidebar, last_indexed_at, forked_from_agent, forked_from_id
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?, ?,?,?, ?,?,?,?)",
         params![
             s.agent.as_str(),
             s.id,
@@ -2070,12 +2099,13 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo, force_skip: b
             s.partial as i64,
             s.available as i64,
             s.archived as i64,
+            merged_hidden_from_sidebar(&identity_rows, hide_from_sidebar),
             now_ms(),
             forked_from_agent.map(|agent| agent.as_str()),
             forked_from_id,
         ],
     )?;
-    delete_duplicate_session_rows(conn, s.agent, &s.id, scope, force_skip)?;
+    delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
     // Subagent rows are written through upsert_subagent so their lifecycle
     // is independent from the parent session's reindex.
     Ok(())
@@ -2627,7 +2657,7 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
         "SELECT p.id, p.path, p.name, p.process_template_id, p.created_at, p.updated_at,
                 COUNT(s.session_id) AS session_count
          FROM projects p
-         LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.skip = 0
+         LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.hidden_from_sidebar = 0
          WHERE p.id = ? AND p.archived = 0
          GROUP BY p.id",
         params![project_id],
@@ -4343,7 +4373,7 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM kanban_item_sessions kis
          INNER JOIN sessions s ON s.agent = kis.agent AND s.session_id = kis.session_id
-         WHERE kis.item_id = ? AND s.available = 1 AND s.skip = 0
+         WHERE kis.item_id = ? AND s.available = 1
          ORDER BY s.updated_at DESC, s.started_at DESC",
     )?;
     let mut sessions: Vec<SessionInfo> = stmt
@@ -4391,7 +4421,7 @@ fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<Sessio
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM thread_sessions ts
          INNER JOIN sessions s ON s.agent = ts.agent AND s.session_id = ts.session_id
-         WHERE ts.thread_id = ? AND s.available = 1 AND s.skip = 0
+         WHERE ts.thread_id = ? AND s.available = 1
          ORDER BY ts.created_at ASC, s.updated_at DESC, s.started_at DESC",
     )?;
     let mut sessions: Vec<SessionInfo> = stmt
@@ -4439,7 +4469,7 @@ fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<S
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM stage_sessions ss
          INNER JOIN sessions s ON s.agent = ss.agent AND s.session_id = ss.session_id
-         WHERE ss.thread_stage_id = ? AND s.available = 1 AND s.skip = 0
+         WHERE ss.thread_stage_id = ? AND s.available = 1
          ORDER BY ss.created_at ASC, s.updated_at DESC, s.started_at DESC",
     )?;
     let mut sessions: Vec<SessionInfo> = stmt
@@ -5118,8 +5148,7 @@ fn load_sessions_by_refs(conn: &Connection, refs: &[SessionRef<'_>]) -> Result<V
                 started_at, updated_at, message_count, rename_title, title, first_user_message,
                 file_size, partial, available, archived, forked_from_agent, forked_from_id
          FROM sessions
-         WHERE skip = 0
-           AND (agent, session_id) IN (",
+         WHERE (agent, session_id) IN (",
     );
     let mut values = Vec::<SqlValue>::with_capacity(unique_refs.len() * 2);
     for (index, (agent, session_id)) in unique_refs.iter().enumerate() {
@@ -5168,14 +5197,14 @@ fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<Sess
                 s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
          FROM sessions s
          INNER JOIN projects p ON p.path = s.project_path AND p.archived = 0
-         WHERE s.skip = 0
+         WHERE s.hidden_from_sidebar = 0
          ORDER BY s.updated_at DESC"
     } else {
         "SELECT agent, session_id, file_path, project_path, project_name,
                 started_at, updated_at, message_count, rename_title, title, first_user_message,
                 file_size, partial, available, archived, forked_from_agent, forked_from_id
          FROM sessions
-         WHERE skip = 0
+         WHERE hidden_from_sidebar = 0
          ORDER BY updated_at DESC"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -5397,7 +5426,7 @@ impl SessionStore for SqliteStore {
             "SELECT p.id, p.path, p.name, p.process_template_id, p.created_at, p.updated_at,
                     COUNT(s.session_id) AS session_count
              FROM projects p
-             LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.skip = 0
+             LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.hidden_from_sidebar = 0
              WHERE p.archived = 0
              GROUP BY p.id
              ORDER BY p.updated_at DESC, p.name COLLATE NOCASE ASC",
@@ -7850,7 +7879,7 @@ impl SessionStore for SqliteStore {
         insert_session(&conn, scope, session, false)
     }
 
-    fn upsert_skipped_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
+    fn upsert_session_hidden_from_sidebar(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         insert_session(&conn, scope, session, true)
     }
@@ -9762,11 +9791,12 @@ mod migration_tests {
     }
 
     #[test]
-    fn skipped_placeholder_stays_hidden_after_real_path_update() {
-        let path = unique_db("sessio-skipped-placeholder-real-path");
+    fn sidebar_hidden_placeholder_stays_hidden_after_real_path_update() {
+        let path = unique_db("sessio-sidebar-hidden-placeholder-real-path");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
-        let project_dir = temp_child_path(&std::env::temp_dir(), "sessio-skipped-placeholder");
+        let project_dir =
+            temp_child_path(&std::env::temp_dir(), "sessio-sidebar-hidden-placeholder");
         std::fs::create_dir(&project_dir).unwrap();
         let project_path = std::fs::canonicalize(&project_dir)
             .unwrap()
@@ -9775,7 +9805,7 @@ mod migration_tests {
         store
             .add_project(
                 &project_path,
-                Some("Skipped Placeholder"),
+                Some("Sidebar Hidden Placeholder"),
                 "research".to_string(),
                 None,
             )
@@ -9787,7 +9817,7 @@ mod migration_tests {
             forked_from_agent: None,
             forked_from_id: None,
             project_path: Some(project_path.clone()),
-            project_name: Some("Skipped Placeholder".to_string()),
+            project_name: Some("Sidebar Hidden Placeholder".to_string()),
             started_at: Some(10),
             updated_at: Some(20),
             message_count: 2,
@@ -9801,9 +9831,20 @@ mod migration_tests {
             archived: false,
             subagents: Vec::new(),
         };
-        store.upsert_skipped_session("", &placeholder).unwrap();
+        store
+            .upsert_session_hidden_from_sidebar("", &placeholder)
+            .unwrap();
         assert!(store.list_sessions().unwrap().is_empty());
         assert!(store.list_all_sessions().unwrap().is_empty());
+        let placeholder_ref = store
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::AstraPi,
+                session_id: "pi-live-session",
+            }])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(placeholder_ref.partial);
 
         let real_path = project_dir
             .join("pi-live-session.jsonl")
@@ -9821,18 +9862,29 @@ mod migration_tests {
 
         assert!(store.list_sessions().unwrap().is_empty());
         assert!(store.list_all_sessions().unwrap().is_empty());
+        let visible_by_ref = store
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::AstraPi,
+                session_id: "pi-live-session",
+            }])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(visible_by_ref.file_path, real_path.as_str());
+        assert!(!visible_by_ref.partial);
+        assert_eq!(visible_by_ref.message_count, 4);
 
-        let skip: i64 = store
+        let hidden_from_sidebar: i64 = store
             .conn
             .lock()
             .unwrap()
             .query_row(
-                "SELECT skip FROM sessions WHERE agent = ? AND session_id = ?",
+                "SELECT hidden_from_sidebar FROM sessions WHERE agent = ? AND session_id = ?",
                 params![Agent::AstraPi.as_str(), "pi-live-session"],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(skip, 1);
+        assert_eq!(hidden_from_sidebar, 1);
         let stored = store
             .conn
             .lock()

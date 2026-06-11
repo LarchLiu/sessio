@@ -2163,7 +2163,7 @@ fn record_and_link_ready_delegated_session(
         archived: false,
         subagents: Vec::new(),
     };
-    store.upsert_skipped_session(&session.file_path, &session)?;
+    store.upsert_session_hidden_from_sidebar(&session.file_path, &session)?;
 
     if let Some(stage_id) = resolved_thread_stage_id {
         store
@@ -2230,7 +2230,7 @@ fn record_ready_internal_planner_session(
         archived: false,
         subagents: Vec::new(),
     };
-    store.upsert_skipped_session(&session.file_path, &session)
+    store.upsert_session_hidden_from_sidebar(&session.file_path, &session)
 }
 
 #[derive(Debug, Clone)]
@@ -3149,7 +3149,7 @@ mod tests {
         AssistantAgentInfo, AssistantType, IssueSeverity, IssueStatus, StageAssistantInfo,
         StageIssueInfo, ThreadKind,
     };
-    use crate::store::{sqlite::SqliteStore, NewAssistant};
+    use crate::store::{sqlite::SqliteStore, NewAssistant, SessionRef};
     use std::path::Path;
 
     #[test]
@@ -3220,22 +3220,25 @@ mod tests {
     }
 
     #[test]
-    fn internal_planner_session_stays_skipped_after_indexed_file_update() {
+    fn internal_planner_session_stays_hidden_from_sidebar_after_indexed_file_update() {
         let db_path =
             std::env::temp_dir().join(format!("sessio-astra-internal-planner-{}.db", now_ms()));
         let store = SqliteStore::open(&db_path).unwrap();
         store.init().unwrap();
-        let run = test_run("run-planner-skip");
+        let run = test_run("run-planner-hidden-from-sidebar");
 
         record_ready_internal_planner_session(&store, &run, Agent::Codex, "planner-session-1")
             .unwrap();
 
         assert!(store.list_sessions().unwrap().is_empty());
+        assert!(store.list_all_sessions().unwrap().is_empty());
         let placeholder = store
-            .list_all_sessions()
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::Codex,
+                session_id: "planner-session-1",
+            }])
             .unwrap()
-            .into_iter()
-            .find(|session| session.agent == Agent::Codex && session.id == "planner-session-1")
+            .pop()
             .unwrap();
         assert!(placeholder.partial);
 
@@ -3250,11 +3253,14 @@ mod tests {
         store.upsert_session("/tmp", &real).unwrap();
 
         assert!(store.list_sessions().unwrap().is_empty());
+        assert!(store.list_all_sessions().unwrap().is_empty());
         let updated = store
-            .list_all_sessions()
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::Codex,
+                session_id: "planner-session-1",
+            }])
             .unwrap()
-            .into_iter()
-            .find(|session| session.agent == Agent::Codex && session.id == "planner-session-1")
+            .pop()
             .unwrap();
         assert_eq!(updated.file_path, "/tmp/planner-session-1.jsonl");
         assert!(!updated.partial);
@@ -4307,13 +4313,22 @@ mod tests {
             reindexed_stage.sessions[0].title.as_deref(),
             Some("# Sessio stage task")
         );
-        let session_row_count = store
+        let sidebar_row_count = store
             .list_all_sessions()
             .unwrap()
             .into_iter()
             .filter(|session| session.agent == Agent::Codex && session.id == "agent-session-real")
             .count();
-        assert_eq!(session_row_count, 1);
+        assert_eq!(sidebar_row_count, 0);
+        let referenced_sessions = store
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::Codex,
+                session_id: "agent-session-real",
+            }])
+            .unwrap();
+        assert_eq!(referenced_sessions.len(), 1);
+        assert_eq!(referenced_sessions[0].file_path, real_session.file_path);
+        assert!(!referenced_sessions[0].partial);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(Path::new(&project.path));
