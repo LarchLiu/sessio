@@ -18,6 +18,8 @@ Date: 2026-06-10
 - `sample` against `thread_summary_perf --operation refresh_all --seconds 15`
 - `sample` against `thread_summary_perf --operation refresh_project --seconds 15`
 - `sample` against `thread_summary_perf --operation get_thread_replay --seconds 15`
+- `sample` against `thread_summary_perf --operation warm --seconds 15`
+- `sample` against a real `target/debug/sessio` startup run
 
 All commands passed locally.
 
@@ -56,27 +58,32 @@ Current local sample on the default DB:
 ## Runtime sample snapshot
 
 To approximate the plan's CPU-sample requirement in this terminal session, I ran the benchmark
-helper for 15-second single-operation loops and sampled each process with macOS `sample`.
+helper for 15-second single-operation loops and sampled each process with macOS `sample`. I also
+captured a startup sample from a real `target/debug/sessio` app run.
 
 Observed hot frames:
 
+- `warm` (startup-equivalent cache load): `ThreadChatSummaryCache::ensure_loaded`
+- real app startup: `ThreadChatSummaryCache::refresh_all_inner -> build_all_summaries -> build_project_summaries`
 - `refresh_all`: `ThreadChatSummaryCache::refresh_all_inner -> build_all_summaries -> build_project_summaries -> load_sessions_by_refs`
 - `refresh_project`: `ThreadChatSummaryCache::refresh_project_inner -> build_project_summaries -> load_sessions_by_refs`
 - `get_thread_replay`: `SessionStore::get_thread_replay -> load_sessions_by_refs`
 
-Forbidden legacy frames were absent from all three samples:
+Forbidden legacy frames were absent from the benchmark-loop samples and the real app startup sample:
 
 - `SessionStore::list_all_sessions`
 - `is_codex_guardian_index_row`
 - `serde_json::from_str`
 
 This does not replace a full Instruments capture of the desktop app, but it does provide
-runtime stack evidence on the current DB that the sampled hot path now flows through scoped
-session lookup instead of the removed global scan and guardian JSON parse path.
+runtime stack evidence on the current DB that the sampled real-app startup, startup-equivalent,
+summary refresh, and replay paths now flow through scoped session lookup instead of the removed
+global scan and guardian JSON parse path.
 
 ## Remaining manual follow-up
 
-The only remaining gap versus the original Phase 5 wording is a full desktop-app CPU sample
-during startup, `sessions_index_updated`, and thread chat UI open flows. The current terminal
-session captured equivalent backend/runtime stack evidence, but not a GUI-driven Instruments
-trace.
+The only remaining gap versus the original Phase 5 wording is an Instruments-style trace driven
+from manual UI interactions inside the Tauri window for `sessions_index_updated` and thread chat
+open flows. The current terminal session did capture a real app startup sample plus backend/runtime
+samples for the startup-equivalent cache load, `sessions_index_updated`-equivalent refresh paths,
+and thread-chat replay path.
