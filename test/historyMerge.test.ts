@@ -151,7 +151,7 @@ describe("mergeHistoryWithLiveTurns", () => {
     expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
   });
 
-  it("drops live turns whose turn id is already persisted in history", () => {
+  it("keeps live turns whose turn id is already persisted in history", () => {
     const history = [
       liveTurn([
         { kind: "user", blocks: [{ type: "text", text: "hi" }], raw: {}, timestamp: 1 },
@@ -166,10 +166,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       { kind: "user", blocks: [{ type: "text", text: "next" }], raw: {}, timestamp: 3 },
     ], "next", 3);
 
-    expect(mergeHistoryWithLiveTurns(history, [replay, next])).toEqual([...history, next]);
+    expect(mergeHistoryWithLiveTurns(history, [replay, next])).toEqual([replay, next]);
   });
 
-  it("drops duplicated live cross-agent user when history already has it", () => {
+  it("keeps live cross-agent turn when history already has the same user", () => {
     const history = [liveTurn([
       {
         kind: "user",
@@ -196,16 +196,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       ], "live", 3),
     ];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([
-      ...history,
-      {
-        ...live[0],
-        blocks: [{ kind: "assistant", blocks: [{ type: "text", text: "我继续处理" }], raw: {}, timestamp: 3 }],
-      },
-    ]);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(live);
   });
 
-  it("drops duplicated live user when history already has the pending new chat prompt", () => {
+  it("keeps live user when history already has the pending new chat prompt", () => {
     const history = [liveTurn([
       { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 1 },
     ], "history", 1)];
@@ -213,10 +207,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 2 },
     ], "live", 2)];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(history);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(live);
   });
 
-  it("keeps an otherwise empty running live turn after dropping its duplicated user", () => {
+  it("keeps an otherwise empty running live turn instead of duplicated history", () => {
     const history = [liveTurn([
       { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 1 },
     ], "history", 1)];
@@ -229,16 +223,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       },
     ];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([
-      ...history,
-      {
-        ...live[0],
-        blocks: [],
-      },
-    ]);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(live);
   });
 
-  it("keeps remaining live blocks after dropping a duplicated live user", () => {
+  it("keeps full live turn when history has the same user", () => {
     const history = [liveTurn([
       { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 1 },
     ], "history", 1)];
@@ -247,16 +235,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       { kind: "assistant", blocks: [{ type: "text", text: "我继续处理" }], raw: {}, timestamp: 3 },
     ], "live", 3)];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([
-      ...history,
-      {
-        ...live[0],
-        blocks: [{ kind: "assistant", blocks: [{ type: "text", text: "我继续处理" }], raw: {}, timestamp: 3 }],
-      },
-    ]);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(live);
   });
 
-  it("does not dedupe non-user live blocks by content", () => {
+  it("keeps full live turn instead of matching history tail content", () => {
     const history = [liveTurn([
       { kind: "assistant", blocks: [{ type: "text", text: "same assistant" }], raw: {}, timestamp: 1 },
       { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 2 },
@@ -266,16 +248,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       { kind: "assistant", blocks: [{ type: "text", text: "same assistant" }], raw: {}, timestamp: 4 },
     ], "live", 4)];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([
-      ...history,
-      {
-        ...live[0],
-        blocks: [{ kind: "assistant", blocks: [{ type: "text", text: "same assistant" }], raw: {}, timestamp: 4 }],
-      },
-    ]);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(live);
   });
 
-  it("drops equivalent content when turn ids differ", () => {
+  it("keeps live equivalent content when turn ids differ", () => {
     const history = [liveTurn([
       {
         kind: "user",
@@ -288,10 +264,10 @@ describe("mergeHistoryWithLiveTurns", () => {
       { kind: "user", blocks: [{ type: "text", text: "hi there" }], raw: {}, timestamp: 2 },
     ], "live", 2)];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(history);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(live);
   });
 
-  it("drops equivalent attachment content when turn ids differ", () => {
+  it("keeps live equivalent attachment content when turn ids differ", () => {
     const history = [liveTurn([
       {
         kind: "user",
@@ -315,7 +291,19 @@ describe("mergeHistoryWithLiveTurns", () => {
       },
     ], "live", 2)];
 
-    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(history);
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual(live);
+  });
+
+  it("keeps same-text history when it is a separate earlier turn", () => {
+    const history = [liveTurn([
+      { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 1 },
+      { kind: "assistant", blocks: [{ type: "text", text: "done" }], raw: {}, timestamp: 2 },
+    ], "history", 2)];
+    const live = [liveTurn([
+      { kind: "user", blocks: [{ type: "text", text: "继续" }], raw: {}, timestamp: 10 * 60 * 1000 },
+    ], "live", 10 * 60 * 1000)];
+
+    expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
   });
 
   it("keeps same-text live replay when attachment references differ", () => {
@@ -345,7 +333,7 @@ describe("mergeHistoryWithLiveTurns", () => {
     expect(mergeHistoryWithLiveTurns(history, live)).toEqual([...history, ...live]);
   });
 
-  it("drops the full live turn when a matching turn id is already in history", () => {
+  it("keeps the full live turn when a matching turn id is already in history", () => {
     const history = [
       liveTurn([
         { kind: "user", blocks: [{ type: "text", text: "hi" }], raw: {}, timestamp: 1 },
@@ -374,7 +362,7 @@ describe("mergeHistoryWithLiveTurns", () => {
       ],
     };
 
-    expect(mergeHistoryWithLiveTurns(history, [replayWithTool])).toEqual(history);
+    expect(mergeHistoryWithLiveTurns(history, [replayWithTool])).toEqual([replayWithTool]);
   });
 });
 

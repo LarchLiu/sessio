@@ -297,12 +297,12 @@ export function mergeHistoryWithLiveTurns(
 ): LiveTurn[] {
   if (historyTurns.length === 0) return liveTurns;
   if (liveTurns.length === 0) return historyTurns;
-  const historyIds = new Set(historyTurns.map((turn) => turn.turnId));
-  const nextLiveTurns = removeDuplicatedTailLiveUser(
-    historyTurns,
-    liveTurns.filter((turn) => !historyIds.has(turn.turnId)),
-  );
-  return [...historyTurns, ...nextLiveTurns];
+  const liveIds = new Set(liveTurns.map((turn) => turn.turnId));
+  const historyWithoutLiveIds = historyTurns.filter((turn) => !liveIds.has(turn.turnId));
+  return [
+    ...historyPrefixBeforeLiveOverlap(historyWithoutLiveIds, liveTurns),
+    ...liveTurns,
+  ];
 }
 
 type UserRenderBlock = Extract<AcpRenderBlock, { kind: "user" }>;
@@ -335,42 +335,47 @@ export function sameAcpUserBlocks(a: UserRenderBlock, b: UserRenderBlock): boole
     attachmentCompareSignature(left) === attachmentCompareSignature(right);
 }
 
-function removeDuplicatedTailLiveUser(
+function historyPrefixBeforeLiveOverlap(
   historyTurns: LiveTurn[],
   liveTurns: LiveTurn[],
 ): LiveTurn[] {
-  if (liveTurns.length === 0) return liveTurns;
-  const historyUser = lastTailUserBlock(historyTurns);
-  if (!historyUser) return liveTurns;
-
-  const firstLiveBlocks = liveTurns[0].blocks;
-  const liveUserIndex = firstLiveBlocks.findIndex((block) => block.kind === "user");
-  if (liveUserIndex < 0) return liveTurns;
-  const liveUser = firstLiveBlocks[liveUserIndex] as UserRenderBlock;
-  if (!sameAcpUserBlocks(historyUser.block, liveUser)) return liveTurns;
-
-  const firstLiveTurn = {
-    ...liveTurns[0],
-    blocks: firstLiveBlocks.filter((_, index) => index !== liveUserIndex),
-  };
-  if (isEmptyRenderableTurn(firstLiveTurn)) {
-    return liveTurns.slice(1);
+  if (historyTurns.length === 0 || liveTurns.length === 0) return historyTurns;
+  const liveUser = firstUserBlock(liveTurns);
+  if (!liveUser) return historyTurns;
+  for (let turnIndex = historyTurns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const blocks = historyTurns[turnIndex].blocks;
+    for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = blocks[blockIndex];
+      if (block.kind !== "user") continue;
+      if (!sameAcpUserBlocks(block, liveUser.block)) continue;
+      if (!sameUserTurnTiming(historyTurns[turnIndex], block, liveTurns[liveUser.turnIndex], liveUser.block)) {
+        continue;
+      }
+      return historyTurns.slice(0, turnIndex);
+    }
   }
-  return [firstLiveTurn, ...liveTurns.slice(1)];
+  return historyTurns;
 }
 
-function isEmptyRenderableTurn(turn: LiveTurn): boolean {
-  if (
-    turn.status === "pending" ||
-    turn.status === "streaming" ||
-    turn.status === "cancelling"
-  ) {
-    return false;
-  }
-  return turn.blocks.length === 0 &&
-    turn.tools.length === 0 &&
-    turn.permissions.length === 0 &&
-    !turn.error;
+const LIVE_HISTORY_USER_MATCH_WINDOW_MS = 2 * 60 * 1000;
+const LIVE_HISTORY_TURN_OVERLAP_GRACE_MS = 1000;
+
+function sameUserTurnTiming(
+  historyTurn: LiveTurn,
+  historyUser: UserRenderBlock,
+  liveTurn: LiveTurn,
+  liveUser: UserRenderBlock,
+): boolean {
+  const historyTime = historyUser.timestamp ?? historyTurn.startedAt;
+  const liveTime = liveUser.timestamp ?? liveTurn.startedAt;
+  if (!Number.isFinite(historyTime) || !Number.isFinite(liveTime)) return true;
+  const userClose = Math.abs(historyTime - liveTime) <= LIVE_HISTORY_USER_MATCH_WINDOW_MS;
+  const historyEnd = Math.max(historyTurn.updatedAt, historyTime);
+  const liveEnd = Math.max(liveTurn.updatedAt, liveTime);
+  const turnsOverlap =
+    historyEnd + LIVE_HISTORY_TURN_OVERLAP_GRACE_MS >= liveTime &&
+    liveEnd + LIVE_HISTORY_TURN_OVERLAP_GRACE_MS >= historyTime;
+  return userClose && turnsOverlap;
 }
 
 export function sanitizeSessioAttachmentText(text: string): string {
