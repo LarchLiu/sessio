@@ -9,7 +9,7 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::sources::types::HistoryAcpMessage;
 use crate::models::{
-    is_system_noise, sessio_attachment_marker_name, sessio_thread_prompt_block_kinds,
+    is_system_noise, sessio_attachment_marker_name, sessio_thread_prompt_block_metas,
     strip_injected_context, strip_sessio_thread_prompt_blocks, text_content_blocks, Agent,
     SessionContentBlock, SessionHistoryBlock, SessionHistoryPermissionOption,
     SessionHistoryPermissionRequest, SessionHistoryToolCall, SessionHistoryTurn,
@@ -1671,12 +1671,12 @@ fn clean_user_content_block(mut block: SessionContentBlock) -> Vec<SessionConten
             let text = block.text.take().unwrap_or_default();
             let cleaned = strip_injected_context(&sanitize_user_text_for_display(&text));
             if cleaned.trim().is_empty() || is_system_noise(&cleaned) {
-                let prompt_kinds = sessio_thread_prompt_block_kinds(&text);
-                if prompt_kinds.is_empty() {
+                let prompt_metas = sessio_thread_prompt_block_metas(&text);
+                if prompt_metas.is_empty() {
                     Vec::new()
                 } else {
                     vec![SessionContentBlock::sessio_thread_prompt_placeholder(
-                        prompt_kinds,
+                        prompt_metas,
                     )]
                 }
             } else {
@@ -2739,7 +2739,7 @@ mod tests {
     #[test]
     fn history_user_thread_prompt_keeps_placeholder_meta_when_body_is_hidden() {
         let prompt = concat!(
-            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"astra_plan_task\" -->\n",
+            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"astra_plan_task\" task_title=\"Write joke\" target_agent=\"codex\" -->\n",
             "hidden task prompt\n",
             "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"
         );
@@ -2757,6 +2757,18 @@ mod tests {
         assert_eq!(
             turns[0].blocks[0].blocks[0].meta.as_ref().unwrap()["sessioThreadPromptKinds"],
             json!(["astra_plan_task"])
+        );
+        assert_eq!(
+            turns[0].blocks[0].blocks[0].meta.as_ref().unwrap()["sessioThreadPrompts"],
+            json!([{
+                "kind": "astra_plan_task",
+                "attrs": {
+                    "nonce": "abc",
+                    "kind": "astra_plan_task",
+                    "task_title": "Write joke",
+                    "target_agent": "codex"
+                }
+            }])
         );
     }
 

@@ -118,7 +118,10 @@ import {
   stripSessioUploadWrapper,
 } from "../historyMerge";
 import { getCachedSessionHistorySnapshots } from "../sessionHistorySnapshots";
-import { threadPromptDisplayContentBlocks } from "../threadPromptDisplay";
+import {
+  threadPromptDisplayContentBlocks,
+  type ThreadPromptDisplayMeta,
+} from "../threadPromptDisplay";
 
 export interface ChatPageProps {
   session: SessionInfo;
@@ -140,6 +143,7 @@ export interface ChatPageProps {
   onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
   beforeMessages?: ReactNode;
   showThreadPromptPlaceholders?: boolean;
+  threadPromptFallbacks?: ThreadPromptDisplayMeta[];
 }
 
 export interface ActiveMessageMeta {
@@ -282,6 +286,7 @@ function ChatPage({
   onActiveMessageMeta,
   beforeMessages,
   showThreadPromptPlaceholders = false,
+  threadPromptFallbacks = [],
 }: ChatPageProps) {
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
@@ -408,6 +413,7 @@ function ChatPage({
           skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
           beforeMessages={tab.kind === "main" ? beforeMessages : null}
           showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+          threadPromptFallbacks={tab.kind === "main" ? threadPromptFallbacks : []}
         />
 
         {previewImage && (
@@ -505,6 +511,7 @@ export interface AcpTranscriptPanelProps {
   scrollKey?: string;
   beforeMessages?: ReactNode | null;
   showThreadPromptPlaceholders?: boolean;
+  threadPromptFallbacks?: ThreadPromptDisplayMeta[];
 }
 
 export function AcpTranscriptPanel({
@@ -532,6 +539,7 @@ export function AcpTranscriptPanel({
   scrollKey,
   beforeMessages = null,
   showThreadPromptPlaceholders = false,
+  threadPromptFallbacks = [],
 }: AcpTranscriptPanelProps) {
   const { t } = useI18n();
   const historyKey = historySourceKey(agent, filePath, sessionId);
@@ -1281,6 +1289,7 @@ export function AcpTranscriptPanel({
               sessioRuntimeSessionId={runtimeSessionId}
               now={runtimeNow}
               showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+              threadPromptFallbacks={threadPromptFallbacks}
               onPreviewImage={onPreviewImage}
               onPreviewFile={onPreviewFile}
               onFilePreviewError={onFilePreviewError}
@@ -2207,6 +2216,7 @@ export function AcpRenderItems({
   now,
   defaultMessageExpanded,
   showThreadPromptPlaceholders = false,
+  threadPromptFallbacks = [],
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2219,6 +2229,7 @@ export function AcpRenderItems({
   now: number;
   defaultMessageExpanded?: boolean;
   showThreadPromptPlaceholders?: boolean;
+  threadPromptFallbacks?: ThreadPromptDisplayMeta[];
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2244,6 +2255,7 @@ export function AcpRenderItems({
             now={now}
             defaultMessageExpanded={defaultMessageExpanded}
             showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+            threadPromptFallbacks={threadPromptFallbacks}
             onPreviewImage={onPreviewImage}
             onPreviewFile={onPreviewFile}
             onFilePreviewError={onFilePreviewError}
@@ -2261,6 +2273,7 @@ function AcpLiveItem({
   now,
   defaultMessageExpanded,
   showThreadPromptPlaceholders,
+  threadPromptFallbacks,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2271,6 +2284,7 @@ function AcpLiveItem({
   now: number;
   defaultMessageExpanded: boolean | undefined;
   showThreadPromptPlaceholders: boolean;
+  threadPromptFallbacks: ThreadPromptDisplayMeta[];
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2335,6 +2349,7 @@ function AcpLiveItem({
       messageFinished={isAcpMessageBlockFinished(item.turn, item.block)}
       defaultMessageExpanded={defaultMessageExpanded}
       showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+      threadPromptFallbacks={threadPromptFallbacks}
       onPreviewImage={onPreviewImage}
       onPreviewFile={onPreviewFile}
       onFilePreviewError={onFilePreviewError}
@@ -2405,6 +2420,7 @@ function AcpContentBlockGroup({
   messageFinished = true,
   defaultMessageExpanded,
   showThreadPromptPlaceholders,
+  threadPromptFallbacks,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2416,6 +2432,7 @@ function AcpContentBlockGroup({
   messageFinished?: boolean;
   defaultMessageExpanded?: boolean;
   showThreadPromptPlaceholders: boolean;
+  threadPromptFallbacks: ThreadPromptDisplayMeta[];
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2439,7 +2456,12 @@ function AcpContentBlockGroup({
     ? block.blocks.filter((item) => !isUserAttachmentContentBlock(item))
     : block.blocks;
   const bodyBlocks = isUser
-    ? threadPromptDisplayContentBlocks(rawBodyBlocks, block.raw, showThreadPromptPlaceholders)
+    ? threadPromptDisplayContentBlocks(
+        rawBodyBlocks,
+        block.raw,
+        showThreadPromptPlaceholders,
+        threadPromptFallbacks,
+      )
     : rawBodyBlocks;
   if (isUser && userAttachmentBlocks.length === 0 && bodyBlocks.length === 0) {
     return null;

@@ -186,6 +186,10 @@ pub(super) fn build_astra_orchestration_prompt(
         &[
             ("run_id", run.run_id.clone()),
             ("round_index", round_index.to_string()),
+            (
+                "prompt_summary",
+                user_prompt.unwrap_or("Astra planner").to_string(),
+            ),
         ],
     )
 }
@@ -441,6 +445,7 @@ fn render_plan_task_snapshot_prompt(
     lines.push("Return a concise final result for Astra. Do not mutate process stages or issues unless this task explicitly asks for a separate manual action.".to_string());
     let mut attrs = vec![
         ("task_id", task.id.clone()),
+        ("task_title", task.title.clone()),
         ("target_agent", task.target_agent.as_str().to_string()),
     ];
     if let Some(plan_task_id) = task.plan_task_id.as_deref() {
@@ -530,7 +535,9 @@ fn render_teamwork_task_prompt(
         lines.join("\n"),
         &[
             ("task_id", task.id.clone()),
+            ("task_title", task.title.clone()),
             ("assistant_id", assistant.assistant_id.clone()),
+            ("assistant_name", assistant.name.clone()),
             ("target_agent", task.target_agent.as_str().to_string()),
         ],
     )
@@ -586,7 +593,9 @@ fn render_brainstorm_task_prompt(
         lines.join("\n"),
         &[
             ("task_id", task.id.clone()),
+            ("task_title", task.title.clone()),
             ("assistant_id", assistant.assistant_id.clone()),
+            ("assistant_name", assistant.name.clone()),
             ("target_agent", task.target_agent.as_str().to_string()),
         ],
     )
@@ -642,7 +651,9 @@ fn render_debate_task_prompt(
         lines.join("\n"),
         &[
             ("task_id", task.id.clone()),
+            ("task_title", task.title.clone()),
             ("assistant_id", assistant.assistant_id.clone()),
+            ("assistant_name", assistant.name.clone()),
             ("target_agent", task.target_agent.as_str().to_string()),
         ],
     )
@@ -919,7 +930,9 @@ fn render_stage_task_prompt(
         lines.join("\n"),
         &[
             ("task_id", task.id.clone()),
+            ("task_title", task.title.clone()),
             ("thread_stage_id", focused_stage.id.clone()),
+            ("stage_name", stage_label(focused_stage)),
             ("target_agent", task.target_agent.as_str().to_string()),
         ],
     )

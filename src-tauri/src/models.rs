@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::agents::runtime::types::{RuntimeCapabilitySet, RuntimeTransportKind};
 
@@ -1023,7 +1023,13 @@ impl SessionContentBlock {
         }
     }
 
-    pub fn sessio_thread_prompt_placeholder(kinds: Vec<String>) -> Self {
+    pub fn sessio_thread_prompt_placeholder(prompts: Vec<Value>) -> Self {
+        let kinds = prompts
+            .iter()
+            .filter_map(|prompt| prompt.get("kind").and_then(Value::as_str))
+            .filter(|kind| !kind.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
         Self {
             kind: "text".to_string(),
             text: Some(String::new()),
@@ -1037,7 +1043,10 @@ impl SessionContentBlock {
             blob: None,
             resource: None,
             annotations: None,
-            meta: Some(json!({ "sessioThreadPromptKinds": kinds })),
+            meta: Some(json!({
+                "sessioThreadPromptKinds": kinds,
+                "sessioThreadPrompts": prompts,
+            })),
         }
     }
 
@@ -1593,7 +1602,25 @@ pub fn strip_sessio_thread_prompt_blocks(input: &str) -> String {
 }
 
 pub fn sessio_thread_prompt_block_kinds(input: &str) -> Vec<String> {
-    let mut kinds = Vec::new();
+    sessio_thread_prompt_block_metas(input)
+        .into_iter()
+        .filter_map(|meta| {
+            meta.get("kind")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|kind| !kind.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .fold(Vec::new(), |mut kinds, kind| {
+            if !kinds.iter().any(|existing| existing == &kind) {
+                kinds.push(kind);
+            }
+            kinds
+        })
+}
+
+pub fn sessio_thread_prompt_block_metas(input: &str) -> Vec<Value> {
+    let mut metas = Vec::new();
     let mut cursor = 0;
     loop {
         let Some(start_rel) = input[cursor..].find(SESSIO_THREAD_PROMPT_START) else {
@@ -1614,14 +1641,17 @@ pub fn sessio_thread_prompt_block_kinds(input: &str) -> Vec<String> {
             cursor = start_comment_end;
             continue;
         };
-        if let Some(kind) = comment_attr(start_comment, "kind").map(str::trim) {
-            if !kind.is_empty() && !kinds.iter().any(|existing| existing == kind) {
-                kinds.push(kind.to_string());
-            }
+        let attrs = comment_attrs(start_comment);
+        let kind = attrs.get("kind").and_then(Value::as_str).unwrap_or("");
+        if !kind.trim().is_empty() {
+            metas.push(json!({
+                "kind": kind,
+                "attrs": attrs,
+            }));
         }
         cursor = start_comment_end + end_rel + end_marker.len();
     }
-    kinds
+    metas
 }
 
 fn comment_attr<'a>(comment: &'a str, key: &str) -> Option<&'a str> {
@@ -1630,6 +1660,53 @@ fn comment_attr<'a>(comment: &'a str, key: &str) -> Option<&'a str> {
         let value = part.strip_prefix(&prefix)?;
         value.strip_suffix('"')
     })
+}
+
+fn comment_attrs(comment: &str) -> Map<String, Value> {
+    let mut attrs = Map::new();
+    let bytes = comment.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let key_start = index;
+        while index < bytes.len()
+            && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'-'))
+        {
+            index += 1;
+        }
+        if key_start == index || index >= bytes.len() || bytes[index] != b'=' {
+            index = index.saturating_add(1);
+            continue;
+        }
+        let key = &comment[key_start..index];
+        index += 1;
+        if index >= bytes.len() || bytes[index] != b'"' {
+            continue;
+        }
+        index += 1;
+        let value_start = index;
+        while index < bytes.len() && bytes[index] != b'"' {
+            index += 1;
+        }
+        if index > value_start {
+            attrs.insert(
+                key.to_string(),
+                Value::String(html_unattr(&comment[value_start..index])),
+            );
+        }
+        index = index.saturating_add(1);
+    }
+    attrs
+}
+
+fn html_unattr(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 #[cfg(test)]
