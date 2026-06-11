@@ -15,5 +15,11 @@ export default function ThreadChatPage(props: ChatPageProps) {
     [snapshot, sources],
   );
 
-  return <ChatPage {...props} beforeMessages={beforeMessages} />;
+  return (
+    <ChatPage
+      {...props}
+      beforeMessages={beforeMessages}
+      showThreadPromptPlaceholders
+    />
+  );
 }

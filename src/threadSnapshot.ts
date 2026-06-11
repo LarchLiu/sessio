@@ -1,5 +1,8 @@
 import type {
   Agent,
+  AstraHandle,
+  PlanRoundInfo,
+  PlanTaskInfo,
   StageInfo,
   StageStatus,
   ThreadInfo,
@@ -8,8 +11,10 @@ import type {
   ThreadWorkSnapshotStage,
 } from "./api";
 import { sessionDisplayTitle } from "./appUtils";
+import { buildSessioThreadPromptBlock } from "./historyMerge";
 
 const COMPLETED: StageStatus[] = ["completed", "skipped"];
+const MAX_CONTEXT_FIELD_CHARS = 700;
 
 function snapshotStage(stage: StageInfo): ThreadWorkSnapshotStage {
   return {
@@ -197,7 +202,87 @@ export function renderThreadWorkContext(snapshot: ThreadWorkSnapshot, targetAgen
     );
     lines.push("(sessio resolves to ~/.sessio/bin/sessio)");
   }
-  return lines.join("\n");
+  return buildSessioThreadPromptBlock("work_context", lines.join("\n"), {
+    thread_id: snapshot.threadId,
+    focused_stage_id: snapshot.focusedStageId,
+    target_agent: targetAgent,
+  });
+}
+
+export function renderThreadOrchestrationContext({
+  threadId,
+  astraRuns,
+  planRounds,
+}: {
+  threadId: string;
+  astraRuns: AstraHandle[];
+  planRounds: PlanRoundInfo[];
+}): string {
+  if (astraRuns.length === 0 && planRounds.length === 0) return "";
+
+  const lines: string[] = [];
+  lines.push("# Thread orchestration snapshot");
+
+  if (astraRuns.length > 0) {
+    lines.push("");
+    lines.push("## Astra runs");
+    for (const run of astraRuns.slice().sort((a, b) => a.createdAt - b.createdAt)) {
+      lines.push(
+        `- [${run.status}] ${run.runId}` +
+          (run.roundIndex !== null ? ` round ${run.roundIndex}/${run.roundLimit}` : "") +
+          (run.plannerBackend ? ` via ${run.plannerBackend}` : ""),
+      );
+      if (run.terminalReason) lines.push(`    terminal reason: ${compactContextField(run.terminalReason)}`);
+      if (run.lastErrorMessage) lines.push(`    last error: ${compactContextField(run.lastErrorMessage)}`);
+      else if (run.error) lines.push(`    error: ${compactContextField(run.error)}`);
+      if (run.internalPlannerSessionIds.length > 0) {
+        lines.push(`    planner sessions: ${run.internalPlannerSessionIds.join(", ")}`);
+      }
+    }
+  }
+
+  if (planRounds.length > 0) {
+    lines.push("");
+    lines.push("## Plan rounds");
+    for (const round of planRounds.slice().sort((a, b) => a.roundIndex - b.roundIndex || a.createdAt - b.createdAt)) {
+      lines.push(
+        `- Round ${round.roundIndex} [${round.status}] ${round.mode}` +
+          (round.astraRunId ? ` run=${round.astraRunId}` : "") +
+          ` source=${round.source}`,
+      );
+      if (round.summary) lines.push(`    summary: ${compactContextField(round.summary)}`);
+      for (const task of round.tasks.slice().sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt)) {
+        lines.push(`    - ${taskLine(task)}`);
+        if (task.resultSummary) lines.push(`        result: ${compactContextField(task.resultSummary)}`);
+        if (task.error) lines.push(`        error: ${compactContextField(task.error)}`);
+        if (task.sessions.length > 0) {
+          lines.push(
+            `        sessions: ${task.sessions
+              .map((session) => `${session.role}:${session.agent}/${session.sessionId}`)
+              .join(", ")}`,
+          );
+        }
+      }
+    }
+  }
+
+  return buildSessioThreadPromptBlock("orchestration_context", lines.join("\n"), {
+    thread_id: threadId,
+  });
+}
+
+function taskLine(task: PlanTaskInfo): string {
+  return `[${task.status}] ${task.title}` +
+    ` -> ${task.targetAgent}` +
+    (task.assistantId ? ` assistant=${task.assistantId}` : "") +
+    (task.threadStageId ? ` stage=${task.threadStageId}` : "") +
+    (task.expectedOutput ? `; expected: ${compactContextField(task.expectedOutput)}` : "");
+}
+
+function compactContextField(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= MAX_CONTEXT_FIELD_CHARS) return compact;
+  return `${compact.slice(0, MAX_CONTEXT_FIELD_CHARS - 3).trimEnd()}...`;
 }
 
 function stageAssistantInstructions(

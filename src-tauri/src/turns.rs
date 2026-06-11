@@ -9,8 +9,9 @@ use crate::agents::runtime::types::{
 };
 use crate::agents::sources::types::HistoryAcpMessage;
 use crate::models::{
-    is_system_noise, sessio_attachment_marker_name, strip_injected_context, text_content_blocks,
-    Agent, SessionContentBlock, SessionHistoryBlock, SessionHistoryPermissionOption,
+    is_system_noise, sessio_attachment_marker_name, sessio_thread_prompt_block_kinds,
+    strip_injected_context, strip_sessio_thread_prompt_blocks, text_content_blocks, Agent,
+    SessionContentBlock, SessionHistoryBlock, SessionHistoryPermissionOption,
     SessionHistoryPermissionRequest, SessionHistoryToolCall, SessionHistoryTurn,
 };
 
@@ -397,7 +398,11 @@ fn history_text_content(text: String) -> Vec<Value> {
 
 fn history_content_block_value(block: SessionContentBlock) -> Value {
     match block.kind.as_str() {
-        "text" => json!({ "type": "text", "text": block.text.unwrap_or_default() }),
+        "text" => json!({
+            "type": "text",
+            "text": block.text.unwrap_or_default(),
+            "meta": block.meta,
+        }),
         "image" => json!({
             "type": "image",
             "uri": block.uri,
@@ -1640,7 +1645,14 @@ fn clean_user_content_block(mut block: SessionContentBlock) -> Vec<SessionConten
             let text = block.text.take().unwrap_or_default();
             let cleaned = strip_injected_context(&sanitize_user_text_for_display(&text));
             if cleaned.trim().is_empty() || is_system_noise(&cleaned) {
-                Vec::new()
+                let prompt_kinds = sessio_thread_prompt_block_kinds(&text);
+                if prompt_kinds.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![SessionContentBlock::sessio_thread_prompt_placeholder(
+                        prompt_kinds,
+                    )]
+                }
             } else {
                 trim_user_text_blocks(text_content_blocks(&cleaned))
             }
@@ -1651,7 +1663,9 @@ fn clean_user_content_block(mut block: SessionContentBlock) -> Vec<SessionConten
 }
 
 fn sanitize_user_text_for_display(text: &str) -> String {
-    sanitize_sessio_attachment_text(&strip_image_placeholder_tags(text))
+    strip_sessio_thread_prompt_blocks(&sanitize_sessio_attachment_text(
+        &strip_image_placeholder_tags(text),
+    ))
 }
 
 fn trim_user_text_blocks(mut blocks: Vec<SessionContentBlock>) -> Vec<SessionContentBlock> {
@@ -1705,7 +1719,7 @@ fn dedupe_user_attachment_blocks(blocks: Vec<SessionContentBlock>) -> Vec<Sessio
     deduped
 }
 
-fn normalize_content_block(value: &Value, role: Option<&str>) -> Option<SessionContentBlock> {
+fn normalize_content_block(value: &Value, _role: Option<&str>) -> Option<SessionContentBlock> {
     let type_name = string_field(value, "type").unwrap_or_else(|| "unknown".to_string());
     let meta = value_field(value, "meta")
         .or_else(|| value_field(value, "_meta"))
@@ -1715,11 +1729,7 @@ fn normalize_content_block(value: &Value, role: Option<&str>) -> Option<SessionC
             let text = string_field(value, "text").unwrap_or_default();
             Some(SessionContentBlock {
                 kind: "text".to_string(),
-                text: Some(if role == Some("user") {
-                    sanitize_sessio_attachment_text(&text)
-                } else {
-                    text
-                }),
+                text: Some(text),
                 uri: None,
                 data: None,
                 mime_type: None,
@@ -2698,6 +2708,30 @@ mod tests {
             Some("here is one")
         );
         assert_eq!(turns[0].updated_at, 20);
+    }
+
+    #[test]
+    fn history_user_thread_prompt_keeps_placeholder_meta_when_body_is_hidden() {
+        let prompt = concat!(
+            "<!-- sessio-thread-prompt:start nonce=\"abc\" kind=\"astra_plan_task\" -->\n",
+            "hidden task prompt\n",
+            "<!-- sessio-thread-prompt:end nonce=\"abc\" -->"
+        );
+        let turns = session_history_turns_from_acp_messages(&[row(
+            history_user_message(prompt, Some(10)),
+            Some(10),
+        )]);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].blocks.len(), 1);
+        assert_eq!(turns[0].blocks[0].kind, "user");
+        assert_eq!(turns[0].blocks[0].blocks.len(), 1);
+        assert_eq!(turns[0].blocks[0].blocks[0].kind, "text");
+        assert_eq!(turns[0].blocks[0].blocks[0].text.as_deref(), Some(""));
+        assert_eq!(
+            turns[0].blocks[0].blocks[0].meta.as_ref().unwrap()["sessioThreadPromptKinds"],
+            json!(["astra_plan_task"])
+        );
     }
 
     #[test]

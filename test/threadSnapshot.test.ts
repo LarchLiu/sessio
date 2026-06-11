@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ThreadWorkSnapshot } from "../src/api";
-import { renderThreadWorkContext } from "../src/threadSnapshot";
+import type { AstraHandle, PlanRoundInfo, ThreadWorkSnapshot } from "../src/api";
+import { renderThreadOrchestrationContext, renderThreadWorkContext } from "../src/threadSnapshot";
 
 function snapshot(): ThreadWorkSnapshot {
   return {
@@ -94,3 +94,88 @@ describe("renderThreadWorkContext", () => {
     expect(rendered).not.toContain("Use the builder instructions.");
   });
 });
+
+describe("renderThreadOrchestrationContext", () => {
+  it("includes Astra completion and task result state", () => {
+    const rendered = renderThreadOrchestrationContext({
+      threadId: "thread-1",
+      astraRuns: [astraRun()],
+      planRounds: [planRound()],
+    });
+
+    expect(rendered).toContain('kind="orchestration_context"');
+    expect(rendered).toContain("[completed] astra-1");
+    expect(rendered).toContain("terminal reason: requested joke has been drafted and polished");
+    expect(rendered).toContain("Round 0 [completed] parallel");
+    expect(rendered).toContain("[completed] Proofread joke -> codex");
+    expect(rendered).toContain("result: polished long cold joke");
+  });
+});
+
+function astraRun(): AstraHandle {
+  return {
+    runId: "astra-1",
+    threadId: "thread-1",
+    projectId: "project-1",
+    status: "completed",
+    mode: "auto",
+    plannerBackend: "astra-pi",
+    roundIndex: 1,
+    roundLimit: 3,
+    terminalReason: "requested joke has been drafted and polished",
+    lastErrorCode: null,
+    lastErrorMessage: null,
+    internalPlannerSessionIds: ["planner-session"],
+    runDiagnostics: [],
+    error: null,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+}
+
+function planRound(): PlanRoundInfo {
+  return {
+    id: "round-1",
+    threadId: "thread-1",
+    astraRunId: "astra-1",
+    roundIndex: 0,
+    summary: "Proofreader delivered a polished long cold joke.",
+    mode: "parallel",
+    source: "astra",
+    status: "completed",
+    createdAt: 1,
+    updatedAt: 2,
+    tasks: [{
+      id: "task-1",
+      roundId: "round-1",
+      threadStageId: null,
+      assistantId: "proofreader",
+      agentParticipantId: null,
+      targetAgent: "codex",
+      stageSnapshotJson: null,
+      assistantSnapshotJson: null,
+      agentSnapshotJson: "{}",
+      title: "Proofread joke",
+      prompt: "Polish the joke.",
+      expectedOutput: "Final joke",
+      risk: "low",
+      sortOrder: 0,
+      status: "completed",
+      resultSummary: "polished long cold joke",
+      error: null,
+      startedAt: 1,
+      completedAt: 2,
+      createdAt: 1,
+      updatedAt: 2,
+      sessions: [{
+        taskId: "task-1",
+        agent: "codex",
+        sessionId: "session-1",
+        role: "runtime",
+        attemptCount: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      }],
+    }],
+  };
+}

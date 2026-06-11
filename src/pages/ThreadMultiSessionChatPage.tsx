@@ -65,9 +65,14 @@ import {
   type ThreadSessionLane,
   type ThreadTimelineRow,
 } from "../threadReplayView";
-import { buildThreadWorkSnapshot, renderThreadWorkContext } from "../threadSnapshot";
+import {
+  buildThreadWorkSnapshot,
+  renderThreadOrchestrationContext,
+  renderThreadWorkContext,
+} from "../threadSnapshot";
 import { collectThreadChatSessions } from "../threadChats";
 import { collectThreadHistorySnapshots, withThreadChatSessions } from "../threadWorkContext";
+import { sessioThreadPromptBlockMetas, stripSessioThreadPromptBlocks } from "../historyMerge";
 import {
   astraStatusClass,
   formatAstraStatus,
@@ -423,10 +428,18 @@ export default function ThreadMultiSessionChatPage({
           runtimeAgent: runtimeAgents.find((agent) => agent.agent === composer.selectedAgent) ?? null,
         })
         : null;
+      const extraContext = [
+        renderThreadWorkContext(snapshotWithSources, composer.selectedAgent),
+        renderThreadOrchestrationContext({
+          threadId: thread.id,
+          astraRuns,
+          planRounds,
+        }),
+      ].filter(Boolean).join("\n\n");
       const sent = await composer.runStartSession(prompt, {
         workspacePath: project.path,
         projectName: project.name,
-        extraContext: renderThreadWorkContext(snapshotWithSources, composer.selectedAgent),
+        extraContext,
         pendingSession: {
           suppressAutoSelect: true,
           origin: "thread_multi_session",
@@ -640,18 +653,38 @@ function ThreadSessionLaneCard({
     >
       <header
         data-thread-lane-header="true"
-        className="mb-1.5 flex min-w-0 items-center gap-2 px-1"
+        className={
+          "relative mb-1.5 flex min-w-0 items-center gap-2 overflow-hidden rounded-md border px-2.5 py-1.5 pl-3.5 " +
+          "before:absolute before:inset-y-1 before:left-1 before:w-0.5 before:rounded-full " +
+          laneHeaderStatusClass(lane.status)
+        }
       >
         {thread.kind === "debate" && (
           <AgentGlyph agent={lane.agent} className="h-3.5 w-3.5 shrink-0" />
         )}
-        <h2 className="min-w-0 truncate text-caption font-medium text-ink/48">
+        <h2 className="min-w-0 truncate text-caption font-medium text-ink/58">
           {meta.title}
         </h2>
       </header>
       {content ?? <ThreadSessionLatestMessage lane={lane} now={now} plannerRun={plannerRun} />}
     </section>
   );
+}
+
+function laneHeaderStatusClass(status: ThreadSessionLane["status"]): string {
+  switch (status) {
+    case "live":
+      return "border-[rgb(var(--color-blue)/0.18)] bg-[rgb(var(--color-blue)/0.055)] before:bg-[rgb(var(--color-blue))]";
+    case "pending":
+      return "border-status-warn/20 bg-status-warn/[0.055] before:bg-status-warn";
+    case "failed":
+      return "border-status-error/20 bg-status-error/[0.055] before:bg-status-error";
+    case "missing":
+      return "border-ink/[0.10] bg-ink/[0.025] before:bg-ink/25";
+    case "history":
+    default:
+      return "border-[rgb(var(--color-emerald)/0.16)] bg-[rgb(var(--color-emerald)/0.045)] before:bg-[rgb(var(--color-emerald))]";
+  }
 }
 
 type ThreadContextNavItem = {
@@ -1075,7 +1108,7 @@ function ThreadTimeline({
   now: number;
 }) {
   return (
-    <section className="grid gap-4">
+    <section className="grid content-start gap-4">
       {rows.map((row) => {
         if (row.kind === "orchestration") {
           const summaryText = row.round ? planRoundSummaryText(row.round, row.run) : null;
@@ -1314,17 +1347,39 @@ function ThreadSessionLatestMessage({
   const workingIndicatorTurnId = hasLiveTurns
     ? liveWorkingIndicatorTurn(lane.liveSession)?.turnId ?? ""
     : "";
-  const visibleItems = useMemo(
-    () => latestLaneRenderItems(
-      acpViewModelToRenderItems(viewModel, liveTurnIds, workingIndicatorTurnId),
-    ),
+  const renderItems = useMemo(
+    () => acpViewModelToRenderItems(viewModel, liveTurnIds, workingIndicatorTurnId),
     [liveTurnIds, viewModel, workingIndicatorTurnId],
+  );
+  const latestItems = useMemo(
+    () => latestLaneRenderItems(renderItems),
+    [renderItems],
+  );
+  const userPromptItems = useMemo(
+    () => laneUserPromptRenderItems(renderItems, latestItems),
+    [latestItems, renderItems],
+  );
+  const visibleItems = useMemo(
+    () => [...userPromptItems, ...latestItems],
+    [latestItems, userPromptItems],
+  );
+  const workingIndicatorItems = useMemo(
+    () => visibleItems.filter((item) => item.kind === "workingIndicator"),
+    [visibleItems],
   );
   const plannerSummary = useMemo(
     () => isPlannerLane(lane) ? plannerSummaryFromTurns(viewModel.turns, plannerRun ?? null) : null,
     [lane, plannerRun, viewModel.turns],
   );
   const itemKeys = useMemo(() => renderItemKeys(visibleItems), [visibleItems]);
+  const userPromptItemKeys = useMemo(
+    () => renderItemKeys(userPromptItems),
+    [userPromptItems],
+  );
+  const workingIndicatorItemKeys = useMemo(
+    () => renderItemKeys(workingIndicatorItems),
+    [workingIndicatorItems],
+  );
   const permissionSessionId = lane.sessioRuntimeSessionId ?? "";
   const handlePermissionResponse = useCallback(
     (sessioRuntimeSessionId: string, requestId: string, optionId: string) => {
@@ -1341,12 +1396,42 @@ function ThreadSessionLatestMessage({
   return (
     <div className="min-w-0">
       {plannerSummary ? (
-        <ThreadPlannerSummaryMessage
-          id={lane.laneId}
-          timestamp={plannerSummary.timestamp}
-          text={plannerSummary.text}
-          now={now}
-        />
+        <div className="grid min-w-0 gap-2">
+          {userPromptItems.length > 0 && (
+            <AcpRenderItems
+              items={userPromptItems}
+              itemKeys={userPromptItemKeys}
+              bubbleRefs={bubbleRefs}
+              sessioRuntimeSessionId={permissionSessionId}
+              now={now}
+              defaultMessageExpanded={false}
+              onPreviewImage={onPreviewImage}
+              onPreviewFile={onPreviewFile}
+              onFilePreviewError={onFilePreviewError}
+              onPermissionResponse={handlePermissionResponse}
+            />
+          )}
+          <ThreadPlannerSummaryMessage
+            id={lane.laneId}
+            timestamp={plannerSummary.timestamp}
+            text={plannerSummary.text}
+            now={now}
+          />
+          {workingIndicatorItems.length > 0 && (
+            <AcpRenderItems
+              items={workingIndicatorItems}
+              itemKeys={workingIndicatorItemKeys}
+              bubbleRefs={bubbleRefs}
+              sessioRuntimeSessionId={permissionSessionId}
+              now={now}
+              defaultMessageExpanded={false}
+              onPreviewImage={onPreviewImage}
+              onPreviewFile={onPreviewFile}
+              onFilePreviewError={onFilePreviewError}
+              onPermissionResponse={handlePermissionResponse}
+            />
+          )}
+        </div>
       ) : visibleItems.length > 0 ? (
         <div className="grid min-w-0 gap-2">
           <AcpRenderItems
@@ -1395,6 +1480,11 @@ function normalizeSessionHistoryTurns(turns: unknown[] | undefined): LiveTurn[] 
 }
 
 function latestLaneRenderItems(items: AcpRenderItem[]): AcpRenderItem[] {
+  const workingIndicator = latestWorkingIndicatorRenderItem(items);
+  const withWorkingIndicator = (previewItems: AcpRenderItem[]) => {
+    if (!workingIndicator || previewItems.includes(workingIndicator)) return previewItems;
+    return [...previewItems, workingIndicator];
+  };
   const pendingPermission = items
     .slice()
     .reverse()
@@ -1403,9 +1493,11 @@ function latestLaneRenderItems(items: AcpRenderItem[]): AcpRenderItem[] {
       !item.permission.selectedOptionId &&
       !item.permission.cancelled,
     );
-  if (pendingPermission) return [pendingPermission];
+  if (pendingPermission) return withWorkingIndicator([pendingPermission]);
   const latestMessageIndex = findLastRenderItemIndex(items, isLanePreviewRenderItem);
-  if (latestMessageIndex < 0) return items.slice(-1);
+  if (latestMessageIndex < 0) {
+    return workingIndicator ? [workingIndicator] : items.slice(-1);
+  }
   const latestMessage = items[latestMessageIndex];
   if (isFileEditRenderItem(latestMessage)) {
     const previousMessageIndex = findLastRenderItemIndex(
@@ -1415,27 +1507,98 @@ function latestLaneRenderItems(items: AcpRenderItem[]): AcpRenderItem[] {
         isLanePreviewRenderItem(item) &&
         !isFileEditRenderItem(item),
     );
-    return previousMessageIndex >= 0
+    return withWorkingIndicator(previousMessageIndex >= 0
       ? [items[previousMessageIndex], latestMessage]
-      : [latestMessage];
+      : [latestMessage]);
   }
-  return [latestMessage];
+  return withWorkingIndicator([latestMessage]);
+}
+
+function latestWorkingIndicatorRenderItem(items: AcpRenderItem[]): AcpRenderItem | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind === "workingIndicator") return item;
+  }
+  return null;
+}
+
+function laneUserPromptRenderItems(
+  items: AcpRenderItem[],
+  latestItems: AcpRenderItem[],
+): AcpRenderItem[] {
+  const item = latestLaneUserPromptRenderItem(items);
+  if (!item || latestItems.includes(item)) return [];
+  return [item];
+}
+
+function latestLaneUserPromptRenderItem(items: AcpRenderItem[]): AcpRenderItem | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!isUserBlockRenderItem(item)) continue;
+    if (isPreviewableUserBlock(item.block)) return item;
+    const plannerPrompt = astraPlannerUserPromptText(item.block);
+    if (plannerPrompt) return userPromptRenderItem(item, plannerPrompt);
+  }
+  return null;
+}
+
+function astraPlannerUserPromptText(block: AcpRenderBlock): string | null {
+  if (block.kind !== "user") return null;
+  const text = acpTextBlockText(block);
+  for (const meta of sessioThreadPromptBlockMetas(text)) {
+    if (meta.kind !== "astra_planner") continue;
+    const value = parsePlannerUserPrompt(meta.content);
+    if (value) return value;
+  }
+  return null;
+}
+
+function parsePlannerUserPrompt(content: string): string | null {
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    if (!parsed || typeof parsed !== "object") return null;
+    const value = (parsed as Record<string, unknown>).userPrompt;
+    return typeof value === "string" ? stripSessioThreadPromptBlocks(value).trim() || null : null;
+  } catch {
+    return null;
+  }
+}
+
+type UserBlockRenderItem = Extract<AcpRenderItem, { kind: "block" }> & {
+  block: Extract<AcpRenderBlock, { kind: "user" }>;
+};
+
+function isUserBlockRenderItem(item: AcpRenderItem): item is UserBlockRenderItem {
+  return item.kind === "block" && item.block.kind === "user";
+}
+
+function userPromptRenderItem(source: UserBlockRenderItem, text: string): AcpRenderItem {
+  return {
+    ...source,
+    block: {
+      ...source.block,
+      kind: "user",
+      blocks: [{ type: "text", text }],
+      raw: { source: "thread_user_prompt", originalRaw: source.block.raw },
+    },
+  };
 }
 
 function isLanePreviewRenderItem(item: AcpRenderItem): boolean {
   if (item.kind === "turnStatus" || item.kind === "workingIndicator") return false;
   if (item.kind !== "block") return true;
-  if (item.block.kind === "user") return !isDelegatedTaskPromptBlock(item.block);
+  if (item.block.kind === "user") return isPreviewableUserBlock(item.block);
   return item.block.kind === "assistant" ||
     item.block.kind === "thought" ||
     isFileEditRenderItem(item);
 }
 
-function isDelegatedTaskPromptBlock(block: AcpRenderBlock): boolean {
+function isPreviewableUserBlock(block: AcpRenderBlock): boolean {
   if (block.kind !== "user") return false;
   const text = acpTextBlockText(block).trimStart();
-  return text.startsWith("# Sessio plan task") ||
-    text.includes("You are working on a delegated Astra plan task.");
+  const visibleText = stripSessioThreadPromptBlocks(text).trim();
+  const hasAttachment = block.blocks.some((item) => item.type !== "text");
+  return Boolean(visibleText || hasAttachment);
 }
 
 function acpTextBlockText(block: AcpRenderBlock): string {
@@ -1535,6 +1698,20 @@ function laneDisplayMeta(
         kind: "planner",
         label: sourceLabel || "Astra planner",
         title: readableTooltipText(source?.label) ?? null,
+      },
+    };
+  }
+  if (source?.kind === "thread") {
+    const threadSourceLabel = readableThreadSourceLabel(source.label);
+    return {
+      title: (lane.session ? sessionDisplayTitle(lane.session) ?? null : null)
+        || threadSourceLabel
+        || t("thread.chat"),
+      context: {
+        kind: "agent",
+        label: AGENT_LABEL[lane.agent],
+        title: threadSourceLabel,
+        agent: lane.agent,
       },
     };
   }
@@ -1966,22 +2143,25 @@ function assistantFromSnapshot(snapshot: Record<string, unknown> | null): {
   };
 }
 
+function readableThreadSourceLabel(value: string | null | undefined): string | null {
+  const label = readableTooltipText(value);
+  if (!label || label.toLowerCase() === "thread") return null;
+  return label;
+}
+
 function assistantFromThread(
   thread: ThreadWorkState,
   source: ThreadReplaySessionSourceInfo | null,
   agent: Agent,
 ) {
-  const direct =
-    source?.planTaskId || source?.stageId
-      ? null
-      : thread.assistants.find((assistant) => assistant.agent.id === agent) ?? null;
-  if (direct) return direct;
+  if (!source || source.kind === "thread" || source.kind === "astra_internal") return null;
   if (source?.stageId) {
     const stage = thread.stages.find((item) => item.id === source.stageId) ?? null;
     const stageAssistant = stage?.assistants.find((assistant) => assistant.agent.id === agent) ?? null;
     if (stageAssistant) return stageAssistant;
   }
-  return thread.assistants.find((assistant) => assistant.agent.id === agent) ?? null;
+  const matching = thread.assistants.filter((assistant) => assistant.agent.id === agent);
+  return matching.length === 1 ? matching[0] : null;
 }
 
 function snapshotStageIcon(snapshot: Record<string, unknown> | null): Pick<StageInfo, "kind" | "icon"> | null {

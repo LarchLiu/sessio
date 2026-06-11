@@ -84,6 +84,31 @@ describe("buildThreadSessionLanes", () => {
     expect(lanes[0].status).toBe("live");
   });
 
+  it("marks an idle live runtime lane as history once its turns are completed", () => {
+    const replay: ThreadReplayInfo = {
+      threadId: "thread-1",
+      kind: "teamwork",
+      sessions: [replaySession("codex", "session-1", session("codex", "session-1"), [])],
+    };
+    const completedLiveSession = liveSession("codex", "runtime-1", "session-1", false);
+    completedLiveSession.turns = [liveTurn("turn-1", "completed")];
+
+    const lanes = buildThreadSessionLanes({
+      thread: thread("teamwork"),
+      replay,
+      liveState: {
+        sessions: { "runtime-1": completedLiveSession },
+        lastSequence: 1,
+      },
+      runtimeSessionAliases: { "codex:session-1": "runtime-1" },
+      pendingNewChats: {},
+      t,
+    });
+
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0].status).toBe("history");
+  });
+
   it("connects a replay lane whose session id is already the runtime id", () => {
     const replay: ThreadReplayInfo = {
       threadId: "thread-1",
@@ -580,10 +605,10 @@ function liveSession(
   };
 }
 
-function liveTurn(turnId: string): LiveTurn {
+function liveTurn(turnId: string, status: LiveTurn["status"] = "streaming"): LiveTurn {
   return {
     turnId,
-    status: "streaming",
+    status,
     blocks: [],
     tools: [],
     permissions: [],

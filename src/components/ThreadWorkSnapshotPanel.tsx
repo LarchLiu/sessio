@@ -61,6 +61,7 @@ export default function ThreadWorkSnapshotPanel({
   }
 
   const stages = Array.isArray(work.stages) ? work.stages : [];
+  const hasStages = stages.length > 0;
   const openIssues = rollup.openIssues ?? stages.reduce(
     (total, stage) => total + (stage.issues ?? []).filter((issue) => issue.status === "open").length,
     0,
@@ -72,53 +73,57 @@ export default function ThreadWorkSnapshotPanel({
           <div className="text-caption uppercase text-ink/35">{t("thread.snapshot")}</div>
           <div className="truncate font-medium text-ink/80">{work.goal ?? snapshot.threadId}</div>
         </div>
-        <div className="flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
-          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
-            {t("thread.snapshot_complete", {
-              completed: rollup.completed,
-              total: rollup.total,
-            })}
-          </span>
-          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
-            {t("thread.snapshot_blocked", { count: rollup.blocked })}
-          </span>
-          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
-            {t("thread.snapshot_open_issues", { count: openIssues })}
-          </span>
-        </div>
-      </div>
-      <div className="mt-2 grid gap-1.5">
-        {stages.map((stage) => (
-          <div
-            key={stage.threadStageId}
-            className={
-              "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-md border px-2 py-1.5 " +
-              (stage.threadStageId === work.focusedStageId
-                ? "border-[rgb(var(--color-emerald)/0.35)] bg-[rgb(var(--color-emerald)/0.06)]"
-                : "border-card-border/[0.10] bg-card-panel")
-            }
-          >
-            <div className="min-w-0">
-              <div className="truncate font-medium text-ink/70">{stage.name}</div>
-              {(stage.summary || stage.outcome) && (
-                <div className="truncate text-caption text-ink/40">
-                  {stage.summary ?? stage.outcome}
-                </div>
-              )}
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5 text-caption text-ink/45">
-              <span>{t(`stage.status.${stage.status}`)}</span>
-              {(stage.issues ?? []).filter((issue) => issue.status === "open").length > 0 && (
-                <span className="rounded bg-ink/[0.06] px-1 py-0.5">
-                  {t("thread.snapshot_stage_issues", {
-                    count: (stage.issues ?? []).filter((issue) => issue.status === "open").length,
-                  })}
-                </span>
-              )}
-            </div>
+        {hasStages && (
+          <div className="flex flex-wrap items-center gap-1.5 text-caption text-ink/45">
+            <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
+              {t("thread.snapshot_complete", {
+                completed: rollup.completed,
+                total: rollup.total,
+              })}
+            </span>
+            <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
+              {t("thread.snapshot_blocked", { count: rollup.blocked })}
+            </span>
+            <span className="rounded bg-ink/[0.06] px-1.5 py-0.5">
+              {t("thread.snapshot_open_issues", { count: openIssues })}
+            </span>
           </div>
-        ))}
+        )}
       </div>
+      {hasStages && (
+        <div className="mt-2 grid gap-1.5">
+          {stages.map((stage) => (
+            <div
+              key={stage.threadStageId}
+              className={
+                "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-md border px-2 py-1.5 " +
+                (stage.threadStageId === work.focusedStageId
+                  ? "border-[rgb(var(--color-emerald)/0.35)] bg-[rgb(var(--color-emerald)/0.06)]"
+                  : "border-card-border/[0.10] bg-card-panel")
+              }
+            >
+              <div className="min-w-0">
+                <div className="truncate font-medium text-ink/70">{stage.name}</div>
+                {(stage.summary || stage.outcome) && (
+                  <div className="truncate text-caption text-ink/40">
+                    {stage.summary ?? stage.outcome}
+                  </div>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5 text-caption text-ink/45">
+                <span>{t(`stage.status.${stage.status}`)}</span>
+                {(stage.issues ?? []).filter((issue) => issue.status === "open").length > 0 && (
+                  <span className="rounded bg-ink/[0.06] px-1 py-0.5">
+                    {t("thread.snapshot_stage_issues", {
+                      count: (stage.issues ?? []).filter((issue) => issue.status === "open").length,
+                    })}
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <ThreadWorkSnapshotSources sources={sources} />
     </section>
   );

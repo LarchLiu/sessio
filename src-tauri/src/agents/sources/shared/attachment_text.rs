@@ -1,18 +1,21 @@
-use crate::models::{is_system_noise, sessio_attachment_marker_name, strip_injected_context};
+use crate::models::{
+    is_system_noise, sessio_attachment_marker_name, strip_injected_context,
+    strip_sessio_thread_prompt_blocks,
+};
 use std::collections::HashMap;
 
 pub fn sanitize_user_attachment_text(text: &str) -> String {
     let without_images = strip_image_placeholder_tags(text);
     let without_file_links = remove_file_markdown_links(&without_images);
     let without_sessio_files = replace_tagged_upload_files(&without_file_links);
-    replace_codex_context_files(&without_sessio_files)
+    strip_sessio_thread_prompt_blocks(&replace_codex_context_files(&without_sessio_files))
 }
 
 pub fn sanitize_user_preview_text(text: &str) -> String {
     let without_images = strip_image_placeholder_tags(text);
     let without_file_links = remove_file_markdown_links(&without_images);
     let without_sessio_files = remove_xmlish_blocks(&without_file_links, "sessio-upload-file");
-    remove_xmlish_blocks(&without_sessio_files, "context")
+    strip_sessio_thread_prompt_blocks(&remove_xmlish_blocks(&without_sessio_files, "context"))
 }
 
 pub fn clean_history_user_preview_text(text: &str) -> Option<String> {

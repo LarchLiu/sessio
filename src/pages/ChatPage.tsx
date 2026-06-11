@@ -118,6 +118,7 @@ import {
   stripSessioUploadWrapper,
 } from "../historyMerge";
 import { getCachedSessionHistorySnapshots } from "../sessionHistorySnapshots";
+import { threadPromptDisplayContentBlocks } from "../threadPromptDisplay";
 
 export interface ChatPageProps {
   session: SessionInfo;
@@ -138,6 +139,7 @@ export interface ChatPageProps {
   ) => boolean;
   onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
   beforeMessages?: ReactNode;
+  showThreadPromptPlaceholders?: boolean;
 }
 
 export interface ActiveMessageMeta {
@@ -279,6 +281,7 @@ function ChatPage({
   onMessageCount,
   onActiveMessageMeta,
   beforeMessages,
+  showThreadPromptPlaceholders = false,
 }: ChatPageProps) {
   const { t } = useI18n();
   const defaultTab: Tab = useMemo(
@@ -404,6 +407,7 @@ function ChatPage({
           workspacePath={session.projectPath}
           skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
           beforeMessages={tab.kind === "main" ? beforeMessages : null}
+          showThreadPromptPlaceholders={showThreadPromptPlaceholders}
         />
 
         {previewImage && (
@@ -500,6 +504,7 @@ export interface AcpTranscriptPanelProps {
   skipHistoryLoad?: boolean;
   scrollKey?: string;
   beforeMessages?: ReactNode | null;
+  showThreadPromptPlaceholders?: boolean;
 }
 
 export function AcpTranscriptPanel({
@@ -526,6 +531,7 @@ export function AcpTranscriptPanel({
   skipHistoryLoad = false,
   scrollKey,
   beforeMessages = null,
+  showThreadPromptPlaceholders = false,
 }: AcpTranscriptPanelProps) {
   const { t } = useI18n();
   const historyKey = historySourceKey(agent, filePath, sessionId);
@@ -1274,6 +1280,7 @@ export function AcpTranscriptPanel({
               bubbleRefs={bubbleRefs}
               sessioRuntimeSessionId={runtimeSessionId}
               now={runtimeNow}
+              showThreadPromptPlaceholders={showThreadPromptPlaceholders}
               onPreviewImage={onPreviewImage}
               onPreviewFile={onPreviewFile}
               onFilePreviewError={onFilePreviewError}
@@ -2199,6 +2206,7 @@ export function AcpRenderItems({
   sessioRuntimeSessionId,
   now,
   defaultMessageExpanded,
+  showThreadPromptPlaceholders = false,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2210,6 +2218,7 @@ export function AcpRenderItems({
   sessioRuntimeSessionId: string;
   now: number;
   defaultMessageExpanded?: boolean;
+  showThreadPromptPlaceholders?: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2234,6 +2243,7 @@ export function AcpRenderItems({
             sessioRuntimeSessionId={sessioRuntimeSessionId}
             now={now}
             defaultMessageExpanded={defaultMessageExpanded}
+            showThreadPromptPlaceholders={showThreadPromptPlaceholders}
             onPreviewImage={onPreviewImage}
             onPreviewFile={onPreviewFile}
             onFilePreviewError={onFilePreviewError}
@@ -2250,6 +2260,7 @@ function AcpLiveItem({
   sessioRuntimeSessionId,
   now,
   defaultMessageExpanded,
+  showThreadPromptPlaceholders,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2259,6 +2270,7 @@ function AcpLiveItem({
   sessioRuntimeSessionId: string;
   now: number;
   defaultMessageExpanded: boolean | undefined;
+  showThreadPromptPlaceholders: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2322,6 +2334,7 @@ function AcpLiveItem({
       typewriterKey={`${item.turn.turnId}:${item.block.kind}`}
       messageFinished={isAcpMessageBlockFinished(item.turn, item.block)}
       defaultMessageExpanded={defaultMessageExpanded}
+      showThreadPromptPlaceholders={showThreadPromptPlaceholders}
       onPreviewImage={onPreviewImage}
       onPreviewFile={onPreviewFile}
       onFilePreviewError={onFilePreviewError}
@@ -2391,6 +2404,7 @@ function AcpContentBlockGroup({
   typewriterKey,
   messageFinished = true,
   defaultMessageExpanded,
+  showThreadPromptPlaceholders,
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
@@ -2401,6 +2415,7 @@ function AcpContentBlockGroup({
   typewriterKey?: string;
   messageFinished?: boolean;
   defaultMessageExpanded?: boolean;
+  showThreadPromptPlaceholders: boolean;
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
@@ -2420,9 +2435,15 @@ function AcpContentBlockGroup({
   const label =
     isThought ? "Thought" : block.kind === "assistant" ? "assistant" : "user";
   const userAttachmentBlocks = isUser ? block.blocks.filter(isUserAttachmentContentBlock) : [];
-  const bodyBlocks = isUser
+  const rawBodyBlocks = isUser
     ? block.blocks.filter((item) => !isUserAttachmentContentBlock(item))
     : block.blocks;
+  const bodyBlocks = isUser
+    ? threadPromptDisplayContentBlocks(rawBodyBlocks, block.raw, showThreadPromptPlaceholders)
+    : rawBodyBlocks;
+  if (isUser && userAttachmentBlocks.length === 0 && bodyBlocks.length === 0) {
+    return null;
+  }
   const messageExpandButtonClass =
     "mt-2 flex items-center gap-1 border-t border-ink/[0.07] py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04] " +
     (isUser ? "-mx-4 w-[calc(100%+2rem)] px-4" : "w-full px-3");
@@ -3664,7 +3685,7 @@ export function acpViewModelToRenderItems(
       }
       items.push({ kind: "block", turn, block });
       if (block.kind === "user") {
-        lastUserIndex = items.length;
+        lastUserIndex = items.length - 1;
       }
     });
     flushPendingTools();

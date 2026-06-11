@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
+use super::prompt::wrap_thread_prompt;
 use super::{
     final_task_output, short_hash, summarize_task_output, AstraOrchestration, AstraRun,
     AstraRunIntent, AstraTaskCompletion, AstraTaskProposal, AstraTaskResultStatus, AstraTaskRisk,
@@ -241,7 +242,24 @@ fn brainstorm_task_prompt(
     } else {
         lines.push("Produce an independent opinion. Offer concrete ideas, rationale, risks, conflicts, and questions. Do not wait for other participants.".to_string());
     }
-    lines.join("\n")
+    wrap_thread_prompt(
+        "astra_brainstorm_participant_task",
+        thread,
+        lines.join("\n"),
+        &[
+            ("participant_id", participant.participant_id.clone()),
+            ("target_agent", participant.agent.as_str().to_string()),
+            (
+                "round_role",
+                if synthesis_round {
+                    "synthesis"
+                } else {
+                    "divergence"
+                }
+                .to_string(),
+            ),
+        ],
+    )
 }
 
 fn participant_label(participant: &ThreadAgentInfo) -> String {

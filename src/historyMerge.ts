@@ -5,6 +5,147 @@ import type {
 } from "./runtimeChat";
 
 const SESSIO_ATTACHMENT_MARKER = "__sessio_attachment__:";
+const SESSIO_THREAD_PROMPT_START = "<!-- sessio-thread-prompt:start";
+const SESSIO_THREAD_PROMPT_END = "<!-- sessio-thread-prompt:end";
+
+export interface SessioThreadPromptBlockMeta {
+  kind: string | null;
+  attrs: Record<string, string>;
+  content: string;
+}
+
+function htmlAttr(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export function buildSessioThreadPromptBlock(
+  kind: string,
+  content: string,
+  attrs: Record<string, string | null | undefined> = {},
+): string {
+  const body = content.trim();
+  if (!body) return "";
+  const nonce = threadPromptNonce();
+  const attrText = [
+    ["nonce", nonce],
+    ["kind", kind],
+    ...Object.entries(attrs),
+  ]
+    .filter((entry): entry is [string, string] =>
+      /^[A-Za-z_][A-Za-z0-9_-]*$/.test(entry[0]) && Boolean(entry[1]?.trim()))
+    .map(([key, value]) => ` ${key}="${htmlAttr(value)}"`)
+    .join("");
+  return `${SESSIO_THREAD_PROMPT_START}${attrText} -->\n\n${body}\n\n${SESSIO_THREAD_PROMPT_END} nonce="${htmlAttr(nonce)}" -->`;
+}
+
+function threadPromptNonce(): string {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function sessioThreadPromptBlockMetas(input: string): SessioThreadPromptBlockMeta[] {
+  const metas: SessioThreadPromptBlockMeta[] = [];
+  let cursor = 0;
+  for (;;) {
+    const start = input.indexOf(SESSIO_THREAD_PROMPT_START, cursor);
+    if (start < 0) break;
+    const startCommentEnd = input.indexOf("-->", start);
+    if (startCommentEnd < 0) break;
+    const startComment = input.slice(start, startCommentEnd + "-->".length);
+    const nonce = commentAttr(startComment, "nonce");
+    if (!nonce) {
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    const endMarker = `${SESSIO_THREAD_PROMPT_END} nonce="${nonce}" -->`;
+    const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
+    if (end < 0) {
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    const attrs = commentAttrs(startComment);
+    const content = input.slice(startCommentEnd + "-->".length, end).trim();
+    metas.push({
+      kind: attrs.kind?.trim() || null,
+      attrs,
+      content,
+    });
+    cursor = end + endMarker.length;
+  }
+  return metas;
+}
+
+export function stripSessioThreadPromptBlocks(input: string): string {
+  let out = "";
+  let cursor = 0;
+  let changed = false;
+  for (;;) {
+    const start = input.indexOf(SESSIO_THREAD_PROMPT_START, cursor);
+    if (start < 0) {
+      out += input.slice(cursor);
+      break;
+    }
+    const startCommentEnd = input.indexOf("-->", start);
+    if (startCommentEnd < 0) {
+      out += input.slice(cursor);
+      break;
+    }
+    const startComment = input.slice(start, startCommentEnd + "-->".length);
+    const nonce = commentAttr(startComment, "nonce");
+    if (!nonce) {
+      out += input.slice(cursor, startCommentEnd + "-->".length);
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    const endMarker = `${SESSIO_THREAD_PROMPT_END} nonce="${nonce}" -->`;
+    const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
+    if (end < 0) {
+      out += input.slice(cursor, startCommentEnd + "-->".length);
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    changed = true;
+    out += input.slice(cursor, start);
+    cursor = end + endMarker.length;
+  }
+  if (!changed) return input;
+  return out
+    .replace(/^\s*---+\s*/, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function commentAttr(comment: string, key: string): string | null {
+  const match = new RegExp(`\\s${key}="([^"]*)"`).exec(comment);
+  return match?.[1] ?? null;
+}
+
+function commentAttrs(comment: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const pattern = /\s([A-Za-z_][A-Za-z0-9_-]*)="([^"]*)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(comment))) {
+    attrs[match[1]] = htmlUnattr(match[2]);
+  }
+  return attrs;
+}
+
+function htmlUnattr(s: string): string {
+  return s
+    .replace(/&quot;/g, "\"")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
 
 export function stripImagePlaceholders(s: string): string {
   return s
@@ -32,7 +173,7 @@ export function stripInjectedContext(s: string): string {
   const MARKER = "## My request for Codex:";
   const idx = text.indexOf(MARKER);
   if (idx >= 0) text = text.slice(idx + MARKER.length);
-  return stripImagePlaceholders(text).trim();
+  return stripSessioThreadPromptBlocks(stripImagePlaceholders(text)).trim();
 }
 
 export function stripSessioUploadWrapper(text: string): string {

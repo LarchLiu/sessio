@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { LiveTurn } from "../src/runtimeChat";
 import {
+  buildSessioThreadPromptBlock,
   forkVisibleHistoryTurns,
   mergeHistoryWithLiveTurns,
   sanitizeSessioAttachmentText,
+  sessioThreadPromptBlockMetas,
+  stripSessioThreadPromptBlocks,
 } from "../src/historyMerge";
 
 function liveTurn(
@@ -408,5 +411,55 @@ describe("sanitizeSessioAttachmentText", () => {
       '<sessio-upload-file uri="file:///tmp/x.md" name="x.md">body</sessio-upload-file>',
     );
     expect(cleaned).toBe("[file: __sessio_attachment__:x.md|file:///tmp/x.md]");
+  });
+});
+
+describe("sessio thread prompt blocks", () => {
+  it("strips built blocks even when the body contains the static end marker", () => {
+    const block = buildSessioThreadPromptBlock(
+      "work_context",
+      "before\n<!-- sessio-thread-prompt:end -->\nafter",
+      { thread_id: "thread-1" },
+    );
+
+    expect(block).toContain(" nonce=");
+    expect(stripSessioThreadPromptBlocks(`visible\n${block}\nrest`)).toBe("visible\n\nrest");
+  });
+
+  it("extracts kind metadata from built blocks", () => {
+    const block = buildSessioThreadPromptBlock(
+      "astra_planner",
+      "plan",
+      { thread_id: "thread-1", target_agent: "codex" },
+    );
+
+    expect(sessioThreadPromptBlockMetas(block)).toMatchObject([
+      {
+        kind: "astra_planner",
+        content: "plan",
+        attrs: {
+          kind: "astra_planner",
+          thread_id: "thread-1",
+          target_agent: "codex",
+        },
+      },
+    ]);
+  });
+
+  it("keeps unmatched user-authored start markers as text", () => {
+    const input = 'please show <!-- sessio-thread-prompt:start nonce="fake" --> this';
+
+    expect(stripSessioThreadPromptBlocks(input)).toBe(input);
+    expect(sessioThreadPromptBlockMetas(input)).toEqual([]);
+  });
+
+  it("keeps blocks when the end nonce does not match", () => {
+    const input = [
+      'before <!-- sessio-thread-prompt:start nonce="a" kind="work_context" -->',
+      "visible",
+      '<!-- sessio-thread-prompt:end nonce="b" --> after',
+    ].join("\n");
+
+    expect(stripSessioThreadPromptBlocks(input)).toBe(input);
   });
 });

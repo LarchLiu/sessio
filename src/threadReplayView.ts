@@ -122,7 +122,7 @@ export function buildThreadSessionLanes({
       sessionId: agentSessionId,
       sessioRuntimeSessionId: pending.sessioRuntimeSessionId,
       session: null,
-      sources: [],
+      sources: pendingReplaySources(pending),
       groupKey: "pending",
       groupLabel: t("thread.pending_lane"),
       status: liveSession ? liveSessionStatus(liveSession) : "pending",
@@ -168,6 +168,42 @@ export function buildThreadSessionLanes({
   }
 
   return lanes.sort(compareLanes);
+}
+
+function pendingReplaySources(pending: PendingNewChatSession): ThreadReplaySessionSourceInfo[] {
+  const threadId = pending.threadLink?.threadId ?? pending.workSnapshot?.threadId ?? null;
+  if (!threadId) return [];
+  const stageId = pending.threadLink?.stageId ?? pending.workSnapshot?.stageId ?? null;
+  if (pending.planTaskLink) {
+    return [{
+      kind: "plan_task",
+      threadId,
+      stageId,
+      planRoundId: null,
+      planTaskId: pending.planTaskLink.taskId,
+      astraRunId: null,
+      role: pending.planTaskLink.role,
+      label: null,
+      stageSnapshotJson: null,
+      assistantSnapshotJson: null,
+      agentSnapshotJson: null,
+      createdAt: pending.timestamp,
+    }];
+  }
+  return [{
+    kind: stageId ? "stage" : "thread",
+    threadId,
+    stageId,
+    planRoundId: null,
+    planTaskId: null,
+    astraRunId: null,
+    role: null,
+    label: pending.prompt,
+    stageSnapshotJson: null,
+    assistantSnapshotJson: null,
+    agentSnapshotJson: null,
+    createdAt: pending.timestamp,
+  }];
 }
 
 export function buildThreadTimelineRows(
@@ -448,8 +484,18 @@ export function shortSessionId(sessionId: string): string {
 
 function liveSessionStatus(liveSession: LiveRuntimeState["sessions"][string]): ThreadSessionLaneStatus {
   if (liveSession.ended) return "history";
-  const hasFailure = liveSession.turns.some((turn) => turn.error);
+  const hasActiveTurn = liveSession.turns.some((turn) =>
+    turn.status === "pending" ||
+    turn.status === "streaming" ||
+    turn.status === "cancelling"
+  );
+  const hasFailure = liveSession.turns.some((turn) =>
+    turn.error ||
+    turn.status === "failed" ||
+    turn.status === "cancelled"
+  );
   if (hasFailure) return "failed";
+  if (!hasActiveTurn && liveSession.turns.length > 0) return "history";
   return "live";
 }
 

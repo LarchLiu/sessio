@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
+use super::prompt::wrap_thread_prompt;
 use super::{
     final_task_output, short_hash, summarize_task_output, AstraOrchestration, AstraRun,
     AstraRunIntent, AstraTaskCompletion, AstraTaskProposal, AstraTaskResultStatus, AstraTaskRisk,
@@ -281,6 +282,19 @@ fn debate_lane_tasks(
                 risk: AstraTaskRisk::Low,
             };
             task.prompt.push_str(&format!("\n\nLane id: {lane_id}"));
+            task.prompt = wrap_thread_prompt(
+                "astra_debate_participant_task",
+                thread,
+                task.prompt,
+                &[
+                    ("participant_id", participant.participant_id.clone()),
+                    ("target_agent", participant.agent.as_str().to_string()),
+                    (
+                        "round_role",
+                        if cross_check_round { "cross_check" } else { "lane" }.to_string(),
+                    ),
+                ],
+            );
             task
         })
         .collect()

@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     dedupe_session_ref_values, pick_stage_agent, short_hash, stage_label, status_label, AstraRun,
@@ -51,6 +52,10 @@ assistantId must reference one of thread.assistants. targetAgent should match th
 
 Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants when independent. Use sequential when task order matters within the same round."#;
 
+const SESSIO_THREAD_PROMPT_START: &str = "<!-- sessio-thread-prompt:start";
+const SESSIO_THREAD_PROMPT_END: &str = "<!-- sessio-thread-prompt:end";
+static THREAD_PROMPT_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 fn astra_orchestration_response_contract(kind: ThreadKind) -> &'static str {
     match kind {
         ThreadKind::Teamwork => ASTRA_TEAMWORK_ORCHESTRATION_RESPONSE_CONTRACT,
@@ -59,6 +64,55 @@ fn astra_orchestration_response_contract(kind: ThreadKind) -> &'static str {
             ASTRA_PROCESS_ORCHESTRATION_RESPONSE_CONTRACT
         }
     }
+}
+
+fn html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+pub(super) fn wrap_thread_prompt(
+    kind: &str,
+    thread: &ThreadInfo,
+    content: String,
+    attrs: &[(&str, String)],
+) -> String {
+    let body = content.trim();
+    if body.is_empty() {
+        return String::new();
+    }
+    let nonce = thread_prompt_nonce(kind, thread, body);
+    let mut attr_text = format!(
+        " nonce=\"{}\" kind=\"{}\" thread_id=\"{}\" thread_kind=\"{}\"",
+        html_attr(&nonce),
+        html_attr(kind),
+        html_attr(&thread.id),
+        html_attr(thread.kind.as_str())
+    );
+    for (key, value) in attrs {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        attr_text.push_str(&format!(" {key}=\"{}\"", html_attr(value)));
+    }
+    format!(
+        "{SESSIO_THREAD_PROMPT_START}{attr_text} -->\n\n{body}\n\n{SESSIO_THREAD_PROMPT_END} nonce=\"{}\" -->",
+        html_attr(&nonce)
+    )
+}
+
+fn thread_prompt_nonce(kind: &str, thread: &ThreadInfo, body: &str) -> String {
+    let sequence = THREAD_PROMPT_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    short_hash(&format!(
+        "{kind}\0{}\0{}\0{sequence}\0{}",
+        thread.id,
+        super::now_ms(),
+        body.len()
+    ))
 }
 
 pub(super) fn build_astra_orchestration_prompt(
@@ -107,7 +161,7 @@ pub(super) fn build_astra_orchestration_prompt(
         .map(super::filtered_task_completion_value)
         .collect::<Vec<_>>();
 
-    json!({
+    let body = json!({
         "instruction": astra_orchestration_response_contract(thread.kind),
         "thread": {
             "id": thread.id,
@@ -124,7 +178,16 @@ pub(super) fn build_astra_orchestration_prompt(
         "userPrompt": user_prompt.unwrap_or(""),
         "completedTasks": completed_tasks,
     })
-    .to_string()
+    .to_string();
+    wrap_thread_prompt(
+        "astra_planner",
+        thread,
+        body,
+        &[
+            ("run_id", run.run_id.clone()),
+            ("round_index", round_index.to_string()),
+        ],
+    )
 }
 
 pub(super) fn build_stage_task_context(
@@ -376,7 +439,20 @@ fn render_plan_task_snapshot_prompt(
     lines.push(String::new());
     lines.push("## Reporting".to_string());
     lines.push("Return a concise final result for Astra. Do not mutate process stages or issues unless this task explicitly asks for a separate manual action.".to_string());
-    lines.join("\n")
+    let mut attrs = vec![
+        ("task_id", task.id.clone()),
+        ("target_agent", task.target_agent.as_str().to_string()),
+    ];
+    if let Some(plan_task_id) = task.plan_task_id.as_deref() {
+        attrs.push(("plan_task_id", plan_task_id.to_string()));
+    }
+    if let Some(stage_id) = task.target_stage_id.as_deref() {
+        attrs.push(("thread_stage_id", stage_id.to_string()));
+    }
+    if let Some(assistant_id) = task.assistant_id.as_deref() {
+        attrs.push(("assistant_id", assistant_id.to_string()));
+    }
+    wrap_thread_prompt("astra_plan_task", thread, lines.join("\n"), &attrs)
 }
 
 fn render_teamwork_task_prompt(
@@ -448,7 +524,16 @@ fn render_teamwork_task_prompt(
         "Do not update process stage state or create stage issues from this teamwork task."
             .to_string(),
     );
-    lines.join("\n")
+    wrap_thread_prompt(
+        "astra_teamwork_task",
+        thread,
+        lines.join("\n"),
+        &[
+            ("task_id", task.id.clone()),
+            ("assistant_id", assistant.assistant_id.clone()),
+            ("target_agent", task.target_agent.as_str().to_string()),
+        ],
+    )
 }
 
 fn render_brainstorm_task_prompt(
@@ -495,7 +580,16 @@ fn render_brainstorm_task_prompt(
         "Do not update process stage state or create stage issues from this brainstorm task."
             .to_string(),
     );
-    lines.join("\n")
+    wrap_thread_prompt(
+        "astra_brainstorm_task",
+        thread,
+        lines.join("\n"),
+        &[
+            ("task_id", task.id.clone()),
+            ("assistant_id", assistant.assistant_id.clone()),
+            ("target_agent", task.target_agent.as_str().to_string()),
+        ],
+    )
 }
 
 fn render_debate_task_prompt(
@@ -542,7 +636,16 @@ fn render_debate_task_prompt(
         "Do not update process stage state or create stage issues from this debate task."
             .to_string(),
     );
-    lines.join("\n")
+    wrap_thread_prompt(
+        "astra_debate_task",
+        thread,
+        lines.join("\n"),
+        &[
+            ("task_id", task.id.clone()),
+            ("assistant_id", assistant.assistant_id.clone()),
+            ("target_agent", task.target_agent.as_str().to_string()),
+        ],
+    )
 }
 
 fn build_stage_task_snapshot(
@@ -810,7 +913,16 @@ fn render_stage_task_prompt(
     lines.push("## Reporting".to_string());
     lines.push("Return a concise final result for Astra. Astra will decide status, summary, and outcome, then ask Sessio to update thread_stage_states.".to_string());
     lines.push("Do not mark unrelated stages complete.".to_string());
-    lines.join("\n")
+    wrap_thread_prompt(
+        "astra_stage_task",
+        thread,
+        lines.join("\n"),
+        &[
+            ("task_id", task.id.clone()),
+            ("thread_stage_id", focused_stage.id.clone()),
+            ("target_agent", task.target_agent.as_str().to_string()),
+        ],
+    )
 }
 
 fn stage_assistant_system_prompts(
@@ -1014,6 +1126,30 @@ mod tests {
         }
     }
 
+    fn thread_prompt_body(prompt: &str) -> &str {
+        let start = prompt.find("-->").map(|idx| idx + "-->".len()).unwrap_or(0);
+        let end = prompt
+            .find(SESSIO_THREAD_PROMPT_END)
+            .unwrap_or(prompt.len());
+        prompt[start..end].trim()
+    }
+
+    #[test]
+    fn wrapped_thread_prompt_requires_matching_nonce_to_strip() {
+        let prompt = wrap_thread_prompt(
+            "test",
+            &thread(),
+            "before <!-- sessio-thread-prompt:end --> after".to_string(),
+            &[],
+        );
+
+        assert!(prompt.contains(" nonce=\""));
+        assert_eq!(
+            crate::models::strip_sessio_thread_prompt_blocks(&format!("visible\n{prompt}\nrest")),
+            "visible\n\nrest"
+        );
+    }
+
     #[test]
     fn orchestration_prompt_uses_explicit_response_contract() {
         let task = task();
@@ -1029,7 +1165,7 @@ mod tests {
             2,
             &[completion],
         );
-        let value: Value = serde_json::from_str(&prompt).unwrap();
+        let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
 
         assert!(instruction.contains("Return only one complete YAML mapping"));
@@ -1066,7 +1202,7 @@ mod tests {
             1,
             &[completion],
         );
-        let value: Value = serde_json::from_str(&prompt).unwrap();
+        let value: Value = serde_json::from_str(thread_prompt_body(&prompt)).unwrap();
         let instruction = value["instruction"].as_str().unwrap();
 
         assert!(instruction.contains("Astra Teamwork Orchestrator"));
