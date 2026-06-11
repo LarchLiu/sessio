@@ -16,16 +16,9 @@ import {
 import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
 import ScrollArea from "../components/ScrollArea";
-import { HashIcon } from "../components/IconifyIcon";
 import { localeTag, useI18n } from "../i18n";
 import { isPersistedSession, sessionDisplayTitle, sessionIdentityKey } from "../appUtils";
-import {
-  compareReplaySessionTime,
-  groupReplaySessionsByThreadKind,
-  replaySourceKey,
-  replaySourceTitle,
-  shortSessionId,
-} from "../threadReplayView";
+import { shortSessionId } from "../threadReplayView";
 import {
   astraRiskClass,
   astraStatusClass,
@@ -96,23 +89,6 @@ export default function ThreadPage({
     };
   }, [loadThreadData, onError]);
 
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let reloadTimer: ReturnType<typeof window.setTimeout> | null = null;
-    listen("sessions_index_updated", () => {
-      if (reloadTimer) window.clearTimeout(reloadTimer);
-      reloadTimer = window.setTimeout(() => {
-        void reload();
-      }, 150);
-    }).then((fn) => {
-      unlisten = fn;
-    }).catch((err) => onError(String(err)));
-    return () => {
-      unlisten?.();
-      if (reloadTimer) window.clearTimeout(reloadTimer);
-    };
-  }, [onError, reload]);
-
   const thread = threads.find((row) => row.id === threadId) ?? null;
   const sortedStages = useMemo(
     () => (thread?.stages ?? []).slice().sort((a, b) => a.order - b.order),
@@ -139,6 +115,12 @@ export default function ThreadPage({
               <ThreadStat label={t("meta.updated")} value={formatDate(thread.updatedAt, lang) ?? "-"} />
             </div>
 
+            {thread.description && (
+              <p className="max-w-[820px] whitespace-pre-wrap text-body-sm leading-relaxed text-ink/55">
+                {thread.description}
+              </p>
+            )}
+
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -150,50 +132,21 @@ export default function ThreadPage({
               </button>
             </div>
 
-            {thread.description && (
-              <p className="max-w-[820px] whitespace-pre-wrap text-body-sm leading-relaxed text-ink/55">
-                {thread.description}
-              </p>
-            )}
-
             <ThreadAstraPanel
               thread={thread}
               stages={sortedStages}
+              replay={replay}
+              onSelectSession={onSelectSession}
               onError={onError}
               onReload={reload}
             />
 
-            {replay && replay.sessions.length > 0 && (
-              <ThreadReplaySessions replay={replay} onSelectSession={onSelectSession} />
-            )}
-
-            {sortedStages.length === 0 && thread.kind !== "process" ? (
-              thread.assistants.length > 0 ? (
-                <div className="grid gap-2">
-                  {thread.assistants.map((assistant) => {
-                    const runtimeAgent = agentFromId(assistant.agent.id);
-                    return (
-                      <AssistantSessionLane
-                        key={assistant.assistantId}
-                        label={assistant.name}
-                        agent={runtimeAgent}
-                        agentLabel={runtimeAgent ? undefined : assistant.agent.name}
-                        assistantColor={assistant.color}
-                        sessions={[]}
-                        onSelectSession={onSelectSession}
-                      />
-                    );
-                  })}
-                </div>
-              ) : (
+            {sortedStages.length === 0 ? (
+              thread.kind === "process" ? (
                 <div className="rounded-lg border border-dashed border-ink/15 py-16 text-center text-body-sm text-ink/40">
-                  {t("thread.no_assistants")}
+                  {t("stage.empty")}
                 </div>
-              )
-            ) : sortedStages.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-ink/15 py-16 text-center text-body-sm text-ink/40">
-                {t("stage.empty")}
-              </div>
+              ) : null
             ) : (
               <div className="grid gap-0">
                 {sortedStages.map((stage, index) => (
@@ -229,11 +182,15 @@ export default function ThreadPage({
 function ThreadAstraPanel({
   thread,
   stages,
+  replay,
+  onSelectSession,
   onError,
   onReload,
 }: {
   thread: ThreadInfo;
   stages: StageInfo[];
+  replay: ThreadReplayInfo | null;
+  onSelectSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
   onReload: () => Promise<void>;
 }) {
@@ -250,6 +207,10 @@ function ThreadAstraPanel({
   const orderedPlanRounds = useMemo(
     () => planRounds.slice().sort((a, b) => b.roundIndex - a.roundIndex || b.createdAt - a.createdAt),
     [planRounds],
+  );
+  const detailIndex = useMemo(
+    () => buildReplayDetailIndex(replay),
+    [replay],
   );
 
   const reloadAstraState = useCallback(() => {
@@ -317,13 +278,20 @@ function ThreadAstraPanel({
                 round={round}
                 thread={thread}
                 stages={stages}
+                plannerSession={round.astraRunId ? detailIndex.plannerByRunId.get(round.astraRunId) ?? null : null}
+                taskSessionById={detailIndex.taskById}
+                onSelectSession={onSelectSession}
               />
             ))}
           </div>
         )}
 
         {activeRun && (
-          <AstraRunDiagnostics run={activeRun} />
+          <AstraRunDiagnostics
+            run={activeRun}
+            plannerSession={detailIndex.plannerByRunId.get(activeRun.runId) ?? null}
+            onSelectSession={onSelectSession}
+          />
         )}
         {activeRun?.error && (
           <div
@@ -343,28 +311,39 @@ function AstraPlanRoundCard({
   round,
   thread,
   stages,
+  plannerSession,
+  taskSessionById,
+  onSelectSession,
 }: {
   round: PlanRoundInfo;
   thread: ThreadInfo;
   stages: StageInfo[];
+  plannerSession: SessionInfo | null;
+  taskSessionById: Map<string, SessionInfo>;
+  onSelectSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
   return (
     <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="text-body-sm font-medium text-ink/78">
-          {t("astra.round", { index: round.roundIndex + 1 })}
-        </span>
-        <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + planRoundStatusClass(round.status)}>
-          {formatAstraStatus(round.status)}
-        </span>
-        <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/45">
-          {t(`astra.mode.${round.mode}`)}
-        </span>
-        {round.astraRunId && (
-          <span className="min-w-0 truncate text-meta text-ink/35">
-            {round.astraRunId}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="text-body-sm font-medium text-ink/78">
+            {t("astra.round", { index: round.roundIndex + 1 })}
           </span>
+          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + planRoundStatusClass(round.status)}>
+            {formatAstraStatus(round.status)}
+          </span>
+          <span className="rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/45">
+            {t(`astra.mode.${round.mode}`)}
+          </span>
+          {round.astraRunId && (
+            <span className="min-w-0 truncate text-meta text-ink/35">
+              {round.astraRunId}
+            </span>
+          )}
+        </div>
+        {plannerSession && (
+          <ThreadChatDetailButton session={plannerSession} onSelectSession={onSelectSession} />
         )}
       </div>
       {round.summary && (
@@ -380,6 +359,8 @@ function AstraPlanRoundCard({
               task={task}
               assistantName={thread.assistants.find((assistant) => assistant.assistantId === task.assistantId)?.name ?? null}
               stage={stages.find((stage) => stage.id === task.threadStageId) ?? null}
+              detailSession={taskSessionById.get(task.id) ?? null}
+              onSelectSession={onSelectSession}
             />
           ))}
         </div>
@@ -392,34 +373,43 @@ function AstraPlanTaskRow({
   task,
   assistantName,
   stage,
+  detailSession,
+  onSelectSession,
 }: {
   task: PlanTaskInfo;
   assistantName: string | null;
   stage: StageInfo | null;
+  detailSession: SessionInfo | null;
+  onSelectSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
   const detail = task.error ?? task.resultSummary ?? task.expectedOutput ?? null;
   const snapshots = planTaskSnapshotLabels(task, t);
   return (
     <div className="rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="min-w-0 truncate text-body-sm font-medium text-ink/78">{task.title}</span>
-        <AgentGlyph agent={task.targetAgent} className="h-3.5 w-3.5 shrink-0" />
-        <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraRiskClass(task.risk)}>
-          {t(`astra.risk.${task.risk}`)}
-        </span>
-        <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraTaskStatusClass(task.status)}>
-          {formatAstraStatus(task.status)}
-        </span>
-        {assistantName && (
-          <span className="truncate text-meta text-ink/35">
-            {assistantName}
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="min-w-0 truncate text-body-sm font-medium text-ink/78">{task.title}</span>
+          <AgentGlyph agent={task.targetAgent} className="h-3.5 w-3.5 shrink-0" />
+          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraRiskClass(task.risk)}>
+            {t(`astra.risk.${task.risk}`)}
           </span>
-        )}
-        {stage && (
-          <span className="truncate text-meta text-ink/35">
-            {projectStageLabel(stage, t)}
+          <span className={"rounded px-1.5 py-0.5 text-meta font-medium " + astraTaskStatusClass(task.status)}>
+            {formatAstraStatus(task.status)}
           </span>
+          {assistantName && (
+            <span className="truncate text-meta text-ink/35">
+              {assistantName}
+            </span>
+          )}
+          {stage && (
+            <span className="truncate text-meta text-ink/35">
+              {projectStageLabel(stage, t)}
+            </span>
+          )}
+        </div>
+        {detailSession && (
+          <ThreadChatDetailButton session={detailSession} onSelectSession={onSelectSession} />
         )}
       </div>
       {task.sessions.length > 0 && (
@@ -436,8 +426,11 @@ function AstraPlanTaskRow({
             <span
               key={`${snapshot.kind}:${snapshot.label}`}
               title={snapshot.title}
-              className="max-w-full truncate rounded bg-ink/[0.045] px-1.5 py-0.5 text-meta text-ink/40"
+              className="inline-flex h-6 max-w-full items-center gap-1 rounded bg-ink/[0.045] px-1.5 py-0.5 text-meta text-ink/40"
             >
+              {snapshot.kind === "assistant" && (
+                <AssistantBotIcon color={snapshot.color} className="h-3.5 w-3.5 shrink-0" />
+              )}
               {snapshot.label}
             </span>
           ))}
@@ -480,7 +473,15 @@ function AstraPlanTaskSessions({ sessions }: { sessions: PlanTaskSessionInfo[] }
   );
 }
 
-function AstraRunDiagnostics({ run }: { run: AstraHandle }) {
+function AstraRunDiagnostics({
+  run,
+  plannerSession,
+  onSelectSession,
+}: {
+  run: AstraHandle;
+  plannerSession: SessionInfo | null;
+  onSelectSession: (session: SessionInfo) => void;
+}) {
   const { t } = useI18n();
   const diagnostics = run.runDiagnostics.slice(-3).reverse().map((diagnostic, index) => {
     return describeAstraDiagnostic(diagnostic, index, t);
@@ -490,17 +491,22 @@ function AstraRunDiagnostics({ run }: { run: AstraHandle }) {
 
   return (
     <div className="rounded-md border border-dashed border-card-border/[0.12] px-2.5 py-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-        <span className="text-caption font-medium text-ink/55">{t("astra.diagnostics")}</span>
-        {run.terminalReason && (
-          <span title={run.terminalReason} className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/45">
-            {t("astra.terminal_reason", { value: run.terminalReason })}
-          </span>
-        )}
-        {run.lastErrorCode && (
-          <span title={run.lastErrorCode} className="max-w-full truncate rounded bg-red-500/[0.10] px-1.5 py-0.5 text-meta text-red-500">
-            {t("astra.error_code", { value: run.lastErrorCode })}
-          </span>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className="text-caption font-medium text-ink/55">{t("astra.diagnostics")}</span>
+          {run.terminalReason && (
+            <span title={run.terminalReason} className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/45">
+              {t("astra.terminal_reason", { value: run.terminalReason })}
+            </span>
+          )}
+          {run.lastErrorCode && (
+            <span title={run.lastErrorCode} className="max-w-full truncate rounded bg-red-500/[0.10] px-1.5 py-0.5 text-meta text-red-500">
+              {t("astra.error_code", { value: run.lastErrorCode })}
+            </span>
+          )}
+        </div>
+        {plannerSession && (
+          <ThreadChatDetailButton session={plannerSession} onSelectSession={onSelectSession} />
         )}
       </div>
       {run.lastErrorMessage && (
@@ -528,6 +534,27 @@ function AstraRunDiagnostics({ run }: { run: AstraHandle }) {
         </div>
       )}
     </div>
+  );
+}
+
+function ThreadChatDetailButton({
+  session,
+  onSelectSession,
+}: {
+  session: SessionInfo;
+  onSelectSession: (session: SessionInfo) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      onClick={() => onSelectSession(session)}
+      aria-label={t("thread.open_detail_page")}
+      title={t("thread.open_full_chat")}
+      className="inline-flex h-6 w-6 shrink-0 self-center items-center justify-center rounded-md text-ink/42 transition hover:bg-ink/[0.045] hover:text-ink/72"
+    >
+      <ExternalLink className="h-3.5 w-3.5" />
+    </button>
   );
 }
 
@@ -836,125 +863,6 @@ function StageIssueSection({
   );
 }
 
-function ThreadReplaySessions({
-  replay,
-  onSelectSession,
-}: {
-  replay: ThreadReplayInfo;
-  onSelectSession: (session: SessionInfo) => void;
-}) {
-  const { t } = useI18n();
-  const groups = groupReplaySessionsByThreadKind(replay, t);
-  if (groups.length === 0) return null;
-  return (
-    <section className="rounded-lg border border-card-border/[0.12] bg-card p-3">
-      <div className="mb-3 flex items-center gap-2 text-body-sm font-medium text-ink/75">
-        <HashIcon className="h-4 w-4 text-ink/40" />
-        {t("thread.replay_sessions")}
-      </div>
-      <div className="grid gap-2">
-        {groups.map(({ key, label, agent, sessions: groupSessions }) => (
-          <ThreadReplaySessionLane
-            key={key}
-            label={label}
-            agent={agent}
-            sessions={groupSessions}
-            onSelectSession={onSelectSession}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ThreadReplaySessionLane({
-  label,
-  agent,
-  sessions,
-  onSelectSession,
-}: {
-  label: string;
-  agent: Agent | null;
-  sessions: ThreadReplaySessionInfo[];
-  onSelectSession: (session: SessionInfo) => void;
-}) {
-  const { t, lang } = useI18n();
-  return (
-    <div className="rounded-md border border-card-border/[0.10] bg-card-panel px-2.5 py-2">
-      <div className="flex min-w-0 items-center gap-2">
-        {agent ? (
-          <AgentGlyph agent={agent} className="h-4 w-4 shrink-0" />
-        ) : (
-          <HashIcon className="h-4 w-4 shrink-0 text-ink/35" />
-        )}
-        <div className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink/75">{label}</div>
-        <span className="shrink-0 text-meta text-ink/35">
-          {t("astra.task_sessions", { count: sessions.length })}
-        </span>
-      </div>
-      <div className="mt-2 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
-        {sessions.slice().sort(compareReplaySessionTime).map((replaySession) => {
-          const canOpenDetail = isPersistedSession(replaySession.session);
-          const content = (
-            <>
-              <div className="truncate text-body-sm text-ink/75">
-                {replaySession.session
-                  ? sessionDisplayTitle(replaySession.session) ?? t("list.no_user_message")
-                  : replaySession.sessionId}
-              </div>
-              <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1">
-                {replaySession.session ? (
-                  <span className="text-meta text-ink/35">
-                    {t("list.msgs", { count: replaySession.session.messageCount })}
-                  </span>
-                ) : (
-                  <span className="text-meta text-ink/35">{t("thread.replay_reference")}</span>
-                )}
-                {replaySession.lastSeenAt && (
-                  <span className="text-meta text-ink/25">
-                    {formatDate(replaySession.lastSeenAt, lang)}
-                  </span>
-                )}
-              </div>
-              <div className="mt-1.5 flex min-w-0 flex-wrap gap-1">
-                {replaySession.sources.map((source) => (
-                  <span
-                    key={replaySourceKey(source)}
-                    title={replaySourceTitle(source)}
-                    className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/40"
-                  >
-                    {source.label ?? t(`thread.replay_source.${source.kind}`)}
-                  </span>
-                ))}
-              </div>
-            </>
-          );
-
-          return (
-            <div
-              key={`${replaySession.agent}:${replaySession.sessionId}`}
-              className="min-w-0 rounded-md border border-card-border/[0.10] bg-card px-2 py-1.5"
-            >
-              {content}
-              {canOpenDetail && replaySession.session && (
-                <button
-                  type="button"
-                  onClick={() => onSelectSession(replaySession.session!)}
-                  title={t("thread.open_full_chat")}
-                  className="mt-2 inline-flex h-7 items-center gap-1.5 rounded border border-ink/12 bg-surface-panel px-2 text-caption font-medium text-ink/55 transition hover:bg-ink/[0.05] hover:text-ink/82"
-                >
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  {t("thread.open_detail_page")}
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function AssistantSessionLane({
   label,
   agent,
@@ -1065,22 +973,56 @@ function threadAssistantCount(thread: ThreadInfo, stages: StageInfo[]): number {
   return new Set(stages.flatMap((stage) => stage.assistants.map((assistant) => assistant.assistantId))).size;
 }
 
-function agentFromId(value: string): Agent | null {
-  return value === "astra-pi" || value === "codex" || value === "claude" || value === "gemini"
-    ? value
-    : null;
-}
-
 function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
   const left = a.updatedAt ?? a.startedAt ?? 0;
   const right = b.updatedAt ?? b.startedAt ?? 0;
   return right - left;
 }
 
+function buildReplayDetailIndex(replay: ThreadReplayInfo | null): {
+  plannerByRunId: Map<string, SessionInfo>;
+  taskById: Map<string, SessionInfo>;
+} {
+  const plannerByRunId = new Map<string, SessionInfo>();
+  const taskById = new Map<string, SessionInfo>();
+  const persistedSessions = (replay?.sessions ?? [])
+    .filter((item): item is ThreadReplaySessionInfo & { session: SessionInfo } => isPersistedSession(item.session))
+    .sort(compareReplayDetailSessionTime);
+
+  for (const replaySession of persistedSessions) {
+    for (const source of replaySession.sources) {
+      if (source.kind === "astra_internal" && source.astraRunId && !plannerByRunId.has(source.astraRunId)) {
+        plannerByRunId.set(source.astraRunId, replaySession.session);
+      }
+      if (source.kind === "plan_task" && source.planTaskId && !taskById.has(source.planTaskId)) {
+        taskById.set(source.planTaskId, replaySession.session);
+      }
+    }
+  }
+
+  return { plannerByRunId, taskById };
+}
+
+function compareReplayDetailSessionTime(
+  a: ThreadReplaySessionInfo,
+  b: ThreadReplaySessionInfo,
+): number {
+  return replayDetailSessionTime(b) - replayDetailSessionTime(a);
+}
+
+function replayDetailSessionTime(session: ThreadReplaySessionInfo): number {
+  return session.session?.updatedAt
+    ?? session.session?.startedAt
+    ?? session.lastSeenAt
+    ?? session.firstSeenAt
+    ?? 0;
+}
+
 type SnapshotChip = {
   kind: "stage" | "assistant" | "participant" | "agent";
   label: string;
   title: string;
+  color?: string | null;
 };
 
 function planTaskSnapshotLabels(task: PlanTaskInfo, t: (key: string, vars?: Record<string, string | number>) => string): SnapshotChip[] {
@@ -1104,10 +1046,9 @@ function planTaskSnapshotLabels(task: PlanTaskInfo, t: (key: string, vars?: Reco
     const model = stringField(agentInfo, "model");
     chips.push({
       kind: "assistant",
-      label: t("astra.snapshot.assistant", {
-        value: model ? `${assistantName} / ${model}` : assistantName,
-      }),
-      title: task.assistantSnapshotJson ?? assistantName,
+      label: assistantName,
+      title: task.assistantSnapshotJson ?? (model ? `${assistantName} / ${model}` : assistantName),
+      color: stringField(assistant, "color"),
     });
   }
 

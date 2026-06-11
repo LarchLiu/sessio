@@ -148,7 +148,7 @@ const DICTS: Record<Lang, Record<string, string>> = {
     "thread.add": "Add thread",
     "thread.new_chat": "New thread chat",
     "thread.multi_session_chat": "Thread Chats",
-    "thread.open_multi_session_chat": "Open thread chat",
+    "thread.open_multi_session_chat": "Open thread chats",
     "thread.back_to_overview": "Back to thread overview",
     "thread.refresh": "Refresh thread chat",
     "thread.edit": "Edit thread",
