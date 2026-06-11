@@ -196,20 +196,6 @@ pub struct RuntimeAgentSelection {
 }
 
 #[derive(Debug, Clone)]
-pub struct SessionHistoryRecord {
-    pub agent: Agent,
-    pub session_id: String,
-    pub file_path: String,
-    pub file_size: u64,
-    pub file_mtime: Option<i64>,
-    pub history_cache_version: i64,
-    pub message_count: usize,
-    pub indexed_through: Option<i64>,
-    pub updated_at: i64,
-    pub turns: Vec<SessionHistoryTurn>,
-}
-
-#[derive(Debug, Clone)]
 pub struct SessionHistorySnapshotRecord {
     pub child_agent: Agent,
     pub child_session_id: String,
@@ -655,13 +641,6 @@ pub trait SessionStore: Send + Sync {
         agent: Agent,
     ) -> Result<Option<RuntimeAgentCapabilityRecord>>;
     fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()>;
-    fn get_session_history(
-        &self,
-        agent: Agent,
-        session_id: &str,
-        file_path: &str,
-    ) -> Result<Option<SessionHistoryRecord>>;
-    fn replace_session_history(&self, record: &SessionHistoryRecord) -> Result<()>;
     fn get_session_history_snapshots(
         &self,
         child_agent: Agent,

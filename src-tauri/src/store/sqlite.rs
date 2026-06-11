@@ -26,8 +26,8 @@ use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
     IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTask,
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, SessionHistoryRecord, SessionHistorySnapshotRecord, SessionRef,
-    SessionStore, ThreadWorkSnapshotRecord,
+    RuntimeAgentSelection, SessionHistorySnapshotRecord, SessionRef, SessionStore,
+    ThreadWorkSnapshotRecord,
 };
 
 pub struct SqliteStore {
@@ -311,40 +311,6 @@ CREATE INDEX IF NOT EXISTS idx_kanban_item_sessions_item
     ON kanban_item_sessions(item_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_kanban_item_sessions_session
     ON kanban_item_sessions(agent, session_id);
-
-CREATE TABLE IF NOT EXISTS session_history (
-    agent           TEXT NOT NULL,
-    session_id      TEXT NOT NULL,
-    file_path       TEXT NOT NULL,
-    file_size       INTEGER NOT NULL DEFAULT 0,
-    file_mtime      INTEGER,
-    history_cache_version INTEGER NOT NULL DEFAULT 0,
-    message_count   INTEGER NOT NULL DEFAULT 0,
-    indexed_through INTEGER,
-    updated_at      INTEGER NOT NULL,
-    PRIMARY KEY(agent, session_id, file_path)
-);
-
-CREATE INDEX IF NOT EXISTS idx_session_history_file_path
-    ON session_history(file_path);
-
-CREATE TABLE IF NOT EXISTS session_history_turns (
-    agent      TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    file_path  TEXT NOT NULL,
-    turn_index INTEGER NOT NULL,
-    turn_id    TEXT NOT NULL,
-    started_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    turn_json  TEXT NOT NULL,
-    PRIMARY KEY(agent, session_id, file_path, turn_index),
-    FOREIGN KEY(agent, session_id, file_path)
-        REFERENCES session_history(agent, session_id, file_path)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_session_history_turns_turn_id
-    ON session_history_turns(agent, session_id, turn_id);
 
 CREATE TABLE IF NOT EXISTS session_history_snapshots (
     child_agent           TEXT NOT NULL,
@@ -4714,125 +4680,6 @@ fn upsert_subagent_inner(
     Ok(())
 }
 
-fn load_session_history(
-    conn: &Connection,
-    agent: Agent,
-    session_id: &str,
-    file_path: &str,
-) -> Result<Option<SessionHistoryRecord>> {
-    let header = conn
-        .query_row(
-            "SELECT file_size, file_mtime, history_cache_version, message_count, indexed_through, updated_at
-             FROM session_history
-             WHERE agent = ? AND session_id = ? AND file_path = ?",
-            params![agent.as_str(), session_id, file_path],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        file_size,
-        file_mtime,
-        history_cache_version,
-        message_count,
-        indexed_through,
-        updated_at,
-    )) = header
-    else {
-        return Ok(None);
-    };
-
-    let mut stmt = conn.prepare(
-        "SELECT turn_json
-         FROM session_history_turns
-         WHERE agent = ? AND session_id = ? AND file_path = ?
-         ORDER BY turn_index ASC",
-    )?;
-    let rows = stmt.query_map(params![agent.as_str(), session_id, file_path], |row| {
-        row.get::<_, String>(0)
-    })?;
-    let mut turns = Vec::new();
-    for row in rows {
-        let json = row?;
-        turns.push(serde_json::from_str::<SessionHistoryTurn>(&json)?);
-    }
-
-    Ok(Some(SessionHistoryRecord {
-        agent,
-        session_id: session_id.to_string(),
-        file_path: file_path.to_string(),
-        file_size: file_size as u64,
-        file_mtime,
-        history_cache_version,
-        message_count: message_count as usize,
-        indexed_through,
-        updated_at,
-        turns,
-    }))
-}
-
-fn replace_session_history_inner(conn: &Connection, record: &SessionHistoryRecord) -> Result<()> {
-    conn.execute(
-        "INSERT INTO session_history (
-            agent, session_id, file_path, file_size, file_mtime, history_cache_version,
-            message_count, indexed_through, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(agent, session_id, file_path) DO UPDATE SET
-            file_size = excluded.file_size,
-            file_mtime = excluded.file_mtime,
-            history_cache_version = excluded.history_cache_version,
-            message_count = excluded.message_count,
-            indexed_through = excluded.indexed_through,
-            updated_at = excluded.updated_at",
-        params![
-            record.agent.as_str(),
-            record.session_id.as_str(),
-            record.file_path.as_str(),
-            record.file_size as i64,
-            record.file_mtime,
-            record.history_cache_version,
-            record.message_count as i64,
-            record.indexed_through,
-            record.updated_at,
-        ],
-    )?;
-    conn.execute(
-        "DELETE FROM session_history_turns
-         WHERE agent = ? AND session_id = ? AND file_path = ?",
-        params![record.agent.as_str(), record.session_id, record.file_path],
-    )?;
-    {
-        let mut stmt = conn.prepare(
-            "INSERT INTO session_history_turns (
-                agent, session_id, file_path, turn_index, turn_id,
-                started_at, updated_at, turn_json
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )?;
-        for (index, turn) in record.turns.iter().enumerate() {
-            let turn_json = serde_json::to_string(turn)?;
-            stmt.execute(params![
-                record.agent.as_str(),
-                record.session_id.as_str(),
-                record.file_path.as_str(),
-                index as i64,
-                turn.turn_id.as_str(),
-                turn.started_at,
-                turn.updated_at,
-                turn_json,
-            ])?;
-        }
-    }
-    Ok(())
-}
-
 fn load_session_history_snapshots(
     conn: &Connection,
     child_agent: Agent,
@@ -7519,24 +7366,6 @@ impl SessionStore for SqliteStore {
         Ok(())
     }
 
-    fn get_session_history(
-        &self,
-        agent: Agent,
-        session_id: &str,
-        file_path: &str,
-    ) -> Result<Option<SessionHistoryRecord>> {
-        let conn = self.conn.lock().unwrap();
-        load_session_history(&conn, agent, session_id, file_path)
-    }
-
-    fn replace_session_history(&self, record: &SessionHistoryRecord) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        replace_session_history_inner(&tx, record)?;
-        tx.commit()?;
-        Ok(())
-    }
-
     fn get_session_history_snapshots(
         &self,
         child_agent: Agent,
@@ -8966,14 +8795,16 @@ mod migration_tests {
             .unwrap();
         assert_eq!(continuations_table, 1);
 
-        let history_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_history'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(history_table, 1);
+        for removed_table in ["session_history", "session_history_turns"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                    params![removed_table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 0, "{removed_table} should not exist");
+        }
 
         let snapshot_table: i64 = conn
             .query_row(
@@ -9078,14 +8909,16 @@ mod migration_tests {
         };
         assert!(job_columns.contains(&"backend".to_string()));
 
-        let history_columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(session_history)").unwrap();
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(history_columns.contains(&"indexed_through".to_string()));
-        assert!(history_columns.contains(&"message_count".to_string()));
-        assert!(history_columns.contains(&"history_cache_version".to_string()));
+        for removed_table in ["session_history", "session_history_turns"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                    params![removed_table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 0, "{removed_table} should not exist");
+        }
 
         let snapshot_columns: Vec<String> = {
             let mut stmt = conn
@@ -9497,52 +9330,6 @@ mod migration_tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&project_path);
-    }
-
-    #[test]
-    fn session_history_roundtrip_stores_acp_turn_json() {
-        let path = unique_db("sessio-history-roundtrip");
-        let store = SqliteStore::open(&path).unwrap();
-        store.init().unwrap();
-        let turn = SessionHistoryTurn {
-            turn_id: "turn-1".to_string(),
-            status: "completed".to_string(),
-            blocks: Vec::new(),
-            tools: Vec::new(),
-            permissions: Vec::new(),
-            protocol_messages: Vec::new(),
-            stop_reason: None,
-            error: None,
-            started_at: 10,
-            updated_at: 20,
-        };
-        let record = SessionHistoryRecord {
-            agent: Agent::Codex,
-            session_id: "session-a".to_string(),
-            file_path: "/tmp/session-a.jsonl".to_string(),
-            file_size: 42,
-            file_mtime: Some(100),
-            history_cache_version: 12,
-            message_count: 3,
-            indexed_through: Some(20),
-            updated_at: 30,
-            turns: vec![turn.clone()],
-        };
-
-        store.replace_session_history(&record).unwrap();
-        let loaded = store
-            .get_session_history(Agent::Codex, "session-a", "/tmp/session-a.jsonl")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(loaded.file_size, 42);
-        assert_eq!(loaded.history_cache_version, 12);
-        assert_eq!(loaded.message_count, 3);
-        assert_eq!(loaded.indexed_through, Some(20));
-        assert_eq!(loaded.turns.len(), 1);
-        assert_eq!(loaded.turns[0].turn_id, turn.turn_id);
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

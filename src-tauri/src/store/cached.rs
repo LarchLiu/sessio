@@ -11,7 +11,7 @@ use crate::models::{
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
     IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTaskSession, PlanTaskStatusPatch,
-    ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection, SessionHistoryRecord,
+    ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
     SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
 };
 
@@ -673,19 +673,6 @@ impl SessionStore for CachedStore {
 
     fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()> {
         self.inner.upsert_runtime_agent_capability(record)
-    }
-
-    fn get_session_history(
-        &self,
-        agent: Agent,
-        session_id: &str,
-        file_path: &str,
-    ) -> Result<Option<SessionHistoryRecord>> {
-        self.inner.get_session_history(agent, session_id, file_path)
-    }
-
-    fn replace_session_history(&self, record: &SessionHistoryRecord) -> Result<()> {
-        self.inner.replace_session_history(record)
     }
 
     fn get_session_history_snapshots(

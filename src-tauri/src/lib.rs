@@ -46,8 +46,8 @@ use store::cached::CachedStore;
 use store::sqlite::SqliteStore;
 use store::{
     AgentPreferencesPatch, AstraConfigPatch, NewAssistant, NewPlanRound, NewPlanTask,
-    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, SessionHistoryRecord,
-    SessionHistorySnapshotRecord, SessionStore, ThreadWorkSnapshotRecord,
+    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, SessionHistorySnapshotRecord,
+    SessionStore, ThreadWorkSnapshotRecord,
 };
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
@@ -2125,136 +2125,6 @@ mod ancestor_tests {
             "resource"
         );
     }
-
-    #[test]
-    fn session_history_api_prefers_fresh_canonical_store_turns() {
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let db_path = std::env::temp_dir().join(format!(
-            "sessio-history-api-{}-{suffix}.db",
-            std::process::id()
-        ));
-        let source_path = std::env::temp_dir().join(format!(
-            "sessio-history-api-{}-{suffix}.jsonl",
-            std::process::id()
-        ));
-
-        std::fs::write(&source_path, "not-jsonl\n").unwrap();
-        let source_path_text = source_path.to_string_lossy().to_string();
-        let store = SqliteStore::open(&db_path).unwrap();
-        store.init().unwrap();
-        let stored_turn = SessionHistoryTurn {
-            turn_id: "db-turn".to_string(),
-            status: "completed".to_string(),
-            blocks: Vec::new(),
-            tools: Vec::new(),
-            permissions: Vec::new(),
-            protocol_messages: Vec::new(),
-            stop_reason: None,
-            error: None,
-            started_at: 10,
-            updated_at: 20,
-        };
-        store
-            .replace_session_history(&SessionHistoryRecord {
-                agent: Agent::Codex,
-                session_id: "session-db".to_string(),
-                file_path: source_path_text.clone(),
-                file_size: file_size_for(&source_path_text).unwrap(),
-                file_mtime: file_mtime_for_history(&source_path_text),
-                history_cache_version: HISTORY_CACHE_VERSION,
-                message_count: 7,
-                indexed_through: Some(20),
-                updated_at: 30,
-                turns: vec![stored_turn],
-            })
-            .unwrap();
-
-        let result = read_session_history_result_with_store(
-            &store,
-            Agent::Codex,
-            &source_path_text,
-            Some("session-db"),
-        )
-        .unwrap();
-
-        assert_eq!(result.message_count, 7);
-        assert_eq!(result.indexed_through, Some(20));
-        assert_eq!(result.turns.len(), 1);
-        assert_eq!(result.turns[0].turn_id, "db-turn");
-
-        let _ = std::fs::remove_file(&source_path);
-        let _ = std::fs::remove_file(&db_path);
-    }
-
-    #[test]
-    fn session_history_api_rebuilds_stale_cache_version() {
-        let suffix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let db_path = std::env::temp_dir().join(format!(
-            "sessio-history-version-{}-{suffix}.db",
-            std::process::id()
-        ));
-        let source_path = std::env::temp_dir().join(format!(
-            "sessio-history-version-{}-{suffix}.jsonl",
-            std::process::id()
-        ));
-
-        std::fs::write(&source_path, "not-jsonl\n").unwrap();
-        let source_path_text = source_path.to_string_lossy().to_string();
-        let store = SqliteStore::open(&db_path).unwrap();
-        store.init().unwrap();
-        store
-            .replace_session_history(&SessionHistoryRecord {
-                agent: Agent::Codex,
-                session_id: "session-db".to_string(),
-                file_path: source_path_text.clone(),
-                file_size: file_size_for(&source_path_text).unwrap(),
-                file_mtime: file_mtime_for_history(&source_path_text),
-                history_cache_version: HISTORY_CACHE_VERSION - 1,
-                message_count: 7,
-                indexed_through: Some(20),
-                updated_at: 30,
-                turns: vec![SessionHistoryTurn {
-                    turn_id: "stale-db-turn".to_string(),
-                    status: "completed".to_string(),
-                    blocks: Vec::new(),
-                    tools: Vec::new(),
-                    permissions: Vec::new(),
-                    protocol_messages: Vec::new(),
-                    stop_reason: None,
-                    error: None,
-                    started_at: 10,
-                    updated_at: 20,
-                }],
-            })
-            .unwrap();
-
-        let result = read_session_history_result_with_store(
-            &store,
-            Agent::Codex,
-            &source_path_text,
-            Some("session-db"),
-        )
-        .unwrap();
-
-        assert_ne!(
-            result.turns.first().map(|turn| turn.turn_id.as_str()),
-            Some("stale-db-turn")
-        );
-        let reloaded = store
-            .get_session_history(Agent::Codex, "session-db", &source_path_text)
-            .unwrap()
-            .unwrap();
-        assert_eq!(reloaded.history_cache_version, HISTORY_CACHE_VERSION);
-
-        let _ = std::fs::remove_file(&source_path);
-        let _ = std::fs::remove_file(&db_path);
-    }
 }
 
 #[tauri::command]
@@ -2601,15 +2471,10 @@ fn get_session_history(
     agent: Agent,
     file_path: String,
     session_id: Option<String>,
-    store: State<'_, Arc<dyn SessionStore>>,
+    _store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<SessionHistoryResult, String> {
-    read_session_history_result_with_store(
-        store.inner().as_ref(),
-        agent,
-        &file_path,
-        session_id.as_deref(),
-    )
-    .map_err(|e| e.to_string())
+    read_session_history_result_from_source(agent, &file_path, session_id.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 pub fn read_session_history_result(
@@ -2618,67 +2483,6 @@ pub fn read_session_history_result(
     session_id: Option<&str>,
 ) -> anyhow::Result<SessionHistoryResult> {
     read_session_history_result_from_source(agent, file_path, session_id)
-}
-
-fn read_session_history_result_with_store(
-    store: &dyn SessionStore,
-    agent: Agent,
-    file_path: &str,
-    session_id: Option<&str>,
-) -> anyhow::Result<SessionHistoryResult> {
-    let session_id = session_id.unwrap_or_default();
-    if !session_id.is_empty() {
-        if let Some(record) = store.get_session_history(agent, session_id, file_path)? {
-            if session_history_record_is_fresh(&record, file_path) {
-                return Ok(SessionHistoryResult {
-                    message_count: record.message_count,
-                    indexed_through: record.indexed_through,
-                    turns: record.turns,
-                });
-            }
-        }
-    }
-
-    let result = read_session_history_result_from_source(agent, file_path, Some(session_id))?;
-    if !session_id.is_empty() {
-        let record = SessionHistoryRecord {
-            agent,
-            session_id: session_id.to_string(),
-            file_path: file_path.to_string(),
-            file_size: file_size_for(file_path).unwrap_or_default(),
-            file_mtime: file_mtime_for_history(file_path),
-            history_cache_version: HISTORY_CACHE_VERSION,
-            message_count: result.message_count,
-            indexed_through: result.indexed_through,
-            updated_at: now_ms(),
-            turns: result.turns.clone(),
-        };
-        store.replace_session_history(&record)?;
-    }
-    Ok(result)
-}
-
-fn session_history_record_is_fresh(record: &SessionHistoryRecord, file_path: &str) -> bool {
-    record.history_cache_version == HISTORY_CACHE_VERSION
-        && record.file_size == file_size_for(file_path).unwrap_or_default()
-        && record.file_mtime == file_mtime_for_history(file_path)
-}
-
-fn file_size_for(file_path: &str) -> Option<u64> {
-    std::fs::metadata(file_path)
-        .ok()
-        .map(|metadata| metadata.len())
-}
-
-fn file_mtime_for_history(file_path: &str) -> Option<i64> {
-    std::fs::metadata(file_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .map(|d| d.as_millis() as i64)
-        })
 }
 
 fn read_session_history_result_from_source(
