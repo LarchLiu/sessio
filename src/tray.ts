@@ -9,7 +9,7 @@ import { Image } from "@tauri-apps/api/image";
 import {
   Agent,
   SessionInfo,
-  ThreadChatSummaryInfo,
+  ThreadIndexItemInfo,
 } from "./api";
 import { getMenuIconBytes, type MenuIconComponent } from "./menuIcon";
 import { sessionDisplayTitle } from "./appUtils";
@@ -34,7 +34,7 @@ type TrayTheme = "light" | "dark";
 
 export type TrayRecentEntry =
   | { kind: "session"; session: SessionInfo; time: number }
-  | { kind: "thread"; thread: ThreadChatSummaryInfo; time: number };
+  | { kind: "thread"; thread: ThreadIndexItemInfo; time: number };
 
 function themedAgentIconColor(agent: Agent, theme: TrayTheme): string | undefined {
   if (agent !== "codex" && agent !== "astra-pi") return undefined;
@@ -105,7 +105,7 @@ type ItemHandle =
 
 export interface TrayRecentActions {
   onSelectSession: (session: SessionInfo) => void;
-  onSelectThread: (thread: ThreadChatSummaryInfo) => void;
+  onSelectThread: (thread: ThreadIndexItemInfo) => void;
 }
 
 let currentMenu: Menu | null = null;

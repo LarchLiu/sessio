@@ -14,14 +14,13 @@ import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   Agent,
   getDebugConfig,
-  listThreadChatSummaries,
-  refreshThreadChatSummaries,
+  listThreadIndex,
   SessionInfo,
   removeSessionsByScope,
   removeSessionFiles,
   updateSessionRenameTitle,
   type SessionScope,
-  type ThreadChatSummaryInfo,
+  type ThreadIndexItemInfo,
 } from "./api";
 import { syncTrayMenu, type TrayRecentEntry } from "./tray";
 import AppLayout from "./layouts/AppLayout";
@@ -132,7 +131,7 @@ export default function App() {
   } | null>(null);
   const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
   const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
-  const [threadChatSummaries, setThreadChatSummaries] = useState<ThreadChatSummaryInfo[]>([]);
+  const [threadIndexItems, setThreadIndexItems] = useState<ThreadIndexItemInfo[]>([]);
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
   const { lang, setLang, t } = useI18n();
@@ -319,11 +318,11 @@ export default function App() {
     setPendingSelectSession,
   });
 
-  const refreshThreadSummaries = useCallback((projectId?: string | null) => {
-    return refreshThreadChatSummaries(projectId).then((rows) => {
-      setThreadChatSummaries((prev) => {
+  const refreshThreadIndex = useCallback((projectId?: string | null) => {
+    return listThreadIndex(projectId).then((rows) => {
+      setThreadIndexItems((prev) => {
         if (!projectId) return rows;
-        const next = prev.filter((summary) => summary.projectId !== projectId);
+        const next = prev.filter((item) => item.projectId !== projectId);
         return [...next, ...rows].sort((a, b) => b.time - a.time);
       });
     });
@@ -331,17 +330,17 @@ export default function App() {
 
   useEffect(() => {
     if (projects.length === 0) {
-      setThreadChatSummaries([]);
+      setThreadIndexItems([]);
       return;
     }
     let cancelled = false;
     const refresh = () => {
-      listThreadChatSummaries()
+      listThreadIndex()
         .then((rows) => {
-          if (!cancelled) setThreadChatSummaries(rows);
+          if (!cancelled) setThreadIndexItems(rows);
         })
         .catch((err) => {
-          if (!cancelled) console.warn("load thread chat summaries failed", err);
+          if (!cancelled) console.warn("load thread index failed", err);
         });
     };
     refresh();
@@ -350,25 +349,25 @@ export default function App() {
       threadId?: string | null;
     }>("threads_updated", (event) => {
       const projectId = event.payload?.projectId ?? null;
-      refreshThreadSummaries(projectId).catch((err) => {
-        if (!cancelled) console.warn("refresh thread chat summaries failed", err);
+      refreshThreadIndex(projectId).catch((err) => {
+        if (!cancelled) console.warn("refresh thread index failed", err);
       });
     });
     return () => {
       cancelled = true;
       unlistenThreads.then((f) => f()).catch(() => {});
     };
-  }, [projects.length, refreshThreadSummaries]);
+  }, [projects.length, refreshThreadIndex]);
 
   const recentForMenu = useMemo<TrayRecentEntry[]>(() => {
     const linkedSessionKeys = new Set<string>();
     const entries: TrayRecentEntry[] = [];
-    for (const summary of threadChatSummaries) {
-      for (const key of summary.sessionKeys) linkedSessionKeys.add(key);
+    for (const item of threadIndexItems) {
+      for (const key of item.sessionKeys) linkedSessionKeys.add(key);
       entries.push({
         kind: "thread",
-        thread: summary,
-        time: summary.time,
+        thread: item,
+        time: item.time,
       });
     }
     for (const session of availableSessions) {
@@ -381,7 +380,7 @@ export default function App() {
       });
     }
     return entries.sort((a, b) => b.time - a.time).slice(0, 5);
-  }, [availableSessions, threadChatSummaries]);
+  }, [availableSessions, threadIndexItems]);
 
   useEffect(() => {
     if (!selectedProject) return;
@@ -630,7 +629,7 @@ export default function App() {
       projectGroups={projectGroups}
       expandedProjects={expandedProjects}
       expandedProjectSessions={expandedProjectSessions}
-      threadChatSummaries={threadChatSummaries}
+      threadIndexItems={threadIndexItems}
       selectedKey={selectedKey}
       selectedIdentityKey={selectedIdentityKey}
       selectedProjectId={selectedProjectId}

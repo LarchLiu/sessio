@@ -20,7 +20,7 @@ use crate::models::{
     ProcessTemplateType, ProjectInfo, ProjectStageInfo, ProjectStageType,
     RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo,
     StageIssueInfo, StageStatus, StageType, SubagentInfo, ThreadAgentInfo, ThreadAssistantInfo,
-    ThreadInfo, ThreadKind,
+    ThreadIndexItemInfo, ThreadInfo, ThreadKind,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
@@ -2551,6 +2551,63 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
         stages: Vec::new(),
         sessions: Vec::new(),
     })
+}
+
+fn thread_index_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadIndexItemInfo> {
+    Ok(ThreadIndexItemInfo {
+        thread_id: row.get(0)?,
+        project_id: row.get(1)?,
+        goal: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        time: row.get(5)?,
+        session_keys: Vec::new(),
+    })
+}
+
+fn load_thread_index_session_keys(
+    conn: &Connection,
+    project_id: Option<&str>,
+) -> Result<HashMap<String, HashSet<String>>> {
+    let mut keys = HashMap::<String, HashSet<String>>::new();
+    for sql in [
+        "SELECT s.thread_id, s.agent, s.session_id
+         FROM thread_sessions s
+         INNER JOIN threads t ON t.id = s.thread_id
+         WHERE (?1 IS NULL OR t.project_id = ?1)",
+        "SELECT ts.thread_id, ss.agent, ss.session_id
+         FROM stage_sessions ss
+         INNER JOIN thread_stages ts ON ts.id = ss.thread_stage_id
+         INNER JOIN threads t ON t.id = ts.thread_id
+         WHERE (?1 IS NULL OR t.project_id = ?1)",
+        "SELECT r.thread_id, s.agent, s.session_id
+         FROM thread_plan_task_sessions s
+         INNER JOIN thread_plan_tasks tk ON tk.id = s.task_id
+         INNER JOIN thread_plan_rounds r ON r.id = tk.round_id
+         INNER JOIN threads t ON t.id = r.thread_id
+         WHERE s.superseded_at IS NULL AND (?1 IS NULL OR t.project_id = ?1)",
+        "SELECT r.thread_id, s.agent, s.session_id
+         FROM astra_run_sessions s
+         INNER JOIN astra_runs r ON r.run_id = s.run_id
+         INNER JOIN threads t ON t.id = r.thread_id
+         WHERE (?1 IS NULL OR t.project_id = ?1)",
+    ] {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (thread_id, agent, session_id) = row?;
+            keys.entry(thread_id)
+                .or_default()
+                .insert(format!("{agent}:{session_id}"));
+        }
+    }
+    Ok(keys)
 }
 
 fn plan_round_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlanRoundInfo> {
@@ -5865,6 +5922,55 @@ impl SessionStore for SqliteStore {
             thread.sessions = load_thread_sessions(&conn, &thread.id)?;
         }
         Ok(threads)
+    }
+
+    fn list_thread_index(&self, project_id: Option<&str>) -> Result<Vec<ThreadIndexItemInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "WITH base AS (
+                SELECT t.id, t.project_id, t.goal, t.created_at, t.updated_at
+                FROM threads t
+                INNER JOIN projects p ON p.id = t.project_id AND p.archived = 0
+                WHERE (?1 IS NULL OR t.project_id = ?1)
+             ), thread_times AS (
+                SELECT id AS thread_id, created_at AS time FROM base
+                UNION ALL SELECT id, updated_at FROM base
+                UNION ALL SELECT b.id, ts.created_at FROM base b INNER JOIN thread_stages ts ON ts.thread_id = b.id
+                UNION ALL SELECT b.id, ts.updated_at FROM base b INNER JOIN thread_stages ts ON ts.thread_id = b.id
+                UNION ALL SELECT b.id, tss.created_at FROM base b INNER JOIN thread_stages ts ON ts.thread_id = b.id INNER JOIN thread_stage_states tss ON tss.thread_stage_id = ts.id
+                UNION ALL SELECT b.id, tss.updated_at FROM base b INNER JOIN thread_stages ts ON ts.thread_id = b.id INNER JOIN thread_stage_states tss ON tss.thread_stage_id = ts.id
+                UNION ALL SELECT b.id, s.created_at FROM base b INNER JOIN thread_sessions s ON s.thread_id = b.id
+                UNION ALL SELECT b.id, COALESCE(sess.updated_at, sess.started_at) FROM base b INNER JOIN thread_sessions s ON s.thread_id = b.id INNER JOIN sessions sess ON sess.agent = s.agent AND sess.session_id = s.session_id
+                UNION ALL SELECT b.id, ss.created_at FROM base b INNER JOIN thread_stages ts ON ts.thread_id = b.id INNER JOIN stage_sessions ss ON ss.thread_stage_id = ts.id
+                UNION ALL SELECT b.id, COALESCE(sess.updated_at, sess.started_at) FROM base b INNER JOIN thread_stages ts ON ts.thread_id = b.id INNER JOIN stage_sessions ss ON ss.thread_stage_id = ts.id INNER JOIN sessions sess ON sess.agent = ss.agent AND sess.session_id = ss.session_id
+                UNION ALL SELECT b.id, r.created_at FROM base b INNER JOIN thread_plan_rounds r ON r.thread_id = b.id
+                UNION ALL SELECT b.id, r.updated_at FROM base b INNER JOIN thread_plan_rounds r ON r.thread_id = b.id
+                UNION ALL SELECT b.id, t.created_at FROM base b INNER JOIN thread_plan_rounds r ON r.thread_id = b.id INNER JOIN thread_plan_tasks t ON t.round_id = r.id
+                UNION ALL SELECT b.id, t.updated_at FROM base b INNER JOIN thread_plan_rounds r ON r.thread_id = b.id INNER JOIN thread_plan_tasks t ON t.round_id = r.id
+                UNION ALL SELECT b.id, pts.created_at FROM base b INNER JOIN thread_plan_rounds r ON r.thread_id = b.id INNER JOIN thread_plan_tasks t ON t.round_id = r.id INNER JOIN thread_plan_task_sessions pts ON pts.task_id = t.id AND pts.superseded_at IS NULL
+                UNION ALL SELECT b.id, pts.updated_at FROM base b INNER JOIN thread_plan_rounds r ON r.thread_id = b.id INNER JOIN thread_plan_tasks t ON t.round_id = r.id INNER JOIN thread_plan_task_sessions pts ON pts.task_id = t.id AND pts.superseded_at IS NULL
+                UNION ALL SELECT b.id, ar.created_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id
+                UNION ALL SELECT b.id, ar.updated_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id
+                UNION ALL SELECT b.id, ars.created_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id INNER JOIN astra_run_sessions ars ON ars.run_id = ar.run_id
+                UNION ALL SELECT b.id, ars.updated_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id INNER JOIN astra_run_sessions ars ON ars.run_id = ar.run_id
+             )
+             SELECT b.id, b.project_id, b.goal, b.created_at, b.updated_at, MAX(tt.time) AS time
+             FROM base b
+             INNER JOIN thread_times tt ON tt.thread_id = b.id
+             GROUP BY b.id, b.project_id, b.goal, b.created_at, b.updated_at
+             ORDER BY time DESC, b.updated_at DESC, b.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![project_id], thread_index_from_row)?;
+        let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut keys_by_thread = load_thread_index_session_keys(&conn, project_id)?;
+        for item in items.iter_mut() {
+            if let Some(keys) = keys_by_thread.remove(&item.thread_id) {
+                let mut keys = keys.into_iter().collect::<Vec<_>>();
+                keys.sort();
+                item.session_keys = keys;
+            }
+        }
+        Ok(items)
     }
 
     fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo> {
@@ -11501,6 +11607,290 @@ mod migration_tests {
             Some("replay-run")
         );
         assert_eq!(internal.sources[0].role, Some(PlanTaskSessionRole::Planner));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn thread_index_lists_thread_without_sessions() {
+        let path = unique_db("sessio-thread-index-empty");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-index-empty-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "thread-index-empty",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Show thread entry", None)
+            .unwrap();
+
+        let items = store.list_thread_index(Some(&project.id)).unwrap();
+        let item = items
+            .iter()
+            .find(|item| item.thread_id == thread.id)
+            .unwrap();
+        assert_eq!(item.goal, thread.goal);
+        assert_eq!(item.project_id, project.id);
+        assert!(item.session_keys.is_empty());
+        assert!(item.time >= thread.updated_at.max(thread.created_at));
+        assert!(store
+            .list_thread_index(None)
+            .unwrap()
+            .iter()
+            .any(|item| item.thread_id == thread.id));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn thread_index_aggregates_session_keys_and_activity_time() {
+        let path = unique_db("sessio-thread-index-sources");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-thread-index-sources-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "thread-index-sources",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let assistant = store
+            .create_assistant(NewAssistant {
+                name: "Index Assistant",
+                agent: AssistantAgentInfo {
+                    id: "codex".to_string(),
+                    name: "Codex".to_string(),
+                    model: "gpt-5.3-codex".to_string(),
+                    mode: "workspace-write".to_string(),
+                    effort: "medium".to_string(),
+                },
+                system_prompt: None,
+                color: None,
+                assistant_type: AssistantType::Custom,
+                process_template_id: None,
+                project_id: Some(&project.id),
+            })
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Aggregate every source", None)
+            .unwrap();
+        let stage_template = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let thread_stage = store
+            .add_thread_stage(
+                &thread.id,
+                &stage_template.id,
+                std::slice::from_ref(&assistant.id),
+            )
+            .unwrap();
+
+        // A linked session whose own updated_at is far ahead of every
+        // thread/link timestamp: the index time must follow live session
+        // activity, not just link-table timestamps.
+        let session_activity_time = thread.updated_at + 250_000;
+        let direct_session = SessionInfo {
+            id: "direct-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(10),
+            updated_at: Some(session_activity_time),
+            message_count: 2,
+            rename_title: None,
+            title: Some("Direct thread chat".to_string()),
+            first_user_message: Some("Thread note".to_string()),
+            file_path: Path::new(&project.path)
+                .join("direct.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            subagents: Vec::new(),
+        };
+        let stage_runtime_session = SessionInfo {
+            id: "stage-runtime-session".to_string(),
+            started_at: Some(30),
+            updated_at: Some(40),
+            message_count: 4,
+            title: Some("Stage runtime".to_string()),
+            first_user_message: Some("Stage note".to_string()),
+            file_path: Path::new(&project.path)
+                .join("stage-runtime.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            ..direct_session.clone()
+        };
+        let planner_session = SessionInfo {
+            id: "planner-session".to_string(),
+            agent: Agent::AstraPi,
+            started_at: Some(50),
+            updated_at: Some(60),
+            message_count: 1,
+            title: Some("Planner trace".to_string()),
+            first_user_message: Some("Plan note".to_string()),
+            file_path: Path::new(&project.path)
+                .join("planner.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            ..direct_session.clone()
+        };
+        for session in [&direct_session, &stage_runtime_session, &planner_session] {
+            store.upsert_session(&session.file_path, session).unwrap();
+        }
+        store
+            .link_thread_session(&thread.id, Agent::Codex, &direct_session.id)
+            .unwrap();
+        store
+            .link_stage_session(&thread_stage.id, Agent::Codex, &stage_runtime_session.id)
+            .unwrap();
+
+        let round = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: None,
+                round_index: None,
+                summary: Some("Index round"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Astra,
+                status: PlanRoundStatus::Running,
+                tasks: vec![NewPlanTask {
+                    thread_stage_id: Some(&thread_stage.id),
+                    assistant_id: Some(&assistant.id),
+                    agent_participant_id: None,
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Runtime task",
+                    prompt: "Do runtime work",
+                    expected_output: None,
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Running,
+                }],
+            })
+            .unwrap();
+        // Linking a second Codex runtime session supersedes the first one.
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: "superseded-runtime-session",
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: None,
+                attempt_count: 1,
+            })
+            .unwrap();
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: &stage_runtime_session.id,
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: None,
+                attempt_count: 1,
+            })
+            .unwrap();
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Gemini,
+                session_id: "missing-runtime-session",
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: None,
+                attempt_count: 1,
+            })
+            .unwrap();
+
+        store
+            .upsert_astra_run(&AstraRunRecord {
+                run_id: "index-run".to_string(),
+                thread_id: thread.id.clone(),
+                project_id: project.id.clone(),
+                project_path: project.path.clone(),
+                status: "completed".to_string(),
+                mode: "auto".to_string(),
+                planner_backend: Some("astra_pi_acp".to_string()),
+                round_index: Some(0),
+                round_limit: 3,
+                terminal_reason: None,
+                last_error_code: None,
+                last_error_message: None,
+                internal_planner_sessions: vec![
+                    AstraRunSessionRecord {
+                        run_id: "index-run".to_string(),
+                        agent: Agent::AstraPi,
+                        session_id: planner_session.id.clone(),
+                        role: PlanTaskSessionRole::Planner,
+                        sort_order: 0,
+                        created_at: 70,
+                        updated_at: 80,
+                    },
+                    AstraRunSessionRecord {
+                        run_id: "index-run".to_string(),
+                        agent: Agent::AstraPi,
+                        session_id: "missing-planner-session".to_string(),
+                        role: PlanTaskSessionRole::Planner,
+                        sort_order: 1,
+                        created_at: 81,
+                        updated_at: 82,
+                    },
+                ],
+                run_diagnostics_json: "[]".to_string(),
+                error: None,
+                created_at: 70,
+                updated_at: 82,
+            })
+            .unwrap();
+
+        let items = store.list_thread_index(Some(&project.id)).unwrap();
+        let item = items
+            .iter()
+            .find(|item| item.thread_id == thread.id)
+            .unwrap();
+        assert_eq!(item.goal, thread.goal);
+        assert_eq!(
+            item.session_keys.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from([
+                format!("{}:direct-session", Agent::Codex.as_str()),
+                format!("{}:stage-runtime-session", Agent::Codex.as_str()),
+                format!("{}:missing-runtime-session", Agent::Gemini.as_str()),
+                format!("{}:planner-session", Agent::AstraPi.as_str()),
+                format!("{}:missing-planner-session", Agent::AstraPi.as_str()),
+            ])
+        );
+        assert_eq!(item.time, session_activity_time);
+
+        // Archiving the project drops its threads from the index without
+        // erroring, for both the scoped and the global listing.
+        store.archive_project(&project.id).unwrap();
+        assert!(store.list_thread_index(Some(&project.id)).unwrap().is_empty());
+        assert!(store
+            .list_thread_index(None)
+            .unwrap()
+            .iter()
+            .all(|item| item.thread_id != thread.id));
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);

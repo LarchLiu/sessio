@@ -6,7 +6,8 @@ use crate::models::{
     Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
     KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo,
     PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo, SessionInfo,
-    StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadAgentInfo, ThreadInfo, ThreadKind,
+    StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadAgentInfo, ThreadIndexItemInfo,
+    ThreadInfo, ThreadKind,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
@@ -328,6 +329,10 @@ impl SessionStore for CachedStore {
 
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>> {
         self.inner.list_threads(project_id)
+    }
+
+    fn list_thread_index(&self, project_id: Option<&str>) -> Result<Vec<ThreadIndexItemInfo>> {
+        self.inner.list_thread_index(project_id)
     }
 
     fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo> {

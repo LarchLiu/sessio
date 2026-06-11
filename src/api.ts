@@ -272,14 +272,13 @@ export interface ThreadReplayInfo {
   sessions: ThreadReplaySessionInfo[];
 }
 
-export interface ThreadChatSummaryInfo {
+export interface ThreadIndexItemInfo {
   threadId: string;
   projectId: string;
   goal: string;
   createdAt: number;
   updatedAt: number;
   time: number;
-  sessions: SessionInfo[];
   sessionKeys: string[];
 }
 
@@ -1121,14 +1120,8 @@ export async function getThreadReplay(threadId: string): Promise<ThreadReplayInf
   return invoke<ThreadReplayInfo>("get_thread_replay", { threadId });
 }
 
-export async function listThreadChatSummaries(projectId?: string | null): Promise<ThreadChatSummaryInfo[]> {
-  return invoke<ThreadChatSummaryInfo[]>("list_thread_chat_summaries", {
-    projectId: projectId ?? null,
-  });
-}
-
-export async function refreshThreadChatSummaries(projectId?: string | null): Promise<ThreadChatSummaryInfo[]> {
-  return invoke<ThreadChatSummaryInfo[]>("refresh_thread_chat_summaries", {
+export async function listThreadIndex(projectId?: string | null): Promise<ThreadIndexItemInfo[]> {
+  return invoke<ThreadIndexItemInfo[]>("list_thread_index", {
     projectId: projectId ?? null,
   });
 }

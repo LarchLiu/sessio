@@ -27,7 +27,7 @@ import {
   listProcessTemplateStages,
   listProcessTemplates,
   type ProjectStageInfo,
-  type ThreadChatSummaryInfo,
+  type ThreadIndexItemInfo,
 } from "../api";
 import { useI18n } from "../i18n";
 import type { ProjectGroup } from "../navigation";
@@ -55,7 +55,7 @@ type SidebarSessionEntry = {
 
 type SidebarThreadChatEntry = {
   kind: "thread";
-  summary: ThreadChatSummaryInfo;
+  thread: ThreadIndexItemInfo;
   time: number;
 };
 
@@ -74,7 +74,7 @@ type AppSidebarProps = {
   projectGroups: ProjectGroup[];
   expandedProjects: Set<string>;
   expandedProjectSessions: Set<string>;
-  threadChatSummaries: ThreadChatSummaryInfo[];
+  threadIndexItems: ThreadIndexItemInfo[];
   selectedKey: string | null;
   selectedIdentityKey: string | null;
   selectedProjectId: string | null;
@@ -114,7 +114,7 @@ export default function AppSidebar({
   projectGroups,
   expandedProjects,
   expandedProjectSessions,
-  threadChatSummaries,
+  threadIndexItems,
   selectedKey,
   selectedIdentityKey,
   selectedProjectId,
@@ -141,15 +141,15 @@ export default function AppSidebar({
   onError,
 }: AppSidebarProps) {
   const { t } = useI18n();
-  const threadChatSummariesByProject = useMemo(() => {
-    const grouped = new Map<string, ThreadChatSummaryInfo[]>();
-    for (const summary of threadChatSummaries) {
-      const current = grouped.get(summary.projectId);
-      if (current) current.push(summary);
-      else grouped.set(summary.projectId, [summary]);
+  const threadIndexByProject = useMemo(() => {
+    const grouped = new Map<string, ThreadIndexItemInfo[]>();
+    for (const item of threadIndexItems) {
+      const current = grouped.get(item.projectId);
+      if (current) current.push(item);
+      else grouped.set(item.projectId, [item]);
     }
     return grouped;
-  }, [threadChatSummaries]);
+  }, [threadIndexItems]);
 
   return (
     <aside
@@ -222,7 +222,7 @@ export default function AppSidebar({
                 liveState={liveState}
                 runtimeSessionAliases={runtimeSessionAliases}
                 unreadSessionIds={unreadSessionIds}
-                threadChatSummaries={threadChatSummariesByProject.get(project.project.id) ?? []}
+                threadIndexItems={threadIndexByProject.get(project.project.id) ?? []}
                 onSelectProject={() => onToggleProjectExpanded(project.key)}
                 onOpenKanban={() => onOpenKanban(project)}
                 onNewChat={() => onNewProjectChat(project)}
@@ -599,7 +599,7 @@ function ProjectSidebarGroup({
   liveState,
   runtimeSessionAliases,
   unreadSessionIds,
-  threadChatSummaries,
+  threadIndexItems,
   onSelectProject,
   onOpenKanban,
   onNewChat,
@@ -619,7 +619,7 @@ function ProjectSidebarGroup({
   liveState: LiveRuntimeState;
   runtimeSessionAliases: Record<string, string>;
   unreadSessionIds: Set<string>;
-  threadChatSummaries: ThreadChatSummaryInfo[];
+  threadIndexItems: ThreadIndexItemInfo[];
   onSelectProject: () => void;
   onOpenKanban: () => void;
   onNewChat: () => void;
@@ -638,12 +638,12 @@ function ProjectSidebarGroup({
   const sidebarEntries = useMemo<SidebarListEntry[]>(() => {
     const linkedSessionKeys = new Set<string>();
     const threadEntries: SidebarThreadChatEntry[] = [];
-    for (const summary of threadChatSummaries) {
-      for (const key of summary.sessionKeys) linkedSessionKeys.add(key);
+    for (const item of threadIndexItems) {
+      for (const key of item.sessionKeys) linkedSessionKeys.add(key);
       threadEntries.push({
         kind: "thread",
-        summary,
-        time: summary.time,
+        thread: item,
+        time: item.time,
       });
     }
 
@@ -659,7 +659,7 @@ function ProjectSidebarGroup({
     }
 
     return [...Array.from(byKey.values()), ...threadEntries].sort((a, b) => b.time - a.time);
-  }, [project.sessions, threadChatSummaries]);
+  }, [project.sessions, threadIndexItems]);
   const visibleEntries = sessionsExpanded
     ? sidebarEntries
     : sidebarEntries.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
@@ -758,12 +758,12 @@ function ProjectSidebarGroup({
               if (entry.kind === "thread") {
                 return (
                   <SidebarThreadItem
-                    key={entry.summary.threadId}
-                    thread={threadRefFromSummary(entry.summary)}
+                    key={entry.thread.threadId}
+                    thread={threadRefFromIndexItem(entry.thread)}
                     time={entry.time}
-                    active={selectedThreadId === entry.summary.threadId}
-                    onSelect={() => onSelectThread(threadRefFromSummary(entry.summary), "threadChat")}
-                    onOpenThread={() => onSelectThread(threadRefFromSummary(entry.summary), "thread")}
+                    active={selectedThreadId === entry.thread.threadId}
+                    onSelect={() => onSelectThread(threadRefFromIndexItem(entry.thread), "threadChat")}
+                    onOpenThread={() => onSelectThread(threadRefFromIndexItem(entry.thread), "thread")}
                   />
                 );
               }
@@ -934,12 +934,12 @@ function SidebarThreadItem({
   );
 }
 
-function threadRefFromSummary(summary: ThreadChatSummaryInfo): SidebarThreadRef {
+function threadRefFromIndexItem(item: ThreadIndexItemInfo): SidebarThreadRef {
   return {
-    id: summary.threadId,
-    goal: summary.goal,
-    createdAt: summary.createdAt,
-    updatedAt: summary.updatedAt,
+    id: item.threadId,
+    goal: item.goal,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
   };
 }
 

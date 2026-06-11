@@ -11,8 +11,9 @@ use crate::models::{
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, SubagentInfo, ThreadInfo, ThreadKind, ThreadReplayInfo,
-    ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo, ThreadReplaySessionSourceKind,
+    StageIssueInfo, StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
+    ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo,
+    ThreadReplaySessionSourceKind,
 };
 
 /// Optional patch fields shared by the agent-preference update methods. Every
@@ -299,6 +300,7 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<AssistantInfo>;
     fn delete_assistant(&self, assistant_id: &str) -> Result<()>;
     fn list_threads(&self, project_id: &str) -> Result<Vec<ThreadInfo>>;
+    fn list_thread_index(&self, project_id: Option<&str>) -> Result<Vec<ThreadIndexItemInfo>>;
     fn get_thread_work_state(&self, thread_id: &str) -> Result<ThreadInfo>;
     fn get_thread_replay(&self, thread_id: &str) -> Result<ThreadReplayInfo> {
         let thread = self.get_thread_work_state(thread_id)?;
@@ -779,10 +781,6 @@ pub(crate) fn better_session_candidate(candidate: &SessionInfo, current: &Sessio
 
 pub(crate) fn session_time(session: &SessionInfo) -> i64 {
     session.updated_at.or(session.started_at).unwrap_or(0)
-}
-
-pub(crate) fn session_identity(agent: Agent, session_id: &str) -> String {
-    format!("{}:{session_id}", agent.as_str())
 }
 
 fn add_replay_session_source(

@@ -9,7 +9,6 @@ pub mod network;
 pub mod polling;
 pub mod shell_env;
 pub mod store;
-pub mod thread_chat_summary;
 pub mod turns;
 pub mod watch;
 
@@ -39,7 +38,7 @@ use models::{
     PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
-    StageIssueInfo, StageStatus, ThreadAgentInfo, ThreadChatSummaryInfo, ThreadInfo, ThreadKind,
+    StageIssueInfo, StageStatus, ThreadAgentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
     ThreadReplayInfo,
 };
 use store::cached::CachedStore;
@@ -56,7 +55,6 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent,
 };
-use thread_chat_summary::ThreadChatSummaryCache;
 
 const HISTORY_CACHE_VERSION: i64 = 1;
 const THREAD_WORK_SNAPSHOT_VERSION: i64 = 2;
@@ -739,35 +737,13 @@ fn get_thread_replay(
 }
 
 #[tauri::command]
-fn list_thread_chat_summaries(
+fn list_thread_index(
     project_id: Option<String>,
-    cache: State<'_, ThreadChatSummaryCache>,
-) -> Result<Vec<ThreadChatSummaryInfo>, String> {
-    match project_id.as_deref() {
-        Some(project_id) => cache.list_project(project_id),
-        None => cache.list_all(),
-    }
-    .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn refresh_thread_chat_summaries(
-    project_id: Option<String>,
-    cache: State<'_, ThreadChatSummaryCache>,
-) -> Result<Vec<ThreadChatSummaryInfo>, String> {
-    match project_id.as_deref() {
-        Some(project_id) => {
-            cache
-                .refresh_project(project_id)
-                .map_err(|e| e.to_string())?;
-            cache.list_project(project_id)
-        }
-        None => {
-            cache.refresh_all().map_err(|e| e.to_string())?;
-            cache.list_all()
-        }
-    }
-    .map_err(|e| e.to_string())
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<ThreadIndexItemInfo>, String> {
+    store
+        .list_thread_index(project_id.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3314,8 +3290,6 @@ pub fn run() {
             app.manage(store.clone());
             app.manage(memory_store.clone());
             app.manage(indexer_handle);
-            let thread_chat_summary_cache = ThreadChatSummaryCache::new(store.clone());
-            app.manage(thread_chat_summary_cache.clone());
             let runtime_probe_store = store.clone();
             let runtime_agents_cache = RuntimeAgentsCache::default();
             let initial_runtime_agents =
@@ -3337,12 +3311,6 @@ pub fn run() {
             app.manage(astra_service);
             app.manage(runtime_agents_cache);
             let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                if let Err(error) = thread_chat_summary_cache.warm() {
-                    log::warn!("[thread-chat-summary:warm] {error}");
-                }
-            });
-
             tauri::async_runtime::spawn_blocking(move || {
                 match startup_probe_runtime_agents(runtime_probe_store) {
                     Ok(agents) => {
@@ -3416,8 +3384,7 @@ pub fn run() {
             list_threads,
             get_thread_work_state,
             get_thread_replay,
-            list_thread_chat_summaries,
-            refresh_thread_chat_summaries,
+            list_thread_index,
             create_thread,
             update_thread,
             delete_thread,
