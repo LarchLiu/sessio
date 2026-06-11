@@ -10,6 +10,9 @@ use super::{
 use crate::astra::astra_pi_acp_adapter::AstraPiAcpOrchestrator;
 use crate::astra::backend::{BackendFailure, OrchestratorBackend};
 use crate::astra::brainstorm_backend::BrainstormBackend;
+use crate::astra::brainstorm_facilitator::{
+    BrainstormFacilitator, HeuristicFacilitator, RuntimeAgentFacilitator,
+};
 use crate::astra::debate_backend::DebateBackend;
 use crate::astra::debate_judge::{DebateJudge, HeuristicJudge, RuntimeAgentJudge};
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
@@ -240,8 +243,28 @@ impl AstraService {
         config: &AstraBackendConfig,
     ) -> Box<dyn OrchestratorBackend> {
         if thread.kind == ThreadKind::Brainstorm {
-            log::info!("[astra:orchestrator:backend] using brainstorm_backend");
-            return Box::new(BrainstormBackend);
+            let facilitator: Box<dyn BrainstormFacilitator> = if let Some(agent) = config.agent {
+                log::info!(
+                    "[astra:orchestrator:backend] using brainstorm_backend with runtime_agent facilitator agent={}",
+                    agent.as_str()
+                );
+                Box::new(RuntimeAgentFacilitator::new(
+                    self.inner.runtime.clone(),
+                    RuntimeAgentBackendConfig {
+                        agent,
+                        timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+                        model: config.model.clone(),
+                        effort: config.effort.clone(),
+                        permission_mode: config.permission_mode.clone(),
+                    },
+                ))
+            } else {
+                log::info!(
+                    "[astra:orchestrator:backend] using brainstorm_backend with heuristic facilitator"
+                );
+                Box::new(HeuristicFacilitator)
+            };
+            return Box::new(BrainstormBackend::new(facilitator));
         }
         if thread.kind == ThreadKind::Debate {
             let judge: Box<dyn DebateJudge> = if let Some(agent) = config.agent {

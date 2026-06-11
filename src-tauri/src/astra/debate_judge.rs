@@ -3,6 +3,9 @@ use serde::Deserialize;
 use super::backend::{BackendFailure, BackendResponse};
 use super::prompt::wrap_thread_prompt;
 use super::runtime_agent_backend::{execute_agent_session, RuntimeAgentBackendConfig};
+use super::structured_response::{
+    clean_string_list, execute_structured_with_retry, parse_yaml_mapping, truncate_chars,
+};
 use super::AstraRun;
 use crate::agents::runtime::RuntimeManager;
 use crate::models::ThreadInfo;
@@ -192,28 +195,15 @@ impl DebateJudge for RuntimeAgentJudge {
 fn judge_with_attempts(
     backend_type: &str,
     prompt: &str,
-    mut execute: impl FnMut(&str) -> Result<(String, String), BackendFailure>,
+    execute: impl FnMut(&str) -> Result<(String, String), BackendFailure>,
 ) -> Result<(JudgeVerdict, String), BackendFailure> {
-    let (text, session_id) = execute(prompt)?;
-    let first_failure = match parse_judge_verdict(backend_type, &text) {
-        Ok(mut verdict) => {
-            verdict.attempts = 1;
-            return Ok((verdict, session_id));
-        }
-        Err(failure) => failure,
-    };
-    let correction_prompt = format!(
-        "{prompt}\n\n## Correction\nYour previous response was rejected: {}. Return only the required YAML mapping with the exact top-level keys and nothing else.",
-        first_failure.message
-    );
-    let (text, session_id) = execute(&correction_prompt)?;
-    match parse_judge_verdict(backend_type, &text) {
-        Ok(mut verdict) => {
-            verdict.attempts = 2;
-            Ok((verdict, session_id))
-        }
-        Err(failure) => Err(failure.with_session_id(Some(session_id))),
-    }
+    let (mut verdict, session_id, attempts) = execute_structured_with_retry(
+        prompt,
+        |text| parse_judge_verdict(backend_type, text),
+        execute,
+    )?;
+    verdict.attempts = attempts;
+    Ok((verdict, session_id))
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,34 +221,7 @@ struct RawJudgeVerdict {
 }
 
 fn parse_judge_verdict(backend_type: &str, response: &str) -> Result<JudgeVerdict, BackendFailure> {
-    let trimmed = response.trim();
-    if trimmed.is_empty() {
-        return Err(BackendFailure::new(
-            backend_type.to_string(),
-            "empty_response",
-            "debate judge returned an empty response",
-        ));
-    }
-    if trimmed.contains("```") {
-        return Err(BackendFailure::new(
-            backend_type.to_string(),
-            "invalid_yaml",
-            "debate judge response must be a plain YAML mapping, not a markdown code fence",
-        )
-        .with_raw_response(response));
-    }
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        return Err(BackendFailure::new(
-            backend_type.to_string(),
-            "invalid_yaml",
-            "JSON debate judge responses are not supported; return a YAML mapping",
-        )
-        .with_raw_response(response));
-    }
-    let raw: RawJudgeVerdict = serde_yaml::from_str(trimmed).map_err(|error| {
-        BackendFailure::new(backend_type.to_string(), "invalid_yaml", error.to_string())
-            .with_raw_response(response)
-    })?;
+    let raw: RawJudgeVerdict = parse_yaml_mapping(backend_type, "debate judge", response)?;
 
     let status = raw
         .status
@@ -281,8 +244,16 @@ fn parse_judge_verdict(backend_type: &str, response: &str) -> Result<JudgeVerdic
             .with_raw_response(response));
         }
     };
-    let agreements = clean_judge_list(raw.agreements.unwrap_or_default());
-    let disagreements = clean_judge_list(raw.disagreements.unwrap_or_default());
+    let agreements = clean_string_list(
+        raw.agreements.unwrap_or_default(),
+        JUDGE_LIST_ITEM_CHAR_LIMIT,
+        JUDGE_LIST_LEN_LIMIT,
+    );
+    let disagreements = clean_string_list(
+        raw.disagreements.unwrap_or_default(),
+        JUDGE_LIST_ITEM_CHAR_LIMIT,
+        JUDGE_LIST_LEN_LIMIT,
+    );
     if status == JudgeStatus::Diverged && disagreements.is_empty() {
         return Err(BackendFailure::new(
             backend_type.to_string(),
@@ -308,28 +279,6 @@ fn parse_judge_verdict(backend_type: &str, response: &str) -> Result<JudgeVerdic
         rationale,
         attempts: 1,
     })
-}
-
-fn clean_judge_list(values: Vec<String>) -> Vec<String> {
-    values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(|value| truncate_chars(&value, JUDGE_LIST_ITEM_CHAR_LIMIT))
-        .take(JUDGE_LIST_LEN_LIMIT)
-        .collect()
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let text = text.trim();
-    if text.chars().count() <= max_chars {
-        text.to_string()
-    } else {
-        text.chars()
-            .take(max_chars.saturating_sub(3))
-            .collect::<String>()
-            + "..."
-    }
 }
 
 fn build_debate_judge_prompt(

@@ -1,6 +1,10 @@
 use serde_json::{json, Value};
 
 use super::backend::{BackendFailure, BackendResponse, OrchestratorBackend};
+use super::brainstorm_facilitator::{
+    heuristic_board, heuristic_report, BrainstormFacilitator, FacilitatorBoard,
+    FacilitatorOpinion, FacilitatorReport, HEURISTIC_FACILITATOR_BACKEND_TYPE,
+};
 use super::prompt::wrap_thread_prompt;
 use super::{
     final_task_output, short_hash, summarize_task_output, AstraOrchestration, AstraRun,
@@ -9,8 +13,17 @@ use super::{
 use crate::models::{PlanRoundMode, ThreadAgentInfo, ThreadInfo, ThreadKind};
 
 const BRAINSTORM_BACKEND_TYPE: &str = "brainstorm_backend";
+const BOARD_INJECTION_MARKER: &str = "## Shared board from previous round";
 
-pub struct BrainstormBackend;
+pub struct BrainstormBackend {
+    facilitator: Box<dyn BrainstormFacilitator>,
+}
+
+impl BrainstormBackend {
+    pub fn new(facilitator: Box<dyn BrainstormFacilitator>) -> Self {
+        Self { facilitator }
+    }
+}
 
 impl OrchestratorBackend for BrainstormBackend {
     fn orchestrate(
@@ -30,11 +43,18 @@ impl OrchestratorBackend for BrainstormBackend {
             ));
         }
 
-        let orchestration =
-            brainstorm_orchestration(run, thread, user_prompt, round_index, completions);
+        let (orchestration, facilitator_session_id) = brainstorm_orchestration(
+            run,
+            thread,
+            user_prompt,
+            round_index,
+            completions,
+            self.facilitator.as_ref(),
+        );
         Ok(BackendResponse {
             data: orchestration,
-            session_id: format!("brainstorm-backend-{}-{}", run.run_id, round_index),
+            session_id: facilitator_session_id
+                .unwrap_or_else(|| format!("brainstorm-backend-{}-{}", run.run_id, round_index)),
             backend_type: BRAINSTORM_BACKEND_TYPE.to_string(),
         })
     }
@@ -46,7 +66,8 @@ fn brainstorm_orchestration(
     user_prompt: Option<&str>,
     round_index: u32,
     completions: &[AstraTaskCompletion],
-) -> AstraOrchestration {
+    facilitator: &dyn BrainstormFacilitator,
+) -> (AstraOrchestration, Option<String>) {
     if let Some(failure) = completions.iter().find(|completion| {
         matches!(
             completion.result.status,
@@ -55,87 +76,220 @@ fn brainstorm_orchestration(
                 | AstraTaskResultStatus::Cancelled
         )
     }) {
-        return AstraOrchestration {
-            summary: format!(
-                "Brainstorm stopped because task {} ended with {}.",
-                failure.task.title,
-                failure.result.status.as_str()
-            ),
-            run_intent: AstraRunIntent::Error,
-            reason: "brainstorm_task_failed".to_string(),
-            mode: None,
-            tasks: Vec::new(),
-            diagnostics: Vec::new(),
-        };
+        return (
+            AstraOrchestration {
+                summary: format!(
+                    "Brainstorm stopped because task {} ended with {}.",
+                    failure.task.title,
+                    failure.result.status.as_str()
+                ),
+                run_intent: AstraRunIntent::Error,
+                reason: "brainstorm_task_failed".to_string(),
+                mode: None,
+                tasks: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+            None,
+        );
     }
 
     if completions.is_empty() {
         let tasks = brainstorm_divergence_tasks(run, thread, user_prompt, round_index, None, false);
         return if tasks.is_empty() {
-            AstraOrchestration {
-                summary: "Brainstorm needs at least one agent participant.".to_string(),
-                run_intent: AstraRunIntent::WaitForHuman,
-                reason: "brainstorm_no_participants".to_string(),
-                mode: None,
-                tasks,
-                diagnostics: Vec::new(),
-            }
+            (
+                AstraOrchestration {
+                    summary: "Brainstorm needs at least one agent participant.".to_string(),
+                    run_intent: AstraRunIntent::WaitForHuman,
+                    reason: "brainstorm_no_participants".to_string(),
+                    mode: None,
+                    tasks,
+                    diagnostics: Vec::new(),
+                },
+                None,
+            )
         } else {
-            AstraOrchestration {
-                summary: format!(
-                    "Brainstorm round {} asks {} participant{} for independent opinions.",
-                    round_index + 1,
-                    tasks.len(),
-                    if tasks.len() == 1 { "" } else { "s" }
-                ),
-                run_intent: AstraRunIntent::Continue,
-                reason: "brainstorm_parallel_opinions".to_string(),
-                mode: Some(PlanRoundMode::Parallel),
-                tasks,
-                diagnostics: Vec::new(),
-            }
+            (
+                AstraOrchestration {
+                    summary: format!(
+                        "Brainstorm round {} asks {} participant{} for independent opinions.",
+                        round_index + 1,
+                        tasks.len(),
+                        if tasks.len() == 1 { "" } else { "s" }
+                    ),
+                    run_intent: AstraRunIntent::Continue,
+                    reason: "brainstorm_parallel_opinions".to_string(),
+                    mode: Some(PlanRoundMode::Parallel),
+                    tasks,
+                    diagnostics: Vec::new(),
+                },
+                None,
+            )
         };
     }
 
-    let board = shared_board_value(thread, round_index.saturating_sub(1), completions);
     if has_board_injection(completions) {
-        return AstraOrchestration {
-            summary: "Brainstorm synthesis completed from the shared board.".to_string(),
-            run_intent: AstraRunIntent::Complete,
-            reason: "brainstorm_synthesis_complete".to_string(),
-            mode: None,
-            tasks: Vec::new(),
-            diagnostics: vec![
-                board.clone(),
-                synthesis_diagnostic(thread, round_index.saturating_sub(1), &board),
-            ],
+        let board = shared_board_value(thread, round_index.saturating_sub(1), completions, None, None);
+        let board_context = extract_board_context(completions);
+        let syntheses = facilitator_opinions(completions);
+        let (report, meta) = match facilitator.synthesize(
+            run,
+            thread,
+            user_prompt,
+            round_index.saturating_sub(1),
+            board_context.as_deref(),
+            &syntheses,
+        ) {
+            Ok(response) => {
+                let meta = FacilitatorMeta {
+                    backend: response.backend_type.clone(),
+                    session_id: Some(response.session_id.clone()),
+                    error: None,
+                };
+                (response.data, meta)
+            }
+            Err(failure) => {
+                log::warn!(
+                    "[astra:brainstorm:facilitator-failure] run={} backend={} purpose=synthesize code={} message={}",
+                    run.run_id,
+                    failure.backend_type,
+                    failure.code,
+                    failure.message
+                );
+                let meta = FacilitatorMeta {
+                    backend: failure.backend_type.clone(),
+                    session_id: failure.session_id.clone(),
+                    error: Some((failure.code, failure.message.clone())),
+                };
+                (heuristic_report(&syntheses, 0), meta)
+            }
         };
+        let facilitator_session_id = facilitator_session_to_propagate(&meta);
+        let synthesis =
+            synthesis_diagnostic(thread, round_index.saturating_sub(1), &board, &report, &meta);
+        return (
+            AstraOrchestration {
+                summary: "Brainstorm synthesis completed from the shared board.".to_string(),
+                run_intent: AstraRunIntent::Complete,
+                reason: "brainstorm_synthesis_complete".to_string(),
+                mode: None,
+                tasks: Vec::new(),
+                diagnostics: vec![board, synthesis],
+            },
+            facilitator_session_id,
+        );
     }
+
+    let opinions = facilitator_opinions(completions);
+    let (facilitator_board, meta) = match facilitator.build_board(
+        run,
+        thread,
+        user_prompt,
+        round_index.saturating_sub(1),
+        &opinions,
+    ) {
+        Ok(response) => {
+            let meta = FacilitatorMeta {
+                backend: response.backend_type.clone(),
+                session_id: Some(response.session_id.clone()),
+                error: None,
+            };
+            (response.data, meta)
+        }
+        Err(failure) => {
+            log::warn!(
+                "[astra:brainstorm:facilitator-failure] run={} backend={} purpose=build_board code={} message={}",
+                run.run_id,
+                failure.backend_type,
+                failure.code,
+                failure.message
+            );
+            let meta = FacilitatorMeta {
+                backend: failure.backend_type.clone(),
+                session_id: failure.session_id.clone(),
+                error: Some((failure.code, failure.message.clone())),
+            };
+            (heuristic_board(0), meta)
+        }
+    };
+    let facilitator_session_id = facilitator_session_to_propagate(&meta);
+    let board = shared_board_value(
+        thread,
+        round_index.saturating_sub(1),
+        completions,
+        Some(&facilitator_board),
+        Some(&meta),
+    );
 
     let tasks =
         brainstorm_divergence_tasks(run, thread, user_prompt, round_index, Some(&board), true);
     if tasks.is_empty() {
-        return AstraOrchestration {
-            summary:
-                "Brainstorm shared board is ready, but no participants are available for synthesis."
-                    .to_string(),
-            run_intent: AstraRunIntent::WaitForHuman,
-            reason: "brainstorm_no_synthesis_participants".to_string(),
-            mode: None,
-            tasks,
-            diagnostics: vec![board],
-        };
+        return (
+            AstraOrchestration {
+                summary:
+                    "Brainstorm shared board is ready, but no participants are available for synthesis."
+                        .to_string(),
+                run_intent: AstraRunIntent::WaitForHuman,
+                reason: "brainstorm_no_synthesis_participants".to_string(),
+                mode: None,
+                tasks,
+                diagnostics: vec![board],
+            },
+            facilitator_session_id,
+        );
     }
 
-    AstraOrchestration {
-        summary: "Brainstorm shared board generated; next round injects the board for synthesis."
-            .to_string(),
-        run_intent: AstraRunIntent::Continue,
-        reason: "brainstorm_shared_board_ready".to_string(),
-        mode: Some(PlanRoundMode::Parallel),
-        tasks,
-        diagnostics: vec![board],
-    }
+    (
+        AstraOrchestration {
+            summary: "Brainstorm shared board generated; next round injects the board for synthesis."
+                .to_string(),
+            run_intent: AstraRunIntent::Continue,
+            reason: "brainstorm_shared_board_ready".to_string(),
+            mode: Some(PlanRoundMode::Parallel),
+            tasks,
+            diagnostics: vec![board],
+        },
+        facilitator_session_id,
+    )
+}
+
+struct FacilitatorMeta {
+    backend: String,
+    session_id: Option<String>,
+    error: Option<(&'static str, String)>,
+}
+
+fn facilitator_session_to_propagate(meta: &FacilitatorMeta) -> Option<String> {
+    (meta.backend != HEURISTIC_FACILITATOR_BACKEND_TYPE && meta.error.is_none())
+        .then(|| meta.session_id.clone())
+        .flatten()
+}
+
+fn facilitator_opinions(completions: &[AstraTaskCompletion]) -> Vec<FacilitatorOpinion> {
+    completions
+        .iter()
+        .map(|completion| FacilitatorOpinion {
+            participant_id: completion
+                .task
+                .agent_participant_id
+                .clone()
+                .or_else(|| completion.task.assistant_id.clone()),
+            agent: completion.task.target_agent.as_str().to_string(),
+            title: completion.task.title.clone(),
+            output: final_task_output(&completion.result.output),
+        })
+        .collect()
+}
+
+/// Recovers the board section injected into the previous synthesis round from
+/// the task prompt; the backend is stateless across rounds, so the prompt is
+/// the only place the dispatched board survives.
+fn extract_board_context(completions: &[AstraTaskCompletion]) -> Option<String> {
+    let prompt = &completions.first()?.task.prompt;
+    let start = prompt.find(BOARD_INJECTION_MARKER)?;
+    let after = &prompt[start + BOARD_INJECTION_MARKER.len()..];
+    let end = after.find("\n## ").unwrap_or(after.len());
+    let context = after[..end].trim();
+    (!context.is_empty()).then(|| context.to_string())
 }
 
 fn brainstorm_divergence_tasks(
@@ -232,8 +386,8 @@ fn brainstorm_task_prompt(
     }
     lines.push(String::new());
     if let Some(board) = shared_board {
-        lines.push("## Shared board from previous round".to_string());
-        lines.push(board_text(board));
+        lines.push(BOARD_INJECTION_MARKER.to_string());
+        lines.push(board_injection_text(board));
         lines.push(String::new());
     }
     lines.push("## Task".to_string());
@@ -274,6 +428,8 @@ fn shared_board_value(
     thread: &ThreadInfo,
     source_round_index: u32,
     completions: &[AstraTaskCompletion],
+    facilitator_board: Option<&FacilitatorBoard>,
+    meta: Option<&FacilitatorMeta>,
 ) -> Value {
     let opinions = completions
         .iter()
@@ -295,20 +451,61 @@ fn shared_board_value(
         .take(6)
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    json!({
+    let fallback_board;
+    let board_data = match facilitator_board {
+        Some(board) => board,
+        None => {
+            fallback_board = heuristic_board(0);
+            &fallback_board
+        }
+    };
+    let ideas = board_data
+        .ideas
+        .iter()
+        .map(|idea| {
+            json!({
+                "id": idea.id,
+                "title": idea.title,
+                "summary": idea.summary,
+                "sources": idea.sources,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut board = json!({
         "kind": "brainstorm_shared_board",
         "threadId": thread.id,
         "sourceRoundIndex": source_round_index,
         "opinions": opinions,
         "highlights": highlights,
-        "conflicts": ["Compare assumptions and tradeoffs across the opinions."],
-        "openQuestions": ["Which candidate best satisfies the thread goal?", "What evidence would change the recommendation?"],
+        "ideas": ideas,
+        "conflicts": &board_data.conflicts,
+        "openQuestions": &board_data.open_questions,
         "recordedAt": super::now_ms(),
-    })
+    });
+    if let Some(meta) = meta {
+        if let Some(record) = board.as_object_mut() {
+            record.insert("facilitatorBackend".to_string(), json!(&meta.backend));
+            record.insert("facilitatorSessionId".to_string(), json!(&meta.session_id));
+            record.insert("facilitatorAttempts".to_string(), json!(board_data.attempts));
+            if let Some((code, message)) = &meta.error {
+                record.insert(
+                    "facilitatorError".to_string(),
+                    json!({ "code": code, "message": message }),
+                );
+            }
+        }
+    }
+    board
 }
 
-fn synthesis_diagnostic(thread: &ThreadInfo, source_round_index: u32, board: &Value) -> Value {
-    json!({
+fn synthesis_diagnostic(
+    thread: &ThreadInfo,
+    source_round_index: u32,
+    board: &Value,
+    report: &FacilitatorReport,
+    meta: &FacilitatorMeta,
+) -> Value {
+    let mut diagnostic = json!({
         "kind": "brainstorm_synthesis",
         "threadId": thread.id,
         "sourceRoundIndex": source_round_index,
@@ -317,28 +514,248 @@ fn synthesis_diagnostic(thread: &ThreadInfo, source_round_index: u32, board: &Va
             .and_then(Value::as_array)
             .map(|values| values.len())
             .unwrap_or(0),
+        "recommendation": &report.recommendation,
+        "consensus": &report.consensus,
+        "disagreements": &report.disagreements,
+        "nextSteps": &report.next_steps,
+        "rationale": &report.rationale,
+        "facilitatorBackend": &meta.backend,
+        "facilitatorSessionId": &meta.session_id,
+        "facilitatorAttempts": report.attempts,
         "recordedAt": super::now_ms(),
-    })
+    });
+    if let Some((code, message)) = &meta.error {
+        if let Some(record) = diagnostic.as_object_mut() {
+            record.insert(
+                "facilitatorError".to_string(),
+                json!({ "code": code, "message": message }),
+            );
+        }
+    }
+    diagnostic
 }
 
-fn board_text(board: &Value) -> String {
-    serde_json::to_string_pretty(board).unwrap_or_else(|_| board.to_string())
+/// Renders the participant-facing markdown view of the shared board. Keeps
+/// facilitator meta fields (session ids, timestamps) out of the prompt.
+fn board_injection_text(board: &Value) -> String {
+    let mut lines = Vec::new();
+    lines.push("### Ideas".to_string());
+    let ideas = board
+        .get("ideas")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if ideas.is_empty() {
+        lines.push("- (none yet)".to_string());
+    }
+    for idea in &ideas {
+        let id = idea.get("id").and_then(Value::as_str).unwrap_or("idea");
+        let title = idea.get("title").and_then(Value::as_str).unwrap_or("");
+        let summary = idea.get("summary").and_then(Value::as_str).unwrap_or("");
+        let sources = idea
+            .get("sources")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let mut line = format!("- [{id}] {title} — {summary}");
+        if !sources.is_empty() {
+            line.push_str(&format!(" (sources: {sources})"));
+        }
+        lines.push(line);
+    }
+    push_board_list(&mut lines, "### Conflicts", board.get("conflicts"));
+    push_board_list(&mut lines, "### Open questions", board.get("openQuestions"));
+    lines.push(String::new());
+    lines.push("### Participant opinions (excerpts)".to_string());
+    for opinion in board
+        .get("opinions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let participant = opinion
+            .get("participantId")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let agent = opinion.get("agent").and_then(Value::as_str).unwrap_or("agent");
+        let text = opinion.get("opinion").and_then(Value::as_str).unwrap_or("");
+        lines.push(format!("- {participant} ({agent}): {text}"));
+    }
+    lines.join("\n")
+}
+
+fn push_board_list(lines: &mut Vec<String>, heading: &str, values: Option<&Value>) {
+    lines.push(String::new());
+    lines.push(heading.to_string());
+    let items = values
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if items.is_empty() {
+        lines.push("- (none)".to_string());
+    }
+    for item in items {
+        lines.push(format!("- {item}"));
+    }
 }
 
 fn has_board_injection(completions: &[AstraTaskCompletion]) -> bool {
-    completions.iter().any(|completion| {
-        completion
-            .task
-            .prompt
-            .contains("## Shared board from previous round")
-    })
+    completions
+        .iter()
+        .any(|completion| completion.task.prompt.contains(BOARD_INJECTION_MARKER))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use crate::astra::brainstorm_facilitator::{
+        BoardIdea, HeuristicFacilitator, HEURISTIC_BOARD_CONFLICT,
+    };
     use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
     use crate::models::{Agent, ThreadAgentInfo};
+
+    struct FakeFacilitator {
+        board: Result<BackendResponse<FacilitatorBoard>, BackendFailure>,
+        report: Result<BackendResponse<FacilitatorReport>, BackendFailure>,
+        seen_board_contexts: Mutex<Vec<Option<String>>>,
+    }
+
+    impl FakeFacilitator {
+        fn new(
+            board: Result<BackendResponse<FacilitatorBoard>, BackendFailure>,
+            report: Result<BackendResponse<FacilitatorReport>, BackendFailure>,
+        ) -> Self {
+            Self {
+                board,
+                report,
+                seen_board_contexts: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl BrainstormFacilitator for FakeFacilitator {
+        fn build_board(
+            &self,
+            _run: &AstraRun,
+            _thread: &ThreadInfo,
+            _user_prompt: Option<&str>,
+            _source_round_index: u32,
+            _opinions: &[FacilitatorOpinion],
+        ) -> Result<BackendResponse<FacilitatorBoard>, BackendFailure> {
+            self.board.clone()
+        }
+
+        fn synthesize(
+            &self,
+            _run: &AstraRun,
+            _thread: &ThreadInfo,
+            _user_prompt: Option<&str>,
+            _source_round_index: u32,
+            board_context: Option<&str>,
+            _syntheses: &[FacilitatorOpinion],
+        ) -> Result<BackendResponse<FacilitatorReport>, BackendFailure> {
+            self.seen_board_contexts
+                .lock()
+                .unwrap()
+                .push(board_context.map(ToString::to_string));
+            self.report.clone()
+        }
+    }
+
+    fn fake_board() -> FacilitatorBoard {
+        FacilitatorBoard {
+            ideas: vec![BoardIdea {
+                id: "idea-async".to_string(),
+                title: "异步内核改造".to_string(),
+                summary: "渐进迁移到异步任务调度。".to_string(),
+                sources: vec!["participant-a".to_string()],
+            }],
+            conflicts: vec!["A 与 B 在迁移节奏上存在冲突。".to_string()],
+            open_questions: vec!["如何保证迁移期一致性？".to_string()],
+            attempts: 1,
+        }
+    }
+
+    fn fake_report() -> FacilitatorReport {
+        FacilitatorReport {
+            recommendation: "采用渐进迁移方案。".to_string(),
+            consensus: vec!["双方都同意异步化方向。".to_string()],
+            disagreements: vec!["迁移节奏仍有分歧。".to_string()],
+            next_steps: vec!["先做基准测试。".to_string()],
+            rationale: "渐进迁移兼顾速度与稳定性。".to_string(),
+            attempts: 1,
+        }
+    }
+
+    fn runtime_response<T>(data: T) -> BackendResponse<T> {
+        BackendResponse {
+            data,
+            session_id: "agent-session-x".to_string(),
+            backend_type: "runtime_agent_claude".to_string(),
+        }
+    }
+
+    fn orchestrate_with_heuristic(
+        run: &AstraRun,
+        thread: &ThreadInfo,
+        user_prompt: Option<&str>,
+        round_index: u32,
+        completions: &[AstraTaskCompletion],
+    ) -> AstraOrchestration {
+        brainstorm_orchestration(
+            run,
+            thread,
+            user_prompt,
+            round_index,
+            completions,
+            &HeuristicFacilitator,
+        )
+        .0
+    }
+
+    fn opinion_completions(run: &AstraRun) -> Vec<AstraTaskCompletion> {
+        let first = orchestrate_with_heuristic(run, &thread(), None, 0, &[]);
+        first
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "Final result: Option A has strong upside."))
+            .collect()
+    }
+
+    fn synthesis_completions(
+        run: &AstraRun,
+        facilitator: &dyn BrainstormFacilitator,
+        output: &str,
+    ) -> Vec<AstraTaskCompletion> {
+        let board_round = brainstorm_orchestration(
+            run,
+            &thread(),
+            None,
+            1,
+            &opinion_completions(run),
+            facilitator,
+        )
+        .0;
+        board_round
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, output))
+            .collect()
+    }
 
     fn thread() -> ThreadInfo {
         ThreadInfo {
@@ -422,7 +839,7 @@ mod tests {
     #[test]
     fn first_round_creates_parallel_opinion_tasks() {
         let orchestration =
-            brainstorm_orchestration(&run(), &thread(), Some("Be practical"), 0, &[]);
+            orchestrate_with_heuristic(&run(), &thread(), Some("Be practical"), 0, &[]);
 
         assert_eq!(orchestration.run_intent, AstraRunIntent::Continue);
         assert_eq!(orchestration.mode, Some(PlanRoundMode::Parallel));
@@ -440,14 +857,14 @@ mod tests {
 
     #[test]
     fn completions_generate_shared_board_and_injected_next_round() {
-        let first = brainstorm_orchestration(&run(), &thread(), None, 0, &[]);
+        let first = orchestrate_with_heuristic(&run(), &thread(), None, 0, &[]);
         let completions = first
             .tasks
             .into_iter()
             .map(|task| completion(task, "Final result: Option A has strong upside."))
             .collect::<Vec<_>>();
 
-        let next = brainstorm_orchestration(&run(), &thread(), None, 1, &completions);
+        let next = orchestrate_with_heuristic(&run(), &thread(), None, 1, &completions);
 
         assert_eq!(next.run_intent, AstraRunIntent::Continue);
         assert_eq!(next.reason, "brainstorm_shared_board_ready");
@@ -456,6 +873,11 @@ mod tests {
             next.diagnostics[0]["opinions"][0]["participantId"],
             "participant-a"
         );
+        assert_eq!(
+            next.diagnostics[0]["facilitatorBackend"],
+            HEURISTIC_FACILITATOR_BACKEND_TYPE
+        );
+        assert_eq!(next.diagnostics[0]["conflicts"][0], HEURISTIC_BOARD_CONFLICT);
         assert!(next
             .tasks
             .iter()
@@ -464,26 +886,205 @@ mod tests {
 
     #[test]
     fn injected_round_completions_finish_with_synthesis_diagnostic() {
-        let first = brainstorm_orchestration(&run(), &thread(), None, 0, &[]);
+        let first = orchestrate_with_heuristic(&run(), &thread(), None, 0, &[]);
         let first_completions = first
             .tasks
             .into_iter()
             .map(|task| completion(task, "Final result: Option A."))
             .collect::<Vec<_>>();
-        let synthesis = brainstorm_orchestration(&run(), &thread(), None, 1, &first_completions);
+        let synthesis = orchestrate_with_heuristic(&run(), &thread(), None, 1, &first_completions);
         let synthesis_completions = synthesis
             .tasks
             .into_iter()
             .map(|task| completion(task, "Final result: Recommend Option A."))
             .collect::<Vec<_>>();
 
-        let terminal = brainstorm_orchestration(&run(), &thread(), None, 2, &synthesis_completions);
+        let terminal = orchestrate_with_heuristic(&run(), &thread(), None, 2, &synthesis_completions);
 
         assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
         assert_eq!(terminal.reason, "brainstorm_synthesis_complete");
-        assert!(terminal
+        let report = terminal
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic["kind"] == "brainstorm_synthesis"));
+            .find(|diagnostic| diagnostic["kind"] == "brainstorm_synthesis")
+            .unwrap();
+        assert_eq!(report["recommendation"], "Recommend Option A.");
+        assert_eq!(
+            report["facilitatorBackend"],
+            HEURISTIC_FACILITATOR_BACKEND_TYPE
+        );
+    }
+
+    #[test]
+    fn runtime_facilitator_ideas_flow_into_board_and_injection() {
+        let run = run();
+        let fake = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        );
+
+        let (next, session_id) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            1,
+            &opinion_completions(&run),
+            &fake,
+        );
+
+        assert_eq!(next.run_intent, AstraRunIntent::Continue);
+        assert_eq!(next.reason, "brainstorm_shared_board_ready");
+        assert_eq!(session_id.as_deref(), Some("agent-session-x"));
+        let board = &next.diagnostics[0];
+        assert_eq!(board["ideas"][0]["id"], "idea-async");
+        assert_eq!(board["ideas"][0]["title"], "异步内核改造");
+        assert_eq!(board["conflicts"][0], "A 与 B 在迁移节奏上存在冲突。");
+        assert_eq!(board["openQuestions"][0], "如何保证迁移期一致性？");
+        assert_eq!(board["facilitatorBackend"], "runtime_agent_claude");
+        assert_eq!(board["facilitatorSessionId"], "agent-session-x");
+        assert_eq!(board["facilitatorAttempts"], 1);
+        assert!(board.get("facilitatorError").is_none());
+        assert!(next.tasks.iter().all(|task| {
+            task.prompt.contains("[idea-async] 异步内核改造")
+                && task.prompt.contains("A 与 B 在迁移节奏上存在冲突。")
+        }));
+    }
+
+    #[test]
+    fn facilitator_board_failure_degrades_to_static_board() {
+        let run = run();
+        let fake = FakeFacilitator::new(
+            Err(BackendFailure::new(
+                "runtime_agent_claude",
+                "timeout",
+                "facilitator timed out",
+            )
+            .with_session_id(Some("facilitator-session-err".to_string()))),
+            Ok(runtime_response(fake_report())),
+        );
+
+        let (next, session_id) = brainstorm_orchestration(
+            &run,
+            &thread(),
+            None,
+            1,
+            &opinion_completions(&run),
+            &fake,
+        );
+
+        assert_eq!(next.run_intent, AstraRunIntent::Continue);
+        assert!(session_id.is_none());
+        let board = &next.diagnostics[0];
+        assert_eq!(board["conflicts"][0], HEURISTIC_BOARD_CONFLICT);
+        assert_eq!(board["ideas"].as_array().map(Vec::len), Some(0));
+        assert_eq!(board["facilitatorError"]["code"], "timeout");
+        assert_eq!(board["facilitatorSessionId"], "facilitator-session-err");
+        assert_eq!(board["facilitatorAttempts"], 0);
+        assert!(!next.tasks.is_empty());
+    }
+
+    #[test]
+    fn runtime_facilitator_synthesis_produces_final_report() {
+        let run = run();
+        let fake = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        );
+        let completions = synthesis_completions(&run, &fake, "Final result: 同意渐进迁移。");
+
+        let (terminal, session_id) =
+            brainstorm_orchestration(&run, &thread(), None, 2, &completions, &fake);
+
+        assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
+        assert_eq!(terminal.reason, "brainstorm_synthesis_complete");
+        assert_eq!(session_id.as_deref(), Some("agent-session-x"));
+        let report = terminal
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["kind"] == "brainstorm_synthesis")
+            .unwrap();
+        assert_eq!(report["recommendation"], "采用渐进迁移方案。");
+        assert_eq!(report["consensus"][0], "双方都同意异步化方向。");
+        assert_eq!(report["disagreements"][0], "迁移节奏仍有分歧。");
+        assert_eq!(report["nextSteps"][0], "先做基准测试。");
+        assert_eq!(report["rationale"], "渐进迁移兼顾速度与稳定性。");
+        assert_eq!(report["facilitatorBackend"], "runtime_agent_claude");
+        assert!(report.get("facilitatorError").is_none());
+    }
+
+    #[test]
+    fn facilitator_synthesis_failure_degrades_with_error_diagnostic() {
+        let run = run();
+        let board_fake = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        );
+        let completions = synthesis_completions(&run, &board_fake, "Final result: 同意渐进迁移。");
+        let failing = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Err(BackendFailure::new(
+                "runtime_agent_claude",
+                "invalid_yaml",
+                "report was not valid YAML",
+            )),
+        );
+
+        let (terminal, session_id) =
+            brainstorm_orchestration(&run, &thread(), None, 2, &completions, &failing);
+
+        assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
+        assert!(session_id.is_none());
+        let report = terminal
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic["kind"] == "brainstorm_synthesis")
+            .unwrap();
+        assert_eq!(report["facilitatorError"]["code"], "invalid_yaml");
+        assert_eq!(report["recommendation"], "同意渐进迁移。");
+        assert_eq!(report["facilitatorAttempts"], 0);
+    }
+
+    #[test]
+    fn synthesize_receives_board_context_extracted_from_prompt() {
+        let run = run();
+        let fake = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        );
+        let completions = synthesis_completions(&run, &fake, "Final result: 同意。");
+
+        let _ = brainstorm_orchestration(&run, &thread(), None, 2, &completions, &fake);
+
+        let contexts = fake.seen_board_contexts.lock().unwrap();
+        let context = contexts.last().unwrap().as_deref().unwrap();
+        assert!(context.contains("[idea-async] 异步内核改造"));
+        assert!(context.contains("### Conflicts"));
+        assert!(!context.contains("facilitatorSessionId"));
+    }
+
+    #[test]
+    fn orchestrate_propagates_runtime_facilitator_session_id_only() {
+        let run = run();
+        let board_fake = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        );
+        let completions = synthesis_completions(&run, &board_fake, "Final result: agree.");
+
+        let runtime_backend = BrainstormBackend::new(Box::new(FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        )));
+        let response = runtime_backend
+            .orchestrate(&run, &thread(), None, 2, &completions, &json!({}))
+            .unwrap();
+        assert_eq!(response.session_id, "agent-session-x");
+        assert_eq!(response.backend_type, BRAINSTORM_BACKEND_TYPE);
+
+        let heuristic_backend = BrainstormBackend::new(Box::new(HeuristicFacilitator));
+        let response = heuristic_backend
+            .orchestrate(&run, &thread(), None, 2, &completions, &json!({}))
+            .unwrap();
+        assert_eq!(response.session_id, "brainstorm-backend-run-1-2");
     }
 }

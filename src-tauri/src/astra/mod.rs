@@ -27,6 +27,7 @@ use crate::store::{
 mod astra_pi_acp_adapter;
 mod backend;
 mod brainstorm_backend;
+mod brainstorm_facilitator;
 mod debate_backend;
 mod debate_judge;
 mod deterministic_backend;
@@ -34,6 +35,7 @@ mod orchestrator;
 mod planner;
 mod prompt;
 mod runtime_agent_backend;
+mod structured_response;
 mod types;
 
 use astra_pi_acp_adapter::{

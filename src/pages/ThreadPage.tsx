@@ -1158,12 +1158,21 @@ function describeDomainAstraDiagnostic(
     const opinions = arrayField(record, "opinions");
     const highlights = stringArrayField(record, "highlights");
     const questions = stringArrayField(record, "openQuestions");
+    const ideas = arrayField(record, "ideas");
+    const firstIdea = objectValue(ideas[0] ?? null);
     const sourceRound = diagnosticString(record, "sourceRoundIndex");
+    const codeParts = [t("astra.diagnostic.opinions", { count: opinions.length })];
+    if (ideas.length > 0) {
+      codeParts.push(t("astra.diagnostic.ideas", { count: ideas.length }));
+    }
     return {
       key: `${kind}:${sourceRound ?? ""}:${index}`,
       label: t("astra.diagnostic.brainstorm_board"),
-      code: t("astra.diagnostic.opinions", { count: opinions.length }),
+      code: codeParts.join(" · "),
       detail: firstNonEmpty([
+        firstIdea
+          ? firstNonEmpty([stringField(firstIdea, "title"), stringField(firstIdea, "summary")])
+          : null,
         highlights[0],
         questions[0] ? t("astra.diagnostic.question", { value: questions[0] }) : null,
       ]),
@@ -1172,11 +1181,23 @@ function describeDomainAstraDiagnostic(
   }
   if (kind === "brainstorm_synthesis") {
     const count = numberField(record, "sharedBoardOpinionCount") ?? 0;
+    const consensus = stringArrayField(record, "consensus");
+    const disagreements = stringArrayField(record, "disagreements");
+    const codeParts = [t("astra.diagnostic.opinions", { count })];
+    if (consensus.length > 0) {
+      codeParts.push(t("astra.diagnostic.consensus", { count: consensus.length }));
+    }
+    if (disagreements.length > 0) {
+      codeParts.push(t("astra.diagnostic.disagreements", { count: disagreements.length }));
+    }
     return {
       key: `${kind}:${count}:${index}`,
       label: t("astra.diagnostic.brainstorm_synthesis"),
-      code: t("astra.diagnostic.opinions", { count }),
-      detail: null,
+      code: codeParts.join(" · "),
+      detail: firstNonEmpty([
+        diagnosticString(record, "recommendation"),
+        diagnosticString(record, "rationale"),
+      ]),
       raw,
     };
   }
