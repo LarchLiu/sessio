@@ -4,7 +4,7 @@
 
 <h1 align="center">Sessio</h1>
 
-<p align="center">用于管理本地多 agent 会话历史的桌面工具。</p>
+<p align="center">面向 coding agent 的桌面工作台：浏览本地会话历史、与 agent 实时对话、编排多智能体协作。</p>
 
 <p align="center">
   <a href="./README-cn.md">中文</a> · <a href="./README.md">English</a>
@@ -12,19 +12,44 @@
 
 ## 功能特性
 
-- 聚合 `Codex`、`Claude Code`、`Gemini` 的本地会话
+### 会话浏览
+
+- 聚合 `Codex`、`Claude Code`、`Gemini` 以及内置 `Astra Pi` 的本地会话
 - 使用 `SQLite` 建立本地索引，避免每次启动都全量扫盘
-- 监听文件变化并自动刷新列表
-- 按助手、按项目筛选会话
-- 查看会话详情与消息时间线
-- 支持 Claude subagents 展示
-- 为原助手复制 `resume` 命令
-- 生成跨助手续写命令，把一个助手的上下文接续到另一个助手
-- 提供 CLI，可列出会话并操作项目记忆
-- 支持构建、检索和回源 project memory record
-- 托盘菜单快速打开最近会话
-- 支持中英文界面、浅色 / 深色 / 跟随系统主题
-- 发布版内置 GitHub 最新版本检查
+- 监听文件变化（辅以定时轮询）并自动刷新列表
+- 侧边栏按项目分组浏览，支持未读标记与实时运行状态指示
+- 消息时间线支持 markdown、KaTeX 公式、代码高亮和文件编辑 diff 渲染
+- 支持 Claude subagents 展示、会话重命名和删除
+
+### 实时对话
+
+- 通过 [Agent Client Protocol (ACP)](https://agentclientprotocol.com) 在应用内直接发起和续写 agent 会话
+- 流式展示文本、推理过程和工具调用，可在对话中直接响应权限请求
+- 每个会话可单独选择模型、推理强度和权限模式，支持图片和文件附件
+- 跨 agent 续写：把会话 fork 给另一个 agent，自动携带上下文继续
+
+### Threads — 多智能体协作
+
+- 四种 thread 类型：`Workflow`（阶段化流程模板）、`Teamwork`（项目助手协作）、`Brainstorm`（两个及以上参与者）、`Debate`（恰好两个参与者）
+- 多会话聊天时间线，展示每条 lane 的状态、轮次和编排记录
+- Workflow thread 提供阶段跟踪：阶段状态、总结 / 产出，以及按阶段的 issue 管理
+- 内置和自定义流程模板，支持拖拽编辑阶段
+
+### Astra 编排器
+
+- Rust 原生、进程内的编排器，负责为 thread 规划任务并分发给各 agent
+- 计划轮次与任务支持依赖感知的波次分发、失败重试，任务产出写入 `<project>/.sessio/astra`
+- 编排所用的 agent / 模型 / 推理强度 / 权限模式均可配置
+- 内置 `astra-pi` sidecar（基于 [pi_agent_rust](https://github.com/Dicklesworthstone/pi_agent_rust) 构建），支持自定义 AI provider 渠道（base URL、API key、模型列表）
+
+### 其他
+
+- 自定义助手（底层 agent + 模型 + 系统提示词 + 权限模式），可全局或按项目管理
+- Project memory：基于会话构建可检索的记忆记录（`qmd` 后端），支持续写溯源（`covered-by` / `base`）
+- CLI 模式，提供 `sessions`、`thread`、`stage`、`config`、`memory` 命令组
+- 托盘菜单快速打开最近的会话和 thread
+- 应用内更新（Tauri updater 产物），并以 GitHub Releases 检查作为兜底
+- 中英文界面、浅色 / 深色 / 跟随系统主题、HTTP(S) 代理设置
 
 ## 支持的数据来源
 
@@ -40,25 +65,45 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 - Gemini
   - `~/.gemini/tmp`
   - `~/.gemini/projects.json`
+- Astra Pi（Sessio 自身创建的会话）
+  - `~/.sessio/astra-pi-agent/sessions`
 
-索引数据库会写入：
+应用数据存放在 `~/.sessio` 下：
 
-- `~/.sessio/db-data/sessio-index.db`
+- `~/.sessio/db-data/sessio-index.db` — SQLite 索引
+- `~/.sessio/config.toml` — memory / 索引 / 代理 / 调试配置
+- `~/.sessio/bin/sessio` — 启动时创建的 CLI 软链接
+
+## Agent 运行时
+
+实时对话会以 ACP 子进程方式启动 agent，默认命令：
+
+- Astra Pi：内置 `astra-pi` sidecar
+- Codex：`npx -y @zed-industries/codex-acp@latest`
+- Claude Code：`npx -y @zed-industries/claude-code-acp@latest`
+- Gemini：`npx -y @google/gemini-cli@latest --experimental-acp`
+
+在设置 → Agents 中可以启用 / 禁用各 agent，并编辑模型目录、默认模型、推理强度和权限模式。Astra 编排器使用的 agent 也在同一设置区域单独配置。
 
 ## 技术栈
 
 - 前端：`React 19` + `TypeScript` + `Vite` + `Tailwind CSS`
 - 桌面壳：`Tauri v2`
-- 后端：`Rust`
+- 后端：`Rust`（edition 2021，`agent-client-protocol`）
 - 存储：`SQLite (rusqlite bundled)`
 
 后端大致分为几个模块：
 
-- `src-tauri/src/readers`：解析不同助手的原始会话文件
+- `src-tauri/src/agents/sources`：解析不同 agent 的原始会话文件
+- `src-tauri/src/agents/runtime`：通过 ACP 运行实时 agent 会话
+- `src-tauri/src/astra`：多智能体编排器
 - `src-tauri/src/store`：本地索引存储
 - `src-tauri/src/indexer`：全量重建与增量更新
 - `src-tauri/src/watch`：文件监听
 - `src-tauri/src/polling.rs`：轮询补偿刷新
+- `src-tauri/src/memory`：project memory 流水线（`qmd` 后端）
+- `src-tauri/src/turns.rs`：把原始事件归一化为可渲染的 turn
+- `src-tauri/src/cli.rs`：`sessio` CLI
 
 ## 开发环境
 
@@ -72,6 +117,14 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 
 ```bash
 pnpm install
+```
+
+准备 `astra-pi` sidecar 二进制（首次运行或打包桌面应用前需要执行一次）：
+
+```bash
+node scripts/prepare-astra-pi-sidecar.mjs <target-triple|all>
+# 例如在 Apple Silicon 上：
+node scripts/prepare-astra-pi-sidecar.mjs aarch64-apple-darwin
 ```
 
 启动前端开发服务器：
@@ -90,6 +143,18 @@ pnpm tauri dev
 
 ```bash
 pnpm typecheck
+```
+
+运行测试：
+
+```bash
+pnpm test
+```
+
+类型检查加测试：
+
+```bash
+pnpm check
 ```
 
 构建前端：
@@ -115,8 +180,8 @@ pnpm bundle
 仓库当前已包含多平台发布配置，GitHub Actions 会产出安装包和 updater 产物：
 
 - macOS 通用 `.dmg`，以及签名后的 `.app.tar.gz` updater 包
-- Linux `x86_64` AppImage 及 updater 签名
-- Linux `arm64` AppImage 及 updater 签名
+- Linux `x86_64` `.deb` / `.rpm` 及 updater 签名
+- Linux `arm64` `.deb` / `.rpm` 及 updater 签名
 - Windows `x86_64` NSIS 安装器及 updater 签名
 
 发布 workflow 需要在 GitHub Secrets 中配置 Tauri updater 私钥
@@ -137,22 +202,32 @@ Linux 构建通常需要先安装 Tauri/WebKitGTK 依赖，例如：
 
 你可以：
 
-- 在侧边栏按助手或项目浏览会话
-- 打开详情页查看消息内容
-- 对同一助手复制 `resume` 命令
-- 对其他助手复制 `cross` 命令，把上下文迁移过去继续对话
-- 从托盘菜单快速进入最近会话
+- 在侧边栏按项目浏览会话和 thread
+- 打开详情页查看消息、工具调用和 diff
+- 用任意已启用的 agent 发起新对话，或续写已有会话
+- 把会话 fork 给另一个 agent，在那边继续上下文
+- 创建 thread（workflow / teamwork / brainstorm / debate），交给 Astra 编排执行
+- 在 thread 页面跟踪 workflow 阶段和 issue
+- 从托盘菜单快速进入最近的会话和 thread
 
 Sessio 也可以作为 CLI 运行，例如：
 
 ```bash
 sessio sessions list --json
 sessio sessions messages --agent codex --session-id <id> --json
+sessio thread list --json
+sessio stage list --thread-id <id> --json
 sessio memory search --project "$PWD" <query> --json
 sessio memory resolve --record-id <id> --json
 ```
 
-`memory` 命令组还包括 `build`、`search`、`resolve`、`base`、`covered-by`、`status`、`sync` 和 `jobs`。
+命令组一览：
+
+- `sessions` — `list`、`messages`
+- `thread` — `list`、`show`
+- `stage` — `list`、`show`、`set-status`、`update`，以及 `issue add | list | set`
+- `config` — `show`、`memory set`
+- `memory` — `status`、`sync`、`build`、`search`、`resolve`、`covered-by`、`base`、`jobs`
 
 当原始会话文件被工具清理后，Sessio 仍会尽量保留索引元数据；如果正文文件已经不存在，详情页会提示该会话内容不可再读取。
 
@@ -163,7 +238,8 @@ sessio memory resolve --record-id <id> --json
 ├── src/                  # React 前端
 ├── src-tauri/            # Tauri + Rust 后端
 ├── docs/                 # 设计与实现文档
-├── scripts/              # 发布辅助脚本
+├── scripts/              # 发布与 sidecar 辅助脚本
+├── test/                 # 前端单元测试（vitest）
 ├── package.json
 └── README-cn.md
 ```
@@ -173,15 +249,15 @@ sessio memory resolve --record-id <id> --json
 本地版本发布脚本：
 
 ```bash
-pnpm release -- 0.3.3
+pnpm release -- 0.5.0
 # 或发布 beta / prerelease tag：
-pnpm release -- 0.4.0-beta.1
+pnpm release -- 0.5.0-beta.1
 ```
 
 或直接执行：
 
 ```bash
-./scripts/release.sh 0.3.3
+./scripts/release.sh 0.5.0
 ```
 
 这个脚本会：
@@ -193,13 +269,14 @@ pnpm release -- 0.4.0-beta.1
 - 创建本地 release commit 和 tag
 
 推送 tag 后会触发 GitHub Actions 发布流程。
-带 prerelease 后缀的 tag（例如 `v0.4.0-beta.1`）会发布为 GitHub prerelease，并且不会被标记为 latest release。
+带 prerelease 后缀的 tag（例如 `v0.5.0-beta.1`）会发布为 GitHub prerelease，并且不会被标记为 latest release。
 
 ## 已知边界
 
 - 目前只索引会话元数据，详情内容仍按需读取原始文件
-- 不同助手的原始日志格式差异较大，兼容逻辑依赖当前本地文件结构
-- 如果第三方工具未来调整目录结构或日志格式，reader 可能需要同步更新
+- 不同 agent 的原始日志格式差异较大，兼容逻辑依赖当前本地文件结构
+- 如果第三方工具未来调整目录结构或日志格式，对应的解析器可能需要同步更新
+- Codex / Claude Code / Gemini 的实时运行时通过 `npx` 拉取，需要本机具备对应 agent 的账号 / API 访问能力
 
 ## License
 
