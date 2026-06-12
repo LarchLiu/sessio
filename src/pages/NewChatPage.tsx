@@ -32,7 +32,8 @@ import {
   listProjectStages,
 } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
-import ChatComposer, { ScrambledProjectName } from "../components/ChatComposer";
+import ChatComposer, { ScrambledProjectName, resizeTextareaToContent } from "../components/ChatComposer";
+import ComposerCommandMenu, { type ComposerCommandItem } from "../components/ComposerCommandMenu";
 import type { InlineMenuSelectOption } from "../components/InlineMenuSelect";
 import InlineMenuSelect from "../components/InlineMenuSelect";
 import { RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
@@ -92,6 +93,9 @@ export default function NewChatPage({
   const [selectedAssistantIds, setSelectedAssistantIds] = useState<string[]>([]);
   const [participantDrafts, setParticipantDrafts] = useState<ParticipantDraft[]>([]);
   const [threadSending, setThreadSending] = useState(false);
+  const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
+  const [commandActiveIndex, setCommandActiveIndex] = useState(0);
+  const [commandDismissedFor, setCommandDismissedFor] = useState<string | null>(null);
   const project = projects.find((p) => p.key === projectKeyValue) ?? projects[0] ?? null;
   const workspacePath = project?.path ?? null;
   const projectId = project?.project.id ?? null;
@@ -186,6 +190,39 @@ export default function NewChatPage({
     [participantDrafts, runtimeAgents],
   );
 
+  const command = useMemo(() => parseComposerCommand(composer.text), [composer.text]);
+  const commandItems: ComposerCommandItem[] = useMemo(() => {
+    if (!command) return [];
+    if (command.kind === "thread") {
+      return THREAD_MODES.filter((kind) => kind.startsWith(command.query.toLowerCase())).map((kind) => ({
+        key: kind,
+        label: t(`thread.kind.${kind}`),
+        description: t(`new_chat.command.thread.${kind}`),
+        icon: threadKindIcon(kind, "h-4 w-4 text-ink/55"),
+      }));
+    }
+    const query = command.query.toLowerCase();
+    return assistants
+      .filter((assistant) => assistant.projectId === projectId && assistant.enabled)
+      .filter((assistant) => assistant.name.toLowerCase().includes(query))
+      .map((assistant) => ({
+        key: assistant.id,
+        label: assistant.name,
+        description: AGENT_LABEL[normalizeAssistantAgent(assistant.agent.id)],
+        icon: assistantRobotIcon(assistant.color),
+      }));
+  }, [assistants, command, projectId, t]);
+  const commandMenuOpen =
+    command !== null && commandDismissedFor !== command.raw && (commandItems.length > 0 || command.query.length === 0);
+
+  useEffect(() => {
+    setCommandActiveIndex(0);
+  }, [command?.kind, command?.query]);
+
+  useEffect(() => {
+    if (commandActiveIndex >= commandItems.length) setCommandActiveIndex(0);
+  }, [commandActiveIndex, commandItems.length]);
+
   useEffect(() => {
     if (initialProjectKey && projects.some((p) => p.key === initialProjectKey)) {
       setProjectKeyValue(initialProjectKey);
@@ -265,6 +302,7 @@ export default function NewChatPage({
       await composer.runStartSession(prompt, {
         workspacePath,
         projectName: project.label,
+        extraContext: selectedAssistant?.systemPrompt?.trim() || undefined,
       });
       return;
     }
@@ -321,6 +359,65 @@ export default function NewChatPage({
     }
   };
 
+  const handleCommandSelect = (key: string) => {
+    if (!command) return;
+    if (command.kind === "thread") {
+      const kind = key as ThreadKind;
+      // 选择 thread kind 后清掉 #slug，由底部 chat mode 选择器展示
+      setMode(kind);
+      setSelectedAssistant(null);
+      composer.setText(command.rest);
+    } else {
+      const assistant = assistants.find((item) => item.id === key);
+      if (!assistant) return;
+      setMode("chat");
+      setSelectedAssistant(assistant);
+      // 选中 assistant 后聊天框 agent 直接切到 assistant 绑定的 agent
+      composer.applyAgentSelection({
+        agent: normalizeAssistantAgent(assistant.agent.id),
+        model: assistant.agent.model,
+        effort: assistant.agent.effort,
+        permissionMode: assistant.agent.mode,
+      });
+      composer.setText(command.rest);
+    }
+    setCommandDismissedFor(null);
+    window.requestAnimationFrame(() => {
+      const el = composer.textareaRef.current;
+      if (!el) return;
+      el.focus();
+      resizeTextareaToContent(el);
+    });
+  };
+
+  const handleTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (!commandMenuOpen || commandItems.length === 0) return false;
+    if (event.nativeEvent.isComposing) return false;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setCommandActiveIndex((index) => (index + 1) % commandItems.length);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setCommandActiveIndex((index) => (index - 1 + commandItems.length) % commandItems.length);
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      const item = commandItems[commandActiveIndex];
+      if (!item) return false;
+      event.preventDefault();
+      handleCommandSelect(item.key);
+      return true;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setCommandDismissedFor(command?.raw ?? null);
+      return true;
+    }
+    return false;
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-surface-panel">
       <div className="flex min-h-0 flex-1 items-center justify-center px-6 pb-16">
@@ -335,11 +432,20 @@ export default function NewChatPage({
                 : composer.canSendWithWorkspace(workspacePath) && !threadSending
             }
             onSend={() => void handleSend()}
+            onTextareaKeyDown={handleTextareaKeyDown}
             sendButtonVariant={threadMode ? "astra" : "chat"}
             sendButtonLabel={threadMode ? threadValidationError ?? createThreadLabel(mode, t) : undefined}
             sendButtonBusy={threadMode ? threadSending || composer.sending : undefined}
             runtimeControlsDisabled={threadMode}
             placeholder={threadMode ? t("new_chat.thread_placeholder") : undefined}
+            modeActions={
+              !threadMode && selectedAssistant ? (
+                <AssistantModeChip
+                  assistant={selectedAssistant}
+                  onRemove={() => setSelectedAssistant(null)}
+                />
+              ) : undefined
+            }
             bottomRow={
               <BottomRow>
                 <RuntimeMenuSelect
@@ -422,6 +528,18 @@ export default function NewChatPage({
                 }}
               />
             </div>
+          )}
+          {commandMenuOpen && command && composer.textareaRef.current && (
+            <ComposerCommandMenu
+              anchor={composer.textareaRef.current}
+              items={commandItems}
+              activeIndex={commandActiveIndex}
+              header={command.kind === "thread" ? t("new_chat.command.thread_header") : t("new_chat.command.assistant_header")}
+              emptyText={command.kind === "thread" ? t("new_chat.command.no_thread") : t("new_chat.command.no_assistant")}
+              onActiveIndexChange={setCommandActiveIndex}
+              onSelect={handleCommandSelect}
+              onClose={() => setCommandDismissedFor(command.raw)}
+            />
           )}
         </div>
       </div>
@@ -696,6 +814,61 @@ function AssistantSelectChip({
       </span>
     </button>
   );
+}
+
+function AssistantModeChip({
+  assistant,
+  onRemove,
+}: {
+  assistant: AssistantInfo;
+  onRemove: () => void;
+}) {
+  return (
+    <span className="inline-flex h-7 max-w-[200px] items-center gap-1.5 rounded-md border border-ink/[0.12] bg-ink/[0.048] px-1.5 text-caption text-ink/70">
+      {assistantRobotIcon(assistant.color)}
+      <span className="min-w-0 truncate">{assistant.name}</span>
+      <Tooltip content="Remove" placement="top">
+        <button
+          type="button"
+          onClick={onRemove}
+          className="shrink-0 rounded p-0.5 text-ink/35 transition hover:bg-ink/6 hover:text-ink/70"
+          aria-label="Remove assistant"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
+    </span>
+  );
+}
+
+type ComposerCommand = {
+  kind: "thread" | "assistant";
+  query: string;
+  rest: string;
+  raw: string;
+};
+
+function parseComposerCommand(text: string): ComposerCommand | null {
+  const trigger = text[0];
+  if (trigger !== "#" && trigger !== "@") return null;
+  const kind = trigger === "#" ? "thread" : "assistant";
+  const spaceIndex = text.indexOf(" ");
+  const newlineIndex = text.indexOf("\n");
+  const separators = [spaceIndex, newlineIndex].filter((index) => index >= 0);
+  if (separators.length === 0) {
+    return { kind, query: text.slice(1), rest: "", raw: text };
+  }
+  const splitIndex = Math.min(...separators);
+  return {
+    kind,
+    query: text.slice(1, splitIndex),
+    rest: text.slice(splitIndex + 1),
+    raw: text,
+  };
+}
+
+function normalizeAssistantAgent(id: string): Agent {
+  return id === "astra-pi" || id === "codex" || id === "claude" || id === "gemini" ? id : "codex";
 }
 
 function threadKindIcon(kind: ThreadKind, className: string) {

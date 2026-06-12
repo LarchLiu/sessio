@@ -39,6 +39,7 @@ export default function ChatComposer({
   runtimeControlsDisabled = false,
   canSend,
   onSend,
+  onTextareaKeyDown,
 }: {
   composer: ChatComposerController;
   title?: ReactNode;
@@ -54,6 +55,7 @@ export default function ChatComposer({
   runtimeControlsDisabled?: boolean;
   canSend?: boolean;
   onSend: () => void;
+  onTextareaKeyDown?: (event: import("react").KeyboardEvent<HTMLTextAreaElement>) => boolean;
 }) {
   const { t } = useI18n();
   const [astraSweep, setAstraSweep] = useState(false);
@@ -124,6 +126,7 @@ export default function ChatComposer({
           }}
           onInput={(event) => resizeTextareaToContent(event.currentTarget)}
           onKeyDown={(event) => {
+            if (onTextareaKeyDown?.(event)) return;
             if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
               return;
             }

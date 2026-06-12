@@ -84,6 +84,12 @@ export interface ChatComposerController {
   permissionOptions: ReturnType<typeof runtimePermissionModeOptions>;
   handleAgentModelChange: (nextValue: string) => Promise<void>;
   handlePermissionModeChange: (nextValue: string) => Promise<void>;
+  applyAgentSelection: (selection: {
+    agent: Agent;
+    model?: string;
+    effort?: string;
+    permissionMode?: string;
+  }) => void;
   runStartSession: (prompt: string, options: ChatComposerStartOptions) => Promise<boolean>;
 }
 
@@ -288,6 +294,34 @@ export function useChatComposer({
     }
   };
 
+  const applyAgentSelection = (selection: {
+    agent: Agent;
+    model?: string;
+    effort?: string;
+    permissionMode?: string;
+  }) => {
+    const targetRuntimeAgent =
+      runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === selection.agent) ?? null;
+    if (!targetRuntimeAgent) return;
+    const nextModel =
+      selection.model && targetRuntimeAgent.models.some((option) => option.value === selection.model && option.enabled)
+        ? selection.model
+        : initialRuntimeModel(targetRuntimeAgent);
+    const nextEffort =
+      selection.effort && targetRuntimeAgent.efforts.some((option) => option.value === selection.effort)
+        ? selection.effort
+        : initialRuntimeEffort(targetRuntimeAgent);
+    const nextPermissionMode =
+      selection.permissionMode &&
+      targetRuntimeAgent.permissionModes.some((option) => option.value === selection.permissionMode)
+        ? selection.permissionMode
+        : initialRuntimePermission(targetRuntimeAgent);
+    setAgent(selection.agent);
+    setModel(nextModel);
+    setEffort(nextEffort);
+    setPermissionMode(nextPermissionMode);
+  };
+
   const runStartSession = async (
     promptValue: string,
     options: ChatComposerStartOptions,
@@ -387,12 +421,17 @@ export function useChatComposer({
     permissionOptions,
     handleAgentModelChange,
     handlePermissionModeChange,
+    applyAgentSelection,
     runStartSession,
   };
 }
 
 function initialRuntimePermission(agent: RuntimeAgentMetadata | null): string {
   return agent?.permissionMode ?? agent?.permissionModes[0]?.value ?? "";
+}
+
+function initialRuntimeModel(agent: RuntimeAgentMetadata | null): string {
+  return agent?.model ?? agent?.models.find((option) => option.enabled)?.value ?? "";
 }
 
 function runtimeSessionOptions(model: string, permissionMode: string, effort = ""): Record<string, unknown> {
