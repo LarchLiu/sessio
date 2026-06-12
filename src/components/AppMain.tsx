@@ -1,5 +1,5 @@
-import { useState, type Dispatch, type SetStateAction } from "react";
-import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo, StageInfo, ThreadInfo } from "../api";
+import { type Dispatch, type SetStateAction } from "react";
+import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo } from "../api";
 import type { ActiveMessageMeta } from "../pages/ChatPage";
 import ChatPage from "../pages/ChatPage";
 import NewChatPage from "../pages/NewChatPage";
@@ -7,7 +7,6 @@ import { ProjectWorkbenchPage } from "../pages/ProjectPage";
 import ThreadPage from "../pages/ThreadPage";
 import ThreadChatPage from "../pages/ThreadChatPage";
 import ThreadMultiSessionChatPage from "../pages/ThreadMultiSessionChatPage";
-import ThreadNewChatPage from "../pages/ThreadNewChatPage";
 import { projectFilterKey, type Filter } from "../appUtils";
 import type { DetailMode, PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
 import type {
@@ -83,25 +82,11 @@ export default function AppMain({
   onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
   onError: (error: string | null) => void;
 }) {
-  const [newChatSnapshot, setNewChatSnapshot] = useState<{
-    thread: ThreadInfo;
-    stage: StageInfo | null;
-  } | null>(null);
-
   const addPendingSession = (pending: PendingNewChatSession) => {
-    setNewChatSnapshot(null);
     setPendingNewChats((prev) => ({
       ...prev,
       [pending.sessioRuntimeSessionId]: pending,
     }));
-  };
-
-  const openNewChatForStage = (thread: ThreadInfo, stage: StageInfo | null) => {
-    setNewChatSnapshot({ thread, stage });
-    setSelectedProject(null);
-    setSelectedThread(null);
-    setSelected(null);
-    setDetailMode("chat");
   };
 
   const projectWorkbenchProps = (project: ProjectInfo) => ({
@@ -116,28 +101,16 @@ export default function AppMain({
       void refreshSessions();
     },
     onSelectSession: (session: SessionInfo) => {
-      setNewChatSnapshot(null);
       setSelectedProject(null);
       setSelectedThread(null);
       setSelected(session);
       setDetailMode("chat");
     },
     onSelectThreadChatSession: (session: SessionInfo) => {
-      setNewChatSnapshot(null);
       setSelectedProject(null);
       setSelectedThread(null);
       setSelected(session);
       setDetailMode("threadChat");
-    },
-    onNewThreadChat: (thread: ThreadInfo) => {
-      const projectGroup = projectGroups.find((group) => group.project.id === project.id);
-      setNewChatSnapshot({ thread, stage: null });
-      setSelectedProject(null);
-      setSelectedThread(null);
-      setSelected(null);
-      setDetailMode("chat");
-      setNewChatProjectKey(projectGroup?.key ?? projectFilterKey(project));
-      setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
     },
     onError,
   });
@@ -164,7 +137,6 @@ export default function AppMain({
             project={activeProject}
             threadId={selectedThreadId}
             onSelectSession={projectWorkbenchProps(activeProject).onSelectThreadChatSession}
-            onNewStageChat={openNewChatForStage}
             onOpenMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
             onError={onError}
           />
@@ -176,22 +148,6 @@ export default function AppMain({
   }
 
   if (!selected) {
-    if (newChatSnapshot) {
-      return (
-        <ThreadNewChatPage
-          projects={projectGroups}
-          initialProjectKey={newChatProjectKey}
-          snapshotContext={newChatSnapshot}
-          runtimeAgents={runtimeAgents}
-          lastRuntimeAgentSelection={lastRuntimeAgentSelection}
-          rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
-          liveState={liveState}
-          dispatchLiveEvent={dispatchLiveEvent}
-          onError={onError}
-          onPendingSession={addPendingSession}
-        />
-      );
-    }
     return (
       <NewChatPage
         projects={projectGroups}
@@ -204,7 +160,6 @@ export default function AppMain({
         onError={onError}
         onPendingSession={addPendingSession}
         onThreadCreated={(projectGroup, thread) => {
-          setNewChatSnapshot(null);
           setSelected(null);
           setSelectedProject(null);
           setSelectedThread({

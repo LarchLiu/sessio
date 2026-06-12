@@ -282,12 +282,10 @@ function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Reco
 
 export function ProjectWorkbenchPage({
   project,
-  onNewThreadChat,
   onSelectThreadChatSession,
   onError,
 }: {
   project: ProjectInfo;
-  onNewThreadChat: (thread: ThreadInfo) => void;
   onSelectThreadChatSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
 }) {
@@ -413,7 +411,6 @@ export function ProjectWorkbenchPage({
                 )
               }
               onSelectThreadChatSession={onSelectThreadChatSession}
-              onNewThreadChat={onNewThreadChat}
               onError={onError}
             />
           )}
@@ -505,7 +502,6 @@ function ThreadProcessTemplatePanel({
   onStageUpdated,
   onStageDeleted,
   onSelectThreadChatSession,
-  onNewThreadChat,
   onError,
 }: {
   project: ProjectInfo;
@@ -521,7 +517,6 @@ function ThreadProcessTemplatePanel({
   onStageUpdated: (stage: StageInfo) => void;
   onStageDeleted: (threadId: string, stageId: string) => void;
   onSelectThreadChatSession: (session: SessionInfo) => void;
-  onNewThreadChat: (thread: ThreadInfo) => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
@@ -868,7 +863,6 @@ function ThreadProcessTemplatePanel({
                   setSelectedThreadChatThreadId(threadId);
                   setPanelView("thread-chats");
                 }}
-                onNewThreadChat={onNewThreadChat}
                 onError={onError}
               />
             ))}
@@ -1079,7 +1073,6 @@ function ThreadCard({
   onStageUpdated,
   onStageDeleted,
   onShowSessions,
-  onNewThreadChat,
   onError,
 }: {
   thread: ThreadInfo;
@@ -1092,7 +1085,6 @@ function ThreadCard({
   onStageUpdated: (stage: StageInfo) => void;
   onStageDeleted: (threadId: string, stageId: string) => void;
   onShowSessions: (threadId: string) => void;
-  onNewThreadChat: (thread: ThreadInfo) => void;
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
@@ -1371,11 +1363,6 @@ function ThreadCard({
             <ConfirmTooltip>
               {(confirm) => (
                 <div className="flex shrink-0 items-center gap-1">
-                  <Tooltip content={t("thread.new_chat")} placement="top">
-                    <button type="button" onClick={() => onNewThreadChat(thread)} className="rounded p-1.5 text-ink/35 hover:bg-ink/5 hover:text-ink/70">
-                      <HashtagChatLinearIcon className="h-3.5 w-3.5" />
-                    </button>
-                  </Tooltip>
                   <Tooltip content={t("thread.edit")} placement="top">
                     <button type="button" onClick={() => setEditing(true)} className="rounded p-1.5 text-ink/35 hover:bg-ink/5 hover:text-ink/70"><Pencil className="h-3.5 w-3.5" /></button>
                   </Tooltip>

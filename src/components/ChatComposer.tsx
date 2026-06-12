@@ -31,6 +31,7 @@ export default function ChatComposer({
   modeActions,
   sendActions,
   setupPanel,
+  placeholder,
   sendButtonVariant = "chat",
   sendButtonLabel,
   sendButtonBusy,
@@ -45,6 +46,7 @@ export default function ChatComposer({
   modeActions?: ReactNode;
   sendActions?: ReactNode;
   setupPanel?: ReactNode;
+  placeholder?: string;
   sendButtonVariant?: "chat" | "astra";
   sendButtonLabel?: string;
   sendButtonBusy?: boolean;
@@ -114,7 +116,7 @@ export default function ChatComposer({
         <textarea
           ref={composer.textareaRef}
           value={composer.text}
-          placeholder={t("new_chat.placeholder")}
+          placeholder={placeholder ?? t("new_chat.placeholder")}
           rows={2}
           onChange={(event) => {
             resizeTextareaToContent(event.currentTarget);

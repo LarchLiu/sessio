@@ -3,7 +3,6 @@ import {
   Brain,
   Check,
   Folder,
-  GitBranch,
   GripVertical,
   MessageSquare,
   Swords,
@@ -33,7 +32,7 @@ import {
   listProjectStages,
 } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
-import ChatComposer, { NewChatMenuButton, ScrambledProjectName } from "../components/ChatComposer";
+import ChatComposer, { ScrambledProjectName } from "../components/ChatComposer";
 import type { InlineMenuSelectOption } from "../components/InlineMenuSelect";
 import InlineMenuSelect from "../components/InlineMenuSelect";
 import { RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
@@ -340,6 +339,7 @@ export default function NewChatPage({
             sendButtonLabel={threadMode ? threadValidationError ?? createThreadLabel(mode, t) : undefined}
             sendButtonBusy={threadMode ? threadSending || composer.sending : undefined}
             runtimeControlsDisabled={threadMode}
+            placeholder={threadMode ? t("new_chat.thread_placeholder") : undefined}
             bottomRow={
               <BottomRow>
                 <RuntimeMenuSelect
@@ -366,7 +366,6 @@ export default function NewChatPage({
                     minMenuWidth={180}
                   />
                 </div>
-                <NewChatMenuButton icon={GitBranch} label="main" text />
               </BottomRow>
             }
           />
