@@ -24,7 +24,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
-agent-client-protocol = { version = "0.12.1", features = ["unstable_session_fork"] }
+agent-client-protocol = { version = "0.14.0", features = ["unstable_session_fork"] }
 walkdir = "2.5"
 sha2 = "0.10"
 hex = "0.4"
