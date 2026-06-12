@@ -492,11 +492,19 @@ function AstraRunDiagnostics({
 
   return (
     <div className="rounded-md border border-dashed border-card-border/[0.12] px-2.5 py-2">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <span className="text-caption font-medium text-ink/55">{t("astra.diagnostics")}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-caption font-medium text-ink/55">{t("astra.diagnostics")}</span>
+        {plannerSession && (
+          <ThreadChatDetailButton session={plannerSession} onSelectSession={onSelectSession} />
+        )}
+      </div>
+      {(run.terminalReason || run.lastErrorCode) && (
+        <div className="mt-1 flex min-w-0 flex-wrap items-start gap-1.5">
           {run.terminalReason && (
-            <span title={run.terminalReason} className="max-w-full truncate rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta text-ink/45">
+            <span
+              title={run.terminalReason}
+              className="min-w-0 max-w-full whitespace-normal break-words rounded bg-ink/[0.06] px-1.5 py-0.5 text-meta leading-relaxed text-ink/45"
+            >
               {t("astra.terminal_reason", { value: run.terminalReason })}
             </span>
           )}
@@ -506,10 +514,7 @@ function AstraRunDiagnostics({
             </span>
           )}
         </div>
-        {plannerSession && (
-          <ThreadChatDetailButton session={plannerSession} onSelectSession={onSelectSession} />
-        )}
-      </div>
+      )}
       {run.lastErrorMessage && (
         <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-status-error">
           {run.lastErrorMessage}
