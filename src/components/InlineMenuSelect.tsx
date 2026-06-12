@@ -201,7 +201,11 @@ export default function InlineMenuSelect({
           className
         }
       >
-        {selectedIcon && <span className="shrink-0">{selectedIcon}</span>}
+        {selectedIcon && (
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+            {selectedIcon}
+          </span>
+        )}
         <span className="min-w-0 flex-1 truncate">
           {selected?.label ?? placeholder ?? ""}
           {selected?.suffix && (
@@ -251,7 +255,9 @@ export default function InlineMenuSelect({
                     {section.group && (
                       <div className="flex items-center gap-2 px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-normal text-ink/45">
                         {section.group.icon && (
-                          <span className="shrink-0">{section.group.icon}</span>
+                          <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                            {section.group.icon}
+                          </span>
                         )}
                         <span className="min-w-0 flex-1 truncate">
                           {section.group.label}
@@ -291,7 +297,11 @@ export default function InlineMenuSelect({
                             (option.disabled ? " opacity-40 pointer-events-none" : "")
                           }
                         >
-                          {menuIcon && <span className="shrink-0">{menuIcon}</span>}
+                          {menuIcon && (
+                            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                              {menuIcon}
+                            </span>
+                          )}
                           <span className="min-w-0 flex-1">
                             <span className="block truncate">{option.label}</span>
                             {option.description && (

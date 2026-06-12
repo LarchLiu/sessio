@@ -611,6 +611,7 @@ pub struct ThreadIndexItemInfo {
     pub thread_id: String,
     pub project_id: String,
     pub goal: String,
+    pub kind: ThreadKind,
     pub created_at: i64,
     pub updated_at: i64,
     pub time: i64,

@@ -38,7 +38,7 @@ import InlineMenuSelect from "../components/InlineMenuSelect";
 import { RuntimeMenuSelect } from "../components/RuntimeMenuSelect";
 import StageSelectChip from "../components/StageSelectChip";
 import Tooltip from "../components/Tooltip";
-import { Robot3LineIcon } from "../components/IconifyIcon";
+import { PeopleTeam24RegularIcon, Robot3LineIcon } from "../components/IconifyIcon";
 import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession, ProjectGroup } from "../navigation";
@@ -703,7 +703,7 @@ function threadKindIcon(kind: ThreadKind, className: string) {
     case "process":
       return <Workflow className={className} />;
     case "teamwork":
-      return <Robot3LineIcon className={className} />;
+      return <PeopleTeam24RegularIcon className={className} />;
     case "brainstorm":
       return <Brain className={className} />;
     case "debate":

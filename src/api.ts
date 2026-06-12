@@ -276,6 +276,7 @@ export interface ThreadIndexItemInfo {
   threadId: string;
   projectId: string;
   goal: string;
+  kind: ThreadKind;
   createdAt: number;
   updatedAt: number;
   time: number;

@@ -2554,13 +2554,15 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
 }
 
 fn thread_index_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadIndexItemInfo> {
+    let kind_raw: String = row.get(3)?;
     Ok(ThreadIndexItemInfo {
         thread_id: row.get(0)?,
         project_id: row.get(1)?,
         goal: row.get(2)?,
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
-        time: row.get(5)?,
+        kind: ThreadKind::from_db_str(&kind_raw).unwrap_or_default(),
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        time: row.get(6)?,
         session_keys: Vec::new(),
     })
 }
@@ -5928,7 +5930,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "WITH base AS (
-                SELECT t.id, t.project_id, t.goal, t.created_at, t.updated_at
+                SELECT t.id, t.project_id, t.goal, t.kind, t.created_at, t.updated_at
                 FROM threads t
                 INNER JOIN projects p ON p.id = t.project_id AND p.archived = 0
                 WHERE (?1 IS NULL OR t.project_id = ?1)
@@ -5954,10 +5956,10 @@ impl SessionStore for SqliteStore {
                 UNION ALL SELECT b.id, ars.created_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id INNER JOIN astra_run_sessions ars ON ars.run_id = ar.run_id
                 UNION ALL SELECT b.id, ars.updated_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id INNER JOIN astra_run_sessions ars ON ars.run_id = ar.run_id
              )
-             SELECT b.id, b.project_id, b.goal, b.created_at, b.updated_at, MAX(tt.time) AS time
+             SELECT b.id, b.project_id, b.goal, b.kind, b.created_at, b.updated_at, MAX(tt.time) AS time
              FROM base b
              INNER JOIN thread_times tt ON tt.thread_id = b.id
-             GROUP BY b.id, b.project_id, b.goal, b.created_at, b.updated_at
+             GROUP BY b.id, b.project_id, b.goal, b.kind, b.created_at, b.updated_at
              ORDER BY time DESC, b.updated_at DESC, b.created_at DESC",
         )?;
         let rows = stmt.query_map(params![project_id], thread_index_from_row)?;
@@ -11824,6 +11826,7 @@ mod migration_tests {
             .unwrap();
         assert_eq!(item.goal, thread.goal);
         assert_eq!(item.project_id, project.id);
+        assert_eq!(item.kind, thread.kind);
         assert!(item.session_keys.is_empty());
         assert!(item.time >= thread.updated_at.max(thread.created_at));
         assert!(store

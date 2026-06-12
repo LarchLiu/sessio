@@ -59,6 +59,7 @@
     "shiki": "^4.1.0"
   },
   "devDependencies": {
+    "@iconify-json/fluent": "^1.2.49",
     "@iconify-json/material-symbols": "^1.2.76",
     "@iconify-json/mynaui": "^1.2.17",
     "@iconify-json/ri": "^1.2.10",

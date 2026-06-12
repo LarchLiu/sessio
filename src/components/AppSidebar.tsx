@@ -2,6 +2,7 @@ import { type MouseEvent, type ReactNode, useMemo, useRef, useState } from "reac
 import { open } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import {
+  Brain,
   ChevronDown,
   CircleAlert,
   Download,
@@ -16,6 +17,8 @@ import {
   PanelLeftClose,
   Settings,
   SquarePen,
+  Swords,
+  Workflow,
   X,
 } from "lucide-react";
 import {
@@ -28,6 +31,7 @@ import {
   listProcessTemplates,
   type ProjectStageInfo,
   type ThreadIndexItemInfo,
+  type ThreadKind,
 } from "../api";
 import { useI18n } from "../i18n";
 import type { ProjectGroup } from "../navigation";
@@ -38,7 +42,7 @@ import {
 import { sessionDisplayTitle } from "../appUtils";
 import { useUpdateCheck } from "../updater";
 import { AgentGlyph } from "./AgentIcon";
-import { HashIcon } from "./IconifyIcon";
+import { HashIcon, PeopleTeam24RegularIcon } from "./IconifyIcon";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
 import ScrollArea from "./ScrollArea";
@@ -64,6 +68,7 @@ type SidebarListEntry = SidebarSessionEntry | SidebarThreadChatEntry;
 type SidebarThreadRef = {
   id: string;
   goal: string;
+  kind: ThreadKind;
   createdAt: number;
   updatedAt: number;
 };
@@ -893,7 +898,7 @@ function SidebarThreadItem({
         (active ? "bg-ink/10 text-ink" : "text-ink/65 hover:bg-ink/5 hover:text-ink")
       }
     >
-      <SidebarThreadStatusIcon />
+      <SidebarThreadStatusIcon kind={thread.kind} />
       <span className="min-w-0 flex-1 truncate text-body-sm leading-snug">
         {thread.goal || <span className="text-ink/30">{t("thread.goal_placeholder")}</span>}
       </span>
@@ -938,17 +943,34 @@ function threadRefFromIndexItem(item: ThreadIndexItemInfo): SidebarThreadRef {
   return {
     id: item.threadId,
     goal: item.goal,
+    kind: item.kind,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
 }
 
-function SidebarThreadStatusIcon() {
+function SidebarThreadStatusIcon({ kind }: { kind: ThreadKind }) {
+  const Icon = threadKindSidebarIcon(kind);
   return (
     <span className="flex h-4 w-4 shrink-0 items-center justify-center text-ink">
-      <MessagesSquare className="h-3.5 w-3.5" />
+      <Icon className="h-3.5 w-3.5" />
     </span>
   );
+}
+
+function threadKindSidebarIcon(kind: ThreadKind) {
+  switch (kind) {
+    case "process":
+      return Workflow;
+    case "teamwork":
+      return PeopleTeam24RegularIcon;
+    case "brainstorm":
+      return Brain;
+    case "debate":
+      return Swords;
+    default:
+      return MessagesSquare;
+  }
 }
 
 function SidebarSessionStatus({

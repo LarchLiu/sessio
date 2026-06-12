@@ -35,6 +35,10 @@ export function Robot3LineIcon({ className, style }: IconifyIconComponentProps) 
   return <IconifyIcon iconClassName="icon-[ri--robot-3-line]" className={className} style={style} />;
 }
 
+export function PeopleTeam24RegularIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[fluent--people-team-24-regular]" className={className} style={style} />;
+}
+
 export function Robot3FillIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[ri--robot-3-fill]" className={className} style={style} />;
 }
