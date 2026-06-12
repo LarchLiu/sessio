@@ -370,7 +370,7 @@ export default function NewChatPage({
             }
           />
           {threadMode && (
-            <div className="absolute left-1/2 top-full z-20 w-[calc(100%-32px)] -translate-x-1/2 overflow-hidden rounded-b-xl border border-t-0 border-ink/10 bg-ink/[0.035] px-3 py-2 shadow-[inset_0_1px_0_rgb(var(--color-ink)/0.03)]">
+            <div className="absolute left-1/2 top-full z-20 w-[calc(100%-32px)] -translate-x-1/2 overflow-hidden rounded-b-xl border border-t-0 border-ink/[0.07] bg-ink/[0.03] px-3 py-2 shadow-[inset_0_1px_0_rgb(var(--color-ink)/0.02)]">
               <ThreadSetupPanel
                 mode={mode}
                 orderedStages={orderedStages}
@@ -608,7 +608,7 @@ function ParticipantChip({
 }) {
   const modelLabel = modelDisplayName(runtimeAgent, participant.model);
   return (
-    <span className="inline-flex h-7 max-w-[260px] items-center gap-1.5 rounded-md border border-ink/10 bg-surface-panel px-1.5 text-caption text-ink/65">
+    <span className="inline-flex h-7 max-w-[260px] items-center gap-1.5 rounded-md border border-ink/[0.08] bg-surface-panel px-1.5 text-caption text-ink/65">
       <span className="text-ink/35 tabular-nums">{index + 1}</span>
       <AgentGlyph agent={participant.agent} className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0 truncate">
@@ -685,13 +685,13 @@ function AssistantSelectChip({
       className={
         "inline-flex h-7 max-w-[180px] items-center gap-1.5 rounded-md border px-1.5 text-caption transition duration-150 " +
         (selected
-          ? "border-ink/18 bg-ink/[0.055] text-ink/70"
-          : "border-ink/10 bg-surface-panel text-ink/45 hover:bg-ink/5 hover:text-ink/65")
+          ? "border-ink/[0.14] bg-ink/[0.048] text-ink/70"
+          : "border-ink/[0.08] bg-surface-panel text-ink/45 hover:bg-ink/[0.04] hover:text-ink/65")
       }
     >
       {assistant.icon}
       <span className="min-w-0 truncate">{assistant.label}</span>
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/50 bg-ink/[0.045] text-ink/75">
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/[0.35] bg-ink/[0.04] text-ink/75">
         {selected && <Check className="h-3 w-3" />}
       </span>
     </button>

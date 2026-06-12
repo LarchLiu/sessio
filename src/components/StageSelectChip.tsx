@@ -32,14 +32,14 @@ const StageSelectChip = forwardRef<HTMLDivElement, StageSelectChipProps>(functio
   const label = projectStageLabel(stage, t);
   const stateClass =
     state === "dragging"
-      ? "z-20 cursor-grabbing border-ink/30 bg-surface-panel shadow-lg"
+      ? "z-20 cursor-grabbing border-ink/[0.24] bg-surface-panel shadow-lg"
       : state === "drop-target"
-        ? "border-ink/35 bg-ink/12 shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.28)]"
+        ? "border-ink/[0.26] bg-ink/[0.095] shadow-[inset_2px_0_0_rgb(var(--color-fg)/0.24)]"
         : !selectable
-          ? "cursor-not-allowed border-ink/10 bg-surface-panel text-ink/25 opacity-55"
+          ? "cursor-not-allowed border-ink/[0.08] bg-surface-panel text-ink/25 opacity-55"
           : selected
-            ? "border-ink/18 bg-ink/[0.055] text-ink/70"
-            : "border-ink/10 bg-surface-panel text-ink/45 hover:bg-ink/5 hover:text-ink/65";
+            ? "border-ink/[0.14] bg-ink/[0.048] text-ink/70"
+            : "border-ink/[0.08] bg-surface-panel text-ink/45 hover:bg-ink/[0.04] hover:text-ink/65";
 
   return (
     <div
@@ -59,7 +59,7 @@ const StageSelectChip = forwardRef<HTMLDivElement, StageSelectChipProps>(functio
       >
         {projectStageIcon(stage)}
         <span className="max-w-[140px] truncate">{label}</span>
-        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/50 bg-ink/[0.045] text-ink/75">
+        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border border-ink/[0.35] bg-ink/[0.04] text-ink/75">
           {selected && <Check className="h-3 w-3" />}
         </span>
       </button>
