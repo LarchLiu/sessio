@@ -18,8 +18,8 @@ use crate::astra::brainstorm_facilitator::{
 use crate::astra::debate_backend::DebateBackend;
 use crate::astra::debate_judge::{DebateJudge, HeuristicJudge, RuntimeAgentJudge};
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
-use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
+use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
 use crate::models::{PlanRoundMode, PlanTaskStatus, StageStatus, ThreadInfo, ThreadKind};
 use crate::store::SessionStore;
 
@@ -59,7 +59,7 @@ impl AstraService {
             .store
             .get_thread_work_state(&current_run.thread_id)?;
         if let Some((reason, code, message)) = dedicated_backend_required_error(&thread) {
-            let _ = self.error_run(&current_run.run_id, reason, code, message)?;
+            self.error_run(&current_run.run_id, reason, code, message)?;
             return Ok(RustNativeWorkerOutcome::Claimed);
         }
         let mut dispatch_batch = Vec::new();
@@ -83,7 +83,7 @@ impl AstraService {
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
                 if round_index >= round_limit {
-                    let _ = self.error_run(
+                    self.error_run(
                         run_id,
                         "round_limit_reached",
                         "round_limit_reached",
@@ -118,7 +118,7 @@ impl AstraService {
                 ) {
                     Ok(orchestration) => orchestration,
                     Err(error) => {
-                        let _ = self.error_run(
+                        self.error_run(
                             &current_run.run_id,
                             "orchestrator_backend_failure",
                             error.code,
@@ -145,7 +145,7 @@ impl AstraService {
                 }
                 completions.clear();
                 if dispatch_batch.is_empty() {
-                    let _ = self.error_run(
+                    self.error_run(
                         &current_run.run_id,
                         "orchestrator_missing_next_tasks",
                         "orchestrator_missing_next_tasks",
@@ -163,7 +163,7 @@ impl AstraService {
             let results = match self.dispatch_task_batch_and_wait(&current_run, &dispatch_batch) {
                 Ok(results) => results,
                 Err(error) => {
-                    let _ = self.fail_run(&current_run.run_id, error.to_string())?;
+                    self.fail_run(&current_run.run_id, error.to_string())?;
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
             };
@@ -330,7 +330,9 @@ impl AstraService {
                     },
                 ))
             } else {
-                log::info!("[astra:orchestrator:backend] using debate_backend with heuristic judge");
+                log::info!(
+                    "[astra:orchestrator:backend] using debate_backend with heuristic judge"
+                );
                 Box::new(HeuristicJudge)
             };
             return Box::new(DebateBackend::new(judge));
@@ -486,7 +488,7 @@ impl AstraService {
         let summary = orchestration.summary;
         let latest_thread = self.inner.store.get_thread_work_state(&run.thread_id)?;
         if let Err(error) = validate_astra_tasks_for_thread(&latest_thread, &tasks) {
-            let _ = self.error_run(
+            self.error_run(
                 &run.run_id,
                 "orchestrator_unsupported_stage_task",
                 "orchestrator_unsupported_stage_task",
@@ -495,7 +497,7 @@ impl AstraService {
             return Ok(AppliedOrchestration::terminal(self.load_run(&run.run_id)?));
         }
         if tasks.is_empty() {
-            let _ = self.error_run(
+            self.error_run(
                 &run.run_id,
                 "orchestrator_missing_next_tasks",
                 "orchestrator_missing_next_tasks",
@@ -625,11 +627,7 @@ impl AstraService {
         Ok(())
     }
 
-    fn record_round_journal(
-        &self,
-        run_id: &str,
-        entry: serde_json::Value,
-    ) -> Result<AstraRun> {
+    fn record_round_journal(&self, run_id: &str, entry: serde_json::Value) -> Result<AstraRun> {
         let (run, ()) = self.mutate_run(run_id, move |next| {
             next.run_diagnostics.push(entry);
             trim_vec_front(&mut next.run_diagnostics, MAX_RUN_DIAGNOSTICS);
@@ -901,13 +899,13 @@ mod tests {
 
     #[test]
     fn rolling_batch_discards_only_undispatched_tasks() {
-        let dispatchable = vec![
+        let dispatchable = [
             test_task("task-1"),
             test_task("task-2"),
             test_task("task-3"),
         ];
 
-        let dispatched = vec![test_task("task-1"), test_task("task-2")];
+        let dispatched = [test_task("task-1"), test_task("task-2")];
         let dispatched_ids = dispatched
             .iter()
             .map(|task| task.id.as_str())
@@ -1159,7 +1157,10 @@ mod tests {
             .partition(|task| task.depends_on.is_empty());
 
         assert_eq!(
-            ready.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "c"]
         );
         assert_eq!(
@@ -1180,7 +1181,11 @@ mod tests {
             &[wave_completion("a", AstraTaskResultStatus::Completed)],
         );
         assert_eq!(
-            first.ready.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            first
+                .ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["b"]
         );
         assert!(first.cancelled.is_empty());

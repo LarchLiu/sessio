@@ -112,7 +112,10 @@ impl DebateJudge for HeuristicJudge {
         };
         Ok(BackendResponse {
             data: verdict,
-            session_id: format!("debate-judge-heuristic-{}-{}", run.run_id, source_round_index),
+            session_id: format!(
+                "debate-judge-heuristic-{}-{}",
+                run.run_id, source_round_index
+            ),
             backend_type: HEURISTIC_JUDGE_BACKEND_TYPE.to_string(),
         })
     }
@@ -169,17 +172,18 @@ impl DebateJudge for RuntimeAgentJudge {
         let prompt =
             build_debate_judge_prompt(run, thread, user_prompt, source_round_index, artifacts);
         let backend_type = self.backend_type();
-        let (verdict, session_id) = judge_with_attempts(&backend_type, &prompt, |attempt_prompt| {
-            execute_agent_session(
-                &self.runtime,
-                &self.config,
-                run,
-                thread,
-                &run.project_path,
-                attempt_prompt,
-                "debate_judge",
-            )
-        })?;
+        let (verdict, session_id) =
+            judge_with_attempts(&backend_type, &prompt, |attempt_prompt| {
+                execute_agent_session(
+                    &self.runtime,
+                    &self.config,
+                    run,
+                    thread,
+                    &run.project_path,
+                    attempt_prompt,
+                    "debate_judge",
+                )
+            })?;
         Ok(BackendResponse {
             data: verdict,
             session_id,
@@ -315,7 +319,10 @@ fn build_debate_judge_prompt(
             artifact.agent,
             artifact.participant_id.as_deref().unwrap_or("unknown")
         ));
-        lines.push(truncate_chars(&artifact.output, JUDGE_LANE_OUTPUT_CHAR_LIMIT));
+        lines.push(truncate_chars(
+            &artifact.output,
+            JUDGE_LANE_OUTPUT_CHAR_LIMIT,
+        ));
     }
     wrap_thread_prompt(
         "astra_debate_judge",
@@ -529,7 +536,10 @@ rationale: 双方在延迟证据上仍有实质分歧。"#;
 
         let (verdict, session_id) = judge_with_attempts("judge", "base prompt", |prompt| {
             prompts.push(prompt.to_string());
-            Ok((responses.next().unwrap(), format!("session-{}", prompts.len())))
+            Ok((
+                responses.next().unwrap(),
+                format!("session-{}", prompts.len()),
+            ))
         })
         .unwrap();
 

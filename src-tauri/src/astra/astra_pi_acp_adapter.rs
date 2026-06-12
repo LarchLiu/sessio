@@ -685,7 +685,12 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
     let mut raw_id_to_idx: HashMap<String, usize> = HashMap::new();
     let mut ambiguous_ids: HashSet<String> = HashSet::new();
     for (idx, task) in raw_tasks.iter().enumerate() {
-        if let Some(id) = task.id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        if let Some(id) = task
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
             if raw_id_to_idx.insert(id.to_string(), idx).is_some() {
                 ambiguous_ids.insert(id.to_string());
             }

@@ -191,8 +191,8 @@ pub(super) fn write_task_artifacts(
     let root = std::path::Path::new(project_path).join(ASTRA_ARTIFACT_ROOT_DIR);
     let gitignore = root.join(".gitignore");
     if !gitignore.exists() {
-        if let Err(error) = std::fs::create_dir_all(&root)
-            .and_then(|()| std::fs::write(&gitignore, "*\n"))
+        if let Err(error) =
+            std::fs::create_dir_all(&root).and_then(|()| std::fs::write(&gitignore, "*\n"))
         {
             log::warn!(
                 "[astra:artifacts] failed to prepare artifact root {}: {error}",
@@ -229,9 +229,15 @@ fn task_artifact_markdown(completion: &AstraTaskCompletion) -> String {
     if let Some(participant_id) = completion.task.agent_participant_id.as_deref() {
         lines.push(format!("- Participant: {participant_id}"));
     }
-    lines.push(format!("- Agent: {}", completion.task.target_agent.as_str()));
+    lines.push(format!(
+        "- Agent: {}",
+        completion.task.target_agent.as_str()
+    ));
     lines.push(format!("- Status: {}", completion.result.status.as_str()));
-    lines.push(format!("- Completed at: {}", completion.result.completed_at));
+    lines.push(format!(
+        "- Completed at: {}",
+        completion.result.completed_at
+    ));
     if let Some(error) = completion
         .result
         .error
@@ -990,6 +996,7 @@ impl AstraService {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn relink_astra_plan_task_session(
         &self,
         task: &AstraTaskProposal,
@@ -3180,6 +3187,7 @@ fn link_astra_plan_task_session_in_store(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn relink_astra_plan_task_session_in_store(
     store: &dyn SessionStore,
     task: &AstraTaskProposal,
@@ -3500,7 +3508,8 @@ mod tests {
         cancelled_result.sessio_runtime_session_id = String::new();
         cancelled_result.turn_id = None;
         cancelled_result.status = AstraTaskResultStatus::Cancelled;
-        cancelled_result.error = Some("dependency task \"实现登录接口\" did not complete".to_string());
+        cancelled_result.error =
+            Some("dependency task \"实现登录接口\" did not complete".to_string());
         let cancelled_completion = AstraTaskCompletion {
             result: cancelled_result,
             task: test_task("task-skip", "stage-1"),
@@ -3537,7 +3546,10 @@ mod tests {
         assert_eq!(tasks[1]["status"], "failed");
         assert!(tasks[0].get("error").is_none());
         let error = tasks[1]["error"].as_str().unwrap();
-        assert_eq!(error.chars().count(), TEAMWORK_JOURNAL_TASK_ERROR_CHAR_LIMIT);
+        assert_eq!(
+            error.chars().count(),
+            TEAMWORK_JOURNAL_TASK_ERROR_CHAR_LIMIT
+        );
         assert!(error.starts_with("依赖缺失"));
         assert_eq!(tasks[2]["status"], "cancelled");
         assert_eq!(
@@ -3554,11 +3566,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let project_path = dir.to_string_lossy().to_string();
         let completion = AstraTaskCompletion {
-            result: test_task_result(
-                "task-ok",
-                "session-1",
-                "Final result: 完整结论正文。",
-            ),
+            result: test_task_result("task-ok", "session-1", "Final result: 完整结论正文。"),
             task: test_task("task-ok", "stage-1"),
         };
 
@@ -3646,7 +3654,8 @@ mod tests {
         let mut teamwork = test_thread(Vec::new());
         teamwork.kind = ThreadKind::Teamwork;
 
-        let error = validate_astra_tasks_for_thread(&teamwork, &[stage_task.clone()]).unwrap_err();
+        let error = validate_astra_tasks_for_thread(&teamwork, std::slice::from_ref(&stage_task))
+            .unwrap_err();
 
         assert!(error.to_string().contains("targetStageId"));
         validate_astra_tasks_for_thread(

@@ -921,6 +921,7 @@ async fn run_command_loop(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_prompt_task(
     manager: RuntimeManager,
     sessio_runtime_session_id: String,

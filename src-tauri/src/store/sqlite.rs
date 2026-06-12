@@ -2990,10 +2990,7 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
 }
 
 fn aggregate_round_status(statuses: &[PlanTaskStatus]) -> PlanRoundStatus {
-    if statuses
-        .iter()
-        .any(|status| *status == PlanTaskStatus::Running)
-    {
+    if statuses.contains(&PlanTaskStatus::Running) {
         return PlanRoundStatus::Running;
     }
     if statuses
@@ -3008,10 +3005,7 @@ fn aggregate_round_status(statuses: &[PlanTaskStatus]) -> PlanRoundStatus {
     {
         return PlanRoundStatus::Cancelled;
     }
-    if statuses
-        .iter()
-        .any(|status| *status == PlanTaskStatus::Planned)
-    {
+    if statuses.contains(&PlanTaskStatus::Planned) {
         return PlanRoundStatus::Planned;
     }
     PlanRoundStatus::Completed
@@ -11888,7 +11882,10 @@ mod migration_tests {
         // Archiving the project drops its threads from the index without
         // erroring, for both the scoped and the global listing.
         store.archive_project(&project.id).unwrap();
-        assert!(store.list_thread_index(Some(&project.id)).unwrap().is_empty());
+        assert!(store
+            .list_thread_index(Some(&project.id))
+            .unwrap()
+            .is_empty());
         assert!(store
             .list_thread_index(None)
             .unwrap()

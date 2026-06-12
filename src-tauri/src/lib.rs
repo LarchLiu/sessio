@@ -747,6 +747,7 @@ fn list_thread_index(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn create_thread(
     project_id: String,
     goal: String,
@@ -776,6 +777,7 @@ fn create_thread(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn update_thread(
     thread_id: String,
     goal: Option<String>,
@@ -2789,7 +2791,6 @@ fn update_runtime_agent_preferences(
                 models: models.as_deref(),
                 efforts: efforts.as_deref(),
                 permission_modes: permission_modes.as_deref(),
-                ..Default::default()
             },
         )
         .map_err(|e| e.to_string())?;

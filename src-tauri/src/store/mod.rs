@@ -479,6 +479,7 @@ pub trait SessionStore: Send + Sync {
         description: Option<Option<&str>>,
         enabled: Option<bool>,
     ) -> Result<ThreadInfo>;
+    #[allow(clippy::too_many_arguments)]
     fn update_thread_with_options(
         &self,
         thread_id: &str,

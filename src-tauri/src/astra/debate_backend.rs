@@ -338,8 +338,9 @@ fn debate_orchestration(
 
     (
         AstraOrchestration {
-            summary: "Debate lane artifacts generated; next round cross-checks stage artifacts only."
-                .to_string(),
+            summary:
+                "Debate lane artifacts generated; next round cross-checks stage artifacts only."
+                    .to_string(),
             run_intent: AstraRunIntent::Continue,
             reason: "debate_cross_check_ready".to_string(),
             mode: Some(PlanRoundMode::Parallel),
@@ -856,7 +857,8 @@ mod tests {
 
     #[test]
     fn first_round_creates_isolated_lane_tasks() {
-        let orchestration = orchestrate_with_heuristic(&run(), &thread(), Some("Be strict"), 0, &[]);
+        let orchestration =
+            orchestrate_with_heuristic(&run(), &thread(), Some("Be strict"), 0, &[]);
 
         assert_eq!(orchestration.run_intent, AstraRunIntent::Continue);
         assert_eq!(orchestration.mode, Some(PlanRoundMode::Parallel));
@@ -924,14 +926,16 @@ mod tests {
             .into_iter()
             .map(|task| completion(task, "Final result: Proposal A."))
             .collect::<Vec<_>>();
-        let cross_check = orchestrate_with_heuristic(&run(), &thread(), None, 1, &first_completions);
+        let cross_check =
+            orchestrate_with_heuristic(&run(), &thread(), None, 1, &first_completions);
         let cross_check_completions = cross_check
             .tasks
             .into_iter()
             .map(|task| completion(task, "Final result: agree with caveats."))
             .collect::<Vec<_>>();
 
-        let terminal = orchestrate_with_heuristic(&run(), &thread(), None, 2, &cross_check_completions);
+        let terminal =
+            orchestrate_with_heuristic(&run(), &thread(), None, 2, &cross_check_completions);
 
         assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
         assert_eq!(terminal.reason, "debate_cross_check_converged");
@@ -952,7 +956,8 @@ mod tests {
             .into_iter()
             .map(|task| completion(task, "Final result: Proposal A."))
             .collect::<Vec<_>>();
-        let cross_check = orchestrate_with_heuristic(&run(), &thread(), None, 1, &first_completions);
+        let cross_check =
+            orchestrate_with_heuristic(&run(), &thread(), None, 1, &first_completions);
         let cross_check_completions = cross_check
             .tasks
             .into_iter()
@@ -989,7 +994,8 @@ mod tests {
             .map(|task| completion(task, "Final result: disagree; assumptions conflict."))
             .collect::<Vec<_>>();
 
-        let terminal = orchestrate_with_heuristic(&run, &thread(), None, 2, &cross_check_completions);
+        let terminal =
+            orchestrate_with_heuristic(&run, &thread(), None, 2, &cross_check_completions);
 
         assert_eq!(terminal.run_intent, AstraRunIntent::Complete);
         assert_eq!(terminal.reason, "debate_round_limit_reached");
@@ -1062,10 +1068,9 @@ mod tests {
             .tasks
             .iter()
             .all(|task| task.prompt.contains(&format!("1. {disagreement}"))));
-        assert!(next
-            .tasks
-            .iter()
-            .all(|task| task.prompt.contains("Arbitration note: 建议由人工复核延迟基准。")));
+        assert!(next.tasks.iter().all(|task| task
+            .prompt
+            .contains("Arbitration note: 建议由人工复核延迟基准。")));
         assert!(next.diagnostics.iter().any(|diagnostic| {
             diagnostic["kind"] == "debate_convergence"
                 && diagnostic["status"] == "diverged"
@@ -1078,12 +1083,10 @@ mod tests {
         let run = run();
         let completions = cross_check_completions(&run, "Final result: 还需要继续讨论。");
         let judge = FakeJudge {
-            result: Err(BackendFailure::new(
-                "runtime_agent_claude",
-                "timeout",
-                "judge timed out",
-            )
-            .with_session_id(Some("judge-session-err".to_string()))),
+            result: Err(
+                BackendFailure::new("runtime_agent_claude", "timeout", "judge timed out")
+                    .with_session_id(Some("judge-session-err".to_string())),
+            ),
         };
 
         let (next, judge_session_id) =
@@ -1138,7 +1141,9 @@ mod tests {
         let completions = cross_check_completions(&run, "Final result: agree.");
 
         let runtime_backend = DebateBackend::new(Box::new(FakeJudge {
-            result: Ok(runtime_judge_response(judge_verdict(JudgeStatus::Converged))),
+            result: Ok(runtime_judge_response(judge_verdict(
+                JudgeStatus::Converged,
+            ))),
         }));
         let response = runtime_backend
             .orchestrate(&run, &thread(), None, 2, &completions, &json!({}))

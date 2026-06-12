@@ -149,7 +149,10 @@ pub(super) fn heuristic_board(attempts: u32) -> FacilitatorBoard {
     }
 }
 
-pub(super) fn heuristic_report(syntheses: &[FacilitatorOpinion], attempts: u32) -> FacilitatorReport {
+pub(super) fn heuristic_report(
+    syntheses: &[FacilitatorOpinion],
+    attempts: u32,
+) -> FacilitatorReport {
     let recommendation = syntheses
         .iter()
         .map(|synthesis| synthesis.output.trim())
@@ -495,7 +498,10 @@ fn push_opinion_sections(lines: &mut Vec<String>, heading: &str, opinions: &[Fac
             opinion.agent,
             opinion.title
         ));
-        lines.push(truncate_chars(&opinion.output, FACILITATOR_OPINION_CHAR_LIMIT));
+        lines.push(truncate_chars(
+            &opinion.output,
+            FACILITATOR_OPINION_CHAR_LIMIT,
+        ));
     }
 }
 
@@ -516,10 +522,16 @@ fn build_board_prompt(
         user_prompt,
         source_round_index,
     );
-    if let Some(board_context) = board_context.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(board_context) = board_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         lines.push(String::new());
         lines.push("## Previous shared board".to_string());
-        lines.push(truncate_chars(board_context, FACILITATOR_OPINION_CHAR_LIMIT));
+        lines.push(truncate_chars(
+            board_context,
+            FACILITATOR_OPINION_CHAR_LIMIT,
+        ));
     }
     push_opinion_sections(&mut lines, "## Participant opinions", opinions);
     wrap_thread_prompt(
@@ -550,10 +562,16 @@ fn build_report_prompt(
         user_prompt,
         source_round_index,
     );
-    if let Some(board_context) = board_context.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(board_context) = board_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         lines.push(String::new());
         lines.push("## Shared board context".to_string());
-        lines.push(truncate_chars(board_context, FACILITATOR_OPINION_CHAR_LIMIT));
+        lines.push(truncate_chars(
+            board_context,
+            FACILITATOR_OPINION_CHAR_LIMIT,
+        ));
     }
     push_opinion_sections(&mut lines, "## Participant syntheses", syntheses);
     wrap_thread_prompt(
@@ -650,8 +668,7 @@ openQuestions:
 
     #[test]
     fn parse_board_rejects_code_fence_json_and_empty() {
-        let fenced =
-            parse_facilitator_board("f", "```yaml\nideas: []\n```", false).unwrap_err();
+        let fenced = parse_facilitator_board("f", "```yaml\nideas: []\n```", false).unwrap_err();
         assert_eq!(fenced.code, "invalid_yaml");
 
         let json = parse_facilitator_board("f", "{\"ideas\": []}", false).unwrap_err();
@@ -720,7 +737,10 @@ nextSteps:
 rationale: 渐进迁移兼顾速度与稳定性。"#;
 
         let report = parse_facilitator_report("f", response).unwrap();
-        assert_eq!(report.recommendation, "优先做异步内核改造，渐进迁移以控制风险。");
+        assert_eq!(
+            report.recommendation,
+            "优先做异步内核改造，渐进迁移以控制风险。"
+        );
         assert_eq!(report.consensus, vec!["双方都同意异步化方向。"]);
         assert_eq!(report.next_steps, vec!["先做基准测试。"]);
         assert_eq!(report.rationale, "渐进迁移兼顾速度与稳定性。");
@@ -737,8 +757,7 @@ rationale: 渐进迁移兼顾速度与稳定性。"#;
         assert_eq!(unknown.code, "invalid_yaml");
 
         let long = "荐".repeat(2100);
-        let report =
-            parse_facilitator_report("f", &format!("recommendation: {long}")).unwrap();
+        let report = parse_facilitator_report("f", &format!("recommendation: {long}")).unwrap();
         assert_eq!(
             report.recommendation.chars().count(),
             REPORT_RECOMMENDATION_CHAR_LIMIT
@@ -753,7 +772,10 @@ rationale: 渐进迁移兼顾速度与稳定性。"#;
             .unwrap();
 
         assert_eq!(response.backend_type, HEURISTIC_FACILITATOR_BACKEND_TYPE);
-        assert_eq!(response.session_id, "brainstorm-facilitator-heuristic-run-1-0");
+        assert_eq!(
+            response.session_id,
+            "brainstorm-facilitator-heuristic-run-1-0"
+        );
         assert!(response.data.ideas.is_empty());
         assert!(response.data.ready_to_synthesize);
         assert_eq!(response.data.conflicts, vec![HEURISTIC_BOARD_CONFLICT]);

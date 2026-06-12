@@ -1622,10 +1622,7 @@ pub fn sessio_thread_prompt_block_kinds(input: &str) -> Vec<String> {
 pub fn sessio_thread_prompt_block_metas(input: &str) -> Vec<Value> {
     let mut metas = Vec::new();
     let mut cursor = 0;
-    loop {
-        let Some(start_rel) = input[cursor..].find(SESSIO_THREAD_PROMPT_START) else {
-            break;
-        };
+    while let Some(start_rel) = input[cursor..].find(SESSIO_THREAD_PROMPT_START) {
         let start = cursor + start_rel;
         let Some(start_comment_end_rel) = input[start..].find("-->") else {
             break;
