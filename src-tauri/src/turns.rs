@@ -809,6 +809,9 @@ fn apply_acp_message_to_turn(
         .unwrap_or(Value::Null);
     let update_type = session_update_type(&update, message.update_type.as_deref())
         .unwrap_or_else(|| "unknown".to_string());
+    if should_ignore_session_update_type(&update_type) {
+        return;
+    }
 
     match update_type.as_str() {
         "user_message_chunk" => {
@@ -855,6 +858,10 @@ fn apply_acp_message_to_turn(
             postprocess_turn(turn);
         }
     }
+}
+
+fn should_ignore_session_update_type(update_type: &str) -> bool {
+    matches!(update_type, "usage_update")
 }
 
 fn apply_session_level_message(
@@ -3404,6 +3411,60 @@ mod tests {
         let data = file_edits[0].data.as_ref().unwrap();
         assert_eq!(data["source"], "codex");
         assert_eq!(data["edits"][0]["path"], "src/explicit.rs");
+    }
+
+    #[test]
+    fn runtime_builder_ignores_usage_updates_in_turn_blocks() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "usage_update",
+                    json!({
+                        "sessionUpdate": "usage_update",
+                        "inputTokens": 123,
+                        "outputTokens": 456
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_assistant_message("done", Some(30)),
+            },
+            30,
+        );
+
+        assert_eq!(state.turns.len(), 1);
+        assert_eq!(state.turns[0].blocks.len(), 1);
+        assert_eq!(state.turns[0].blocks[0].kind, "assistant");
+        assert!(state.turns[0]
+            .blocks
+            .iter()
+            .all(|block| block.update_type.as_deref() != Some("usage_update")));
     }
 
     #[test]
