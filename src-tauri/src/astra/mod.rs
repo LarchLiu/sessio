@@ -61,6 +61,7 @@ const ASTRA_ORCHESTRATOR_TIMEOUT_MS: u64 = 300_000;
 const ASTRA_SESSION_DIR_NAME: &str = "astra-sessions";
 const ENABLE_ASTRA_PI_SESSION_PERSISTENCE: bool = false;
 const MAX_ASTRA_RUN_DIAGNOSTICS: usize = 100;
+pub(crate) const ASTRA_ARTIFACT_ROOT_DIR: &str = ".sessio/astra";
 pub(crate) const TEAMWORK_ROUND_JOURNAL_KIND: &str = "teamwork_round_journal";
 const TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT: usize = 6000;
 const TEAMWORK_JOURNAL_SUMMARY_CHAR_LIMIT: usize = 600;
@@ -132,14 +133,126 @@ fn filtered_task_completion_value(completion: &AstraTaskCompletion) -> Value {
 }
 
 /// Teamwork planner variant: keeps far more of each task output than the
-/// generic 1000-char excerpt so the planner can reason about prior work.
-fn planner_task_completion_value(completion: &AstraTaskCompletion) -> Value {
-    task_completion_value(completion, TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT)
+/// generic 1000-char excerpt and points at the on-disk artifact with the
+/// complete output so the planner can read details on demand.
+fn planner_task_completion_value(run_id: &str, completion: &AstraTaskCompletion) -> Value {
+    let mut value = task_completion_value(completion, TEAMWORK_PLANNER_OUTPUT_CHAR_LIMIT);
+    if completion.result.status != AstraTaskResultStatus::Cancelled {
+        if let Some(result) = value.get_mut("result").and_then(Value::as_object_mut) {
+            result.insert(
+                "fullOutputPath".to_string(),
+                json!(task_artifact_relative_path(run_id, &completion.task.id)),
+            );
+        }
+    }
+    value
+}
+
+/// Workspace-relative path of the markdown artifact holding a task's complete
+/// final output. The scheme is deterministic so prompt builders never need IO.
+pub(super) fn task_artifact_relative_path(run_id: &str, task_id: &str) -> String {
+    format!(
+        "{ASTRA_ARTIFACT_ROOT_DIR}/{}/tasks/{}.md",
+        artifact_path_component(run_id),
+        artifact_path_component(task_id)
+    )
+}
+
+fn artifact_path_component(value: &str) -> String {
+    let component = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if component.is_empty() {
+        "unknown".to_string()
+    } else {
+        component
+    }
+}
+
+/// Persists each completion's full final output under the project workspace so
+/// later rounds (planner sessions and participant tasks run in the same
+/// workspace) can read complete outputs on demand. Best-effort: failures are
+/// logged and skipped, and consumers treat the files as optional.
+pub(super) fn write_task_artifacts(
+    project_path: &str,
+    run_id: &str,
+    completions: &[AstraTaskCompletion],
+) {
+    if completions.is_empty() {
+        return;
+    }
+    let root = std::path::Path::new(project_path).join(ASTRA_ARTIFACT_ROOT_DIR);
+    let gitignore = root.join(".gitignore");
+    if !gitignore.exists() {
+        if let Err(error) = std::fs::create_dir_all(&root)
+            .and_then(|()| std::fs::write(&gitignore, "*\n"))
+        {
+            log::warn!(
+                "[astra:artifacts] failed to prepare artifact root {}: {error}",
+                root.display()
+            );
+            return;
+        }
+    }
+    for completion in completions {
+        let relative = task_artifact_relative_path(run_id, &completion.task.id);
+        let path = std::path::Path::new(project_path).join(&relative);
+        let result = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| std::fs::write(&path, task_artifact_markdown(completion)));
+        if let Err(error) = result {
+            log::warn!(
+                "[astra:artifacts] failed to write task artifact {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn task_artifact_markdown(completion: &AstraTaskCompletion) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("# {}", completion.task.title));
+    lines.push(String::new());
+    lines.push(format!("- Task id: {}", completion.task.id));
+    if let Some(assistant_id) = completion.task.assistant_id.as_deref() {
+        lines.push(format!("- Assistant: {assistant_id}"));
+    }
+    if let Some(participant_id) = completion.task.agent_participant_id.as_deref() {
+        lines.push(format!("- Participant: {participant_id}"));
+    }
+    lines.push(format!("- Agent: {}", completion.task.target_agent.as_str()));
+    lines.push(format!("- Status: {}", completion.result.status.as_str()));
+    lines.push(format!("- Completed at: {}", completion.result.completed_at));
+    if let Some(error) = completion
+        .result
+        .error
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("- Error: {error}"));
+    }
+    lines.push(String::new());
+    lines.push("## Final output".to_string());
+    lines.push(String::new());
+    lines.push(final_task_output(&completion.result.output));
+    lines.push(String::new());
+    lines.join("\n")
 }
 
 /// Compact per-round journal entry persisted into run diagnostics so the next
 /// planning rounds keep memory of earlier work after `completions` is cleared.
 pub(super) fn teamwork_round_journal_entry(
+    run_id: &str,
     round_index: u32,
     planner_summary: &str,
     completions: &[AstraTaskCompletion],
@@ -158,14 +271,20 @@ pub(super) fn teamwork_round_journal_entry(
                     TEAMWORK_JOURNAL_TASK_EXCERPT_CHAR_LIMIT,
                 ),
             });
-            if let Some(error) = completion
-                .result
-                .error
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                if let Some(record) = task.as_object_mut() {
+            if let Some(record) = task.as_object_mut() {
+                if completion.result.status != AstraTaskResultStatus::Cancelled {
+                    record.insert(
+                        "outputPath".to_string(),
+                        json!(task_artifact_relative_path(run_id, &completion.task.id)),
+                    );
+                }
+                if let Some(error) = completion
+                    .result
+                    .error
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
                     record.insert(
                         "error".to_string(),
                         json!(structured_response::truncate_chars(
@@ -3324,7 +3443,7 @@ mod tests {
             task,
         };
 
-        let planner_value = planner_task_completion_value(&completion);
+        let planner_value = planner_task_completion_value("run-1", &completion);
         let filtered_value = filtered_task_completion_value(&completion);
 
         assert_eq!(planner_value["result"]["finalOutput"], long_output);
@@ -3337,7 +3456,7 @@ mod tests {
             result: test_task_result("task-1", "session-1", &oversized),
             task: test_task("task-1", "stage-1"),
         };
-        let oversized_value = planner_task_completion_value(&oversized_completion);
+        let oversized_value = planner_task_completion_value("run-1", &oversized_completion);
         let oversized_output = oversized_value["result"]["finalOutput"].as_str().unwrap();
         assert_eq!(
             oversized_output.chars().count(),
@@ -3350,7 +3469,7 @@ mod tests {
             task: test_task("task-1", "stage-1"),
         };
         assert_eq!(
-            planner_task_completion_value(&empty_completion)["result"]["finalOutput"],
+            planner_task_completion_value("run-1", &empty_completion)["result"]["finalOutput"],
             "Astra delegated task completed."
         );
     }
@@ -3388,6 +3507,7 @@ mod tests {
         };
 
         let entry = teamwork_round_journal_entry(
+            "run-1",
             3,
             &format!("第 3 轮总结 {}", "决定 ".repeat(300)),
             &[ok_completion, failed_completion, cancelled_completion],
@@ -3410,6 +3530,10 @@ mod tests {
             TEAMWORK_JOURNAL_TASK_EXCERPT_CHAR_LIMIT
         );
         assert!(!excerpt.contains("Final result:"));
+        assert_eq!(
+            tasks[0]["outputPath"],
+            task_artifact_relative_path("run-1", "task-ok")
+        );
         assert_eq!(tasks[1]["status"], "failed");
         assert!(tasks[0].get("error").is_none());
         let error = tasks[1]["error"].as_str().unwrap();
@@ -3420,6 +3544,65 @@ mod tests {
             tasks[2]["error"],
             "dependency task \"实现登录接口\" did not complete"
         );
+        // Cancelled tasks never ran, so no artifact path is advertised.
+        assert!(tasks[2].get("outputPath").is_none());
+    }
+
+    #[test]
+    fn task_artifacts_are_written_and_paths_are_sanitized() {
+        let dir = std::env::temp_dir().join(format!("sessio-artifact-test-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project_path = dir.to_string_lossy().to_string();
+        let completion = AstraTaskCompletion {
+            result: test_task_result(
+                "task-ok",
+                "session-1",
+                "Final result: 完整结论正文。",
+            ),
+            task: test_task("task-ok", "stage-1"),
+        };
+
+        write_task_artifacts(&project_path, "run/1", &[completion]);
+
+        let relative = task_artifact_relative_path("run/1", "task-ok");
+        assert_eq!(relative, ".sessio/astra/run-1/tasks/task-ok.md");
+        let body = std::fs::read_to_string(dir.join(&relative)).unwrap();
+        assert!(body.contains("# Advance stage"));
+        assert!(body.contains("完整结论正文。"));
+        assert!(!body.contains("Final result:"));
+        let gitignore = std::fs::read_to_string(dir.join(".sessio/astra/.gitignore")).unwrap();
+        assert_eq!(gitignore, "*\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn planner_completion_includes_full_output_path_except_for_cancelled() {
+        let completion = AstraTaskCompletion {
+            result: test_task_result("task-ok", "session-1", "Final result: done"),
+            task: test_task("task-ok", "stage-1"),
+        };
+        let value = planner_task_completion_value("run-1", &completion);
+        assert_eq!(
+            value["result"]["fullOutputPath"],
+            task_artifact_relative_path("run-1", "task-ok")
+        );
+
+        let mut cancelled_result = test_task_result("task-skip", "", "");
+        cancelled_result.status = AstraTaskResultStatus::Cancelled;
+        let cancelled = AstraTaskCompletion {
+            result: cancelled_result,
+            task: test_task("task-skip", "stage-1"),
+        };
+        let value = planner_task_completion_value("run-1", &cancelled);
+        assert!(value["result"].get("fullOutputPath").is_none());
+
+        // The generic excerpt path used by non-teamwork prompts stays
+        // path-free: debate lanes must not learn where peers' full text lives.
+        let plain = filtered_task_completion_value(&AstraTaskCompletion {
+            result: test_task_result("task-ok", "session-1", "Final result: done"),
+            task: test_task("task-ok", "stage-1"),
+        });
+        assert!(plain["result"].get("fullOutputPath").is_none());
     }
 
     #[test]

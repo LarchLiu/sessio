@@ -14,6 +14,42 @@ use crate::models::{PlanRoundMode, ThreadAgentInfo, ThreadInfo, ThreadKind};
 
 const BRAINSTORM_BACKEND_TYPE: &str = "brainstorm_backend";
 const BOARD_INJECTION_MARKER: &str = "## Shared board from previous round";
+/// Hard cap on critique rounds even when the facilitator keeps asking for
+/// more; the round budget check below bounds it further.
+const MAX_BRAINSTORM_CRITIQUE_ROUNDS: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrainstormRole {
+    Divergence,
+    Critique,
+    Synthesis,
+}
+
+impl BrainstormRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Divergence => "divergence",
+            Self::Critique => "critique",
+            Self::Synthesis => "synthesis",
+        }
+    }
+}
+
+/// Recovers the role of the round that produced these completions from the
+/// `round_role` attribute embedded in the wrapped task prompt.
+fn round_role_of(completions: &[AstraTaskCompletion]) -> Option<BrainstormRole> {
+    let prompt = &completions.first()?.task.prompt;
+    for role in [
+        BrainstormRole::Synthesis,
+        BrainstormRole::Critique,
+        BrainstormRole::Divergence,
+    ] {
+        if prompt.contains(&format!("round_role=\"{}\"", role.as_str())) {
+            return Some(role);
+        }
+    }
+    None
+}
 
 pub struct BrainstormBackend {
     facilitator: Box<dyn BrainstormFacilitator>,
@@ -94,7 +130,14 @@ fn brainstorm_orchestration(
     }
 
     if completions.is_empty() {
-        let tasks = brainstorm_divergence_tasks(run, thread, user_prompt, round_index, None, false);
+        let tasks = brainstorm_participant_tasks(
+            run,
+            thread,
+            user_prompt,
+            round_index,
+            None,
+            BrainstormRole::Divergence,
+        );
         return if tasks.is_empty() {
             (
                 AstraOrchestration {
@@ -127,8 +170,15 @@ fn brainstorm_orchestration(
         };
     }
 
-    if has_board_injection(completions) {
-        let board = shared_board_value(thread, round_index.saturating_sub(1), completions, None, None);
+    if round_role_of(completions) == Some(BrainstormRole::Synthesis) {
+        let board = shared_board_value(
+            run,
+            thread,
+            round_index.saturating_sub(1),
+            completions,
+            None,
+            None,
+        );
         let board_context = extract_board_context(completions);
         let syntheses = facilitator_opinions(completions);
         let (report, meta) = match facilitator.synthesize(
@@ -180,11 +230,13 @@ fn brainstorm_orchestration(
     }
 
     let opinions = facilitator_opinions(completions);
+    let board_context = extract_board_context(completions);
     let (facilitator_board, meta) = match facilitator.build_board(
         run,
         thread,
         user_prompt,
         round_index.saturating_sub(1),
+        board_context.as_deref(),
         &opinions,
     ) {
         Ok(response) => {
@@ -213,6 +265,7 @@ fn brainstorm_orchestration(
     };
     let facilitator_session_id = facilitator_session_to_propagate(&meta);
     let board = shared_board_value(
+        run,
         thread,
         round_index.saturating_sub(1),
         completions,
@@ -220,8 +273,19 @@ fn brainstorm_orchestration(
         Some(&meta),
     );
 
+    // A critique round needs budget for itself, the synthesis round, and the
+    // terminal synthesis planning that follows it.
+    let critique_rounds_so_far = round_index.saturating_sub(1);
+    let next_role = if !facilitator_board.ready_to_synthesize
+        && critique_rounds_so_far < MAX_BRAINSTORM_CRITIQUE_ROUNDS
+        && round_index.saturating_add(2) < run.round_limit
+    {
+        BrainstormRole::Critique
+    } else {
+        BrainstormRole::Synthesis
+    };
     let tasks =
-        brainstorm_divergence_tasks(run, thread, user_prompt, round_index, Some(&board), true);
+        brainstorm_participant_tasks(run, thread, user_prompt, round_index, Some(&board), next_role);
     if tasks.is_empty() {
         return (
             AstraOrchestration {
@@ -231,6 +295,23 @@ fn brainstorm_orchestration(
                 run_intent: AstraRunIntent::WaitForHuman,
                 reason: "brainstorm_no_synthesis_participants".to_string(),
                 mode: None,
+                tasks,
+                diagnostics: vec![board],
+            },
+            facilitator_session_id,
+        );
+    }
+
+    if next_role == BrainstormRole::Critique {
+        return (
+            AstraOrchestration {
+                summary: format!(
+                    "Brainstorm board still has open conflicts; round {} asks participants to critique and build on it.",
+                    round_index + 1
+                ),
+                run_intent: AstraRunIntent::Continue,
+                reason: "brainstorm_critique_round".to_string(),
+                mode: Some(PlanRoundMode::Parallel),
                 tasks,
                 diagnostics: vec![board],
             },
@@ -292,13 +373,13 @@ fn extract_board_context(completions: &[AstraTaskCompletion]) -> Option<String> 
     (!context.is_empty()).then(|| context.to_string())
 }
 
-fn brainstorm_divergence_tasks(
+fn brainstorm_participant_tasks(
     run: &AstraRun,
     thread: &ThreadInfo,
     user_prompt: Option<&str>,
     round_index: u32,
     shared_board: Option<&Value>,
-    synthesis_round: bool,
+    role: BrainstormRole,
 ) -> Vec<AstraTaskProposal> {
     let mut participants = thread.agent_participants.clone();
     participants.sort_by_key(|participant| participant.order);
@@ -314,35 +395,38 @@ fn brainstorm_divergence_tasks(
                     participant.participant_id,
                     target_agent.as_str(),
                     round_index,
-                    if synthesis_round { "synthesis" } else { "diverge" }
+                    role.as_str()
                 ))
             );
-            let prompt = brainstorm_task_prompt(
-                thread,
-                user_prompt,
-                &participant,
-                shared_board,
-                synthesis_round,
-            );
+            let prompt =
+                brainstorm_task_prompt(thread, user_prompt, &participant, shared_board, role);
             AstraTaskProposal {
                 id: task_id,
                 plan_task_id: None,
                 assistant_id: None,
                 agent_participant_id: Some(participant.participant_id.clone()),
-                title: if synthesis_round {
-                    format!("{} brainstorm synthesis", participant_label(&participant))
-                } else {
-                    format!("{} brainstorm opinion", participant_label(&participant))
-                },
+                title: format!(
+                    "{} brainstorm {}",
+                    participant_label(&participant),
+                    match role {
+                        BrainstormRole::Divergence => "opinion",
+                        BrainstormRole::Critique => "critique",
+                        BrainstormRole::Synthesis => "synthesis",
+                    }
+                ),
                 target_stage_id: None,
                 target_agent,
                 prompt,
-                expected_output: if synthesis_round {
-                    "Synthesis result with candidates, consensus, disagreements, and recommendation."
-                        .to_string()
-                } else {
-                    "Independent brainstorm opinion with rationale, opportunities, risks, and questions."
-                        .to_string()
+                expected_output: match role {
+                    BrainstormRole::Divergence =>
+                        "Independent brainstorm opinion with rationale, opportunities, risks, and questions."
+                            .to_string(),
+                    BrainstormRole::Critique =>
+                        "Critique referencing board idea ids with explicit support, rebuttal, or extension, plus any genuinely new ideas."
+                            .to_string(),
+                    BrainstormRole::Synthesis =>
+                        "Synthesis result with candidates, consensus, disagreements, and recommendation."
+                            .to_string(),
                 },
                 risk: AstraTaskRisk::Low,
                 depends_on: Vec::new(),
@@ -356,7 +440,7 @@ fn brainstorm_task_prompt(
     user_prompt: Option<&str>,
     participant: &ThreadAgentInfo,
     shared_board: Option<&Value>,
-    synthesis_round: bool,
+    role: BrainstormRole,
 ) -> String {
     let mut lines = Vec::new();
     lines.push("# Sessio brainstorm task".to_string());
@@ -392,10 +476,20 @@ fn brainstorm_task_prompt(
         lines.push(String::new());
     }
     lines.push("## Task".to_string());
-    if synthesis_round {
-        lines.push("Use the shared board above as explicit context. Synthesize the candidates, consensus, disagreements, risks, and a recommendation. Extend or challenge the board where useful.".to_string());
-    } else {
-        lines.push("Produce an independent opinion. Offer concrete ideas, rationale, risks, conflicts, and questions. Do not wait for other participants.".to_string());
+    match role {
+        BrainstormRole::Divergence => {
+            lines.push("Produce an independent opinion. Offer concrete ideas, rationale, risks, conflicts, and questions. Do not wait for other participants.".to_string());
+        }
+        BrainstormRole::Critique => {
+            lines.push("Critique and build on the shared board above. For every idea you address, reference its id (for example [idea-x]) and explicitly support, rebut, or extend it with reasons and evidence. Address the listed conflicts and open questions directly. Add a genuinely new idea only if the critique surfaced one. End with your current preferred direction.".to_string());
+            lines.push(String::new());
+            lines.push("Board excerpts are truncated; read the full-output files listed on the board (paths are relative to this workspace) when you need a participant's complete opinion.".to_string());
+        }
+        BrainstormRole::Synthesis => {
+            lines.push("Use the shared board above as explicit context. Synthesize the candidates, consensus, disagreements, risks, and a recommendation. Extend or challenge the board where useful.".to_string());
+            lines.push(String::new());
+            lines.push("Board excerpts are truncated; read the full-output files listed on the board (paths are relative to this workspace) when you need a participant's complete opinion.".to_string());
+        }
     }
     wrap_thread_prompt(
         "astra_brainstorm_participant_task",
@@ -404,15 +498,7 @@ fn brainstorm_task_prompt(
         &[
             ("participant_id", participant.participant_id.clone()),
             ("target_agent", participant.agent.as_str().to_string()),
-            (
-                "round_role",
-                if synthesis_round {
-                    "synthesis"
-                } else {
-                    "divergence"
-                }
-                .to_string(),
-            ),
+            ("round_role", role.as_str().to_string()),
         ],
     )
 }
@@ -426,6 +512,7 @@ fn participant_label(participant: &ThreadAgentInfo) -> String {
 }
 
 fn shared_board_value(
+    run: &AstraRun,
     thread: &ThreadInfo,
     source_round_index: u32,
     completions: &[AstraTaskCompletion],
@@ -443,6 +530,7 @@ fn shared_board_value(
                 "title": completion.task.title,
                 "status": completion.result.status.as_str(),
                 "opinion": output,
+                "fullOutputPath": super::task_artifact_relative_path(&run.run_id, &completion.task.id),
             })
         })
         .collect::<Vec<_>>();
@@ -481,6 +569,7 @@ fn shared_board_value(
         "ideas": ideas,
         "conflicts": &board_data.conflicts,
         "openQuestions": &board_data.open_questions,
+        "readyToSynthesize": board_data.ready_to_synthesize,
         "recordedAt": super::now_ms(),
     });
     if let Some(meta) = meta {
@@ -586,7 +675,11 @@ fn board_injection_text(board: &Value) -> String {
             .unwrap_or("unknown");
         let agent = opinion.get("agent").and_then(Value::as_str).unwrap_or("agent");
         let text = opinion.get("opinion").and_then(Value::as_str).unwrap_or("");
-        lines.push(format!("- {participant} ({agent}): {text}"));
+        let mut line = format!("- {participant} ({agent}): {text}");
+        if let Some(path) = opinion.get("fullOutputPath").and_then(Value::as_str) {
+            line.push_str(&format!("\n  Full text: {path}"));
+        }
+        lines.push(line);
     }
     lines.join("\n")
 }
@@ -612,12 +705,6 @@ fn push_board_list(lines: &mut Vec<String>, heading: &str, values: Option<&Value
     }
 }
 
-fn has_board_injection(completions: &[AstraTaskCompletion]) -> bool {
-    completions
-        .iter()
-        .any(|completion| completion.task.prompt.contains(BOARD_INJECTION_MARKER))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -633,6 +720,7 @@ mod tests {
         board: Result<BackendResponse<FacilitatorBoard>, BackendFailure>,
         report: Result<BackendResponse<FacilitatorReport>, BackendFailure>,
         seen_board_contexts: Mutex<Vec<Option<String>>>,
+        seen_build_board_contexts: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeFacilitator {
@@ -644,6 +732,7 @@ mod tests {
                 board,
                 report,
                 seen_board_contexts: Mutex::new(Vec::new()),
+                seen_build_board_contexts: Mutex::new(Vec::new()),
             }
         }
     }
@@ -655,8 +744,13 @@ mod tests {
             _thread: &ThreadInfo,
             _user_prompt: Option<&str>,
             _source_round_index: u32,
+            board_context: Option<&str>,
             _opinions: &[FacilitatorOpinion],
         ) -> Result<BackendResponse<FacilitatorBoard>, BackendFailure> {
+            self.seen_build_board_contexts
+                .lock()
+                .unwrap()
+                .push(board_context.map(ToString::to_string));
             self.board.clone()
         }
 
@@ -687,7 +781,15 @@ mod tests {
             }],
             conflicts: vec!["A 与 B 在迁移节奏上存在冲突。".to_string()],
             open_questions: vec!["如何保证迁移期一致性？".to_string()],
+            ready_to_synthesize: true,
             attempts: 1,
+        }
+    }
+
+    fn unready_board() -> FacilitatorBoard {
+        FacilitatorBoard {
+            ready_to_synthesize: false,
+            ..fake_board()
         }
     }
 
@@ -1087,5 +1189,138 @@ mod tests {
             .orchestrate(&run, &thread(), None, 2, &completions, &json!({}))
             .unwrap();
         assert_eq!(response.session_id, "brainstorm-backend-run-1-2");
+    }
+
+    #[test]
+    fn unready_board_dispatches_critique_round() {
+        let run = run();
+        let fake = FakeFacilitator::new(
+            Ok(runtime_response(unready_board())),
+            Ok(runtime_response(fake_report())),
+        );
+
+        let (next, _) =
+            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &fake);
+
+        assert_eq!(next.run_intent, AstraRunIntent::Continue);
+        assert_eq!(next.reason, "brainstorm_critique_round");
+        assert_eq!(next.mode, Some(PlanRoundMode::Parallel));
+        assert_eq!(next.diagnostics[0]["readyToSynthesize"], false);
+        assert!(next.tasks.iter().all(|task| {
+            task.prompt.contains("round_role=\"critique\"")
+                && task.prompt.contains(BOARD_INJECTION_MARKER)
+                && task.prompt.contains("support, rebut, or extend")
+                && task.prompt.contains("[idea-async] 异步内核改造")
+        }));
+        assert!(next.tasks[0].title.contains("brainstorm critique"));
+    }
+
+    #[test]
+    fn critique_completions_feed_previous_board_back_to_facilitator() {
+        let run = run();
+        let unready = FakeFacilitator::new(
+            Ok(runtime_response(unready_board())),
+            Ok(runtime_response(fake_report())),
+        );
+        let critique_round =
+            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &unready)
+                .0;
+        let critique_completions = critique_round
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "支持 [idea-async]，但建议放缓迁移节奏。"))
+            .collect::<Vec<_>>();
+
+        let ready = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        );
+        let (next, _) =
+            brainstorm_orchestration(&run, &thread(), None, 2, &critique_completions, &ready);
+
+        // The facilitator saw the previous board while rebuilding it, and the
+        // now-ready board moves the flow to synthesis.
+        let contexts = ready.seen_build_board_contexts.lock().unwrap();
+        let context = contexts.last().unwrap().as_deref().unwrap();
+        assert!(context.contains("[idea-async] 异步内核改造"));
+        assert_eq!(next.reason, "brainstorm_shared_board_ready");
+        assert!(next
+            .tasks
+            .iter()
+            .all(|task| task.prompt.contains("round_role=\"synthesis\"")));
+    }
+
+    #[test]
+    fn critique_rounds_are_capped_even_when_facilitator_stays_unready() {
+        let run = run();
+        let unready = FakeFacilitator::new(
+            Ok(runtime_response(unready_board())),
+            Ok(runtime_response(fake_report())),
+        );
+        let critique_round =
+            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &unready)
+                .0;
+        let mut completions = critique_round
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "仍有分歧。"))
+            .collect::<Vec<_>>();
+
+        // Round 2 may still critique (1 critique round so far); round 3 hits
+        // the MAX_BRAINSTORM_CRITIQUE_ROUNDS cap and must synthesize.
+        let second = brainstorm_orchestration(&run, &thread(), None, 2, &completions, &unready).0;
+        assert_eq!(second.reason, "brainstorm_critique_round");
+        completions = second
+            .tasks
+            .into_iter()
+            .map(|task| completion(task, "仍有分歧。"))
+            .collect();
+
+        let third = brainstorm_orchestration(&run, &thread(), None, 3, &completions, &unready).0;
+        assert_eq!(third.reason, "brainstorm_shared_board_ready");
+        assert!(third
+            .tasks
+            .iter()
+            .all(|task| task.prompt.contains("round_role=\"synthesis\"")));
+    }
+
+    #[test]
+    fn critique_is_skipped_when_round_budget_is_tight() {
+        let run = AstraRun {
+            round_limit: 3,
+            ..run()
+        };
+        let unready = FakeFacilitator::new(
+            Ok(runtime_response(unready_board())),
+            Ok(runtime_response(fake_report())),
+        );
+
+        let (next, _) =
+            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &unready);
+
+        // round_index 1 + critique + synthesis + terminal planning would
+        // exceed round_limit 3, so the flow goes straight to synthesis.
+        assert_eq!(next.reason, "brainstorm_shared_board_ready");
+    }
+
+    #[test]
+    fn board_injection_lists_full_output_paths() {
+        let run = run();
+        let fake = FakeFacilitator::new(
+            Ok(runtime_response(fake_board())),
+            Ok(runtime_response(fake_report())),
+        );
+
+        let (next, _) =
+            brainstorm_orchestration(&run, &thread(), None, 1, &opinion_completions(&run), &fake);
+
+        let board = &next.diagnostics[0];
+        let path = board["opinions"][0]["fullOutputPath"].as_str().unwrap();
+        assert!(path.starts_with(".sessio/astra/run-1/tasks/"));
+        assert!(path.ends_with(".md"));
+        assert!(next
+            .tasks
+            .iter()
+            .all(|task| task.prompt.contains(&format!("Full text: {path}"))));
     }
 }

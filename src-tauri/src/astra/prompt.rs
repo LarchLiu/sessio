@@ -58,6 +58,8 @@ Plan the next useful batch from the shared thread goal, userPrompt, thread.assis
 
 previousRounds is the run journal: one entry per earlier completed round, with the planner summary and each task's title, assistantId, risk, status, and outputExcerpt. completedTasks carries the full outputs of the most recent round only; the round already covered by completedTasks is not repeated in previousRounds. Use previousRounds to recall earlier results and decisions, avoid re-running finished work, and keep new tasks consistent with what was already built.
 
+Full outputs on demand: each completedTasks result includes result.fullOutputPath and each previousRounds task includes outputPath - a workspace-relative markdown file containing that task's complete final output. finalOutput and outputExcerpt are truncated; read the file when planning needs details beyond the excerpt.
+
 Write each expectedOutput as concrete acceptance criteria: the artifacts, behaviors, or checks a reviewer could verify, not a restatement of the prompt.
 
 Review gate: when a completed task has risk medium|high, or later work depends on its output, schedule a review/verification task for a different assistant in a following round before building on it. If the review finds problems, re-dispatch the original work with the reviewer's concrete feedback included in the new task prompt. Do not re-review work that already passed review.
@@ -170,16 +172,17 @@ pub(super) fn build_astra_orchestration_prompt(
             })
         })
         .collect::<Vec<_>>();
-    let completion_value: fn(&AstraTaskCompletion) -> Value = if thread.kind == ThreadKind::Teamwork
-    {
-        super::planner_task_completion_value
+    let completed_tasks = if thread.kind == ThreadKind::Teamwork {
+        completions
+            .iter()
+            .map(|completion| super::planner_task_completion_value(&run.run_id, completion))
+            .collect::<Vec<_>>()
     } else {
-        super::filtered_task_completion_value
+        completions
+            .iter()
+            .map(super::filtered_task_completion_value)
+            .collect::<Vec<_>>()
     };
-    let completed_tasks = completions
-        .iter()
-        .map(completion_value)
-        .collect::<Vec<_>>();
 
     let mut body = json!({
         "instruction": astra_orchestration_response_contract(thread.kind),
@@ -1396,6 +1399,7 @@ mod tests {
         assert!(instruction.contains("dependsOn: [ids of other tasks in this response]"));
         assert!(instruction.contains("only valid with mode: parallel"));
         assert!(instruction.contains("previousRounds is the run journal"));
+        assert!(instruction.contains("Full outputs on demand"));
         assert!(instruction.contains("acceptance criteria"));
         assert!(instruction.contains("Review gate:"));
         assert!(instruction.contains("Synthesis gate:"));
@@ -1477,6 +1481,11 @@ mod tests {
         assert!(final_output.chars().count() > 1000);
         assert!(final_output.contains("结论"));
         assert!(!final_output.contains("Final result:"));
+        let full_output_path = value["completedTasks"][0]["result"]["fullOutputPath"]
+            .as_str()
+            .unwrap();
+        assert!(full_output_path.starts_with(".sessio/astra/run-1/tasks/"));
+        assert!(full_output_path.ends_with(".md"));
     }
 
     #[test]

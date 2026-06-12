@@ -34,6 +34,7 @@ Required top-level YAML response:
 ideas: []
 conflicts: []
 openQuestions: []
+readyToSynthesize: true|false
 
 ideas item shape (every key required):
 - id: short kebab-case identifier, unique within the list
@@ -45,6 +46,8 @@ Field rules:
 - ideas: cluster and deduplicate the concrete ideas across all opinions. Merge near-duplicate proposals into a single idea and list every contributing participant id in sources. ideas must be non-empty when at least one opinion is provided.
 - conflicts: real, substantive disagreements between the opinions, one sentence each naming the conflicting positions. Leave empty when there is no genuine conflict; do not invent one.
 - openQuestions: unresolved questions whose answers would most change the recommendation.
+- readyToSynthesize: false when a critique round would add real value because substantive conflicts or open questions remain that participants should debate; true when the opinions already align or further debate is unlikely to change the recommendation.
+- When a previous shared board is provided, update it instead of starting over: keep existing idea ids stable, merge newly supported ideas, refine summaries from the critiques, and drop ideas that were convincingly rebutted.
 - Write title, summary, conflicts, and openQuestions in the same language as the opinions (for example, respond in Chinese when participants brainstorm in Chinese). Keep ids ASCII kebab-case.
 - Facilitate only from the opinions below. Do not invent ideas that no participant stated."#;
 
@@ -83,6 +86,8 @@ pub(super) struct FacilitatorBoard {
     pub ideas: Vec<BoardIdea>,
     pub conflicts: Vec<String>,
     pub open_questions: Vec<String>,
+    /// false asks the backend for another critique round before synthesis.
+    pub ready_to_synthesize: bool,
     pub attempts: u32,
 }
 
@@ -114,6 +119,7 @@ pub(super) trait BrainstormFacilitator: Send + Sync {
         thread: &ThreadInfo,
         user_prompt: Option<&str>,
         source_round_index: u32,
+        board_context: Option<&str>,
         opinions: &[FacilitatorOpinion],
     ) -> Result<BackendResponse<FacilitatorBoard>, BackendFailure>;
 
@@ -136,6 +142,9 @@ pub(super) fn heuristic_board(attempts: u32) -> FacilitatorBoard {
             .iter()
             .map(ToString::to_string)
             .collect(),
+        // The keyword fallback cannot judge convergence; keep the short
+        // diverge -> synthesize flow instead of spending critique rounds.
+        ready_to_synthesize: true,
         attempts,
     }
 }
@@ -171,6 +180,7 @@ impl BrainstormFacilitator for HeuristicFacilitator {
         _thread: &ThreadInfo,
         _user_prompt: Option<&str>,
         source_round_index: u32,
+        _board_context: Option<&str>,
         _opinions: &[FacilitatorOpinion],
     ) -> Result<BackendResponse<FacilitatorBoard>, BackendFailure> {
         Ok(BackendResponse {
@@ -225,9 +235,17 @@ impl BrainstormFacilitator for RuntimeAgentFacilitator {
         thread: &ThreadInfo,
         user_prompt: Option<&str>,
         source_round_index: u32,
+        board_context: Option<&str>,
         opinions: &[FacilitatorOpinion],
     ) -> Result<BackendResponse<FacilitatorBoard>, BackendFailure> {
-        let prompt = build_board_prompt(run, thread, user_prompt, source_round_index, opinions);
+        let prompt = build_board_prompt(
+            run,
+            thread,
+            user_prompt,
+            source_round_index,
+            board_context,
+            opinions,
+        );
         let backend_type = self.backend_type();
         let require_ideas = !opinions.is_empty();
         let (mut board, session_id, attempts) = execute_structured_with_retry(
@@ -304,6 +322,8 @@ struct RawFacilitatorBoard {
     conflicts: Option<Vec<String>>,
     #[serde(default)]
     open_questions: Option<Vec<String>>,
+    #[serde(default)]
+    ready_to_synthesize: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,6 +393,9 @@ fn parse_facilitator_board(
             FACILITATOR_LIST_ITEM_CHAR_LIMIT,
             FACILITATOR_LIST_LEN_LIMIT,
         ),
+        // Missing flag defaults to ready: a forgetful facilitator should not
+        // silently spend critique rounds.
+        ready_to_synthesize: raw.ready_to_synthesize.unwrap_or(true),
         attempts: 1,
     })
 }
@@ -481,6 +504,7 @@ fn build_board_prompt(
     thread: &ThreadInfo,
     user_prompt: Option<&str>,
     source_round_index: u32,
+    board_context: Option<&str>,
     opinions: &[FacilitatorOpinion],
 ) -> String {
     let mut lines = Vec::new();
@@ -492,6 +516,11 @@ fn build_board_prompt(
         user_prompt,
         source_round_index,
     );
+    if let Some(board_context) = board_context.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push(String::new());
+        lines.push("## Previous shared board".to_string());
+        lines.push(truncate_chars(board_context, FACILITATOR_OPINION_CHAR_LIMIT));
+    }
     push_opinion_sections(&mut lines, "## Participant opinions", opinions);
     wrap_thread_prompt(
         "astra_brainstorm_facilitator_board",
@@ -720,12 +749,13 @@ rationale: 渐进迁移兼顾速度与稳定性。"#;
     #[test]
     fn heuristic_facilitator_board_keeps_static_content() {
         let response = HeuristicFacilitator
-            .build_board(&run(), &thread(), None, 0, &[opinion("a", "想法一")])
+            .build_board(&run(), &thread(), None, 0, None, &[opinion("a", "想法一")])
             .unwrap();
 
         assert_eq!(response.backend_type, HEURISTIC_FACILITATOR_BACKEND_TYPE);
         assert_eq!(response.session_id, "brainstorm-facilitator-heuristic-run-1-0");
         assert!(response.data.ideas.is_empty());
+        assert!(response.data.ready_to_synthesize);
         assert_eq!(response.data.conflicts, vec![HEURISTIC_BOARD_CONFLICT]);
         assert_eq!(response.data.open_questions.len(), 2);
     }
@@ -761,16 +791,54 @@ rationale: 渐进迁移兼顾速度与稳定性。"#;
             &thread(),
             Some("Be practical"),
             0,
+            None,
             &[opinion("a", &long_opinion), opinion("b", "short")],
         );
 
         assert!(prompt.contains("ideas must be non-empty"));
+        assert!(prompt.contains("readyToSynthesize: true|false"));
         assert!(prompt.contains("Thread goal: Choose a product direction"));
         assert!(prompt.contains("User brainstorm instruction: Be practical"));
         assert!(prompt.contains("### From participant participant-a (agent codex"));
         assert!(prompt.contains("in the same language as the opinions"));
         assert!(prompt.contains(long_opinion.trim()));
         assert!(prompt.contains("sessio-thread-prompt:start"));
+        assert!(!prompt.contains("## Previous shared board"));
+    }
+
+    #[test]
+    fn board_prompt_includes_previous_board_for_critique_rounds() {
+        let prompt = build_board_prompt(
+            &run(),
+            &thread(),
+            None,
+            2,
+            Some("### Ideas\n- [idea-1] 异步内核改造"),
+            &[opinion("a", "支持 idea-1，但迁移节奏要放缓。")],
+        );
+
+        assert!(prompt.contains("## Previous shared board"));
+        assert!(prompt.contains("[idea-1] 异步内核改造"));
+        assert!(prompt.contains("keep existing idea ids stable"));
+    }
+
+    #[test]
+    fn parse_board_reads_ready_to_synthesize_and_defaults_to_true() {
+        let unready = parse_facilitator_board(
+            "f",
+            "ideas:\n  - id: idea-1\n    title: t\n    summary: s\n    sources: []\nreadyToSynthesize: false",
+            true,
+        )
+        .unwrap();
+        assert!(!unready.ready_to_synthesize);
+
+        let omitted = parse_facilitator_board(
+            "f",
+            "ideas:\n  - id: idea-1\n    title: t\n    summary: s\n    sources: []",
+            true,
+        )
+        .unwrap();
+        assert!(omitted.ready_to_synthesize);
     }
 
     #[test]

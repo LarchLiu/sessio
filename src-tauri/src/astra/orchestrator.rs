@@ -100,6 +100,7 @@ impl AstraService {
                 if latest_thread.kind == ThreadKind::Teamwork && !completions.is_empty() {
                     if let Some((journal_round_index, planner_summary)) = pending_journal.take() {
                         let entry = super::teamwork_round_journal_entry(
+                            &current_run.run_id,
                             journal_round_index,
                             &planner_summary,
                             &completions,
@@ -179,6 +180,15 @@ impl AstraService {
                     Ok(AstraTaskCompletion { task, result })
                 })
                 .collect::<Result<Vec<_>>>()?;
+            // Persist full outputs as workspace artifacts so later rounds can
+            // read them on demand. Debate is skipped to preserve lane isolation.
+            if matches!(thread.kind, ThreadKind::Teamwork | ThreadKind::Brainstorm) {
+                super::write_task_artifacts(
+                    &current_run.project_path,
+                    &current_run.run_id,
+                    &batch_completions,
+                );
+            }
             // Accumulate across sequential batches: the whole round's results
             // must reach the next planning, not just the last task's.
             completions.extend(batch_completions);
