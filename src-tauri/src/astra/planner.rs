@@ -64,6 +64,7 @@ fn deterministic_teamwork_plan(
                     "Teamwork task result, concrete progress, decisions, and verification notes."
                         .to_string(),
                 risk: AstraTaskRisk::Low,
+                depends_on: Vec::new(),
             })
         })
         .collect::<Vec<_>>();
@@ -135,6 +136,7 @@ fn deterministic_process_plan(
                         "Process stage task result, concrete progress, blockers, and verification notes."
                             .to_string(),
                     risk: AstraTaskRisk::Low,
+                    depends_on: Vec::new(),
                 })
             })
             .collect::<Vec<_>>();

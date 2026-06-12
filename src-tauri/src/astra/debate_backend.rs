@@ -408,6 +408,7 @@ fn debate_lane_tasks(
                         .to_string()
                 },
                 risk: AstraTaskRisk::Low,
+                depends_on: Vec::new(),
             };
             task.prompt.push_str(&format!("\n\nLane id: {lane_id}"));
             task.prompt = wrap_thread_prompt(

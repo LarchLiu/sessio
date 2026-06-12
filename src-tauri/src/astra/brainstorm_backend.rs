@@ -345,6 +345,7 @@ fn brainstorm_divergence_tasks(
                         .to_string()
                 },
                 risk: AstraTaskRisk::Low,
+                depends_on: Vec::new(),
             }
         })
         .collect()

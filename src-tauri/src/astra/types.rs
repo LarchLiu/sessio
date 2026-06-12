@@ -84,6 +84,11 @@ pub struct AstraTaskProposal {
     pub prompt: String,
     pub expected_output: String,
     pub risk: AstraTaskRisk,
+    /// Ids of tasks in the same plan round that must complete before this one
+    /// is dispatched. Wave scheduling is in-memory only; the field is never
+    /// persisted to the plan task table.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

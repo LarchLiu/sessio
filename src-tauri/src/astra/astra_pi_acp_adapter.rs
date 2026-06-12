@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -646,6 +647,8 @@ struct RawAstraPiAcpTask {
     prompt: Option<String>,
     expected_output: Option<String>,
     risk: Option<String>,
+    #[serde(default)]
+    depends_on: Option<Vec<String>>,
 }
 
 pub(super) fn parse_astra_pi_acp_orchestration_response(
@@ -679,9 +682,20 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
     let reason = reason
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| default_orchestration_reason(run_intent, completions.len()));
+    let mut raw_id_to_idx: HashMap<String, usize> = HashMap::new();
+    let mut ambiguous_ids: HashSet<String> = HashSet::new();
+    for (idx, task) in raw_tasks.iter().enumerate() {
+        if let Some(id) = task.id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            if raw_id_to_idx.insert(id.to_string(), idx).is_some() {
+                ambiguous_ids.insert(id.to_string());
+            }
+        }
+    }
+    let mut raw_deps = Vec::with_capacity(raw_tasks.len());
     let mut tasks = Vec::new();
     let mut invalid_messages = Vec::new();
-    for (idx, task) in raw_tasks.into_iter().enumerate() {
+    for (idx, mut task) in raw_tasks.into_iter().enumerate() {
+        raw_deps.push(task.depends_on.take());
         match sanitize_astra_pi_acp_task(task, run, thread, round_index, idx) {
             Ok(task) => tasks.push(task),
             Err(error) => invalid_messages.push(error.message),
@@ -696,6 +710,7 @@ pub(super) fn parse_astra_pi_acp_orchestration_response(
             ),
         ));
     }
+    resolve_task_dependencies(&mut tasks, &raw_deps, &raw_id_to_idx, &ambiguous_ids)?;
     validate_orchestration_contract(thread, run_intent, mode, &tasks)?;
 
     Ok(AstraOrchestration {
@@ -743,6 +758,94 @@ fn reject_legacy_orchestration_fields(value: &YamlValue) -> Result<(), AstraPiAc
     Ok(())
 }
 
+/// Resolves planner-assigned `dependsOn` references (raw task ids) into the
+/// sanitized task ids and rejects malformed graphs. Duplicate raw ids are only
+/// an error when something actually depends on them, so planners that emit
+/// redundant ids without using dependsOn keep working.
+fn resolve_task_dependencies(
+    tasks: &mut [AstraTaskProposal],
+    raw_deps: &[Option<Vec<String>>],
+    raw_id_to_idx: &HashMap<String, usize>,
+    ambiguous_ids: &HashSet<String>,
+) -> Result<(), AstraPiAcpFailure> {
+    let mut dep_indices: Vec<Vec<usize>> = vec![Vec::new(); tasks.len()];
+    for (idx, deps) in raw_deps.iter().enumerate() {
+        let Some(deps) = deps else { continue };
+        let mut seen = HashSet::new();
+        for reference in deps {
+            let reference = reference.trim();
+            if reference.is_empty() {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    "task dependsOn contains an empty id",
+                ));
+            }
+            if ambiguous_ids.contains(reference) {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    format!("duplicate task id referenced by dependsOn: {reference}"),
+                ));
+            }
+            let Some(&dep_idx) = raw_id_to_idx.get(reference) else {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    format!("task dependsOn references unknown task id: {reference}"),
+                ));
+            };
+            if dep_idx == idx {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    format!("task must not depend on itself: {reference}"),
+                ));
+            }
+            if seen.insert(dep_idx) {
+                dep_indices[idx].push(dep_idx);
+            }
+        }
+    }
+
+    // Kahn's algorithm over task indices; forward references are fine, cycles
+    // are not.
+    let mut in_degree = dep_indices.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); tasks.len()];
+    for (idx, deps) in dep_indices.iter().enumerate() {
+        for &dep_idx in deps {
+            dependents[dep_idx].push(idx);
+        }
+    }
+    let mut queue = in_degree
+        .iter()
+        .enumerate()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(idx, _)| idx)
+        .collect::<VecDeque<_>>();
+    let mut visited = 0usize;
+    while let Some(node) = queue.pop_front() {
+        visited += 1;
+        for &dependent in &dependents[node] {
+            in_degree[dependent] -= 1;
+            if in_degree[dependent] == 0 {
+                queue.push_back(dependent);
+            }
+        }
+    }
+    if visited != tasks.len() {
+        return Err(AstraPiAcpFailure::new(
+            "validation_failed",
+            "task dependsOn contains a cycle",
+        ));
+    }
+
+    let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
+    for (idx, deps) in dep_indices.into_iter().enumerate() {
+        tasks[idx].depends_on = deps
+            .into_iter()
+            .map(|dep_idx| task_ids[dep_idx].clone())
+            .collect();
+    }
+    Ok(())
+}
+
 fn validate_orchestration_contract(
     thread: &ThreadInfo,
     run_intent: AstraRunIntent,
@@ -767,6 +870,14 @@ fn validate_orchestration_contract(
                 return Err(AstraPiAcpFailure::new(
                     "validation_failed",
                     "continue runIntent requires at least one task",
+                ));
+            }
+            if mode == Some(PlanRoundMode::Sequential)
+                && tasks.iter().any(|task| !task.depends_on.is_empty())
+            {
+                return Err(AstraPiAcpFailure::new(
+                    "validation_failed",
+                    "dependsOn is only supported with mode: parallel",
                 ));
             }
         }
@@ -875,6 +986,7 @@ fn sanitize_astra_pi_acp_task(
                     .to_string()
             }),
         risk: parse_task_risk(raw.risk.as_deref()),
+        depends_on: Vec::new(),
     })
 }
 
@@ -1016,6 +1128,209 @@ tasks:
         assert_eq!(orchestration.tasks[0].target_stage_id, None);
         assert_eq!(orchestration.tasks[0].target_agent, Agent::Codex);
         assert_eq!(orchestration.tasks[0].risk, AstraTaskRisk::Medium);
+    }
+
+    fn depends_on_response(mode: &str, tasks_yaml: &str) -> String {
+        format!(
+            "summary: plan\nrunIntent: continue\nreason: fan_out\nmode: {mode}\ntasks:\n{tasks_yaml}"
+        )
+    }
+
+    fn task_yaml(id: &str, assistant: &str, agent: &str, depends_on: Option<&str>) -> String {
+        let mut yaml = format!(
+            "  - id: {id}\n    title: Task {id}\n    assistantId: {assistant}\n    targetAgent: {agent}\n    prompt: Work on {id}\n    expectedOutput: Notes\n    risk: low\n"
+        );
+        if let Some(depends_on) = depends_on {
+            yaml.push_str(&format!("    dependsOn: [{depends_on}]\n"));
+        }
+        yaml
+    }
+
+    #[test]
+    fn parses_depends_on_and_remaps_to_sanitized_ids() {
+        let response = depends_on_response(
+            "parallel",
+            &format!(
+                "{}{}{}",
+                task_yaml("t1", "assistant-codex", "codex", None),
+                task_yaml("t2", "assistant-claude", "claude", None),
+                task_yaml("t3", "assistant-codex", "codex", Some("t1, t2")),
+            ),
+        );
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            &response,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap();
+
+        assert!(orchestration.tasks[0].depends_on.is_empty());
+        assert!(orchestration.tasks[1].depends_on.is_empty());
+        assert_eq!(
+            orchestration.tasks[2].depends_on,
+            vec![
+                orchestration.tasks[0].id.clone(),
+                orchestration.tasks[1].id.clone()
+            ]
+        );
+        assert!(orchestration.tasks[2]
+            .depends_on
+            .iter()
+            .all(|id| id.starts_with("task-")));
+    }
+
+    #[test]
+    fn allows_forward_depends_on_reference() {
+        let response = depends_on_response(
+            "parallel",
+            &format!(
+                "{}{}",
+                task_yaml("t1", "assistant-codex", "codex", Some("t2")),
+                task_yaml("t2", "assistant-claude", "claude", None),
+            ),
+        );
+
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            &response,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            orchestration.tasks[0].depends_on,
+            vec![orchestration.tasks[1].id.clone()]
+        );
+    }
+
+    #[test]
+    fn rejects_depends_on_unknown_id() {
+        let response = depends_on_response(
+            "parallel",
+            &task_yaml("t1", "assistant-codex", "codex", Some("missing")),
+        );
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            &response,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("unknown task id"));
+    }
+
+    #[test]
+    fn rejects_depends_on_self_reference() {
+        let response = depends_on_response(
+            "parallel",
+            &task_yaml("t1", "assistant-codex", "codex", Some("t1")),
+        );
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            &response,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("depend on itself"));
+    }
+
+    #[test]
+    fn rejects_depends_on_cycle() {
+        let response = depends_on_response(
+            "parallel",
+            &format!(
+                "{}{}",
+                task_yaml("t1", "assistant-codex", "codex", Some("t2")),
+                task_yaml("t2", "assistant-claude", "claude", Some("t1")),
+            ),
+        );
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            &response,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("cycle"));
+    }
+
+    #[test]
+    fn rejects_depends_on_referencing_duplicate_id() {
+        let duplicated = format!(
+            "{}{}{}",
+            task_yaml("t1", "assistant-codex", "codex", None),
+            task_yaml("t1", "assistant-claude", "claude", None),
+            task_yaml("t3", "assistant-codex", "codex", Some("t1")),
+        );
+        let error = parse_astra_pi_acp_orchestration_response(
+            &depends_on_response("parallel", &duplicated),
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("duplicate task id"));
+
+        // Duplicate ids that nothing depends on stay legal: today's planners
+        // may emit redundant ids and must keep parsing.
+        let unused_duplicates = format!(
+            "{}{}",
+            task_yaml("t1", "assistant-codex", "codex", None),
+            task_yaml("t1", "assistant-claude", "claude", None),
+        );
+        let orchestration = parse_astra_pi_acp_orchestration_response(
+            &depends_on_response("parallel", &unused_duplicates),
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(orchestration.tasks.len(), 2);
+    }
+
+    #[test]
+    fn rejects_sequential_round_with_depends_on() {
+        let response = depends_on_response(
+            "sequential",
+            &format!(
+                "{}{}",
+                task_yaml("t1", "assistant-codex", "codex", None),
+                task_yaml("t2", "assistant-claude", "claude", Some("t1")),
+            ),
+        );
+
+        let error = parse_astra_pi_acp_orchestration_response(
+            &response,
+            &run(),
+            &teamwork_thread(),
+            0,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "validation_failed");
+        assert!(error.message.contains("mode: parallel"));
     }
 
     #[test]

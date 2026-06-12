@@ -41,16 +41,20 @@ Use runIntent:
 
 Teamwork task shape:
 tasks:
-  - title: string
+  - id: short unique id within this response (t1, t2, ...)
+    title: string
     assistantId: thread-assistant-id
     targetAgent: codex|claude|gemini|astra-pi
     prompt: string
     expectedOutput: string
     risk: low|medium|high
+    dependsOn: [ids of other tasks in this response]
 
 assistantId must reference one of thread.assistants. targetAgent should match that assistant's runtime agent. If you create an agent-level task without assistantId, targetAgent is required, but prefer assistantId so Sessio can preserve team-member history and assistant snapshots.
 
-Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants when independent. Use sequential when task order matters within the same round.
+dependsOn declares execution-order dependencies inside one parallel round and is only valid with mode: parallel; a sequential round with dependsOn is rejected. Tasks with an empty or omitted dependsOn start immediately and run concurrently. A task starts only after every task it depends on completed successfully; if any dependency fails, errors, or is cancelled, the dependent task is cancelled automatically and reported as cancelled with the blocking dependency in its error. dependsOn must be a YAML list of task ids from this same response, with no self references, no unknown ids, and no cycles. id is required for any task that other tasks depend on, and a referenced id must be unique in the response. Prefer one parallel round with dependsOn over several single-task rounds when work fans out and joins (for example: t1 and t2 independent, then t3 with dependsOn: [t1, t2]).
+
+Plan the next useful batch from the shared thread goal, userPrompt, thread.assistants, completedTasks, and prior session refs. Tasks in a parallel batch may target different assistants when independent. Use sequential only when the whole round is strictly linear; when a round mixes independent and dependent tasks, use parallel with dependsOn.
 
 previousRounds is the run journal: one entry per earlier completed round, with the planner summary and each task's title, assistantId, risk, status, and outputExcerpt. completedTasks carries the full outputs of the most recent round only; the round already covered by completedTasks is not repeated in previousRounds. Use previousRounds to recall earlier results and decisions, avoid re-running finished work, and keep new tasks consistent with what was already built.
 
@@ -1229,6 +1233,7 @@ mod tests {
             prompt: "Do the stage work.".to_string(),
             expected_output: "Research notes.".to_string(),
             risk: AstraTaskRisk::Low,
+            depends_on: Vec::new(),
         }
     }
 
@@ -1281,6 +1286,7 @@ mod tests {
             prompt: "Implement the shared-context task.".to_string(),
             expected_output: "Implementation result and verification.".to_string(),
             risk: AstraTaskRisk::Medium,
+            depends_on: Vec::new(),
         }
     }
 
@@ -1387,6 +1393,8 @@ mod tests {
         assert!(instruction.contains("mode: parallel|sequential|null"));
         assert!(instruction.contains("assistantId: thread-assistant-id"));
         assert!(instruction.contains("response schema is closed"));
+        assert!(instruction.contains("dependsOn: [ids of other tasks in this response]"));
+        assert!(instruction.contains("only valid with mode: parallel"));
         assert!(instruction.contains("previousRounds is the run journal"));
         assert!(instruction.contains("acceptance criteria"));
         assert!(instruction.contains("Review gate:"));

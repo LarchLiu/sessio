@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Result;
 use serde_json::json;
 
@@ -16,6 +18,7 @@ use crate::astra::brainstorm_facilitator::{
 use crate::astra::debate_backend::DebateBackend;
 use crate::astra::debate_judge::{DebateJudge, HeuristicJudge, RuntimeAgentJudge};
 use crate::astra::deterministic_backend::DeterministicOrchestratorBackend;
+use crate::astra::types::{AstraTaskResult, AstraTaskResultStatus};
 use crate::astra::runtime_agent_backend::{RuntimeAgentBackendConfig, RuntimeAgentOrchestrator};
 use crate::models::{PlanRoundMode, PlanTaskStatus, StageStatus, ThreadInfo, ThreadKind};
 use crate::store::SessionStore;
@@ -61,6 +64,9 @@ impl AstraService {
         }
         let mut dispatch_batch = Vec::new();
         let mut completions = Vec::new();
+        // Tasks of the current parallel round whose dependsOn is not yet
+        // satisfied; dispatched in waves as their dependencies complete.
+        let mut pending_wave_tasks: Vec<super::AstraTaskProposal> = Vec::new();
         // Round index and planner summary of the last dispatched teamwork
         // round, journaled once its completions arrive at the next planning.
         let mut pending_journal: Option<(u32, String)> = None;
@@ -121,17 +127,18 @@ impl AstraService {
                     }
                 };
                 let plan_summary = orchestration.summary.clone();
-                let (next_run, next_batch) = self.apply_orchestration_intent(
+                let applied = self.apply_orchestration_intent(
                     &current_run,
                     orchestration,
                     &orchestrator_backend,
                     current_round_index,
                 )?;
-                current_run = next_run;
+                current_run = applied.run;
                 if !current_run.status.active() {
                     return Ok(RustNativeWorkerOutcome::Claimed);
                 }
-                dispatch_batch = next_batch;
+                dispatch_batch = applied.dispatch_batch;
+                pending_wave_tasks = applied.deferred;
                 if !dispatch_batch.is_empty() {
                     pending_journal = Some((current_round_index, plan_summary));
                 }
@@ -187,6 +194,15 @@ impl AstraService {
                 return Ok(RustNativeWorkerOutcome::Claimed);
             }
             dispatch_batch = self.next_running_sequential_task_batch(&current_run)?;
+            if dispatch_batch.is_empty() && !pending_wave_tasks.is_empty() {
+                let transition = next_wave(&mut pending_wave_tasks, &completions);
+                for (task, reason) in transition.cancelled {
+                    let completion =
+                        self.cancel_undispatched_wave_task(&current_run, task, &reason);
+                    completions.push(completion);
+                }
+                dispatch_batch = transition.ready;
+            }
         }
     }
 
@@ -347,7 +363,7 @@ impl AstraService {
         orchestration: AstraOrchestration,
         orchestrator_backend: &str,
         round_index: u32,
-    ) -> Result<(AstraRun, Vec<super::AstraTaskProposal>)> {
+    ) -> Result<AppliedOrchestration> {
         let mut orchestration = orchestration;
         self.record_orchestration_diagnostics(
             &run.run_id,
@@ -362,12 +378,12 @@ impl AstraService {
             ),
             AstraRunIntent::Complete => {
                 self.complete_run(&run.run_id, &orchestration.reason)?;
-                Ok((self.load_run(&run.run_id)?, Vec::new()))
+                Ok(AppliedOrchestration::terminal(self.load_run(&run.run_id)?))
             }
             AstraRunIntent::WaitForHuman => {
                 self.mark_process_manual_checkpoint(run)?;
                 self.complete_run(&run.run_id, &orchestration.reason)?;
-                Ok((self.load_run(&run.run_id)?, Vec::new()))
+                Ok(AppliedOrchestration::terminal(self.load_run(&run.run_id)?))
             }
             AstraRunIntent::Error => {
                 self.error_run(
@@ -376,7 +392,7 @@ impl AstraService {
                     "orchestrator_error",
                     orchestration.summary,
                 )?;
-                Ok((self.load_run(&run.run_id)?, Vec::new()))
+                Ok(AppliedOrchestration::terminal(self.load_run(&run.run_id)?))
             }
         }
     }
@@ -403,13 +419,56 @@ impl AstraService {
         Ok(Vec::new())
     }
 
+    /// Marks a never-dispatched wave task as cancelled in the plan tables and
+    /// synthesizes its completion so the planner and round journal see why it
+    /// was skipped. Bypassing `finish_delegated_task` is safe here: a task
+    /// that was never dispatched has no delegated session, waiter, or runtime
+    /// resource to release.
+    fn cancel_undispatched_wave_task(
+        &self,
+        run: &AstraRun,
+        task: super::AstraTaskProposal,
+        reason: &str,
+    ) -> AstraTaskCompletion {
+        let result = AstraTaskResult {
+            task_id: task.id.clone(),
+            thread_stage_id: None,
+            sessio_runtime_session_id: String::new(),
+            turn_id: None,
+            status: AstraTaskResultStatus::Cancelled,
+            output: String::new(),
+            error: Some(reason.to_string()),
+            attempt_count: 0,
+            retry_limit_reached: false,
+            completed_at: now_ms(),
+        };
+        if let Err(error) = self.record_task_result(&run.run_id, result.clone()) {
+            log::warn!(
+                "[astra:task:wave-cancel-record-failed] runId={} taskId={} message={}",
+                run.run_id,
+                task.id,
+                error
+            );
+        }
+        match serde_json::to_value(&result) {
+            Ok(value) => self.emit(run, "task_result", value),
+            Err(error) => log::warn!(
+                "[astra:task:wave-cancel-emit-failed] runId={} taskId={} message={}",
+                run.run_id,
+                task.id,
+                error
+            ),
+        }
+        AstraTaskCompletion { task, result }
+    }
+
     fn apply_orchestration_tasks(
         &self,
         run: &AstraRun,
         orchestration: AstraOrchestration,
         orchestrator_backend: &str,
         round_index: u32,
-    ) -> Result<(AstraRun, Vec<super::AstraTaskProposal>)> {
+    ) -> Result<AppliedOrchestration> {
         let mode = orchestration
             .mode
             .ok_or_else(|| anyhow::anyhow!("continue runIntent requires a plan round mode"))?;
@@ -423,7 +482,7 @@ impl AstraService {
                 "orchestrator_unsupported_stage_task",
                 error.to_string(),
             )?;
-            return Ok((self.load_run(&run.run_id)?, Vec::new()));
+            return Ok(AppliedOrchestration::terminal(self.load_run(&run.run_id)?));
         }
         if tasks.is_empty() {
             let _ = self.error_run(
@@ -432,7 +491,7 @@ impl AstraService {
                 "orchestrator_missing_next_tasks",
                 "Astra Orchestrator returned continue without tasks".to_string(),
             )?;
-            return Ok((self.load_run(&run.run_id)?, Vec::new()));
+            return Ok(AppliedOrchestration::terminal(self.load_run(&run.run_id)?));
         }
         let tasks = self.create_plan_round_for_astra_tasks(
             run,
@@ -465,11 +524,17 @@ impl AstraService {
                 "roundIndex": round_index,
             }),
         );
-        let dispatch_batch = match mode {
-            PlanRoundMode::Parallel => next_dispatchable_tasks(&tasks, &latest_thread),
-            PlanRoundMode::Sequential => tasks.into_iter().take(1).collect(),
+        let (dispatch_batch, deferred) = match mode {
+            PlanRoundMode::Parallel => next_dispatchable_tasks(&tasks, &latest_thread)
+                .into_iter()
+                .partition(|task| task.depends_on.is_empty()),
+            PlanRoundMode::Sequential => (tasks.into_iter().take(1).collect(), Vec::new()),
         };
-        Ok((planned, dispatch_batch))
+        Ok(AppliedOrchestration {
+            run: planned,
+            dispatch_batch,
+            deferred,
+        })
     }
 
     fn mark_process_manual_checkpoint(&self, run: &AstraRun) -> Result<()> {
@@ -602,6 +667,99 @@ impl AstraService {
         }
         Ok(run)
     }
+}
+
+struct AppliedOrchestration {
+    run: AstraRun,
+    dispatch_batch: Vec<super::AstraTaskProposal>,
+    deferred: Vec<super::AstraTaskProposal>,
+}
+
+impl AppliedOrchestration {
+    fn terminal(run: AstraRun) -> Self {
+        Self {
+            run,
+            dispatch_batch: Vec::new(),
+            deferred: Vec::new(),
+        }
+    }
+}
+
+struct WaveTransition {
+    ready: Vec<super::AstraTaskProposal>,
+    cancelled: Vec<(super::AstraTaskProposal, String)>,
+}
+
+/// Computes the next wave of a dependsOn round. Tasks whose dependencies all
+/// completed move to `ready`; tasks blocked by a failed, errored, or cancelled
+/// dependency (directly or transitively) move to `cancelled`. When nothing can
+/// ever become ready (a dependency id that was never dispatched), the whole
+/// remaining pool is cancelled so the orchestration loop always progresses
+/// instead of spinning on empty batches.
+fn next_wave(
+    pending: &mut Vec<super::AstraTaskProposal>,
+    completions: &[AstraTaskCompletion],
+) -> WaveTransition {
+    let mut completed: HashSet<String> = HashSet::new();
+    let mut failed: HashMap<String, String> = HashMap::new();
+    for completion in completions {
+        if completion.result.status == AstraTaskResultStatus::Completed {
+            completed.insert(completion.task.id.clone());
+        } else {
+            failed.insert(completion.task.id.clone(), completion.task.title.clone());
+        }
+    }
+
+    let mut ready = Vec::new();
+    let mut cancelled: Vec<(super::AstraTaskProposal, String)> = Vec::new();
+    loop {
+        let mut progressed = false;
+        let mut index = 0;
+        while index < pending.len() {
+            let task = &pending[index];
+            if let Some(blocked_title) = task
+                .depends_on
+                .iter()
+                .find_map(|dep| failed.get(dep))
+                .cloned()
+            {
+                let task = pending.remove(index);
+                failed.insert(task.id.clone(), task.title.clone());
+                cancelled.push((
+                    task,
+                    format!("dependency task \"{blocked_title}\" did not complete"),
+                ));
+                progressed = true;
+                continue;
+            }
+            if task.depends_on.iter().all(|dep| completed.contains(dep)) {
+                ready.push(pending.remove(index));
+                progressed = true;
+                continue;
+            }
+            index += 1;
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    if ready.is_empty() && cancelled.is_empty() && !pending.is_empty() {
+        for task in pending.drain(..) {
+            let missing_dep = task
+                .depends_on
+                .iter()
+                .find(|dep| !completed.contains(*dep))
+                .cloned()
+                .unwrap_or_default();
+            cancelled.push((
+                task,
+                format!("dependency task \"{missing_dep}\" was never dispatched in this round"),
+            ));
+        }
+    }
+
+    WaveTransition { ready, cancelled }
 }
 
 pub(super) fn push_unique_bounded(values: &mut Vec<String>, value: String, max_len: usize) {
@@ -849,6 +1007,7 @@ mod tests {
                 prompt: "Plan next.".to_string(),
                 expected_output: "Plan.".to_string(),
                 risk: super::super::AstraTaskRisk::Low,
+                depends_on: Vec::new(),
             },
             super::super::AstraTaskProposal {
                 id: "task-review".to_string(),
@@ -861,6 +1020,7 @@ mod tests {
                 prompt: "Review research.".to_string(),
                 expected_output: "Review notes.".to_string(),
                 risk: super::super::AstraTaskRisk::Medium,
+                depends_on: Vec::new(),
             },
         ];
         let thread = test_thread(vec![research, plan]);
@@ -888,6 +1048,7 @@ mod tests {
                 prompt: "Plan next.".to_string(),
                 expected_output: "Plan.".to_string(),
                 risk: super::super::AstraTaskRisk::Low,
+                depends_on: Vec::new(),
             },
             super::super::AstraTaskProposal {
                 id: "task-blocked".to_string(),
@@ -900,6 +1061,7 @@ mod tests {
                 prompt: "Recover blocked stage.".to_string(),
                 expected_output: "Recovery notes.".to_string(),
                 risk: super::super::AstraTaskRisk::High,
+                depends_on: Vec::new(),
             },
         ];
         let thread = test_thread(vec![blocked, plan]);
@@ -945,7 +1107,158 @@ mod tests {
             prompt: "Work".to_string(),
             expected_output: "Notes".to_string(),
             risk: super::super::AstraTaskRisk::Low,
+            depends_on: Vec::new(),
         }
+    }
+
+    fn dep_task(id: &str, deps: &[&str]) -> super::super::AstraTaskProposal {
+        let mut task = test_task(id);
+        task.depends_on = deps.iter().map(ToString::to_string).collect();
+        task
+    }
+
+    fn wave_completion(id: &str, status: AstraTaskResultStatus) -> AstraTaskCompletion {
+        AstraTaskCompletion {
+            task: test_task(id),
+            result: AstraTaskResult {
+                task_id: id.to_string(),
+                thread_stage_id: None,
+                sessio_runtime_session_id: "session".to_string(),
+                turn_id: None,
+                status,
+                output: String::new(),
+                error: None,
+                attempt_count: 1,
+                retry_limit_reached: false,
+                completed_at: 1,
+            },
+        }
+    }
+
+    #[test]
+    fn parallel_first_wave_partitions_by_empty_depends_on() {
+        let tasks = vec![
+            test_task("a"),
+            dep_task("b", &["a"]),
+            test_task("c"),
+            dep_task("d", &["b", "c"]),
+        ];
+
+        let (ready, deferred): (Vec<_>, Vec<_>) = tasks
+            .into_iter()
+            .partition(|task| task.depends_on.is_empty());
+
+        assert_eq!(
+            ready.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(
+            deferred
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "d"]
+        );
+    }
+
+    #[test]
+    fn next_wave_unlocks_tasks_whose_deps_completed_and_keeps_waiting_ones() {
+        let mut pending = vec![dep_task("b", &["a"]), dep_task("c", &["a", "b"])];
+
+        let first = next_wave(
+            &mut pending,
+            &[wave_completion("a", AstraTaskResultStatus::Completed)],
+        );
+        assert_eq!(
+            first.ready.iter().map(|task| task.id.as_str()).collect::<Vec<_>>(),
+            vec!["b"]
+        );
+        assert!(first.cancelled.is_empty());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "c");
+
+        let second = next_wave(
+            &mut pending,
+            &[
+                wave_completion("a", AstraTaskResultStatus::Completed),
+                wave_completion("b", AstraTaskResultStatus::Completed),
+            ],
+        );
+        assert_eq!(
+            second
+                .ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn next_wave_cancels_dependents_of_failed_deps_recursively() {
+        let mut pending = vec![
+            dep_task("b", &["a"]),
+            dep_task("c", &["b"]),
+            dep_task("d", &["ok"]),
+        ];
+
+        let transition = next_wave(
+            &mut pending,
+            &[
+                wave_completion("a", AstraTaskResultStatus::Failed),
+                wave_completion("ok", AstraTaskResultStatus::Completed),
+            ],
+        );
+
+        assert_eq!(
+            transition
+                .ready
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["d"]
+        );
+        let cancelled = transition
+            .cancelled
+            .iter()
+            .map(|(task, reason)| (task.id.as_str(), reason.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(cancelled.len(), 2);
+        assert_eq!(cancelled[0].0, "b");
+        assert!(cancelled[0].1.contains("\"a\" did not complete"));
+        assert_eq!(cancelled[1].0, "c");
+        assert!(cancelled[1].1.contains("\"b\" did not complete"));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn next_wave_cascades_from_cancelled_dependencies_too() {
+        let mut pending = vec![dep_task("b", &["a"])];
+
+        let transition = next_wave(
+            &mut pending,
+            &[wave_completion("a", AstraTaskResultStatus::Cancelled)],
+        );
+
+        assert!(transition.ready.is_empty());
+        assert_eq!(transition.cancelled.len(), 1);
+        assert_eq!(transition.cancelled[0].0.id, "b");
+    }
+
+    #[test]
+    fn next_wave_cancels_all_when_no_progress_possible() {
+        let mut pending = vec![dep_task("b", &["ghost"]), dep_task("c", &["b"])];
+
+        let transition = next_wave(
+            &mut pending,
+            &[wave_completion("a", AstraTaskResultStatus::Completed)],
+        );
+
+        assert!(transition.ready.is_empty());
+        assert_eq!(transition.cancelled.len(), 2);
+        assert!(transition.cancelled[0].1.contains("never dispatched"));
+        assert!(pending.is_empty());
     }
 
     fn stage_assistant() -> crate::models::StageAssistantInfo {

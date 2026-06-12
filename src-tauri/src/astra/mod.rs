@@ -2841,6 +2841,7 @@ pub(crate) fn astra_task_from_plan_task(task: &PlanTaskInfo) -> AstraTaskProposa
             .clone()
             .unwrap_or_else(|| "Task result.".to_string()),
         risk: astra_task_risk_from_plan(task.risk),
+        depends_on: Vec::new(),
     }
 }
 
@@ -2901,9 +2902,18 @@ fn create_plan_round_for_astra_tasks_in_store(
     })?;
 
     let mut next_tasks = tasks;
+    let mut id_map = HashMap::with_capacity(next_tasks.len());
     for (task, plan_task) in next_tasks.iter_mut().zip(round.tasks.iter()) {
-        task.id = plan_task.id.clone();
+        let old_id = std::mem::replace(&mut task.id, plan_task.id.clone());
+        id_map.insert(old_id, plan_task.id.clone());
         task.plan_task_id = Some(plan_task.id.clone());
+    }
+    for task in next_tasks.iter_mut() {
+        for dep in task.depends_on.iter_mut() {
+            if let Some(new_id) = id_map.get(dep) {
+                *dep = new_id.clone();
+            }
+        }
     }
     Ok(next_tasks)
 }
@@ -3365,10 +3375,22 @@ mod tests {
             task: test_task("task-bad", "stage-1"),
         };
 
+        // Mirrors the synthetic completion produced when a wave-scheduled
+        // task is cancelled because its dependency did not complete.
+        let mut cancelled_result = test_task_result("task-skip", "", "");
+        cancelled_result.sessio_runtime_session_id = String::new();
+        cancelled_result.turn_id = None;
+        cancelled_result.status = AstraTaskResultStatus::Cancelled;
+        cancelled_result.error = Some("dependency task \"实现登录接口\" did not complete".to_string());
+        let cancelled_completion = AstraTaskCompletion {
+            result: cancelled_result,
+            task: test_task("task-skip", "stage-1"),
+        };
+
         let entry = teamwork_round_journal_entry(
             3,
             &format!("第 3 轮总结 {}", "决定 ".repeat(300)),
-            &[ok_completion, failed_completion],
+            &[ok_completion, failed_completion, cancelled_completion],
             42,
         );
 
@@ -3393,6 +3415,11 @@ mod tests {
         let error = tasks[1]["error"].as_str().unwrap();
         assert_eq!(error.chars().count(), TEAMWORK_JOURNAL_TASK_ERROR_CHAR_LIMIT);
         assert!(error.starts_with("依赖缺失"));
+        assert_eq!(tasks[2]["status"], "cancelled");
+        assert_eq!(
+            tasks[2]["error"],
+            "dependency task \"实现登录接口\" did not complete"
+        );
     }
 
     #[test]
@@ -3687,6 +3714,7 @@ mod tests {
                     prompt: "Implement the bridge.".to_string(),
                     expected_output: "Implementation summary.".to_string(),
                     risk: AstraTaskRisk::Medium,
+                    depends_on: Vec::new(),
                 },
                 AstraTaskProposal {
                     id: "task-2".to_string(),
@@ -3699,6 +3727,7 @@ mod tests {
                     prompt: "Review the bridge.".to_string(),
                     expected_output: "Review summary.".to_string(),
                     risk: AstraTaskRisk::Low,
+                    depends_on: vec!["task-1".to_string()],
                 },
             ],
         )
@@ -3706,6 +3735,8 @@ mod tests {
         assert!(tasks.iter().all(|task| task.plan_task_id.is_some()));
         assert_eq!(tasks[0].id, tasks[0].plan_task_id.clone().unwrap());
         assert_eq!(tasks[1].id, tasks[1].plan_task_id.clone().unwrap());
+        // depends_on references are remapped onto the persisted plan task ids.
+        assert_eq!(tasks[1].depends_on, vec![tasks[0].id.clone()]);
 
         let rounds = store.list_plan_rounds(&thread.id).unwrap();
         assert_eq!(rounds.len(), 1);
@@ -3907,6 +3938,7 @@ mod tests {
                     prompt: "Build the feature.".to_string(),
                     expected_output: "Build result.".to_string(),
                     risk: AstraTaskRisk::Low,
+                    depends_on: Vec::new(),
                 },
                 AstraTaskProposal {
                     id: "task-review".to_string(),
@@ -3919,6 +3951,7 @@ mod tests {
                     prompt: "Review the feature.".to_string(),
                     expected_output: "Review result.".to_string(),
                     risk: AstraTaskRisk::Low,
+                    depends_on: Vec::new(),
                 },
             ],
         )
@@ -4139,6 +4172,7 @@ mod tests {
                 prompt: "Implement the teamwork bridge.".to_string(),
                 expected_output: "Implementation summary.".to_string(),
                 risk: AstraTaskRisk::Medium,
+                depends_on: Vec::new(),
             }],
         )
         .unwrap();
@@ -4210,6 +4244,7 @@ mod tests {
             prompt: "Do the stage work.".to_string(),
             expected_output: "Stage result.".to_string(),
             risk: AstraTaskRisk::Low,
+            depends_on: Vec::new(),
         };
         let run = AstraRun {
             run_id: "astra-run-stage-link".to_string(),
@@ -4329,6 +4364,7 @@ mod tests {
             prompt: "Do the stage work.".to_string(),
             expected_output: "Focused worker result.".to_string(),
             risk: AstraTaskRisk::Low,
+            depends_on: Vec::new(),
         };
         let context = build_stage_task_context(&thread, &stage.id, &task).unwrap();
 
@@ -4413,6 +4449,7 @@ mod tests {
             prompt: "Research the stage.".to_string(),
             expected_output: "Research summary.".to_string(),
             risk: AstraTaskRisk::Low,
+            depends_on: Vec::new(),
         };
         store
             .update_thread_stage_state(&stage.id, Some(StageStatus::InProgress), None, None)
@@ -4672,6 +4709,7 @@ mod tests {
             prompt: "Implement and verify the missing API.".to_string(),
             expected_output: "Implementation summary and verification.".to_string(),
             risk: AstraTaskRisk::Medium,
+            depends_on: Vec::new(),
         };
 
         let context = build_stage_task_context(&thread, "thread-stage-1", &task).unwrap();
@@ -5144,6 +5182,7 @@ mod tests {
             prompt: "Do the stage work.".to_string(),
             expected_output: "Stage progress.".to_string(),
             risk: AstraTaskRisk::Low,
+            depends_on: Vec::new(),
         }
     }
 
