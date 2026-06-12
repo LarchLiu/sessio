@@ -68,6 +68,7 @@ import {
 } from "../api";
 import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
+import { renderMarkdownInput } from "../components/markdownInput";
 import {
   agentModelSelectOptions,
   agentModelSelectValue,
@@ -5486,6 +5487,7 @@ function createMarkdownComponents(
     ol: ({ children }) => <ol className="list-decimal pl-5 my-2 space-y-1">{children}</ol>,
     li: ({ children }) => <li>{children}</li>,
     hr: () => <hr className="border-ink/10 my-3" />,
+    input: ({ type, checked, disabled }) => renderMarkdownInput({ type, checked, disabled }),
     pre: ({ children }) => <>{children}</>,
     code: ({ children, className }) => {
       if (className) {
