@@ -3,6 +3,7 @@ import {
   Brain,
   Check,
   Folder,
+  GitBranch,
   GripVertical,
   MessageSquare,
   Swords,
@@ -365,7 +366,7 @@ export default function NewChatPage({
                     minMenuWidth={180}
                   />
                 </div>
-                <NewChatMenuButton icon={Workflow} label="main" text />
+                <NewChatMenuButton icon={GitBranch} label="main" text />
               </BottomRow>
             }
           />
