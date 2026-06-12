@@ -99,7 +99,7 @@ export default function ThreadPage({
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-16 text-body-sm text-ink/45">
             <LoaderCircle className="h-4 w-4 animate-spin" />
-            {t("memory_search.searching")}
+            {t("thread.loading")}
           </div>
         ) : !thread ? (
           <div className="rounded-lg border border-dashed border-ink/15 py-16 text-center text-body-sm text-ink/40">

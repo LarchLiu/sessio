@@ -491,7 +491,7 @@ export default function ThreadMultiSessionChatPage({
           {loading ? (
             <div className="flex items-center justify-center gap-2 py-16 text-body-sm text-ink/45">
               <LoaderCircle className="h-4 w-4 animate-spin" />
-              {t("memory_search.searching")}
+              {t("thread.multi_session_loading")}
             </div>
           ) : loadError && !thread ? (
             <ThreadMultiSessionEmpty
