@@ -835,7 +835,12 @@ function AgentEditor({
           ?? agent.aiProviders.find((provider) => provider.enabled)
           ?? agent.aiProviders[0]
         : null;
-    setModel(selectedProvider?.model ?? defaultModelValue(selectedProvider?.models ?? agent.models) ?? "");
+    setModel(
+      selectedProvider?.model
+      ?? agent.model
+      ?? defaultModelValue(selectedProvider?.models ?? agent.models)
+      ?? "",
+    );
     setEffort(agent.effort ?? agent.efforts[0]?.value ?? "");
     setPermissionMode(agent.permissionMode ?? agent.permissionModes[0]?.value ?? "");
     setModels(selectedProvider?.models ?? agent.models);
