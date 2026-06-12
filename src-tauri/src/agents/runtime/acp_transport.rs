@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::{
     CancelNotification, ContentBlock, EmbeddedResource, EmbeddedResourceResource,
@@ -23,6 +25,11 @@ use super::types::{
     RuntimeCapabilitySet, RuntimeError, RuntimeMetadata, RuntimeTransportKind,
 };
 use crate::models::Agent;
+
+type TurnActivityMap = Arc<Mutex<HashMap<String, Instant>>>;
+
+const ACP_TURN_COMPLETION_SETTLE_MS: u64 = 250;
+const ACP_TURN_COMPLETION_POLL_MS: u64 = 25;
 
 #[derive(Debug, Clone)]
 pub struct AcpInitializeProbe {
@@ -228,12 +235,15 @@ async fn run_session(
     let acp_agent = AcpAgent::from_str(&command)
         .with_context(|| format!("failed to parse ACP command: {command}"))?;
     let current_turn_id = Arc::new(Mutex::new(None::<String>));
+    let turn_activity = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
     let notification_manager = manager.clone();
     let notification_session_id = sessio_runtime_session_id.clone();
     let notification_turn_id = current_turn_id.clone();
+    let notification_turn_activity = turn_activity.clone();
     let permission_manager = manager.clone();
     let permission_session_id = sessio_runtime_session_id.clone();
     let permission_turn_id = current_turn_id.clone();
+    let permission_turn_activity = turn_activity.clone();
 
     agent_client_protocol::Client
         .builder()
@@ -267,6 +277,9 @@ async fn run_session(
                         .map_err(acp_internal_error)?;
                     return Ok(());
                 };
+                if session_update_extends_turn_quiet_period(&notification.update) {
+                    note_turn_activity(&notification_turn_activity, &turn_id);
+                }
                 log::debug!(
                     "[sessio-runtime:acp:notification] session={} turn={} update={:?}",
                     notification_session_id,
@@ -316,6 +329,7 @@ async fn run_session(
                         RequestPermissionOutcome::Cancelled,
                     ));
                 };
+                note_turn_activity(&permission_turn_activity, &turn_id);
                 let request_id = json_id_to_string(responder.id());
                 permission_manager
                     .emit(
@@ -395,6 +409,7 @@ async fn run_session(
             let start = start.clone();
             let current_turn_id = current_turn_id.clone();
             let runtime_config = runtime_config.clone();
+            let turn_activity = turn_activity.clone();
             async move {
                 let init = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -608,6 +623,7 @@ async fn run_session(
                     connection,
                     command_rx,
                     current_turn_id,
+                    turn_activity,
                 )
                 .await
                 .map_err(acp_internal_error)
@@ -833,17 +849,20 @@ async fn run_command_loop(
     connection: ConnectionTo<AcpAgentRole>,
     mut command_rx: tauri::async_runtime::Receiver<AcpWorkerCommand>,
     current_turn_id: Arc<Mutex<Option<String>>>,
+    turn_activity: TurnActivityMap,
 ) -> Result<()> {
     while let Some(command) = command_rx.recv().await {
         match command {
             AcpWorkerCommand::Prompt { turn_id, input } => {
                 set_current_turn(&current_turn_id, Some(turn_id.clone()));
+                note_turn_activity(&turn_activity, &turn_id);
                 spawn_prompt_task(
                     manager.clone(),
                     sessio_runtime_session_id.clone(),
                     acp_session_id.clone(),
                     connection.clone(),
                     current_turn_id.clone(),
+                    turn_activity.clone(),
                     turn_id,
                     input,
                 );
@@ -908,6 +927,7 @@ fn spawn_prompt_task(
     acp_session_id: SessionId,
     connection: ConnectionTo<AcpAgentRole>,
     current_turn_id: Arc<Mutex<Option<String>>>,
+    turn_activity: TurnActivityMap,
     turn_id: String,
     input: AgentInput,
 ) {
@@ -928,6 +948,7 @@ fn spawn_prompt_task(
                     error
                 );
                 clear_current_turn(&current_turn_id, &turn_id);
+                clear_turn_activity(&turn_activity, &turn_id);
                 let _ = manager.fail_turn(
                     &sessio_runtime_session_id,
                     &turn_id,
@@ -987,6 +1008,7 @@ fn spawn_prompt_task(
                     response.stop_reason
                 );
                 clear_current_turn(&current_turn_id, &turn_id);
+                clear_turn_activity(&turn_activity, &turn_id);
                 let _ = manager.cancel_turn_if_active(&sessio_runtime_session_id, &turn_id);
             }
             Ok(response) => {
@@ -1016,15 +1038,28 @@ fn spawn_prompt_task(
                     turn_id,
                     response.stop_reason
                 );
+                note_turn_activity(&turn_activity, &turn_id);
                 tauri::async_runtime::spawn_blocking({
                     let manager = manager.clone();
                     let sessio_runtime_session_id = sessio_runtime_session_id.clone();
                     let current_turn_id = current_turn_id.clone();
+                    let turn_activity = turn_activity.clone();
                     let turn_id = turn_id.clone();
                     move || {
-                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        let should_complete = wait_for_turn_quiet_period(
+                            &current_turn_id,
+                            &turn_activity,
+                            &turn_id,
+                            Duration::from_millis(ACP_TURN_COMPLETION_SETTLE_MS),
+                            Duration::from_millis(ACP_TURN_COMPLETION_POLL_MS),
+                        );
+                        if !should_complete {
+                            clear_turn_activity(&turn_activity, &turn_id);
+                            return;
+                        }
                         let _ = manager.complete_turn(&sessio_runtime_session_id, &turn_id);
                         clear_current_turn(&current_turn_id, &turn_id);
+                        clear_turn_activity(&turn_activity, &turn_id);
                     }
                 });
             }
@@ -1036,6 +1071,7 @@ fn spawn_prompt_task(
                     error
                 );
                 clear_current_turn(&current_turn_id, &turn_id);
+                clear_turn_activity(&turn_activity, &turn_id);
                 let _ = manager.fail_turn(
                     &sessio_runtime_session_id,
                     &turn_id,
@@ -1224,6 +1260,18 @@ fn session_update_type(update: &SessionUpdate) -> &'static str {
     }
 }
 
+fn session_update_extends_turn_quiet_period(update: &SessionUpdate) -> bool {
+    matches!(
+        update,
+        SessionUpdate::UserMessageChunk(_)
+            | SessionUpdate::AgentMessageChunk(_)
+            | SessionUpdate::AgentThoughtChunk(_)
+            | SessionUpdate::ToolCall(_)
+            | SessionUpdate::ToolCallUpdate(_)
+            | SessionUpdate::Plan(_)
+    )
+}
+
 fn current_turn(current_turn_id: &Arc<Mutex<Option<String>>>) -> Option<String> {
     current_turn_id.lock().ok().and_then(|guard| guard.clone())
 }
@@ -1232,6 +1280,47 @@ fn set_current_turn(current_turn_id: &Arc<Mutex<Option<String>>>, turn_id: Optio
     if let Ok(mut guard) = current_turn_id.lock() {
         *guard = turn_id;
     }
+}
+
+fn note_turn_activity(turn_activity: &TurnActivityMap, turn_id: &str) {
+    if let Ok(mut guard) = turn_activity.lock() {
+        guard.insert(turn_id.to_string(), Instant::now());
+    }
+}
+
+fn clear_turn_activity(turn_activity: &TurnActivityMap, turn_id: &str) {
+    if let Ok(mut guard) = turn_activity.lock() {
+        guard.remove(turn_id);
+    }
+}
+
+fn wait_for_turn_quiet_period(
+    current_turn_id: &Arc<Mutex<Option<String>>>,
+    turn_activity: &TurnActivityMap,
+    turn_id: &str,
+    settle_window: Duration,
+    poll_interval: Duration,
+) -> bool {
+    loop {
+        if current_turn(current_turn_id).as_deref() != Some(turn_id) {
+            return false;
+        }
+        let Some(last_activity) = turn_last_activity(turn_activity, turn_id) else {
+            return true;
+        };
+        let remaining = settle_window.saturating_sub(last_activity.elapsed());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(poll_interval));
+    }
+}
+
+fn turn_last_activity(turn_activity: &TurnActivityMap, turn_id: &str) -> Option<Instant> {
+    turn_activity
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(turn_id).copied())
 }
 
 fn clear_current_turn(current_turn_id: &Arc<Mutex<Option<String>>>, turn_id: &str) {
@@ -1471,5 +1560,66 @@ mod tests {
         let command = command_from_options(Agent::Claude, &options);
 
         assert_eq!(command, "npx -y @zed-industries/claude-code-acp@latest");
+    }
+
+    #[test]
+    fn turn_content_updates_extend_quiet_period() {
+        let update =
+            SessionUpdate::AgentMessageChunk(agent_client_protocol::schema::ContentChunk::new(
+                ContentBlock::Text(TextContent::new("hello")),
+            ));
+
+        assert!(session_update_extends_turn_quiet_period(&update));
+    }
+
+    #[test]
+    fn session_metadata_updates_do_not_extend_quiet_period() {
+        let update = SessionUpdate::SessionInfoUpdate(
+            agent_client_protocol::schema::SessionInfoUpdate::new(),
+        );
+
+        assert!(!session_update_extends_turn_quiet_period(&update));
+    }
+
+    #[test]
+    fn wait_for_turn_quiet_period_waits_after_last_activity() {
+        let current_turn_id = Arc::new(Mutex::new(Some("turn-1".to_string())));
+        let turn_activity = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
+        note_turn_activity(&turn_activity, "turn-1");
+
+        let started = Instant::now();
+        let completed = wait_for_turn_quiet_period(
+            &current_turn_id,
+            &turn_activity,
+            "turn-1",
+            Duration::from_millis(20),
+            Duration::from_millis(2),
+        );
+
+        assert!(completed);
+        assert!(started.elapsed() >= Duration::from_millis(15));
+    }
+
+    #[test]
+    fn wait_for_turn_quiet_period_stops_when_turn_is_cleared() {
+        let current_turn_id = Arc::new(Mutex::new(Some("turn-1".to_string())));
+        let turn_activity = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
+        note_turn_activity(&turn_activity, "turn-1");
+
+        let current_turn_for_thread = current_turn_id.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            clear_current_turn(&current_turn_for_thread, "turn-1");
+        });
+
+        let completed = wait_for_turn_quiet_period(
+            &current_turn_id,
+            &turn_activity,
+            "turn-1",
+            Duration::from_millis(40),
+            Duration::from_millis(2),
+        );
+
+        assert!(!completed);
     }
 }
