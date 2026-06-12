@@ -374,30 +374,6 @@ pub trait SessionStore: Send + Sync {
             }
         }
 
-        let mut planner_round_by_session = HashMap::<(String, Agent, String), String>::new();
-        for run in &astra_runs {
-            let mut run_rounds = plan_rounds
-                .iter()
-                .filter(|round| round.astra_run_id.as_deref() == Some(run.run_id.as_str()))
-                .collect::<Vec<_>>();
-            run_rounds.sort_by(|a, b| {
-                a.round_index
-                    .cmp(&b.round_index)
-                    .then_with(|| a.created_at.cmp(&b.created_at))
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            for (session_ref, round) in run.internal_planner_sessions.iter().zip(run_rounds) {
-                planner_round_by_session.insert(
-                    (
-                        run.run_id.clone(),
-                        session_ref.agent,
-                        session_ref.session_id.clone(),
-                    ),
-                    round.id.clone(),
-                );
-            }
-        }
-
         for round in &plan_rounds {
             for task in &round.tasks {
                 for task_session in &task.sessions {
@@ -445,13 +421,7 @@ pub trait SessionStore: Send + Sync {
                         kind: ThreadReplaySessionSourceKind::AstraInternal,
                         thread_id: Some(thread.id.clone()),
                         stage_id: None,
-                        plan_round_id: planner_round_by_session
-                            .get(&(
-                                run.run_id.clone(),
-                                session_ref.agent,
-                                session_ref.session_id.clone(),
-                            ))
-                            .cloned(),
+                        plan_round_id: None,
                         plan_task_id: None,
                         astra_run_id: Some(run.run_id.clone()),
                         role: Some(PlanTaskSessionRole::Planner),
@@ -463,7 +433,7 @@ pub trait SessionStore: Send + Sync {
                         stage_snapshot_json: None,
                         assistant_snapshot_json: None,
                         agent_snapshot_json: None,
-                        created_at: Some(session_ref.created_at),
+                        created_at: Some(run.updated_at),
                     },
                 );
             }

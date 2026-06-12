@@ -279,7 +279,6 @@ function ThreadAstraPanel({
                 round={round}
                 thread={thread}
                 stages={stages}
-                plannerSession={detailIndex.plannerByRoundId.get(round.id) ?? null}
                 taskSessionById={detailIndex.taskById}
                 onSelectSession={onSelectSession}
               />
@@ -290,8 +289,6 @@ function ThreadAstraPanel({
         {activeRun && (
           <AstraRunDiagnostics
             run={activeRun}
-            plannerSession={detailIndex.plannerByRunId.get(activeRun.runId) ?? null}
-            onSelectSession={onSelectSession}
           />
         )}
         {activeRun?.error && (
@@ -312,14 +309,12 @@ function AstraPlanRoundCard({
   round,
   thread,
   stages,
-  plannerSession,
   taskSessionById,
   onSelectSession,
 }: {
   round: PlanRoundInfo;
   thread: ThreadInfo;
   stages: StageInfo[];
-  plannerSession: SessionInfo | null;
   taskSessionById: Map<string, SessionInfo>;
   onSelectSession: (session: SessionInfo) => void;
 }) {
@@ -343,9 +338,6 @@ function AstraPlanRoundCard({
             </span>
           )}
         </div>
-        {plannerSession && (
-          <ThreadChatDetailButton session={plannerSession} onSelectSession={onSelectSession} />
-        )}
       </div>
       {round.summary && (
         <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-ink/45">
@@ -476,12 +468,8 @@ function AstraPlanTaskSessions({ sessions }: { sessions: PlanTaskSessionInfo[] }
 
 function AstraRunDiagnostics({
   run,
-  plannerSession,
-  onSelectSession,
 }: {
   run: AstraHandle;
-  plannerSession: SessionInfo | null;
-  onSelectSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
   const diagnostics = visibleAstraRunDiagnostics(run.runDiagnostics).slice(-3).reverse().map((diagnostic, index) => {
@@ -492,11 +480,8 @@ function AstraRunDiagnostics({
 
   return (
     <div className="rounded-md border border-dashed border-card-border/[0.12] px-2.5 py-2">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center gap-2">
         <span className="text-caption font-medium text-ink/55">{t("astra.diagnostics")}</span>
-        {plannerSession && (
-          <ThreadChatDetailButton session={plannerSession} onSelectSession={onSelectSession} />
-        )}
       </div>
       {(run.terminalReason || run.lastErrorCode) && (
         <div className="mt-1 flex min-w-0 flex-wrap items-start gap-1.5">
@@ -986,11 +971,9 @@ function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
 }
 
 function buildReplayDetailIndex(replay: ThreadReplayInfo | null): {
-  plannerByRoundId: Map<string, SessionInfo>;
   plannerByRunId: Map<string, SessionInfo>;
   taskById: Map<string, SessionInfo>;
 } {
-  const plannerByRoundId = new Map<string, SessionInfo>();
   const plannerByRunId = new Map<string, SessionInfo>();
   const taskById = new Map<string, SessionInfo>();
   const persistedSessions = (replay?.sessions ?? [])
@@ -999,13 +982,8 @@ function buildReplayDetailIndex(replay: ThreadReplayInfo | null): {
 
   for (const replaySession of persistedSessions) {
     for (const source of replaySession.sources) {
-      if (source.kind === "astra_internal") {
-        if (source.planRoundId && !plannerByRoundId.has(source.planRoundId)) {
-          plannerByRoundId.set(source.planRoundId, replaySession.session);
-        }
-        if (source.astraRunId && !plannerByRunId.has(source.astraRunId)) {
-          plannerByRunId.set(source.astraRunId, replaySession.session);
-        }
+      if (source.kind === "astra_internal" && source.astraRunId && !plannerByRunId.has(source.astraRunId)) {
+        plannerByRunId.set(source.astraRunId, replaySession.session);
       }
       if (source.kind === "plan_task" && source.planTaskId && !taskById.has(source.planTaskId)) {
         taskById.set(source.planTaskId, replaySession.session);
@@ -1013,7 +991,7 @@ function buildReplayDetailIndex(replay: ThreadReplayInfo | null): {
     }
   }
 
-  return { plannerByRoundId, plannerByRunId, taskById };
+  return { plannerByRunId, taskById };
 }
 
 function compareReplayDetailSessionTime(
