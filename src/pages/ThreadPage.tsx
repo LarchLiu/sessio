@@ -279,7 +279,7 @@ function ThreadAstraPanel({
                 round={round}
                 thread={thread}
                 stages={stages}
-                plannerSession={round.astraRunId ? detailIndex.plannerByRunId.get(round.astraRunId) ?? null : null}
+                plannerSession={detailIndex.plannerByRoundId.get(round.id) ?? null}
                 taskSessionById={detailIndex.taskById}
                 onSelectSession={onSelectSession}
               />
@@ -986,9 +986,11 @@ function compareSessionTime(a: SessionInfo, b: SessionInfo): number {
 }
 
 function buildReplayDetailIndex(replay: ThreadReplayInfo | null): {
+  plannerByRoundId: Map<string, SessionInfo>;
   plannerByRunId: Map<string, SessionInfo>;
   taskById: Map<string, SessionInfo>;
 } {
+  const plannerByRoundId = new Map<string, SessionInfo>();
   const plannerByRunId = new Map<string, SessionInfo>();
   const taskById = new Map<string, SessionInfo>();
   const persistedSessions = (replay?.sessions ?? [])
@@ -997,8 +999,13 @@ function buildReplayDetailIndex(replay: ThreadReplayInfo | null): {
 
   for (const replaySession of persistedSessions) {
     for (const source of replaySession.sources) {
-      if (source.kind === "astra_internal" && source.astraRunId && !plannerByRunId.has(source.astraRunId)) {
-        plannerByRunId.set(source.astraRunId, replaySession.session);
+      if (source.kind === "astra_internal") {
+        if (source.planRoundId && !plannerByRoundId.has(source.planRoundId)) {
+          plannerByRoundId.set(source.planRoundId, replaySession.session);
+        }
+        if (source.astraRunId && !plannerByRunId.has(source.astraRunId)) {
+          plannerByRunId.set(source.astraRunId, replaySession.session);
+        }
       }
       if (source.kind === "plan_task" && source.planTaskId && !taskById.has(source.planTaskId)) {
         taskById.set(source.planTaskId, replaySession.session);
@@ -1006,7 +1013,7 @@ function buildReplayDetailIndex(replay: ThreadReplayInfo | null): {
     }
   }
 
-  return { plannerByRunId, taskById };
+  return { plannerByRoundId, plannerByRunId, taskById };
 }
 
 function compareReplayDetailSessionTime(
