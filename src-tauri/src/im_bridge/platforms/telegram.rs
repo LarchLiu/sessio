@@ -426,15 +426,18 @@ struct WorkspaceChoice {
 
 fn workspace_choices(state: &Arc<ImBridgeState>, key: &ChatKey) -> Vec<WorkspaceChoice> {
     let config = state.config_snapshot();
+    let Some(telegram) = config.telegram.as_ref() else {
+        return Vec::new();
+    };
     let projects = state.store.list_projects().unwrap_or_default();
     let mut paths = Vec::<String>::new();
-    if let Some(workspace) = config.default_workspace() {
+    if let Some(workspace) = telegram.default_workspace() {
         push_unique(&mut paths, workspace);
     }
-    for workspace in &config.allowed_workspaces {
+    for workspace in &telegram.allowed_workspaces {
         push_unique(&mut paths, workspace);
     }
-    for binding in &config.workspace_bindings {
+    for binding in &telegram.workspace_bindings {
         if binding.platform == key.platform && binding.chat_id.trim() == key.chat_id {
             push_unique(&mut paths, &binding.workspace_path);
         }
@@ -444,7 +447,7 @@ fn workspace_choices(state: &Arc<ImBridgeState>, key: &ChatKey) -> Vec<Workspace
     }
     paths
         .into_iter()
-        .filter(|path| config.is_workspace_allowed(path))
+        .filter(|path| config.is_workspace_allowed(key.platform, path))
         .map(|path| {
             let label = projects
                 .iter()

@@ -33,7 +33,7 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, Bot, Check, Circle, Download, Eye, EyeOff, FolderSymlink, Globe2, GripVertical, Info, Languages, Link2, LoaderCircle, MessageCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
@@ -74,8 +74,6 @@ import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
 type SettingsSection = "general" | "agents" | "assistants" | "processTemplates" | "channels";
 type ChannelPlatform = "telegram" | "discord" | "feishu" | "lark" | "wechat";
-
-const TELEGRAM_AGENT_DEFAULT_VALUE = "__telegram_agent_default__";
 
 type AgentPreferencePatch = {
   displayName?: string | null;
@@ -425,6 +423,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
   const [runtimeAgents, setRuntimeAgents] = useState<RuntimeAgentMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [detecting, setDetecting] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testStatus, setTestStatus] = useState<"idle" | "success" | "error">("idle");
@@ -433,16 +432,17 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
   const [showToken, setShowToken] = useState(false);
   const [allowedUserIds, setAllowedUserIds] = useState<number[]>([]);
   const [userIdInput, setUserIdInput] = useState("");
-  const [defaultAgent, setDefaultAgent] = useState<Agent>("claude");
-  const [defaultModel, setDefaultModel] = useState<string | null>(null);
-  const [defaultEffort, setDefaultEffort] = useState<string | null>(null);
-  const [defaultWorkspace, setDefaultWorkspace] = useState("");
+  const [telegramAgent, setTelegramAgent] = useState<Agent | null>(null);
+  const [telegramModel, setTelegramModel] = useState<string | null>(null);
+  const [telegramEffort, setTelegramEffort] = useState<string | null>(null);
+  const [telegramWorkspace, setTelegramWorkspace] = useState("");
   const [bindings, setBindings] = useState<ImBridgeWorkspaceBinding[]>([]);
   const [bindingChatId, setBindingChatId] = useState("");
   const [bindingWorkspace, setBindingWorkspace] = useState("");
 
   const load = async () => {
     setLoading(true);
+    setSaveStatus("idle");
     try {
       const [bridgeConfig, projectRows, runtimeAgentRows] = await Promise.all([
         getImBridgeConfig(),
@@ -456,11 +456,12 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       setTelegramEnabled(Boolean(bridgeConfig.enabled && telegram.enabled));
       setBotToken(telegram.botToken ?? "");
       setAllowedUserIds(telegram.allowedUserIds ?? []);
-      setDefaultAgent(bridgeConfig.defaultAgent ?? "claude");
-      setDefaultModel(telegram.defaultModel ?? null);
-      setDefaultEffort(telegram.defaultEffort ?? null);
-      setDefaultWorkspace(bridgeConfig.defaultWorkspace ?? bridgeConfig.allowedWorkspaces[0] ?? "");
-      setBindings((bridgeConfig.workspaceBindings ?? []).filter((binding) => binding.platform === "telegram"));
+      const resolvedSelection = resolveTelegramAgentSelection(runtimeAgentRows, telegram);
+      setTelegramAgent(resolvedSelection.agent);
+      setTelegramModel(resolvedSelection.model);
+      setTelegramEffort(resolvedSelection.effort);
+      setTelegramWorkspace(telegram.defaultWorkspace ?? telegram.allowedWorkspaces[0] ?? "");
+      setBindings(telegram.workspaceBindings ?? []);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -472,52 +473,70 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     void load();
   }, []);
 
-  const defaultModelValue = defaultModel
-    ? agentModelSelectValue(defaultAgent, defaultModel)
-    : TELEGRAM_AGENT_DEFAULT_VALUE;
+  const selectedTelegramRuntimeAgent = useMemo(
+    () => runtimeAgents.find((agent) => agent.agent === telegramAgent && agent.enabled) ?? firstEnabledRuntimeAgent(runtimeAgents),
+    [runtimeAgents, telegramAgent],
+  );
+  const selectedTelegramAgent = selectedTelegramRuntimeAgent?.agent ?? telegramAgent;
+  const enabledRuntimeAgents = useMemo(
+    () => runtimeAgents.filter((agent) => agent.enabled),
+    [runtimeAgents],
+  );
+  const telegramModelValue = selectedTelegramAgent && telegramModel
+    ? agentModelSelectValue(selectedTelegramAgent, telegramModel)
+    : "";
   const modelOptions = useMemo(() => {
     const effortControls = Object.fromEntries(
-      runtimeAgents.map((runtimeAgent) => [
+      enabledRuntimeAgents.map((runtimeAgent) => [
         runtimeAgent.agent,
         <RuntimeEffortControl
-          value={runtimeAgent.agent === defaultAgent ? defaultEffort ?? initialRuntimeEffort(runtimeAgent) : initialRuntimeEffort(runtimeAgent)}
+          value={runtimeAgent.agent === selectedTelegramAgent ? telegramEffort ?? initialRuntimeEffort(runtimeAgent) : initialRuntimeEffort(runtimeAgent)}
           options={runtimeEffortOptions(runtimeAgent)}
           onChange={(value) => {
-            if (runtimeAgent.agent !== defaultAgent) {
-              setDefaultAgent(runtimeAgent.agent);
-              setDefaultModel(defaultRuntimeModel(runtimeAgent));
+            if (runtimeAgent.agent !== selectedTelegramAgent) {
+              setTelegramAgent(runtimeAgent.agent);
+              setTelegramModel(defaultRuntimeModel(runtimeAgent));
             }
-            setDefaultEffort(value);
+            setTelegramEffort(value);
           }}
         />,
       ]),
     ) as Partial<Record<Agent, ReactNode>>;
-    const selectedEfforts = defaultEffort ? { [defaultAgent]: defaultEffort } : {};
-    const options = agentModelSelectOptions(runtimeAgents, effortControls, selectedEfforts);
-    const selectedExists = options.some((option) => option.value === defaultModelValue);
+    const selectedEfforts = selectedTelegramAgent && telegramEffort ? { [selectedTelegramAgent]: telegramEffort } : {};
+    const options = agentModelSelectOptions(enabledRuntimeAgents, effortControls, selectedEfforts);
+    const selectedExists = options.some((option) => option.value === telegramModelValue);
     return [
-      {
-        value: TELEGRAM_AGENT_DEFAULT_VALUE,
-        label: t("settings.telegram_default_model_agent_default"),
-        icon: <Bot className="h-3.5 w-3.5 text-ink/55" />,
-      },
-      ...(!selectedExists && defaultModel
+      ...(!selectedExists && selectedTelegramAgent && telegramModel
         ? [{
-          value: defaultModelValue,
-          label: defaultModel,
-          icon: <AgentGlyph agent={defaultAgent} className="h-3.5 w-3.5" />,
+          value: telegramModelValue,
+          label: telegramModel,
+          icon: <AgentGlyph agent={selectedTelegramAgent} className="h-3.5 w-3.5" />,
         }]
         : []),
       ...options,
     ];
-  }, [defaultAgent, defaultEffort, defaultModel, defaultModelValue, runtimeAgents, t]);
+  }, [enabledRuntimeAgents, selectedTelegramAgent, telegramEffort, telegramModel, telegramModelValue]);
+  useEffect(() => {
+    if (runtimeAgents.length === 0) return;
+    const selected = selectedTelegramRuntimeAgent ?? firstEnabledRuntimeAgent(runtimeAgents);
+    if (!selected) return;
+    if (telegramAgent !== selected.agent) {
+      setTelegramAgent(selected.agent);
+    }
+    if (!telegramModel) {
+      setTelegramModel(defaultRuntimeModel(selected));
+    }
+    if (!telegramEffort) {
+      setTelegramEffort(initialRuntimeEffort(selected) || null);
+    }
+  }, [runtimeAgents, selectedTelegramRuntimeAgent, telegramAgent, telegramModel, telegramEffort]);
   const workspaceChoices = useMemo(
     () => uniqueStrings([
       ...projects.map((project) => project.path),
-      defaultWorkspace,
+      telegramWorkspace,
       ...bindings.map((binding) => binding.workspacePath),
     ]),
-    [bindings, defaultWorkspace, projects],
+    [bindings, telegramWorkspace, projects],
   );
   const telegramApiBase = config?.telegram?.apiBase ?? null;
   const channelTabs = useMemo(
@@ -572,6 +591,10 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     }
   };
 
+  useEffect(() => {
+    setSaveStatus("idle");
+  }, [telegramEnabled, botToken, allowedUserIds, selectedTelegramAgent, telegramModel, telegramEffort, telegramWorkspace, bindings]);
+
   const addBinding = () => {
     const chatId = bindingChatId.trim();
     if (!chatId || !bindingWorkspace) return;
@@ -585,40 +608,40 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
   const save = async () => {
     if (saving) return;
     setSaving(true);
+    setSaveStatus("idle");
     try {
       const nextTelegram = {
         ...(config?.telegram ?? defaultTelegramBridgeConfig()),
         enabled: telegramEnabled,
+        agent: selectedTelegramAgent ?? null,
+        model: telegramModel?.trim() || null,
+        effort: telegramEffort?.trim() || null,
+        defaultWorkspace: telegramWorkspace.trim() || null,
+        allowedWorkspaces: uniqueStrings([
+          telegramWorkspace.trim(),
+          ...bindings.map((binding) => binding.workspacePath),
+        ]),
+        workspaceBindings: bindings
+          .map((binding) => ({
+            platform: "telegram",
+            chatId: binding.chatId.trim(),
+            workspacePath: binding.workspacePath.trim(),
+          }))
+          .filter((binding) => binding.chatId && binding.workspacePath),
         botToken: botToken.trim(),
         allowedUserIds,
-        defaultModel: defaultModel?.trim() || null,
-        defaultEffort: defaultEffort?.trim() || null,
       };
-      const telegramBindings = bindings
-        .map((binding) => ({
-          platform: "telegram",
-          chatId: binding.chatId.trim(),
-          workspacePath: binding.workspacePath.trim(),
-        }))
-        .filter((binding) => binding.chatId && binding.workspacePath);
-      const nonTelegramBindings = (config?.workspaceBindings ?? []).filter((binding) => binding.platform !== "telegram");
-      const allowedWorkspaces = uniqueStrings([
-        defaultWorkspace.trim(),
-        ...telegramBindings.map((binding) => binding.workspacePath),
-      ]);
       const nextConfig: ImBridgeConfig = {
         ...(config ?? defaultImBridgeConfig()),
         enabled: telegramEnabled,
-        defaultAgent,
-        defaultWorkspace: defaultWorkspace.trim() || null,
-        allowedWorkspaces,
-        workspaceBindings: [...nonTelegramBindings, ...telegramBindings],
         telegram: nextTelegram,
       };
       const saved = await updateImBridgeConfig(nextConfig);
       setConfig(saved);
+      setSaveStatus("success");
       onError(null);
     } catch (err) {
+      setSaveStatus("error");
       onError(String(err));
     } finally {
       setSaving(false);
@@ -642,9 +665,19 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
           <SettingsGroup
             title={t("settings.telegram_bot")}
             action={
-              <button type="button" disabled={saving || loading} onClick={() => void save()} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
-                {saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                {t("project.save")}
+              <button type="button" disabled={saving || loading} onClick={() => void save()} className={channelSaveButtonClass(saveStatus)}>
+                {saving
+                  ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                  : saveStatus === "error"
+                    ? <X className="h-4 w-4" />
+                    : <Check className="h-4 w-4" />}
+                {saving
+                  ? t("project.save")
+                  : saveStatus === "success"
+                    ? t("settings.saved")
+                    : saveStatus === "error"
+                      ? t("settings.save_failed")
+                      : t("project.save")}
               </button>
             }
             flush
@@ -702,20 +735,17 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
             <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.telegram_default_model")} description={t("settings.telegram_default_model_description")}>
               <RuntimeMenuSelect
                 ariaLabel={t("settings.telegram_default_model")}
-                value={defaultModelValue}
+                value={telegramModelValue}
                 options={modelOptions}
                 onChange={(value) => {
-                  if (value === TELEGRAM_AGENT_DEFAULT_VALUE) {
-                    setDefaultModel(null);
-                    return;
-                  }
                   const parsed = parseAgentModelSelectValue(value);
                   if (!parsed) return;
-                  if (parsed.agent !== defaultAgent) {
-                    setDefaultEffort(null);
+                  const runtimeAgent = runtimeAgents.find((agent) => agent.agent === parsed.agent);
+                  if (parsed.agent !== selectedTelegramAgent) {
+                    setTelegramEffort(runtimeAgent ? initialRuntimeEffort(runtimeAgent) : null);
                   }
-                  setDefaultAgent(parsed.agent);
-                  setDefaultModel(parsed.model || null);
+                  setTelegramAgent(parsed.agent);
+                  setTelegramModel(parsed.model || null);
                 }}
                 minMenuWidth={240}
                 maxWidthClassName="max-w-[300px]"
@@ -725,7 +755,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
 
           <SettingsGroup title={t("settings.channel_workspace_bindings")} flush>
             <SettingsStackedRow icon={<FolderSymlink className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.channels_default_workspace_description")}>
-              <select value={defaultWorkspace} onChange={(event) => setDefaultWorkspace(event.target.value)} className={inputClassName + " w-full"}>
+              <select value={telegramWorkspace} onChange={(event) => setTelegramWorkspace(event.target.value)} className={inputClassName + " w-full"}>
                 <option value="">{t("settings.channels_select_workspace")}</option>
                 {workspaceChoices.map((path) => (
                   <option key={path} value={path}>{projectLabel(projects, path)}</option>
@@ -768,23 +798,49 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
 function defaultImBridgeConfig(): ImBridgeConfig {
   return {
     enabled: false,
-    defaultAgent: "claude",
-    defaultWorkspace: null,
-    allowedWorkspaces: [],
-    workspaceBindings: [],
+    idleTimeoutSecs: 900,
     telegram: defaultTelegramBridgeConfig(),
   };
 }
 
-function defaultTelegramBridgeConfig() {
+function defaultTelegramBridgeConfig(): TelegramBridgeConfig {
   return {
     enabled: false,
+    agent: null,
+    model: null,
+    effort: null,
+    defaultWorkspace: null,
+    allowedWorkspaces: [],
+    workspaceBindings: [],
     botToken: "",
     allowedUserIds: [],
-    defaultModel: null,
-    defaultEffort: null,
     pollTimeoutSecs: 30,
     apiBase: null,
+  };
+}
+
+function firstEnabledRuntimeAgent(runtimeAgents: RuntimeAgentMetadata[]): RuntimeAgentMetadata | null {
+  return runtimeAgents.find((agent) => agent.enabled) ?? runtimeAgents[0] ?? null;
+}
+
+function resolveTelegramAgentSelection(
+  runtimeAgents: RuntimeAgentMetadata[],
+  telegram: TelegramBridgeConfig,
+): { agent: Agent | null; model: string | null; effort: string | null } {
+  const selected =
+    runtimeAgents.find((agent) => agent.agent === telegram.agent && agent.enabled)
+    ?? firstEnabledRuntimeAgent(runtimeAgents);
+  if (!selected) {
+    return {
+      agent: telegram.agent ?? null,
+      model: telegram.model ?? null,
+      effort: telegram.effort ?? null,
+    };
+  }
+  return {
+    agent: selected.agent,
+    model: telegram.model ?? defaultRuntimeModel(selected),
+    effort: telegram.effort ?? (initialRuntimeEffort(selected) || null),
   };
 }
 
@@ -794,6 +850,17 @@ function defaultRuntimeModel(agent: RuntimeAgentMetadata): string | null {
 
 function telegramTestButtonClass(status: "idle" | "success" | "error"): string {
   const base = "inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-body-sm font-medium transition disabled:opacity-35 ";
+  if (status === "success") {
+    return base + "border-emerald/45 bg-emerald/14 text-emerald hover:bg-emerald/20";
+  }
+  if (status === "error") {
+    return base + "border-status-error/45 bg-status-error/12 text-status-error hover:bg-status-error/18";
+  }
+  return base + "border-card-border/[0.12] bg-card-chip/[0.08] text-card-fg/75 hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]";
+}
+
+function channelSaveButtonClass(status: "idle" | "success" | "error"): string {
+  const base = "inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-body-sm font-medium transition disabled:opacity-35 ";
   if (status === "success") {
     return base + "border-emerald/45 bg-emerald/14 text-emerald hover:bg-emerald/20";
   }

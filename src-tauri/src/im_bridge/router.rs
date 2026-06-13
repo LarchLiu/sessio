@@ -119,7 +119,7 @@ pub(super) fn start_new_session(
         })
         .context("no workspace given and no default configured")?;
 
-    if !config.is_workspace_allowed(&workspace) {
+    if !config.is_workspace_allowed(key.platform, &workspace) {
         bail!("workspace not allowed: {workspace}");
     }
 
@@ -128,7 +128,7 @@ pub(super) fn start_new_session(
     let agent = current_session
         .as_ref()
         .map(|session| session.agent)
-        .unwrap_or(config.default_agent);
+        .unwrap_or(resolve_default_agent(state, key.platform)?);
 
     let handle = start_session(state, key.platform, agent, &workspace)?;
     if current_session.is_some() {
@@ -365,7 +365,7 @@ fn restore_or_start_session(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result
         .workspace_for_chat(key.platform, &key.chat_id)
         .map(str::to_string)
         .context("no session and no default workspace; use /new <workspace> first")?;
-    let agent = config.default_agent;
+    let agent = resolve_default_agent(state, key.platform)?;
     let handle = start_session(state, key.platform, agent, &workspace)?;
     let session = ChatSession {
         agent_runtime_session_id: state.runtime.agent_runtime_session_id_for_session(&handle),
@@ -397,7 +397,7 @@ fn resume_channel_session(
     record: ChannelSessionRecord,
 ) -> Result<ChatSession> {
     let config = state.config_snapshot();
-    if !config.is_workspace_allowed(&record.workspace_path) {
+    if !config.is_workspace_allowed(key.platform, &record.workspace_path) {
         bail!(
             "persisted workspace no longer allowed: {}",
             record.workspace_path
@@ -451,13 +451,13 @@ fn start_session(
     };
     hydrate_start_request(&mut req, &state.store)?;
     let config = state.config_snapshot();
-    if let Some(model) = config.default_model_for_platform(platform) {
+    if let Some(model) = config.model_for_platform(platform) {
         req.options.insert(
             "model".to_string(),
             serde_json::Value::String(model.to_string()),
         );
     }
-    if let Some(effort) = config.default_effort_for_platform(platform) {
+    if let Some(effort) = config.effort_for_platform(platform) {
         req.options.insert(
             "effort".to_string(),
             serde_json::Value::String(effort.to_string()),
@@ -468,6 +468,24 @@ fn start_session(
         .runtime
         .wait_for_session_startup(&handle.sessio_runtime_session_id, SESSION_STARTUP_TIMEOUT)?;
     Ok(handle.sessio_runtime_session_id)
+}
+
+fn resolve_default_agent(state: &Arc<ImBridgeState>, platform: &str) -> Result<Agent> {
+    let config = state.config_snapshot();
+    let agents = state.store.list_agents()?;
+    if let Some(agent) = config.configured_agent_for_platform(platform) {
+        if agents
+            .iter()
+            .any(|info| info.enabled && info.id == agent.as_str())
+        {
+            return Ok(agent);
+        }
+    }
+    agents
+        .into_iter()
+        .find(|agent| agent.enabled)
+        .and_then(|agent| Agent::from_db_str(&agent.id))
+        .context("no enabled runtime agent configured")
 }
 
 /// Populate session options from the stored agent definition. Mirrors

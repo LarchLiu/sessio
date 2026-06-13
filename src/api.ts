@@ -86,10 +86,7 @@ export interface NetworkProxyConfig {
 
 export interface ImBridgeConfig {
   enabled: boolean;
-  defaultAgent: Agent;
-  defaultWorkspace: string | null;
-  allowedWorkspaces: string[];
-  workspaceBindings: ImBridgeWorkspaceBinding[];
+  idleTimeoutSecs: number;
   telegram: TelegramBridgeConfig | null;
 }
 
@@ -101,10 +98,14 @@ export interface ImBridgeWorkspaceBinding {
 
 export interface TelegramBridgeConfig {
   enabled: boolean;
+  agent: Agent | null;
+  model: string | null;
+  effort: string | null;
+  defaultWorkspace: string | null;
+  allowedWorkspaces: string[];
+  workspaceBindings: ImBridgeWorkspaceBinding[];
   botToken: string;
   allowedUserIds: number[];
-  defaultModel: string | null;
-  defaultEffort: string | null;
   pollTimeoutSecs: number;
   apiBase: string | null;
 }

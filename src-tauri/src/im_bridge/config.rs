@@ -19,26 +19,6 @@ pub struct ImBridgeConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Default agent for new chat-initiated sessions when the user does not
-    /// pick one with `/agent`.
-    #[serde(default = "default_agent", alias = "default_agent")]
-    pub default_agent: Agent,
-
-    /// Default workspace for chat-initiated sessions when a chat-specific
-    /// binding is absent.
-    #[serde(default, alias = "default_workspace")]
-    pub default_workspace: Option<String>,
-
-    /// Workspaces a chat is allowed to open sessions in. The first entry is the
-    /// default. Sessions outside this allowlist are rejected — this is the main
-    /// guard against turning the bridge into arbitrary remote command execution.
-    #[serde(default, alias = "allowed_workspaces")]
-    pub allowed_workspaces: Vec<String>,
-
-    /// Optional per-channel workspace overrides.
-    #[serde(default, alias = "workspace_bindings")]
-    pub workspace_bindings: Vec<WorkspaceBindingConfig>,
-
     /// Seconds of no IM interaction before the in-memory runtime connection is
     /// suspended. The channel session row stays active and resumes on next use.
     #[serde(default = "default_idle_timeout_secs", alias = "idle_timeout_secs")]
@@ -68,6 +48,33 @@ pub struct TelegramConfig {
     #[serde(default)]
     pub enabled: bool,
 
+    /// Agent used for new Telegram-created sessions. When absent, the bridge
+    /// resolves to the first enabled runtime agent from the local store.
+    #[serde(default)]
+    pub agent: Option<Agent>,
+
+    /// Model used for new Telegram-created sessions.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Effort used for new Telegram-created sessions.
+    #[serde(default)]
+    pub effort: Option<String>,
+
+    /// Default workspace for Telegram-created sessions when a chat-specific
+    /// binding is absent.
+    #[serde(default, alias = "default_workspace")]
+    pub default_workspace: Option<String>,
+
+    /// Workspaces Telegram chats are allowed to open sessions in. Empty denies
+    /// everything unless a default workspace or binding supplies the path.
+    #[serde(default, alias = "allowed_workspaces")]
+    pub allowed_workspaces: Vec<String>,
+
+    /// Optional per-Telegram-chat workspace overrides.
+    #[serde(default, alias = "workspace_bindings")]
+    pub workspace_bindings: Vec<WorkspaceBindingConfig>,
+
     /// Bot token from @BotFather.
     #[serde(default, alias = "bot_token")]
     pub bot_token: String,
@@ -76,14 +83,6 @@ pub struct TelegramConfig {
     /// nobody (fail closed). A message from any other user is ignored.
     #[serde(default, alias = "allowed_user_ids")]
     pub allowed_user_ids: Vec<i64>,
-
-    /// Optional model override for Telegram-created sessions.
-    #[serde(default, alias = "default_model")]
-    pub default_model: Option<String>,
-
-    /// Optional effort override for Telegram-created sessions.
-    #[serde(default, alias = "default_effort")]
-    pub default_effort: Option<String>,
 
     /// Long-poll timeout in seconds passed to `getUpdates`. Telegram holds the
     /// request open this long when idle.
@@ -94,10 +93,6 @@ pub struct TelegramConfig {
     /// servers). Defaults to the public endpoint.
     #[serde(default, alias = "api_base")]
     pub api_base: Option<String>,
-}
-
-fn default_agent() -> Agent {
-    Agent::Claude
 }
 
 fn default_poll_timeout() -> u64 {
@@ -112,10 +107,6 @@ impl Default for ImBridgeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            default_agent: default_agent(),
-            default_workspace: None,
-            allowed_workspaces: Vec::new(),
-            workspace_bindings: Vec::new(),
             idle_timeout_secs: default_idle_timeout_secs(),
             telegram: Some(TelegramConfig::default()),
         }
@@ -126,10 +117,14 @@ impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            agent: None,
+            model: None,
+            effort: None,
+            default_workspace: None,
+            allowed_workspaces: Vec::new(),
+            workspace_bindings: Vec::new(),
             bot_token: String::new(),
             allowed_user_ids: Vec::new(),
-            default_model: None,
-            default_effort: None,
             poll_timeout_secs: default_poll_timeout(),
             api_base: None,
         }
@@ -137,7 +132,67 @@ impl Default for TelegramConfig {
 }
 
 impl ImBridgeConfig {
-    /// The default workspace for chat-initiated sessions, if any.
+    /// Configured agent for a platform, if the platform has one.
+    pub fn configured_agent_for_platform(&self, platform: &str) -> Option<Agent> {
+        match platform {
+            "telegram" => self.telegram.as_ref().and_then(|config| config.agent),
+            _ => None,
+        }
+    }
+
+    /// Whether `path` is permitted for a new session on `platform`.
+    pub fn is_workspace_allowed(&self, platform: &str, path: &str) -> bool {
+        match platform {
+            "telegram" => self
+                .telegram
+                .as_ref()
+                .map(|config| config.is_workspace_allowed(path))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Workspace selected for a specific chat. Falls back to the platform
+    /// default.
+    pub fn workspace_for_chat(&self, platform: &str, chat_id: &str) -> Option<&str> {
+        match platform {
+            "telegram" => self
+                .telegram
+                .as_ref()
+                .and_then(|config| config.workspace_for_chat(platform, chat_id)),
+            _ => None,
+        }
+    }
+
+    /// Optional model override for sessions opened by a given platform.
+    pub fn model_for_platform(&self, platform: &str) -> Option<&str> {
+        match platform {
+            "telegram" => self
+                .telegram
+                .as_ref()
+                .and_then(|config| config.model.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            _ => None,
+        }
+    }
+
+    /// Optional effort override for sessions opened by a given platform.
+    pub fn effort_for_platform(&self, platform: &str) -> Option<&str> {
+        match platform {
+            "telegram" => self
+                .telegram
+                .as_ref()
+                .and_then(|config| config.effort.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            _ => None,
+        }
+    }
+}
+
+impl TelegramConfig {
+    /// The default workspace for Telegram chat-initiated sessions, if any.
     pub fn default_workspace(&self) -> Option<&str> {
         self.default_workspace
             .as_deref()
@@ -146,14 +201,14 @@ impl ImBridgeConfig {
             .or_else(|| self.allowed_workspaces.first().map(String::as_str))
     }
 
-    /// Whether `path` is permitted for a new session. An empty allowlist denies
-    /// everything (fail closed).
+    /// Whether `path` is permitted for a new Telegram session. A workspace is
+    /// allowed when it is the default, listed explicitly, or bound to a chat.
     pub fn is_workspace_allowed(&self, path: &str) -> bool {
         let path = path.trim();
         if path.is_empty() {
             return false;
         }
-        self.allowed_workspaces.iter().any(|w| w == path)
+        self.allowed_workspaces.iter().any(|w| w.trim() == path)
             || self.default_workspace() == Some(path)
             || self
                 .workspace_bindings
@@ -161,7 +216,8 @@ impl ImBridgeConfig {
                 .any(|binding| binding.workspace_path.trim() == path)
     }
 
-    /// Workspace selected for a specific chat. Falls back to the global default.
+    /// Workspace selected for a specific Telegram chat. Falls back to the
+    /// Telegram default.
     pub fn workspace_for_chat(&self, platform: &str, chat_id: &str) -> Option<&str> {
         self.workspace_bindings
             .iter()
@@ -172,32 +228,6 @@ impl ImBridgeConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .or_else(|| self.default_workspace())
-    }
-
-    /// Optional model override for sessions opened by a given platform.
-    pub fn default_model_for_platform(&self, platform: &str) -> Option<&str> {
-        match platform {
-            "telegram" => self
-                .telegram
-                .as_ref()
-                .and_then(|config| config.default_model.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-            _ => None,
-        }
-    }
-
-    /// Optional effort override for sessions opened by a given platform.
-    pub fn default_effort_for_platform(&self, platform: &str) -> Option<&str> {
-        match platform {
-            "telegram" => self
-                .telegram
-                .as_ref()
-                .and_then(|config| config.default_effort.as_deref())
-                .map(str::trim)
-                .filter(|value| !value.is_empty()),
-            _ => None,
-        }
     }
 }
 
