@@ -16,6 +16,7 @@ use super::super::config::DiscordConfig;
 use super::super::router;
 use super::super::state::{
     ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ImBridgeState,
+    PermissionResolutionOutcome,
 };
 
 const PLATFORM: &str = "discord";
@@ -589,6 +590,65 @@ impl DiscordSink {
             .map(|_| ())
     }
 
+    /// Send a message and return the resulting message id so we can later edit
+    /// the message (used for permission prompts).
+    fn send_message_with_id(
+        &self,
+        channel_id: &str,
+        text: &str,
+        components: Option<Value>,
+    ) -> Result<String> {
+        let mut body = json!({
+            "content": text,
+            "allowed_mentions": { "parse": [] },
+        });
+        if let Some(components) = components {
+            body["components"] = components;
+        }
+        let value: Value = self.post_json(&format!("/channels/{channel_id}/messages"), &body)?;
+        value
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("Discord createMessage response missing id"))
+    }
+
+    fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        text: &str,
+        components: Option<Value>,
+    ) -> Result<()> {
+        let mut body = json!({
+            "content": text,
+            "allowed_mentions": { "parse": [] },
+        });
+        if let Some(components) = components {
+            body["components"] = components;
+        }
+        self.client
+            .patch(self.endpoint(&format!("/channels/{channel_id}/messages/{message_id}")))
+            .bearer_auth(&self.bot_token)
+            .json(&body)
+            .send()
+            .with_context(|| "Discord editMessage failed")?
+            .error_for_status()
+            .with_context(|| "Discord editMessage returned HTTP error")?;
+        Ok(())
+    }
+
+    fn trigger_typing(&self, channel_id: &str) -> Result<()> {
+        self.client
+            .post(self.endpoint(&format!("/channels/{channel_id}/typing")))
+            .bearer_auth(&self.bot_token)
+            .send()
+            .with_context(|| "Discord triggerTyping failed")?
+            .error_for_status()
+            .with_context(|| "Discord triggerTyping returned HTTP error")?;
+        Ok(())
+    }
+
     fn respond_interaction(&self, interaction_id: &str, token: &str, content: &str) -> Result<()> {
         let body = json!({
             "type": 4,
@@ -649,32 +709,75 @@ impl ChatSink for DiscordSink {
         &self,
         chat_id: &str,
         request: &ChatPermissionRequest,
+    ) -> Result<Option<Value>> {
+        let text = format_permission_text(request);
+        let components = permission_components(request);
+        let message_id = self.send_message_with_id(chat_id, &text, components)?;
+        Ok(Some(json!({
+            "channel_id": chat_id,
+            "message_id": message_id,
+        })))
+    }
+
+    fn resolve_permission_message(
+        &self,
+        chat_id: &str,
+        message_ref: &Value,
+        request: &ChatPermissionRequest,
+        outcome: PermissionResolutionOutcome<'_>,
     ) -> Result<()> {
-        let mut text = format!("Permission requested\nTool: {}", request.tool_name);
-        if let Some(input) = &request.input_summary {
-            if !input.trim().is_empty() {
-                text.push_str("\n\nInput:\n");
-                text.push_str(input);
-            }
-        }
-        let buttons = request
-            .options
-            .iter()
-            .map(|option| {
-                json!({
-                    "type": 2,
-                    "style": 2,
-                    "label": option.label,
-                    "custom_id": format!("{}{}", CALLBACK_PREFIX, option.token),
-                })
-            })
-            .collect::<Vec<_>>();
-        let components = if buttons.is_empty() {
-            None
-        } else {
-            Some(json!([{ "type": 1, "components": buttons }]))
+        let Some(message_id) = message_ref.get("message_id").and_then(Value::as_str) else {
+            return Ok(());
         };
-        self.send_message(chat_id, &text, components)
+        let mut text = format_permission_text(request);
+        text.push_str("\n\n");
+        text.push_str(&format_permission_outcome(outcome));
+        // Editing with an empty components array clears the buttons.
+        self.edit_message(chat_id, message_id, &text, Some(json!([])))
+    }
+
+    fn send_typing(&self, chat_id: &str) -> Result<()> {
+        self.trigger_typing(chat_id)
+    }
+}
+
+fn format_permission_text(request: &ChatPermissionRequest) -> String {
+    let mut text = format!("Permission requested\nTool: {}", request.tool_name);
+    if let Some(input) = &request.input_summary {
+        if !input.trim().is_empty() {
+            text.push_str("\n\nInput:\n");
+            text.push_str(input);
+        }
+    }
+    text
+}
+
+fn format_permission_outcome(outcome: PermissionResolutionOutcome<'_>) -> String {
+    let marker = if outcome.approved { "✅" } else { "❌" };
+    match outcome.label {
+        Some(label) => format!("{marker} {label}"),
+        None if outcome.approved => format!("{marker} Allowed"),
+        None => format!("{marker} Rejected"),
+    }
+}
+
+fn permission_components(request: &ChatPermissionRequest) -> Option<Value> {
+    let buttons = request
+        .options
+        .iter()
+        .map(|option| {
+            json!({
+                "type": 2,
+                "style": 2,
+                "label": option.label,
+                "custom_id": format!("{}{}", CALLBACK_PREFIX, option.token),
+            })
+        })
+        .collect::<Vec<_>>();
+    if buttons.is_empty() {
+        None
+    } else {
+        Some(json!([{ "type": 1, "components": buttons }]))
     }
 }
 

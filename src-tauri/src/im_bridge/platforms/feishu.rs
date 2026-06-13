@@ -828,7 +828,7 @@ impl ChatSink for FeishuSink {
         &self,
         chat_id: &str,
         request: &ChatPermissionRequest,
-    ) -> Result<()> {
+    ) -> Result<Option<Value>> {
         let mut elements = vec![json!({
             "tag": "markdown",
             "content": permission_markdown(request),
@@ -871,7 +871,12 @@ impl ChatSink for FeishuSink {
                 "elements": elements,
             }))?,
         });
-        self.send_message(chat_id, &body)
+        self.send_message(chat_id, &body)?;
+        // TODO: capture message_id from the send response so we can edit the
+        // card after the user resolves it. For now leave it un-editable; the
+        // runtime will still mark the permission spent so a second click is a
+        // safe no-op.
+        Ok(None)
     }
 }
 

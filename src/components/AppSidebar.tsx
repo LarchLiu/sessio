@@ -845,7 +845,7 @@ function SidebarSessionItem({
       }
     >
       <SidebarSessionStatus activity={liveActivity} unread={unread} />
-      <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+      <span className="relative flex h-4 w-4 shrink-0 items-center justify-center text-ink">
         {source === "thread" && (
           <HashIcon className="absolute -left-1 top-1/2 h-3 w-3 -translate-y-1/2 text-ink/45" />
         )}
@@ -877,17 +877,6 @@ function SidebarSessionItem({
           <span className="text-ink/30">{t("list.no_user_message")}</span>
         )}
       </span>
-      {channelLabel && (
-        <span className="inline-flex shrink-0 items-center gap-1 rounded border border-ink/10 px-1 py-0.5 text-meta leading-none text-ink/42">
-          {channelIconClass && (
-            <IconifyIcon
-              iconClassName={channelIconClass}
-              className="h-2.5 w-2.5"
-            />
-          )}
-          {channelLabel}
-        </span>
-      )}
       <span className="shrink-0 text-meta tabular-nums text-ink/35">
         {relativeTime}
       </span>

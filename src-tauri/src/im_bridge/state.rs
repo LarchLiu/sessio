@@ -70,6 +70,8 @@ pub struct ChannelContext {
 #[derive(Debug, Default)]
 pub struct TurnBuffer {
     pub text: String,
+    /// Streamed reasoning/thought content shown as a prefix block on flush.
+    pub thought: String,
     /// Tool-call titles seen this turn, surfaced as a short activity footer.
     pub tools: Vec<String>,
     /// Human-readable tool summaries, such as TodoWrite checklist updates.
@@ -102,6 +104,7 @@ impl ChatPermissionRequest {
 
 #[derive(Debug, Clone)]
 pub struct ChatPermissionOption {
+    pub option_id: String,
     pub label: String,
     pub token: String,
 }
@@ -111,6 +114,18 @@ pub struct PendingPermissionDecision {
     pub sessio_runtime_session_id: String,
     pub request_id: String,
     pub option_id: String,
+}
+
+/// Tracks a permission message we already sent to a chat so we can edit/clear
+/// the buttons once the upstream runtime emits `PermissionResolved` (from any
+/// channel — IM button click, Tauri UI, etc.).
+#[derive(Debug, Clone)]
+pub struct PendingPermissionMessage {
+    pub chat: ChatKey,
+    /// Opaque per-platform handle (message id, channel+id, etc.) the sink will
+    /// use to locate the original message.
+    pub message_ref: JsonValue,
+    pub request: ChatPermissionRequest,
 }
 
 /// A platform's outbound sink. Implemented per platform so the outbound pump
@@ -126,13 +141,47 @@ pub trait ChatSink: Send + Sync {
 
     /// Deliver a permission request. Platforms with buttons override this;
     /// others get a safe text-only fallback.
+    ///
+    /// Returns an opaque platform-specific message handle when the sink can
+    /// later edit the message (to strip buttons after the user responds). A
+    /// `None` return means the sink delivered the request but cannot edit it
+    /// (e.g. plain-text fallback).
     fn send_permission_request(
         &self,
         chat_id: &str,
         request: &ChatPermissionRequest,
-    ) -> anyhow::Result<()> {
-        self.send_text(chat_id, &request.fallback_text())
+    ) -> anyhow::Result<Option<JsonValue>> {
+        self.send_text(chat_id, &request.fallback_text())?;
+        Ok(None)
     }
+
+    /// Strip interactive controls from a previously sent permission message and
+    /// annotate it with the user's choice so the prompt cannot be triggered
+    /// twice. Default no-op for platforms that cannot edit messages.
+    fn resolve_permission_message(
+        &self,
+        _chat_id: &str,
+        _message_ref: &JsonValue,
+        _request: &ChatPermissionRequest,
+        _outcome: PermissionResolutionOutcome<'_>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Send a "typing" / activity indicator to the chat. Implemented for
+    /// platforms that support it (Telegram, Discord). Default no-op.
+    fn send_typing(&self, _chat_id: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// Conveys the resolution of a permission prompt to the sink that originally
+/// rendered it. `label` is the human-readable name of the chosen option when
+/// known, used to annotate the original message.
+#[derive(Debug, Clone, Copy)]
+pub struct PermissionResolutionOutcome<'a> {
+    pub approved: bool,
+    pub label: Option<&'a str>,
 }
 
 struct Inner {
@@ -148,6 +197,10 @@ struct Inner {
     inbound_queues: Mutex<HashMap<ChatKey, VecDeque<String>>>,
     /// short callback token -> permission response data
     pending_permissions: Mutex<HashMap<String, PendingPermissionDecision>>,
+    /// sessio runtime session id -> request id -> rendered permission message
+    /// so we can edit/clear it after the user (or another channel) resolves it.
+    pending_permission_messages:
+        Mutex<HashMap<String, HashMap<String, PendingPermissionMessage>>>,
     permission_counter: AtomicU64,
     /// registered outbound sinks, keyed by platform tag
     sinks: Mutex<HashMap<&'static str, Arc<dyn ChatSink>>>,
@@ -179,6 +232,7 @@ impl ImBridgeState {
                 turns: Mutex::new(HashMap::new()),
                 inbound_queues: Mutex::new(HashMap::new()),
                 pending_permissions: Mutex::new(HashMap::new()),
+                pending_permission_messages: Mutex::new(HashMap::new()),
                 permission_counter: AtomicU64::new(1),
                 sinks: Mutex::new(HashMap::new()),
             },
@@ -420,6 +474,17 @@ impl ImBridgeState {
         }
     }
 
+    /// Append streamed reasoning/thought content for the active turn.
+    pub fn buffer_thought(&self, session_id: &str, text: &str) {
+        if let Ok(mut turns) = self.inner.turns.lock() {
+            turns
+                .entry(session_id.to_string())
+                .or_default()
+                .thought
+                .push_str(text);
+        }
+    }
+
     /// Record a tool-call title for the current turn.
     pub fn buffer_tool(&self, session_id: &str, tool: &str) {
         if let Ok(mut turns) = self.inner.turns.lock() {
@@ -510,10 +575,14 @@ impl ImBridgeState {
         sink.send_text(&key.chat_id, text)
     }
 
-    /// Send a permission request to a chat via its platform sink.
+    /// Send a permission request to a chat via its platform sink. If the sink
+    /// returns a message handle, we remember it so a later `PermissionResolved`
+    /// event can strip the buttons and prevent double-triggering.
     pub fn send_permission_to_chat(
         &self,
         key: &ChatKey,
+        sessio_runtime_session_id: &str,
+        request_id: &str,
         request: &ChatPermissionRequest,
     ) -> anyhow::Result<()> {
         let sink = self
@@ -523,7 +592,97 @@ impl ImBridgeState {
             .ok()
             .and_then(|sinks| sinks.get(key.platform).cloned())
             .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
-        sink.send_permission_request(&key.chat_id, request)
+        let message_ref = sink.send_permission_request(&key.chat_id, request)?;
+        if let Some(message_ref) = message_ref {
+            if let Ok(mut messages) = self.inner.pending_permission_messages.lock() {
+                messages
+                    .entry(sessio_runtime_session_id.to_string())
+                    .or_default()
+                    .insert(
+                        request_id.to_string(),
+                        PendingPermissionMessage {
+                            chat: key.clone(),
+                            message_ref,
+                            request: request.clone(),
+                        },
+                    );
+            }
+        }
+        Ok(())
+    }
+
+    /// Send a "typing" indicator to a chat. Best-effort: missing sinks or
+    /// platform errors return an error but the caller usually just logs it.
+    pub fn send_typing_to_chat(&self, key: &ChatKey) -> anyhow::Result<()> {
+        let sink = self
+            .inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
+        sink.send_typing(&key.chat_id)
+    }
+
+    /// Pop the stored permission-message handle for a (session, request) pair.
+    pub fn take_permission_message(
+        &self,
+        sessio_runtime_session_id: &str,
+        request_id: &str,
+    ) -> Option<PendingPermissionMessage> {
+        let mut messages = self.inner.pending_permission_messages.lock().ok()?;
+        let bucket = messages.get_mut(sessio_runtime_session_id)?;
+        let removed = bucket.remove(request_id);
+        if bucket.is_empty() {
+            messages.remove(sessio_runtime_session_id);
+        }
+        removed
+    }
+
+    /// Strip controls from a previously-rendered permission message. Used when
+    /// the runtime emits `PermissionResolved` (from any source: an IM button,
+    /// the Tauri UI, or another platform).
+    pub fn resolve_permission_message(
+        &self,
+        sessio_runtime_session_id: &str,
+        request_id: &str,
+        approved: bool,
+        option_id: Option<&str>,
+    ) {
+        let Some(pending) = self.take_permission_message(sessio_runtime_session_id, request_id)
+        else {
+            return;
+        };
+        let sink = match self
+            .inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(pending.chat.platform).cloned())
+        {
+            Some(sink) => sink,
+            None => return,
+        };
+        let label = option_id.and_then(|wanted| {
+            pending
+                .request
+                .options
+                .iter()
+                .find(|option| option.option_id == wanted)
+                .map(|option| option.label.as_str())
+        });
+        let outcome = PermissionResolutionOutcome { approved, label };
+        if let Err(error) = sink.resolve_permission_message(
+            &pending.chat.chat_id,
+            &pending.message_ref,
+            &pending.request,
+            outcome,
+        ) {
+            log::warn!(
+                "[im-bridge:{}] failed to resolve permission message: {error:#}",
+                pending.chat.platform
+            );
+        }
     }
 
     /// Create a compact callback token for a permission option.

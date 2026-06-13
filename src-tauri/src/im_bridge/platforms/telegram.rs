@@ -14,6 +14,7 @@ use super::super::config::TelegramConfig;
 use super::super::router;
 use super::super::state::{
     ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ImBridgeState,
+    PermissionResolutionOutcome,
 };
 
 const PLATFORM: &str = "telegram";
@@ -837,6 +838,50 @@ impl TelegramSink {
         response.into_result().map(|_| ())
     }
 
+    /// Send a message and return the resulting `message_id`. Used when we may
+    /// need to edit the message later (e.g. permission prompts).
+    fn send_message_with_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+        reply_markup: Option<Value>,
+    ) -> Result<i64> {
+        let mut body = json!({
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": true,
+        });
+        if let Some(reply_markup) = reply_markup {
+            body["reply_markup"] = reply_markup;
+        }
+        let response: TelegramApiResponse<Value> = self.post_json("sendMessage", &body)?;
+        let value = response.into_result()?;
+        value
+            .get("message_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("Telegram sendMessage response missing message_id"))
+    }
+
+    fn edit_message_text(&self, chat_id: &str, message_id: i64, text: &str) -> Result<()> {
+        let body = json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "disable_web_page_preview": true,
+        });
+        let response: TelegramApiResponse<Value> = self.post_json("editMessageText", &body)?;
+        response.into_result().map(|_| ())
+    }
+
+    fn send_chat_action(&self, chat_id: &str, action: &str) -> Result<()> {
+        let body = json!({
+            "chat_id": chat_id,
+            "action": action,
+        });
+        let response: TelegramApiResponse<Value> = self.post_json("sendChatAction", &body)?;
+        response.into_result().map(|_| ())
+    }
+
     fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<()> {
         let body = json!({
             "callback_query_id": callback_query_id,
@@ -876,14 +921,8 @@ impl ChatSink for TelegramSink {
         &self,
         chat_id: &str,
         request: &ChatPermissionRequest,
-    ) -> Result<()> {
-        let mut text = format!("Permission requested\nTool: {}", request.tool_name);
-        if let Some(input) = &request.input_summary {
-            if !input.trim().is_empty() {
-                text.push_str("\n\nInput:\n");
-                text.push_str(input);
-            }
-        }
+    ) -> Result<Option<Value>> {
+        let text = format_permission_text(request);
         let buttons: Vec<Value> = request
             .options
             .iter()
@@ -899,7 +938,50 @@ impl ChatSink for TelegramSink {
         } else {
             Some(json!({ "inline_keyboard": [buttons] }))
         };
-        self.send_message(chat_id, &text, reply_markup)
+        let message_id = self.send_message_with_id(chat_id, &text, reply_markup)?;
+        Ok(Some(json!({ "message_id": message_id })))
+    }
+
+    fn resolve_permission_message(
+        &self,
+        chat_id: &str,
+        message_ref: &Value,
+        request: &ChatPermissionRequest,
+        outcome: PermissionResolutionOutcome<'_>,
+    ) -> Result<()> {
+        let Some(message_id) = message_ref.get("message_id").and_then(Value::as_i64) else {
+            return Ok(());
+        };
+        let mut text = format_permission_text(request);
+        text.push_str("\n\n");
+        text.push_str(&format_permission_outcome(outcome));
+        // editMessageText with no reply_markup also drops the inline keyboard,
+        // which is exactly what we want: no more callbacks possible.
+        self.edit_message_text(chat_id, message_id, &text)
+    }
+
+    fn send_typing(&self, chat_id: &str) -> Result<()> {
+        self.send_chat_action(chat_id, "typing")
+    }
+}
+
+fn format_permission_text(request: &ChatPermissionRequest) -> String {
+    let mut text = format!("Permission requested\nTool: {}", request.tool_name);
+    if let Some(input) = &request.input_summary {
+        if !input.trim().is_empty() {
+            text.push_str("\n\nInput:\n");
+            text.push_str(input);
+        }
+    }
+    text
+}
+
+fn format_permission_outcome(outcome: PermissionResolutionOutcome<'_>) -> String {
+    let marker = if outcome.approved { "✅" } else { "❌" };
+    match outcome.label {
+        Some(label) => format!("{marker} {label}"),
+        None if outcome.approved => format!("{marker} Allowed"),
+        None => format!("{marker} Rejected"),
     }
 }
 

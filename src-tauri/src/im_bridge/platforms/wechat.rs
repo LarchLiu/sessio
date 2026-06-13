@@ -362,8 +362,9 @@ impl ChatSink for WechatSink {
         &self,
         chat_id: &str,
         request: &ChatPermissionRequest,
-    ) -> Result<()> {
-        self.send_text(chat_id, &request.fallback_text())
+    ) -> Result<Option<Value>> {
+        self.send_text(chat_id, &request.fallback_text())?;
+        Ok(None)
     }
 }
 
