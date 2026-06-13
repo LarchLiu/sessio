@@ -210,6 +210,14 @@ impl RuntimeManager {
         })
     }
 
+    pub fn active_turn_id(&self, sessio_runtime_session_id: &str) -> Option<String> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(sessio_runtime_session_id)
+                .and_then(|state| state.active_turn_id.clone())
+        })
+    }
+
     pub fn has_active_acp_turn(&self) -> bool {
         self.inner
             .sessions

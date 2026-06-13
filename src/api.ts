@@ -84,6 +84,31 @@ export interface NetworkProxyConfig {
   noProxy: string | null;
 }
 
+export interface ImBridgeConfig {
+  enabled: boolean;
+  defaultAgent: Agent;
+  defaultWorkspace: string | null;
+  allowedWorkspaces: string[];
+  workspaceBindings: ImBridgeWorkspaceBinding[];
+  telegram: TelegramBridgeConfig | null;
+}
+
+export interface ImBridgeWorkspaceBinding {
+  platform: string;
+  chatId: string;
+  workspacePath: string;
+}
+
+export interface TelegramBridgeConfig {
+  enabled: boolean;
+  botToken: string;
+  allowedUserIds: number[];
+  defaultModel: string | null;
+  defaultEffort: string | null;
+  pollTimeoutSecs: number;
+  apiBase: string | null;
+}
+
 export type AssistantType = "builtin" | "custom";
 
 export interface AssistantAgentInfo {
@@ -1815,6 +1840,22 @@ export async function getNetworkConfig(): Promise<NetworkConfig> {
 
 export async function updateNetworkConfig(config: NetworkConfig): Promise<NetworkConfig> {
   return invoke<NetworkConfig>("update_network_config", { config });
+}
+
+export async function getImBridgeConfig(): Promise<ImBridgeConfig> {
+  return invoke<ImBridgeConfig>("get_im_bridge_config");
+}
+
+export async function updateImBridgeConfig(config: ImBridgeConfig): Promise<ImBridgeConfig> {
+  return invoke<ImBridgeConfig>("update_im_bridge_config", { config });
+}
+
+export async function detectTelegramUserIds(botToken: string, apiBase: string | null): Promise<number[]> {
+  return invoke<number[]>("detect_telegram_user_ids", { botToken, apiBase });
+}
+
+export async function testTelegramBotConnection(botToken: string, apiBase: string | null): Promise<void> {
+  return invoke<void>("test_telegram_bot_connection", { botToken, apiBase });
 }
 
 export async function updateRuntimeAgentPreferences(

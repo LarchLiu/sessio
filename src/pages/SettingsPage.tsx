@@ -32,28 +32,35 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, Check, Circle, Download, Globe2, GripVertical, Info, Languages, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2, Workflow } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, NetworkConfig, ProjectStageInfo, RuntimeAgentOptionMetadata, ProcessTemplateInfo } from "../api";
+import { ArrowLeft, Bot, Check, Circle, Download, Eye, EyeOff, FolderSymlink, Globe2, GripVertical, Info, Languages, Link2, LoaderCircle, MessageCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2, Workflow, X } from "lucide-react";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo } from "../api";
 import {
   createProcessTemplate,
+  detectTelegramUserIds,
   getAstraConfig,
+  getImBridgeConfig,
   getNetworkConfig,
   listAgents,
   listAssistants,
+  listProjects,
   listProcessTemplateStages,
   listProcessTemplates,
+  listRuntimeAgents,
+  testTelegramBotConnection,
   updateAgentPreferences,
   updateAstraConfig,
+  updateImBridgeConfig,
   updateNetworkConfig,
   updateRuntimeAgentPreferences,
 } from "../api";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
 import AssistantCard from "../components/AssistantCard";
+import { agentModelSelectOptions, agentModelSelectValue, initialRuntimeEffort, parseAgentModelSelectValue, runtimeEffortOptions } from "../components/AgentSelect";
 import { AgentGlyph } from "../components/AgentIcon";
 import InlineMenuSelect from "../components/InlineMenuSelect";
 import StageList from "../components/StageList";
-import { runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
+import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
@@ -65,7 +72,10 @@ import { formatVersionLabel, type UpdateState } from "../updater";
 import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
 import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
-type SettingsSection = "general" | "agents" | "assistants" | "processTemplates";
+type SettingsSection = "general" | "agents" | "assistants" | "processTemplates" | "channels";
+type ChannelPlatform = "telegram" | "discord" | "feishu" | "lark" | "wechat";
+
+const TELEGRAM_AGENT_DEFAULT_VALUE = "__telegram_agent_default__";
 
 type AgentPreferencePatch = {
   displayName?: string | null;
@@ -113,6 +123,7 @@ export default function SettingsPage({
     { id: "general" as const, label: t("settings.general"), icon: Settings2 },
     { id: "agents" as const, label: t("agent.title"), icon: AiGenerate2Icon },
     { id: "assistants" as const, label: t("assistant.title"), icon: Robot3LineIcon },
+    { id: "channels" as const, label: t("settings.channels"), icon: MessageCircle },
     { id: "processTemplates" as const, label: t("settings.process_templates"), icon: Workflow },
   ];
   const sectionTitle = navItems.find((item) => item.id === section)?.label ?? t("settings.general");
@@ -175,6 +186,7 @@ export default function SettingsPage({
             )}
             {section === "agents" && <AgentsSettings onError={onError} />}
             {section === "assistants" && <AssistantsSettings onError={onError} />}
+            {section === "channels" && <ChannelsSettings onError={onError} />}
             {section === "processTemplates" && <ProcessTemplatesSettings onError={onError} />}
           </div>
         </ScrollArea>
@@ -403,6 +415,405 @@ function GeneralSettings({
       />
     </section>
   );
+}
+
+function ChannelsSettings({ onError }: { onError: (error: string | null) => void }) {
+  const { t } = useI18n();
+  const [activePlatform, setActivePlatform] = useState<ChannelPlatform>("telegram");
+  const [config, setConfig] = useState<ImBridgeConfig | null>(null);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [runtimeAgents, setRuntimeAgents] = useState<RuntimeAgentMetadata[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testStatus, setTestStatus] = useState<"idle" | "success" | "error">("idle");
+  const [telegramEnabled, setTelegramEnabled] = useState(false);
+  const [botToken, setBotToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [allowedUserIds, setAllowedUserIds] = useState<number[]>([]);
+  const [userIdInput, setUserIdInput] = useState("");
+  const [defaultAgent, setDefaultAgent] = useState<Agent>("claude");
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  const [defaultEffort, setDefaultEffort] = useState<string | null>(null);
+  const [defaultWorkspace, setDefaultWorkspace] = useState("");
+  const [bindings, setBindings] = useState<ImBridgeWorkspaceBinding[]>([]);
+  const [bindingChatId, setBindingChatId] = useState("");
+  const [bindingWorkspace, setBindingWorkspace] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [bridgeConfig, projectRows, runtimeAgentRows] = await Promise.all([
+        getImBridgeConfig(),
+        listProjects(),
+        listRuntimeAgents(),
+      ]);
+      setConfig(bridgeConfig);
+      setProjects(projectRows);
+      setRuntimeAgents(runtimeAgentRows);
+      const telegram = bridgeConfig.telegram ?? defaultTelegramBridgeConfig();
+      setTelegramEnabled(Boolean(bridgeConfig.enabled && telegram.enabled));
+      setBotToken(telegram.botToken ?? "");
+      setAllowedUserIds(telegram.allowedUserIds ?? []);
+      setDefaultAgent(bridgeConfig.defaultAgent ?? "claude");
+      setDefaultModel(telegram.defaultModel ?? null);
+      setDefaultEffort(telegram.defaultEffort ?? null);
+      setDefaultWorkspace(bridgeConfig.defaultWorkspace ?? bridgeConfig.allowedWorkspaces[0] ?? "");
+      setBindings((bridgeConfig.workspaceBindings ?? []).filter((binding) => binding.platform === "telegram"));
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const defaultModelValue = defaultModel
+    ? agentModelSelectValue(defaultAgent, defaultModel)
+    : TELEGRAM_AGENT_DEFAULT_VALUE;
+  const modelOptions = useMemo(() => {
+    const effortControls = Object.fromEntries(
+      runtimeAgents.map((runtimeAgent) => [
+        runtimeAgent.agent,
+        <RuntimeEffortControl
+          value={runtimeAgent.agent === defaultAgent ? defaultEffort ?? initialRuntimeEffort(runtimeAgent) : initialRuntimeEffort(runtimeAgent)}
+          options={runtimeEffortOptions(runtimeAgent)}
+          onChange={(value) => {
+            if (runtimeAgent.agent !== defaultAgent) {
+              setDefaultAgent(runtimeAgent.agent);
+              setDefaultModel(defaultRuntimeModel(runtimeAgent));
+            }
+            setDefaultEffort(value);
+          }}
+        />,
+      ]),
+    ) as Partial<Record<Agent, ReactNode>>;
+    const selectedEfforts = defaultEffort ? { [defaultAgent]: defaultEffort } : {};
+    const options = agentModelSelectOptions(runtimeAgents, effortControls, selectedEfforts);
+    const selectedExists = options.some((option) => option.value === defaultModelValue);
+    return [
+      {
+        value: TELEGRAM_AGENT_DEFAULT_VALUE,
+        label: t("settings.telegram_default_model_agent_default"),
+        icon: <Bot className="h-3.5 w-3.5 text-ink/55" />,
+      },
+      ...(!selectedExists && defaultModel
+        ? [{
+          value: defaultModelValue,
+          label: defaultModel,
+          icon: <AgentGlyph agent={defaultAgent} className="h-3.5 w-3.5" />,
+        }]
+        : []),
+      ...options,
+    ];
+  }, [defaultAgent, defaultEffort, defaultModel, defaultModelValue, runtimeAgents, t]);
+  const workspaceChoices = useMemo(
+    () => uniqueStrings([
+      ...projects.map((project) => project.path),
+      defaultWorkspace,
+      ...bindings.map((binding) => binding.workspacePath),
+    ]),
+    [bindings, defaultWorkspace, projects],
+  );
+  const telegramApiBase = config?.telegram?.apiBase ?? null;
+  const channelTabs = useMemo(
+    () => [
+      { value: "telegram" as const, label: "Telegram" },
+      { value: "discord" as const, label: "Discord" },
+      { value: "feishu" as const, label: "飞书" },
+      { value: "lark" as const, label: "Lark" },
+      { value: "wechat" as const, label: "WeChat" },
+    ],
+    [],
+  );
+
+  const addAllowedUserId = () => {
+    const value = Number(userIdInput.trim());
+    if (!Number.isSafeInteger(value)) {
+      onError(t("settings.channels_invalid_user_id"));
+      return;
+    }
+    setAllowedUserIds((current) => current.includes(value) ? current : [...current, value]);
+    setUserIdInput("");
+    onError(null);
+  };
+
+  const detectUserIds = async () => {
+    if (!botToken.trim() || detecting) return;
+    setDetecting(true);
+    try {
+      const ids = await detectTelegramUserIds(botToken.trim(), telegramApiBase);
+      setAllowedUserIds((current) => uniqueNumbers([...current, ...ids]));
+      onError(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const sendTest = async () => {
+    if (!botToken.trim() || testing) return;
+    setTesting(true);
+    setTestStatus("idle");
+    try {
+      await testTelegramBotConnection(botToken.trim(), telegramApiBase);
+      setTestStatus("success");
+      onError(null);
+    } catch (err) {
+      setTestStatus("error");
+      onError(String(err));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const addBinding = () => {
+    const chatId = bindingChatId.trim();
+    if (!chatId || !bindingWorkspace) return;
+    setBindings((current) => [
+      ...current.filter((binding) => binding.chatId !== chatId),
+      { platform: "telegram", chatId, workspacePath: bindingWorkspace },
+    ]);
+    setBindingChatId("");
+  };
+
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const nextTelegram = {
+        ...(config?.telegram ?? defaultTelegramBridgeConfig()),
+        enabled: telegramEnabled,
+        botToken: botToken.trim(),
+        allowedUserIds,
+        defaultModel: defaultModel?.trim() || null,
+        defaultEffort: defaultEffort?.trim() || null,
+      };
+      const telegramBindings = bindings
+        .map((binding) => ({
+          platform: "telegram",
+          chatId: binding.chatId.trim(),
+          workspacePath: binding.workspacePath.trim(),
+        }))
+        .filter((binding) => binding.chatId && binding.workspacePath);
+      const nonTelegramBindings = (config?.workspaceBindings ?? []).filter((binding) => binding.platform !== "telegram");
+      const allowedWorkspaces = uniqueStrings([
+        defaultWorkspace.trim(),
+        ...telegramBindings.map((binding) => binding.workspacePath),
+      ]);
+      const nextConfig: ImBridgeConfig = {
+        ...(config ?? defaultImBridgeConfig()),
+        enabled: telegramEnabled,
+        defaultAgent,
+        defaultWorkspace: defaultWorkspace.trim() || null,
+        allowedWorkspaces,
+        workspaceBindings: [...nonTelegramBindings, ...telegramBindings],
+        telegram: nextTelegram,
+      };
+      const saved = await updateImBridgeConfig(nextConfig);
+      setConfig(saved);
+      onError(null);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="min-w-0 max-w-full">
+      <div className="mb-4">
+        <SegmentedTabs<ChannelPlatform>
+          items={channelTabs}
+          value={activePlatform}
+          onChange={setActivePlatform}
+          itemHeight={30}
+          fullWidth
+        />
+      </div>
+
+      {activePlatform === "telegram" ? (
+        <>
+          <SettingsGroup
+            title={t("settings.telegram_bot")}
+            action={
+              <button type="button" disabled={saving || loading} onClick={() => void save()} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+                {saving ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                {t("project.save")}
+              </button>
+            }
+            flush
+          >
+            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.telegram_enable")} description={t("settings.telegram_enable_description")}>
+              <div className="flex items-center gap-3">
+                <span className="text-caption text-ink/45">{telegramEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
+                <SwitchControl checked={telegramEnabled} tooltip={t("settings.telegram_enable")} onToggle={() => setTelegramEnabled((value) => !value)} />
+              </div>
+            </SettingsRow>
+            <SettingsStackedRow icon={<Bot className="h-4 w-4" />} label={t("settings.telegram_bot_token")} description={t("settings.telegram_bot_token_description")}>
+              <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                <input value={botToken} type={showToken ? "text" : "password"} onChange={(event) => {
+                  setBotToken(event.target.value);
+                  setTestStatus("idle");
+                }} placeholder="123456:ABC-DEF..." className={inputClassName + " min-w-0 flex-1"} />
+                <button type="button" onClick={() => setShowToken((value) => !value)} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-ink/55 transition hover:bg-ink/[0.06] hover:text-ink" aria-label={showToken ? t("settings.telegram_hide_token") : t("settings.telegram_show_token")}>
+                  {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+                <button type="button" disabled={testing || !botToken.trim()} onClick={() => void sendTest()} className={telegramTestButtonClass(testStatus)}>
+                  {testing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                  {testing
+                    ? t("settings.telegram_testing_connection")
+                    : testStatus === "success"
+                      ? t("settings.telegram_connected")
+                      : testStatus === "error"
+                        ? t("settings.telegram_connection_failed")
+                        : t("settings.telegram_test_connection")}
+                </button>
+              </div>
+            </SettingsStackedRow>
+            <SettingsStackedRow icon={<Bot className="h-4 w-4" />} label={t("settings.telegram_allowed_users")} description={t("settings.telegram_allowed_users_description")}>
+              <div className="flex w-full min-w-0 flex-col gap-2">
+                <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                  <input value={userIdInput} onChange={(event) => setUserIdInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addAllowedUserId(); }} placeholder="Telegram user ID" className={inputClassName + " min-w-[180px] flex-1"} />
+                  <button type="button" onClick={addAllowedUserId} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]">
+                    <Plus className="h-4 w-4" />
+                    {t("settings.add")}
+                  </button>
+                  <button type="button" disabled={detecting || !botToken.trim()} onClick={() => void detectUserIds()} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+                    {detecting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                    {t("settings.telegram_detect")}
+                  </button>
+                </div>
+                <div className="flex max-w-full flex-wrap gap-1.5">
+                  {allowedUserIds.map((id) => (
+                    <button key={id} type="button" onClick={() => setAllowedUserIds((current) => current.filter((item) => item !== id))} className="inline-flex h-7 items-center gap-1 rounded-md bg-ink/[0.07] px-2 text-caption text-ink/70 transition hover:bg-ink/[0.1]">
+                      {id}
+                      <X className="h-3 w-3" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </SettingsStackedRow>
+            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.telegram_default_model")} description={t("settings.telegram_default_model_description")}>
+              <RuntimeMenuSelect
+                ariaLabel={t("settings.telegram_default_model")}
+                value={defaultModelValue}
+                options={modelOptions}
+                onChange={(value) => {
+                  if (value === TELEGRAM_AGENT_DEFAULT_VALUE) {
+                    setDefaultModel(null);
+                    return;
+                  }
+                  const parsed = parseAgentModelSelectValue(value);
+                  if (!parsed) return;
+                  if (parsed.agent !== defaultAgent) {
+                    setDefaultEffort(null);
+                  }
+                  setDefaultAgent(parsed.agent);
+                  setDefaultModel(parsed.model || null);
+                }}
+                minMenuWidth={240}
+                maxWidthClassName="max-w-[300px]"
+              />
+            </SettingsRow>
+          </SettingsGroup>
+
+          <SettingsGroup title={t("settings.channel_workspace_bindings")} flush>
+            <SettingsStackedRow icon={<FolderSymlink className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.channels_default_workspace_description")}>
+              <select value={defaultWorkspace} onChange={(event) => setDefaultWorkspace(event.target.value)} className={inputClassName + " w-full"}>
+                <option value="">{t("settings.channels_select_workspace")}</option>
+                {workspaceChoices.map((path) => (
+                  <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                ))}
+              </select>
+            </SettingsStackedRow>
+            <SettingsStackedRow icon={<FolderSymlink className="h-4 w-4" />} label={t("settings.channels_add_binding")} description={t("settings.channels_add_binding_description")}>
+              <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                <input value={bindingChatId} onChange={(event) => setBindingChatId(event.target.value)} placeholder="e.g. 123456789" className={inputClassName + " min-w-[170px] flex-1"} />
+                <select value={bindingWorkspace} onChange={(event) => setBindingWorkspace(event.target.value)} className={inputClassName + " min-w-[220px] flex-[1.4]"}>
+                  <option value="">{t("settings.channels_select_workspace")}</option>
+                  {workspaceChoices.map((path) => (
+                    <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                  ))}
+                </select>
+                <button type="button" disabled={!bindingChatId.trim() || !bindingWorkspace} onClick={addBinding} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+                  <Plus className="h-4 w-4" />
+                  {t("settings.add")}
+                </button>
+              </div>
+            </SettingsStackedRow>
+            {bindings.map((binding) => (
+              <SettingsStackedRow key={binding.chatId} icon={<FolderSymlink className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
+                <button type="button" onClick={() => setBindings((current) => current.filter((item) => item.chatId !== binding.chatId))} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink/55 transition hover:bg-red-500/10 hover:text-red-600" aria-label={t("sidebar.remove")}>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </SettingsStackedRow>
+            ))}
+          </SettingsGroup>
+        </>
+      ) : (
+        <SettingsGroup title={t("settings.channels_coming_soon")}>
+          <EmptyState label={t("settings.channels_coming_soon_description")} />
+        </SettingsGroup>
+      )}
+    </section>
+  );
+}
+
+function defaultImBridgeConfig(): ImBridgeConfig {
+  return {
+    enabled: false,
+    defaultAgent: "claude",
+    defaultWorkspace: null,
+    allowedWorkspaces: [],
+    workspaceBindings: [],
+    telegram: defaultTelegramBridgeConfig(),
+  };
+}
+
+function defaultTelegramBridgeConfig() {
+  return {
+    enabled: false,
+    botToken: "",
+    allowedUserIds: [],
+    defaultModel: null,
+    defaultEffort: null,
+    pollTimeoutSecs: 30,
+    apiBase: null,
+  };
+}
+
+function defaultRuntimeModel(agent: RuntimeAgentMetadata): string | null {
+  return agent.model ?? agent.models.find((model) => model.enabled)?.value ?? agent.models[0]?.value ?? null;
+}
+
+function telegramTestButtonClass(status: "idle" | "success" | "error"): string {
+  const base = "inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-body-sm font-medium transition disabled:opacity-35 ";
+  if (status === "success") {
+    return base + "border-emerald/45 bg-emerald/14 text-emerald hover:bg-emerald/20";
+  }
+  if (status === "error") {
+    return base + "border-status-error/45 bg-status-error/12 text-status-error hover:bg-status-error/18";
+  }
+  return base + "border-card-border/[0.12] bg-card-chip/[0.08] text-card-fg/75 hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]";
+}
+
+function projectLabel(projects: ProjectInfo[], path: string): string {
+  const project = projects.find((item) => item.path === path);
+  return project ? `${project.name} · ${project.path}` : path;
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return Array.from(new Set(values));
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
 function AgentsSettings({ onError }: { onError: (error: string | null) => void }) {
@@ -2251,6 +2662,31 @@ function SettingsRow({
         </span>
       </div>
       {children}
+    </div>
+  );
+}
+
+function SettingsStackedRow({
+  icon,
+  label,
+  description,
+  children,
+}: {
+  icon: ReactNode;
+  label: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="border-b border-ink/[0.12] px-3 py-4 last:border-b-0">
+      <div className="mb-3 flex min-w-0 gap-3">
+        <span className="mt-0.5 shrink-0 text-ink/55">{icon}</span>
+        <span className="min-w-0">
+          <span className="block text-body-sm font-medium text-ink/75">{label}</span>
+          <span className="mt-1 block max-w-[56rem] text-caption leading-relaxed text-ink/60">{description}</span>
+        </span>
+      </div>
+      <div className="min-w-0 pl-7">{children}</div>
     </div>
   );
 }

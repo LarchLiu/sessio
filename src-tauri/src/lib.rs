@@ -2,6 +2,7 @@ pub mod agents;
 pub mod astra;
 pub mod cli;
 pub mod config;
+pub mod im_bridge;
 pub mod indexer;
 pub mod memory;
 pub mod models;
@@ -2766,6 +2767,42 @@ fn update_network_config(config: config::NetworkConfig) -> Result<config::Networ
 }
 
 #[tauri::command]
+fn get_im_bridge_config() -> Result<im_bridge::ImBridgeConfig, String> {
+    im_bridge::load_config_or_default().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_im_bridge_config(
+    config: im_bridge::ImBridgeConfig,
+    bridge: State<'_, im_bridge::ImBridgeService>,
+) -> Result<im_bridge::ImBridgeConfig, String> {
+    im_bridge::save_config(&config).map_err(|e| e.to_string())?;
+    bridge.update_config(config.clone());
+    Ok(config)
+}
+
+#[tauri::command]
+fn detect_telegram_user_ids(
+    bot_token: String,
+    api_base: Option<String>,
+) -> Result<Vec<i64>, String> {
+    im_bridge::detect_telegram_user_ids(&bot_token, api_base.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn test_telegram_bot_connection(
+    bot_token: String,
+    api_base: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        im_bridge::test_telegram_bot_connection(&bot_token, api_base.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
@@ -3308,6 +3345,23 @@ pub fn run() {
             if let Err(error) = pi_session_store.watch_runtime_events(runtime.clone()) {
                 log::warn!("[pi-acp-session-store] failed to watch runtime events: {error}");
             }
+            let im_bridge_config = match im_bridge::load_config_or_default() {
+                Ok(config) => config,
+                Err(error) => {
+                    log::warn!("[im-bridge] failed to load config: {error:#}");
+                    im_bridge::ImBridgeConfig::default()
+                }
+            };
+            let im_bridge_service = im_bridge::ImBridgeService::new(
+                app.handle().clone(),
+                store.clone(),
+                runtime.clone(),
+                im_bridge_config,
+            );
+            if let Err(error) = im_bridge_service.start() {
+                log::warn!("[im-bridge] failed to start: {error:#}");
+            }
+            app.manage(im_bridge_service);
             app.manage(pi_session_store);
             app.manage(astra_service);
             app.manage(runtime_agents_cache);
@@ -3450,6 +3504,10 @@ pub fn run() {
             get_debug_config,
             get_network_config,
             update_network_config,
+            get_im_bridge_config,
+            update_im_bridge_config,
+            detect_telegram_user_ids,
+            test_telegram_bot_connection,
             update_runtime_agent_preferences,
             start_agent_session,
             fork_agent_session,
