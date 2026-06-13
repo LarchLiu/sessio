@@ -71,6 +71,7 @@ pub fn handle_message(state: &Arc<ImBridgeState>, key: &ChatKey, text: &str) -> 
 /// Parse and execute a slash command. `rest` is everything after the leading
 /// `/`. Unknown commands return usage help.
 fn handle_command(state: &Arc<ImBridgeState>, key: &ChatKey, rest: &str) -> HandleOutcome {
+    state.touch_chat(key);
     let mut parts = rest.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("").to_ascii_lowercase();
     let arg = parts.next().map(str::trim).unwrap_or("");
@@ -142,6 +143,7 @@ pub(super) fn start_new_session(
             agent_runtime_session_id: state.runtime.agent_runtime_session_id_for_session(&handle),
             agent,
             workspace_path: workspace.clone(),
+            last_activity_at: 0,
         },
     );
 
@@ -200,6 +202,7 @@ pub(super) fn switch_agent(
             sessio_runtime_session_id: handle,
             agent,
             workspace_path: workspace.clone(),
+            last_activity_at: 0,
         },
     );
 
@@ -275,6 +278,7 @@ fn dispatch_prompt(
         Some(session) => session,
         None => restore_or_start_session(state, key)?,
     };
+    state.touch_chat(key);
 
     if state
         .runtime
@@ -368,6 +372,7 @@ fn restore_or_start_session(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result
         sessio_runtime_session_id: handle,
         agent,
         workspace_path: workspace,
+        last_activity_at: 0,
     };
     state.bind_chat(key.clone(), session.clone());
     Ok(session)
@@ -378,7 +383,10 @@ pub(super) fn ensure_chat_session(
     key: &ChatKey,
 ) -> Result<ChatSession> {
     match state.chat_session(key) {
-        Some(session) => Ok(session),
+        Some(session) => {
+            state.touch_chat(key);
+            Ok(session)
+        }
         None => restore_or_start_session(state, key),
     }
 }
@@ -418,6 +426,7 @@ fn resume_channel_session(
         agent_runtime_session_id,
         agent: handle.agent,
         workspace_path: handle.workspace_path,
+        last_activity_at: 0,
     };
     state.bind_chat(key.clone(), session.clone());
     Ok(session)

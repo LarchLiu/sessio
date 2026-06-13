@@ -39,6 +39,11 @@ pub struct ImBridgeConfig {
     #[serde(default, alias = "workspace_bindings")]
     pub workspace_bindings: Vec<WorkspaceBindingConfig>,
 
+    /// Seconds of no IM interaction before the in-memory runtime connection is
+    /// suspended. The channel session row stays active and resumes on next use.
+    #[serde(default = "default_idle_timeout_secs", alias = "idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+
     /// Telegram platform config. Absent = Telegram disabled.
     #[serde(default)]
     pub telegram: Option<TelegramConfig>,
@@ -99,6 +104,10 @@ fn default_poll_timeout() -> u64 {
     30
 }
 
+fn default_idle_timeout_secs() -> u64 {
+    15 * 60
+}
+
 impl Default for ImBridgeConfig {
     fn default() -> Self {
         Self {
@@ -107,6 +116,7 @@ impl Default for ImBridgeConfig {
             default_workspace: None,
             allowed_workspaces: Vec::new(),
             workspace_bindings: Vec::new(),
+            idle_timeout_secs: default_idle_timeout_secs(),
             telegram: Some(TelegramConfig::default()),
         }
     }

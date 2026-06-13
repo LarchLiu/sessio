@@ -587,20 +587,25 @@ fn handle_callback(
             .as_ref()
             .map(|message| message.chat.id.to_string());
         match chat_id {
-            Some(chat_id) => match handle_action_callback(state, &chat_id, action) {
-                Ok(message) => {
-                    let _ = sink.answer_callback_query(&callback.id, &message);
-                }
-                Err(error) => {
-                    let _ = sink.answer_callback_query(&callback.id, "Failed");
-                    if let Err(send_error) = sink.send_text(&chat_id, &format!("⚠️ {error:#}"))
-                    {
-                        log::warn!(
-                            "[im-bridge:telegram] failed to send action callback error: {send_error:#}"
-                        );
+            Some(chat_id) => {
+                let key = ChatKey::new(PLATFORM, chat_id.clone());
+                state.touch_chat(&key);
+                record_chat_activity(state, &chat_id);
+                match handle_action_callback(state, &chat_id, action) {
+                    Ok(message) => {
+                        let _ = sink.answer_callback_query(&callback.id, &message);
+                    }
+                    Err(error) => {
+                        let _ = sink.answer_callback_query(&callback.id, "Failed");
+                        if let Err(send_error) = sink.send_text(&chat_id, &format!("⚠️ {error:#}"))
+                        {
+                            log::warn!(
+                                "[im-bridge:telegram] failed to send action callback error: {send_error:#}"
+                            );
+                        }
                     }
                 }
-            },
+            }
             None => {
                 let _ = sink.answer_callback_query(&callback.id, "Missing chat");
             }
@@ -614,6 +619,14 @@ fn handle_callback(
         let _ = sink.answer_callback_query(&callback.id, "Permission request expired");
         return;
     };
+    if let Some(chat_id) = callback
+        .message
+        .as_ref()
+        .map(|message| message.chat.id.to_string())
+    {
+        record_chat_activity(state, &chat_id);
+        state.touch_chat(&ChatKey::new(PLATFORM, chat_id));
+    }
     match state.runtime.respond_permission(
         &decision.sessio_runtime_session_id,
         &decision.request_id,
@@ -626,6 +639,16 @@ fn handle_callback(
             let _ = sink.answer_callback_query(&callback.id, "Failed");
             log::warn!("[im-bridge:telegram] permission response failed: {error:#}");
         }
+    }
+}
+
+fn record_chat_activity(state: &Arc<ImBridgeState>, chat_id: &str) {
+    if let Err(error) =
+        state
+            .store
+            .update_channel_session_activity(PLATFORM, chat_id, None, now_ms())
+    {
+        log::warn!("[im-bridge:telegram] failed to record chat activity: {error:#}");
     }
 }
 

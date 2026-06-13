@@ -11,6 +11,7 @@
 //! outbound aggregator.
 
 mod config;
+mod idle;
 mod outbound;
 mod platforms;
 mod router;
@@ -80,6 +81,7 @@ impl ImBridgeService {
     pub fn start(&self) -> Result<()> {
         platforms::spawn_all(self.state.clone());
         outbound::spawn(self.state.clone())?;
+        idle::spawn(self.state.clone())?;
         log::info!("[im-bridge] started");
         Ok(())
     }

@@ -50,6 +50,7 @@ pub struct ChatSession {
     pub agent_runtime_session_id: Option<String>,
     pub agent: Agent,
     pub workspace_path: String,
+    pub last_activity_at: i64,
 }
 
 /// Platform-neutral metadata for the external chat/channel that owns a session.
@@ -220,6 +221,16 @@ impl ImBridgeState {
         self.inner.chats.lock().ok()?.get(key).cloned()
     }
 
+    /// Mark a chat as recently used. Inbound IM messages and platform callback
+    /// interactions both count as activity for idle suspension.
+    pub fn touch_chat(&self, key: &ChatKey) {
+        if let Ok(mut chats) = self.inner.chats.lock() {
+            if let Some(session) = chats.get_mut(key) {
+                session.last_activity_at = now_ms();
+            }
+        }
+    }
+
     /// Remember the latest platform-side identifiers for this chat and refresh
     /// the persisted row if the chat is already bound to a runtime session.
     pub fn remember_channel_context(&self, key: ChatKey, context: ChannelContext) {
@@ -237,7 +248,10 @@ impl ImBridgeState {
 
     /// Bind a chat to a runtime session, replacing any prior binding and
     /// maintaining the reverse index.
-    pub fn bind_chat(&self, key: ChatKey, session: ChatSession) {
+    pub fn bind_chat(&self, key: ChatKey, mut session: ChatSession) {
+        if session.last_activity_at <= 0 {
+            session.last_activity_at = now_ms();
+        }
         self.persist_channel_session(&key, &session);
         let old_session_id = self
             .inner
@@ -279,6 +293,43 @@ impl ImBridgeState {
             }
         }
         self.clear_queued_prompts(key);
+    }
+
+    /// Drop a chat's in-memory runtime binding without marking the persisted
+    /// channel session as ended. Used for idle suspend; the next inbound
+    /// message resumes from `channel_sessions`.
+    pub fn suspend_chat(&self, key: &ChatKey) -> Option<ChatSession> {
+        let removed = self
+            .inner
+            .chats
+            .lock()
+            .ok()
+            .and_then(|mut chats| chats.remove(key));
+        if let Some(session) = removed.as_ref() {
+            let session_id = &session.sessio_runtime_session_id;
+            if let Ok(mut rev) = self.inner.session_to_chat.lock() {
+                rev.remove(session_id);
+            }
+            if let Ok(mut turns) = self.inner.turns.lock() {
+                turns.remove(session_id);
+            }
+        }
+        self.clear_queued_prompts(key);
+        removed
+    }
+
+    pub fn idle_suspend_candidates(&self, idle_before_ms: i64) -> Vec<(ChatKey, ChatSession)> {
+        self.inner
+            .chats
+            .lock()
+            .map(|chats| {
+                chats
+                    .iter()
+                    .filter(|(_, session)| session.last_activity_at <= idle_before_ms)
+                    .map(|(key, session)| (key.clone(), session.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn persist_channel_session(&self, key: &ChatKey, session: &ChatSession) {
