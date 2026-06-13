@@ -32,8 +32,8 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, FolderSymlink, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, MessageCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig } from "../api";
+import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
@@ -47,6 +47,7 @@ import {
   listProcessTemplates,
   listRuntimeAgents,
   testDiscordBotConnection,
+  testFeishuBotConnection,
   testTelegramBotConnection,
   updateAgentPreferences,
   updateAstraConfig,
@@ -66,7 +67,7 @@ import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
-import { AiGenerate2Icon, Robot3LineIcon } from "../components/IconifyIcon";
+import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, Robot3LineIcon, TelegramLogoIcon, TokenOutlineIcon } from "../components/IconifyIcon";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
 import { formatVersionLabel, type UpdateState } from "../updater";
@@ -74,7 +75,7 @@ import acpMarkBlackUrl from "../../assets/acp_mark-black.svg?url";
 import acpMarkWhiteUrl from "../../assets/acp_mark-white.svg?url";
 
 type SettingsSection = "general" | "agents" | "assistants" | "processTemplates" | "channels";
-type ChannelPlatform = "telegram" | "discord" | "feishu" | "lark" | "wechat";
+type ChannelPlatform = "telegram" | "discord" | "feishu" | "wechat";
 
 type AgentPreferencePatch = {
   displayName?: string | null;
@@ -122,7 +123,7 @@ export default function SettingsPage({
     { id: "general" as const, label: t("settings.general"), icon: Settings2 },
     { id: "agents" as const, label: t("agent.title"), icon: AiGenerate2Icon },
     { id: "assistants" as const, label: t("assistant.title"), icon: Robot3LineIcon },
-    { id: "channels" as const, label: t("settings.channels"), icon: MessageCircle },
+    { id: "channels" as const, label: t("settings.channels"), icon: ChannelShare24RegularIcon },
     { id: "processTemplates" as const, label: t("settings.process_templates"), icon: Workflow },
   ];
   const sectionTitle = navItems.find((item) => item.id === section)?.label ?? t("settings.general");
@@ -457,6 +458,20 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
   const [discordServerIdInput, setDiscordServerIdInput] = useState("");
   const [discordChannelIdInput, setDiscordChannelIdInput] = useState("");
   const [discordMentionOnly, setDiscordMentionOnly] = useState(true);
+  const [feishuEnabled, setFeishuEnabled] = useState(false);
+  const [feishuAppId, setFeishuAppId] = useState("");
+  const [feishuAppSecret, setFeishuAppSecret] = useState("");
+  const [showFeishuSecret, setShowFeishuSecret] = useState(false);
+  const [feishuTesting, setFeishuTesting] = useState(false);
+  const [feishuTestStatus, setFeishuTestStatus] = useState<"idle" | "success" | "error">("idle");
+  const [feishuAgent, setFeishuAgent] = useState<Agent | null>(null);
+  const [feishuModel, setFeishuModel] = useState<string | null>(null);
+  const [feishuEffort, setFeishuEffort] = useState<string | null>(null);
+  const [feishuWorkspace, setFeishuWorkspace] = useState("");
+  const [feishuBindings, setFeishuBindings] = useState<ImBridgeWorkspaceBinding[]>([]);
+  const [feishuBindingChatId, setFeishuBindingChatId] = useState("");
+  const [feishuBindingWorkspace, setFeishuBindingWorkspace] = useState("");
+  const [feishuDomain, setFeishuDomain] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -472,6 +487,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       setRuntimeAgents(runtimeAgentRows);
       const telegram = bridgeConfig.telegram ?? defaultTelegramBridgeConfig();
       const discord = bridgeConfig.discord ?? defaultDiscordBridgeConfig();
+      const feishu = bridgeConfig.feishu ?? defaultFeishuBridgeConfig();
       setTelegramEnabled(Boolean(bridgeConfig.enabled && telegram.enabled));
       setBotToken(telegram.botToken ?? "");
       setAllowedUserIds(telegram.allowedUserIds ?? []);
@@ -492,6 +508,16 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       setDiscordAllowedServerIds(discord.allowedServerIds ?? []);
       setDiscordAllowedChannelIds(discord.allowedChannelIds ?? []);
       setDiscordMentionOnly(discord.mentionOnly ?? true);
+      setFeishuEnabled(Boolean(bridgeConfig.enabled && feishu.enabled));
+      setFeishuAppId(feishu.appId ?? "");
+      setFeishuAppSecret(feishu.appSecret ?? "");
+      const resolvedFeishuSelection = resolveRuntimeSelection(runtimeAgentRows, feishu);
+      setFeishuAgent(resolvedFeishuSelection.agent);
+      setFeishuModel(resolvedFeishuSelection.model);
+      setFeishuEffort(resolvedFeishuSelection.effort);
+      setFeishuWorkspace(feishu.defaultWorkspace ?? feishu.allowedWorkspaces[0] ?? "");
+      setFeishuBindings(feishu.workspaceBindings ?? []);
+      setFeishuDomain(feishu.domain ?? null);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -629,17 +655,78 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     ]),
     [discordBindings, discordWorkspace, projects],
   );
+  const selectedFeishuRuntimeAgent = useMemo(
+    () => runtimeAgents.find((agent) => agent.agent === feishuAgent && agent.enabled) ?? firstEnabledRuntimeAgent(runtimeAgents),
+    [runtimeAgents, feishuAgent],
+  );
+  const selectedFeishuAgent = selectedFeishuRuntimeAgent?.agent ?? feishuAgent;
+  const feishuModelValue = selectedFeishuAgent && feishuModel
+    ? agentModelSelectValue(selectedFeishuAgent, feishuModel)
+    : "";
+  const feishuModelOptions = useMemo(() => {
+    const effortControls = Object.fromEntries(
+      enabledRuntimeAgents.map((runtimeAgent) => [
+        runtimeAgent.agent,
+        <RuntimeEffortControl
+          value={runtimeAgent.agent === selectedFeishuAgent ? feishuEffort ?? initialRuntimeEffort(runtimeAgent) : initialRuntimeEffort(runtimeAgent)}
+          options={runtimeEffortOptions(runtimeAgent)}
+          onChange={(value) => {
+            if (runtimeAgent.agent !== selectedFeishuAgent) {
+              setFeishuAgent(runtimeAgent.agent);
+              setFeishuModel(defaultRuntimeModel(runtimeAgent));
+            }
+            setFeishuEffort(value);
+          }}
+        />,
+      ]),
+    ) as Partial<Record<Agent, ReactNode>>;
+    const selectedEfforts = selectedFeishuAgent && feishuEffort ? { [selectedFeishuAgent]: feishuEffort } : {};
+    const options = agentModelSelectOptions(enabledRuntimeAgents, effortControls, selectedEfforts);
+    const selectedExists = options.some((option) => option.value === feishuModelValue);
+    return [
+      ...(!selectedExists && selectedFeishuAgent && feishuModel
+        ? [{
+          value: feishuModelValue,
+          label: feishuModel,
+          icon: <AgentGlyph agent={selectedFeishuAgent} className="h-3.5 w-3.5" />,
+        }]
+        : []),
+      ...options,
+    ];
+  }, [enabledRuntimeAgents, selectedFeishuAgent, feishuEffort, feishuModel, feishuModelValue]);
+  useEffect(() => {
+    if (runtimeAgents.length === 0) return;
+    const selected = selectedFeishuRuntimeAgent ?? firstEnabledRuntimeAgent(runtimeAgents);
+    if (!selected) return;
+    if (feishuAgent !== selected.agent) {
+      setFeishuAgent(selected.agent);
+    }
+    if (!feishuModel) {
+      setFeishuModel(defaultRuntimeModel(selected));
+    }
+    if (!feishuEffort) {
+      setFeishuEffort(initialRuntimeEffort(selected) || null);
+    }
+  }, [runtimeAgents, selectedFeishuRuntimeAgent, feishuAgent, feishuModel, feishuEffort]);
+  const feishuWorkspaceChoices = useMemo(
+    () => uniqueStrings([
+      ...projects.map((project) => project.path),
+      feishuWorkspace,
+      ...feishuBindings.map((binding) => binding.workspacePath),
+    ]),
+    [feishuBindings, feishuWorkspace, projects],
+  );
   const telegramApiBase = config?.telegram?.apiBase ?? null;
   const discordApiBase = config?.discord?.apiBase ?? null;
+  const effectiveFeishuDomain = feishuDomain?.trim() || null;
   const channelTabs = useMemo(
     () => [
-      { value: "telegram" as const, label: "Telegram" },
-      { value: "discord" as const, label: "Discord" },
-      { value: "feishu" as const, label: "飞书" },
-      { value: "lark" as const, label: "Lark" },
+      { value: "telegram" as const, label: "Telegram", icon: TelegramLogoIcon },
+      { value: "discord" as const, label: "Discord", icon: DiscordLogoIcon },
+      { value: "feishu" as const, label: t("settings.feishu_platform"), icon: LarkLogoIcon },
       { value: "wechat" as const, label: "WeChat" },
     ],
-    [],
+    [t],
   );
 
   const addAllowedUserId = () => {
@@ -699,6 +786,22 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     }
   };
 
+  const sendFeishuTest = async () => {
+    if (!feishuAppId.trim() || !feishuAppSecret.trim() || feishuTesting) return;
+    setFeishuTesting(true);
+    setFeishuTestStatus("idle");
+    try {
+      await testFeishuBotConnection(feishuAppId.trim(), feishuAppSecret.trim(), effectiveFeishuDomain);
+      setFeishuTestStatus("success");
+      onError(null);
+    } catch (err) {
+      setFeishuTestStatus("error");
+      onError(String(err));
+    } finally {
+      setFeishuTesting(false);
+    }
+  };
+
   useEffect(() => {
     setSaveStatus("idle");
   }, [
@@ -720,6 +823,15 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     discordAllowedServerIds,
     discordAllowedChannelIds,
     discordMentionOnly,
+    feishuEnabled,
+    feishuAppId,
+    feishuAppSecret,
+    selectedFeishuAgent,
+    feishuModel,
+    feishuEffort,
+    feishuWorkspace,
+    feishuBindings,
+    feishuDomain,
   ]);
 
   const addBinding = () => {
@@ -754,6 +866,16 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       { platform: "discord", chatId, workspacePath: discordBindingWorkspace },
     ]);
     setDiscordBindingChannelId("");
+  };
+
+  const addFeishuBinding = () => {
+    const chatId = feishuBindingChatId.trim();
+    if (!chatId || !feishuBindingWorkspace) return;
+    setFeishuBindings((current) => [
+      ...current.filter((binding) => binding.chatId !== chatId),
+      { platform: "feishu", chatId, workspacePath: feishuBindingWorkspace },
+    ]);
+    setFeishuBindingChatId("");
   };
 
   const save = async () => {
@@ -805,11 +927,34 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
         allowedChannelIds: uniqueStrings(discordAllowedChannelIds),
         mentionOnly: discordMentionOnly,
       };
+      const nextFeishu = {
+        ...(config?.feishu ?? defaultFeishuBridgeConfig()),
+        enabled: feishuEnabled,
+        agent: selectedFeishuAgent ?? null,
+        model: feishuModel?.trim() || null,
+        effort: feishuEffort?.trim() || null,
+        defaultWorkspace: feishuWorkspace.trim() || null,
+        allowedWorkspaces: uniqueStrings([
+          feishuWorkspace.trim(),
+          ...feishuBindings.map((binding) => binding.workspacePath),
+        ]),
+        workspaceBindings: feishuBindings
+          .map((binding) => ({
+            platform: "feishu",
+            chatId: binding.chatId.trim(),
+            workspacePath: binding.workspacePath.trim(),
+          }))
+          .filter((binding) => binding.chatId && binding.workspacePath),
+        appId: feishuAppId.trim(),
+        appSecret: feishuAppSecret.trim(),
+        domain: effectiveFeishuDomain,
+      };
       const nextConfig: ImBridgeConfig = {
         ...(config ?? defaultImBridgeConfig()),
-        enabled: telegramEnabled || discordEnabled,
+        enabled: telegramEnabled || discordEnabled || feishuEnabled,
         telegram: nextTelegram,
         discord: nextDiscord,
+        feishu: nextFeishu,
       };
       const saved = await updateImBridgeConfig(nextConfig);
       setConfig(saved);
@@ -857,13 +1002,13 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
             }
             flush
           >
-            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.telegram_enable")} description={t("settings.telegram_enable_description")}>
+            <SettingsRow icon={<TelegramLogoIcon className="h-4 w-4" />} label={t("settings.telegram_enable")} description={t("settings.telegram_enable_description")}>
               <div className="flex items-center gap-3">
                 <span className="text-caption text-ink/45">{telegramEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
                 <SwitchControl checked={telegramEnabled} tooltip={t("settings.telegram_enable")} onToggle={() => setTelegramEnabled((value) => !value)} />
               </div>
             </SettingsRow>
-            <SettingsStackedRow icon={<Bot className="h-4 w-4" />} label={t("settings.telegram_bot_token")} description={t("settings.telegram_bot_token_description")}>
+            <SettingsStackedRow icon={<TokenOutlineIcon className="h-4 w-4" />} label={t("settings.telegram_bot_token")} description={t("settings.telegram_bot_token_description")}>
               <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
                 <input value={botToken} type={showToken ? "text" : "password"} onChange={(event) => {
                   setBotToken(event.target.value);
@@ -929,7 +1074,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
           </SettingsGroup>
 
           <SettingsGroup title={t("settings.channel_workspace_bindings")} flush>
-            <SettingsStackedRow icon={<FolderSymlink className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.channels_default_workspace_description")}>
+            <SettingsStackedRow icon={<SquareKanban className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.channels_default_workspace_description")}>
               <select value={telegramWorkspace} onChange={(event) => setTelegramWorkspace(event.target.value)} className={inputClassName + " w-full"}>
                 <option value="">{t("settings.channels_select_workspace")}</option>
                 {workspaceChoices.map((path) => (
@@ -937,7 +1082,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
                 ))}
               </select>
             </SettingsStackedRow>
-            <SettingsStackedRow icon={<FolderSymlink className="h-4 w-4" />} label={t("settings.channels_add_binding")} description={t("settings.channels_add_binding_description")}>
+            <SettingsStackedRow icon={<Server className="h-4 w-4" />} label={t("settings.channels_add_binding")} description={t("settings.channels_add_binding_description")}>
               <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
                 <input value={bindingChatId} onChange={(event) => setBindingChatId(event.target.value)} placeholder="e.g. 123456789" className={inputClassName + " min-w-[170px] flex-1"} />
                 <select value={bindingWorkspace} onChange={(event) => setBindingWorkspace(event.target.value)} className={inputClassName + " min-w-[220px] flex-[1.4]"}>
@@ -953,7 +1098,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
               </div>
             </SettingsStackedRow>
             {bindings.map((binding) => (
-              <SettingsStackedRow key={binding.chatId} icon={<FolderSymlink className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
+              <SettingsStackedRow key={binding.chatId} icon={<Server className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
                 <button type="button" onClick={() => setBindings((current) => current.filter((item) => item.chatId !== binding.chatId))} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink/55 transition hover:bg-red-500/10 hover:text-red-600" aria-label={t("sidebar.remove")}>
                   <Trash2 className="h-4 w-4" />
                 </button>
@@ -983,13 +1128,13 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
             }
             flush
           >
-            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.discord_enable")} description={t("settings.discord_enable_description")}>
+            <SettingsRow icon={<DiscordLogoIcon className="h-4 w-4" />} label={t("settings.discord_enable")} description={t("settings.discord_enable_description")}>
               <div className="flex items-center gap-3">
                 <span className="text-caption text-ink/45">{discordEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
                 <SwitchControl checked={discordEnabled} tooltip={t("settings.discord_enable")} onToggle={() => setDiscordEnabled((value) => !value)} />
               </div>
             </SettingsRow>
-            <SettingsStackedRow icon={<Bot className="h-4 w-4" />} label={t("settings.discord_bot_token")} description={t("settings.discord_bot_token_description")}>
+            <SettingsStackedRow icon={<TokenOutlineIcon className="h-4 w-4" />} label={t("settings.discord_bot_token")} description={t("settings.discord_bot_token_description")}>
               <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
                 <input value={discordBotToken} type={showDiscordToken ? "text" : "password"} onChange={(event) => {
                   setDiscordBotToken(event.target.value);
@@ -1010,7 +1155,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
                 </button>
               </div>
             </SettingsStackedRow>
-            <SettingsRow icon={<Settings2 className="h-4 w-4" />} label={t("settings.discord_default_model")} description={t("settings.discord_default_model_description")}>
+            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.discord_default_model")} description={t("settings.discord_default_model_description")}>
               <RuntimeMenuSelect
                 ariaLabel={t("settings.discord_default_model")}
                 value={discordModelValue}
@@ -1073,7 +1218,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
           </SettingsGroup>
 
           <SettingsGroup title={t("settings.discord_workspace_bindings")} flush>
-            <SettingsStackedRow icon={<FolderSymlink className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.discord_default_workspace_description")}>
+            <SettingsStackedRow icon={<SquareKanban className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.discord_default_workspace_description")}>
               <select value={discordWorkspace} onChange={(event) => setDiscordWorkspace(event.target.value)} className={inputClassName + " w-full"}>
                 <option value="">{t("settings.channels_select_workspace")}</option>
                 {discordWorkspaceChoices.map((path) => (
@@ -1097,8 +1242,127 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
               </div>
             </SettingsStackedRow>
             {discordBindings.map((binding) => (
-              <SettingsStackedRow key={binding.chatId} icon={<Hash className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
+              <SettingsStackedRow key={binding.chatId} icon={<Server className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
                 <button type="button" onClick={() => setDiscordBindings((current) => current.filter((item) => item.chatId !== binding.chatId))} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink/55 transition hover:bg-red-500/10 hover:text-red-600" aria-label={t("sidebar.remove")}>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </SettingsStackedRow>
+            ))}
+          </SettingsGroup>
+        </>
+      ) : activePlatform === "feishu" ? (
+        <>
+          <SettingsGroup
+            title={t("settings.feishu_bot")}
+            action={
+              <button type="button" disabled={saving || loading} onClick={() => void save()} className={channelSaveButtonClass(saveStatus)}>
+                {saving
+                  ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                  : saveStatus === "error"
+                    ? <X className="h-4 w-4" />
+                    : <Check className="h-4 w-4" />}
+                {saving
+                  ? t("project.save")
+                  : saveStatus === "success"
+                    ? t("settings.saved")
+                    : saveStatus === "error"
+                      ? t("settings.save_failed")
+                      : t("project.save")}
+              </button>
+            }
+            flush
+          >
+            <SettingsRow icon={<LarkLogoIcon className="h-4 w-4" />} label={t("settings.feishu_enable")} description={t("settings.feishu_enable_description")}>
+              <div className="flex items-center gap-3">
+                <span className="text-caption text-ink/45">{feishuEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
+                <SwitchControl checked={feishuEnabled} tooltip={t("settings.feishu_enable")} onToggle={() => setFeishuEnabled((value) => !value)} />
+              </div>
+            </SettingsRow>
+            <SettingsStackedRow icon={<TokenOutlineIcon className="h-4 w-4" />} label={t("settings.feishu_app_credentials")} description={t("settings.feishu_app_credentials_description")}>
+              <div className="flex w-full min-w-0 flex-col gap-2">
+                <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                  <input value={feishuAppId} onChange={(event) => {
+                    setFeishuAppId(event.target.value);
+                    setFeishuTestStatus("idle");
+                  }} placeholder="cli_xxxxxxxxxxxxxxxx" className={inputClassName + " min-w-[190px] flex-1"} />
+                  <input value={feishuAppSecret} type={showFeishuSecret ? "text" : "password"} onChange={(event) => {
+                    setFeishuAppSecret(event.target.value);
+                    setFeishuTestStatus("idle");
+                  }} placeholder={t("settings.feishu_app_secret_placeholder")} className={inputClassName + " min-w-[190px] flex-1"} />
+                  <button type="button" onClick={() => setShowFeishuSecret((value) => !value)} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-ink/55 transition hover:bg-ink/[0.06] hover:text-ink" aria-label={showFeishuSecret ? t("settings.telegram_hide_token") : t("settings.telegram_show_token")}>
+                    {showFeishuSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                  <button type="button" disabled={feishuTesting || !feishuAppId.trim() || !feishuAppSecret.trim()} onClick={() => void sendFeishuTest()} className={telegramTestButtonClass(feishuTestStatus)}>
+                    {feishuTesting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                    {feishuTesting
+                      ? t("settings.testing_connection")
+                      : feishuTestStatus === "success"
+                        ? t("settings.connected")
+                        : feishuTestStatus === "error"
+                          ? t("settings.connection_failed")
+                          : t("settings.test_connection")}
+                  </button>
+                </div>
+                <select value={feishuDomain ?? ""} onChange={(event) => {
+                  setFeishuDomain(event.target.value || null);
+                  setFeishuTestStatus("idle");
+                }} className={inputClassName + " w-full max-w-[300px]"}>
+                  <option value="">{t("settings.feishu_domain_feishu")}</option>
+                  <option value="https://open.larksuite.com">{t("settings.feishu_domain_lark")}</option>
+                </select>
+              </div>
+            </SettingsStackedRow>
+            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.feishu_default_model")} description={t("settings.feishu_default_model_description")}>
+              <RuntimeMenuSelect
+                ariaLabel={t("settings.feishu_default_model")}
+                value={feishuModelValue}
+                options={feishuModelOptions}
+                onChange={(value) => {
+                  const parsed = parseAgentModelSelectValue(value);
+                  if (!parsed) return;
+                  const runtimeAgent = runtimeAgents.find((agent) => agent.agent === parsed.agent);
+                  if (parsed.agent !== selectedFeishuAgent) {
+                    setFeishuEffort(runtimeAgent ? initialRuntimeEffort(runtimeAgent) : null);
+                  }
+                  setFeishuAgent(parsed.agent);
+                  setFeishuModel(parsed.model || null);
+                }}
+                minMenuWidth={240}
+                maxWidthClassName="max-w-[300px]"
+              />
+            </SettingsRow>
+            <SettingsStackedRow icon={<Globe2 className="h-4 w-4" />} label={t("settings.feishu_connection_mode")} description={t("settings.feishu_connection_mode_description")}>
+              <p className="text-caption leading-relaxed text-ink/62">{t("settings.feishu_connection_mode_detail")}</p>
+            </SettingsStackedRow>
+          </SettingsGroup>
+
+          <SettingsGroup title={t("settings.feishu_workspace_bindings")} flush>
+            <SettingsStackedRow icon={<SquareKanban className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.feishu_default_workspace_description")}>
+              <select value={feishuWorkspace} onChange={(event) => setFeishuWorkspace(event.target.value)} className={inputClassName + " w-full"}>
+                <option value="">{t("settings.channels_select_workspace")}</option>
+                {feishuWorkspaceChoices.map((path) => (
+                  <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                ))}
+              </select>
+            </SettingsStackedRow>
+            <SettingsStackedRow icon={<Server className="h-4 w-4" />} label={t("settings.feishu_add_binding")} description={t("settings.feishu_add_binding_description")}>
+              <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                <input value={feishuBindingChatId} onChange={(event) => setFeishuBindingChatId(event.target.value)} placeholder="oc_xxxxxx" className={inputClassName + " min-w-[170px] flex-1"} />
+                <select value={feishuBindingWorkspace} onChange={(event) => setFeishuBindingWorkspace(event.target.value)} className={inputClassName + " min-w-[220px] flex-[1.4]"}>
+                  <option value="">{t("settings.channels_select_workspace")}</option>
+                  {feishuWorkspaceChoices.map((path) => (
+                    <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                  ))}
+                </select>
+                <button type="button" disabled={!feishuBindingChatId.trim() || !feishuBindingWorkspace} onClick={addFeishuBinding} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+                  <Plus className="h-4 w-4" />
+                  {t("settings.add")}
+                </button>
+              </div>
+            </SettingsStackedRow>
+            {feishuBindings.map((binding) => (
+              <SettingsStackedRow key={binding.chatId} icon={<Server className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
+                <button type="button" onClick={() => setFeishuBindings((current) => current.filter((item) => item.chatId !== binding.chatId))} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink/55 transition hover:bg-red-500/10 hover:text-red-600" aria-label={t("sidebar.remove")}>
                   <Trash2 className="h-4 w-4" />
                 </button>
               </SettingsStackedRow>
@@ -1120,6 +1384,7 @@ function defaultImBridgeConfig(): ImBridgeConfig {
     idleTimeoutSecs: 900,
     telegram: defaultTelegramBridgeConfig(),
     discord: defaultDiscordBridgeConfig(),
+    feishu: defaultFeishuBridgeConfig(),
   };
 }
 
@@ -1154,6 +1419,21 @@ function defaultDiscordBridgeConfig(): DiscordBridgeConfig {
     mentionOnly: true,
     apiBase: null,
     gatewayUrl: null,
+  };
+}
+
+function defaultFeishuBridgeConfig(): FeishuBridgeConfig {
+  return {
+    enabled: false,
+    agent: null,
+    model: null,
+    effort: null,
+    defaultWorkspace: null,
+    allowedWorkspaces: [],
+    workspaceBindings: [],
+    appId: "",
+    appSecret: "",
+    domain: null,
   };
 }
 

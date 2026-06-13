@@ -2823,6 +2823,20 @@ async fn test_discord_bot_connection(
 }
 
 #[tauri::command]
+async fn test_feishu_bot_connection(
+    app_id: String,
+    app_secret: String,
+    domain: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        im_bridge::test_feishu_bot_connection(&app_id, &app_secret, domain.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
@@ -3530,6 +3544,7 @@ pub fn run() {
             detect_telegram_user_ids,
             test_telegram_bot_connection,
             test_discord_bot_connection,
+            test_feishu_bot_connection,
             update_runtime_agent_preferences,
             start_agent_session,
             fork_agent_session,

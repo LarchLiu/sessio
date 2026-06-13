@@ -829,6 +829,7 @@ function SidebarSessionItem({
   const { t } = useI18n();
   const title = sessionDisplayTitle(item) ?? t("list.no_user_message");
   const channelLabel = channelPlatformLabel(item.channel?.platform);
+  const channelIconClass = channelPlatformIconClass(item.channel?.platform);
   const relativeTime = formatShortRelativeTime(item.updatedAt ?? item.startedAt, t);
   return (
     <button
@@ -848,13 +849,23 @@ function SidebarSessionItem({
         {source === "thread" && (
           <HashIcon className="absolute -left-1 top-1/2 h-3 w-3 -translate-y-1/2 text-ink/45" />
         )}
-        <AgentGlyph
-          agent={item.agent}
-          className={
-            "h-3.5 w-3.5 " +
-            (source === "thread" ? "relative z-10 translate-x-1" : "")
-          }
-        />
+        {channelIconClass ? (
+          <IconifyIcon
+            iconClassName={channelIconClass}
+            className={
+              "h-3.5 w-3.5 " +
+              (source === "thread" ? "relative z-10 translate-x-1" : "")
+            }
+          />
+        ) : (
+          <AgentGlyph
+            agent={item.agent}
+            className={
+              "h-3.5 w-3.5 " +
+              (source === "thread" ? "relative z-10 translate-x-1" : "")
+            }
+          />
+        )}
       </span>
       <span
         className={
@@ -868,9 +879,9 @@ function SidebarSessionItem({
       </span>
       {channelLabel && (
         <span className="inline-flex shrink-0 items-center gap-1 rounded border border-ink/10 px-1 py-0.5 text-meta leading-none text-ink/42">
-          {item.channel?.platform === "telegram" && (
+          {channelIconClass && (
             <IconifyIcon
-              iconClassName="icon-[streamline-logos--telegram-logo-1]"
+              iconClassName={channelIconClass}
               className="h-2.5 w-2.5"
             />
           )}
@@ -890,10 +901,26 @@ function channelPlatformLabel(platform: string | null | undefined): string | nul
       return "Telegram";
     case "discord":
       return "Discord";
+    case "feishu":
+      return "Lark";
     case "lark":
       return "Lark";
     case "wework":
       return "WeWork";
+    default:
+      return null;
+  }
+}
+
+function channelPlatformIconClass(platform: string | null | undefined): string | null {
+  switch (platform) {
+    case "telegram":
+      return "icon-[streamline-logos--telegram-logo-1]";
+    case "discord":
+      return "icon-[streamline-logos--discord-logo-2]";
+    case "feishu":
+    case "lark":
+      return "icon-[icon-park-outline--new-lark]";
     default:
       return null;
   }

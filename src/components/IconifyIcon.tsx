@@ -47,6 +47,26 @@ export function AiGenerate2Icon({ className, style }: IconifyIconComponentProps)
   return <IconifyIcon iconClassName="icon-[ri--ai-generate-2]" className={className} style={style} />;
 }
 
+export function ChannelShare24RegularIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[fluent--channel-share-24-regular]" className={className} style={style} />;
+}
+
+export function TelegramLogoIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[streamline-logos--telegram-logo-1]" className={className} style={style} />;
+}
+
+export function DiscordLogoIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[streamline-logos--discord-logo-2]" className={className} style={style} />;
+}
+
+export function LarkLogoIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[icon-park-outline--new-lark]" className={className} style={style} />;
+}
+
+export function TokenOutlineIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[material-symbols--token-outline]" className={className} style={style} />;
+}
+
 export function HashtagChatLinearIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[solar--hashtag-chat-linear]" className={className} style={style} />;
 }

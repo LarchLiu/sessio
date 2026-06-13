@@ -89,6 +89,7 @@ export interface ImBridgeConfig {
   idleTimeoutSecs: number;
   telegram: TelegramBridgeConfig | null;
   discord: DiscordBridgeConfig | null;
+  feishu: FeishuBridgeConfig | null;
 }
 
 export interface ImBridgeWorkspaceBinding {
@@ -125,6 +126,19 @@ export interface DiscordBridgeConfig {
   mentionOnly: boolean;
   apiBase: string | null;
   gatewayUrl: string | null;
+}
+
+export interface FeishuBridgeConfig {
+  enabled: boolean;
+  agent: Agent | null;
+  model: string | null;
+  effort: string | null;
+  defaultWorkspace: string | null;
+  allowedWorkspaces: string[];
+  workspaceBindings: ImBridgeWorkspaceBinding[];
+  appId: string;
+  appSecret: string;
+  domain: string | null;
 }
 
 export type AssistantType = "builtin" | "custom";
@@ -1902,6 +1916,10 @@ export async function testTelegramBotConnection(botToken: string, apiBase: strin
 
 export async function testDiscordBotConnection(botToken: string, apiBase: string | null): Promise<void> {
   return invoke<void>("test_discord_bot_connection", { botToken, apiBase });
+}
+
+export async function testFeishuBotConnection(appId: string, appSecret: string, domain: string | null): Promise<void> {
+  return invoke<void>("test_feishu_bot_connection", { appId, appSecret, domain });
 }
 
 export async function updateRuntimeAgentPreferences(

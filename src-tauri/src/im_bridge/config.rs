@@ -31,6 +31,10 @@ pub struct ImBridgeConfig {
     /// Discord platform config. Absent = Discord disabled.
     #[serde(default)]
     pub discord: Option<DiscordConfig>,
+
+    /// Feishu/Lark platform config. Absent = Feishu disabled.
+    #[serde(default)]
+    pub feishu: Option<FeishuConfig>,
 }
 
 /// Bind one external chat/channel to a local workspace.
@@ -158,6 +162,54 @@ pub struct DiscordConfig {
     pub gateway_url: Option<String>,
 }
 
+/// Feishu/Lark bot configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuConfig {
+    /// Whether the Feishu worker should start.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Agent used for new Feishu-created sessions. When absent, the bridge
+    /// resolves to the first enabled runtime agent from the local store.
+    #[serde(default)]
+    pub agent: Option<Agent>,
+
+    /// Model used for new Feishu-created sessions.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Effort used for new Feishu-created sessions.
+    #[serde(default)]
+    pub effort: Option<String>,
+
+    /// Default workspace for Feishu-created sessions when a chat-specific
+    /// binding is absent.
+    #[serde(default, alias = "default_workspace")]
+    pub default_workspace: Option<String>,
+
+    /// Workspaces Feishu chats are allowed to open sessions in.
+    #[serde(default, alias = "allowed_workspaces")]
+    pub allowed_workspaces: Vec<String>,
+
+    /// Optional per-Feishu-chat workspace overrides.
+    #[serde(default, alias = "workspace_bindings")]
+    pub workspace_bindings: Vec<WorkspaceBindingConfig>,
+
+    /// Feishu/Lark application ID.
+    #[serde(default, alias = "app_id")]
+    pub app_id: String,
+
+    /// Feishu/Lark application secret.
+    #[serde(default, alias = "app_secret")]
+    pub app_secret: String,
+
+    /// Open platform domain. Defaults to Feishu China; Lark international can
+    /// use `https://open.larksuite.com`.
+    #[serde(default)]
+    pub domain: Option<String>,
+}
+
 fn default_poll_timeout() -> u64 {
     30
 }
@@ -173,6 +225,7 @@ impl Default for ImBridgeConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             telegram: Some(TelegramConfig::default()),
             discord: Some(DiscordConfig::default()),
+            feishu: Some(FeishuConfig::default()),
         }
     }
 }
@@ -215,12 +268,30 @@ impl Default for DiscordConfig {
     }
 }
 
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            agent: None,
+            model: None,
+            effort: None,
+            default_workspace: None,
+            allowed_workspaces: Vec::new(),
+            workspace_bindings: Vec::new(),
+            app_id: String::new(),
+            app_secret: String::new(),
+            domain: None,
+        }
+    }
+}
+
 impl ImBridgeConfig {
     /// Configured agent for a platform, if the platform has one.
     pub fn configured_agent_for_platform(&self, platform: &str) -> Option<Agent> {
         match platform {
             "telegram" => self.telegram.as_ref().and_then(|config| config.agent),
             "discord" => self.discord.as_ref().and_then(|config| config.agent),
+            "feishu" => self.feishu.as_ref().and_then(|config| config.agent),
             _ => None,
         }
     }
@@ -235,6 +306,11 @@ impl ImBridgeConfig {
                 .unwrap_or(false),
             "discord" => self
                 .discord
+                .as_ref()
+                .map(|config| config.is_workspace_allowed(path))
+                .unwrap_or(false),
+            "feishu" => self
+                .feishu
                 .as_ref()
                 .map(|config| config.is_workspace_allowed(path))
                 .unwrap_or(false),
@@ -254,7 +330,33 @@ impl ImBridgeConfig {
                 .discord
                 .as_ref()
                 .and_then(|config| config.workspace_for_chat(platform, chat_id)),
+            "feishu" => self
+                .feishu
+                .as_ref()
+                .and_then(|config| config.workspace_for_chat(platform, chat_id)),
             _ => None,
+        }
+    }
+
+    /// Workspaces that can be selected interactively for a platform/chat.
+    pub fn workspace_choices_for_chat(&self, platform: &str, chat_id: &str) -> Vec<&str> {
+        match platform {
+            "telegram" => self
+                .telegram
+                .as_ref()
+                .map(|config| config.workspace_choices_for_chat(platform, chat_id))
+                .unwrap_or_default(),
+            "discord" => self
+                .discord
+                .as_ref()
+                .map(|config| config.workspace_choices_for_chat(platform, chat_id))
+                .unwrap_or_default(),
+            "feishu" => self
+                .feishu
+                .as_ref()
+                .map(|config| config.workspace_choices_for_chat(platform, chat_id))
+                .unwrap_or_default(),
+            _ => Vec::new(),
         }
     }
 
@@ -269,6 +371,12 @@ impl ImBridgeConfig {
                 .filter(|value| !value.is_empty()),
             "discord" => self
                 .discord
+                .as_ref()
+                .and_then(|config| config.model.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "feishu" => self
+                .feishu
                 .as_ref()
                 .and_then(|config| config.model.as_deref())
                 .map(str::trim)
@@ -288,6 +396,12 @@ impl ImBridgeConfig {
                 .filter(|value| !value.is_empty()),
             "discord" => self
                 .discord
+                .as_ref()
+                .and_then(|config| config.effort.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "feishu" => self
+                .feishu
                 .as_ref()
                 .and_then(|config| config.effort.as_deref())
                 .map(str::trim)
@@ -335,6 +449,16 @@ impl TelegramConfig {
             .filter(|value| !value.is_empty())
             .or_else(|| self.default_workspace())
     }
+
+    pub fn workspace_choices_for_chat(&self, platform: &str, chat_id: &str) -> Vec<&str> {
+        workspace_choices_from_config(
+            platform,
+            chat_id,
+            self.default_workspace(),
+            &self.allowed_workspaces,
+            &self.workspace_bindings,
+        )
+    }
 }
 
 impl DiscordConfig {
@@ -373,6 +497,94 @@ impl DiscordConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .or_else(|| self.default_workspace())
+    }
+
+    pub fn workspace_choices_for_chat(&self, platform: &str, chat_id: &str) -> Vec<&str> {
+        workspace_choices_from_config(
+            platform,
+            chat_id,
+            self.default_workspace(),
+            &self.allowed_workspaces,
+            &self.workspace_bindings,
+        )
+    }
+}
+
+impl FeishuConfig {
+    /// The default workspace for Feishu chat-initiated sessions, if any.
+    pub fn default_workspace(&self) -> Option<&str> {
+        self.default_workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.allowed_workspaces.first().map(String::as_str))
+    }
+
+    /// Whether `path` is permitted for a new Feishu session.
+    pub fn is_workspace_allowed(&self, path: &str) -> bool {
+        let path = path.trim();
+        if path.is_empty() {
+            return false;
+        }
+        self.allowed_workspaces.iter().any(|w| w.trim() == path)
+            || self.default_workspace() == Some(path)
+            || self
+                .workspace_bindings
+                .iter()
+                .any(|binding| binding.workspace_path.trim() == path)
+    }
+
+    /// Workspace selected for a specific Feishu chat. Falls back to the Feishu
+    /// default.
+    pub fn workspace_for_chat(&self, platform: &str, chat_id: &str) -> Option<&str> {
+        self.workspace_bindings
+            .iter()
+            .find(|binding| {
+                binding.platform == platform && binding.chat_id.trim() == chat_id.trim()
+            })
+            .map(|binding| binding.workspace_path.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.default_workspace())
+    }
+
+    pub fn workspace_choices_for_chat(&self, platform: &str, chat_id: &str) -> Vec<&str> {
+        workspace_choices_from_config(
+            platform,
+            chat_id,
+            self.default_workspace(),
+            &self.allowed_workspaces,
+            &self.workspace_bindings,
+        )
+    }
+}
+
+fn workspace_choices_from_config<'a>(
+    platform: &str,
+    chat_id: &str,
+    default_workspace: Option<&'a str>,
+    allowed_workspaces: &'a [String],
+    workspace_bindings: &'a [WorkspaceBindingConfig],
+) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    if let Some(workspace) = default_workspace {
+        push_unique_ref(&mut values, workspace);
+    }
+    for workspace in allowed_workspaces {
+        push_unique_ref(&mut values, workspace);
+    }
+    for binding in workspace_bindings {
+        if binding.platform == platform && binding.chat_id.trim() == chat_id.trim() {
+            push_unique_ref(&mut values, &binding.workspace_path);
+        }
+    }
+    values
+}
+
+fn push_unique_ref<'a>(values: &mut Vec<&'a str>, value: &'a str) {
+    let value = value.trim();
+    if !value.is_empty() && !values.iter().any(|existing| *existing == value) {
+        values.push(value);
     }
 }
 

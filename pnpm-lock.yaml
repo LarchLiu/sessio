@@ -72,6 +72,9 @@ importers:
       '@iconify-json/fluent':
         specifier: ^1.2.49
         version: 1.2.49
+      '@iconify-json/icon-park-outline':
+        specifier: ^1.2.4
+        version: 1.2.4
       '@iconify-json/material-symbols':
         specifier: ^1.2.76
         version: 1.2.76
@@ -581,6 +584,9 @@ packages:
 
   '@iconify-json/fluent@1.2.49':
     resolution: {integrity: sha512-FYRYT/w+1wVAwX6aMNug1oKpuPCXdMadv0qx81t4j//ZtV2D0EGQFfHt9WdcRckym1Z2qiBslRHTUd79qo6kIQ==}
+
+  '@iconify-json/icon-park-outline@1.2.4':
+    resolution: {integrity: sha512-NyZxXe2gD2TbTOyoRRMdtEJhr6i2KQCdDlYYoOn5oZLndQjwpIhw79hzeFhXvP38/o40D3gQ+l+IaSJgbB+0TQ==}
 
   '@iconify-json/material-symbols@1.2.76':
     resolution: {integrity: sha512-xhhw+8qkh4s1JnJKa96wZtR2TejLiXU2JYxcALYNsBdw2f69C22MxG2O1zQbedBskeSPt1G66aSr9sr0UPVpbw==}
@@ -4070,6 +4076,10 @@ snapshots:
       react-dom: 19.2.6(react@19.2.6)
 
   '@iconify-json/fluent@1.2.49':
+    dependencies:
+      '@iconify/types': 2.0.0
+
+  '@iconify-json/icon-park-outline@1.2.4':
     dependencies:
       '@iconify/types': 2.0.0
 
