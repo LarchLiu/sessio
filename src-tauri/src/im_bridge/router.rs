@@ -1,6 +1,6 @@
 //! Inbound routing: turn an incoming chat message into a runtime action.
 //!
-//! A message is either a slash command (`/new`, `/use`, `/cancel`, ...) or a
+//! A message is either a slash command (`/new`, `/agent`, `/cancel`, ...) or a
 //! plain prompt. Commands manage the chat-to-session binding; prompts are sent
 //! to the bound session's agent. All platform listeners funnel through
 //! [`handle_message`] so command semantics stay identical everywhere.
@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-use crate::agents::runtime::types::{AgentInput, EnsureAgentRuntimeSession, StartAgentSession};
+use crate::agents::runtime::types::{
+    AgentInput, AgentSessionConfigChange, EnsureAgentRuntimeSession, StartAgentSession,
+};
 use crate::models::Agent;
 use crate::store::ChannelSessionRecord;
 
@@ -75,12 +77,13 @@ fn handle_command(state: &Arc<ImBridgeState>, key: &ChatKey, rest: &str) -> Hand
 
     match cmd.as_str() {
         "help" | "start" => HandleOutcome::reply(help_text()),
-        "status" => HandleOutcome::reply(status_text(state, key)),
-        "new" => match cmd_new(state, key, arg) {
+        "status" => HandleOutcome::reply(session_status_text(state, key)),
+        "new" => match start_new_session(state, key, if arg.is_empty() { None } else { Some(arg) })
+        {
             Ok(msg) => HandleOutcome::reply(msg),
             Err(error) => HandleOutcome::reply(format!("⚠️ {error:#}")),
         },
-        "use" => match cmd_use(state, key, arg) {
+        "agent" if !arg.is_empty() => match switch_agent(state, key, arg) {
             Ok(msg) => HandleOutcome::reply(msg),
             Err(error) => HandleOutcome::reply(format!("⚠️ {error:#}")),
         },
@@ -96,18 +99,24 @@ fn handle_command(state: &Arc<ImBridgeState>, key: &ChatKey, rest: &str) -> Hand
     }
 }
 
-/// `/new [workspace]` — open a fresh session in the given (or default)
-/// workspace using the chat's current agent (or the configured default).
-fn cmd_new(state: &Arc<ImBridgeState>, key: &ChatKey, arg: &str) -> Result<String> {
+/// Open a fresh session in the given (or default) workspace using the chat's
+/// current agent (or the configured default).
+pub(super) fn start_new_session(
+    state: &Arc<ImBridgeState>,
+    key: &ChatKey,
+    workspace_arg: Option<&str>,
+) -> Result<String> {
     let config = state.config_snapshot();
-    let workspace = if arg.is_empty() {
-        config
-            .workspace_for_chat(key.platform, &key.chat_id)
-            .map(str::to_string)
-            .context("no workspace given and no default configured")?
-    } else {
-        arg.to_string()
-    };
+    let workspace = workspace_arg
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            config
+                .workspace_for_chat(key.platform, &key.chat_id)
+                .map(str::to_string)
+        })
+        .context("no workspace given and no default configured")?;
 
     if !config.is_workspace_allowed(&workspace) {
         bail!("workspace not allowed: {workspace}");
@@ -143,17 +152,34 @@ fn cmd_new(state: &Arc<ImBridgeState>, key: &ChatKey, arg: &str) -> Result<Strin
     ))
 }
 
-/// `/use <agent>` — switch the agent for this chat. Opens a new session in the
-/// current (or default) workspace immediately so subsequent prompts route to
-/// the chosen agent.
-fn cmd_use(state: &Arc<ImBridgeState>, key: &ChatKey, arg: &str) -> Result<String> {
+/// Switch the agent for this chat. Changing agents opens a new session;
+/// selecting the current agent keeps the existing session so model/effort
+/// changes can be applied in place.
+pub(super) fn switch_agent(
+    state: &Arc<ImBridgeState>,
+    key: &ChatKey,
+    agent_arg: &str,
+) -> Result<String> {
+    let arg = agent_arg.trim();
     let agent = Agent::from_db_str(arg.trim())
         .with_context(|| format!("unknown agent: {arg} (expected claude/codex/gemini/astra-pi)"))?;
 
     let config = state.config_snapshot();
-    let workspace = state
-        .chat_session(key)
-        .map(|s| s.workspace_path)
+    let current_session = state.chat_session(key);
+    if let Some(session) = current_session.as_ref() {
+        if session.agent == agent {
+            state.clear_queued_prompts(key);
+            return Ok(format!(
+                "当前已在使用 agent: {}\nworkspace: {}",
+                agent.as_str(),
+                session.workspace_path
+            ));
+        }
+    }
+
+    let workspace = current_session
+        .as_ref()
+        .map(|session| session.workspace_path.clone())
         .or_else(|| {
             config
                 .workspace_for_chat(key.platform, &key.chat_id)
@@ -162,7 +188,11 @@ fn cmd_use(state: &Arc<ImBridgeState>, key: &ChatKey, arg: &str) -> Result<Strin
         .context("no workspace bound and no default configured; use /new <workspace> first")?;
 
     let handle = start_session(state, key.platform, agent, &workspace)?;
-    state.clear_queued_prompts(key);
+    if current_session.is_some() {
+        state.unbind_chat(key);
+    } else {
+        state.clear_queued_prompts(key);
+    }
     state.bind_chat(
         key.clone(),
         ChatSession {
@@ -178,6 +208,26 @@ fn cmd_use(state: &Arc<ImBridgeState>, key: &ChatKey, arg: &str) -> Result<Strin
         agent.as_str(),
         workspace
     ))
+}
+
+/// Update a config option on the current runtime session without changing the
+/// channel session binding. Used for same-agent model/effort switches.
+pub(super) fn set_session_config_option(
+    state: &Arc<ImBridgeState>,
+    key: &ChatKey,
+    config_id: &str,
+    value: serde_json::Value,
+) -> Result<()> {
+    let session = state
+        .chat_session(key)
+        .context("no active session for this chat")?;
+    state.runtime.set_config_option(
+        &session.sessio_runtime_session_id,
+        AgentSessionConfigChange {
+            config_id: config_id.to_string(),
+            value,
+        },
+    )
 }
 
 /// `/cancel` — cancel the active turn on the chat's session, if any.
@@ -323,6 +373,16 @@ fn restore_or_start_session(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result
     Ok(session)
 }
 
+pub(super) fn ensure_chat_session(
+    state: &Arc<ImBridgeState>,
+    key: &ChatKey,
+) -> Result<ChatSession> {
+    match state.chat_session(key) {
+        Some(session) => Ok(session),
+        None => restore_or_start_session(state, key),
+    }
+}
+
 fn resume_channel_session(
     state: &Arc<ImBridgeState>,
     key: &ChatKey,
@@ -466,7 +526,7 @@ fn transport_option(transport: crate::agents::runtime::types::RuntimeTransportKi
     .to_string()
 }
 
-fn status_text(state: &Arc<ImBridgeState>, key: &ChatKey) -> String {
+pub(super) fn session_status_text(state: &Arc<ImBridgeState>, key: &ChatKey) -> String {
     let queued = state.queued_prompt_count(key);
     match state.chat_session(key) {
         Some(session) => {
@@ -488,7 +548,10 @@ fn status_text(state: &Arc<ImBridgeState>, key: &ChatKey) -> String {
 fn help_text() -> String {
     "Sessio 命令:\n\
      /new [workspace] — 开启新会话\n\
-     /use <agent> — 切换 agent (claude/codex/gemini/astra-pi)\n\
+     /agent [agent] — 选择或切换 agent (claude/codex/gemini/astra-pi)\n\
+     /model — 切换当前会话的 model\n\
+     /effort — 切换当前会话的 effort\n\
+     /workspace — 切换当前会话的 workspace\n\
      /cancel — 取消当前回合\n\
      /end — 结束会话\n\
      /status — 查看当前会话\n\

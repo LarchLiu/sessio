@@ -20,7 +20,7 @@ pub struct ImBridgeConfig {
     pub enabled: bool,
 
     /// Default agent for new chat-initiated sessions when the user does not
-    /// pick one with `/use`.
+    /// pick one with `/agent`.
     #[serde(default = "default_agent", alias = "default_agent")]
     pub default_agent: Agent,
 
