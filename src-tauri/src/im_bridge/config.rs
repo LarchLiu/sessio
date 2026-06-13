@@ -27,6 +27,10 @@ pub struct ImBridgeConfig {
     /// Telegram platform config. Absent = Telegram disabled.
     #[serde(default)]
     pub telegram: Option<TelegramConfig>,
+
+    /// Discord platform config. Absent = Discord disabled.
+    #[serde(default)]
+    pub discord: Option<DiscordConfig>,
 }
 
 /// Bind one external chat/channel to a local workspace.
@@ -95,6 +99,65 @@ pub struct TelegramConfig {
     pub api_base: Option<String>,
 }
 
+/// Discord bot configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscordConfig {
+    /// Whether the Discord worker should start.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Agent used for new Discord-created sessions. When absent, the bridge
+    /// resolves to the first enabled runtime agent from the local store.
+    #[serde(default)]
+    pub agent: Option<Agent>,
+
+    /// Model used for new Discord-created sessions.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Effort used for new Discord-created sessions.
+    #[serde(default)]
+    pub effort: Option<String>,
+
+    /// Default workspace for Discord-created sessions when a channel-specific
+    /// binding is absent.
+    #[serde(default, alias = "default_workspace")]
+    pub default_workspace: Option<String>,
+
+    /// Workspaces Discord channels are allowed to open sessions in.
+    #[serde(default, alias = "allowed_workspaces")]
+    pub allowed_workspaces: Vec<String>,
+
+    /// Optional per-Discord-channel workspace overrides.
+    #[serde(default, alias = "workspace_bindings")]
+    pub workspace_bindings: Vec<WorkspaceBindingConfig>,
+
+    /// Bot token from the Discord Developer Portal.
+    #[serde(default, alias = "bot_token")]
+    pub bot_token: String,
+
+    /// Guild/server IDs the bot may respond in. Empty = all guilds.
+    #[serde(default, alias = "allowed_server_ids")]
+    pub allowed_server_ids: Vec<String>,
+
+    /// Channel IDs the bot may respond in. Empty = all channels.
+    #[serde(default, alias = "allowed_channel_ids")]
+    pub allowed_channel_ids: Vec<String>,
+
+    /// When true, only respond to DMs, replies, or messages mentioning the bot.
+    #[serde(default, alias = "mention_only")]
+    pub mention_only: bool,
+
+    /// Optional override for the Discord REST API base.
+    #[serde(default, alias = "api_base")]
+    pub api_base: Option<String>,
+
+    /// Optional override for the Discord Gateway URL.
+    #[serde(default, alias = "gateway_url")]
+    pub gateway_url: Option<String>,
+}
+
 fn default_poll_timeout() -> u64 {
     30
 }
@@ -109,6 +172,7 @@ impl Default for ImBridgeConfig {
             enabled: false,
             idle_timeout_secs: default_idle_timeout_secs(),
             telegram: Some(TelegramConfig::default()),
+            discord: Some(DiscordConfig::default()),
         }
     }
 }
@@ -131,11 +195,32 @@ impl Default for TelegramConfig {
     }
 }
 
+impl Default for DiscordConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            agent: None,
+            model: None,
+            effort: None,
+            default_workspace: None,
+            allowed_workspaces: Vec::new(),
+            workspace_bindings: Vec::new(),
+            bot_token: String::new(),
+            allowed_server_ids: Vec::new(),
+            allowed_channel_ids: Vec::new(),
+            mention_only: true,
+            api_base: None,
+            gateway_url: None,
+        }
+    }
+}
+
 impl ImBridgeConfig {
     /// Configured agent for a platform, if the platform has one.
     pub fn configured_agent_for_platform(&self, platform: &str) -> Option<Agent> {
         match platform {
             "telegram" => self.telegram.as_ref().and_then(|config| config.agent),
+            "discord" => self.discord.as_ref().and_then(|config| config.agent),
             _ => None,
         }
     }
@@ -145,6 +230,11 @@ impl ImBridgeConfig {
         match platform {
             "telegram" => self
                 .telegram
+                .as_ref()
+                .map(|config| config.is_workspace_allowed(path))
+                .unwrap_or(false),
+            "discord" => self
+                .discord
                 .as_ref()
                 .map(|config| config.is_workspace_allowed(path))
                 .unwrap_or(false),
@@ -160,6 +250,10 @@ impl ImBridgeConfig {
                 .telegram
                 .as_ref()
                 .and_then(|config| config.workspace_for_chat(platform, chat_id)),
+            "discord" => self
+                .discord
+                .as_ref()
+                .and_then(|config| config.workspace_for_chat(platform, chat_id)),
             _ => None,
         }
     }
@@ -173,6 +267,12 @@ impl ImBridgeConfig {
                 .and_then(|config| config.model.as_deref())
                 .map(str::trim)
                 .filter(|value| !value.is_empty()),
+            "discord" => self
+                .discord
+                .as_ref()
+                .and_then(|config| config.model.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
             _ => None,
         }
     }
@@ -182,6 +282,12 @@ impl ImBridgeConfig {
         match platform {
             "telegram" => self
                 .telegram
+                .as_ref()
+                .and_then(|config| config.effort.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "discord" => self
+                .discord
                 .as_ref()
                 .and_then(|config| config.effort.as_deref())
                 .map(str::trim)
@@ -218,6 +324,45 @@ impl TelegramConfig {
 
     /// Workspace selected for a specific Telegram chat. Falls back to the
     /// Telegram default.
+    pub fn workspace_for_chat(&self, platform: &str, chat_id: &str) -> Option<&str> {
+        self.workspace_bindings
+            .iter()
+            .find(|binding| {
+                binding.platform == platform && binding.chat_id.trim() == chat_id.trim()
+            })
+            .map(|binding| binding.workspace_path.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.default_workspace())
+    }
+}
+
+impl DiscordConfig {
+    /// The default workspace for Discord chat-initiated sessions, if any.
+    pub fn default_workspace(&self) -> Option<&str> {
+        self.default_workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.allowed_workspaces.first().map(String::as_str))
+    }
+
+    /// Whether `path` is permitted for a new Discord session.
+    pub fn is_workspace_allowed(&self, path: &str) -> bool {
+        let path = path.trim();
+        if path.is_empty() {
+            return false;
+        }
+        self.allowed_workspaces.iter().any(|w| w.trim() == path)
+            || self.default_workspace() == Some(path)
+            || self
+                .workspace_bindings
+                .iter()
+                .any(|binding| binding.workspace_path.trim() == path)
+    }
+
+    /// Workspace selected for a specific Discord channel. Falls back to the
+    /// Discord default.
     pub fn workspace_for_chat(&self, platform: &str, chat_id: &str) -> Option<&str> {
         self.workspace_bindings
             .iter()

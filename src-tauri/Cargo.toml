@@ -38,6 +38,7 @@ base64 = "0.22"
 tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

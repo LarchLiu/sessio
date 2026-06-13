@@ -2810,6 +2810,19 @@ async fn test_telegram_bot_connection(
 }
 
 #[tauri::command]
+async fn test_discord_bot_connection(
+    bot_token: String,
+    api_base: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        im_bridge::test_discord_bot_connection(&bot_token, api_base.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
@@ -3516,6 +3529,7 @@ pub fn run() {
             update_im_bridge_config,
             detect_telegram_user_ids,
             test_telegram_bot_connection,
+            test_discord_bot_connection,
             update_runtime_agent_preferences,
             start_agent_session,
             fork_agent_session,

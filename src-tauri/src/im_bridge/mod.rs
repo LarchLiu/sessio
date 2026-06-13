@@ -17,7 +17,7 @@ mod platforms;
 mod router;
 mod state;
 
-pub use config::{ImBridgeConfig, TelegramConfig, WorkspaceBindingConfig};
+pub use config::{DiscordConfig, ImBridgeConfig, TelegramConfig, WorkspaceBindingConfig};
 
 use std::sync::Arc;
 
@@ -109,4 +109,8 @@ pub fn detect_telegram_user_ids(bot_token: &str, api_base: Option<&str>) -> Resu
 
 pub fn test_telegram_bot_connection(bot_token: &str, api_base: Option<&str>) -> Result<()> {
     platforms::test_telegram_bot_connection(bot_token, api_base)
+}
+
+pub fn test_discord_bot_connection(bot_token: &str, api_base: Option<&str>) -> Result<()> {
+    platforms::test_discord_bot_connection(bot_token, api_base)
 }

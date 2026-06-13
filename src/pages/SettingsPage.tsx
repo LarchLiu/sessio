@@ -32,8 +32,8 @@ import {
   XiaomiMiMo,
   ZAI,
 } from "@lobehub/icons";
-import { ArrowLeft, Bot, Check, Circle, Download, Eye, EyeOff, FolderSymlink, Globe2, GripVertical, Info, Languages, Link2, LoaderCircle, MessageCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig } from "../api";
+import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, FolderSymlink, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, MessageCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, Sun, Trash2, Workflow, X } from "lucide-react";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
@@ -46,6 +46,7 @@ import {
   listProcessTemplateStages,
   listProcessTemplates,
   listRuntimeAgents,
+  testDiscordBotConnection,
   testTelegramBotConnection,
   updateAgentPreferences,
   updateAstraConfig,
@@ -439,6 +440,23 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
   const [bindings, setBindings] = useState<ImBridgeWorkspaceBinding[]>([]);
   const [bindingChatId, setBindingChatId] = useState("");
   const [bindingWorkspace, setBindingWorkspace] = useState("");
+  const [discordEnabled, setDiscordEnabled] = useState(false);
+  const [discordBotToken, setDiscordBotToken] = useState("");
+  const [showDiscordToken, setShowDiscordToken] = useState(false);
+  const [discordTesting, setDiscordTesting] = useState(false);
+  const [discordTestStatus, setDiscordTestStatus] = useState<"idle" | "success" | "error">("idle");
+  const [discordAgent, setDiscordAgent] = useState<Agent | null>(null);
+  const [discordModel, setDiscordModel] = useState<string | null>(null);
+  const [discordEffort, setDiscordEffort] = useState<string | null>(null);
+  const [discordWorkspace, setDiscordWorkspace] = useState("");
+  const [discordBindings, setDiscordBindings] = useState<ImBridgeWorkspaceBinding[]>([]);
+  const [discordBindingChannelId, setDiscordBindingChannelId] = useState("");
+  const [discordBindingWorkspace, setDiscordBindingWorkspace] = useState("");
+  const [discordAllowedServerIds, setDiscordAllowedServerIds] = useState<string[]>([]);
+  const [discordAllowedChannelIds, setDiscordAllowedChannelIds] = useState<string[]>([]);
+  const [discordServerIdInput, setDiscordServerIdInput] = useState("");
+  const [discordChannelIdInput, setDiscordChannelIdInput] = useState("");
+  const [discordMentionOnly, setDiscordMentionOnly] = useState(true);
 
   const load = async () => {
     setLoading(true);
@@ -453,6 +471,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       setProjects(projectRows);
       setRuntimeAgents(runtimeAgentRows);
       const telegram = bridgeConfig.telegram ?? defaultTelegramBridgeConfig();
+      const discord = bridgeConfig.discord ?? defaultDiscordBridgeConfig();
       setTelegramEnabled(Boolean(bridgeConfig.enabled && telegram.enabled));
       setBotToken(telegram.botToken ?? "");
       setAllowedUserIds(telegram.allowedUserIds ?? []);
@@ -462,6 +481,17 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       setTelegramEffort(resolvedSelection.effort);
       setTelegramWorkspace(telegram.defaultWorkspace ?? telegram.allowedWorkspaces[0] ?? "");
       setBindings(telegram.workspaceBindings ?? []);
+      setDiscordEnabled(Boolean(bridgeConfig.enabled && discord.enabled));
+      setDiscordBotToken(discord.botToken ?? "");
+      const resolvedDiscordSelection = resolveRuntimeSelection(runtimeAgentRows, discord);
+      setDiscordAgent(resolvedDiscordSelection.agent);
+      setDiscordModel(resolvedDiscordSelection.model);
+      setDiscordEffort(resolvedDiscordSelection.effort);
+      setDiscordWorkspace(discord.defaultWorkspace ?? discord.allowedWorkspaces[0] ?? "");
+      setDiscordBindings(discord.workspaceBindings ?? []);
+      setDiscordAllowedServerIds(discord.allowedServerIds ?? []);
+      setDiscordAllowedChannelIds(discord.allowedChannelIds ?? []);
+      setDiscordMentionOnly(discord.mentionOnly ?? true);
     } catch (err) {
       onError(String(err));
     } finally {
@@ -538,7 +568,69 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     ]),
     [bindings, telegramWorkspace, projects],
   );
+  const selectedDiscordRuntimeAgent = useMemo(
+    () => runtimeAgents.find((agent) => agent.agent === discordAgent && agent.enabled) ?? firstEnabledRuntimeAgent(runtimeAgents),
+    [runtimeAgents, discordAgent],
+  );
+  const selectedDiscordAgent = selectedDiscordRuntimeAgent?.agent ?? discordAgent;
+  const discordModelValue = selectedDiscordAgent && discordModel
+    ? agentModelSelectValue(selectedDiscordAgent, discordModel)
+    : "";
+  const discordModelOptions = useMemo(() => {
+    const effortControls = Object.fromEntries(
+      enabledRuntimeAgents.map((runtimeAgent) => [
+        runtimeAgent.agent,
+        <RuntimeEffortControl
+          value={runtimeAgent.agent === selectedDiscordAgent ? discordEffort ?? initialRuntimeEffort(runtimeAgent) : initialRuntimeEffort(runtimeAgent)}
+          options={runtimeEffortOptions(runtimeAgent)}
+          onChange={(value) => {
+            if (runtimeAgent.agent !== selectedDiscordAgent) {
+              setDiscordAgent(runtimeAgent.agent);
+              setDiscordModel(defaultRuntimeModel(runtimeAgent));
+            }
+            setDiscordEffort(value);
+          }}
+        />,
+      ]),
+    ) as Partial<Record<Agent, ReactNode>>;
+    const selectedEfforts = selectedDiscordAgent && discordEffort ? { [selectedDiscordAgent]: discordEffort } : {};
+    const options = agentModelSelectOptions(enabledRuntimeAgents, effortControls, selectedEfforts);
+    const selectedExists = options.some((option) => option.value === discordModelValue);
+    return [
+      ...(!selectedExists && selectedDiscordAgent && discordModel
+        ? [{
+          value: discordModelValue,
+          label: discordModel,
+          icon: <AgentGlyph agent={selectedDiscordAgent} className="h-3.5 w-3.5" />,
+        }]
+        : []),
+      ...options,
+    ];
+  }, [enabledRuntimeAgents, selectedDiscordAgent, discordEffort, discordModel, discordModelValue]);
+  useEffect(() => {
+    if (runtimeAgents.length === 0) return;
+    const selected = selectedDiscordRuntimeAgent ?? firstEnabledRuntimeAgent(runtimeAgents);
+    if (!selected) return;
+    if (discordAgent !== selected.agent) {
+      setDiscordAgent(selected.agent);
+    }
+    if (!discordModel) {
+      setDiscordModel(defaultRuntimeModel(selected));
+    }
+    if (!discordEffort) {
+      setDiscordEffort(initialRuntimeEffort(selected) || null);
+    }
+  }, [runtimeAgents, selectedDiscordRuntimeAgent, discordAgent, discordModel, discordEffort]);
+  const discordWorkspaceChoices = useMemo(
+    () => uniqueStrings([
+      ...projects.map((project) => project.path),
+      discordWorkspace,
+      ...discordBindings.map((binding) => binding.workspacePath),
+    ]),
+    [discordBindings, discordWorkspace, projects],
+  );
   const telegramApiBase = config?.telegram?.apiBase ?? null;
+  const discordApiBase = config?.discord?.apiBase ?? null;
   const channelTabs = useMemo(
     () => [
       { value: "telegram" as const, label: "Telegram" },
@@ -591,9 +683,44 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     }
   };
 
+  const sendDiscordTest = async () => {
+    if (!discordBotToken.trim() || discordTesting) return;
+    setDiscordTesting(true);
+    setDiscordTestStatus("idle");
+    try {
+      await testDiscordBotConnection(discordBotToken.trim(), discordApiBase);
+      setDiscordTestStatus("success");
+      onError(null);
+    } catch (err) {
+      setDiscordTestStatus("error");
+      onError(String(err));
+    } finally {
+      setDiscordTesting(false);
+    }
+  };
+
   useEffect(() => {
     setSaveStatus("idle");
-  }, [telegramEnabled, botToken, allowedUserIds, selectedTelegramAgent, telegramModel, telegramEffort, telegramWorkspace, bindings]);
+  }, [
+    telegramEnabled,
+    botToken,
+    allowedUserIds,
+    selectedTelegramAgent,
+    telegramModel,
+    telegramEffort,
+    telegramWorkspace,
+    bindings,
+    discordEnabled,
+    discordBotToken,
+    selectedDiscordAgent,
+    discordModel,
+    discordEffort,
+    discordWorkspace,
+    discordBindings,
+    discordAllowedServerIds,
+    discordAllowedChannelIds,
+    discordMentionOnly,
+  ]);
 
   const addBinding = () => {
     const chatId = bindingChatId.trim();
@@ -603,6 +730,30 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       { platform: "telegram", chatId, workspacePath: bindingWorkspace },
     ]);
     setBindingChatId("");
+  };
+
+  const addDiscordServerId = () => {
+    const value = discordServerIdInput.trim();
+    if (!value) return;
+    setDiscordAllowedServerIds((current) => current.includes(value) ? current : [...current, value]);
+    setDiscordServerIdInput("");
+  };
+
+  const addDiscordChannelId = () => {
+    const value = discordChannelIdInput.trim();
+    if (!value) return;
+    setDiscordAllowedChannelIds((current) => current.includes(value) ? current : [...current, value]);
+    setDiscordChannelIdInput("");
+  };
+
+  const addDiscordBinding = () => {
+    const chatId = discordBindingChannelId.trim();
+    if (!chatId || !discordBindingWorkspace) return;
+    setDiscordBindings((current) => [
+      ...current.filter((binding) => binding.chatId !== chatId),
+      { platform: "discord", chatId, workspacePath: discordBindingWorkspace },
+    ]);
+    setDiscordBindingChannelId("");
   };
 
   const save = async () => {
@@ -631,10 +782,34 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
         botToken: botToken.trim(),
         allowedUserIds,
       };
+      const nextDiscord = {
+        ...(config?.discord ?? defaultDiscordBridgeConfig()),
+        enabled: discordEnabled,
+        agent: selectedDiscordAgent ?? null,
+        model: discordModel?.trim() || null,
+        effort: discordEffort?.trim() || null,
+        defaultWorkspace: discordWorkspace.trim() || null,
+        allowedWorkspaces: uniqueStrings([
+          discordWorkspace.trim(),
+          ...discordBindings.map((binding) => binding.workspacePath),
+        ]),
+        workspaceBindings: discordBindings
+          .map((binding) => ({
+            platform: "discord",
+            chatId: binding.chatId.trim(),
+            workspacePath: binding.workspacePath.trim(),
+          }))
+          .filter((binding) => binding.chatId && binding.workspacePath),
+        botToken: discordBotToken.trim(),
+        allowedServerIds: uniqueStrings(discordAllowedServerIds),
+        allowedChannelIds: uniqueStrings(discordAllowedChannelIds),
+        mentionOnly: discordMentionOnly,
+      };
       const nextConfig: ImBridgeConfig = {
         ...(config ?? defaultImBridgeConfig()),
-        enabled: telegramEnabled,
+        enabled: telegramEnabled || discordEnabled,
         telegram: nextTelegram,
+        discord: nextDiscord,
       };
       const saved = await updateImBridgeConfig(nextConfig);
       setConfig(saved);
@@ -700,12 +875,12 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
                 <button type="button" disabled={testing || !botToken.trim()} onClick={() => void sendTest()} className={telegramTestButtonClass(testStatus)}>
                   {testing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
                   {testing
-                    ? t("settings.telegram_testing_connection")
+                    ? t("settings.testing_connection")
                     : testStatus === "success"
-                      ? t("settings.telegram_connected")
+                      ? t("settings.connected")
                       : testStatus === "error"
-                        ? t("settings.telegram_connection_failed")
-                        : t("settings.telegram_test_connection")}
+                        ? t("settings.connection_failed")
+                        : t("settings.test_connection")}
                 </button>
               </div>
             </SettingsStackedRow>
@@ -786,6 +961,150 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
             ))}
           </SettingsGroup>
         </>
+      ) : activePlatform === "discord" ? (
+        <>
+          <SettingsGroup
+            title={t("settings.discord_bot")}
+            action={
+              <button type="button" disabled={saving || loading} onClick={() => void save()} className={channelSaveButtonClass(saveStatus)}>
+                {saving
+                  ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                  : saveStatus === "error"
+                    ? <X className="h-4 w-4" />
+                    : <Check className="h-4 w-4" />}
+                {saving
+                  ? t("project.save")
+                  : saveStatus === "success"
+                    ? t("settings.saved")
+                    : saveStatus === "error"
+                      ? t("settings.save_failed")
+                      : t("project.save")}
+              </button>
+            }
+            flush
+          >
+            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.discord_enable")} description={t("settings.discord_enable_description")}>
+              <div className="flex items-center gap-3">
+                <span className="text-caption text-ink/45">{discordEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
+                <SwitchControl checked={discordEnabled} tooltip={t("settings.discord_enable")} onToggle={() => setDiscordEnabled((value) => !value)} />
+              </div>
+            </SettingsRow>
+            <SettingsStackedRow icon={<Bot className="h-4 w-4" />} label={t("settings.discord_bot_token")} description={t("settings.discord_bot_token_description")}>
+              <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                <input value={discordBotToken} type={showDiscordToken ? "text" : "password"} onChange={(event) => {
+                  setDiscordBotToken(event.target.value);
+                  setDiscordTestStatus("idle");
+                }} placeholder="MTIz..." className={inputClassName + " min-w-0 flex-1"} />
+                <button type="button" onClick={() => setShowDiscordToken((value) => !value)} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-ink/55 transition hover:bg-ink/[0.06] hover:text-ink" aria-label={showDiscordToken ? t("settings.telegram_hide_token") : t("settings.telegram_show_token")}>
+                  {showDiscordToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+                <button type="button" disabled={discordTesting || !discordBotToken.trim()} onClick={() => void sendDiscordTest()} className={telegramTestButtonClass(discordTestStatus)}>
+                  {discordTesting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                  {discordTesting
+                    ? t("settings.testing_connection")
+                    : discordTestStatus === "success"
+                      ? t("settings.connected")
+                      : discordTestStatus === "error"
+                        ? t("settings.connection_failed")
+                        : t("settings.test_connection")}
+                </button>
+              </div>
+            </SettingsStackedRow>
+            <SettingsRow icon={<Settings2 className="h-4 w-4" />} label={t("settings.discord_default_model")} description={t("settings.discord_default_model_description")}>
+              <RuntimeMenuSelect
+                ariaLabel={t("settings.discord_default_model")}
+                value={discordModelValue}
+                options={discordModelOptions}
+                onChange={(value) => {
+                  const parsed = parseAgentModelSelectValue(value);
+                  if (!parsed) return;
+                  const runtimeAgent = runtimeAgents.find((agent) => agent.agent === parsed.agent);
+                  if (parsed.agent !== selectedDiscordAgent) {
+                    setDiscordEffort(runtimeAgent ? initialRuntimeEffort(runtimeAgent) : null);
+                  }
+                  setDiscordAgent(parsed.agent);
+                  setDiscordModel(parsed.model || null);
+                }}
+                minMenuWidth={240}
+                maxWidthClassName="max-w-[300px]"
+              />
+            </SettingsRow>
+          </SettingsGroup>
+
+          <SettingsGroup title={t("settings.discord_access_control")} flush>
+            <SettingsStackedRow icon={<Shield className="h-4 w-4" />} label={t("settings.discord_allowed_servers")} description={t("settings.discord_allowed_servers_description")}>
+              <IdListEditor
+                value={discordServerIdInput}
+                placeholder={t("settings.discord_server_id_placeholder")}
+                ids={discordAllowedServerIds}
+                addLabel={t("settings.add")}
+                onInputChange={setDiscordServerIdInput}
+                onAdd={addDiscordServerId}
+                onRemove={(id) => setDiscordAllowedServerIds((current) => current.filter((item) => item !== id))}
+              />
+            </SettingsStackedRow>
+            <SettingsStackedRow icon={<Hash className="h-4 w-4" />} label={t("settings.discord_allowed_channels")} description={t("settings.discord_allowed_channels_description")}>
+              <IdListEditor
+                value={discordChannelIdInput}
+                placeholder={t("settings.discord_channel_id_placeholder")}
+                ids={discordAllowedChannelIds}
+                addLabel={t("settings.add")}
+                onInputChange={setDiscordChannelIdInput}
+                onAdd={addDiscordChannelId}
+                onRemove={(id) => setDiscordAllowedChannelIds((current) => current.filter((item) => item !== id))}
+              />
+            </SettingsStackedRow>
+            <SettingsRow icon={<AtSign className="h-4 w-4" />} label={t("settings.discord_mention_only")} description={t("settings.discord_mention_only_description")}>
+              <SwitchControl checked={discordMentionOnly} tooltip={t("settings.discord_mention_only")} onToggle={() => setDiscordMentionOnly((value) => !value)} />
+            </SettingsRow>
+          </SettingsGroup>
+
+          <SettingsGroup title={t("settings.discord_setup_guide")} flush>
+            <SettingsStackedRow icon={<Bot className="h-4 w-4" />} label={t("settings.discord_setup_guide")} description={t("settings.discord_setup_description")}>
+              <ol className="space-y-2 pl-4 text-caption leading-relaxed text-ink/65">
+                <li>{t("settings.discord_setup_step_1")}</li>
+                <li>{t("settings.discord_setup_step_2")}</li>
+                <li>{t("settings.discord_setup_step_3")}</li>
+                <li>{t("settings.discord_setup_step_4")}</li>
+                <li>{t("settings.discord_setup_step_5")}</li>
+                <li>{t("settings.discord_setup_step_6")}</li>
+              </ol>
+            </SettingsStackedRow>
+          </SettingsGroup>
+
+          <SettingsGroup title={t("settings.discord_workspace_bindings")} flush>
+            <SettingsStackedRow icon={<FolderSymlink className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.discord_default_workspace_description")}>
+              <select value={discordWorkspace} onChange={(event) => setDiscordWorkspace(event.target.value)} className={inputClassName + " w-full"}>
+                <option value="">{t("settings.channels_select_workspace")}</option>
+                {discordWorkspaceChoices.map((path) => (
+                  <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                ))}
+              </select>
+            </SettingsStackedRow>
+            <SettingsStackedRow icon={<Server className="h-4 w-4" />} label={t("settings.discord_add_binding")} description={t("settings.discord_add_binding_description")}>
+              <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                <input value={discordBindingChannelId} onChange={(event) => setDiscordBindingChannelId(event.target.value)} placeholder="Channel ID" className={inputClassName + " min-w-[170px] flex-1"} />
+                <select value={discordBindingWorkspace} onChange={(event) => setDiscordBindingWorkspace(event.target.value)} className={inputClassName + " min-w-[220px] flex-[1.4]"}>
+                  <option value="">{t("settings.channels_select_workspace")}</option>
+                  {discordWorkspaceChoices.map((path) => (
+                    <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                  ))}
+                </select>
+                <button type="button" disabled={!discordBindingChannelId.trim() || !discordBindingWorkspace} onClick={addDiscordBinding} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+                  <Plus className="h-4 w-4" />
+                  {t("settings.add")}
+                </button>
+              </div>
+            </SettingsStackedRow>
+            {discordBindings.map((binding) => (
+              <SettingsStackedRow key={binding.chatId} icon={<Hash className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
+                <button type="button" onClick={() => setDiscordBindings((current) => current.filter((item) => item.chatId !== binding.chatId))} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink/55 transition hover:bg-red-500/10 hover:text-red-600" aria-label={t("sidebar.remove")}>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </SettingsStackedRow>
+            ))}
+          </SettingsGroup>
+        </>
       ) : (
         <SettingsGroup title={t("settings.channels_coming_soon")}>
           <EmptyState label={t("settings.channels_coming_soon_description")} />
@@ -800,6 +1119,7 @@ function defaultImBridgeConfig(): ImBridgeConfig {
     enabled: false,
     idleTimeoutSecs: 900,
     telegram: defaultTelegramBridgeConfig(),
+    discord: defaultDiscordBridgeConfig(),
   };
 }
 
@@ -819,6 +1139,24 @@ function defaultTelegramBridgeConfig(): TelegramBridgeConfig {
   };
 }
 
+function defaultDiscordBridgeConfig(): DiscordBridgeConfig {
+  return {
+    enabled: false,
+    agent: null,
+    model: null,
+    effort: null,
+    defaultWorkspace: null,
+    allowedWorkspaces: [],
+    workspaceBindings: [],
+    botToken: "",
+    allowedServerIds: [],
+    allowedChannelIds: [],
+    mentionOnly: true,
+    apiBase: null,
+    gatewayUrl: null,
+  };
+}
+
 function firstEnabledRuntimeAgent(runtimeAgents: RuntimeAgentMetadata[]): RuntimeAgentMetadata | null {
   return runtimeAgents.find((agent) => agent.enabled) ?? runtimeAgents[0] ?? null;
 }
@@ -827,20 +1165,27 @@ function resolveTelegramAgentSelection(
   runtimeAgents: RuntimeAgentMetadata[],
   telegram: TelegramBridgeConfig,
 ): { agent: Agent | null; model: string | null; effort: string | null } {
+  return resolveRuntimeSelection(runtimeAgents, telegram);
+}
+
+function resolveRuntimeSelection(
+  runtimeAgents: RuntimeAgentMetadata[],
+  config: { agent: Agent | null; model: string | null; effort: string | null },
+): { agent: Agent | null; model: string | null; effort: string | null } {
   const selected =
-    runtimeAgents.find((agent) => agent.agent === telegram.agent && agent.enabled)
+    runtimeAgents.find((agent) => agent.agent === config.agent && agent.enabled)
     ?? firstEnabledRuntimeAgent(runtimeAgents);
   if (!selected) {
     return {
-      agent: telegram.agent ?? null,
-      model: telegram.model ?? null,
-      effort: telegram.effort ?? null,
+      agent: config.agent ?? null,
+      model: config.model ?? null,
+      effort: config.effort ?? null,
     };
   }
   return {
     agent: selected.agent,
-    model: telegram.model ?? defaultRuntimeModel(selected),
-    effort: telegram.effort ?? (initialRuntimeEffort(selected) || null),
+    model: config.model ?? defaultRuntimeModel(selected),
+    effort: config.effort ?? (initialRuntimeEffort(selected) || null),
   };
 }
 
@@ -868,6 +1213,50 @@ function channelSaveButtonClass(status: "idle" | "success" | "error"): string {
     return base + "border-status-error/45 bg-status-error/12 text-status-error hover:bg-status-error/18";
   }
   return base + "border-card-border/[0.12] bg-card-chip/[0.08] text-card-fg/75 hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]";
+}
+
+function IdListEditor({
+  value,
+  placeholder,
+  ids,
+  addLabel,
+  onInputChange,
+  onAdd,
+  onRemove,
+}: {
+  value: string;
+  placeholder: string;
+  ids: string[];
+  addLabel: string;
+  onInputChange: (value: string) => void;
+  onAdd: () => void;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="flex w-full min-w-0 flex-col gap-2">
+      <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+        <input
+          value={value}
+          onChange={(event) => onInputChange(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") onAdd(); }}
+          placeholder={placeholder}
+          className={inputClassName + " min-w-[180px] flex-1"}
+        />
+        <button type="button" disabled={!value.trim()} onClick={onAdd} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+          <Plus className="h-4 w-4" />
+          {addLabel}
+        </button>
+      </div>
+      <div className="flex max-w-full flex-wrap gap-1.5">
+        {ids.map((id) => (
+          <button key={id} type="button" onClick={() => onRemove(id)} className="inline-flex h-7 items-center gap-1 rounded-md bg-ink/[0.07] px-2 text-caption text-ink/70 transition hover:bg-ink/[0.1]">
+            {id}
+            <X className="h-3 w-3" />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function projectLabel(projects: ProjectInfo[], path: string): string {

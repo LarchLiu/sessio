@@ -88,6 +88,7 @@ export interface ImBridgeConfig {
   enabled: boolean;
   idleTimeoutSecs: number;
   telegram: TelegramBridgeConfig | null;
+  discord: DiscordBridgeConfig | null;
 }
 
 export interface ImBridgeWorkspaceBinding {
@@ -108,6 +109,22 @@ export interface TelegramBridgeConfig {
   allowedUserIds: number[];
   pollTimeoutSecs: number;
   apiBase: string | null;
+}
+
+export interface DiscordBridgeConfig {
+  enabled: boolean;
+  agent: Agent | null;
+  model: string | null;
+  effort: string | null;
+  defaultWorkspace: string | null;
+  allowedWorkspaces: string[];
+  workspaceBindings: ImBridgeWorkspaceBinding[];
+  botToken: string;
+  allowedServerIds: string[];
+  allowedChannelIds: string[];
+  mentionOnly: boolean;
+  apiBase: string | null;
+  gatewayUrl: string | null;
 }
 
 export type AssistantType = "builtin" | "custom";
@@ -1881,6 +1898,10 @@ export async function detectTelegramUserIds(botToken: string, apiBase: string | 
 
 export async function testTelegramBotConnection(botToken: string, apiBase: string | null): Promise<void> {
   return invoke<void>("test_telegram_bot_connection", { botToken, apiBase });
+}
+
+export async function testDiscordBotConnection(botToken: string, apiBase: string | null): Promise<void> {
+  return invoke<void>("test_discord_bot_connection", { botToken, apiBase });
 }
 
 export async function updateRuntimeAgentPreferences(
