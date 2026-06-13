@@ -18,6 +18,11 @@ export interface CrossPromptSource {
 
 export interface CrossPromptTurn {
   blocks: CrossPromptRenderBlock[];
+  /// Optional tool calls collected for this turn. Used to surface high-signal
+  /// tool state (currently TodoWrite / Update Plan snapshots) in the cross
+  /// prompt; defaulting to undefined keeps callers that only pass `blocks`
+  /// working unchanged.
+  tools?: CrossPromptToolCall[];
 }
 
 export interface CrossPromptRenderBlock {
@@ -26,8 +31,15 @@ export interface CrossPromptRenderBlock {
   [key: string]: unknown;
 }
 
+export interface CrossPromptToolCall {
+  title?: string;
+  kind?: string;
+  rawInput?: unknown;
+  updatedAt?: number;
+}
+
 interface CrossPromptEntry {
-  role: "user" | "thinking" | "assistant";
+  role: "user" | "assistant";
   text: string;
 }
 
@@ -98,23 +110,123 @@ function buildCrossPromptEntries(
   const filtered = entries.filter((entry) => entry.text.trim());
   if (filtered.length === 0) return "";
   const formatted = filtered.map((entry) => `[${entry.role}]\n${entry.text}`);
-  let size = 0;
-  let startIdx = filtered.length;
-  for (let i = filtered.length - 1; i >= 0; i--) {
-    const extra =
-      formatted[i].length + (i === filtered.length - 1 ? 0 : CROSS_PROMPT_SEP.length);
-    if (size + extra > CROSS_PROMPT_MAX) break;
-    size += extra;
-    startIdx = i;
+  const SEP_LEN = CROSS_PROMPT_SEP.length;
+  const MIN_ANCHOR_BUDGET = 512;
+
+  // Anchor on the latest user message and the very last entry so the
+  // receiver always sees the immediate request being continued. We fan out
+  // from the tail to capture nearby context, then — after packing — backfill
+  // the most recent user message preceding the selection if the head of the
+  // selection isn't already a user turn (so the receiver knows the topic).
+  const lastUserIdx = lastIndexOfRole(filtered, "user");
+  const anchorIndices = uniqueSortedAnchors(
+    [lastUserIdx, formatted.length - 1].filter((idx) => idx >= 0),
+  );
+
+  const picked = new Map<number, string>();
+  // Seed each anchor with at least a minimal slice so a runaway middle entry
+  // cannot crowd them out before we even consider neighbors.
+  for (const idx of anchorIndices) {
+    const raw = formatted[idx];
+    picked.set(
+      idx,
+      raw.length <= MIN_ANCHOR_BUDGET ? raw : truncateMessageTail(raw, MIN_ANCHOR_BUDGET),
+    );
   }
-  while (startIdx < filtered.length && filtered[startIdx].role !== "user") {
-    startIdx++;
+
+  // Build the neighbor walk order: newest-first from the most recent anchor
+  // backwards, then anything still missing before the earliest anchor (rare,
+  // because anchors include `0` whenever there's a user at the very start).
+  const newestAnchor = anchorIndices[anchorIndices.length - 1];
+  const oldestAnchor = anchorIndices[0];
+  const orderedNeighbors: number[] = [];
+  for (let i = newestAnchor - 1; i > oldestAnchor; i--) orderedNeighbors.push(i);
+  for (let i = newestAnchor + 1; i < formatted.length; i++) orderedNeighbors.push(i);
+  for (let i = oldestAnchor - 1; i >= 0; i--) orderedNeighbors.push(i);
+
+  for (const idx of orderedNeighbors) {
+    if (picked.has(idx)) continue;
+    const raw = formatted[idx];
+    const remaining = CROSS_PROMPT_MAX - budgetUsedFromMap(picked, SEP_LEN) - SEP_LEN;
+    if (remaining <= 0) break;
+    if (raw.length <= remaining) {
+      picked.set(idx, raw);
+      continue;
+    }
+    const TRUNCATE_MIN_USEFUL = 256;
+    if (remaining < TRUNCATE_MIN_USEFUL) continue;
+    const truncated = truncateMessageTail(raw, remaining);
+    if (truncated.length > remaining) continue;
+    picked.set(idx, truncated);
   }
-  if (startIdx >= filtered.length) {
-    startIdx = filtered.map((message) => message.role).lastIndexOf("user");
+
+  // Finalize each anchor with whatever extra room is now free, preferring full
+  // content when possible. Walk newest → oldest so the most recent turn keeps
+  // priority on growth.
+  for (const idx of [...anchorIndices].reverse()) {
+    const raw = formatted[idx];
+    const current = picked.get(idx) as string;
+    if (current === raw) continue;
+    const sepCount = Math.max(picked.size - 1, 0);
+    const otherTotal =
+      budgetUsedFromMap(picked, SEP_LEN) - current.length - sepCount * SEP_LEN;
+    const budget = CROSS_PROMPT_MAX - otherTotal - sepCount * SEP_LEN;
+    if (raw.length <= budget) {
+      picked.set(idx, raw);
+    } else if (budget > current.length) {
+      picked.set(idx, truncateMessageTail(raw, budget));
+    }
   }
-  if (startIdx < 0) return "";
-  const selected = fitFormattedSelection(formatted.slice(startIdx));
+
+  // After the budget settles, make sure the very first entry the receiver
+  // sees is a user message — that's the topic anchor. If the current top of
+  // the selection is an assistant turn, walk backwards to the nearest user
+  // message before it and squeeze it in (truncating if needed). This keeps
+  // assistants from leading the prompt orphaned without their question.
+  const sortedKeys = Array.from(picked.keys()).sort((a, b) => a - b);
+  const topIdx = sortedKeys[0];
+  if (topIdx !== undefined && filtered[topIdx]?.role !== "user") {
+    let headUserIdx = -1;
+    for (let i = topIdx - 1; i >= 0; i--) {
+      if (filtered[i].role === "user") {
+        headUserIdx = i;
+        break;
+      }
+    }
+    if (headUserIdx >= 0 && !picked.has(headUserIdx)) {
+      const raw = formatted[headUserIdx];
+      let remaining = CROSS_PROMPT_MAX - budgetUsedFromMap(picked, SEP_LEN) - SEP_LEN;
+      if (remaining < MIN_ANCHOR_BUDGET) {
+        // Make room by shrinking the newest non-anchor neighbor until the
+        // head user can fit at MIN_ANCHOR_BUDGET (or we run out of victims).
+        const anchorSet = new Set(anchorIndices);
+        const neighborKeys = sortedKeys
+          .filter((k) => !anchorSet.has(k))
+          .sort((a, b) => b - a); // newest first
+        for (const victim of neighborKeys) {
+          if (remaining >= MIN_ANCHOR_BUDGET) break;
+          const current = picked.get(victim) as string;
+          if (current.length <= 64) continue;
+          const need = MIN_ANCHOR_BUDGET + SEP_LEN - remaining;
+          const newLen = Math.max(64, current.length - need);
+          picked.set(victim, truncateMessageTail(formatted[victim], newLen));
+          remaining = CROSS_PROMPT_MAX - budgetUsedFromMap(picked, SEP_LEN) - SEP_LEN;
+        }
+      }
+      if (remaining >= MIN_ANCHOR_BUDGET) {
+        picked.set(
+          headUserIdx,
+          raw.length <= remaining ? raw : truncateMessageTail(raw, remaining),
+        );
+      }
+    }
+  }
+
+  const orderedSelection = Array.from(picked.keys())
+    .sort((a, b) => a - b)
+    .map((idx) => picked.get(idx) as string);
+  const selected = fitFormattedSelection(orderedSelection);
+
   const meta = source
     ? `\n\n<!-- sessio-cross:start source_agent="${htmlAttr(
         source.sourceAgent,
@@ -133,6 +245,29 @@ function buildCrossPromptEntries(
   return header + selected.join(CROSS_PROMPT_SEP) + `\n\n<!-- sessio-cross:end -->`;
 }
 
+function lastIndexOfRole(
+  entries: CrossPromptEntry[],
+  role: CrossPromptEntry["role"],
+): number {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].role === role) return i;
+  }
+  return -1;
+}
+
+function uniqueSortedAnchors(indices: number[]): number[] {
+  const set = new Set<number>();
+  for (const idx of indices) if (idx >= 0) set.add(idx);
+  return Array.from(set).sort((a, b) => a - b);
+}
+
+function budgetUsedFromMap(picked: Map<number, string>, sepLen: number): number {
+  if (picked.size === 0) return 0;
+  let total = 0;
+  for (const value of picked.values()) total += value.length;
+  return total + (picked.size - 1) * sepLen;
+}
+
 export function buildCrossPromptFromTurns(
   turns: CrossPromptTurn[],
   source?: CrossPromptSource,
@@ -141,22 +276,129 @@ export function buildCrossPromptFromTurns(
 }
 
 function crossPromptEntriesFromTurns(turns: CrossPromptTurn[]): CrossPromptEntry[] {
-  return turns.flatMap((turn) =>
-    turn.blocks.flatMap((block) => {
+  const out: CrossPromptEntry[] = [];
+  for (const turn of turns) {
+    for (const block of turn.blocks) {
       const role = crossPromptRole(block.kind);
-      if (!role) return [];
+      if (!role) continue;
       const text = contentBlocksTextWithSessioAttachmentMarkers(
         normalizeCrossContentBlocks(block.blocks),
       ).trim();
-      return text ? [{ role, text }] : [];
-    }),
-  );
+      if (text) out.push({ role, text });
+    }
+    const todoEntry = todoEntryFromTurnTools(turn.tools);
+    if (todoEntry) out.push(todoEntry);
+  }
+  return out;
 }
 
 function crossPromptRole(kind: string): CrossPromptEntry["role"] | null {
+  // Skip `thought` blocks intentionally: a receiving agent does its own
+  // reasoning, and the source's chain-of-thought tends to dominate the budget
+  // (each thinking block can run several KB), crowding out the actual
+  // user/assistant exchange. Preserve the conversation skeleton instead.
   if (kind === "user" || kind === "assistant") return kind;
-  if (kind === "thought") return "thinking";
   return null;
+}
+
+/// Render a single `[assistant]` entry per turn that snapshots the latest
+/// todo/plan tool call. Captures both Claude/AstraPi's `TodoWrite` and
+/// Codex/Gemini's `update_plan` / `TaskUpdate` so the receiving agent inherits
+/// the active work plan rather than rediscovering it.
+function todoEntryFromTurnTools(
+  tools: CrossPromptToolCall[] | undefined,
+): CrossPromptEntry | null {
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+  // Walk from the end so we report the most recent snapshot first when a turn
+  // updated the list multiple times.
+  for (let i = tools.length - 1; i >= 0; i--) {
+    const tool = tools[i];
+    if (!tool || typeof tool !== "object") continue;
+    const text = renderTodoToolText(tool);
+    if (text) return { role: "assistant", text };
+  }
+  return null;
+}
+
+function renderTodoToolText(tool: CrossPromptToolCall): string | null {
+  const title = typeof tool.title === "string" ? tool.title : "";
+  const kind = typeof tool.kind === "string" ? tool.kind : "";
+  const isTodo =
+    title === "TodoWrite" || title === "todo_write" || kind === "todo";
+  const isPlan =
+    title === "TaskUpdate" ||
+    title === "update_plan" ||
+    title === "automation_update" ||
+    kind === "task_list";
+  if (!isTodo && !isPlan) return null;
+
+  const entries = extractTodoEntries(tool.rawInput);
+  if (entries.length === 0) return null;
+
+  const header = isPlan ? "Plan" : "Todos";
+  const lines = entries.map((entry) => formatTodoLine(entry));
+  return `[${header}]\n${lines.join("\n")}`;
+}
+
+interface CrossTodoEntry {
+  content: string;
+  status?: string;
+}
+
+function extractTodoEntries(raw: unknown): CrossTodoEntry[] {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  const record = raw as Record<string, unknown>;
+  const candidates: unknown[] = [
+    record.entries,
+    record.todos,
+    record.plan,
+    record.tasks,
+  ];
+  let items: unknown[] | null = null;
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      items = candidate;
+      break;
+    }
+  }
+  if (!items) return [];
+  const out: CrossTodoEntry[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const obj = item as Record<string, unknown>;
+    const content =
+      pickStringField(obj.content) ??
+      pickStringField(obj.activeForm) ??
+      pickStringField(obj.step) ??
+      pickStringField(obj.title) ??
+      pickStringField(obj.text);
+    if (!content) continue;
+    out.push({
+      content,
+      status: pickStringField(obj.status) ?? undefined,
+    });
+  }
+  return out;
+}
+
+function pickStringField(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function formatTodoLine(entry: CrossTodoEntry): string {
+  const status = (entry.status ?? "").toLowerCase();
+  const marker =
+    status === "completed" || status === "complete" || status === "done"
+      ? "[x]"
+      : status === "in_progress" ||
+        status === "in-progress" ||
+        status === "active" ||
+        status === "running"
+      ? "[~]"
+      : "[ ]";
+  return `${marker} ${entry.content}`;
 }
 
 function normalizeCrossContentBlocks(blocks: unknown): AcpContentBlock[] {
