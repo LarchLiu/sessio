@@ -42,7 +42,7 @@ import {
 import { sessionDisplayTitle } from "../appUtils";
 import { useUpdateCheck } from "../updater";
 import { AgentGlyph } from "./AgentIcon";
-import { HashIcon, PeopleTeam24RegularIcon } from "./IconifyIcon";
+import IconifyIcon, { HashIcon, PeopleTeam24RegularIcon } from "./IconifyIcon";
 import PopupMenu, { type PopupMenuOption } from "./PopupMenu";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
 import ScrollArea from "./ScrollArea";
@@ -828,13 +828,14 @@ function SidebarSessionItem({
 }) {
   const { t } = useI18n();
   const title = sessionDisplayTitle(item) ?? t("list.no_user_message");
+  const channelLabel = channelPlatformLabel(item.channel?.platform);
   const relativeTime = formatShortRelativeTime(item.updatedAt ?? item.startedAt, t);
   return (
     <button
       type="button"
       onClick={onSelect}
       onContextMenu={onContextMenu}
-      title={title}
+      title={channelLabel ? `${title} · ${channelLabel}` : title}
       className={
         "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
         (active
@@ -865,11 +866,37 @@ function SidebarSessionItem({
           <span className="text-ink/30">{t("list.no_user_message")}</span>
         )}
       </span>
+      {channelLabel && (
+        <span className="inline-flex shrink-0 items-center gap-1 rounded border border-ink/10 px-1 py-0.5 text-meta leading-none text-ink/42">
+          {item.channel?.platform === "telegram" && (
+            <IconifyIcon
+              iconClassName="icon-[streamline-logos--telegram-logo-1]"
+              className="h-2.5 w-2.5"
+            />
+          )}
+          {channelLabel}
+        </span>
+      )}
       <span className="shrink-0 text-meta tabular-nums text-ink/35">
         {relativeTime}
       </span>
     </button>
   );
+}
+
+function channelPlatformLabel(platform: string | null | undefined): string | null {
+  switch (platform) {
+    case "telegram":
+      return "Telegram";
+    case "discord":
+      return "Discord";
+    case "lark":
+      return "Lark";
+    case "wework":
+      return "WeWork";
+    default:
+      return null;
+  }
 }
 
 function SidebarThreadItem({

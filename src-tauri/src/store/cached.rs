@@ -3,16 +3,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::models::{
-    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, IssueSeverity, IssueStatus,
-    KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo,
-    PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo, SessionInfo,
-    StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadAgentInfo, ThreadIndexItemInfo,
-    ThreadInfo, ThreadKind,
+    Agent, AgentInfo, AssistantAgentInfo, AssistantInfo, AstraConfig, ChannelSessionInfo,
+    IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo,
+    PlanTaskSessionInfo, PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo,
+    SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadAgentInfo,
+    ThreadIndexItemInfo, ThreadInfo, ThreadKind,
 };
 use crate::store::{
-    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, IndexedSessionRecord,
-    IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTaskSession, PlanTaskStatusPatch,
-    ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
+    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, ChannelSessionRecord,
+    IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTaskSession,
+    PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
     SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
 };
 
@@ -176,6 +176,54 @@ impl SessionStore for CachedStore {
 
     fn list_sessions_by_refs(&self, refs: &[SessionRef<'_>]) -> Result<Vec<SessionInfo>> {
         self.inner.list_sessions_by_refs(refs)
+    }
+
+    fn list_channel_sessions(&self) -> Result<Vec<ChannelSessionInfo>> {
+        self.inner.list_channel_sessions()
+    }
+
+    fn get_active_channel_session(
+        &self,
+        platform: &str,
+        channel_id: &str,
+    ) -> Result<Option<ChannelSessionRecord>> {
+        self.inner.get_active_channel_session(platform, channel_id)
+    }
+
+    fn upsert_channel_session(&self, record: &ChannelSessionRecord) -> Result<()> {
+        self.inner.upsert_channel_session(record)
+    }
+
+    fn update_channel_session_activity(
+        &self,
+        platform: &str,
+        channel_id: &str,
+        last_update_id: Option<i64>,
+        last_activity_at: i64,
+    ) -> Result<()> {
+        self.inner.update_channel_session_activity(
+            platform,
+            channel_id,
+            last_update_id,
+            last_activity_at,
+        )
+    }
+
+    fn mark_channel_session_ended(
+        &self,
+        platform: &str,
+        channel_id: &str,
+        agent: Agent,
+        agent_session_id: &str,
+        ended_at: i64,
+    ) -> Result<()> {
+        self.inner.mark_channel_session_ended(
+            platform,
+            channel_id,
+            agent,
+            agent_session_id,
+            ended_at,
+        )
     }
 
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {

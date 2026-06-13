@@ -286,6 +286,13 @@ fn list_sessions(store: State<'_, Arc<dyn SessionStore>>) -> Result<Vec<SessionI
 }
 
 #[tauri::command]
+fn list_channel_sessions(
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Vec<models::ChannelSessionInfo>, String> {
+    store.list_channel_sessions().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_process_templates(
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<Vec<ProcessTemplateInfo>, String> {
@@ -3418,6 +3425,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
+            list_channel_sessions,
             list_process_templates,
             create_process_template,
             update_process_template,

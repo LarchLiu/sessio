@@ -11,7 +11,9 @@ use serde_json::{json, Value};
 
 use super::super::config::TelegramConfig;
 use super::super::router;
-use super::super::state::{ChatKey, ChatPermissionRequest, ChatSink, ImBridgeState};
+use super::super::state::{
+    ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ImBridgeState,
+};
 
 const PLATFORM: &str = "telegram";
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
@@ -157,7 +159,7 @@ fn handle_update(
     let Some(text) = message.text.as_deref() else {
         return;
     };
-    let Some(from) = message.from else {
+    let Some(from) = message.from.as_ref() else {
         return;
     };
     if !is_allowed(config, from.id) {
@@ -168,13 +170,130 @@ fn handle_update(
         return;
     }
 
-    let key = ChatKey::new(PLATFORM, message.chat.id.to_string());
+    let chat_id = message.chat.id.to_string();
+    if is_duplicate_update(state, &chat_id, update.update_id) {
+        log::info!(
+            "[im-bridge:telegram] skipped duplicate update {} for chat {}",
+            update.update_id,
+            chat_id
+        );
+        return;
+    }
+
+    let key = ChatKey::new(PLATFORM, chat_id.clone());
+    state.remember_channel_context(
+        key.clone(),
+        telegram_channel_context(&message, from, update.update_id),
+    );
     let outcome = router::handle_message(state, &key, text);
     if let Some(reply) = outcome.reply {
-        if let Err(error) = sink.send_text(&message.chat.id.to_string(), &reply) {
+        if let Err(error) = sink.send_text(&chat_id, &reply) {
             log::warn!("[im-bridge:telegram] failed to send command reply: {error:#}");
         }
     }
+    if let Err(error) = state.store.update_channel_session_activity(
+        PLATFORM,
+        &chat_id,
+        Some(update.update_id),
+        now_ms(),
+    ) {
+        log::warn!("[im-bridge:telegram] failed to record update id: {error:#}");
+    }
+}
+
+fn telegram_channel_context(
+    message: &TelegramMessage,
+    from: &TelegramUser,
+    update_id: i64,
+) -> ChannelContext {
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "telegramChat".to_string(),
+        json!({
+            "id": message.chat.id,
+            "type": message.chat.kind.as_deref(),
+            "title": message.chat.title.as_deref(),
+            "username": message.chat.username.as_deref(),
+            "firstName": message.chat.first_name.as_deref(),
+            "lastName": message.chat.last_name.as_deref(),
+        }),
+    );
+    metadata.insert(
+        "telegramUser".to_string(),
+        json!({
+            "id": from.id,
+            "username": from.username.as_deref(),
+            "firstName": from.first_name.as_deref(),
+            "lastName": from.last_name.as_deref(),
+        }),
+    );
+    ChannelContext {
+        channel_type: message.chat.kind.clone(),
+        user_id: Some(from.id.to_string()),
+        team_id: None,
+        thread_id: None,
+        display_name: telegram_chat_display_name(&message.chat)
+            .or_else(|| telegram_user_display_name(from)),
+        metadata,
+        last_update_id: Some(update_id),
+    }
+}
+
+fn telegram_chat_display_name(chat: &TelegramChat) -> Option<String> {
+    trimmed(&chat.title)
+        .map(str::to_string)
+        .or_else(|| person_display_name(&chat.first_name, &chat.last_name, &chat.username))
+}
+
+fn telegram_user_display_name(user: &TelegramUser) -> Option<String> {
+    person_display_name(&user.first_name, &user.last_name, &user.username)
+}
+
+fn person_display_name(
+    first_name: &Option<String>,
+    last_name: &Option<String>,
+    username: &Option<String>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(first_name) = trimmed(first_name) {
+        parts.push(first_name);
+    }
+    if let Some(last_name) = trimmed(last_name) {
+        parts.push(last_name);
+    }
+    if !parts.is_empty() {
+        return Some(parts.join(" "));
+    }
+    trimmed(username).map(|value| format!("@{}", value.trim_start_matches('@')))
+}
+
+fn trimmed(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn is_duplicate_update(state: &Arc<ImBridgeState>, chat_id: &str, update_id: i64) -> bool {
+    match state.store.get_active_channel_session(PLATFORM, chat_id) {
+        Ok(Some(record)) => record
+            .last_update_id
+            .map(|last_update_id| update_id <= last_update_id)
+            .unwrap_or(false),
+        Ok(None) => false,
+        Err(error) => {
+            log::warn!("[im-bridge:telegram] failed to read last update id: {error:#}");
+            false
+        }
+    }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn handle_callback(
@@ -424,11 +543,20 @@ struct TelegramMessage {
 #[derive(Debug, Deserialize)]
 struct TelegramChat {
     id: i64,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    title: Option<String>,
+    username: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TelegramUser {
     id: i64,
+    username: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-use crate::agents::runtime::types::{AgentInput, StartAgentSession};
+use crate::agents::runtime::types::{AgentInput, EnsureAgentRuntimeSession, StartAgentSession};
 use crate::models::Agent;
+use crate::store::ChannelSessionRecord;
 
 use super::state::{ChatKey, ChatSession, ImBridgeState};
 
@@ -113,17 +114,23 @@ fn cmd_new(state: &Arc<ImBridgeState>, key: &ChatKey, arg: &str) -> Result<Strin
     }
 
     // Preserve the chat's current agent choice across /new if one exists.
-    let agent = state
-        .chat_session(key)
-        .map(|s| s.agent)
+    let current_session = state.chat_session(key);
+    let agent = current_session
+        .as_ref()
+        .map(|session| session.agent)
         .unwrap_or(config.default_agent);
 
     let handle = start_session(state, key.platform, agent, &workspace)?;
-    state.clear_queued_prompts(key);
+    if current_session.is_some() {
+        state.unbind_chat(key);
+    } else {
+        state.clear_queued_prompts(key);
+    }
     state.bind_chat(
         key.clone(),
         ChatSession {
             sessio_runtime_session_id: handle.clone(),
+            agent_runtime_session_id: state.runtime.agent_runtime_session_id_for_session(&handle),
             agent,
             workspace_path: workspace.clone(),
         },
@@ -159,6 +166,7 @@ fn cmd_use(state: &Arc<ImBridgeState>, key: &ChatKey, arg: &str) -> Result<Strin
     state.bind_chat(
         key.clone(),
         ChatSession {
+            agent_runtime_session_id: state.runtime.agent_runtime_session_id_for_session(&handle),
             sessio_runtime_session_id: handle,
             agent,
             workspace_path: workspace.clone(),
@@ -215,23 +223,7 @@ fn dispatch_prompt(
 ) -> Result<PromptDispatchOutcome> {
     let session = match state.chat_session(key) {
         Some(session) => session,
-        None => {
-            // Lazily open a default session on first prompt.
-            let config = state.config_snapshot();
-            let workspace = config
-                .workspace_for_chat(key.platform, &key.chat_id)
-                .map(str::to_string)
-                .context("no session and no default workspace; use /new <workspace> first")?;
-            let agent = config.default_agent;
-            let handle = start_session(state, key.platform, agent, &workspace)?;
-            let session = ChatSession {
-                sessio_runtime_session_id: handle,
-                agent,
-                workspace_path: workspace,
-            };
-            state.bind_chat(key.clone(), session.clone());
-            session
-        }
+        None => restore_or_start_session(state, key)?,
     };
 
     if state
@@ -297,6 +289,80 @@ pub(super) fn dispatch_next_queued_prompt(state: &Arc<ImBridgeState>, key: &Chat
     }
 }
 
+fn restore_or_start_session(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ChatSession> {
+    if let Some(record) = state
+        .store
+        .get_active_channel_session(key.platform, &key.chat_id)?
+    {
+        match resume_channel_session(state, key, record) {
+            Ok(session) => return Ok(session),
+            Err(error) => {
+                log::warn!(
+                    "[im-bridge:router] failed to resume channel session for {} chat {}: {error:#}",
+                    key.platform,
+                    key.chat_id
+                );
+            }
+        }
+    }
+
+    let config = state.config_snapshot();
+    let workspace = config
+        .workspace_for_chat(key.platform, &key.chat_id)
+        .map(str::to_string)
+        .context("no session and no default workspace; use /new <workspace> first")?;
+    let agent = config.default_agent;
+    let handle = start_session(state, key.platform, agent, &workspace)?;
+    let session = ChatSession {
+        agent_runtime_session_id: state.runtime.agent_runtime_session_id_for_session(&handle),
+        sessio_runtime_session_id: handle,
+        agent,
+        workspace_path: workspace,
+    };
+    state.bind_chat(key.clone(), session.clone());
+    Ok(session)
+}
+
+fn resume_channel_session(
+    state: &Arc<ImBridgeState>,
+    key: &ChatKey,
+    record: ChannelSessionRecord,
+) -> Result<ChatSession> {
+    let config = state.config_snapshot();
+    if !config.is_workspace_allowed(&record.workspace_path) {
+        bail!(
+            "persisted workspace no longer allowed: {}",
+            record.workspace_path
+        );
+    }
+
+    let mut req = EnsureAgentRuntimeSession {
+        agent: record.agent,
+        sessio_runtime_session_id: record.sessio_runtime_session_id.clone(),
+        workspace_path: record.workspace_path.clone(),
+        agent_runtime_session_id: Some(record.agent_session_id.clone()),
+        source_agent: Some(record.agent),
+        options: Default::default(),
+    };
+    hydrate_options_from_store(req.agent, &mut req.options, &state.store)?;
+    let handle = state.runtime.ensure_session(req)?;
+    state
+        .runtime
+        .wait_for_session_startup(&handle.sessio_runtime_session_id, SESSION_STARTUP_TIMEOUT)?;
+    let agent_runtime_session_id = state
+        .runtime
+        .agent_runtime_session_id_for_session(&handle.sessio_runtime_session_id)
+        .or(Some(record.agent_session_id));
+    let session = ChatSession {
+        sessio_runtime_session_id: handle.sessio_runtime_session_id,
+        agent_runtime_session_id,
+        agent: handle.agent,
+        workspace_path: handle.workspace_path,
+    };
+    state.bind_chat(key.clone(), session.clone());
+    Ok(session)
+}
+
 /// Start a runtime session for `agent` in `workspace`, hydrating agent defaults
 /// (model/effort/transport/command) from the store the same way the Tauri
 /// command does, then wait for startup so the first prompt won't race.
@@ -342,24 +408,32 @@ fn hydrate_start_request(
     req: &mut StartAgentSession,
     store: &Arc<dyn crate::store::SessionStore>,
 ) -> Result<()> {
+    hydrate_options_from_store(req.agent, &mut req.options, store)
+}
+
+fn hydrate_options_from_store(
+    agent_id: Agent,
+    options: &mut crate::agents::runtime::types::RuntimeMetadata,
+    store: &Arc<dyn crate::store::SessionStore>,
+) -> Result<()> {
     let Some(agent) = store
         .list_agents()?
         .into_iter()
-        .find(|a| a.id == req.agent.as_str())
+        .find(|a| a.id == agent_id.as_str())
     else {
         return Ok(());
     };
-    insert_if_missing(&mut req.options, "model", agent.model);
-    insert_if_missing(&mut req.options, "effort", agent.effort);
-    insert_if_missing(&mut req.options, "permissionMode", agent.permission_mode);
+    insert_if_missing(options, "model", agent.model);
+    insert_if_missing(options, "effort", agent.effort);
+    insert_if_missing(options, "permissionMode", agent.permission_mode);
     insert_if_missing(
-        &mut req.options,
+        options,
         "transport",
         Some(transport_option(agent.transport)),
     );
-    if !req.options.contains_key("command") && !req.options.contains_key("acpCommand") {
+    if !options.contains_key("command") && !options.contains_key("acpCommand") {
         if let Some(command) = agent.commands.session.first().cloned() {
-            insert_if_missing(&mut req.options, "command", Some(command));
+            insert_if_missing(options, "command", Some(command));
         }
     }
     Ok(())

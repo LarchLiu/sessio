@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use crate::agents::runtime::types::RuntimeTransportKind;
 use crate::models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
-    AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
-    PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
+    AstraConfig, ChannelSessionInfo, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus,
+    PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
     StageIssueInfo, StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
@@ -219,11 +219,54 @@ pub struct ThreadWorkSnapshotRecord {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChannelSessionRecord {
+    pub platform: String,
+    pub channel_id: String,
+    pub channel_type: Option<String>,
+    pub user_id: Option<String>,
+    pub team_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub display_name: Option<String>,
+    pub agent: Agent,
+    pub agent_session_id: String,
+    pub sessio_runtime_session_id: String,
+    pub workspace_path: String,
+    pub metadata_json: String,
+    pub last_update_id: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_activity_at: i64,
+    pub ended_at: Option<i64>,
+}
+
 pub trait SessionStore: Send + Sync {
     fn init(&self) -> Result<()>;
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_all_sessions(&self) -> Result<Vec<SessionInfo>>;
     fn list_sessions_by_refs(&self, refs: &[SessionRef<'_>]) -> Result<Vec<SessionInfo>>;
+    fn list_channel_sessions(&self) -> Result<Vec<ChannelSessionInfo>>;
+    fn get_active_channel_session(
+        &self,
+        platform: &str,
+        channel_id: &str,
+    ) -> Result<Option<ChannelSessionRecord>>;
+    fn upsert_channel_session(&self, record: &ChannelSessionRecord) -> Result<()>;
+    fn update_channel_session_activity(
+        &self,
+        platform: &str,
+        channel_id: &str,
+        last_update_id: Option<i64>,
+        last_activity_at: i64,
+    ) -> Result<()>;
+    fn mark_channel_session_ended(
+        &self,
+        platform: &str,
+        channel_id: &str,
+        agent: Agent,
+        agent_session_id: &str,
+        ended_at: i64,
+    ) -> Result<()>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
     fn update_session_rename_title(
         &self,

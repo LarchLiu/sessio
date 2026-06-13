@@ -65,6 +65,27 @@ pub struct SessionInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChannelSessionInfo {
+    pub platform: String,
+    pub channel_id: String,
+    pub channel_type: Option<String>,
+    pub user_id: Option<String>,
+    pub team_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub display_name: Option<String>,
+    pub agent: Agent,
+    pub agent_session_id: String,
+    pub sessio_runtime_session_id: String,
+    pub workspace_path: String,
+    pub metadata: Value,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub last_activity_at: i64,
+    pub ended_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubagentInfo {
     pub id: String,
     pub agent_type: Option<String>,

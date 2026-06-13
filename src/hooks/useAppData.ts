@@ -3,14 +3,33 @@ import { listen } from "@tauri-apps/api/event";
 import {
   getIndexStatus,
   getMemoryBackendStatus,
+  listChannelSessions,
   listProjects,
   listSessions,
   type AstraEvent,
+  type ChannelSessionInfo,
   type IndexPhase,
   type MemoryBackendStatus,
   type ProjectInfo,
   type SessionInfo,
 } from "../api";
+
+function mergeSessionChannels(
+  sessions: SessionInfo[],
+  channels: ChannelSessionInfo[],
+): SessionInfo[] {
+  if (channels.length === 0) return sessions;
+  const bySession = new Map(
+    channels.map((channel) => [
+      `${channel.agent}:${channel.agentSessionId}`,
+      channel,
+    ]),
+  );
+  return sessions.map((session) => ({
+    ...session,
+    channel: bySession.get(`${session.agent}:${session.id}`) ?? session.channel ?? null,
+  }));
+}
 
 export function useAppData({
   setError,
@@ -41,8 +60,10 @@ export function useAppData({
   }, [setError]);
 
   const refreshSessions = useCallback(() => {
-    return listSessions()
-      .then(setSessions)
+    return Promise.all([listSessions(), listChannelSessions()])
+      .then(([sessionRows, channelRows]) => {
+        setSessions(mergeSessionChannels(sessionRows, channelRows));
+      })
       .catch((err) => {
         setError(String(err));
       });
@@ -51,10 +72,10 @@ export function useAppData({
   useEffect(() => {
     let cancelled = false;
     setError(null);
-    Promise.all([listSessions(), listProjects()])
-      .then(([sessionRows, projectRows]) => {
+    Promise.all([listSessions(), listChannelSessions(), listProjects()])
+      .then(([sessionRows, channelRows, projectRows]) => {
         if (cancelled) return;
-        setSessions(sessionRows);
+        setSessions(mergeSessionChannels(sessionRows, channelRows));
         setProjects(projectRows);
       })
       .catch((err) => {

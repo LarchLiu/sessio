@@ -12,9 +12,18 @@ use std::sync::{
 
 use crate::agents::runtime::RuntimeManager;
 use crate::models::Agent;
-use crate::store::SessionStore;
+use crate::store::{ChannelSessionRecord, SessionStore};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::config::ImBridgeConfig;
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Identifies a chat across platforms. `platform` is a short tag ("telegram",
 /// "discord", ...) so the same chat id on two platforms never collides.
@@ -38,8 +47,21 @@ impl ChatKey {
 #[derive(Debug, Clone)]
 pub struct ChatSession {
     pub sessio_runtime_session_id: String,
+    pub agent_runtime_session_id: Option<String>,
     pub agent: Agent,
     pub workspace_path: String,
+}
+
+/// Platform-neutral metadata for the external chat/channel that owns a session.
+#[derive(Debug, Clone, Default)]
+pub struct ChannelContext {
+    pub channel_type: Option<String>,
+    pub user_id: Option<String>,
+    pub team_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub display_name: Option<String>,
+    pub metadata: JsonMap<String, JsonValue>,
+    pub last_update_id: Option<i64>,
 }
 
 /// Buffers an in-flight turn's streamed text so the bridge can post one
@@ -115,6 +137,8 @@ pub trait ChatSink: Send + Sync {
 struct Inner {
     /// chat -> active session binding
     chats: Mutex<HashMap<ChatKey, ChatSession>>,
+    /// chat -> latest platform metadata for persistence/display
+    channel_contexts: Mutex<HashMap<ChatKey, ChannelContext>>,
     /// sessio runtime session id -> owning chat (reverse lookup for events)
     session_to_chat: Mutex<HashMap<String, ChatKey>>,
     /// sessio runtime session id -> in-flight turn buffer
@@ -149,6 +173,7 @@ impl ImBridgeState {
             config: RwLock::new(config),
             inner: Inner {
                 chats: Mutex::new(HashMap::new()),
+                channel_contexts: Mutex::new(HashMap::new()),
                 session_to_chat: Mutex::new(HashMap::new()),
                 turns: Mutex::new(HashMap::new()),
                 inbound_queues: Mutex::new(HashMap::new()),
@@ -195,9 +220,25 @@ impl ImBridgeState {
         self.inner.chats.lock().ok()?.get(key).cloned()
     }
 
+    /// Remember the latest platform-side identifiers for this chat and refresh
+    /// the persisted row if the chat is already bound to a runtime session.
+    pub fn remember_channel_context(&self, key: ChatKey, context: ChannelContext) {
+        if let Ok(mut contexts) = self.inner.channel_contexts.lock() {
+            contexts.insert(key.clone(), context);
+        }
+        if let Some(session) = self.chat_session(&key) {
+            self.persist_channel_session(&key, &session);
+        }
+    }
+
+    fn channel_context(&self, key: &ChatKey) -> Option<ChannelContext> {
+        self.inner.channel_contexts.lock().ok()?.get(key).cloned()
+    }
+
     /// Bind a chat to a runtime session, replacing any prior binding and
     /// maintaining the reverse index.
     pub fn bind_chat(&self, key: ChatKey, session: ChatSession) {
+        self.persist_channel_session(&key, &session);
         let old_session_id = self
             .inner
             .chats
@@ -221,14 +262,15 @@ impl ImBridgeState {
     /// Drop a chat's binding (e.g. after the session ends). Also clears the
     /// reverse index and any pending turn buffer.
     pub fn unbind_chat(&self, key: &ChatKey) {
-        let session_id = self
+        let removed = self
             .inner
             .chats
             .lock()
             .ok()
-            .and_then(|mut chats| chats.remove(key))
-            .map(|s| s.sessio_runtime_session_id);
-        if let Some(session_id) = session_id {
+            .and_then(|mut chats| chats.remove(key));
+        if let Some(session) = removed {
+            self.mark_channel_session_ended(key, &session);
+            let session_id = session.sessio_runtime_session_id;
             if let Ok(mut rev) = self.inner.session_to_chat.lock() {
                 rev.remove(&session_id);
             }
@@ -237,6 +279,73 @@ impl ImBridgeState {
             }
         }
         self.clear_queued_prompts(key);
+    }
+
+    fn persist_channel_session(&self, key: &ChatKey, session: &ChatSession) {
+        let Some(agent_session_id) = session
+            .agent_runtime_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        let now = now_ms();
+        let context = self.channel_context(key);
+        let mut metadata = JsonMap::new();
+        metadata.insert("chatId".to_string(), JsonValue::String(key.chat_id.clone()));
+        if let Some(context) = context.as_ref() {
+            for (metadata_key, metadata_value) in &context.metadata {
+                metadata.insert(metadata_key.clone(), metadata_value.clone());
+            }
+        }
+        let metadata_json = JsonValue::Object(metadata).to_string();
+        let record = ChannelSessionRecord {
+            platform: key.platform.to_string(),
+            channel_id: key.chat_id.clone(),
+            channel_type: context
+                .as_ref()
+                .and_then(|value| value.channel_type.clone()),
+            user_id: context.as_ref().and_then(|value| value.user_id.clone()),
+            team_id: context.as_ref().and_then(|value| value.team_id.clone()),
+            thread_id: context.as_ref().and_then(|value| value.thread_id.clone()),
+            display_name: context
+                .as_ref()
+                .and_then(|value| value.display_name.clone()),
+            agent: session.agent,
+            agent_session_id: agent_session_id.to_string(),
+            sessio_runtime_session_id: session.sessio_runtime_session_id.clone(),
+            workspace_path: session.workspace_path.clone(),
+            metadata_json,
+            last_update_id: context.as_ref().and_then(|value| value.last_update_id),
+            created_at: now,
+            updated_at: now,
+            last_activity_at: now,
+            ended_at: None,
+        };
+        if let Err(error) = self.store.upsert_channel_session(&record) {
+            log::warn!("[im-bridge] failed to persist channel session: {error:#}");
+        }
+    }
+
+    fn mark_channel_session_ended(&self, key: &ChatKey, session: &ChatSession) {
+        let Some(agent_session_id) = session
+            .agent_runtime_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+        if let Err(error) = self.store.mark_channel_session_ended(
+            key.platform,
+            &key.chat_id,
+            session.agent,
+            agent_session_id,
+            now_ms(),
+        ) {
+            log::warn!("[im-bridge] failed to end channel session: {error:#}");
+        }
     }
 
     /// Reverse lookup: which chat owns this runtime session, if any.

@@ -500,6 +500,7 @@ export interface SessionInfo {
   agent: Agent;
   forkedFromAgent?: Agent | null;
   forkedFromId?: string | null;
+  channel?: ChannelSessionInfo | null;
   projectPath: string | null;
   projectName: string | null;
   startedAt: number | null;
@@ -514,6 +515,25 @@ export interface SessionInfo {
   available: boolean;
   archived: boolean;
   subagents: SubagentInfo[];
+}
+
+export interface ChannelSessionInfo {
+  platform: string;
+  channelId: string;
+  channelType: string | null;
+  userId: string | null;
+  teamId: string | null;
+  threadId: string | null;
+  displayName: string | null;
+  agent: Agent;
+  agentSessionId: string;
+  sessioRuntimeSessionId: string;
+  workspacePath: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+  lastActivityAt: number;
+  endedAt: number | null;
 }
 
 export interface SubagentInfo {
@@ -968,6 +988,10 @@ export type SessionScope =
 
 export async function listSessions(): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions");
+}
+
+export async function listChannelSessions(): Promise<ChannelSessionInfo[]> {
+  return invoke<ChannelSessionInfo[]>("list_channel_sessions");
 }
 
 export async function updateSessionRenameTitle(
