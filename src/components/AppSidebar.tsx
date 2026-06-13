@@ -907,6 +907,8 @@ function channelPlatformLabel(platform: string | null | undefined): string | nul
       return "Lark";
     case "wework":
       return "WeWork";
+    case "wechat":
+      return "WeChat";
     default:
       return null;
   }
@@ -915,12 +917,14 @@ function channelPlatformLabel(platform: string | null | undefined): string | nul
 function channelPlatformIconClass(platform: string | null | undefined): string | null {
   switch (platform) {
     case "telegram":
-      return "icon-[streamline-logos--telegram-logo-1]";
+      return "icon-[streamline-logos--telegram-logo-2-solid]";
     case "discord":
-      return "icon-[streamline-logos--discord-logo-2]";
+      return "icon-[streamline-logos--discord-logo-2-solid]";
     case "feishu":
     case "lark":
       return "icon-[icon-park-outline--new-lark]";
+    case "wechat":
+      return "icon-[streamline-logos--wechat-logo-solid]";
     default:
       return null;
   }

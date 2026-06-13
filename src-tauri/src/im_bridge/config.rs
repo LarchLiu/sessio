@@ -35,6 +35,10 @@ pub struct ImBridgeConfig {
     /// Feishu/Lark platform config. Absent = Feishu disabled.
     #[serde(default)]
     pub feishu: Option<FeishuConfig>,
+
+    /// WeChat iLink platform config. Absent = WeChat disabled.
+    #[serde(default)]
+    pub wechat: Option<WechatConfig>,
 }
 
 /// Bind one external chat/channel to a local workspace.
@@ -210,12 +214,69 @@ pub struct FeishuConfig {
     pub domain: Option<String>,
 }
 
+/// WeChat iLink bot configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WechatConfig {
+    /// Whether the WeChat worker should start.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Agent used for new WeChat-created sessions. When absent, the bridge
+    /// resolves to the first enabled runtime agent from the local store.
+    #[serde(default)]
+    pub agent: Option<Agent>,
+
+    /// Model used for new WeChat-created sessions.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Effort used for new WeChat-created sessions.
+    #[serde(default)]
+    pub effort: Option<String>,
+
+    /// Default workspace for WeChat-created sessions when a user-specific
+    /// binding is absent.
+    #[serde(default, alias = "default_workspace")]
+    pub default_workspace: Option<String>,
+
+    /// Workspaces WeChat users are allowed to open sessions in.
+    #[serde(default, alias = "allowed_workspaces")]
+    pub allowed_workspaces: Vec<String>,
+
+    /// Optional per-WeChat-user workspace overrides.
+    #[serde(default, alias = "workspace_bindings")]
+    pub workspace_bindings: Vec<WorkspaceBindingConfig>,
+
+    /// iLink bot token acquired by QR login.
+    #[serde(default, alias = "bot_token")]
+    pub bot_token: String,
+
+    /// Optional bot/account identifiers returned by QR login.
+    #[serde(default, alias = "bot_id")]
+    pub bot_id: Option<String>,
+    #[serde(default, alias = "user_id")]
+    pub user_id: Option<String>,
+
+    /// iLink API base. Defaults to `https://ilinkai.weixin.qq.com`.
+    #[serde(default, alias = "base_url")]
+    pub base_url: Option<String>,
+
+    /// Long-poll timeout in seconds for `getupdates`.
+    #[serde(default = "default_wechat_poll_timeout", alias = "poll_timeout_secs")]
+    pub poll_timeout_secs: u64,
+}
+
 fn default_poll_timeout() -> u64 {
     30
 }
 
 fn default_idle_timeout_secs() -> u64 {
     15 * 60
+}
+
+fn default_wechat_poll_timeout() -> u64 {
+    40
 }
 
 impl Default for ImBridgeConfig {
@@ -226,6 +287,7 @@ impl Default for ImBridgeConfig {
             telegram: Some(TelegramConfig::default()),
             discord: Some(DiscordConfig::default()),
             feishu: Some(FeishuConfig::default()),
+            wechat: Some(WechatConfig::default()),
         }
     }
 }
@@ -285,6 +347,25 @@ impl Default for FeishuConfig {
     }
 }
 
+impl Default for WechatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            agent: None,
+            model: None,
+            effort: None,
+            default_workspace: None,
+            allowed_workspaces: Vec::new(),
+            workspace_bindings: Vec::new(),
+            bot_token: String::new(),
+            bot_id: None,
+            user_id: None,
+            base_url: None,
+            poll_timeout_secs: default_wechat_poll_timeout(),
+        }
+    }
+}
+
 impl ImBridgeConfig {
     /// Configured agent for a platform, if the platform has one.
     pub fn configured_agent_for_platform(&self, platform: &str) -> Option<Agent> {
@@ -292,6 +373,7 @@ impl ImBridgeConfig {
             "telegram" => self.telegram.as_ref().and_then(|config| config.agent),
             "discord" => self.discord.as_ref().and_then(|config| config.agent),
             "feishu" => self.feishu.as_ref().and_then(|config| config.agent),
+            "wechat" => self.wechat.as_ref().and_then(|config| config.agent),
             _ => None,
         }
     }
@@ -311,6 +393,11 @@ impl ImBridgeConfig {
                 .unwrap_or(false),
             "feishu" => self
                 .feishu
+                .as_ref()
+                .map(|config| config.is_workspace_allowed(path))
+                .unwrap_or(false),
+            "wechat" => self
+                .wechat
                 .as_ref()
                 .map(|config| config.is_workspace_allowed(path))
                 .unwrap_or(false),
@@ -334,6 +421,10 @@ impl ImBridgeConfig {
                 .feishu
                 .as_ref()
                 .and_then(|config| config.workspace_for_chat(platform, chat_id)),
+            "wechat" => self
+                .wechat
+                .as_ref()
+                .and_then(|config| config.workspace_for_chat(platform, chat_id)),
             _ => None,
         }
     }
@@ -353,6 +444,11 @@ impl ImBridgeConfig {
                 .unwrap_or_default(),
             "feishu" => self
                 .feishu
+                .as_ref()
+                .map(|config| config.workspace_choices_for_chat(platform, chat_id))
+                .unwrap_or_default(),
+            "wechat" => self
+                .wechat
                 .as_ref()
                 .map(|config| config.workspace_choices_for_chat(platform, chat_id))
                 .unwrap_or_default(),
@@ -381,6 +477,12 @@ impl ImBridgeConfig {
                 .and_then(|config| config.model.as_deref())
                 .map(str::trim)
                 .filter(|value| !value.is_empty()),
+            "wechat" => self
+                .wechat
+                .as_ref()
+                .and_then(|config| config.model.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
             _ => None,
         }
     }
@@ -402,6 +504,12 @@ impl ImBridgeConfig {
                 .filter(|value| !value.is_empty()),
             "feishu" => self
                 .feishu
+                .as_ref()
+                .and_then(|config| config.effort.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            "wechat" => self
+                .wechat
                 .as_ref()
                 .and_then(|config| config.effort.as_deref())
                 .map(str::trim)
@@ -535,6 +643,55 @@ impl FeishuConfig {
     }
 
     /// Workspace selected for a specific Feishu chat. Falls back to the Feishu
+    /// default.
+    pub fn workspace_for_chat(&self, platform: &str, chat_id: &str) -> Option<&str> {
+        self.workspace_bindings
+            .iter()
+            .find(|binding| {
+                binding.platform == platform && binding.chat_id.trim() == chat_id.trim()
+            })
+            .map(|binding| binding.workspace_path.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.default_workspace())
+    }
+
+    pub fn workspace_choices_for_chat(&self, platform: &str, chat_id: &str) -> Vec<&str> {
+        workspace_choices_from_config(
+            platform,
+            chat_id,
+            self.default_workspace(),
+            &self.allowed_workspaces,
+            &self.workspace_bindings,
+        )
+    }
+}
+
+impl WechatConfig {
+    /// The default workspace for WeChat chat-initiated sessions, if any.
+    pub fn default_workspace(&self) -> Option<&str> {
+        self.default_workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.allowed_workspaces.first().map(String::as_str))
+    }
+
+    /// Whether `path` is permitted for a new WeChat session.
+    pub fn is_workspace_allowed(&self, path: &str) -> bool {
+        let path = path.trim();
+        if path.is_empty() {
+            return false;
+        }
+        self.allowed_workspaces.iter().any(|w| w.trim() == path)
+            || self.default_workspace() == Some(path)
+            || self
+                .workspace_bindings
+                .iter()
+                .any(|binding| binding.workspace_path.trim() == path)
+    }
+
+    /// Workspace selected for a specific WeChat user. Falls back to the WeChat
     /// default.
     pub fn workspace_for_chat(&self, platform: &str, chat_id: &str) -> Option<&str> {
         self.workspace_bindings

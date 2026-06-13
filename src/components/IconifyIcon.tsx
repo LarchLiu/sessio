@@ -52,19 +52,27 @@ export function ChannelShare24RegularIcon({ className, style }: IconifyIconCompo
 }
 
 export function TelegramLogoIcon({ className, style }: IconifyIconComponentProps) {
-  return <IconifyIcon iconClassName="icon-[streamline-logos--telegram-logo-1]" className={className} style={style} />;
+  return <IconifyIcon iconClassName="icon-[streamline-logos--telegram-logo-2-solid]" className={className} style={style} />;
 }
 
 export function DiscordLogoIcon({ className, style }: IconifyIconComponentProps) {
-  return <IconifyIcon iconClassName="icon-[streamline-logos--discord-logo-2]" className={className} style={style} />;
+  return <IconifyIcon iconClassName="icon-[streamline-logos--discord-logo-2-solid]" className={className} style={style} />;
 }
 
 export function LarkLogoIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[icon-park-outline--new-lark]" className={className} style={style} />;
 }
 
+export function WechatLogoIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[streamline-logos--wechat-logo-solid]" className={className} style={style} />;
+}
+
 export function TokenOutlineIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[material-symbols--token-outline]" className={className} style={style} />;
+}
+
+export function QrCodeIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[material-symbols--qr-code]" className={className} style={style} />;
 }
 
 export function HashtagChatLinearIcon({ className, style }: IconifyIconComponentProps) {

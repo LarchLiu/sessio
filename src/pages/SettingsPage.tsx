@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
+import { QRCodeSVG } from "@rc-component/qrcode";
 import {
   Anthropic,
   Aws,
@@ -33,12 +34,13 @@ import {
   ZAI,
 } from "@lobehub/icons";
 import { ArrowLeft, AtSign, Bot, Check, Circle, Download, Eye, EyeOff, Globe2, GripVertical, Hash, Info, Languages, Link2, LoaderCircle, Monitor, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, Settings2, Shield, Sparkles, SquareKanban, Sun, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig } from "../api";
+import type { Agent, AgentAiProviderInfo, AgentInfo, AstraConfig, AssistantInfo, DiscordBridgeConfig, FeishuBridgeConfig, ImBridgeConfig, ImBridgeWorkspaceBinding, NetworkConfig, ProjectInfo, ProjectStageInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata, ProcessTemplateInfo, TelegramBridgeConfig, WechatBridgeConfig, WechatQrStatus } from "../api";
 import {
   createProcessTemplate,
   detectTelegramUserIds,
   getAstraConfig,
   getImBridgeConfig,
+  getWechatQrcode,
   getNetworkConfig,
   listAgents,
   listAssistants,
@@ -49,6 +51,8 @@ import {
   testDiscordBotConnection,
   testFeishuBotConnection,
   testTelegramBotConnection,
+  testWechatBotConnection,
+  pollWechatQrcodeStatus,
   updateAgentPreferences,
   updateAstraConfig,
   updateImBridgeConfig,
@@ -67,7 +71,7 @@ import ScrollArea from "../components/ScrollArea";
 import SegmentedTabs from "../components/SegmentedTabs";
 import SwitchControl from "../components/SwitchControl";
 import Tooltip from "../components/Tooltip";
-import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, Robot3LineIcon, TelegramLogoIcon, TokenOutlineIcon } from "../components/IconifyIcon";
+import { AiGenerate2Icon, ChannelShare24RegularIcon, DiscordLogoIcon, LarkLogoIcon, QrCodeIcon, Robot3LineIcon, TelegramLogoIcon, TokenOutlineIcon, WechatLogoIcon } from "../components/IconifyIcon";
 import { type Lang, useI18n } from "../i18n";
 import type { ThemeMode } from "../theme";
 import { formatVersionLabel, type UpdateState } from "../updater";
@@ -123,8 +127,8 @@ export default function SettingsPage({
     { id: "general" as const, label: t("settings.general"), icon: Settings2 },
     { id: "agents" as const, label: t("agent.title"), icon: AiGenerate2Icon },
     { id: "assistants" as const, label: t("assistant.title"), icon: Robot3LineIcon },
-    { id: "channels" as const, label: t("settings.channels"), icon: ChannelShare24RegularIcon },
     { id: "processTemplates" as const, label: t("settings.process_templates"), icon: Workflow },
+    { id: "channels" as const, label: t("settings.channels"), icon: ChannelShare24RegularIcon },
   ];
   const sectionTitle = navItems.find((item) => item.id === section)?.label ?? t("settings.general");
 
@@ -472,6 +476,27 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
   const [feishuBindingChatId, setFeishuBindingChatId] = useState("");
   const [feishuBindingWorkspace, setFeishuBindingWorkspace] = useState("");
   const [feishuDomain, setFeishuDomain] = useState<string | null>(null);
+  const [wechatEnabled, setWechatEnabled] = useState(false);
+  const [wechatBotToken, setWechatBotToken] = useState("");
+  const [showWechatToken, setShowWechatToken] = useState(false);
+  const [wechatTesting, setWechatTesting] = useState(false);
+  const [wechatTestStatus, setWechatTestStatus] = useState<"idle" | "success" | "error">("idle");
+  const [wechatAgent, setWechatAgent] = useState<Agent | null>(null);
+  const [wechatModel, setWechatModel] = useState<string | null>(null);
+  const [wechatEffort, setWechatEffort] = useState<string | null>(null);
+  const [wechatWorkspace, setWechatWorkspace] = useState("");
+  const [wechatBindings, setWechatBindings] = useState<ImBridgeWorkspaceBinding[]>([]);
+  const [wechatBindingUserId, setWechatBindingUserId] = useState("");
+  const [wechatBindingWorkspace, setWechatBindingWorkspace] = useState("");
+  const [wechatBaseUrl, setWechatBaseUrl] = useState<string | null>(null);
+  const [wechatBotId, setWechatBotId] = useState<string | null>(null);
+  const [wechatUserId, setWechatUserId] = useState<string | null>(null);
+  const [wechatQrContent, setWechatQrContent] = useState<string | null>(null);
+  const [wechatQrImageContent, setWechatQrImageContent] = useState<string | null>(null);
+  const [wechatQrId, setWechatQrId] = useState<string | null>(null);
+  const [wechatQrPolling, setWechatQrPolling] = useState(false);
+  const [wechatQrPollBaseUrl, setWechatQrPollBaseUrl] = useState<string | null>(null);
+  const [wechatQrStatus, setWechatQrStatus] = useState<"idle" | "loading" | "waiting" | "scanned" | "confirmed" | "expired" | "error">("idle");
 
   const load = async () => {
     setLoading(true);
@@ -488,6 +513,7 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       const telegram = bridgeConfig.telegram ?? defaultTelegramBridgeConfig();
       const discord = bridgeConfig.discord ?? defaultDiscordBridgeConfig();
       const feishu = bridgeConfig.feishu ?? defaultFeishuBridgeConfig();
+      const wechat = bridgeConfig.wechat ?? defaultWechatBridgeConfig();
       setTelegramEnabled(Boolean(bridgeConfig.enabled && telegram.enabled));
       setBotToken(telegram.botToken ?? "");
       setAllowedUserIds(telegram.allowedUserIds ?? []);
@@ -518,6 +544,23 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
       setFeishuWorkspace(feishu.defaultWorkspace ?? feishu.allowedWorkspaces[0] ?? "");
       setFeishuBindings(feishu.workspaceBindings ?? []);
       setFeishuDomain(feishu.domain ?? null);
+      setWechatEnabled(Boolean(bridgeConfig.enabled && wechat.enabled));
+      setWechatBotToken(wechat.botToken ?? "");
+      const resolvedWechatSelection = resolveRuntimeSelection(runtimeAgentRows, wechat);
+      setWechatAgent(resolvedWechatSelection.agent);
+      setWechatModel(resolvedWechatSelection.model);
+      setWechatEffort(resolvedWechatSelection.effort);
+      setWechatWorkspace(wechat.defaultWorkspace ?? wechat.allowedWorkspaces[0] ?? "");
+      setWechatBindings(wechat.workspaceBindings ?? []);
+      setWechatBaseUrl(wechat.baseUrl ?? null);
+      setWechatBotId(wechat.botId ?? null);
+      setWechatUserId(wechat.userId ?? null);
+      setWechatQrContent(null);
+      setWechatQrImageContent(null);
+      setWechatQrId(null);
+      setWechatQrPolling(false);
+      setWechatQrPollBaseUrl(null);
+      setWechatQrStatus("idle");
     } catch (err) {
       onError(String(err));
     } finally {
@@ -716,15 +759,78 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     ]),
     [feishuBindings, feishuWorkspace, projects],
   );
+  const selectedWechatRuntimeAgent = useMemo(
+    () => runtimeAgents.find((agent) => agent.agent === wechatAgent && agent.enabled) ?? firstEnabledRuntimeAgent(runtimeAgents),
+    [runtimeAgents, wechatAgent],
+  );
+  const selectedWechatAgent = selectedWechatRuntimeAgent?.agent ?? wechatAgent;
+  const wechatModelValue = selectedWechatAgent && wechatModel
+    ? agentModelSelectValue(selectedWechatAgent, wechatModel)
+    : "";
+  const wechatModelOptions = useMemo(() => {
+    const effortControls = Object.fromEntries(
+      enabledRuntimeAgents.map((runtimeAgent) => [
+        runtimeAgent.agent,
+        <RuntimeEffortControl
+          value={runtimeAgent.agent === selectedWechatAgent ? wechatEffort ?? initialRuntimeEffort(runtimeAgent) : initialRuntimeEffort(runtimeAgent)}
+          options={runtimeEffortOptions(runtimeAgent)}
+          onChange={(value) => {
+            if (runtimeAgent.agent !== selectedWechatAgent) {
+              setWechatAgent(runtimeAgent.agent);
+              setWechatModel(defaultRuntimeModel(runtimeAgent));
+            }
+            setWechatEffort(value);
+          }}
+        />,
+      ]),
+    ) as Partial<Record<Agent, ReactNode>>;
+    const selectedEfforts = selectedWechatAgent && wechatEffort ? { [selectedWechatAgent]: wechatEffort } : {};
+    const options = agentModelSelectOptions(enabledRuntimeAgents, effortControls, selectedEfforts);
+    const selectedExists = options.some((option) => option.value === wechatModelValue);
+    return [
+      ...(!selectedExists && selectedWechatAgent && wechatModel
+        ? [{
+          value: wechatModelValue,
+          label: wechatModel,
+          icon: <AgentGlyph agent={selectedWechatAgent} className="h-3.5 w-3.5" />,
+        }]
+        : []),
+      ...options,
+    ];
+  }, [enabledRuntimeAgents, selectedWechatAgent, wechatEffort, wechatModel, wechatModelValue]);
+  useEffect(() => {
+    if (runtimeAgents.length === 0) return;
+    const selected = selectedWechatRuntimeAgent ?? firstEnabledRuntimeAgent(runtimeAgents);
+    if (!selected) return;
+    if (wechatAgent !== selected.agent) {
+      setWechatAgent(selected.agent);
+    }
+    if (!wechatModel) {
+      setWechatModel(defaultRuntimeModel(selected));
+    }
+    if (!wechatEffort) {
+      setWechatEffort(initialRuntimeEffort(selected) || null);
+    }
+  }, [runtimeAgents, selectedWechatRuntimeAgent, wechatAgent, wechatModel, wechatEffort]);
+  const wechatWorkspaceChoices = useMemo(
+    () => uniqueStrings([
+      ...projects.map((project) => project.path),
+      wechatWorkspace,
+      ...wechatBindings.map((binding) => binding.workspacePath),
+    ]),
+    [wechatBindings, wechatWorkspace, projects],
+  );
   const telegramApiBase = config?.telegram?.apiBase ?? null;
   const discordApiBase = config?.discord?.apiBase ?? null;
   const effectiveFeishuDomain = feishuDomain?.trim() || null;
+  const effectiveWechatBaseUrl = wechatBaseUrl?.trim() || null;
+  const wechatQrImage = wechatQrImageSrc(wechatQrImageContent);
   const channelTabs = useMemo(
     () => [
       { value: "telegram" as const, label: "Telegram", icon: TelegramLogoIcon },
       { value: "discord" as const, label: "Discord", icon: DiscordLogoIcon },
       { value: "feishu" as const, label: t("settings.feishu_platform"), icon: LarkLogoIcon },
-      { value: "wechat" as const, label: "WeChat" },
+      { value: "wechat" as const, label: "WeChat", icon: WechatLogoIcon },
     ],
     [t],
   );
@@ -802,6 +908,259 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     }
   };
 
+  const buildNextImBridgeConfig = (
+    wechatOverrides: Partial<WechatBridgeConfig> = {},
+    forceWechatEnabled?: boolean,
+  ): ImBridgeConfig => {
+    const nextTelegram: TelegramBridgeConfig = {
+      ...(config?.telegram ?? defaultTelegramBridgeConfig()),
+      enabled: telegramEnabled,
+      agent: selectedTelegramAgent ?? null,
+      model: telegramModel?.trim() || null,
+      effort: telegramEffort?.trim() || null,
+      defaultWorkspace: telegramWorkspace.trim() || null,
+      allowedWorkspaces: uniqueStrings([
+        telegramWorkspace.trim(),
+        ...bindings.map((binding) => binding.workspacePath),
+      ]),
+      workspaceBindings: bindings
+        .map((binding) => ({
+          platform: "telegram",
+          chatId: binding.chatId.trim(),
+          workspacePath: binding.workspacePath.trim(),
+        }))
+        .filter((binding) => binding.chatId && binding.workspacePath),
+      botToken: botToken.trim(),
+      allowedUserIds,
+    };
+    const nextDiscord: DiscordBridgeConfig = {
+      ...(config?.discord ?? defaultDiscordBridgeConfig()),
+      enabled: discordEnabled,
+      agent: selectedDiscordAgent ?? null,
+      model: discordModel?.trim() || null,
+      effort: discordEffort?.trim() || null,
+      defaultWorkspace: discordWorkspace.trim() || null,
+      allowedWorkspaces: uniqueStrings([
+        discordWorkspace.trim(),
+        ...discordBindings.map((binding) => binding.workspacePath),
+      ]),
+      workspaceBindings: discordBindings
+        .map((binding) => ({
+          platform: "discord",
+          chatId: binding.chatId.trim(),
+          workspacePath: binding.workspacePath.trim(),
+        }))
+        .filter((binding) => binding.chatId && binding.workspacePath),
+      botToken: discordBotToken.trim(),
+      allowedServerIds: uniqueStrings(discordAllowedServerIds),
+      allowedChannelIds: uniqueStrings(discordAllowedChannelIds),
+      mentionOnly: discordMentionOnly,
+    };
+    const nextFeishu: FeishuBridgeConfig = {
+      ...(config?.feishu ?? defaultFeishuBridgeConfig()),
+      enabled: feishuEnabled,
+      agent: selectedFeishuAgent ?? null,
+      model: feishuModel?.trim() || null,
+      effort: feishuEffort?.trim() || null,
+      defaultWorkspace: feishuWorkspace.trim() || null,
+      allowedWorkspaces: uniqueStrings([
+        feishuWorkspace.trim(),
+        ...feishuBindings.map((binding) => binding.workspacePath),
+      ]),
+      workspaceBindings: feishuBindings
+        .map((binding) => ({
+          platform: "feishu",
+          chatId: binding.chatId.trim(),
+          workspacePath: binding.workspacePath.trim(),
+        }))
+        .filter((binding) => binding.chatId && binding.workspacePath),
+      appId: feishuAppId.trim(),
+      appSecret: feishuAppSecret.trim(),
+      domain: effectiveFeishuDomain,
+    };
+    const nextWechatEnabled = forceWechatEnabled ?? wechatEnabled;
+    const nextWechat: WechatBridgeConfig = {
+      ...(config?.wechat ?? defaultWechatBridgeConfig()),
+      enabled: nextWechatEnabled,
+      agent: wechatOverrides.agent !== undefined ? wechatOverrides.agent : selectedWechatAgent ?? null,
+      model: wechatOverrides.model !== undefined ? wechatOverrides.model : wechatModel?.trim() || null,
+      effort: wechatOverrides.effort !== undefined ? wechatOverrides.effort : wechatEffort?.trim() || null,
+      defaultWorkspace: wechatOverrides.defaultWorkspace !== undefined ? wechatOverrides.defaultWorkspace : wechatWorkspace.trim() || null,
+      allowedWorkspaces: wechatOverrides.allowedWorkspaces ?? uniqueStrings([
+        wechatWorkspace.trim(),
+        ...wechatBindings.map((binding) => binding.workspacePath),
+      ]),
+      workspaceBindings: wechatOverrides.workspaceBindings ?? wechatBindings
+        .map((binding) => ({
+          platform: "wechat",
+          chatId: binding.chatId.trim(),
+          workspacePath: binding.workspacePath.trim(),
+        }))
+        .filter((binding) => binding.chatId && binding.workspacePath),
+      botToken: wechatOverrides.botToken !== undefined ? wechatOverrides.botToken : wechatBotToken.trim(),
+      botId: wechatOverrides.botId !== undefined ? wechatOverrides.botId : wechatBotId,
+      userId: wechatOverrides.userId !== undefined ? wechatOverrides.userId : wechatUserId,
+      baseUrl: wechatOverrides.baseUrl !== undefined ? wechatOverrides.baseUrl : effectiveWechatBaseUrl,
+      pollTimeoutSecs: wechatOverrides.pollTimeoutSecs ?? config?.wechat?.pollTimeoutSecs ?? 40,
+    };
+    return {
+      ...(config ?? defaultImBridgeConfig()),
+      enabled: telegramEnabled || discordEnabled || feishuEnabled || nextWechatEnabled,
+      telegram: nextTelegram,
+      discord: nextDiscord,
+      feishu: nextFeishu,
+      wechat: nextWechat,
+    };
+  };
+
+  const sendWechatTest = async () => {
+    if (!wechatBotToken.trim() || wechatTesting) return;
+    setWechatTesting(true);
+    setWechatTestStatus("idle");
+    try {
+      await testWechatBotConnection(wechatBotToken.trim(), effectiveWechatBaseUrl);
+      setWechatTestStatus("success");
+      onError(null);
+    } catch (err) {
+      setWechatTestStatus("error");
+      onError(String(err));
+    } finally {
+      setWechatTesting(false);
+    }
+  };
+
+  const startWechatQrLogin = async () => {
+    if (wechatQrStatus === "loading") return;
+    setWechatQrPolling(false);
+    setWechatQrPollBaseUrl(null);
+    setWechatQrStatus("loading");
+    try {
+      const qr = await getWechatQrcode(effectiveWechatBaseUrl);
+      setWechatQrContent(qr.qrcodeContent);
+      setWechatQrImageContent(qr.qrcodeImageContent ?? null);
+      setWechatQrId(qr.qrcodeId);
+      setWechatQrPolling(true);
+      setWechatQrStatus("waiting");
+      onError(null);
+    } catch (err) {
+      setWechatQrStatus("error");
+      onError(String(err));
+    }
+  };
+
+  const pollWechatQrLogin = async () => {
+    if (!wechatQrId || wechatQrStatus === "loading" || wechatQrPolling) return;
+    setWechatQrStatus("loading");
+    try {
+      const status = await pollWechatQrcodeStatus(wechatQrId, wechatQrPollBaseUrl);
+      await applyWechatQrStatus(status);
+    } catch (err) {
+      setWechatQrStatus("error");
+      onError(String(err));
+    }
+  };
+
+  const applyWechatQrStatus = async (status: WechatQrStatus) => {
+    const normalized = status.status === "scaned" ? "scanned" : status.status;
+    if (normalized === "scannedRedirect") {
+      if (status.redirectHost) {
+        setWechatQrPollBaseUrl(`https://${status.redirectHost}`);
+      }
+      setWechatQrStatus("scanned");
+      onError(null);
+      return;
+    }
+    if (normalized === "alreadyConnected") {
+      setWechatQrPolling(false);
+      setWechatQrStatus("confirmed");
+      onError(null);
+      return;
+    }
+    if (normalized === "needVerifyCode" || normalized === "verifyCodeBlocked") {
+      setWechatQrPolling(false);
+      setWechatQrStatus("error");
+      onError(status.error ?? normalized);
+      return;
+    }
+    if (normalized === "confirmed" && status.botToken) {
+      const nextBaseUrl = status.baseUrl ?? effectiveWechatBaseUrl;
+      setWechatBotToken(status.botToken);
+      setWechatBotId(status.botId ?? null);
+      setWechatUserId(status.userId ?? null);
+      setWechatBaseUrl(nextBaseUrl);
+      setWechatEnabled(true);
+      setWechatTestStatus("success");
+      setSaveStatus("idle");
+      setSaving(true);
+      try {
+        const saved = await updateImBridgeConfig(buildNextImBridgeConfig({
+          enabled: true,
+          botToken: status.botToken,
+          botId: status.botId ?? null,
+          userId: status.userId ?? null,
+          baseUrl: nextBaseUrl,
+        }, true));
+        setConfig(saved);
+        setSaveStatus("success");
+        setWechatQrPolling(false);
+        setWechatQrStatus("confirmed");
+        onError(null);
+      } catch (err) {
+        setSaveStatus("error");
+        setWechatQrPolling(false);
+        setWechatQrStatus("error");
+        onError(String(err));
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+    if (normalized === "scanned" || normalized === "waiting" || normalized === "expired" || normalized === "error") {
+      if (normalized === "expired" || normalized === "error") {
+        setWechatQrPolling(false);
+      }
+      setWechatQrStatus(normalized);
+      onError(status.error ? status.error : null);
+      return;
+    }
+    setWechatQrStatus("waiting");
+    onError(status.error ? status.error : null);
+  };
+
+  useEffect(() => {
+    if (!wechatQrId || !wechatQrPolling) return;
+    let cancelled = false;
+    const pollBaseUrl = wechatQrPollBaseUrl;
+    const run = async () => {
+      while (!cancelled) {
+        try {
+          const status = await pollWechatQrcodeStatus(wechatQrId, pollBaseUrl);
+          if (cancelled) return;
+          await applyWechatQrStatus(status);
+          if (
+            status.status === "confirmed"
+            || status.status === "expired"
+            || status.status === "error"
+            || status.status === "needVerifyCode"
+            || status.status === "verifyCodeBlocked"
+            || status.status === "alreadyConnected"
+          ) {
+            return;
+          }
+        } catch (err) {
+          if (!cancelled) {
+            onError(String(err));
+          }
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [wechatQrId, wechatQrPolling, wechatQrPollBaseUrl]);
+
   useEffect(() => {
     setSaveStatus("idle");
   }, [
@@ -832,6 +1191,14 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     feishuWorkspace,
     feishuBindings,
     feishuDomain,
+    wechatEnabled,
+    wechatBotToken,
+    selectedWechatAgent,
+    wechatModel,
+    wechatEffort,
+    wechatWorkspace,
+    wechatBindings,
+    wechatBaseUrl,
   ]);
 
   const addBinding = () => {
@@ -878,85 +1245,22 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
     setFeishuBindingChatId("");
   };
 
+  const addWechatBinding = () => {
+    const chatId = wechatBindingUserId.trim();
+    if (!chatId || !wechatBindingWorkspace) return;
+    setWechatBindings((current) => [
+      ...current.filter((binding) => binding.chatId !== chatId),
+      { platform: "wechat", chatId, workspacePath: wechatBindingWorkspace },
+    ]);
+    setWechatBindingUserId("");
+  };
+
   const save = async () => {
     if (saving) return;
     setSaving(true);
     setSaveStatus("idle");
     try {
-      const nextTelegram = {
-        ...(config?.telegram ?? defaultTelegramBridgeConfig()),
-        enabled: telegramEnabled,
-        agent: selectedTelegramAgent ?? null,
-        model: telegramModel?.trim() || null,
-        effort: telegramEffort?.trim() || null,
-        defaultWorkspace: telegramWorkspace.trim() || null,
-        allowedWorkspaces: uniqueStrings([
-          telegramWorkspace.trim(),
-          ...bindings.map((binding) => binding.workspacePath),
-        ]),
-        workspaceBindings: bindings
-          .map((binding) => ({
-            platform: "telegram",
-            chatId: binding.chatId.trim(),
-            workspacePath: binding.workspacePath.trim(),
-          }))
-          .filter((binding) => binding.chatId && binding.workspacePath),
-        botToken: botToken.trim(),
-        allowedUserIds,
-      };
-      const nextDiscord = {
-        ...(config?.discord ?? defaultDiscordBridgeConfig()),
-        enabled: discordEnabled,
-        agent: selectedDiscordAgent ?? null,
-        model: discordModel?.trim() || null,
-        effort: discordEffort?.trim() || null,
-        defaultWorkspace: discordWorkspace.trim() || null,
-        allowedWorkspaces: uniqueStrings([
-          discordWorkspace.trim(),
-          ...discordBindings.map((binding) => binding.workspacePath),
-        ]),
-        workspaceBindings: discordBindings
-          .map((binding) => ({
-            platform: "discord",
-            chatId: binding.chatId.trim(),
-            workspacePath: binding.workspacePath.trim(),
-          }))
-          .filter((binding) => binding.chatId && binding.workspacePath),
-        botToken: discordBotToken.trim(),
-        allowedServerIds: uniqueStrings(discordAllowedServerIds),
-        allowedChannelIds: uniqueStrings(discordAllowedChannelIds),
-        mentionOnly: discordMentionOnly,
-      };
-      const nextFeishu = {
-        ...(config?.feishu ?? defaultFeishuBridgeConfig()),
-        enabled: feishuEnabled,
-        agent: selectedFeishuAgent ?? null,
-        model: feishuModel?.trim() || null,
-        effort: feishuEffort?.trim() || null,
-        defaultWorkspace: feishuWorkspace.trim() || null,
-        allowedWorkspaces: uniqueStrings([
-          feishuWorkspace.trim(),
-          ...feishuBindings.map((binding) => binding.workspacePath),
-        ]),
-        workspaceBindings: feishuBindings
-          .map((binding) => ({
-            platform: "feishu",
-            chatId: binding.chatId.trim(),
-            workspacePath: binding.workspacePath.trim(),
-          }))
-          .filter((binding) => binding.chatId && binding.workspacePath),
-        appId: feishuAppId.trim(),
-        appSecret: feishuAppSecret.trim(),
-        domain: effectiveFeishuDomain,
-      };
-      const nextConfig: ImBridgeConfig = {
-        ...(config ?? defaultImBridgeConfig()),
-        enabled: telegramEnabled || discordEnabled || feishuEnabled,
-        telegram: nextTelegram,
-        discord: nextDiscord,
-        feishu: nextFeishu,
-      };
-      const saved = await updateImBridgeConfig(nextConfig);
+      const saved = await updateImBridgeConfig(buildNextImBridgeConfig());
       setConfig(saved);
       setSaveStatus("success");
       onError(null);
@@ -1370,9 +1674,168 @@ function ChannelsSettings({ onError }: { onError: (error: string | null) => void
           </SettingsGroup>
         </>
       ) : (
-        <SettingsGroup title={t("settings.channels_coming_soon")}>
-          <EmptyState label={t("settings.channels_coming_soon_description")} />
-        </SettingsGroup>
+        <>
+          <SettingsGroup
+            title={t("settings.wechat_bot")}
+            action={
+              <button type="button" disabled={saving || loading} onClick={() => void save()} className={channelSaveButtonClass(saveStatus)}>
+                {saving
+                  ? <LoaderCircle className="h-4 w-4 animate-spin" />
+                  : saveStatus === "error"
+                    ? <X className="h-4 w-4" />
+                    : <Check className="h-4 w-4" />}
+                {saving
+                  ? t("project.save")
+                  : saveStatus === "success"
+                    ? t("settings.saved")
+                    : saveStatus === "error"
+                      ? t("settings.save_failed")
+                      : t("project.save")}
+              </button>
+            }
+            flush
+          >
+            <SettingsRow icon={<WechatLogoIcon className="h-4 w-4" />} label={t("settings.wechat_enable")} description={t("settings.wechat_enable_description")}>
+              <div className="flex items-center gap-3">
+                <span className="text-caption text-ink/45">{wechatEnabled ? t("settings.proxy_enabled") : t("settings.proxy_disabled")}</span>
+                <SwitchControl checked={wechatEnabled} tooltip={t("settings.wechat_enable")} onToggle={() => setWechatEnabled((value) => !value)} />
+              </div>
+            </SettingsRow>
+            <SettingsStackedRow icon={<TokenOutlineIcon className="h-4 w-4" />} label={t("settings.wechat_bot_token")} description={t("settings.wechat_bot_token_description")}>
+              <div className="flex w-full min-w-0 flex-col gap-2">
+                <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                  <input value={wechatBotToken} type={showWechatToken ? "text" : "password"} onChange={(event) => {
+                    setWechatBotToken(event.target.value);
+                    setWechatTestStatus("idle");
+                  }} placeholder="iLink bot token" className={inputClassName + " min-w-0 flex-1"} />
+                  <button type="button" onClick={() => setShowWechatToken((value) => !value)} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-ink/55 transition hover:bg-ink/[0.06] hover:text-ink" aria-label={showWechatToken ? t("settings.telegram_hide_token") : t("settings.telegram_show_token")}>
+                    {showWechatToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                  <button type="button" disabled={wechatTesting || !wechatBotToken.trim()} onClick={() => void sendWechatTest()} className={telegramTestButtonClass(wechatTestStatus)}>
+                    {wechatTesting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                    {wechatTesting
+                      ? t("settings.testing_connection")
+                      : wechatTestStatus === "success"
+                        ? t("settings.connected")
+                        : wechatTestStatus === "error"
+                          ? t("settings.connection_failed")
+                          : t("settings.test_connection")}
+                  </button>
+                </div>
+                <input value={wechatBaseUrl ?? ""} onChange={(event) => {
+                  setWechatBaseUrl(event.target.value || null);
+                  setWechatTestStatus("idle");
+                }} placeholder="https://ilinkai.weixin.qq.com" className={inputClassName + " w-full max-w-[360px]"} />
+                {(wechatBotId || wechatUserId) && (
+                  <p className="text-caption text-ink/50">
+                    {wechatBotId ? `Bot: ${wechatBotId}` : ""}
+                    {wechatBotId && wechatUserId ? " · " : ""}
+                    {wechatUserId ? `User: ${wechatUserId}` : ""}
+                  </p>
+                )}
+              </div>
+            </SettingsStackedRow>
+            <SettingsStackedRow icon={<QrCodeIcon className="h-4 w-4" />} label={t("settings.wechat_qr_login")} description={t("settings.wechat_qr_login_description")}>
+              <div className="flex w-full min-w-0 flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" disabled={wechatQrStatus === "loading"} onClick={() => void startWechatQrLogin()} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+                    {wechatQrStatus === "loading" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                    {t("settings.wechat_get_qr")}
+                  </button>
+                  <button type="button" disabled={!wechatQrId || wechatQrStatus === "loading" || wechatQrPolling} onClick={() => void pollWechatQrLogin()} className={telegramTestButtonClass(wechatQrStatus === "confirmed" ? "success" : wechatQrStatus === "error" || wechatQrStatus === "expired" ? "error" : "idle")}>
+                    {wechatQrStatus === "loading" || wechatQrPolling ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                    {wechatQrStatus === "confirmed"
+                      ? t("settings.wechat_qr_confirmed")
+                      : wechatQrStatus === "scanned"
+                        ? t("settings.wechat_qr_scanned")
+                        : wechatQrStatus === "expired"
+                          ? t("settings.wechat_qr_expired")
+                          : wechatQrPolling
+                            ? t("settings.wechat_polling_qr")
+                            : t("settings.wechat_poll_qr")}
+                  </button>
+                </div>
+                {wechatQrContent && (
+                  <div className="flex w-full min-w-0 flex-col gap-2">
+                    {wechatQrImage ? (
+                      <div className="inline-flex w-fit rounded-md border border-card-border/[0.12] bg-white p-3">
+                        <img
+                          src={wechatQrImage}
+                          alt={t("settings.wechat_qr_login")}
+                          className="h-48 w-48 object-contain"
+                          onError={() => setWechatQrImageContent(null)}
+                        />
+                      </div>
+                    ) : (
+                      <div className="inline-flex w-fit rounded-md border border-card-border/[0.12] bg-white p-3">
+                        <QRCodeSVG
+                          value={wechatQrContent}
+                          size={192}
+                          level="M"
+                          marginSize={2}
+                          title={t("settings.wechat_qr_login")}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+                <p className="text-caption leading-relaxed text-ink/55">{t("settings.wechat_qr_content_hint")}</p>
+              </div>
+            </SettingsStackedRow>
+            <SettingsRow icon={<Bot className="h-4 w-4" />} label={t("settings.wechat_default_model")} description={t("settings.wechat_default_model_description")}>
+              <RuntimeMenuSelect
+                ariaLabel={t("settings.wechat_default_model")}
+                value={wechatModelValue}
+                options={wechatModelOptions}
+                onChange={(value) => {
+                  const parsed = parseAgentModelSelectValue(value);
+                  if (!parsed) return;
+                  const runtimeAgent = runtimeAgents.find((agent) => agent.agent === parsed.agent);
+                  if (parsed.agent !== selectedWechatAgent) {
+                    setWechatEffort(runtimeAgent ? initialRuntimeEffort(runtimeAgent) : null);
+                  }
+                  setWechatAgent(parsed.agent);
+                  setWechatModel(parsed.model || null);
+                }}
+                minMenuWidth={240}
+                maxWidthClassName="max-w-[300px]"
+              />
+            </SettingsRow>
+          </SettingsGroup>
+
+          <SettingsGroup title={t("settings.wechat_workspace_bindings")} flush>
+            <SettingsStackedRow icon={<SquareKanban className="h-4 w-4" />} label={t("settings.channels_default_workspace")} description={t("settings.wechat_default_workspace_description")}>
+              <select value={wechatWorkspace} onChange={(event) => setWechatWorkspace(event.target.value)} className={inputClassName + " w-full"}>
+                <option value="">{t("settings.channels_select_workspace")}</option>
+                {wechatWorkspaceChoices.map((path) => (
+                  <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                ))}
+              </select>
+            </SettingsStackedRow>
+            <SettingsStackedRow icon={<Server className="h-4 w-4" />} label={t("settings.wechat_add_binding")} description={t("settings.wechat_add_binding_description")}>
+              <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
+                <input value={wechatBindingUserId} onChange={(event) => setWechatBindingUserId(event.target.value)} placeholder="WeChat user ID" className={inputClassName + " min-w-[170px] flex-1"} />
+                <select value={wechatBindingWorkspace} onChange={(event) => setWechatBindingWorkspace(event.target.value)} className={inputClassName + " min-w-[220px] flex-[1.4]"}>
+                  <option value="">{t("settings.channels_select_workspace")}</option>
+                  {wechatWorkspaceChoices.map((path) => (
+                    <option key={path} value={path}>{projectLabel(projects, path)}</option>
+                  ))}
+                </select>
+                <button type="button" disabled={!wechatBindingUserId.trim() || !wechatBindingWorkspace} onClick={addWechatBinding} className="inline-flex h-9 items-center gap-1.5 rounded-md border border-card-border/[0.12] bg-card-chip/[0.08] px-3 text-body-sm font-medium text-card-fg/75 transition hover:border-card-border/[0.18] hover:bg-card-chip/[0.12] disabled:opacity-35">
+                  <Plus className="h-4 w-4" />
+                  {t("settings.add")}
+                </button>
+              </div>
+            </SettingsStackedRow>
+            {wechatBindings.map((binding) => (
+              <SettingsStackedRow key={binding.chatId} icon={<Server className="h-4 w-4" />} label={binding.chatId} description={projectLabel(projects, binding.workspacePath)}>
+                <button type="button" onClick={() => setWechatBindings((current) => current.filter((item) => item.chatId !== binding.chatId))} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink/55 transition hover:bg-red-500/10 hover:text-red-600" aria-label={t("sidebar.remove")}>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </SettingsStackedRow>
+            ))}
+          </SettingsGroup>
+        </>
       )}
     </section>
   );
@@ -1385,6 +1848,7 @@ function defaultImBridgeConfig(): ImBridgeConfig {
     telegram: defaultTelegramBridgeConfig(),
     discord: defaultDiscordBridgeConfig(),
     feishu: defaultFeishuBridgeConfig(),
+    wechat: defaultWechatBridgeConfig(),
   };
 }
 
@@ -1437,6 +1901,23 @@ function defaultFeishuBridgeConfig(): FeishuBridgeConfig {
   };
 }
 
+function defaultWechatBridgeConfig(): WechatBridgeConfig {
+  return {
+    enabled: false,
+    agent: null,
+    model: null,
+    effort: null,
+    defaultWorkspace: null,
+    allowedWorkspaces: [],
+    workspaceBindings: [],
+    botToken: "",
+    botId: null,
+    userId: null,
+    baseUrl: null,
+    pollTimeoutSecs: 40,
+  };
+}
+
 function firstEnabledRuntimeAgent(runtimeAgents: RuntimeAgentMetadata[]): RuntimeAgentMetadata | null {
   return runtimeAgents.find((agent) => agent.enabled) ?? runtimeAgents[0] ?? null;
 }
@@ -1482,6 +1963,35 @@ function telegramTestButtonClass(status: "idle" | "success" | "error"): string {
     return base + "border-status-error/45 bg-status-error/12 text-status-error hover:bg-status-error/18";
   }
   return base + "border-card-border/[0.12] bg-card-chip/[0.08] text-card-fg/75 hover:border-card-border/[0.18] hover:bg-card-chip/[0.12]";
+}
+
+function wechatQrImageSrc(content: string | null): string | null {
+  const value = content?.trim();
+  if (!value) return null;
+  if (/^(data:image\/|https?:\/\/|blob:)/i.test(value)) {
+    return value;
+  }
+  if (value.startsWith("<svg") || value.startsWith("<?xml")) {
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(value)}`;
+  }
+  const compact = value.replace(/\s/g, "");
+  if (/^[A-Za-z0-9+/=]+$/.test(compact) && compact.length > 80 && looksLikeImageBase64(compact)) {
+    return `data:${imageMimeFromBase64(compact)};base64,${compact}`;
+  }
+  return null;
+}
+
+function looksLikeImageBase64(value: string): boolean {
+  return imageMimeFromBase64(value) !== null;
+}
+
+function imageMimeFromBase64(value: string): string | null {
+  if (value.startsWith("iVBORw0KGgo")) return "image/png";
+  if (value.startsWith("/9j/")) return "image/jpeg";
+  if (value.startsWith("R0lGOD")) return "image/gif";
+  if (value.startsWith("UklGR")) return "image/webp";
+  if (value.startsWith("PHN2Zy") || value.startsWith("PD94bWwg")) return "image/svg+xml";
+  return null;
 }
 
 function channelSaveButtonClass(status: "idle" | "success" | "error"): string {

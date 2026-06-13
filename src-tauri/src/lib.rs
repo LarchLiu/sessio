@@ -2837,6 +2837,41 @@ async fn test_feishu_bot_connection(
 }
 
 #[tauri::command]
+async fn test_wechat_bot_connection(
+    bot_token: String,
+    base_url: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        im_bridge::test_wechat_bot_connection(&bot_token, base_url.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_wechat_qrcode(base_url: Option<String>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        im_bridge::get_wechat_qrcode(base_url.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn poll_wechat_qrcode_status(
+    qrcode: String,
+    base_url: Option<String>,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        im_bridge::poll_wechat_qrcode_status(&qrcode, base_url.as_deref())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn update_runtime_agent_preferences(
     req: UpdateRuntimeAgentPreferencesRequest,
     app: AppHandle,
@@ -3545,6 +3580,9 @@ pub fn run() {
             test_telegram_bot_connection,
             test_discord_bot_connection,
             test_feishu_bot_connection,
+            test_wechat_bot_connection,
+            get_wechat_qrcode,
+            poll_wechat_qrcode_status,
             update_runtime_agent_preferences,
             start_agent_session,
             fork_agent_session,

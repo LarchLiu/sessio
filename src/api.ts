@@ -90,6 +90,7 @@ export interface ImBridgeConfig {
   telegram: TelegramBridgeConfig | null;
   discord: DiscordBridgeConfig | null;
   feishu: FeishuBridgeConfig | null;
+  wechat: WechatBridgeConfig | null;
 }
 
 export interface ImBridgeWorkspaceBinding {
@@ -139,6 +140,37 @@ export interface FeishuBridgeConfig {
   appId: string;
   appSecret: string;
   domain: string | null;
+}
+
+export interface WechatBridgeConfig {
+  enabled: boolean;
+  agent: Agent | null;
+  model: string | null;
+  effort: string | null;
+  defaultWorkspace: string | null;
+  allowedWorkspaces: string[];
+  workspaceBindings: ImBridgeWorkspaceBinding[];
+  botToken: string;
+  botId: string | null;
+  userId: string | null;
+  baseUrl: string | null;
+  pollTimeoutSecs: number;
+}
+
+export interface WechatQrCode {
+  qrcodeId: string;
+  qrcodeContent: string;
+  qrcodeImageContent: string | null;
+}
+
+export interface WechatQrStatus {
+  status: string;
+  botToken: string | null;
+  botId: string | null;
+  userId: string | null;
+  baseUrl: string | null;
+  redirectHost: string | null;
+  error: string | null;
 }
 
 export type AssistantType = "builtin" | "custom";
@@ -1920,6 +1952,18 @@ export async function testDiscordBotConnection(botToken: string, apiBase: string
 
 export async function testFeishuBotConnection(appId: string, appSecret: string, domain: string | null): Promise<void> {
   return invoke<void>("test_feishu_bot_connection", { appId, appSecret, domain });
+}
+
+export async function testWechatBotConnection(botToken: string, baseUrl: string | null): Promise<void> {
+  return invoke<void>("test_wechat_bot_connection", { botToken, baseUrl });
+}
+
+export async function getWechatQrcode(baseUrl: string | null): Promise<WechatQrCode> {
+  return invoke<WechatQrCode>("get_wechat_qrcode", { baseUrl });
+}
+
+export async function pollWechatQrcodeStatus(qrcode: string, baseUrl: string | null): Promise<WechatQrStatus> {
+  return invoke<WechatQrStatus>("poll_wechat_qrcode_status", { qrcode, baseUrl });
 }
 
 export async function updateRuntimeAgentPreferences(

@@ -18,7 +18,8 @@ mod router;
 mod state;
 
 pub use config::{
-    DiscordConfig, FeishuConfig, ImBridgeConfig, TelegramConfig, WorkspaceBindingConfig,
+    DiscordConfig, FeishuConfig, ImBridgeConfig, TelegramConfig, WechatConfig,
+    WorkspaceBindingConfig,
 };
 
 use std::sync::Arc;
@@ -123,4 +124,21 @@ pub fn test_feishu_bot_connection(
     domain: Option<&str>,
 ) -> Result<()> {
     platforms::test_feishu_bot_connection(app_id, app_secret, domain)
+}
+
+pub fn test_wechat_bot_connection(bot_token: &str, base_url: Option<&str>) -> Result<()> {
+    platforms::test_wechat_bot_connection(bot_token, base_url)
+}
+
+pub fn get_wechat_qrcode(base_url: Option<&str>) -> Result<serde_json::Value> {
+    platforms::get_wechat_qrcode(base_url)
+        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
+}
+
+pub fn poll_wechat_qrcode_status(
+    qrcode: &str,
+    base_url: Option<&str>,
+) -> Result<serde_json::Value> {
+    platforms::poll_wechat_qrcode_status(qrcode, base_url)
+        .and_then(|value| serde_json::to_value(value).map_err(Into::into))
 }

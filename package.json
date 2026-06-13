@@ -40,6 +40,7 @@
     "@dnd-kit/react": "^0.4.0",
     "@lobehub/icons": "^5.8.0",
     "@pierre/diffs": "^1.1.22",
+    "@rc-component/qrcode": "^1.1.1",
     "@tauri-apps/api": "^2.4.0",
     "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-opener": "^2.5.4",
