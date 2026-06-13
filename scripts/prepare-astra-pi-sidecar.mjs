@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { get } from "node:https";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_ASTRA_PI_AGENT_RUST_VERSION = "v0.1.17";
+const DEFAULT_ASTRA_PI_AGENT_RUST_VERSION = "v0.1.18";
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const BIN_DIR = join(ROOT, "src-tauri", "binaries");
 
@@ -83,14 +83,14 @@ async function download(url, destination) {
 
 async function ensureArchive(target) {
   mkdirSync(BIN_DIR, { recursive: true });
-  const archivePath = join(BIN_DIR, target.archive);
+  const version =
+    process.env.SESSIO_ASTRA_PI_AGENT_RUST_VERSION ||
+    DEFAULT_ASTRA_PI_AGENT_RUST_VERSION;
+  const archivePath = join(BIN_DIR, `${version}-${target.archive}`);
   if (existsSync(archivePath)) {
     return archivePath;
   }
 
-  const version =
-    process.env.SESSIO_ASTRA_PI_AGENT_RUST_VERSION ||
-    DEFAULT_ASTRA_PI_AGENT_RUST_VERSION;
   const baseUrl =
     process.env.SESSIO_ASTRA_PI_AGENT_RUST_RELEASE_BASE_URL ||
     `https://github.com/Dicklesworthstone/pi_agent_rust/releases/download/${version}`;
