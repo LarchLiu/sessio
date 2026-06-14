@@ -150,6 +150,7 @@ struct StreamReplyState {
 #[derive(Default)]
 struct StreamReplyTracker {
     streams: Mutex<HashMap<String, StreamReplyState>>,
+    permission_blocked: Mutex<HashSet<String>>,
 }
 
 impl StreamReplyTracker {
@@ -161,6 +162,25 @@ impl StreamReplyTracker {
         if let Ok(mut streams) = self.streams.lock() {
             streams.remove(session_id);
         }
+        self.set_permission_blocked(session_id, false);
+    }
+
+    fn set_permission_blocked(&self, session_id: &str, blocked: bool) {
+        if let Ok(mut sessions) = self.permission_blocked.lock() {
+            if blocked {
+                sessions.insert(session_id.to_string());
+            } else {
+                sessions.remove(session_id);
+            }
+        }
+    }
+
+    fn is_permission_blocked(&self, session_id: &str) -> bool {
+        self.permission_blocked
+            .lock()
+            .ok()
+            .map(|sessions| sessions.contains(session_id))
+            .unwrap_or(false)
     }
 
     fn active_draft_sessions(&self) -> Vec<String> {
@@ -170,11 +190,12 @@ impl StreamReplyTracker {
             .map(|streams| {
                 streams
                     .iter()
-                    .filter(|(_, stream)| {
+                    .filter(|(session_id, stream)| {
                         matches!(stream.capability.mode, ChatStreamMode::Draft)
                             && stream.message_ref.is_some()
                             && !stream.failed
                             && !stream.last_text.trim().is_empty()
+                            && !self.is_permission_blocked(session_id)
                     })
                     .map(|(session_id, _)| session_id.clone())
                     .collect()
@@ -299,6 +320,7 @@ fn handle_event(
             };
             let display_tool_name = tool_display_name(&tool_name, Some(&data));
             state.buffer_tool(&sessio_runtime_session_id, &display_tool_name);
+            streaming.set_permission_blocked(&sessio_runtime_session_id, true);
             let options = permission_options_from_data(&data);
             let options = options
                 .into_iter()
@@ -328,7 +350,6 @@ fn handle_event(
             ) {
                 log::warn!("[im-bridge:outbound] failed to send permission request: {error:#}");
             }
-            maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, true);
         }
         AgentRuntimeEventPayload::PermissionResolved {
             sessio_runtime_session_id,
@@ -343,12 +364,15 @@ fn handle_event(
                 approved,
                 option_id.as_deref(),
             );
+            streaming.set_permission_blocked(&sessio_runtime_session_id, false);
+            maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, true);
         }
         AgentRuntimeEventPayload::TurnCompleted {
             sessio_runtime_session_id,
             ..
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
+            streaming.set_permission_blocked(&sessio_runtime_session_id, false);
             flush_turn(state, streaming, &sessio_runtime_session_id, "Done.");
             dispatch_next_queued_prompt(state, &sessio_runtime_session_id);
         }
@@ -358,6 +382,7 @@ fn handle_event(
             ..
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
+            streaming.set_permission_blocked(&sessio_runtime_session_id, false);
             let fallback = format!("Turn failed: {}", error.message);
             flush_turn(state, streaming, &sessio_runtime_session_id, &fallback);
             dispatch_next_queued_prompt(state, &sessio_runtime_session_id);
@@ -367,6 +392,7 @@ fn handle_event(
             ..
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
+            streaming.set_permission_blocked(&sessio_runtime_session_id, false);
             flush_turn(
                 state,
                 streaming,
@@ -379,6 +405,7 @@ fn handle_event(
             sessio_runtime_session_id,
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
+            streaming.set_permission_blocked(&sessio_runtime_session_id, false);
             streaming.clear(&sessio_runtime_session_id);
             if let Some(chat) = state.chat_for_session(&sessio_runtime_session_id) {
                 state.unbind_chat(&chat);
@@ -394,6 +421,9 @@ fn maybe_update_stream_reply(
     session_id: &str,
     force: bool,
 ) {
+    if streaming.is_permission_blocked(session_id) {
+        return;
+    }
     let Some(chat) = state.chat_for_session(session_id) else {
         return;
     };
@@ -868,5 +898,19 @@ mod tests {
         };
 
         assert_eq!(format_turn_text(&buffer, "Done."), "Done.");
+    }
+
+    #[test]
+    fn format_turn_text_lists_tools_together() {
+        let buffer = TurnBuffer {
+            text: "Result".to_string(),
+            tools: vec!["Terminal".to_string(), "Read File".to_string()],
+            ..TurnBuffer::default()
+        };
+
+        assert_eq!(
+            format_turn_text(&buffer, "Done."),
+            "Result\n\nTools: Terminal, Read File"
+        );
     }
 }

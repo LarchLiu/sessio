@@ -184,6 +184,7 @@ pub(super) fn handle_action_callback(
 ) -> Result<String> {
     let mut parts = action.split(':');
     match parts.next().unwrap_or("") {
+        "cancel" => Ok("Cancelled.".to_string()),
         "agent" => {
             let agent = parts.next().context("missing agent")?;
             switch_agent(state, key, agent)?;
@@ -251,10 +252,10 @@ fn agent_menu(state: &Arc<ImBridgeState>) -> Result<ActionMenu> {
             })
         })
         .collect();
-    Ok(ActionMenu {
+    Ok(with_cancel_choice(ActionMenu {
         text: "选择 agent。切换到不同 agent 会开启新会话；选择当前 agent 不会新建。".to_string(),
         choices,
-    })
+    }))
 }
 
 fn model_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMenu> {
@@ -264,7 +265,7 @@ fn model_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMenu> {
     if choices.is_empty() {
         bail!("{} has no model options", agent_info.display_name);
     }
-    Ok(ActionMenu {
+    Ok(with_cancel_choice(ActionMenu {
         text: format!(
             "选择 {} 的 model。不会新建 session。",
             agent_info.display_name
@@ -277,7 +278,7 @@ fn model_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMenu> {
                 action: format!("model:{}:{index}", session.agent.as_str()),
             })
             .collect(),
-    })
+    }))
 }
 
 fn effort_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMenu> {
@@ -287,7 +288,7 @@ fn effort_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMenu> 
     if choices.is_empty() {
         bail!("{} has no effort options", agent_info.display_name);
     }
-    Ok(ActionMenu {
+    Ok(with_cancel_choice(ActionMenu {
         text: format!(
             "选择 {} 的 effort。不会新建 session。",
             agent_info.display_name
@@ -300,7 +301,7 @@ fn effort_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMenu> 
                 action: format!("effort:{}:{index}", session.agent.as_str()),
             })
             .collect(),
-    })
+    }))
 }
 
 fn workspace_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMenu> {
@@ -308,7 +309,7 @@ fn workspace_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMen
     if choices.is_empty() {
         bail!("no allowed workspaces configured");
     }
-    Ok(ActionMenu {
+    Ok(with_cancel_choice(ActionMenu {
         text: "选择当前会话的 workspace。会开启同 agent 的新 runtime session，不会修改默认 workspace。"
             .to_string(),
         choices: choices
@@ -319,7 +320,15 @@ fn workspace_menu(state: &Arc<ImBridgeState>, key: &ChatKey) -> Result<ActionMen
                 action: format!("workspace:{index}"),
             })
             .collect(),
-    })
+    }))
+}
+
+fn with_cancel_choice(mut menu: ActionMenu) -> ActionMenu {
+    menu.choices.push(ActionChoice {
+        label: "Cancel".to_string(),
+        action: "cancel".to_string(),
+    });
+    menu
 }
 
 fn parse_action_agent(value: Option<&str>) -> Result<Agent> {
@@ -947,10 +956,15 @@ pub(super) fn session_status_text(state: &Arc<ImBridgeState>, key: &ChatKey) -> 
     let queued = state.queued_prompt_count(key);
     match state.chat_session(key) {
         Some(session) => {
+            let agent_session_id = session
+                .agent_runtime_session_id
+                .as_deref()
+                .unwrap_or(&session.sessio_runtime_session_id);
             let mut text = format!(
-                "📍 当前会话\nagent: {}\nworkspace: {}\nsession: {}",
+                "📍 当前会话\nagent: {}\nworkspace: {}\nsession: {}\nruntime: {}",
                 session.agent.as_str(),
                 session.workspace_path,
+                agent_session_id,
                 session.sessio_runtime_session_id
             );
             if queued > 0 {

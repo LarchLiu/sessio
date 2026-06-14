@@ -355,11 +355,12 @@ fn send_action_menu(
             })]
         })
         .collect::<Vec<_>>();
+    let rendered = telegram_markdown_to_html(&menu.text);
     sink.send_message(
         &key.chat_id,
-        &menu.text,
+        &rendered,
         Some(json!({ "inline_keyboard": rows })),
-        None,
+        Some(TELEGRAM_PARSE_MODE),
         None,
     )
 }
@@ -490,11 +491,12 @@ fn handle_callback(
                             log::debug!(
                                 "[im-bridge:telegram] failed to delete action menu; falling back to edit: {error:#}"
                             );
+                            let rendered = telegram_markdown_to_html(&reply);
                             if let Err(edit_error) = sink.edit_message_text(
                                 &chat_id,
                                 message.message_id,
-                                &reply,
-                                None,
+                                &rendered,
+                                Some(TELEGRAM_PARSE_MODE),
                                 None,
                             ) {
                                 log::debug!(
