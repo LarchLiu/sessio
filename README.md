@@ -28,6 +28,17 @@
 - Per-session model, reasoning effort, and permission mode selection; image and file attachments
 - Cross-agent continuation: fork a session to a different agent and carry the context across
 
+### Channels — chat agents from IM
+
+- Connects external chat platforms to the same Sessio runtime used by the desktop UI
+- Supported channels include Telegram bots, Discord bots, Lark / Feishu long connections, and WeChat iLink bots
+- Each channel can choose its own default agent, model, reasoning effort, and workspace
+- Persists chat-to-agent session bindings so IM conversations can resume after app restart
+- Supports text, image, and file attachments where the platform allows it; outbound files are uploaded back to the chat
+- Telegram includes slash commands and inline menus for `/new`, `/agent`, `/model`, `/effort`, `/workspace`, `/cancel`, and `/end`
+- Permission requests are sent back to the IM channel with approve / deny actions when supported
+- Designed for local desktop use: Telegram, Discord, and Lark connect outward, so no public HTTP server is required
+
 ### Threads — multi-agent collaboration
 
 - Four thread kinds: `Workflow` (staged process templates), `Teamwork` (project assistants), `Brainstorm` (two or more participants), and `Debate` (exactly two participants)
@@ -72,6 +83,7 @@ App data lives under `~/.sessio`:
 
 - `~/.sessio/db-data/sessio-index.db` — SQLite index
 - `~/.sessio/config.toml` — memory / index / proxy / debug configuration
+- `~/.sessio/im-bridge.yaml` — Channels configuration for Telegram / Discord / Lark / WeChat
 - `~/.sessio/bin/sessio` — CLI symlink created on launch
 
 ## Agent Runtime
@@ -85,6 +97,8 @@ Live chats spawn agents as ACP subprocesses. Default commands:
 
 Agents can be enabled / disabled in Settings → Agents, where you can also edit each agent's model catalog, default model, reasoning effort, and permission mode. The orchestrator agent used by Astra is configured separately in the same settings section.
 
+Channels can be configured in Settings → Workflows → Channels. Sessio stores per-platform defaults and workspace allowlists in `~/.sessio/im-bridge.yaml`, while active chat bindings live in the local SQLite index. Because a channel can drive agents that run local tools, restrict allowed users / chats and workspaces before enabling it.
+
 ## Tech Stack
 
 - Frontend: `React 19` + `TypeScript` + `Vite` + `Tailwind CSS`
@@ -97,6 +111,7 @@ Backend modules:
 - `src-tauri/src/agents/sources` for parsing raw agent session files
 - `src-tauri/src/agents/runtime` for running live agent sessions over ACP
 - `src-tauri/src/astra` for the multi-agent orchestrator
+- `src-tauri/src/im_bridge` for Channels integrations and IM-to-runtime routing
 - `src-tauri/src/store` for local index storage
 - `src-tauri/src/indexer` for full rebuilds and incremental updates
 - `src-tauri/src/watch` for file watching
@@ -208,6 +223,7 @@ You can:
 - Fork a session to a different agent to continue the context there
 - Create a thread (workflow / teamwork / brainstorm / debate) and let Astra orchestrate it
 - Track workflow stages and issues from the thread page
+- Enable Channels to chat with local agents from Telegram, Discord, Lark, or WeChat
 - Jump to recent sessions and threads from the tray menu
 
 Sessio also runs as a CLI when invoked with arguments:
