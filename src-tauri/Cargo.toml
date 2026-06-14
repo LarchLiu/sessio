@@ -23,6 +23,7 @@ log = "0.4"
 anyhow = "1.0"
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
+croner = "2"
 dirs = "5.0"
 agent-client-protocol = { version = "0.14.0", features = ["unstable_session_fork"] }
 walkdir = "2.5"

@@ -99,6 +99,41 @@ export interface ImBridgeWorkspaceBinding {
   workspacePath: string;
 }
 
+// --- Scheduled ("auto") tasks ---
+
+export type ScheduleKind = "interval" | "daily" | "weekly" | "cron";
+
+export type Schedule =
+  | { kind: "interval"; everySecs: number }
+  | { kind: "daily"; hour: number; minute: number }
+  | { kind: "weekly"; weekday: number; hour: number; minute: number }
+  | { kind: "cron"; expr: string };
+
+export type TaskTargetKind = "local" | "im";
+
+export type TaskTarget =
+  | {
+      kind: "local";
+      workspacePath: string;
+      agent: Agent;
+      model: string | null;
+      effort: string | null;
+      permissionMode: string | null;
+    }
+  | { kind: "im"; platform: string; chatId: string };
+
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  enabled: boolean;
+  prompt: string;
+  schedule: Schedule;
+  target: TaskTarget;
+  createdAtMs: number;
+  updatedAtMs: number;
+  lastRunAtMs: number | null;
+}
+
 export interface TelegramBridgeConfig {
   enabled: boolean;
   agent: Agent | null;
@@ -1936,6 +1971,18 @@ export async function getImBridgeConfig(): Promise<ImBridgeConfig> {
 
 export async function updateImBridgeConfig(config: ImBridgeConfig): Promise<ImBridgeConfig> {
   return invoke<ImBridgeConfig>("update_im_bridge_config", { config });
+}
+
+export async function getScheduledTasks(): Promise<ScheduledTask[]> {
+  return invoke<ScheduledTask[]>("get_scheduled_tasks");
+}
+
+export async function saveScheduledTasks(tasks: ScheduledTask[]): Promise<ScheduledTask[]> {
+  return invoke<ScheduledTask[]>("save_scheduled_tasks", { tasks });
+}
+
+export async function runScheduledTaskNow(id: string): Promise<void> {
+  return invoke<void>("run_scheduled_task_now", { id });
 }
 
 export async function detectTelegramUserIds(botToken: string, apiBase: string | null): Promise<number[]> {

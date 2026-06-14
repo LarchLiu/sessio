@@ -25,13 +25,13 @@ pub use config::{
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use tauri::AppHandle;
 
 use crate::agents::runtime::RuntimeManager;
 use crate::store::SessionStore;
 
-use self::state::ImBridgeState;
+use self::state::{ChatKey, ImBridgeState};
 
 /// Owns the IM bridge background workers. Held in Tauri managed state so it
 /// lives for the duration of the app.
@@ -96,6 +96,31 @@ impl ImBridgeService {
     pub fn update_config(&self, config: ImBridgeConfig) {
         self.state.update_config(config);
         log::info!("[im-bridge] config updated");
+    }
+
+    /// Submit `text` to a chat as if it had arrived from the platform, lazily
+    /// opening a default session when the chat is unbound. The agent's output is
+    /// delivered asynchronously through the outbound pump to the platform sink,
+    /// so the platform listener for `platform` must be running. Used by the
+    /// scheduled-tasks worker to deliver auto-task prompts to a chat.
+    pub fn submit_prompt_to_chat(&self, platform: &str, chat_id: &str, text: &str) -> Result<()> {
+        let platform_tag: &'static str = match platform {
+            "telegram" => "telegram",
+            "discord" => "discord",
+            "feishu" => "feishu",
+            "wechat" => "wechat",
+            other => bail!("unknown IM platform: {other}"),
+        };
+        let key = ChatKey::new(platform_tag, chat_id.to_string());
+        let outcome = router::handle_message_with_attachments(&self.state, &key, text, Vec::new());
+        if let Some(reply) = outcome.reply {
+            if let Err(error) = self.state.send_to_chat(&key, &reply) {
+                log::warn!(
+                    "[im-bridge] failed to deliver scheduled-task notice to {platform} chat {chat_id}: {error:#}"
+                );
+            }
+        }
+        Ok(())
     }
 }
 

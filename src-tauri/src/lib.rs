@@ -8,6 +8,7 @@ pub mod memory;
 pub mod models;
 pub mod network;
 pub mod polling;
+pub mod scheduled_tasks;
 pub mod shell_env;
 pub mod store;
 pub mod turns;
@@ -586,7 +587,7 @@ fn runtime_transport_option(transport: agents::runtime::types::RuntimeTransportK
     .to_string()
 }
 
-fn hydrate_start_request_from_db(
+pub(crate) fn hydrate_start_request_from_db(
     req: &mut StartAgentSession,
     store: &Arc<dyn SessionStore>,
 ) -> anyhow::Result<()> {
@@ -2789,6 +2790,34 @@ fn update_im_bridge_config(
 }
 
 #[tauri::command]
+fn get_scheduled_tasks(
+    service: State<'_, scheduled_tasks::ScheduledTasksService>,
+) -> Result<Vec<scheduled_tasks::ScheduledTask>, String> {
+    Ok(service.list())
+}
+
+#[tauri::command]
+fn save_scheduled_tasks(
+    tasks: Vec<scheduled_tasks::ScheduledTask>,
+    service: State<'_, scheduled_tasks::ScheduledTasksService>,
+) -> Result<Vec<scheduled_tasks::ScheduledTask>, String> {
+    service
+        .save(scheduled_tasks::ScheduledTasksConfig { tasks })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn run_scheduled_task_now(
+    id: String,
+    service: State<'_, scheduled_tasks::ScheduledTasksService>,
+) -> Result<(), String> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.run_now(&id).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn detect_telegram_user_ids(
     bot_token: String,
     api_base: Option<String>,
@@ -3430,6 +3459,15 @@ pub fn run() {
             if let Err(error) = im_bridge_service.start() {
                 log::warn!("[im-bridge] failed to start: {error:#}");
             }
+            let scheduled_tasks_service = scheduled_tasks::ScheduledTasksService::new(
+                store.clone(),
+                runtime.clone(),
+                Some(im_bridge_service.clone()),
+            );
+            if let Err(error) = scheduled_tasks_service.start() {
+                log::warn!("[scheduled-tasks] failed to start: {error:#}");
+            }
+            app.manage(scheduled_tasks_service);
             app.manage(im_bridge_service);
             app.manage(pi_session_store);
             app.manage(astra_service);
@@ -3576,6 +3614,9 @@ pub fn run() {
             update_network_config,
             get_im_bridge_config,
             update_im_bridge_config,
+            get_scheduled_tasks,
+            save_scheduled_tasks,
+            run_scheduled_task_now,
             detect_telegram_user_ids,
             test_telegram_bot_connection,
             test_discord_bot_connection,

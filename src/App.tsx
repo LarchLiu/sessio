@@ -32,6 +32,7 @@ import AppSidebar from "./components/AppSidebar";
 import ToastStack from "./components/ToastStack";
 import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
+import AutoTasksPage from "./pages/AutoTasksPage";
 import { useAppData } from "./hooks/useAppData";
 import { usePendingNewChats } from "./hooks/usePendingNewChats";
 import { usePlanTaskRuntimeCompletion } from "./hooks/usePlanTaskRuntimeCompletion";
@@ -48,7 +49,7 @@ import {
   emptyLiveRuntimeState,
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
-import { Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
+import { CalendarClock, Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
 import type { DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
   isSubagentOnly,
@@ -111,6 +112,7 @@ export default function App() {
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [autoTasksOpen, setAutoTasksOpen] = useState(false);
   const [updateConfirmOpen, setUpdateConfirmOpen] = useState(false);
   const [updateConfirmMounted, setUpdateConfirmMounted] = useState(false);
   const [viewMode] = useState<ViewMode>(() => readViewMode());
@@ -641,6 +643,7 @@ export default function App() {
       update={update}
       onCloseSidebar={() => setSidebarOpen(false)}
       onNewChat={() => {
+        setAutoTasksOpen(false);
         setSelectedProject(null);
         setSelectedThread(null);
         setNewChatProjectKey(null);
@@ -649,6 +652,7 @@ export default function App() {
       }}
       onToggleProjectSection={() => setExpandProject((value) => !value)}
       onProjectAdded={(project) => {
+        setAutoTasksOpen(false);
         setProjects((prev) => [project, ...prev.filter((p) => p.id !== project.id)]);
         setSelectedProject({ kind: "project", projectId: project.id });
         setSelectedThread(null);
@@ -666,6 +670,7 @@ export default function App() {
         });
       }}
       onOpenKanban={(projectGroup) => {
+        setAutoTasksOpen(false);
         setSelected(null);
         setSelectedThread(null);
         setSelectedProject({ kind: "project", projectId: projectGroup.project.id });
@@ -674,6 +679,7 @@ export default function App() {
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
       }}
       onNewProjectChat={(projectGroup) => {
+        setAutoTasksOpen(false);
         setSelectedProject(null);
         setSelectedThread(null);
         setNewChatProjectKey(projectGroup.key);
@@ -682,6 +688,7 @@ export default function App() {
         setFilter({ kind: "project", key: projectFilterKey(projectGroup.project), label: projectGroup.label });
       }}
       onSelectSession={(projectGroup, session) => {
+        setAutoTasksOpen(false);
         setSelectedProject(null);
         setSelectedThread(null);
         setNewChatProjectKey(null);
@@ -690,6 +697,7 @@ export default function App() {
         setDetailMode("chat");
       }}
       onSelectThread={(projectGroup, thread, source) => {
+        setAutoTasksOpen(false);
         setSelected(null);
         setSelectedProject(null);
         setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id, goal: thread.goal });
@@ -716,6 +724,8 @@ export default function App() {
         void openSessionMenu(session, pos);
       }}
       onOpenSettings={() => setSettingsOpen(true)}
+      onOpenAutoTasks={() => setAutoTasksOpen(true)}
+      autoTasksActive={autoTasksOpen}
       onInstallUpdate={openUpdateConfirm}
       onError={setError}
     />
@@ -734,6 +744,22 @@ export default function App() {
       metaPopoverOpen={metaPopoverOpen}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => setMetaPopoverOpen((open) => !open)}
+    />
+  );
+
+  const autoTasksHeader = (
+    <AppHeader
+      isMac={IS_MAC}
+      sidebarOpen={sidebarOpen}
+      selected={null}
+      detailTitle=""
+      contextTitle={{ label: t("autoTasks.title"), icon: CalendarClock }}
+      entityTitle={null}
+      projectContext={null}
+      activeMessageMeta={null}
+      metaPopoverOpen={false}
+      onOpenSidebar={() => setSidebarOpen(true)}
+      onToggleMetaPopover={() => {}}
     />
   );
 
@@ -825,11 +851,14 @@ export default function App() {
     <div className="relative h-screen">
       <AppLayout
         sidebar={sidebar}
-        header={header}
+        header={autoTasksOpen ? autoTasksHeader : header}
         sidebarOpen={sidebarOpen}
         overlays={overlays}
       >
-        <AppMain
+        {autoTasksOpen ? (
+          <AutoTasksPage onError={setError} />
+        ) : (
+          <AppMain
           activeProject={activeProject ?? activeThreadProject}
           selectedThreadId={selectedThreadId}
           selected={selected}
@@ -861,6 +890,7 @@ export default function App() {
           onActiveMessageMeta={handleActiveMessageMeta}
           onError={setError}
         />
+        )}
       </AppLayout>
       <ToastStack message={error} onMessageConsumed={() => setError(null)} />
     </div>

@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { createPortal } from "react-dom";
 import {
   Brain,
+  CalendarClock,
   ChevronDown,
   CircleAlert,
   Download,
@@ -109,6 +110,8 @@ type AppSidebarProps = {
     pos: { x: number; y: number },
   ) => void;
   onOpenSettings: () => void;
+  onOpenAutoTasks: () => void;
+  autoTasksActive: boolean;
   onInstallUpdate: () => void;
   onError: (error: string | null) => void;
 };
@@ -142,6 +145,8 @@ export default function AppSidebar({
   onProjectContextMenu,
   onSessionContextMenu,
   onOpenSettings,
+  onOpenAutoTasks,
+  autoTasksActive,
   onInstallUpdate,
   onError,
 }: AppSidebarProps) {
@@ -185,13 +190,26 @@ export default function AppSidebar({
           onClick={onNewChat}
           className={
             "mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-body-sm font-medium transition " +
-            (!hasActiveSelection
+            (!hasActiveSelection && !autoTasksActive
               ? "bg-ink/10 text-ink"
               : "text-ink/72 hover:bg-ink/5 hover:text-ink")
           }
         >
           <SquarePen className="h-4 w-4 shrink-0" />
           <span className="truncate">{t("sidebar.new_chat")}</span>
+        </button>
+        <button
+          type="button"
+          onClick={onOpenAutoTasks}
+          className={
+            "mb-2 flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-body-sm font-medium transition " +
+            (autoTasksActive
+              ? "bg-ink/10 text-ink"
+              : "text-ink/72 hover:bg-ink/5 hover:text-ink")
+          }
+        >
+          <CalendarClock className="h-4 w-4 shrink-0" />
+          <span className="truncate">{t("sidebar.auto_tasks")}</span>
         </button>
         <div className="shrink-0 flex flex-col gap-0.5">
           <div className="flex items-center gap-1">
