@@ -31,6 +31,7 @@ const DEFAULT_API_BASE: &str = "https://discord.com/api/v10";
 const DEFAULT_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const DISCORD_TEXT_LIMIT: usize = 1900;
 const CALLBACK_PREFIX: &str = "sessio_perm:";
+const ACTION_CALLBACK_PREFIX: &str = "sessio:";
 
 const OP_DISPATCH: i64 = 0;
 const OP_HEARTBEAT: i64 = 1;
@@ -347,6 +348,22 @@ fn handle_message_create(
     let key = ChatKey::new(PLATFORM, channel_id.to_string());
     state.remember_channel_context(key.clone(), discord_channel_context(&message));
     let attachments = download_discord_attachments(state, sink, &key, &message);
+    if let Some(result) =
+        handle_interactive_command(state, sink, &key, &strip_bot_mention(sink, content))
+    {
+        match result {
+            Ok(()) => {}
+            Err(error) => {
+                if let Err(send_error) = sink.send_text(channel_id, &format!("⚠️ {error:#}")) {
+                    log::warn!(
+                        "[im-bridge:discord] failed to send interactive command error: {send_error:#}"
+                    );
+                }
+            }
+        }
+        record_message_activity(state, channel_id, snowflake_i64(&message.id));
+        return;
+    }
     let outcome = router::handle_message_with_attachments(
         state,
         &key,
@@ -430,6 +447,48 @@ fn handle_interaction_create(
     let Some(data) = interaction.data.as_ref() else {
         return;
     };
+    if let Some(action) = data
+        .custom_id
+        .as_deref()
+        .and_then(|value| value.strip_prefix(ACTION_CALLBACK_PREFIX))
+    {
+        let Some(message) = interaction.message.as_ref() else {
+            let _ =
+                sink.respond_interaction(&interaction.id, &interaction.token, "Missing message");
+            return;
+        };
+        let key = ChatKey::new(PLATFORM, message.channel_id.clone());
+        state.touch_chat(&key);
+        record_message_activity(state, &message.channel_id, snowflake_i64(&message.id));
+        match router::handle_action_callback(state, &key, action) {
+            Ok(reply) => {
+                let _ = sink.respond_interaction(&interaction.id, &interaction.token, &reply);
+                if let Err(error) = sink.delete_message(&message.channel_id, &message.id) {
+                    log::debug!(
+                        "[im-bridge:discord] failed to delete action menu; falling back to edit: {error:#}"
+                    );
+                    if let Err(edit_error) =
+                        sink.edit_message(&message.channel_id, &message.id, &reply, Some(json!([])))
+                    {
+                        log::debug!(
+                            "[im-bridge:discord] failed to clear action menu: {edit_error:#}"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = sink.respond_interaction(&interaction.id, &interaction.token, "Failed");
+                if let Err(send_error) =
+                    sink.send_text(&message.channel_id, &format!("⚠️ {error:#}"))
+                {
+                    log::warn!(
+                        "[im-bridge:discord] failed to send action callback error: {send_error:#}"
+                    );
+                }
+            }
+        }
+        return;
+    }
     let Some(token) = data
         .custom_id
         .as_deref()
@@ -470,6 +529,26 @@ fn handle_interaction_create(
             log::warn!("[im-bridge:discord] permission response failed: {error:#}");
         }
     }
+}
+
+fn handle_interactive_command(
+    state: &Arc<ImBridgeState>,
+    sink: &Arc<DiscordSink>,
+    key: &ChatKey,
+    text: &str,
+) -> Option<Result<()>> {
+    router::interactive_action_menu(state, key, text).map(|menu| {
+        let menu = menu?;
+        send_action_menu(sink, key, &menu)
+    })
+}
+
+fn send_action_menu(
+    sink: &Arc<DiscordSink>,
+    key: &ChatKey,
+    menu: &router::ActionMenu,
+) -> Result<()> {
+    sink.send_message(&key.chat_id, &menu.text, discord_action_components(menu))
 }
 
 fn is_allowed(config: &DiscordConfig, message: &DiscordMessage) -> bool {
@@ -906,23 +985,53 @@ fn format_permission_outcome(outcome: PermissionResolutionOutcome<'_>) -> String
 }
 
 fn permission_components(request: &ChatPermissionRequest) -> Option<Value> {
-    let buttons = request
-        .options
-        .iter()
-        .map(|option| {
-            json!({
-                "type": 2,
-                "style": 2,
-                "label": option.label,
-                "custom_id": format!("{}{}", CALLBACK_PREFIX, option.token),
+    discord_button_components(
+        request
+            .options
+            .iter()
+            .map(|option| {
+                json!({
+                    "type": 2,
+                    "style": 2,
+                    "label": option.label,
+                    "custom_id": format!("{}{}", CALLBACK_PREFIX, option.token),
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect(),
+    )
+}
+
+fn discord_action_components(menu: &router::ActionMenu) -> Option<Value> {
+    discord_button_components(
+        menu.choices
+            .iter()
+            .map(|choice| {
+                json!({
+                    "type": 2,
+                    "style": 2,
+                    "label": choice.label,
+                    "custom_id": format!("{}{}", ACTION_CALLBACK_PREFIX, choice.action),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn discord_button_components(buttons: Vec<Value>) -> Option<Value> {
     if buttons.is_empty() {
-        None
-    } else {
-        Some(json!([{ "type": 1, "components": buttons }]))
+        return None;
     }
+    Some(Value::Array(
+        buttons
+            .chunks(5)
+            .map(|chunk| {
+                json!({
+                    "type": 1,
+                    "components": chunk,
+                })
+            })
+            .collect(),
+    ))
 }
 
 fn split_discord_text(text: &str) -> Vec<String> {
@@ -998,7 +1107,16 @@ struct DiscordInteraction {
     id: String,
     token: String,
     #[serde(default)]
+    message: Option<DiscordInteractionMessage>,
+    #[serde(default)]
     data: Option<DiscordInteractionData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordInteractionMessage {
+    id: String,
+    #[serde(rename = "channel_id")]
+    channel_id: String,
 }
 
 #[derive(Debug, Deserialize)]

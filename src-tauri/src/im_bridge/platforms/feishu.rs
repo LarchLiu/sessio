@@ -34,6 +34,7 @@ const PLATFORM: &str = "feishu";
 const DEFAULT_DOMAIN: &str = "https://open.feishu.cn";
 const FEISHU_TEXT_LIMIT: usize = 8000;
 const CALLBACK_PREFIX: &str = "sessio_perm:";
+const ACTION_CALLBACK_PREFIX: &str = "sessio:";
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(120);
 
 const FRAME_CONTROL: i32 = 0;
@@ -368,6 +369,20 @@ fn handle_feishu_payload(
         key.clone(),
         feishu_channel_context(message, sender, open_id.as_deref(), user_id.as_deref()),
     );
+    if let Some(result) = handle_interactive_command(state, sink, &key, &trimmed_text) {
+        match result {
+            Ok(()) => {}
+            Err(error) => {
+                if let Err(send_error) = sink.send_text(&chat_id, &format!("⚠️ {error:#}")) {
+                    log::warn!(
+                        "[im-bridge:feishu] failed to send interactive command error: {send_error:#}"
+                    );
+                }
+            }
+        }
+        record_message_activity(state, &chat_id);
+        return Ok(());
+    }
     let attachments = if attachment_refs.is_empty() {
         Vec::new()
     } else if let Some(message_id) = message_id.as_deref() {
@@ -544,7 +559,7 @@ fn extract_post_text(value: &Value) -> Option<String> {
 
 fn handle_card_callback(
     state: &Arc<ImBridgeState>,
-    _sink: &Arc<FeishuSink>,
+    sink: &Arc<FeishuSink>,
     value: Value,
 ) -> Result<()> {
     let action_value = value
@@ -553,18 +568,6 @@ fn handle_card_callback(
         .and_then(|action| action.get("value"))
         .or_else(|| value.get("action").and_then(|action| action.get("value")))
         .or_else(|| value.get("value"));
-    let Some(token) = action_value
-        .and_then(|value| {
-            value
-                .get("token")
-                .or_else(|| value.get("permissionToken"))
-                .or_else(|| value.get("permission_token"))
-        })
-        .and_then(Value::as_str)
-        .and_then(|value| value.strip_prefix(CALLBACK_PREFIX))
-    else {
-        return Ok(());
-    };
 
     let chat_id = value
         .get("event")
@@ -577,6 +580,50 @@ fn handle_card_callback(
                 .or_else(|| value.get("chat_id"))
                 .and_then(Value::as_str)
         });
+
+    if let Some(action) = action_value
+        .and_then(|value| value.get("action"))
+        .and_then(Value::as_str)
+        .and_then(|value| value.strip_prefix(ACTION_CALLBACK_PREFIX))
+    {
+        let Some(chat_id) = chat_id else {
+            return Ok(());
+        };
+        let key = ChatKey::new(PLATFORM, chat_id.to_string());
+        state.touch_chat(&key);
+        record_message_activity(state, chat_id);
+        match router::handle_action_callback(state, &key, action) {
+            Ok(reply) => {
+                if let Some(message_id) = feishu_callback_message_id(&value) {
+                    if let Err(error) = sink.delete_message(&message_id) {
+                        log::debug!("[im-bridge:feishu] failed to delete action menu: {error:#}");
+                    }
+                }
+                log::debug!("[im-bridge:feishu] action callback recorded: {reply}");
+            }
+            Err(error) => {
+                if let Err(send_error) = sink.send_text(chat_id, &format!("⚠️ {error:#}")) {
+                    log::warn!(
+                        "[im-bridge:feishu] failed to send action callback error: {send_error:#}"
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    let Some(token) = action_value
+        .and_then(|value| {
+            value
+                .get("token")
+                .or_else(|| value.get("permissionToken"))
+                .or_else(|| value.get("permission_token"))
+        })
+        .and_then(Value::as_str)
+        .and_then(|value| value.strip_prefix(CALLBACK_PREFIX))
+    else {
+        return Ok(());
+    };
 
     let Some(decision) = state.take_permission_token(token) else {
         return Ok(());
@@ -597,6 +644,31 @@ fn handle_card_callback(
         }
     }
     Ok(())
+}
+
+fn feishu_callback_message_id(value: &Value) -> Option<String> {
+    value
+        .get("event")
+        .and_then(|event| event.get("context"))
+        .and_then(|context| string_field(context, &["message_id", "messageId"]))
+        .or_else(|| {
+            value
+                .get("event")
+                .and_then(|event| string_field(event, &["message_id", "messageId"]))
+        })
+        .or_else(|| string_field(value, &["message_id", "messageId"]))
+}
+
+fn handle_interactive_command(
+    state: &Arc<ImBridgeState>,
+    sink: &Arc<FeishuSink>,
+    key: &ChatKey,
+    text: &str,
+) -> Option<Result<()>> {
+    router::interactive_action_menu(state, key, text).map(|menu| {
+        let menu = menu?;
+        sink.send_action_menu(&key.chat_id, &menu).map(|_| ())
+    })
 }
 
 fn feishu_channel_context(
@@ -936,6 +1008,51 @@ impl FeishuSink {
             );
         }
         Ok(())
+    }
+
+    fn send_action_menu(&self, chat_id: &str, menu: &router::ActionMenu) -> Result<Option<String>> {
+        let actions = menu
+            .choices
+            .iter()
+            .map(|choice| {
+                json!({
+                    "tag": "button",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": choice.label,
+                    },
+                    "type": "default",
+                    "value": {
+                        "action": format!("{}{}", ACTION_CALLBACK_PREFIX, choice.action),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = json!({
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": serde_json::to_string(&json!({
+                "config": { "wide_screen_mode": true },
+                "header": {
+                    "template": "blue",
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "Sessio",
+                    },
+                },
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": menu.text,
+                    },
+                    {
+                        "tag": "action",
+                        "actions": actions,
+                    }
+                ],
+            }))?,
+        });
+        self.send_message(chat_id, &body)
     }
 
     /// Download the file/image attached to an inbound message. `resource_type`

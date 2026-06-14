@@ -9,7 +9,6 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::agents::runtime::types::AgentAttachmentKind;
-use crate::models::{Agent, AgentInfo, RuntimeAgentOptionMetadata};
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::{multipart, Client, ClientBuilder};
 use serde::Deserialize;
@@ -335,261 +334,34 @@ fn handle_interactive_command(
     key: &ChatKey,
     text: &str,
 ) -> Option<Result<()>> {
-    let trimmed = text.trim();
-    let command_text = trimmed.strip_prefix('/')?;
-    let mut parts = command_text.splitn(2, char::is_whitespace);
-    let command = parts
-        .next()
-        .unwrap_or("")
-        .split('@')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let arg = parts.next().map(str::trim).unwrap_or("");
-    let result = match command.as_str() {
-        "agent" if arg.is_empty() => send_agent_menu(state, sink, key),
-        "model" => send_model_menu(state, sink, key),
-        "effort" => send_effort_menu(state, sink, key),
-        "workspace" => send_workspace_menu(state, sink, key),
-        _ => return None,
-    };
-    Some(result)
+    router::interactive_action_menu(state, key, text).map(|menu| {
+        let menu = menu?;
+        send_action_menu(sink, key, &menu)
+    })
 }
 
-fn send_agent_menu(
-    state: &Arc<ImBridgeState>,
+fn send_action_menu(
     sink: &Arc<TelegramSink>,
     key: &ChatKey,
+    menu: &router::ActionMenu,
 ) -> Result<()> {
-    let agents = available_agents(state)?;
-    if agents.is_empty() {
-        bail!("no agents configured");
-    }
-    let rows = agents
-        .into_iter()
-        .filter_map(|agent_info| {
-            let agent = Agent::from_db_str(&agent_info.id)?;
-            Some(vec![json!({
-                "text": agent_info.display_name,
-                "callback_data": format!("{ACTION_CALLBACK_PREFIX}agent:{}", agent.as_str()),
-            })])
-        })
-        .collect::<Vec<_>>();
-    sink.send_message(
-        &key.chat_id,
-        "选择 agent。切换到不同 agent 会开启新会话；选择当前 agent 不会新建。",
-        Some(json!({ "inline_keyboard": rows })),
-        None,
-        None,
-    )
-}
-
-fn send_model_menu(
-    state: &Arc<ImBridgeState>,
-    sink: &Arc<TelegramSink>,
-    key: &ChatKey,
-) -> Result<()> {
-    let session = router::ensure_chat_session(state, key)?;
-    let agent_info = agent_info(state, session.agent)?;
-    let choices = option_choices(&agent_info.models, agent_info.model.as_deref());
-    if choices.is_empty() {
-        bail!("{} has no model options", agent_info.display_name);
-    }
-    let rows = choices
+    let rows = menu
+        .choices
         .iter()
-        .enumerate()
-        .map(|(index, choice)| {
+        .map(|choice| {
             vec![json!({
                 "text": choice.label,
-                "callback_data": format!(
-                    "{ACTION_CALLBACK_PREFIX}model:{}:{index}",
-                    session.agent.as_str()
-                ),
+                "callback_data": format!("{ACTION_CALLBACK_PREFIX}{}", choice.action),
             })]
         })
         .collect::<Vec<_>>();
     sink.send_message(
         &key.chat_id,
-        &format!(
-            "选择 {} 的 model。不会新建 session。",
-            agent_info.display_name
-        ),
+        &menu.text,
         Some(json!({ "inline_keyboard": rows })),
         None,
         None,
     )
-}
-
-fn send_effort_menu(
-    state: &Arc<ImBridgeState>,
-    sink: &Arc<TelegramSink>,
-    key: &ChatKey,
-) -> Result<()> {
-    let session = router::ensure_chat_session(state, key)?;
-    let agent_info = agent_info(state, session.agent)?;
-    let choices = option_choices(&agent_info.efforts, agent_info.effort.as_deref());
-    if choices.is_empty() {
-        bail!("{} has no effort options", agent_info.display_name);
-    }
-    let rows = choices
-        .iter()
-        .enumerate()
-        .map(|(index, choice)| {
-            vec![json!({
-                "text": choice.label,
-                "callback_data": format!(
-                    "{ACTION_CALLBACK_PREFIX}effort:{}:{index}",
-                    session.agent.as_str()
-                ),
-            })]
-        })
-        .collect::<Vec<_>>();
-    sink.send_message(
-        &key.chat_id,
-        &format!(
-            "选择 {} 的 effort。不会新建 session。",
-            agent_info.display_name
-        ),
-        Some(json!({ "inline_keyboard": rows })),
-        None,
-        None,
-    )
-}
-
-fn send_workspace_menu(
-    state: &Arc<ImBridgeState>,
-    sink: &Arc<TelegramSink>,
-    key: &ChatKey,
-) -> Result<()> {
-    let choices = workspace_choices(state, key);
-    if choices.is_empty() {
-        bail!("no allowed workspaces configured");
-    }
-    let rows = choices
-        .iter()
-        .enumerate()
-        .map(|(index, choice)| {
-            vec![json!({
-                "text": choice.label,
-                "callback_data": format!("{ACTION_CALLBACK_PREFIX}workspace:{index}"),
-            })]
-        })
-        .collect::<Vec<_>>();
-    sink.send_message(
-        &key.chat_id,
-        "选择当前会话的 workspace。会开启同 agent 的新 runtime session，不会修改默认 workspace。",
-        Some(json!({ "inline_keyboard": rows })),
-        None,
-        None,
-    )
-}
-
-fn available_agents(state: &Arc<ImBridgeState>) -> Result<Vec<AgentInfo>> {
-    Ok(state
-        .store
-        .list_agents()?
-        .into_iter()
-        .filter(|agent| agent.enabled && Agent::from_db_str(&agent.id).is_some())
-        .collect())
-}
-
-fn agent_info(state: &Arc<ImBridgeState>, agent: Agent) -> Result<AgentInfo> {
-    state
-        .store
-        .list_agents()?
-        .into_iter()
-        .find(|agent_info| agent_info.id == agent.as_str())
-        .with_context(|| format!("agent not configured: {}", agent.as_str()))
-}
-
-#[derive(Debug, Clone)]
-struct OptionChoice {
-    value: String,
-    label: String,
-}
-
-fn option_choices(
-    options: &[RuntimeAgentOptionMetadata],
-    fallback: Option<&str>,
-) -> Vec<OptionChoice> {
-    let mut choices = options
-        .iter()
-        .filter(|option| option.enabled)
-        .map(|option| OptionChoice {
-            value: option.value.clone(),
-            label: if option.display_name.trim().is_empty() {
-                option.label.clone()
-            } else {
-                option.display_name.clone()
-            },
-        })
-        .collect::<Vec<_>>();
-    if choices.is_empty() {
-        if let Some(value) = fallback.map(str::trim).filter(|value| !value.is_empty()) {
-            choices.push(OptionChoice {
-                value: value.to_string(),
-                label: value.to_string(),
-            });
-        }
-    }
-    choices
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceChoice {
-    path: String,
-    label: String,
-}
-
-fn workspace_choices(state: &Arc<ImBridgeState>, key: &ChatKey) -> Vec<WorkspaceChoice> {
-    let config = state.config_snapshot();
-    let Some(telegram) = config.telegram.as_ref() else {
-        return Vec::new();
-    };
-    let projects = state.store.list_projects().unwrap_or_default();
-    let mut paths = Vec::<String>::new();
-    if let Some(workspace) = telegram.default_workspace() {
-        push_unique(&mut paths, workspace);
-    }
-    for workspace in &telegram.allowed_workspaces {
-        push_unique(&mut paths, workspace);
-    }
-    for binding in &telegram.workspace_bindings {
-        if binding.platform == key.platform && binding.chat_id.trim() == key.chat_id {
-            push_unique(&mut paths, &binding.workspace_path);
-        }
-    }
-    if let Some(session) = state.chat_session(key) {
-        push_unique(&mut paths, &session.workspace_path);
-    }
-    paths
-        .into_iter()
-        .filter(|path| config.is_workspace_allowed(key.platform, path))
-        .map(|path| {
-            let label = projects
-                .iter()
-                .find(|project| project.path == path)
-                .map(|project| project.name.clone())
-                .unwrap_or_else(|| workspace_label(&path));
-            WorkspaceChoice { path, label }
-        })
-        .collect()
-}
-
-fn push_unique(values: &mut Vec<String>, value: &str) {
-    let value = value.trim();
-    if !value.is_empty() && !values.iter().any(|existing| existing == value) {
-        values.push(value.to_string());
-    }
-}
-
-fn workspace_label(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| path.to_string())
 }
 
 fn telegram_channel_context(
@@ -705,18 +477,31 @@ fn handle_callback(
         return;
     };
     if let Some(action) = data.strip_prefix(ACTION_CALLBACK_PREFIX) {
-        let chat_id = callback
-            .message
-            .as_ref()
-            .map(|message| message.chat.id.to_string());
-        match chat_id {
-            Some(chat_id) => {
+        match callback.message.as_ref() {
+            Some(message) => {
+                let chat_id = message.chat.id.to_string();
                 let key = ChatKey::new(PLATFORM, chat_id.clone());
                 state.touch_chat(&key);
                 record_chat_activity(state, &chat_id);
-                match handle_action_callback(state, &chat_id, action) {
-                    Ok(message) => {
-                        let _ = sink.answer_callback_query(&callback.id, &message);
+                match router::handle_action_callback(state, &key, action) {
+                    Ok(reply) => {
+                        let _ = sink.answer_callback_query(&callback.id, &reply);
+                        if let Err(error) = sink.delete_message(&chat_id, message.message_id) {
+                            log::debug!(
+                                "[im-bridge:telegram] failed to delete action menu; falling back to edit: {error:#}"
+                            );
+                            if let Err(edit_error) = sink.edit_message_text(
+                                &chat_id,
+                                message.message_id,
+                                &reply,
+                                None,
+                                None,
+                            ) {
+                                log::debug!(
+                                    "[im-bridge:telegram] failed to clear action menu: {edit_error:#}"
+                                );
+                            }
+                        }
                     }
                     Err(error) => {
                         let _ = sink.answer_callback_query(&callback.id, "Failed");
@@ -772,93 +557,6 @@ fn record_chat_activity(state: &Arc<ImBridgeState>, chat_id: &str) {
             .update_channel_session_activity(PLATFORM, chat_id, None, now_ms())
     {
         log::warn!("[im-bridge:telegram] failed to record chat activity: {error:#}");
-    }
-}
-
-fn handle_action_callback(
-    state: &Arc<ImBridgeState>,
-    chat_id: &str,
-    action: &str,
-) -> Result<String> {
-    let key = ChatKey::new(PLATFORM, chat_id.to_string());
-    let mut parts = action.split(':');
-    match parts.next().unwrap_or("") {
-        "agent" => {
-            let agent = parts.next().context("missing agent")?;
-            router::switch_agent(state, &key, agent)?;
-            Ok(format!("Agent: {agent}"))
-        }
-        "model" => {
-            let agent = parse_action_agent(parts.next())?;
-            let index = parse_action_index(parts.next())?;
-            ensure_current_agent(state, &key, agent)?;
-            let agent_info = agent_info(state, agent)?;
-            let choices = option_choices(&agent_info.models, agent_info.model.as_deref());
-            let choice = choices
-                .get(index)
-                .with_context(|| "model menu expired; open /model again")?;
-            router::set_session_config_option(
-                state,
-                &key,
-                "model",
-                serde_json::Value::String(choice.value.clone()),
-            )?;
-            Ok(format!("Model: {}", choice.label))
-        }
-        "effort" => {
-            let agent = parse_action_agent(parts.next())?;
-            let index = parse_action_index(parts.next())?;
-            ensure_current_agent(state, &key, agent)?;
-            let agent_info = agent_info(state, agent)?;
-            let choices = option_choices(&agent_info.efforts, agent_info.effort.as_deref());
-            let choice = choices
-                .get(index)
-                .with_context(|| "effort menu expired; open /effort again")?;
-            router::set_session_config_option(
-                state,
-                &key,
-                effort_config_id(agent),
-                serde_json::Value::String(choice.value.clone()),
-            )?;
-            Ok(format!("Effort: {}", choice.label))
-        }
-        "workspace" => {
-            let index = parse_action_index(parts.next())?;
-            let choices = workspace_choices(state, &key);
-            let choice = choices
-                .get(index)
-                .with_context(|| "workspace menu expired; open /workspace again")?;
-            router::start_new_session(state, &key, Some(&choice.path))?;
-            Ok(format!("Workspace: {}", choice.label))
-        }
-        other => bail!("unknown action: {other}"),
-    }
-}
-
-fn parse_action_agent(value: Option<&str>) -> Result<Agent> {
-    let value = value.context("missing agent")?;
-    Agent::from_db_str(value).with_context(|| format!("unknown agent: {value}"))
-}
-
-fn parse_action_index(value: Option<&str>) -> Result<usize> {
-    value
-        .context("missing index")?
-        .parse::<usize>()
-        .context("invalid index")
-}
-
-fn ensure_current_agent(state: &Arc<ImBridgeState>, key: &ChatKey, agent: Agent) -> Result<()> {
-    let session = router::ensure_chat_session(state, key)?;
-    if session.agent != agent {
-        bail!("agent changed; open the menu again");
-    }
-    Ok(())
-}
-
-fn effort_config_id(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Codex => "reasoning_effort",
-        Agent::AstraPi | Agent::Claude | Agent::Gemini => "effort",
     }
 }
 
@@ -1757,6 +1455,7 @@ struct TelegramCallbackQuery {
 
 #[derive(Debug, Deserialize)]
 struct TelegramCallbackMessage {
+    message_id: i64,
     chat: TelegramChat,
 }
 
