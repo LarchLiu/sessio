@@ -159,11 +159,11 @@ impl SchedulerState {
             if fire_at > now {
                 continue;
             }
-            self.run(&task, now);
+            self.run(&task, now, fire_at);
         }
     }
 
-    fn run(&self, task: &ScheduledTask, now: i64) {
+    fn run(&self, task: &ScheduledTask, now: i64, scheduled_for_ms: i64) {
         if task_has_running_run(task) {
             log::info!(
                 "[scheduled-tasks] skipped task {} ({}) because a previous run is still active",
@@ -180,7 +180,7 @@ impl SchedulerState {
                     &outcome,
                     now,
                     ScheduledTaskRunTrigger::Scheduled,
-                    Some(now),
+                    Some(scheduled_for_ms),
                 );
                 self.mark_ran(&task.id, now);
             }

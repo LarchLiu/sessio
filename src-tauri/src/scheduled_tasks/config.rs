@@ -286,6 +286,7 @@ pub struct ImPushTarget {
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum TaskTarget {
     Chat {
+        #[serde(rename = "projectId", alias = "project_id")]
         project_id: String,
         #[serde(default)]
         prompt: String,
@@ -294,49 +295,53 @@ pub enum TaskTarget {
         model: Option<String>,
         #[serde(default)]
         effort: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "permissionMode", alias = "permission_mode")]
         permission_mode: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "imPush", alias = "im_push")]
         im_push: Option<ImPushTarget>,
     },
     Process {
+        #[serde(rename = "projectId", alias = "project_id")]
         project_id: String,
         goal: String,
         #[serde(default)]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "stageIds", alias = "stage_ids")]
         stage_ids: Vec<String>,
-        #[serde(default)]
+        #[serde(default, rename = "imPush", alias = "im_push")]
         im_push: Option<ImPushTarget>,
     },
     Teamwork {
+        #[serde(rename = "projectId", alias = "project_id")]
         project_id: String,
         goal: String,
         #[serde(default)]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "assistantIds", alias = "assistant_ids")]
         assistant_ids: Vec<String>,
-        #[serde(default)]
+        #[serde(default, rename = "imPush", alias = "im_push")]
         im_push: Option<ImPushTarget>,
     },
     Brainstorm {
+        #[serde(rename = "projectId", alias = "project_id")]
         project_id: String,
         goal: String,
         #[serde(default)]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "agentParticipants", alias = "agent_participants")]
         agent_participants: Vec<ThreadAgentInfo>,
-        #[serde(default)]
+        #[serde(default, rename = "imPush", alias = "im_push")]
         im_push: Option<ImPushTarget>,
     },
     Debate {
+        #[serde(rename = "projectId", alias = "project_id")]
         project_id: String,
         goal: String,
         #[serde(default)]
         description: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "agentParticipants", alias = "agent_participants")]
         agent_participants: Vec<ThreadAgentInfo>,
-        #[serde(default)]
+        #[serde(default, rename = "imPush", alias = "im_push")]
         im_push: Option<ImPushTarget>,
     },
 }
@@ -671,5 +676,58 @@ mod tests {
             im_push: None,
         };
         assert!(validate_config(&ScheduledTasksConfig { tasks: vec![task] }).is_err());
+    }
+
+    #[test]
+    fn task_target_deserializes_frontend_camel_case_fields() {
+        let target = serde_json::from_value::<TaskTarget>(serde_json::json!({
+            "mode": "chat",
+            "projectId": "project-test",
+            "prompt": "Do the thing",
+            "agent": "codex",
+            "model": "gpt-5",
+            "effort": "medium",
+            "permissionMode": "workspace-write",
+            "imPush": {
+                "enabled": true,
+                "platform": "telegram",
+                "chatId": "123456"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            target,
+            TaskTarget::Chat {
+                project_id: "project-test".to_string(),
+                prompt: "Do the thing".to_string(),
+                agent: Agent::Codex,
+                model: Some("gpt-5".to_string()),
+                effort: Some("medium".to_string()),
+                permission_mode: Some("workspace-write".to_string()),
+                im_push: Some(ImPushTarget {
+                    enabled: true,
+                    platform: "telegram".to_string(),
+                    chat_id: "123456".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn task_target_serializes_variant_fields_as_camel_case() {
+        let value = serde_json::to_value(TaskTarget::Process {
+            project_id: "project-test".to_string(),
+            goal: "Ship it".to_string(),
+            description: Some("Run the release workflow".to_string()),
+            stage_ids: vec!["stage-a".to_string(), "stage-b".to_string()],
+            im_push: None,
+        })
+        .unwrap();
+
+        assert_eq!(value.get("projectId").and_then(serde_json::Value::as_str), Some("project-test"));
+        assert_eq!(value.get("stageIds").and_then(serde_json::Value::as_array).map(Vec::len), Some(2));
+        assert!(value.get("project_id").is_none());
+        assert!(value.get("stage_ids").is_none());
     }
 }

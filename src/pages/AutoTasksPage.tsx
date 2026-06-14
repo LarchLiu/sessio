@@ -8,6 +8,8 @@ import {
   type AgentInfo,
   type AssistantInfo,
   type AssistantAgentInfo,
+  type ChannelSessionInfo,
+  type ImBridgeConfig,
   type ProjectInfo,
   type ProjectStageInfo,
   type RuntimeAgentMetadata,
@@ -21,8 +23,10 @@ import {
   type ThreadAgentInfo,
   forceUnlockScheduledTask,
   getScheduledTasks,
+  getImBridgeConfig,
   listAgents,
   listAssistants,
+  listChannelSessions,
   listProjectStages,
   listProjects,
   runScheduledTaskNow,
@@ -61,6 +65,97 @@ const PLATFORM_META: {
 ];
 
 type ScheduleKind = Schedule["kind"];
+type PushChannelChoice = { platform: string; chatId: string; label: string; value: string; icon?: ReactNode };
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+function platformDisplayLabel(
+  platform: string,
+  t: Translate,
+): string {
+  const meta = PLATFORM_META.find((item) => item.value === platform);
+  if (!meta) return platform;
+  return meta.labelKey ? t(meta.labelKey) : meta.label;
+}
+
+function pushChannelValue(platform: string, chatId: string): string {
+  return JSON.stringify({ platform, chatId });
+}
+
+function parsePushChannelValue(value: string): { platform: string; chatId: string } | null {
+  try {
+    const parsed = JSON.parse(value) as { platform?: unknown; chatId?: unknown };
+    if (typeof parsed.platform !== "string" || typeof parsed.chatId !== "string") return null;
+    return { platform: parsed.platform, chatId: parsed.chatId };
+  } catch {
+    return null;
+  }
+}
+
+function buildPushChannelChoices(
+  config: ImBridgeConfig | null,
+  channelSessions: ChannelSessionInfo[],
+  t: Translate,
+): PushChannelChoice[] {
+  const choices = new Map<string, { platform: string; chatId: string; displayName: string | null; updatedAt: number }>();
+  const addChoice = (platform: string, chatId: string, displayName: string | null = null, updatedAt = 0) => {
+    const normalizedChatId = chatId.trim();
+    if (!normalizedChatId) return;
+    const key = `${platform}:${normalizedChatId}`;
+    const existing = choices.get(key);
+    if (!existing) {
+      choices.set(key, { platform, chatId: normalizedChatId, displayName, updatedAt });
+      return;
+    }
+    choices.set(key, {
+      platform,
+      chatId: normalizedChatId,
+      displayName: existing.displayName || displayName,
+      updatedAt: Math.max(existing.updatedAt, updatedAt),
+    });
+  };
+
+  if (config?.telegram?.enabled) {
+    config.telegram.allowedUserIds.forEach((userId) => addChoice("telegram", String(userId)));
+    config.telegram.workspaceBindings.forEach((binding) => addChoice("telegram", binding.chatId));
+  }
+  if (config?.discord?.enabled) {
+    config.discord.allowedChannelIds.forEach((channelId) => addChoice("discord", channelId));
+    config.discord.workspaceBindings.forEach((binding) => addChoice("discord", binding.chatId));
+  }
+  if (config?.feishu?.enabled) {
+    config.feishu.workspaceBindings.forEach((binding) => addChoice("feishu", binding.chatId));
+  }
+  if (config?.wechat?.enabled) {
+    config.wechat.workspaceBindings.forEach((binding) => addChoice("wechat", binding.chatId));
+  }
+
+  const enabledPlatforms = new Set(
+    [
+      config?.telegram?.enabled ? "telegram" : null,
+      config?.discord?.enabled ? "discord" : null,
+      config?.feishu?.enabled ? "feishu" : null,
+      config?.wechat?.enabled ? "wechat" : null,
+    ].filter((value): value is string => Boolean(value)),
+  );
+  channelSessions
+    .filter((session) => session.endedAt === null && enabledPlatforms.has(session.platform))
+    .forEach((session) => addChoice(session.platform, session.channelId, session.displayName, session.lastActivityAt));
+
+  return Array.from(choices.values())
+    .sort((a, b) => b.updatedAt - a.updatedAt || a.platform.localeCompare(b.platform) || a.chatId.localeCompare(b.chatId))
+    .map((choice) => {
+      const meta = PLATFORM_META.find((item) => item.value === choice.platform);
+      const platformLabel = platformDisplayLabel(choice.platform, t);
+      const labelBase = choice.displayName?.trim() || choice.chatId;
+      return {
+        platform: choice.platform,
+        chatId: choice.chatId,
+        label: `${labelBase} · ${platformLabel}`,
+        value: pushChannelValue(choice.platform, choice.chatId),
+        icon: meta ? <meta.Icon className="h-3.5 w-3.5" /> : undefined,
+      };
+    });
+}
 
 function defaultSchedule(kind: ScheduleKind): Schedule {
   switch (kind) {
@@ -137,6 +232,8 @@ export default function AutoTasksPage({ onError }: { onError: (error: string | n
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [imBridgeConfig, setImBridgeConfig] = useState<ImBridgeConfig | null>(null);
+  const [channelSessions, setChannelSessions] = useState<ChannelSessionInfo[]>([]);
   const [draft, setDraft] = useState<ScheduledTask | null>(null);
   const [busy, setBusy] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => monthStart(new Date()));
@@ -144,14 +241,18 @@ export default function AutoTasksPage({ onError }: { onError: (error: string | n
 
   const load = async () => {
     try {
-      const [taskList, projectList, agentList] = await Promise.all([
+      const [taskList, projectList, agentList, nextImBridgeConfig, nextChannelSessions] = await Promise.all([
         getScheduledTasks(),
         listProjects(),
         listAgents(),
+        getImBridgeConfig(),
+        listChannelSessions(),
       ]);
       setTasks(taskList);
       setProjects(projectList);
       setAgents(agentList);
+      setImBridgeConfig(nextImBridgeConfig);
+      setChannelSessions(nextChannelSessions);
     } catch (error) {
       onError(String(error));
     }
@@ -173,6 +274,10 @@ export default function AutoTasksPage({ onError }: { onError: (error: string | n
   const selectedDaySlots = useMemo(
     () => scheduledTaskSlotsForDay(selectedCalendarDate, tasks),
     [selectedCalendarDate, tasks],
+  );
+  const pushChannelChoices = useMemo(
+    () => buildPushChannelChoices(imBridgeConfig, channelSessions, t),
+    [channelSessions, imBridgeConfig, t],
   );
 
   const projectName = (projectId: string): string =>
@@ -384,6 +489,7 @@ export default function AutoTasksPage({ onError }: { onError: (error: string | n
               weekdayNames={weekdayNames}
               projects={projects}
               agents={agents}
+              pushChannelChoices={pushChannelChoices}
               onError={onError}
             />
           )}
@@ -484,6 +590,7 @@ function TaskEditor({
   weekdayNames,
   projects,
   agents,
+  pushChannelChoices,
   onError,
 }: {
   draft: ScheduledTask;
@@ -494,6 +601,7 @@ function TaskEditor({
   weekdayNames: string[];
   projects: ProjectInfo[];
   agents: AgentInfo[];
+  pushChannelChoices: PushChannelChoice[];
   onError: (error: string | null) => void;
 }) {
   const { t } = useI18n();
@@ -761,7 +869,7 @@ function TaskEditor({
             </>
           )}
 
-          <ImPushControls target={target} setTarget={setTarget} />
+          <ImPushControls target={target} setTarget={setTarget} pushChannelChoices={pushChannelChoices} />
         </div>
       </Field>
 
@@ -1273,8 +1381,28 @@ function ProcessStageChip({
   );
 }
 
-function ImPushControls({ target, setTarget }: { target: TaskTarget; setTarget: (target: TaskTarget) => void }) {
+function ImPushControls({
+  target,
+  setTarget,
+  pushChannelChoices,
+}: {
+  target: TaskTarget;
+  setTarget: (target: TaskTarget) => void;
+  pushChannelChoices: PushChannelChoice[];
+}) {
   const { t } = useI18n();
+  const selectedChannelValue = target.imPush ? pushChannelValue(target.imPush.platform, target.imPush.chatId) : "";
+  const selectedChannelExists = pushChannelChoices.some((option) => option.value === selectedChannelValue);
+  const channelOptions = selectedChannelExists || !target.imPush?.enabled || !target.imPush?.chatId.trim()
+    ? pushChannelChoices
+    : [
+        {
+          value: selectedChannelValue,
+          label: `${target.imPush.chatId} · ${platformDisplayLabel(target.imPush.platform, t)}`,
+        },
+        ...pushChannelChoices,
+      ];
+
   return (
     <>
       <label className="inline-flex w-fit items-center gap-2 text-body-sm text-ink/65">
@@ -1285,7 +1413,13 @@ function ImPushControls({ target, setTarget }: { target: TaskTarget; setTarget: 
             setTarget({
               ...target,
               imPush: event.target.checked
-                ? { ...(target.imPush ?? { platform: "telegram", chatId: "" }), enabled: true }
+                ? {
+                    ...(target.imPush ?? {
+                      platform: pushChannelChoices[0]?.platform ?? "telegram",
+                      chatId: pushChannelChoices[0]?.chatId ?? "",
+                    }),
+                    enabled: true,
+                  }
                 : target.imPush
                   ? { ...target.imPush, enabled: false }
                   : null,
@@ -1296,39 +1430,25 @@ function ImPushControls({ target, setTarget }: { target: TaskTarget; setTarget: 
       </label>
       {target.imPush?.enabled && (
         <div className="flex flex-wrap gap-3">
-          <Labeled label={t("autoTasks.target.platform")}>
+          <Labeled label={t("settings.channels")}>
             <FormSelect
-              width="w-44"
-              ariaLabel={t("autoTasks.target.platform")}
-              value={target.imPush.platform}
-              options={PLATFORM_META.map(({ value, label, labelKey, Icon }) => ({
-                value,
-                label: labelKey ? t(labelKey) : label,
-                icon: <Icon className="h-3.5 w-3.5" />,
-              }))}
-              onChange={(value) =>
+              width="w-full max-w-[420px]"
+              ariaLabel={t("settings.channels")}
+              value={selectedChannelValue}
+              options={channelOptions}
+              onChange={(value) => {
+                const next = parsePushChannelValue(value);
+                if (!next) return;
                 setTarget({
                   ...target,
-                  imPush: { ...(target.imPush ?? { enabled: true, chatId: "" }), platform: value },
-                })
-              }
+                  imPush: { ...(target.imPush ?? { enabled: true }), platform: next.platform, chatId: next.chatId, enabled: true },
+                });
+              }}
             />
           </Labeled>
-          <Labeled label={t("autoTasks.target.chat_id")}>
-            <input
-              className={inputClass + " w-64"}
-              value={target.imPush.chatId}
-              onChange={(e) =>
-                setTarget({
-                  ...target,
-                  imPush: {
-                    ...(target.imPush ?? { enabled: true, platform: "telegram" }),
-                    chatId: e.target.value,
-                  },
-                })
-              }
-            />
-          </Labeled>
+          {pushChannelChoices.length === 0 && (
+            <span className="self-end text-caption text-ink/45">{t("autoTasks.channels.none_enabled")}</span>
+          )}
         </div>
       )}
     </>
@@ -1590,6 +1710,7 @@ function scheduledTaskSlotsForDay(date: Date, tasks: ScheduledTask[]): TaskCalen
             run.trigger === "scheduled"
             && !matchedRunIds.has(run.id)
             && run.scheduledForMs != null
+            && !times.some((at) => runMatchesScheduledSlot(task, run, at))
             && sameDay(new Date(run.scheduledForMs), date),
         )
         .map((run, index) => ({
@@ -1606,12 +1727,29 @@ function scheduledTaskSlotsForDay(date: Date, tasks: ScheduledTask[]): TaskCalen
 }
 
 function matchRunForScheduledSlot(task: ScheduledTask, at: Date): ScheduledTaskRun | null {
-  const scheduledForMs = at.getTime();
   return (
     task.runs
-      .filter((run) => run.trigger === "scheduled" && run.scheduledForMs === scheduledForMs)
+      .filter((run) => runMatchesScheduledSlot(task, run, at))
       .sort((a, b) => b.startedAtMs - a.startedAtMs)[0] ?? null
   );
+}
+
+function runMatchesScheduledSlot(task: ScheduledTask, run: ScheduledTaskRun, at: Date): boolean {
+  if (run.trigger !== "scheduled" || run.scheduledForMs == null) return false;
+  const scheduledAt = new Date(run.scheduledForMs);
+  switch (task.schedule.kind) {
+    case "interval": {
+      const diff = Math.abs(run.scheduledForMs - at.getTime());
+      const toleranceMs = Math.min(30_000, Math.max(1_000, task.schedule.everySecs * 250));
+      return diff <= toleranceMs;
+    }
+    case "daily":
+    case "weekly":
+    case "cron":
+      return sameDay(scheduledAt, at)
+        && scheduledAt.getHours() === at.getHours()
+        && scheduledAt.getMinutes() === at.getMinutes();
+  }
 }
 
 function uniqueTaskCount(slots: TaskCalendarSlot[]): number {
