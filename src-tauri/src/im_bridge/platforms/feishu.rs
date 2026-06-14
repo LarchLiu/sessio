@@ -119,10 +119,7 @@ fn ws_loop(state: Arc<ImBridgeState>) {
             continue;
         };
 
-        let run_config = state
-            .config_snapshot()
-            .feishu
-            .unwrap_or_else(FeishuConfig::default);
+        let run_config = state.config_snapshot().feishu.unwrap_or_default();
         match run_ws_once(&state, &sink, &run_config) {
             Ok(()) => thread::sleep(Duration::from_millis(500)),
             Err(error) => {
@@ -1393,7 +1390,7 @@ fn decode_string(bytes: &[u8]) -> Result<String> {
 }
 
 fn write_varint_field(out: &mut Vec<u8>, field: u32, value: u64) {
-    write_varint(out, ((field as u64) << 3) | 0);
+    write_varint(out, (field as u64) << 3);
     write_varint(out, value);
 }
 

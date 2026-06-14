@@ -182,21 +182,17 @@ fn handle_event(
             sessio_runtime_session_id,
             text,
             ..
-        } => {
-            if state.chat_for_session(&sessio_runtime_session_id).is_some() {
-                state.buffer_text(&sessio_runtime_session_id, &text);
-                maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
-            }
+        } if state.chat_for_session(&sessio_runtime_session_id).is_some() => {
+            state.buffer_text(&sessio_runtime_session_id, &text);
+            maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
         }
         AgentRuntimeEventPayload::ReasoningDelta {
             sessio_runtime_session_id,
             text,
             ..
-        } => {
-            if state.chat_for_session(&sessio_runtime_session_id).is_some() {
-                state.buffer_thought(&sessio_runtime_session_id, &text);
-                maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
-            }
+        } if state.chat_for_session(&sessio_runtime_session_id).is_some() => {
+            state.buffer_thought(&sessio_runtime_session_id, &text);
+            maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
         }
         AgentRuntimeEventPayload::ToolStarted {
             sessio_runtime_session_id,
@@ -204,19 +200,17 @@ fn handle_event(
             input,
             data,
             ..
-        } => {
-            if state.chat_for_session(&sessio_runtime_session_id).is_some() {
-                if is_todo_tool(&name, &data) {
-                    if let Some(summary) = todo_summary(input.as_ref(), &data) {
-                        state.buffer_tool_summary(&sessio_runtime_session_id, summary);
-                    } else {
-                        state.buffer_tool(&sessio_runtime_session_id, &name);
-                    }
+        } if state.chat_for_session(&sessio_runtime_session_id).is_some() => {
+            if is_todo_tool(&name, &data) {
+                if let Some(summary) = todo_summary(input.as_ref(), &data) {
+                    state.buffer_tool_summary(&sessio_runtime_session_id, summary);
                 } else {
                     state.buffer_tool(&sessio_runtime_session_id, &name);
                 }
-                maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
+            } else {
+                state.buffer_tool(&sessio_runtime_session_id, &name);
             }
+            maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
         }
         AgentRuntimeEventPayload::PermissionRequested {
             sessio_runtime_session_id,

@@ -337,9 +337,7 @@ fn dispatch_prompt(
                 // ACP capability negotiation.
                 (
                     Vec::new(),
-                    vec![format!(
-                        "⚠️ 会话尚未就绪，已忽略本条消息中的附件。"
-                    )],
+                    vec![format!("⚠️ 会话尚未就绪，已忽略本条消息中的附件。")],
                 )
             }
         }

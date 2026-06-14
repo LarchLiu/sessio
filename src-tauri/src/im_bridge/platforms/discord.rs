@@ -111,10 +111,7 @@ fn gateway_loop(state: Arc<ImBridgeState>) {
             continue;
         };
 
-        let run_config = state
-            .config_snapshot()
-            .discord
-            .unwrap_or_else(DiscordConfig::default);
+        let run_config = state.config_snapshot().discord.unwrap_or_default();
         match run_gateway_once(&state, &sink, &run_config) {
             Ok(()) => thread::sleep(Duration::from_millis(500)),
             Err(error) => {
@@ -373,12 +370,15 @@ fn download_discord_attachments(
     if message.attachments.is_empty() {
         return Vec::new();
     }
-    let workspace = match state.chat_session(key).map(|s| s.workspace_path).or_else(|| {
-        state
-            .config_snapshot()
-            .workspace_for_chat(key.platform, &key.chat_id)
-            .map(str::to_string)
-    }) {
+    let workspace = match state
+        .chat_session(key)
+        .map(|s| s.workspace_path)
+        .or_else(|| {
+            state
+                .config_snapshot()
+                .workspace_for_chat(key.platform, &key.chat_id)
+                .map(str::to_string)
+        }) {
         Some(workspace) => workspace,
         None => {
             log::warn!(
@@ -405,9 +405,7 @@ fn download_discord_attachments(
             .unwrap_or(AgentAttachmentKind::File);
         let suggested = attachment.filename.clone();
         let destination = allocate_attachment_path(&dir, suggested.as_deref());
-        if let Err(error) =
-            download_to_file(&sink.client, &attachment.url, None, &destination)
-        {
+        if let Err(error) = download_to_file(&sink.client, &attachment.url, None, &destination) {
             log::warn!(
                 "[im-bridge:discord] download attachment {} failed: {error:#}",
                 attachment.url
@@ -752,8 +750,8 @@ impl DiscordSink {
             .and_then(|name| name.to_str())
             .unwrap_or("file")
             .to_string();
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("read attachment {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("read attachment {}", path.display()))?;
         let part = multipart::Part::bytes(bytes)
             .file_name(file_name)
             .mime_str(mime)

@@ -167,7 +167,7 @@ pub struct DiscordConfig {
 }
 
 /// Feishu/Lark bot configuration.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuConfig {
     /// Whether the Feishu worker should start.
@@ -326,23 +326,6 @@ impl Default for DiscordConfig {
             mention_only: true,
             api_base: None,
             gateway_url: None,
-        }
-    }
-}
-
-impl Default for FeishuConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            agent: None,
-            model: None,
-            effort: None,
-            default_workspace: None,
-            allowed_workspaces: Vec::new(),
-            workspace_bindings: Vec::new(),
-            app_id: String::new(),
-            app_secret: String::new(),
-            domain: None,
         }
     }
 }
@@ -740,7 +723,7 @@ fn workspace_choices_from_config<'a>(
 
 fn push_unique_ref<'a>(values: &mut Vec<&'a str>, value: &'a str) {
     let value = value.trim();
-    if !value.is_empty() && !values.iter().any(|existing| *existing == value) {
+    if !value.is_empty() && !values.contains(&value) {
         values.push(value);
     }
 }

@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use reqwest::blocking::Client;
 
-use crate::agents::runtime::types::{
-    AgentAttachment, AgentAttachmentKind, RuntimeCapabilitySet,
-};
+use crate::agents::runtime::types::{AgentAttachment, AgentAttachmentKind, RuntimeCapabilitySet};
 
 /// A file the platform listener already saved to local disk. The router takes
 /// ownership and decides whether to forward it to the runtime.
@@ -212,9 +210,7 @@ pub fn extract_outbound_attachments(text: &str, workspace: &str) -> Vec<Outbound
         if !resolved.is_file() {
             continue;
         }
-        let canonical = resolved
-            .canonicalize()
-            .unwrap_or_else(|_| resolved.clone());
+        let canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
         if !seen.insert(canonical.clone()) {
             continue;
         }

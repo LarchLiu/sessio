@@ -432,7 +432,7 @@ fn extract_text(items: &[WechatMessageItem]) -> String {
                     parts.push(title.to_string());
                 }
                 if let Some(ref_item) = ref_msg.message_item.as_deref() {
-                    let ref_text = extract_text(&[ref_item.clone()]);
+                    let ref_text = extract_text(std::slice::from_ref(ref_item));
                     if !ref_text.trim().is_empty() {
                         parts.push(ref_text);
                     }

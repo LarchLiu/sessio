@@ -863,10 +863,7 @@ fn effort_config_id(agent: Agent) -> &'static str {
 }
 
 fn is_allowed(config: &TelegramConfig, user_id: i64) -> bool {
-    config
-        .allowed_user_ids
-        .iter()
-        .any(|allowed| *allowed == user_id)
+    config.allowed_user_ids.contains(&user_id)
 }
 
 pub struct TelegramSink {
@@ -1503,9 +1500,9 @@ fn render_inline_markdown(text: &str) -> String {
     let mut cursor = 0;
     while cursor < text.len() {
         let rest = &text[cursor..];
-        if rest.starts_with('`') {
-            if let Some(end) = rest[1..].find('`') {
-                let inner = &rest[1..1 + end];
+        if let Some(stripped) = rest.strip_prefix('`') {
+            if let Some(end) = stripped.find('`') {
+                let inner = &stripped[..end];
                 out.push_str("<code>");
                 out.push_str(&escape_telegram_html(inner));
                 out.push_str("</code>");
