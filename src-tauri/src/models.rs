@@ -580,7 +580,7 @@ pub struct ThreadAssistantInfo {
     pub order: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadAgentInfo {
     pub participant_id: String,

@@ -26,8 +26,9 @@ use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch,
-    RuntimeAgentCapabilityRecord, RuntimeAgentSelection, SessionHistorySnapshotRecord, SessionRef,
-    SessionStore, ThreadWorkSnapshotRecord,
+    RuntimeAgentCapabilityRecord, RuntimeAgentSelection, ScheduledTaskRecord,
+    ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
+    ThreadWorkSnapshotRecord, SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
 };
 
 pub struct SqliteStore {
@@ -762,6 +763,65 @@ CREATE INDEX IF NOT EXISTS idx_channel_sessions_channel
 
 CREATE INDEX IF NOT EXISTS idx_channel_sessions_session
     ON channel_sessions(agent, agent_session_id);
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'paused')),
+    schedule_json  TEXT NOT NULL,
+    target_json    TEXT NOT NULL,
+    project_id     TEXT NOT NULL,
+    mode           TEXT NOT NULL CHECK(mode IN ('chat', 'process', 'teamwork', 'brainstorm', 'debate')),
+    sort_order     INTEGER NOT NULL DEFAULT 0,
+    created_at_ms  INTEGER NOT NULL,
+    updated_at_ms  INTEGER NOT NULL,
+    last_run_at_ms INTEGER,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_order
+    ON scheduled_tasks(status, sort_order, created_at_ms);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project
+    ON scheduled_tasks(project_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+    id             TEXT PRIMARY KEY,
+    task_id        TEXT NOT NULL,
+    mode           TEXT NOT NULL CHECK(mode IN ('chat', 'process', 'teamwork', 'brainstorm', 'debate')),
+    trigger        TEXT NOT NULL DEFAULT 'scheduled' CHECK(trigger IN ('scheduled', 'manual')),
+    status         TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+    started_at_ms  INTEGER NOT NULL,
+    scheduled_for_ms INTEGER,
+    completed_at_ms INTEGER,
+    task_name      TEXT,
+    target_json    TEXT,
+    session_agent  TEXT,
+    session_id     TEXT,
+    thread_id      TEXT,
+    astra_run_id   TEXT,
+    push_platform  TEXT,
+    push_chat_id   TEXT,
+    push_status    TEXT CHECK(push_status IS NULL OR push_status IN ('pending', 'summarizing', 'sent', 'failed')),
+    push_summary   TEXT,
+    push_error     TEXT,
+    push_sent_at_ms INTEGER,
+    error          TEXT,
+    FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task_started
+    ON scheduled_task_runs(task_id, started_at_ms DESC);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_session
+    ON scheduled_task_runs(session_agent, session_id);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_thread
+    ON scheduled_task_runs(thread_id);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_status_push
+    ON scheduled_task_runs(status, push_status, started_at_ms);
 "#;
 
 // Backfill for pre-v1 (v0.3.2) databases whose sessions table predates the
@@ -797,6 +857,67 @@ CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_run
 
 CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_session
     ON astra_run_sessions(agent, session_id);
+"#;
+
+const SCHEMA_CURRENT_SCHEDULED_TASKS: &str = r#"
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'paused')),
+    schedule_json  TEXT NOT NULL,
+    target_json    TEXT NOT NULL,
+    project_id     TEXT NOT NULL,
+    mode           TEXT NOT NULL CHECK(mode IN ('chat', 'process', 'teamwork', 'brainstorm', 'debate')),
+    sort_order     INTEGER NOT NULL DEFAULT 0,
+    created_at_ms  INTEGER NOT NULL,
+    updated_at_ms  INTEGER NOT NULL,
+    last_run_at_ms INTEGER,
+    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_order
+    ON scheduled_tasks(status, sort_order, created_at_ms);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project
+    ON scheduled_tasks(project_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+    id             TEXT PRIMARY KEY,
+    task_id        TEXT NOT NULL,
+    mode           TEXT NOT NULL CHECK(mode IN ('chat', 'process', 'teamwork', 'brainstorm', 'debate')),
+    trigger        TEXT NOT NULL DEFAULT 'scheduled' CHECK(trigger IN ('scheduled', 'manual')),
+    status         TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
+    started_at_ms  INTEGER NOT NULL,
+    scheduled_for_ms INTEGER,
+    completed_at_ms INTEGER,
+    task_name      TEXT,
+    target_json    TEXT,
+    session_agent  TEXT,
+    session_id     TEXT,
+    thread_id      TEXT,
+    astra_run_id   TEXT,
+    push_platform  TEXT,
+    push_chat_id   TEXT,
+    push_status    TEXT CHECK(push_status IS NULL OR push_status IN ('pending', 'summarizing', 'sent', 'failed')),
+    push_summary   TEXT,
+    push_error     TEXT,
+    push_sent_at_ms INTEGER,
+    error          TEXT,
+    FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task_started
+    ON scheduled_task_runs(task_id, started_at_ms DESC);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_session
+    ON scheduled_task_runs(session_agent, session_id);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_thread
+    ON scheduled_task_runs(thread_id);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_status_push
+    ON scheduled_task_runs(status, push_status, started_at_ms);
 "#;
 
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
@@ -881,12 +1002,42 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     }
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR);
     ensure_current_astra_run_sessions(conn)?;
+    ensure_current_scheduled_tasks(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     Ok(())
 }
 
 fn ensure_current_astra_run_sessions(conn: &Connection) -> Result<()> {
     Ok(conn.execute_batch(SCHEMA_CURRENT_ASTRA_RUN_SESSIONS)?)
+}
+
+fn ensure_current_scheduled_tasks(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA_CURRENT_SCHEDULED_TASKS)?;
+    let _ = conn.execute_batch(
+        "ALTER TABLE scheduled_tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
+    );
+    for sql in [
+        "ALTER TABLE scheduled_task_runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'scheduled';",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN completed_at_ms INTEGER;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN scheduled_for_ms INTEGER;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN task_name TEXT;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN target_json TEXT;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN push_platform TEXT;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN push_chat_id TEXT;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN push_status TEXT;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN push_summary TEXT;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN push_error TEXT;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN push_sent_at_ms INTEGER;",
+        "ALTER TABLE scheduled_task_runs ADD COLUMN error TEXT;",
+    ] {
+        let _ = conn.execute_batch(sql);
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_status_push
+            ON scheduled_task_runs(status, push_status, started_at_ms);",
+    )?;
+    Ok(())
 }
 
 /// Seed all builtin data in dependency order: process templates, their stages,
@@ -5109,6 +5260,53 @@ fn channel_session_info_from_record(record: ChannelSessionRecord) -> ChannelSess
     }
 }
 
+fn scheduled_task_record_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ScheduledTaskRecord> {
+    Ok(ScheduledTaskRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        status: row.get(2)?,
+        schedule_json: row.get(3)?,
+        target_json: row.get(4)?,
+        project_id: row.get(5)?,
+        mode: row.get(6)?,
+        sort_order: row.get(7)?,
+        created_at_ms: row.get(8)?,
+        updated_at_ms: row.get(9)?,
+        last_run_at_ms: row.get(10)?,
+    })
+}
+
+fn scheduled_task_run_record_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ScheduledTaskRunRecord> {
+    let session_agent_raw: Option<String> = row.get(10)?;
+    Ok(ScheduledTaskRunRecord {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        mode: row.get(2)?,
+        trigger: row.get(3)?,
+        status: row.get(4)?,
+        started_at_ms: row.get(5)?,
+        scheduled_for_ms: row.get(6)?,
+        completed_at_ms: row.get(7)?,
+        task_name: row.get(8)?,
+        target_json: row.get(9)?,
+        session_agent: session_agent_raw.as_deref().and_then(Agent::from_db_str),
+        session_id: row.get(11)?,
+        thread_id: row.get(12)?,
+        astra_run_id: row.get(13)?,
+        push_platform: row.get(14)?,
+        push_chat_id: row.get(15)?,
+        push_status: row.get(16)?,
+        push_summary: row.get(17)?,
+        push_error: row.get(18)?,
+        push_sent_at_ms: row.get(19)?,
+        error: row.get(20)?,
+    })
+}
+
 fn select_channel_session_columns() -> &'static str {
     "platform, channel_id, channel_type, user_id, team_id, thread_id, display_name,
      agent, agent_session_id, sessio_runtime_session_id, workspace_path, metadata_json,
@@ -5380,6 +5578,228 @@ impl SessionStore for SqliteStore {
                 agent.as_str(),
                 agent_session_id,
             ],
+        )?;
+        Ok(())
+    }
+
+    fn list_scheduled_tasks(&self) -> Result<Vec<ScheduledTaskRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, status, schedule_json, target_json, project_id, mode,
+                    sort_order, created_at_ms, updated_at_ms, last_run_at_ms
+             FROM scheduled_tasks
+             ORDER BY sort_order ASC, created_at_ms ASC",
+        )?;
+        let records = stmt
+            .query_map([], scheduled_task_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    fn list_scheduled_task_runs(&self) -> Result<Vec<ScheduledTaskRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
+                    task_name, target_json, session_agent, session_id,
+                    thread_id, astra_run_id, push_platform, push_chat_id,
+                    push_status, push_summary, push_error, push_sent_at_ms, error
+             FROM (
+                SELECT id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
+                       task_name, target_json, session_agent, session_id,
+                       thread_id, astra_run_id, push_platform, push_chat_id,
+                       push_status, push_summary, push_error, push_sent_at_ms, error,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY task_id
+                           ORDER BY started_at_ms DESC, id DESC
+                       ) AS run_rank
+                FROM scheduled_task_runs
+             )
+             WHERE run_rank <= ?
+                OR status = 'running'
+                OR push_status IN ('pending', 'summarizing')
+             ORDER BY started_at_ms DESC, id DESC",
+        )?;
+        let records = stmt
+            .query_map(
+                params![SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK as i64],
+                scheduled_task_run_record_from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    fn list_scheduled_task_runs_requiring_update(&self) -> Result<Vec<ScheduledTaskRunRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
+                    task_name, target_json, session_agent, session_id,
+                    thread_id, astra_run_id, push_platform, push_chat_id,
+                    push_status, push_summary, push_error, push_sent_at_ms, error
+             FROM scheduled_task_runs
+             WHERE status = 'running'
+                OR push_status IN ('pending', 'summarizing')
+             ORDER BY started_at_ms DESC, id DESC",
+        )?;
+        let records = stmt
+            .query_map([], scheduled_task_run_record_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    fn replace_scheduled_tasks(&self, tasks: &[ScheduledTaskRecord]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        if tasks.is_empty() {
+            tx.execute("DELETE FROM scheduled_tasks", [])?;
+        } else {
+            let placeholders = vec!["?"; tasks.len()].join(", ");
+            let sql = format!("DELETE FROM scheduled_tasks WHERE id NOT IN ({placeholders})");
+            let ids = tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>();
+            tx.execute(&sql, params_from_iter(ids))?;
+        }
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO scheduled_tasks (
+                    id, name, status, schedule_json, target_json, project_id, mode,
+                    sort_order, created_at_ms, updated_at_ms, last_run_at_ms
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    status = excluded.status,
+                    schedule_json = excluded.schedule_json,
+                    target_json = excluded.target_json,
+                    project_id = excluded.project_id,
+                    mode = excluded.mode,
+                    sort_order = excluded.sort_order,
+                    updated_at_ms = excluded.updated_at_ms,
+                    last_run_at_ms = excluded.last_run_at_ms",
+            )?;
+            for (index, task) in tasks.iter().enumerate() {
+                stmt.execute(params![
+                    task.id.as_str(),
+                    task.name.as_str(),
+                    task.status.as_str(),
+                    task.schedule_json.as_str(),
+                    task.target_json.as_str(),
+                    task.project_id.as_str(),
+                    task.mode.as_str(),
+                    index as i64,
+                    task.created_at_ms,
+                    task.updated_at_ms,
+                    task.last_run_at_ms,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn insert_scheduled_task_run(&self, run: &ScheduledTaskRunRecord) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO scheduled_task_runs (
+                id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
+                task_name, target_json, session_agent, session_id, thread_id, astra_run_id,
+                push_platform, push_chat_id, push_status, push_summary, push_error, push_sent_at_ms, error
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                run.id.as_str(),
+                run.task_id.as_str(),
+                run.mode.as_str(),
+                run.trigger.as_str(),
+                run.status.as_str(),
+                run.started_at_ms,
+                run.scheduled_for_ms,
+                run.completed_at_ms,
+                run.task_name.as_deref(),
+                run.target_json.as_deref(),
+                run.session_agent.map(|agent| agent.as_str().to_string()),
+                run.session_id.as_deref(),
+                run.thread_id.as_deref(),
+                run.astra_run_id.as_deref(),
+                run.push_platform.as_deref(),
+                run.push_chat_id.as_deref(),
+                run.push_status.as_deref(),
+                run.push_summary.as_deref(),
+                run.push_error.as_deref(),
+                run.push_sent_at_ms,
+                run.error.as_deref(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn update_scheduled_task_run_status(
+        &self,
+        run_id: &str,
+        status: &str,
+        completed_at_ms: Option<i64>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE scheduled_task_runs
+             SET status = ?,
+                 completed_at_ms = CASE WHEN ? IS NULL THEN completed_at_ms ELSE ? END,
+                 error = CASE WHEN ? IS NULL THEN error ELSE ? END
+             WHERE id = ?",
+            params![status, completed_at_ms, completed_at_ms, error, error, run_id],
+        )?;
+        Ok(())
+    }
+
+    fn update_scheduled_task_run_push(
+        &self,
+        run_id: &str,
+        push_status: &str,
+        push_summary: Option<&str>,
+        push_error: Option<&str>,
+        push_sent_at_ms: Option<i64>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE scheduled_task_runs
+             SET push_status = ?,
+                 push_summary = CASE WHEN ? IS NULL THEN push_summary ELSE ? END,
+                 push_error = ?,
+                 push_sent_at_ms = CASE WHEN ? IS NULL THEN push_sent_at_ms ELSE ? END
+             WHERE id = ?",
+            params![
+                push_status,
+                push_summary,
+                push_summary,
+                push_error,
+                push_sent_at_ms,
+                push_sent_at_ms,
+                run_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn update_scheduled_task_last_run(&self, task_id: &str, when_ms: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE scheduled_tasks
+             SET last_run_at_ms = ?
+             WHERE id = ?",
+            params![when_ms, task_id],
+        )?;
+        Ok(())
+    }
+
+    fn fail_interrupted_task_run_pushes(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE scheduled_task_runs
+             SET push_status = 'failed',
+                 push_error = COALESCE(push_error, 'push interrupted by app restart')
+             WHERE push_status = 'summarizing'",
+            [],
         )?;
         Ok(())
     }
@@ -8947,6 +9367,95 @@ mod migration_tests {
         }
     }
 
+    fn assert_current_scheduled_task_schema(conn: &Connection) {
+        for table in ["scheduled_tasks", "scheduled_task_runs"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{table} table should exist");
+        }
+
+        let task_columns: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(scheduled_tasks)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        for column in [
+            "id",
+            "name",
+            "status",
+            "schedule_json",
+            "target_json",
+            "project_id",
+            "mode",
+            "sort_order",
+            "created_at_ms",
+            "updated_at_ms",
+            "last_run_at_ms",
+        ] {
+            assert!(
+                task_columns.contains(&column.to_string()),
+                "scheduled_tasks.{column} should exist"
+            );
+        }
+
+        let run_columns: Vec<String> = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(scheduled_task_runs)")
+                .unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        for column in [
+            "id",
+            "task_id",
+            "mode",
+            "status",
+            "started_at_ms",
+            "completed_at_ms",
+            "task_name",
+            "target_json",
+            "session_agent",
+            "session_id",
+            "thread_id",
+            "astra_run_id",
+            "push_platform",
+            "push_chat_id",
+            "push_status",
+            "push_summary",
+            "push_error",
+            "push_sent_at_ms",
+            "error",
+        ] {
+            assert!(
+                run_columns.contains(&column.to_string()),
+                "scheduled_task_runs.{column} should exist"
+            );
+        }
+
+        for index in [
+            "idx_scheduled_tasks_status_order",
+            "idx_scheduled_tasks_project",
+            "idx_scheduled_task_runs_task_started",
+            "idx_scheduled_task_runs_session",
+            "idx_scheduled_task_runs_thread",
+            "idx_scheduled_task_runs_status_push",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{index} index should exist");
+        }
+    }
+
     fn assert_revised_v5_process_template_schema(conn: &Connection) {
         let latest_schema_version: i64 = conn
             .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
@@ -8954,6 +9463,7 @@ mod migration_tests {
             })
             .unwrap();
         assert_eq!(latest_schema_version, 5);
+        assert_current_scheduled_task_schema(conn);
 
         let process_templates: i64 = conn
             .query_row(

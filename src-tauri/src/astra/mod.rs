@@ -954,6 +954,57 @@ impl AstraService {
         self.load_run(run_id).map(|run| self.run_to_handle(run))
     }
 
+    pub fn summarize_auto_task_notification(
+        &self,
+        workspace_path: &str,
+        source: &str,
+    ) -> Result<String> {
+        let config = self.astra_backend_config();
+        let agent = config.agent.unwrap_or(Agent::AstraPi);
+        let runtime_config = runtime_agent_backend::RuntimeAgentBackendConfig {
+            agent,
+            timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
+            model: config.model,
+            effort: config.effort,
+            permission_mode: config.permission_mode,
+        };
+        let mut options = RuntimeMetadata::default();
+        options.insert("astraInternal".to_string(), Value::Bool(true));
+        options.insert(
+            "astraPurpose".to_string(),
+            Value::String("auto_task_push_summary".to_string()),
+        );
+        if let Some(model) = &runtime_config.model {
+            options.insert("model".to_string(), Value::String(model.clone()));
+        }
+        if let Some(effort) = &runtime_config.effort {
+            options.insert("effort".to_string(), Value::String(effort.clone()));
+        }
+        if let Some(permission_mode) = &runtime_config.permission_mode {
+            options.insert(
+                "permissionMode".to_string(),
+                Value::String(permission_mode.clone()),
+            );
+        }
+        let prompt = build_auto_task_notification_summary_prompt(source);
+        let (summary, _) = runtime_agent_backend::execute_agent_prompt(
+            &self.inner.runtime,
+            &runtime_config,
+            workspace_path,
+            &prompt,
+            options,
+        )
+        .map_err(|failure| {
+            anyhow::anyhow!(
+                "{} failed with {}: {}",
+                failure.backend_type,
+                failure.code,
+                failure.message
+            )
+        })?;
+        Ok(summarize_task_output(&summary))
+    }
+
     pub(super) fn create_plan_round_for_astra_tasks(
         &self,
         run: &AstraRun,
@@ -2709,6 +2760,21 @@ pub(crate) fn summarize_task_output(output: &str) -> String {
     } else {
         text.chars().take(997).collect::<String>() + "..."
     }
+}
+
+fn build_auto_task_notification_summary_prompt(source: &str) -> String {
+    let source = structured_response::truncate_chars(source.trim(), 12_000);
+    format!(
+        "You are Astra. Summarize this completed scheduled task for an outbound channel notification.\n\
+         Requirements:\n\
+         - Use the same language as the task/result when practical.\n\
+         - Be concise, concrete, and useful for someone reading a channel notification.\n\
+         - Mention final status, important outcome, blockers/errors, and next steps only when present.\n\
+         - Do not include raw logs, internal IDs unless they are essential, or markdown tables.\n\
+         - Keep the notification under 1200 characters.\n\n\
+         Scheduled task run context:\n{source}\n\n\
+         Write only the notification summary."
+    )
 }
 
 fn final_task_output(output: &str) -> String {

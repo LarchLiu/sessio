@@ -2818,6 +2818,19 @@ async fn run_scheduled_task_now(
 }
 
 #[tauri::command]
+async fn force_unlock_scheduled_task(
+    id: String,
+    service: State<'_, scheduled_tasks::ScheduledTasksService>,
+) -> Result<(), String> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.force_unlock(&id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn detect_telegram_user_ids(
     bot_token: String,
     api_base: Option<String>,
@@ -3462,6 +3475,7 @@ pub fn run() {
             let scheduled_tasks_service = scheduled_tasks::ScheduledTasksService::new(
                 store.clone(),
                 runtime.clone(),
+                astra_service.clone(),
                 Some(im_bridge_service.clone()),
             );
             if let Err(error) = scheduled_tasks_service.start() {
@@ -3617,6 +3631,7 @@ pub fn run() {
             get_scheduled_tasks,
             save_scheduled_tasks,
             run_scheduled_task_now,
+            force_unlock_scheduled_task,
             detect_telegram_user_ids,
             test_telegram_bot_connection,
             test_discord_bot_connection,

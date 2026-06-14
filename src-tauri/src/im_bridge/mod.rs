@@ -28,10 +28,14 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use tauri::AppHandle;
 
+use crate::agents::runtime::types::AgentAttachmentKind;
 use crate::agents::runtime::RuntimeManager;
 use crate::store::SessionStore;
 
+use self::attachments::extract_outbound_attachments;
 use self::state::{ChatKey, ImBridgeState};
+
+const MAX_NOTIFICATION_ATTACHMENTS: usize = 5;
 
 /// Owns the IM bridge background workers. Held in Tauri managed state so it
 /// lives for the duration of the app.
@@ -101,8 +105,7 @@ impl ImBridgeService {
     /// Submit `text` to a chat as if it had arrived from the platform, lazily
     /// opening a default session when the chat is unbound. The agent's output is
     /// delivered asynchronously through the outbound pump to the platform sink,
-    /// so the platform listener for `platform` must be running. Used by the
-    /// scheduled-tasks worker to deliver auto-task prompts to a chat.
+    /// so the platform listener for `platform` must be running.
     pub fn submit_prompt_to_chat(&self, platform: &str, chat_id: &str, text: &str) -> Result<()> {
         let platform_tag: &'static str = match platform {
             "telegram" => "telegram",
@@ -116,12 +119,62 @@ impl ImBridgeService {
         if let Some(reply) = outcome.reply {
             if let Err(error) = self.state.send_to_chat(&key, &reply) {
                 log::warn!(
-                    "[im-bridge] failed to deliver scheduled-task notice to {platform} chat {chat_id}: {error:#}"
+                    "[im-bridge] failed to deliver IM reply to {platform} chat {chat_id}: {error:#}"
                 );
             }
         }
         Ok(())
     }
+
+    /// Send outbound text to a chat without routing it back through the IM
+    /// session handler. Used for notifications where IM is only a sink.
+    pub fn send_text_to_chat(&self, platform: &str, chat_id: &str, text: &str) -> Result<()> {
+        let platform_tag = platform_tag(platform)?;
+        let key = ChatKey::new(platform_tag, chat_id.to_string());
+        self.state.send_to_chat(&key, text)
+    }
+
+    /// Scan notification text for local image/file references and push them to
+    /// the chat. This is outbound-only and never opens or drives an IM session.
+    pub fn send_referenced_attachments_to_chat(
+        &self,
+        platform: &str,
+        chat_id: &str,
+        text: &str,
+        workspace_path: &str,
+    ) -> Result<usize> {
+        let platform_tag = platform_tag(platform)?;
+        let key = ChatKey::new(platform_tag, chat_id.to_string());
+        let attachments = extract_outbound_attachments(text, workspace_path)
+            .into_iter()
+            .take(MAX_NOTIFICATION_ATTACHMENTS)
+            .collect::<Vec<_>>();
+        let count = attachments.len();
+        for attachment in attachments {
+            let caption = attachment.display_name.as_deref();
+            match attachment.kind {
+                AgentAttachmentKind::Image => {
+                    self.state
+                        .send_image_to_chat(&key, &attachment.path, caption)?;
+                }
+                AgentAttachmentKind::File => {
+                    self.state
+                        .send_file_to_chat(&key, &attachment.path, caption)?;
+                }
+            }
+        }
+        Ok(count)
+    }
+}
+
+fn platform_tag(platform: &str) -> Result<&'static str> {
+    Ok(match platform {
+        "telegram" => "telegram",
+        "discord" => "discord",
+        "feishu" => "feishu",
+        "wechat" => "wechat",
+        other => bail!("unknown IM platform: {other}"),
+    })
 }
 
 pub fn load_config_or_default() -> Result<ImBridgeConfig> {

@@ -13,7 +13,8 @@ use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, ChannelSessionRecord,
     IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTaskSession,
     PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
-    SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
+    SessionStore, ThreadWorkSnapshotRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -224,6 +225,62 @@ impl SessionStore for CachedStore {
             agent_session_id,
             ended_at,
         )
+    }
+
+    fn list_scheduled_tasks(&self) -> Result<Vec<ScheduledTaskRecord>> {
+        self.inner.list_scheduled_tasks()
+    }
+
+    fn list_scheduled_task_runs(&self) -> Result<Vec<ScheduledTaskRunRecord>> {
+        self.inner.list_scheduled_task_runs()
+    }
+
+    fn list_scheduled_task_runs_requiring_update(&self) -> Result<Vec<ScheduledTaskRunRecord>> {
+        self.inner.list_scheduled_task_runs_requiring_update()
+    }
+
+    fn replace_scheduled_tasks(&self, tasks: &[ScheduledTaskRecord]) -> Result<()> {
+        self.inner.replace_scheduled_tasks(tasks)
+    }
+
+    fn insert_scheduled_task_run(&self, run: &ScheduledTaskRunRecord) -> Result<()> {
+        self.inner.insert_scheduled_task_run(run)
+    }
+
+    fn update_scheduled_task_run_status(
+        &self,
+        run_id: &str,
+        status: &str,
+        completed_at_ms: Option<i64>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.inner
+            .update_scheduled_task_run_status(run_id, status, completed_at_ms, error)
+    }
+
+    fn update_scheduled_task_run_push(
+        &self,
+        run_id: &str,
+        push_status: &str,
+        push_summary: Option<&str>,
+        push_error: Option<&str>,
+        push_sent_at_ms: Option<i64>,
+    ) -> Result<()> {
+        self.inner.update_scheduled_task_run_push(
+            run_id,
+            push_status,
+            push_summary,
+            push_error,
+            push_sent_at_ms,
+        )
+    }
+
+    fn update_scheduled_task_last_run(&self, task_id: &str, when_ms: i64) -> Result<()> {
+        self.inner.update_scheduled_task_last_run(task_id, when_ms)
+    }
+
+    fn fail_interrupted_task_run_pushes(&self) -> Result<()> {
+        self.inner.fail_interrupted_task_run_pushes()
     }
 
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>> {

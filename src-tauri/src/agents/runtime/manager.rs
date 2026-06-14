@@ -218,6 +218,26 @@ impl RuntimeManager {
         })
     }
 
+    pub fn latest_turn_status(&self, sessio_runtime_session_id: &str) -> Option<String> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions.get(sessio_runtime_session_id).and_then(|state| {
+                state
+                    .turn_state
+                    .turns
+                    .last()
+                    .map(|turn| turn.status.clone())
+            })
+        })
+    }
+
+    pub fn session_transcript_text(&self, sessio_runtime_session_id: &str) -> Option<String> {
+        self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(sessio_runtime_session_id)
+                .map(|state| session_turns_text(&state.turn_state.turns))
+        })
+    }
+
     pub fn has_active_acp_turn(&self) -> bool {
         self.inner
             .sessions
@@ -1302,6 +1322,59 @@ fn should_emit_snapshot_immediately(payload: &AgentRuntimeEventPayload) -> bool 
 
 fn should_emit_turn_snapshot_for_event(payload: &AgentRuntimeEventPayload) -> bool {
     !matches!(payload, AgentRuntimeEventPayload::SessionEnded { .. })
+}
+
+fn session_turns_text(turns: &[crate::models::SessionHistoryTurn]) -> String {
+    let mut lines = Vec::new();
+    for (index, turn) in turns.iter().enumerate() {
+        lines.push(format!("Turn {} [{}]", index + 1, turn.status));
+        for block in &turn.blocks {
+            if !matches!(block.kind.as_str(), "user" | "assistant") {
+                continue;
+            }
+            let text_parts = block
+                .blocks
+                .iter()
+                .filter_map(session_content_block_summary)
+                .collect::<Vec<_>>();
+            let text = text_parts.join("\n");
+            if !text.is_empty() {
+                lines.push(format!("{}: {}", block.kind, text));
+            }
+        }
+        if let Some(error) = &turn.error {
+            lines.push(format!("error: {error}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn session_content_block_summary(block: &crate::models::SessionContentBlock) -> Option<String> {
+    if let Some(text) = block
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    let uri = block
+        .uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|uri| !uri.is_empty())?;
+    let label = block
+        .name
+        .as_deref()
+        .or(block.title.as_deref())
+        .or(block.description.as_deref())
+        .unwrap_or(uri)
+        .trim();
+    if block.kind == "image" {
+        Some(format!("![{}]({})", label, uri))
+    } else {
+        Some(format!("[{}]({})", label, uri))
+    }
 }
 
 fn event_session_id(payload: &AgentRuntimeEventPayload) -> Option<&str> {

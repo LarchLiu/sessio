@@ -109,29 +109,91 @@ export type Schedule =
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
   | { kind: "cron"; expr: string };
 
-export type TaskTargetKind = "local" | "im";
+export type ScheduledTaskMode = "chat" | ThreadKind;
+export type ScheduledTaskStatus = "active" | "paused";
+export type ScheduledTaskRunStatus = "running" | "completed" | "failed" | "cancelled";
+export type ScheduledTaskPushStatus = "pending" | "summarizing" | "sent" | "failed";
+export type ScheduledTaskRunTrigger = "scheduled" | "manual";
+
+export interface ScheduledTaskRun {
+  id: string;
+  taskId: string;
+  mode: ScheduledTaskMode;
+  trigger: ScheduledTaskRunTrigger;
+  status: ScheduledTaskRunStatus;
+  startedAtMs: number;
+  scheduledForMs: number | null;
+  completedAtMs: number | null;
+  sessionAgent: Agent | null;
+  sessionId: string | null;
+  threadId: string | null;
+  astraRunId: string | null;
+  pushPlatform: string | null;
+  pushChatId: string | null;
+  pushStatus: ScheduledTaskPushStatus | null;
+  pushSummary: string | null;
+  pushError: string | null;
+  pushSentAtMs: number | null;
+  error: string | null;
+}
+
+export interface TaskImPush {
+  enabled: boolean;
+  platform: string;
+  chatId: string;
+}
+
+export interface TaskTargetBase {
+  projectId: string;
+  imPush: TaskImPush | null;
+}
+
+export interface ChatTaskTarget extends TaskTargetBase {
+  mode: "chat";
+  prompt: string;
+  agent: Agent;
+  model: string | null;
+  effort: string | null;
+  permissionMode: string | null;
+}
+
+export interface ProcessTaskTarget extends TaskTargetBase {
+  mode: "process";
+  goal: string;
+  description: string | null;
+  stageIds: string[];
+}
+
+export interface TeamworkTaskTarget extends TaskTargetBase {
+  mode: "teamwork";
+  goal: string;
+  description: string | null;
+  assistantIds: string[];
+}
+
+export interface AgentThreadTaskTarget extends TaskTargetBase {
+  mode: "brainstorm" | "debate";
+  goal: string;
+  description: string | null;
+  agentParticipants: ThreadAgentInfo[];
+}
 
 export type TaskTarget =
-  | {
-      kind: "local";
-      workspacePath: string;
-      agent: Agent;
-      model: string | null;
-      effort: string | null;
-      permissionMode: string | null;
-    }
-  | { kind: "im"; platform: string; chatId: string };
+  | ChatTaskTarget
+  | ProcessTaskTarget
+  | TeamworkTaskTarget
+  | AgentThreadTaskTarget;
 
 export interface ScheduledTask {
   id: string;
   name: string;
-  enabled: boolean;
-  prompt: string;
+  status: ScheduledTaskStatus;
   schedule: Schedule;
   target: TaskTarget;
   createdAtMs: number;
   updatedAtMs: number;
   lastRunAtMs: number | null;
+  runs: ScheduledTaskRun[];
 }
 
 export interface TelegramBridgeConfig {
@@ -1983,6 +2045,10 @@ export async function saveScheduledTasks(tasks: ScheduledTask[]): Promise<Schedu
 
 export async function runScheduledTaskNow(id: string): Promise<void> {
   return invoke<void>("run_scheduled_task_now", { id });
+}
+
+export async function forceUnlockScheduledTask(id: string): Promise<void> {
+  return invoke<void>("force_unlock_scheduled_task", { id });
 }
 
 export async function detectTelegramUserIds(botToken: string, apiBase: string | null): Promise<number[]> {

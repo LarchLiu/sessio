@@ -28,7 +28,7 @@ pub struct RuntimeAgentBackendConfig {
 impl Default for RuntimeAgentBackendConfig {
     fn default() -> Self {
         Self {
-            agent: Agent::Claude,
+            agent: Agent::AstraPi,
             timeout_ms: ASTRA_ORCHESTRATOR_TIMEOUT_MS,
             model: None,
             effort: None,
@@ -135,6 +135,16 @@ pub(super) fn execute_agent_session(
         );
     }
 
+    execute_agent_prompt(runtime, config, workspace_path, prompt, options)
+}
+
+pub(super) fn execute_agent_prompt(
+    runtime: &RuntimeManager,
+    config: &RuntimeAgentBackendConfig,
+    workspace_path: &str,
+    prompt: &str,
+    options: RuntimeMetadata,
+) -> Result<(String, String), BackendFailure> {
     let req = StartAgentSession {
         agent: config.agent,
         workspace_path: workspace_path.to_string(),

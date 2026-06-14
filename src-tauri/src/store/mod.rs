@@ -240,6 +240,48 @@ pub struct ChannelSessionRecord {
     pub ended_at: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScheduledTaskRecord {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub schedule_json: String,
+    pub target_json: String,
+    pub project_id: String,
+    pub mode: String,
+    pub sort_order: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub last_run_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduledTaskRunRecord {
+    pub id: String,
+    pub task_id: String,
+    pub mode: String,
+    pub trigger: String,
+    pub status: String,
+    pub started_at_ms: i64,
+    pub scheduled_for_ms: Option<i64>,
+    pub completed_at_ms: Option<i64>,
+    pub task_name: Option<String>,
+    pub target_json: Option<String>,
+    pub session_agent: Option<Agent>,
+    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub astra_run_id: Option<String>,
+    pub push_platform: Option<String>,
+    pub push_chat_id: Option<String>,
+    pub push_status: Option<String>,
+    pub push_summary: Option<String>,
+    pub push_error: Option<String>,
+    pub push_sent_at_ms: Option<i64>,
+    pub error: Option<String>,
+}
+
+pub const SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK: usize = 20;
+
 pub trait SessionStore: Send + Sync {
     fn init(&self) -> Result<()>;
     fn list_sessions(&self) -> Result<Vec<SessionInfo>>;
@@ -267,6 +309,34 @@ pub trait SessionStore: Send + Sync {
         agent_session_id: &str,
         ended_at: i64,
     ) -> Result<()>;
+    fn list_scheduled_tasks(&self) -> Result<Vec<ScheduledTaskRecord>>;
+    /// Bounded task run history for UI/state hydration. Implementations should
+    /// include runs that still need completion or push processing even if they
+    /// are outside the history window.
+    fn list_scheduled_task_runs(&self) -> Result<Vec<ScheduledTaskRunRecord>>;
+    /// Runs that still need background completion detection or channel push.
+    fn list_scheduled_task_runs_requiring_update(&self) -> Result<Vec<ScheduledTaskRunRecord>>;
+    fn replace_scheduled_tasks(&self, tasks: &[ScheduledTaskRecord]) -> Result<()>;
+    fn insert_scheduled_task_run(&self, run: &ScheduledTaskRunRecord) -> Result<()>;
+    fn update_scheduled_task_run_status(
+        &self,
+        run_id: &str,
+        status: &str,
+        completed_at_ms: Option<i64>,
+        error: Option<&str>,
+    ) -> Result<()>;
+    fn update_scheduled_task_run_push(
+        &self,
+        run_id: &str,
+        push_status: &str,
+        push_summary: Option<&str>,
+        push_error: Option<&str>,
+        push_sent_at_ms: Option<i64>,
+    ) -> Result<()>;
+    fn update_scheduled_task_last_run(&self, task_id: &str, when_ms: i64) -> Result<()>;
+    /// Mark pushes interrupted mid-summarization (by a shutdown) as failed so a
+    /// restart does not re-run summarization and double-notify the channel.
+    fn fail_interrupted_task_run_pushes(&self) -> Result<()>;
     fn list_indexed_sessions(&self) -> Result<Vec<IndexedSessionRecord>>;
     fn update_session_rename_title(
         &self,
