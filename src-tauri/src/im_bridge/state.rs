@@ -86,6 +86,9 @@ pub struct TurnBuffer {
 pub enum ChatStreamMode {
     /// Ephemeral platform preview; the final answer still needs a normal send.
     Draft,
+    /// Normal platform message edited in place; finalizing the stream is the
+    /// official reply, so no duplicate text send is needed.
+    Editable,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,19 +102,12 @@ pub struct ChatStreamCapability {
 #[derive(Debug, Clone)]
 pub struct ChatPermissionRequest {
     pub tool_name: String,
-    pub input_summary: Option<String>,
     pub options: Vec<ChatPermissionOption>,
 }
 
 impl ChatPermissionRequest {
     pub fn fallback_text(&self) -> String {
         let mut text = format!("Permission requested for tool: {}", self.tool_name);
-        if let Some(input) = &self.input_summary {
-            if !input.trim().is_empty() {
-                text.push_str("\n\n");
-                text.push_str(input);
-            }
-        }
         if !self.options.is_empty() {
             text.push_str("\n\nOpen Sessio or use a supported platform button to respond.");
         }
@@ -677,6 +673,10 @@ impl ImBridgeState {
 
     /// Record a tool-call title for the current turn.
     pub fn buffer_tool(&self, session_id: &str, tool: &str) {
+        let tool = tool.trim();
+        if tool.is_empty() {
+            return;
+        }
         if let Ok(mut turns) = self.inner.turns.lock() {
             let buf = turns.entry(session_id.to_string()).or_default();
             if !buf.tools.iter().any(|t| t == tool) {

@@ -1291,15 +1291,7 @@ impl ChatSink for FeishuSink {
 }
 
 fn permission_markdown(request: &ChatPermissionRequest) -> String {
-    let mut text = format!("**Tool:** `{}`", request.tool_name);
-    if let Some(input) = &request.input_summary {
-        if !input.trim().is_empty() {
-            text.push_str("\n\n**Input:**\n```json\n");
-            text.push_str(input);
-            text.push_str("\n```");
-        }
-    }
-    text
+    format!("**Tool:** `{}`", request.tool_name)
 }
 
 fn split_text(text: &str, limit: usize) -> Vec<String> {

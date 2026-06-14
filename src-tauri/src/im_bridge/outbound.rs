@@ -242,10 +242,16 @@ fn handle_event(
                 if let Some(summary) = todo_summary(input.as_ref(), &data) {
                     state.buffer_tool_summary(&sessio_runtime_session_id, summary);
                 } else {
-                    state.buffer_tool(&sessio_runtime_session_id, &name);
+                    state.buffer_tool(
+                        &sessio_runtime_session_id,
+                        &tool_display_name(&name, Some(&data)),
+                    );
                 }
             } else {
-                state.buffer_tool(&sessio_runtime_session_id, &name);
+                state.buffer_tool(
+                    &sessio_runtime_session_id,
+                    &tool_display_name(&name, Some(&data)),
+                );
             }
             maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
         }
@@ -284,15 +290,15 @@ fn handle_event(
             sessio_runtime_session_id,
             request_id,
             tool_name,
-            input,
+            input: _,
             data,
             ..
         } => {
             let Some(chat) = state.chat_for_session(&sessio_runtime_session_id) else {
                 return;
             };
-            state.buffer_tool(&sessio_runtime_session_id, &tool_name);
-            maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
+            let display_tool_name = tool_display_name(&tool_name, Some(&data));
+            state.buffer_tool(&sessio_runtime_session_id, &display_tool_name);
             let options = permission_options_from_data(&data);
             let options = options
                 .into_iter()
@@ -307,8 +313,11 @@ fn handle_event(
                 })
                 .collect();
             let request = ChatPermissionRequest {
-                tool_name,
-                input_summary: input.as_ref().map(summarize_json),
+                tool_name: if display_tool_name.is_empty() {
+                    "requested action".to_string()
+                } else {
+                    display_tool_name
+                },
                 options,
             };
             if let Err(error) = state.send_permission_to_chat(
@@ -319,6 +328,7 @@ fn handle_event(
             ) {
                 log::warn!("[im-bridge:outbound] failed to send permission request: {error:#}");
             }
+            maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, true);
         }
         AgentRuntimeEventPayload::PermissionResolved {
             sessio_runtime_session_id,
@@ -506,6 +516,7 @@ fn flush_turn(
     // text first so platforms without media support still see the message.
     let attachments = collect_outbound_attachments(state, &chat, &body);
 
+    let mut text_finalized_by_stream = false;
     if let Some(stream) = stream.as_ref() {
         if !stream.failed {
             if let Some(message_ref) = stream.message_ref.as_ref() {
@@ -515,14 +526,18 @@ fn flush_turn(
                         state.finish_stream_reply_to_chat(&stream.chat, message_ref, &final_text)
                     {
                         log::debug!("[im-bridge:outbound] stream reply finish failed: {error:#}");
+                    } else if matches!(stream.capability.mode, ChatStreamMode::Editable) {
+                        text_finalized_by_stream = true;
                     }
                 }
             }
         }
     }
 
-    if let Err(error) = state.send_to_chat(&chat, &text) {
-        log::warn!("[im-bridge:outbound] failed to send chat reply: {error:#}");
+    if !text_finalized_by_stream {
+        if let Err(error) = state.send_to_chat(&chat, &text) {
+            log::warn!("[im-bridge:outbound] failed to send chat reply: {error:#}");
+        }
     }
     for attachment in attachments {
         if let Err(error) = send_outbound_attachment(state, &chat, &attachment) {
@@ -547,8 +562,14 @@ fn format_turn_text(buffer: &TurnBuffer, empty_fallback: &str) -> String {
     if !buffer.tool_summaries.is_empty() {
         append_turn_section(&mut text, &buffer.tool_summaries.join("\n\n"));
     }
-    if !buffer.tools.is_empty() {
-        append_turn_section(&mut text, &format!("Tools: {}", buffer.tools.join(", ")));
+    let tools = buffer
+        .tools
+        .iter()
+        .map(|tool| tool.trim())
+        .filter(|tool| !tool.is_empty())
+        .collect::<Vec<_>>();
+    if !tools.is_empty() {
+        append_turn_section(&mut text, &format!("Tools: {}", tools.join(", ")));
     }
     if text.trim().is_empty() {
         text.push_str(empty_fallback);
@@ -651,18 +672,25 @@ fn string_field(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn tool_display_name(tool_id: &str, data: Option<&Value>) -> String {
-    data.and_then(|value| {
+    let name = data.and_then(|value| {
         string_field(value, &["title", "name"])
             .or_else(|| string_field(value.get("fields")?, &["title", "name"]))
             .or_else(|| string_field(value.get("toolCall")?, &["title", "name"]))
             .or_else(|| string_field(value.get("tool_call")?, &["title", "name"]))
-    })
-    .unwrap_or_else(|| tool_id.to_string())
+    });
+    match name {
+        Some(name) if !looks_like_tool_use_id(&name) => name,
+        _ if !looks_like_tool_use_id(tool_id) => tool_id.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn tool_status_display_name(tool_id: &str, status: &str, data: Option<&Value>) -> String {
     let name = tool_display_name(tool_id, data);
     let status = status.trim();
+    if name.is_empty() {
+        return String::new();
+    }
     if status.is_empty() {
         name
     } else {
@@ -670,19 +698,13 @@ fn tool_status_display_name(tool_id: &str, status: &str, data: Option<&Value>) -
     }
 }
 
-fn summarize_json(value: &Value) -> String {
-    let summary = match value {
-        Value::String(text) => text.clone(),
-        _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
-    };
-    const LIMIT: usize = 1200;
-    if summary.chars().count() <= LIMIT {
-        summary
-    } else {
-        let mut truncated = summary.chars().take(LIMIT).collect::<String>();
-        truncated.push_str("\n...");
-        truncated
-    }
+fn looks_like_tool_use_id(value: &str) -> bool {
+    let value = value.trim();
+    let normalized = value.to_ascii_lowercase();
+    normalized.starts_with("tooluse_")
+        || normalized.starts_with("toolu_")
+        || normalized.starts_with("tool_call_")
+        || normalized.starts_with("call_")
 }
 
 #[derive(Debug, Clone)]
@@ -799,5 +821,52 @@ fn todo_status_marker(status: Option<&str>) -> &'static str {
         "completed" | "complete" | "done" => "[x]",
         "in_progress" | "in-progress" | "active" | "running" => "[~]",
         _ => "[ ]",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tool_display_name_hides_internal_tool_use_ids() {
+        assert_eq!(tool_display_name("tooluse_abc123", None), "");
+        assert_eq!(tool_display_name("toolu_abc123", None), "");
+        assert_eq!(tool_display_name("tool_call_abc123", None), "");
+        assert_eq!(tool_display_name("call_abc123", None), "");
+    }
+
+    #[test]
+    fn tool_display_name_prefers_human_title_over_internal_id() {
+        let data = json!({ "title": "Read File" });
+        assert_eq!(
+            tool_display_name("tooluse_abc123", Some(&data)),
+            "Read File"
+        );
+
+        let nested = json!({ "tool_call": { "name": "Terminal" } });
+        assert_eq!(
+            tool_display_name("tooluse_def456", Some(&nested)),
+            "Terminal"
+        );
+    }
+
+    #[test]
+    fn tool_status_display_name_hides_internal_id_without_title() {
+        assert_eq!(
+            tool_status_display_name("tooluse_abc123", "completed", None),
+            ""
+        );
+    }
+
+    #[test]
+    fn format_turn_text_omits_empty_tool_footer() {
+        let buffer = TurnBuffer {
+            tools: vec!["".to_string(), "  ".to_string()],
+            ..TurnBuffer::default()
+        };
+
+        assert_eq!(format_turn_text(&buffer, "Done."), "Done.");
     }
 }

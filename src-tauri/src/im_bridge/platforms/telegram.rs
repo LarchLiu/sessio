@@ -1078,14 +1078,7 @@ impl ChatSink for TelegramSink {
 }
 
 fn format_permission_text(request: &ChatPermissionRequest) -> String {
-    let mut text = format!("Permission requested\nTool: {}", request.tool_name);
-    if let Some(input) = &request.input_summary {
-        if !input.trim().is_empty() {
-            text.push_str("\n\nInput:\n");
-            text.push_str(input);
-        }
-    }
-    text
+    format!("Permission requested\nTool: {}", request.tool_name)
 }
 
 fn format_permission_outcome(outcome: PermissionResolutionOutcome<'_>) -> String {

@@ -22,14 +22,16 @@ use super::super::attachments::{
 use super::super::config::DiscordConfig;
 use super::super::router;
 use super::super::state::{
-    ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ImBridgeState,
-    PermissionResolutionOutcome,
+    ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ChatStreamCapability, ChatStreamMode,
+    ImBridgeState, PermissionResolutionOutcome,
 };
 
 const PLATFORM: &str = "discord";
 const DEFAULT_API_BASE: &str = "https://discord.com/api/v10";
 const DEFAULT_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const DISCORD_TEXT_LIMIT: usize = 1900;
+const DISCORD_STREAM_LIMIT: usize = 1900;
+const DISCORD_STREAM_INTERVAL: Duration = Duration::from_millis(1200);
 const CALLBACK_PREFIX: &str = "sessio_perm:";
 const ACTION_CALLBACK_PREFIX: &str = "sessio:";
 
@@ -902,6 +904,26 @@ impl ChatSink for DiscordSink {
         Ok(())
     }
 
+    fn stream_capability(&self) -> Option<ChatStreamCapability> {
+        Some(ChatStreamCapability {
+            mode: ChatStreamMode::Editable,
+            min_interval: DISCORD_STREAM_INTERVAL,
+            max_chars: DISCORD_STREAM_LIMIT,
+        })
+    }
+
+    fn start_stream_reply(&self, chat_id: &str, text: &str) -> Result<Value> {
+        let message_id = self.send_message_with_id(chat_id, text, None)?;
+        Ok(json!({ "message_id": message_id }))
+    }
+
+    fn update_stream_reply(&self, chat_id: &str, message_ref: &Value, text: &str) -> Result<()> {
+        let Some(message_id) = message_ref.get("message_id").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        self.edit_message(chat_id, message_id, text, None)
+    }
+
     fn send_image(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
         let mime = guess_image_mime(path);
         self.send_attachment(chat_id, path, caption, mime)
@@ -965,14 +987,7 @@ impl ChatSink for DiscordSink {
 }
 
 fn format_permission_text(request: &ChatPermissionRequest) -> String {
-    let mut text = format!("Permission requested\nTool: {}", request.tool_name);
-    if let Some(input) = &request.input_summary {
-        if !input.trim().is_empty() {
-            text.push_str("\n\nInput:\n");
-            text.push_str(input);
-        }
-    }
-    text
+    format!("Permission requested\nTool: {}", request.tool_name)
 }
 
 fn format_permission_outcome(outcome: PermissionResolutionOutcome<'_>) -> String {
