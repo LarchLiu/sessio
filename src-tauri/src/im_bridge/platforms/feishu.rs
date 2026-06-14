@@ -27,6 +27,7 @@ use super::super::config::FeishuConfig;
 use super::super::router;
 use super::super::state::{
     ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ImBridgeState,
+    PermissionResolutionOutcome,
 };
 
 const PLATFORM: &str = "feishu";
@@ -543,7 +544,7 @@ fn extract_post_text(value: &Value) -> Option<String> {
 
 fn handle_card_callback(
     state: &Arc<ImBridgeState>,
-    sink: &Arc<FeishuSink>,
+    _sink: &Arc<FeishuSink>,
     value: Value,
 ) -> Result<()> {
     let action_value = value
@@ -578,9 +579,6 @@ fn handle_card_callback(
         });
 
     let Some(decision) = state.take_permission_token(token) else {
-        if let Some(chat_id) = chat_id {
-            let _ = sink.send_text(chat_id, "Permission request expired");
-        }
         return Ok(());
     };
     if let Some(chat_id) = chat_id {
@@ -593,15 +591,8 @@ fn handle_card_callback(
         &decision.request_id,
         decision.option_id,
     ) {
-        Ok(()) => {
-            if let Some(chat_id) = chat_id {
-                let _ = sink.send_text(chat_id, "Permission response recorded");
-            }
-        }
+        Ok(()) => {}
         Err(error) => {
-            if let Some(chat_id) = chat_id {
-                let _ = sink.send_text(chat_id, "Permission response failed");
-            }
             log::warn!("[im-bridge:feishu] permission response failed: {error:#}");
         }
     }
@@ -898,7 +889,7 @@ impl FeishuSink {
         })
     }
 
-    fn send_message(&self, chat_id: &str, body: &Value) -> Result<()> {
+    fn send_message(&self, chat_id: &str, body: &Value) -> Result<Option<String>> {
         let token = self.tenant_access_token()?;
         let response: FeishuApiResponse = self
             .client
@@ -915,6 +906,31 @@ impl FeishuSink {
         if response.code != 0 {
             bail!(
                 "Feishu send message to {chat_id} failed: code={}, msg={}",
+                response.code,
+                response.msg.unwrap_or_default()
+            );
+        }
+        Ok(response
+            .data
+            .as_ref()
+            .and_then(|data| string_field(data, &["message_id", "messageId"])))
+    }
+
+    fn delete_message(&self, message_id: &str) -> Result<()> {
+        let token = self.tenant_access_token()?;
+        let response: FeishuApiResponse = self
+            .client
+            .delete(self.endpoint(&format!("/open-apis/im/v1/messages/{message_id}")))
+            .bearer_auth(token)
+            .send()
+            .context("Feishu delete message request failed")?
+            .error_for_status()
+            .context("Feishu delete message returned HTTP error")?
+            .json()
+            .context("parse Feishu delete message response")?;
+        if response.code != 0 {
+            bail!(
+                "Feishu delete message {message_id} failed: code={}, msg={}",
                 response.code,
                 response.msg.unwrap_or_default()
             );
@@ -1059,7 +1075,7 @@ impl ChatSink for FeishuSink {
                     }
                 }))?,
             });
-            self.send_message(chat_id, &body)?;
+            self.send_message(chat_id, &body).map(|_| ())?;
         }
         Ok(())
     }
@@ -1071,7 +1087,7 @@ impl ChatSink for FeishuSink {
             "msg_type": "image",
             "content": serde_json::to_string(&json!({ "image_key": image_key }))?,
         });
-        self.send_message(chat_id, &body)
+        self.send_message(chat_id, &body).map(|_| ())
     }
 
     fn send_file(&self, chat_id: &str, path: &Path, _caption: Option<&str>) -> Result<()> {
@@ -1081,7 +1097,7 @@ impl ChatSink for FeishuSink {
             "msg_type": "file",
             "content": serde_json::to_string(&json!({ "file_key": file_key }))?,
         });
-        self.send_message(chat_id, &body)
+        self.send_message(chat_id, &body).map(|_| ())
     }
 
     fn supports_images(&self) -> bool {
@@ -1139,12 +1155,21 @@ impl ChatSink for FeishuSink {
                 "elements": elements,
             }))?,
         });
-        self.send_message(chat_id, &body)?;
-        // TODO: capture message_id from the send response so we can edit the
-        // card after the user resolves it. For now leave it un-editable; the
-        // runtime will still mark the permission spent so a second click is a
-        // safe no-op.
-        Ok(None)
+        let message_id = self.send_message(chat_id, &body)?;
+        Ok(message_id.map(|message_id| json!({ "message_id": message_id })))
+    }
+
+    fn resolve_permission_message(
+        &self,
+        _chat_id: &str,
+        message_ref: &Value,
+        _request: &ChatPermissionRequest,
+        _outcome: PermissionResolutionOutcome<'_>,
+    ) -> Result<()> {
+        let Some(message_id) = message_ref.get("message_id").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        self.delete_message(message_id)
     }
 }
 
@@ -1257,6 +1282,8 @@ struct FeishuApiResponse {
     code: i64,
     #[serde(default)]
     msg: Option<String>,
+    #[serde(default)]
+    data: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]

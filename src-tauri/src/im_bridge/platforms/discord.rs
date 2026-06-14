@@ -709,6 +709,17 @@ impl DiscordSink {
         Ok(())
     }
 
+    fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        self.client
+            .delete(self.endpoint(&format!("/channels/{channel_id}/messages/{message_id}")))
+            .bearer_auth(&self.bot_token)
+            .send()
+            .with_context(|| "Discord deleteMessage failed")?
+            .error_for_status()
+            .with_context(|| "Discord deleteMessage returned HTTP error")?;
+        Ok(())
+    }
+
     fn trigger_typing(&self, channel_id: &str) -> Result<()> {
         self.client
             .post(self.endpoint(&format!("/channels/{channel_id}/typing")))
@@ -854,10 +865,18 @@ impl ChatSink for DiscordSink {
         let Some(message_id) = message_ref.get("message_id").and_then(Value::as_str) else {
             return Ok(());
         };
+        if let Err(error) = self.delete_message(chat_id, message_id) {
+            log::debug!(
+                "[im-bridge:discord] failed to delete permission message; falling back to edit: {error:#}"
+            );
+        } else {
+            return Ok(());
+        }
         let mut text = format_permission_text(request);
         text.push_str("\n\n");
         text.push_str(&format_permission_outcome(outcome));
-        // Editing with an empty components array clears the buttons.
+        // If deleteMessage is unavailable, editing with an empty components
+        // array still clears the buttons.
         self.edit_message(chat_id, message_id, &text, Some(json!([])))
     }
 

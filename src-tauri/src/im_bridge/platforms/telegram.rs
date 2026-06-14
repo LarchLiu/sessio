@@ -1017,6 +1017,15 @@ impl TelegramSink {
         response.into_result().map(|_| ())
     }
 
+    fn delete_message(&self, chat_id: &str, message_id: i64) -> Result<()> {
+        let body = json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+        });
+        let response: TelegramApiResponse<bool> = self.post_json("deleteMessage", &body)?;
+        response.into_result().map(|_| ())
+    }
+
     fn send_message_draft(
         &self,
         chat_id: &str,
@@ -1303,6 +1312,15 @@ impl ChatSink for TelegramSink {
         chat_id: &str,
         request: &ChatPermissionRequest,
     ) -> Result<Option<Value>> {
+        self.send_permission_request_with_context(chat_id, request, None)
+    }
+
+    fn send_permission_request_with_context(
+        &self,
+        chat_id: &str,
+        request: &ChatPermissionRequest,
+        context: Option<&ChannelContext>,
+    ) -> Result<Option<Value>> {
         let text = format_permission_text(request);
         let buttons: Vec<Value> = request
             .options
@@ -1319,7 +1337,7 @@ impl ChatSink for TelegramSink {
         } else {
             Some(json!({ "inline_keyboard": [buttons] }))
         };
-        let message_id = self.send_message_with_id(chat_id, &text, reply_markup, None, None)?;
+        let message_id = self.send_message_with_id(chat_id, &text, reply_markup, None, context)?;
         Ok(Some(json!({ "message_id": message_id })))
     }
 
@@ -1333,11 +1351,18 @@ impl ChatSink for TelegramSink {
         let Some(message_id) = message_ref.get("message_id").and_then(Value::as_i64) else {
             return Ok(());
         };
+        if let Err(error) = self.delete_message(chat_id, message_id) {
+            log::debug!(
+                "[im-bridge:telegram] failed to delete permission message; falling back to edit: {error:#}"
+            );
+        } else {
+            return Ok(());
+        }
         let mut text = format_permission_text(request);
         text.push_str("\n\n");
         text.push_str(&format_permission_outcome(outcome));
-        // editMessageText with no reply_markup also drops the inline keyboard,
-        // which is exactly what we want: no more callbacks possible.
+        // If deleteMessage is unavailable for this message, editMessageText
+        // with no reply_markup still drops the inline keyboard.
         self.edit_message_text(chat_id, message_id, &text, None, None)
     }
 
