@@ -10,6 +10,7 @@
 //! WeWork) can be added under `platforms/` without touching the router or the
 //! outbound aggregator.
 
+mod attachments;
 mod config;
 mod idle;
 mod outbound;

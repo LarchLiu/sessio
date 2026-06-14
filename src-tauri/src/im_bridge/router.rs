@@ -16,6 +16,7 @@ use crate::agents::runtime::types::{
 use crate::models::Agent;
 use crate::store::ChannelSessionRecord;
 
+use super::attachments::{filter_by_capability, InboundAttachment};
 use super::state::{ChatKey, ChatSession, ImBridgeState};
 
 /// How long to wait for a freshly started session to leave `Starting` before
@@ -35,6 +36,14 @@ enum PromptDispatchOutcome {
     Queued(usize),
 }
 
+/// Plain prompts queued behind an active turn. Attachments piggy-back on the
+/// prompt that introduced them so they're replayed together.
+#[derive(Debug, Clone, Default)]
+pub(super) struct QueuedPrompt {
+    pub text: String,
+    pub attachments: Vec<InboundAttachment>,
+}
+
 impl HandleOutcome {
     fn reply(text: impl Into<String>) -> Self {
         Self {
@@ -47,11 +56,19 @@ impl HandleOutcome {
     }
 }
 
-/// Entry point for an authenticated inbound message. `text` is the raw message
-/// body; `key` identifies the originating chat.
-pub fn handle_message(state: &Arc<ImBridgeState>, key: &ChatKey, text: &str) -> HandleOutcome {
+/// Variant accepting media/file attachments already downloaded to local disk.
+/// Slash commands ignore attachments; plain prompts forward them subject to the
+/// bound agent's runtime capabilities. Pass an empty `attachments` vec for
+/// text-only flows.
+pub fn handle_message_with_attachments(
+    state: &Arc<ImBridgeState>,
+    key: &ChatKey,
+    text: &str,
+    attachments: Vec<InboundAttachment>,
+) -> HandleOutcome {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    let has_attachments = !attachments.is_empty();
+    if trimmed.is_empty() && !has_attachments {
         return HandleOutcome::silent();
     }
 
@@ -59,11 +76,30 @@ pub fn handle_message(state: &Arc<ImBridgeState>, key: &ChatKey, text: &str) -> 
         return handle_command(state, key, rest);
     }
 
-    match dispatch_prompt(state, key, trimmed) {
-        Ok(PromptDispatchOutcome::Sent) => HandleOutcome::silent(),
-        Ok(PromptDispatchOutcome::Queued(position)) => HandleOutcome::reply(format!(
-            "上一轮还在处理中，已将这条消息加入队列（第 {position} 条）。\n发送 /cancel 可取消当前回合。"
-        )),
+    let effective_text = if trimmed.is_empty() {
+        "(attached files)".to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    match dispatch_prompt(state, key, &effective_text, attachments) {
+        Ok((PromptDispatchOutcome::Sent, notes)) => {
+            if notes.is_empty() {
+                HandleOutcome::silent()
+            } else {
+                HandleOutcome::reply(notes.join("\n"))
+            }
+        }
+        Ok((PromptDispatchOutcome::Queued(position), notes)) => {
+            let mut reply = format!(
+                "上一轮还在处理中，已将这条消息加入队列（第 {position} 条）。\n发送 /cancel 可取消当前回合。"
+            );
+            if !notes.is_empty() {
+                reply.push_str("\n\n");
+                reply.push_str(&notes.join("\n"));
+            }
+            HandleOutcome::reply(reply)
+        }
         Err(error) => HandleOutcome::reply(format!("⚠️ {error:#}")),
     }
 }
@@ -273,21 +309,61 @@ fn dispatch_prompt(
     state: &Arc<ImBridgeState>,
     key: &ChatKey,
     text: &str,
-) -> Result<PromptDispatchOutcome> {
+    attachments: Vec<InboundAttachment>,
+) -> Result<(PromptDispatchOutcome, Vec<String>)> {
     let session = match state.chat_session(key) {
         Some(session) => session,
         None => restore_or_start_session(state, key)?,
     };
     state.touch_chat(key);
 
+    // Filter attachments to what the bound runtime/agent can accept and collect
+    // a user-facing note for anything dropped.
+    let (filtered, notes) = if attachments.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        let caps = state
+            .runtime
+            .capabilities_for_session(&session.sessio_runtime_session_id);
+        match caps {
+            Some(caps) => {
+                let result = filter_by_capability(attachments, &caps);
+                let notes = result.notes(session.agent.as_str());
+                (result.allowed, notes)
+            }
+            None => {
+                // Capabilities unknown means the session is still warming up;
+                // be conservative and drop attachments rather than racing the
+                // ACP capability negotiation.
+                (
+                    Vec::new(),
+                    vec![format!(
+                        "⚠️ 会话尚未就绪，已忽略本条消息中的附件。"
+                    )],
+                )
+            }
+        }
+    };
+
     if state
         .runtime
         .active_turn_id(&session.sessio_runtime_session_id)
         .is_some()
     {
-        let position = state.enqueue_prompt(key, text.to_string());
-        return Ok(PromptDispatchOutcome::Queued(position));
+        let position = state.enqueue_prompt(
+            key,
+            QueuedPrompt {
+                text: text.to_string(),
+                attachments: filtered,
+            },
+        );
+        return Ok((PromptDispatchOutcome::Queued(position), notes));
     }
+
+    let agent_attachments = filtered
+        .into_iter()
+        .map(InboundAttachment::into_agent)
+        .collect::<Vec<_>>();
 
     state
         .runtime
@@ -295,17 +371,17 @@ fn dispatch_prompt(
             &session.sessio_runtime_session_id,
             AgentInput {
                 text: text.to_string(),
-                attachments: Vec::new(),
+                attachments: agent_attachments,
                 options: Default::default(),
             },
         )
-        .map(|_| PromptDispatchOutcome::Sent)
+        .map(|_| (PromptDispatchOutcome::Sent, notes))
 }
 
 /// Dispatch the next queued prompt for a chat after its active turn settles.
 /// Commands are never queued, so this only needs to replay plain text prompts.
 pub(super) fn dispatch_next_queued_prompt(state: &Arc<ImBridgeState>, key: &ChatKey) {
-    let Some(text) = state.pop_queued_prompt(key) else {
+    let Some(prompt) = state.pop_queued_prompt(key) else {
         return;
     };
     let Some(session) = state.chat_session(key) else {
@@ -322,15 +398,21 @@ pub(super) fn dispatch_next_queued_prompt(state: &Arc<ImBridgeState>, key: &Chat
         .active_turn_id(&session.sessio_runtime_session_id)
         .is_some()
     {
-        state.prepend_prompt(key, text);
+        state.prepend_prompt(key, prompt);
         return;
     }
+
+    let agent_attachments = prompt
+        .attachments
+        .into_iter()
+        .map(InboundAttachment::into_agent)
+        .collect::<Vec<_>>();
 
     if let Err(error) = state.runtime.send_input(
         &session.sessio_runtime_session_id,
         AgentInput {
-            text,
-            attachments: Vec::new(),
+            text: prompt.text,
+            attachments: agent_attachments,
             options: Default::default(),
         },
     ) {

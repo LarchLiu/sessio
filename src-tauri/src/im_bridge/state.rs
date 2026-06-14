@@ -16,6 +16,7 @@ use crate::store::{ChannelSessionRecord, SessionStore};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::config::ImBridgeConfig;
+use super::router::QueuedPrompt;
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -139,6 +140,60 @@ pub trait ChatSink: Send + Sync {
     /// caller; a failed send must not poison the pump.
     fn send_text(&self, chat_id: &str, text: &str) -> anyhow::Result<()>;
 
+    /// Upload an image file from local disk. Default falls back to a text note
+    /// so the user at least sees the path.
+    fn send_image(
+        &self,
+        chat_id: &str,
+        path: &std::path::Path,
+        caption: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image");
+        let mut text = format!("[image: {}]", label);
+        if let Some(caption) = caption {
+            if !caption.trim().is_empty() {
+                text.push('\n');
+                text.push_str(caption);
+            }
+        }
+        self.send_text(chat_id, &text)
+    }
+
+    /// Upload a generic file from local disk. Default falls back to a text note.
+    fn send_file(
+        &self,
+        chat_id: &str,
+        path: &std::path::Path,
+        caption: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        let mut text = format!("[file: {}]", label);
+        if let Some(caption) = caption {
+            if !caption.trim().is_empty() {
+                text.push('\n');
+                text.push_str(caption);
+            }
+        }
+        self.send_text(chat_id, &text)
+    }
+
+    /// Whether this platform can upload images via [`send_image`]. Outbound
+    /// scanning skips files when both this and [`supports_files`] return false.
+    fn supports_images(&self) -> bool {
+        false
+    }
+
+    /// Whether this platform can upload arbitrary files via [`send_file`].
+    fn supports_files(&self) -> bool {
+        false
+    }
+
     /// Deliver a permission request. Platforms with buttons override this;
     /// others get a safe text-only fallback.
     ///
@@ -194,7 +249,7 @@ struct Inner {
     /// sessio runtime session id -> in-flight turn buffer
     turns: Mutex<HashMap<String, TurnBuffer>>,
     /// chat -> plain prompts waiting for the active turn to finish
-    inbound_queues: Mutex<HashMap<ChatKey, VecDeque<String>>>,
+    inbound_queues: Mutex<HashMap<ChatKey, VecDeque<QueuedPrompt>>>,
     /// short callback token -> permission response data
     pending_permissions: Mutex<HashMap<String, PendingPermissionDecision>>,
     /// sessio runtime session id -> request id -> rendered permission message
@@ -516,10 +571,10 @@ impl ImBridgeState {
 
     /// Queue a prompt behind the chat's active turn. Returns the new 1-based
     /// queue length for user-facing feedback.
-    pub fn enqueue_prompt(&self, key: &ChatKey, text: String) -> usize {
+    pub fn enqueue_prompt(&self, key: &ChatKey, prompt: QueuedPrompt) -> usize {
         if let Ok(mut queues) = self.inner.inbound_queues.lock() {
             let queue = queues.entry(key.clone()).or_default();
-            queue.push_back(text);
+            queue.push_back(prompt);
             queue.len()
         } else {
             0
@@ -528,14 +583,14 @@ impl ImBridgeState {
 
     /// Put a prompt back at the front of a chat queue. Used when a queued prompt
     /// races with another active turn.
-    pub fn prepend_prompt(&self, key: &ChatKey, text: String) {
+    pub fn prepend_prompt(&self, key: &ChatKey, prompt: QueuedPrompt) {
         if let Ok(mut queues) = self.inner.inbound_queues.lock() {
-            queues.entry(key.clone()).or_default().push_front(text);
+            queues.entry(key.clone()).or_default().push_front(prompt);
         }
     }
 
     /// Pop the next queued prompt for a chat.
-    pub fn pop_queued_prompt(&self, key: &ChatKey) -> Option<String> {
+    pub fn pop_queued_prompt(&self, key: &ChatKey) -> Option<QueuedPrompt> {
         let mut queues = self.inner.inbound_queues.lock().ok()?;
         let queue = queues.get_mut(key)?;
         let prompt = queue.pop_front();
@@ -573,6 +628,62 @@ impl ImBridgeState {
             .and_then(|sinks| sinks.get(key.platform).cloned())
             .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
         sink.send_text(&key.chat_id, text)
+    }
+
+    /// Send an image file to a chat via its platform sink.
+    pub fn send_image_to_chat(
+        &self,
+        key: &ChatKey,
+        path: &std::path::Path,
+        caption: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let sink = self
+            .inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
+        sink.send_image(&key.chat_id, path, caption)
+    }
+
+    /// Send a generic file to a chat via its platform sink.
+    pub fn send_file_to_chat(
+        &self,
+        key: &ChatKey,
+        path: &std::path::Path,
+        caption: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let sink = self
+            .inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
+        sink.send_file(&key.chat_id, path, caption)
+    }
+
+    /// Whether the platform sink for `key` advertises image upload support.
+    pub fn sink_supports_images(&self, key: &ChatKey) -> bool {
+        self.inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .map(|sink| sink.supports_images())
+            .unwrap_or(false)
+    }
+
+    /// Whether the platform sink for `key` advertises file upload support.
+    pub fn sink_supports_files(&self, key: &ChatKey) -> bool {
+        self.inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .map(|sink| sink.supports_files())
+            .unwrap_or(false)
     }
 
     /// Send a permission request to a chat via its platform sink. If the sink

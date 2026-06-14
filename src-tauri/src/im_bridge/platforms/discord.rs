@@ -1,17 +1,24 @@
 //! Discord Bot Gateway platform implementation.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use reqwest::blocking::{Client, ClientBuilder};
+use reqwest::blocking::{multipart, Client, ClientBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
+use crate::agents::runtime::types::AgentAttachmentKind;
+
+use super::super::attachments::{
+    allocate_attachment_path, attachment_dir, download_to_file, guess_file_mime, guess_image_mime,
+    InboundAttachment,
+};
 use super::super::config::DiscordConfig;
 use super::super::router;
 use super::super::state::{
@@ -336,19 +343,85 @@ fn handle_message_create(
         return;
     }
     let content = message.content.trim();
-    if content.is_empty() {
+    if content.is_empty() && message.attachments.is_empty() {
         return;
     }
 
     let key = ChatKey::new(PLATFORM, channel_id.to_string());
     state.remember_channel_context(key.clone(), discord_channel_context(&message));
-    let outcome = router::handle_message(state, &key, &strip_bot_mention(sink, content));
+    let attachments = download_discord_attachments(state, sink, &key, &message);
+    let outcome = router::handle_message_with_attachments(
+        state,
+        &key,
+        &strip_bot_mention(sink, content),
+        attachments,
+    );
     if let Some(reply) = outcome.reply {
         if let Err(error) = sink.send_text(channel_id, &reply) {
             log::warn!("[im-bridge:discord] failed to send command reply: {error:#}");
         }
     }
     record_message_activity(state, channel_id, snowflake_i64(&message.id));
+}
+
+fn download_discord_attachments(
+    state: &Arc<ImBridgeState>,
+    sink: &Arc<DiscordSink>,
+    key: &ChatKey,
+    message: &DiscordMessage,
+) -> Vec<InboundAttachment> {
+    if message.attachments.is_empty() {
+        return Vec::new();
+    }
+    let workspace = match state.chat_session(key).map(|s| s.workspace_path).or_else(|| {
+        state
+            .config_snapshot()
+            .workspace_for_chat(key.platform, &key.chat_id)
+            .map(str::to_string)
+    }) {
+        Some(workspace) => workspace,
+        None => {
+            log::warn!(
+                "[im-bridge:discord] dropping attachments for {}: no workspace bound",
+                key.chat_id
+            );
+            return Vec::new();
+        }
+    };
+    let dir = match attachment_dir(&workspace, key.platform, &key.chat_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            log::warn!("[im-bridge:discord] cannot prepare attachment dir: {error:#}");
+            return Vec::new();
+        }
+    };
+    let mut downloaded = Vec::new();
+    for attachment in &message.attachments {
+        let kind = attachment
+            .content_type
+            .as_deref()
+            .filter(|mime| mime.starts_with("image/"))
+            .map(|_| AgentAttachmentKind::Image)
+            .unwrap_or(AgentAttachmentKind::File);
+        let suggested = attachment.filename.clone();
+        let destination = allocate_attachment_path(&dir, suggested.as_deref());
+        if let Err(error) =
+            download_to_file(&sink.client, &attachment.url, None, &destination)
+        {
+            log::warn!(
+                "[im-bridge:discord] download attachment {} failed: {error:#}",
+                attachment.url
+            );
+            continue;
+        }
+        downloaded.push(InboundAttachment {
+            path: destination,
+            kind,
+            mime_type: attachment.content_type.clone(),
+            display_name: suggested,
+        });
+    }
+    downloaded
 }
 
 fn handle_interaction_create(
@@ -667,6 +740,42 @@ impl DiscordSink {
         Ok(())
     }
 
+    fn send_attachment(
+        &self,
+        channel_id: &str,
+        path: &Path,
+        caption: Option<&str>,
+        mime: &str,
+    ) -> Result<()> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read attachment {}", path.display()))?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(mime)
+            .context("set attachment MIME type")?;
+        let payload = json!({
+            "content": caption.unwrap_or(""),
+            "allowed_mentions": { "parse": [] },
+        });
+        let form = multipart::Form::new()
+            .text("payload_json", payload.to_string())
+            .part("files[0]", part);
+        self.client
+            .post(self.endpoint(&format!("/channels/{channel_id}/messages")))
+            .bearer_auth(&self.bot_token)
+            .multipart(form)
+            .send()
+            .with_context(|| "Discord createMessage (attachment) failed")?
+            .error_for_status()
+            .with_context(|| "Discord createMessage (attachment) returned HTTP error")?;
+        Ok(())
+    }
+
     fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T> {
         self.client
             .get(self.endpoint(path))
@@ -703,6 +812,24 @@ impl ChatSink for DiscordSink {
             self.send_message(chat_id, &chunk, None)?;
         }
         Ok(())
+    }
+
+    fn send_image(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+        let mime = guess_image_mime(path);
+        self.send_attachment(chat_id, path, caption, mime)
+    }
+
+    fn send_file(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+        let mime = guess_file_mime(path);
+        self.send_attachment(chat_id, path, caption, mime)
+    }
+
+    fn supports_images(&self) -> bool {
+        true
+    }
+
+    fn supports_files(&self) -> bool {
+        true
     }
 
     fn send_permission_request(
@@ -825,6 +952,17 @@ struct DiscordMessage {
     mentions: Vec<DiscordUser>,
     #[serde(default, rename = "referenced_message")]
     referenced_message: Option<Value>,
+    #[serde(default)]
+    attachments: Vec<DiscordAttachment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordAttachment {
+    url: String,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default, rename = "content_type")]
+    content_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

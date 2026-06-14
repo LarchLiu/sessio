@@ -1,15 +1,21 @@
 //! Telegram Bot API platform implementation.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::agents::runtime::types::AgentAttachmentKind;
 use crate::models::{Agent, AgentInfo, RuntimeAgentOptionMetadata};
 use anyhow::{anyhow, bail, Context, Result};
-use reqwest::blocking::{Client, ClientBuilder};
+use reqwest::blocking::{multipart, Client, ClientBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::super::attachments::{
+    allocate_attachment_path, attachment_dir, download_to_file, guess_file_mime, guess_image_mime,
+    InboundAttachment,
+};
 use super::super::config::TelegramConfig;
 use super::super::router;
 use super::super::state::{
@@ -162,9 +168,11 @@ fn handle_update(
     let Some(message) = update.message else {
         return;
     };
-    let Some(text) = message.text.as_deref() else {
-        return;
-    };
+    let text = message
+        .text
+        .as_deref()
+        .or(message.caption.as_deref())
+        .unwrap_or("");
     let Some(from) = message.from.as_ref() else {
         return;
     };
@@ -202,13 +210,101 @@ fn handle_update(
         record_update_activity(state, &chat_id, update.update_id);
         return;
     }
-    let outcome = router::handle_message(state, &key, text);
+    let attachments = download_message_attachments(state, sink, &key, &message);
+    let outcome =
+        router::handle_message_with_attachments(state, &key, text, attachments);
     if let Some(reply) = outcome.reply {
         if let Err(error) = sink.send_text(&chat_id, &reply) {
             log::warn!("[im-bridge:telegram] failed to send command reply: {error:#}");
         }
     }
     record_update_activity(state, &chat_id, update.update_id);
+}
+
+/// Download photo/document attachments to the chat's workspace attachment
+/// directory. Logs and skips entries that fail; the message still flows.
+fn download_message_attachments(
+    state: &Arc<ImBridgeState>,
+    sink: &Arc<TelegramSink>,
+    key: &ChatKey,
+    message: &TelegramMessage,
+) -> Vec<InboundAttachment> {
+    let mut entries: Vec<(String, AgentAttachmentKind, Option<String>)> = Vec::new();
+    if let Some(photo) = best_photo(&message.photo) {
+        entries.push((photo.file_id.clone(), AgentAttachmentKind::Image, None));
+    }
+    if let Some(document) = message.document.as_ref() {
+        let kind = document
+            .mime_type
+            .as_deref()
+            .filter(|mime| mime.starts_with("image/"))
+            .map(|_| AgentAttachmentKind::Image)
+            .unwrap_or(AgentAttachmentKind::File);
+        entries.push((document.file_id.clone(), kind, document.file_name.clone()));
+    }
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let workspace = match state.chat_session(key).map(|s| s.workspace_path).or_else(|| {
+        state
+            .config_snapshot()
+            .workspace_for_chat(key.platform, &key.chat_id)
+            .map(str::to_string)
+    }) {
+        Some(workspace) => workspace,
+        None => {
+            log::warn!(
+                "[im-bridge:telegram] dropping attachments for {}: no workspace bound",
+                key.chat_id
+            );
+            return Vec::new();
+        }
+    };
+    let dir = match attachment_dir(&workspace, key.platform, &key.chat_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            log::warn!("[im-bridge:telegram] cannot prepare attachment dir: {error:#}");
+            return Vec::new();
+        }
+    };
+    let mut downloaded = Vec::new();
+    for (file_id, kind, suggested_name) in entries {
+        let file = match sink.get_file(&file_id) {
+            Ok(file) => file,
+            Err(error) => {
+                log::warn!("[im-bridge:telegram] getFile failed for {file_id}: {error:#}");
+                continue;
+            }
+        };
+        let Some(path) = file.file_path else {
+            log::warn!("[im-bridge:telegram] getFile response missing file_path");
+            continue;
+        };
+        let display = suggested_name
+            .clone()
+            .or_else(|| Path::new(&path).file_name().and_then(|n| n.to_str()).map(str::to_string));
+        let destination = allocate_attachment_path(&dir, display.as_deref());
+        let url = sink.file_download_url(&path);
+        if let Err(error) = download_to_file(&sink.client, &url, None, &destination) {
+            log::warn!("[im-bridge:telegram] download {file_id} failed: {error:#}");
+            continue;
+        }
+        downloaded.push(InboundAttachment {
+            path: destination,
+            kind,
+            mime_type: None,
+            display_name: display,
+        });
+    }
+    downloaded
+}
+
+/// Pick the largest available photo size. Telegram delivers an array of
+/// progressively higher-resolution variants.
+fn best_photo(photos: &[TelegramPhotoSize]) -> Option<&TelegramPhotoSize> {
+    photos
+        .iter()
+        .max_by_key(|photo| photo.file_size.unwrap_or(0))
 }
 
 fn record_update_activity(state: &Arc<ImBridgeState>, chat_id: &str, update_id: i64) {
@@ -892,6 +988,84 @@ impl TelegramSink {
         response.into_result().map(|_| ())
     }
 
+    fn get_file(&self, file_id: &str) -> Result<TelegramFile> {
+        let body = json!({ "file_id": file_id });
+        let response: TelegramApiResponse<TelegramFile> = self.post_json("getFile", &body)?;
+        response.into_result()
+    }
+
+    fn file_download_url(&self, file_path: &str) -> String {
+        format!("{}/file/bot{}/{}", self.api_base, self.bot_token, file_path)
+    }
+
+    fn send_photo(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("photo")
+            .to_string();
+        let mime = guess_image_mime(path);
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read image {}", path.display()))?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(mime)
+            .context("set image MIME type")?;
+        let mut form = multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("photo", part);
+        if let Some(caption) = caption {
+            if !caption.trim().is_empty() {
+                form = form.text("caption", caption.to_string());
+            }
+        }
+        let response: TelegramApiResponse<Value> = self
+            .client
+            .post(self.endpoint("sendPhoto"))
+            .multipart(form)
+            .send()
+            .with_context(|| "Telegram sendPhoto request failed")?
+            .error_for_status()
+            .with_context(|| "Telegram sendPhoto returned HTTP error")?
+            .json()
+            .with_context(|| "parse Telegram sendPhoto response")?;
+        response.into_result().map(|_| ())
+    }
+
+    fn send_document(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let mime = guess_file_mime(path);
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read file {}", path.display()))?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(mime)
+            .context("set document MIME type")?;
+        let mut form = multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("document", part);
+        if let Some(caption) = caption {
+            if !caption.trim().is_empty() {
+                form = form.text("caption", caption.to_string());
+            }
+        }
+        let response: TelegramApiResponse<Value> = self
+            .client
+            .post(self.endpoint("sendDocument"))
+            .multipart(form)
+            .send()
+            .with_context(|| "Telegram sendDocument request failed")?
+            .error_for_status()
+            .with_context(|| "Telegram sendDocument returned HTTP error")?
+            .json()
+            .with_context(|| "parse Telegram sendDocument response")?;
+        response.into_result().map(|_| ())
+    }
+
     fn post_json<T: for<'de> Deserialize<'de>>(&self, method: &str, body: &Value) -> Result<T> {
         self.client
             .post(self.endpoint(method))
@@ -915,6 +1089,22 @@ impl ChatSink for TelegramSink {
             self.send_message(chat_id, &chunk, None)?;
         }
         Ok(())
+    }
+
+    fn send_image(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+        self.send_photo(chat_id, path, caption)
+    }
+
+    fn send_file(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+        self.send_document(chat_id, path, caption)
+    }
+
+    fn supports_images(&self) -> bool {
+        true
+    }
+
+    fn supports_files(&self) -> bool {
+        true
     }
 
     fn send_permission_request(
@@ -1048,6 +1238,34 @@ struct TelegramMessage {
     chat: TelegramChat,
     from: Option<TelegramUser>,
     text: Option<String>,
+    #[serde(default)]
+    caption: Option<String>,
+    #[serde(default)]
+    photo: Vec<TelegramPhotoSize>,
+    #[serde(default)]
+    document: Option<TelegramDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramPhotoSize {
+    file_id: String,
+    #[serde(default)]
+    file_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramDocument {
+    file_id: String,
+    #[serde(default)]
+    file_name: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramFile {
+    #[serde(default)]
+    file_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

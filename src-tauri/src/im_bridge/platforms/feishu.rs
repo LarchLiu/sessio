@@ -5,18 +5,24 @@
 //! official SDK uses for receiving event callbacks and acknowledging them.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use reqwest::blocking::{Client, ClientBuilder};
+use reqwest::blocking::{multipart, Client, ClientBuilder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
+use crate::agents::runtime::types::AgentAttachmentKind;
+
+use super::super::attachments::{
+    allocate_attachment_path, attachment_dir, guess_file_mime, guess_image_mime, InboundAttachment,
+};
 use super::super::config::FeishuConfig;
 use super::super::router;
 use super::super::state::{
@@ -349,20 +355,30 @@ fn handle_feishu_payload(
         .map(str::to_string);
 
     let chat_id = string_field(message, &["chat_id"]).context("Feishu message missing chat_id")?;
-    let text = extract_message_text(message)?;
-    let Some(text) = text
+    let message_id = string_field(message, &["message_id"]);
+    let (text, attachment_refs) = extract_message_payload(message)?;
+    let key = ChatKey::new(PLATFORM, chat_id.clone());
+    let trimmed_text = text
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-    else {
+        .unwrap_or_default();
+    if trimmed_text.is_empty() && attachment_refs.is_empty() {
         return Ok(());
-    };
+    }
 
-    let key = ChatKey::new(PLATFORM, chat_id.clone());
     state.remember_channel_context(
         key.clone(),
         feishu_channel_context(message, sender, open_id.as_deref(), user_id.as_deref()),
     );
-    let outcome = router::handle_message(state, &key, &text);
+    let attachments = if attachment_refs.is_empty() {
+        Vec::new()
+    } else if let Some(message_id) = message_id.as_deref() {
+        download_feishu_attachments(state, sink, &key, message_id, attachment_refs)
+    } else {
+        log::warn!("[im-bridge:feishu] cannot download attachments without message_id");
+        Vec::new()
+    };
+    let outcome = router::handle_message_with_attachments(state, &key, &trimmed_text, attachments);
     if let Some(reply) = outcome.reply {
         if let Err(error) = sink.send_text(&chat_id, &reply) {
             log::warn!("[im-bridge:feishu] failed to send command reply: {error:#}");
@@ -372,25 +388,132 @@ fn handle_feishu_payload(
     Ok(())
 }
 
-fn extract_message_text(message: &Value) -> Result<Option<String>> {
+/// What we know about an inbound Feishu attachment before downloading it.
+struct FeishuAttachmentRef {
+    key: String,
+    kind: AgentAttachmentKind,
+    resource_type: &'static str,
+    file_name: Option<String>,
+}
+
+fn extract_message_payload(message: &Value) -> Result<(Option<String>, Vec<FeishuAttachmentRef>)> {
     let message_type = string_field(message, &["message_type"]).unwrap_or_default();
     let content = string_field(message, &["content"]).unwrap_or_default();
     match message_type.as_str() {
         "text" => {
             let value: Value =
                 serde_json::from_str(&content).context("parse Feishu text content")?;
-            Ok(value
+            let text = value
                 .get("text")
                 .and_then(Value::as_str)
-                .map(str::to_string))
+                .map(str::to_string);
+            Ok((text, Vec::new()))
         }
         "post" => {
             let value: Value =
                 serde_json::from_str(&content).context("parse Feishu post content")?;
-            Ok(extract_post_text(&value))
+            Ok((extract_post_text(&value), Vec::new()))
         }
-        _ => Ok(None),
+        "image" => {
+            let value: Value =
+                serde_json::from_str(&content).context("parse Feishu image content")?;
+            let key = value
+                .get("image_key")
+                .and_then(Value::as_str)
+                .context("Feishu image content missing image_key")?
+                .to_string();
+            Ok((
+                None,
+                vec![FeishuAttachmentRef {
+                    key,
+                    kind: AgentAttachmentKind::Image,
+                    resource_type: "image",
+                    file_name: None,
+                }],
+            ))
+        }
+        "file" | "media" | "audio" => {
+            let value: Value =
+                serde_json::from_str(&content).context("parse Feishu file content")?;
+            let key = value
+                .get("file_key")
+                .and_then(Value::as_str)
+                .context("Feishu file content missing file_key")?
+                .to_string();
+            let file_name = value
+                .get("file_name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Ok((
+                None,
+                vec![FeishuAttachmentRef {
+                    key,
+                    kind: AgentAttachmentKind::File,
+                    resource_type: "file",
+                    file_name,
+                }],
+            ))
+        }
+        _ => Ok((None, Vec::new())),
     }
+}
+
+fn download_feishu_attachments(
+    state: &Arc<ImBridgeState>,
+    sink: &Arc<FeishuSink>,
+    key: &ChatKey,
+    message_id: &str,
+    refs: Vec<FeishuAttachmentRef>,
+) -> Vec<InboundAttachment> {
+    let workspace = match state
+        .chat_session(key)
+        .map(|s| s.workspace_path)
+        .or_else(|| {
+            state
+                .config_snapshot()
+                .workspace_for_chat(key.platform, &key.chat_id)
+                .map(str::to_string)
+        }) {
+        Some(workspace) => workspace,
+        None => {
+            log::warn!(
+                "[im-bridge:feishu] dropping attachments for {}: no workspace bound",
+                key.chat_id
+            );
+            return Vec::new();
+        }
+    };
+    let dir = match attachment_dir(&workspace, key.platform, &key.chat_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            log::warn!("[im-bridge:feishu] cannot prepare attachment dir: {error:#}");
+            return Vec::new();
+        }
+    };
+    let mut downloaded = Vec::new();
+    for entry in refs {
+        let suggested = entry.file_name.clone().or_else(|| Some(entry.key.clone()));
+        let destination = allocate_attachment_path(&dir, suggested.as_deref());
+        if let Err(error) = sink.download_message_resource(
+            message_id,
+            &entry.key,
+            entry.resource_type,
+            &destination,
+        ) {
+            log::warn!(
+                "[im-bridge:feishu] download resource {} failed: {error:#}",
+                entry.key
+            );
+            continue;
+        }
+        downloaded.push(InboundAttachment {
+            path: destination,
+            kind: entry.kind,
+            mime_type: None,
+            display_name: suggested,
+        });
+    }
+    downloaded
 }
 
 fn extract_post_text(value: &Value) -> Option<String> {
@@ -801,6 +924,126 @@ impl FeishuSink {
         }
         Ok(())
     }
+
+    /// Download the file/image attached to an inbound message. `resource_type`
+    /// is "image" or "file" per Feishu's resources API.
+    fn download_message_resource(
+        &self,
+        message_id: &str,
+        file_key: &str,
+        resource_type: &str,
+        destination: &Path,
+    ) -> Result<()> {
+        let token = self.tenant_access_token()?;
+        let url = self.endpoint(&format!(
+            "/open-apis/im/v1/messages/{message_id}/resources/{file_key}"
+        ));
+        let mut response = self
+            .client
+            .get(url)
+            .query(&[("type", resource_type)])
+            .bearer_auth(token)
+            .send()
+            .with_context(|| format!("Feishu resource {file_key} request failed"))?
+            .error_for_status()
+            .with_context(|| format!("Feishu resource {file_key} returned HTTP error"))?;
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create directory {}", parent.display()))?;
+        }
+        let mut file = std::fs::File::create(destination)
+            .with_context(|| format!("create attachment file {}", destination.display()))?;
+        response
+            .copy_to(&mut file)
+            .with_context(|| format!("write attachment file {}", destination.display()))?;
+        Ok(())
+    }
+
+    /// Upload an image, returning the `image_key` used to reference it in
+    /// subsequent `msg_type=image` messages.
+    fn upload_image(&self, path: &Path) -> Result<String> {
+        let token = self.tenant_access_token()?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let mime = guess_image_mime(path);
+        let bytes =
+            std::fs::read(path).with_context(|| format!("read image {}", path.display()))?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(mime)
+            .context("set image MIME type")?;
+        let form = multipart::Form::new()
+            .text("image_type", "message")
+            .part("image", part);
+        let response: FeishuUploadImageResponse = self
+            .client
+            .post(self.endpoint("/open-apis/im/v1/images"))
+            .bearer_auth(token)
+            .multipart(form)
+            .send()
+            .context("Feishu upload image failed")?
+            .error_for_status()
+            .context("Feishu upload image returned HTTP error")?
+            .json()
+            .context("parse Feishu upload image response")?;
+        if response.code != 0 {
+            bail!(
+                "Feishu upload image failed: code={}, msg={}",
+                response.code,
+                response.msg.unwrap_or_default()
+            );
+        }
+        response
+            .data
+            .and_then(|data| data.image_key)
+            .context("Feishu upload image response missing image_key")
+    }
+
+    /// Upload a generic file, returning the `file_key` used in
+    /// `msg_type=file` messages.
+    fn upload_file(&self, path: &Path) -> Result<String> {
+        let token = self.tenant_access_token()?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let mime = guess_file_mime(path);
+        let bytes = std::fs::read(path).with_context(|| format!("read file {}", path.display()))?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name.clone())
+            .mime_str(mime)
+            .context("set file MIME type")?;
+        let form = multipart::Form::new()
+            .text("file_type", feishu_file_type(path))
+            .text("file_name", file_name)
+            .part("file", part);
+        let response: FeishuUploadFileResponse = self
+            .client
+            .post(self.endpoint("/open-apis/im/v1/files"))
+            .bearer_auth(token)
+            .multipart(form)
+            .send()
+            .context("Feishu upload file failed")?
+            .error_for_status()
+            .context("Feishu upload file returned HTTP error")?
+            .json()
+            .context("parse Feishu upload file response")?;
+        if response.code != 0 {
+            bail!(
+                "Feishu upload file failed: code={}, msg={}",
+                response.code,
+                response.msg.unwrap_or_default()
+            );
+        }
+        response
+            .data
+            .and_then(|data| data.file_key)
+            .context("Feishu upload file response missing file_key")
+    }
 }
 
 impl ChatSink for FeishuSink {
@@ -822,6 +1065,34 @@ impl ChatSink for FeishuSink {
             self.send_message(chat_id, &body)?;
         }
         Ok(())
+    }
+
+    fn send_image(&self, chat_id: &str, path: &Path, _caption: Option<&str>) -> Result<()> {
+        let image_key = self.upload_image(path)?;
+        let body = json!({
+            "receive_id": chat_id,
+            "msg_type": "image",
+            "content": serde_json::to_string(&json!({ "image_key": image_key }))?,
+        });
+        self.send_message(chat_id, &body)
+    }
+
+    fn send_file(&self, chat_id: &str, path: &Path, _caption: Option<&str>) -> Result<()> {
+        let file_key = self.upload_file(path)?;
+        let body = json!({
+            "receive_id": chat_id,
+            "msg_type": "file",
+            "content": serde_json::to_string(&json!({ "file_key": file_key }))?,
+        });
+        self.send_message(chat_id, &body)
+    }
+
+    fn supports_images(&self) -> bool {
+        true
+    }
+
+    fn supports_files(&self) -> bool {
+        true
     }
 
     fn send_permission_request(
@@ -911,6 +1182,22 @@ fn split_text(text: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
+fn feishu_file_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("pdf") => "pdf",
+        Some("doc" | "docx") => "doc",
+        Some("xls" | "xlsx") => "xls",
+        Some("ppt" | "pptx") => "ppt",
+        Some("mp4") => "mp4",
+        _ => "stream",
+    }
+}
+
 fn normalize_domain(domain: Option<&str>) -> String {
     domain
         .map(str::trim)
@@ -973,6 +1260,36 @@ struct FeishuApiResponse {
     code: i64,
     #[serde(default)]
     msg: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadImageResponse {
+    code: i64,
+    #[serde(default)]
+    msg: Option<String>,
+    #[serde(default)]
+    data: Option<FeishuUploadImageData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadImageData {
+    #[serde(default)]
+    image_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadFileResponse {
+    code: i64,
+    #[serde(default)]
+    msg: Option<String>,
+    #[serde(default)]
+    data: Option<FeishuUploadFileData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeishuUploadFileData {
+    #[serde(default)]
+    file_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

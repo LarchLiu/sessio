@@ -8,10 +8,13 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::agents::runtime::types::{AgentRuntimeEvent, AgentRuntimeEventPayload};
+use crate::agents::runtime::types::{
+    AgentAttachmentKind, AgentRuntimeEvent, AgentRuntimeEventPayload,
+};
 
+use super::attachments::{extract_outbound_attachments, OutboundAttachment};
 use super::router;
-use super::state::{ChatPermissionOption, ChatPermissionRequest, ImBridgeState};
+use super::state::{ChatKey, ChatPermissionOption, ChatPermissionRequest, ImBridgeState};
 
 /// How often we re-send the platform's "typing" indicator while a turn is in
 /// flight. Telegram's `sendChatAction` expires at ~5s and Discord's typing at
@@ -291,8 +294,61 @@ fn flush_turn(state: &Arc<ImBridgeState>, session_id: &str, empty_fallback: &str
         text.push_str("\n\nTools: ");
         text.push_str(&buffer.tools.join(", "));
     }
+    // Extract attachments referenced from the body text and dispatch them
+    // through the platform sink before the text reply (caption-style). Send
+    // text first so platforms without media support still see the message.
+    let attachments = collect_outbound_attachments(state, &chat, &body);
     if let Err(error) = state.send_to_chat(&chat, &text) {
         log::warn!("[im-bridge:outbound] failed to send chat reply: {error:#}");
+    }
+    for attachment in attachments {
+        if let Err(error) = send_outbound_attachment(state, &chat, &attachment) {
+            log::warn!(
+                "[im-bridge:outbound] failed to send attachment {}: {error:#}",
+                attachment.path.display()
+            );
+        }
+    }
+}
+
+/// Resolve assistant-referenced attachment paths against the chat's workspace,
+/// keep only those the platform sink can actually upload, and cap the count so
+/// a runaway response cannot flood the chat.
+fn collect_outbound_attachments(
+    state: &Arc<ImBridgeState>,
+    chat: &ChatKey,
+    body: &str,
+) -> Vec<OutboundAttachment> {
+    const MAX_OUTBOUND_ATTACHMENTS: usize = 5;
+    let Some(session) = state.chat_session(chat) else {
+        return Vec::new();
+    };
+    let supports_images = state.sink_supports_images(chat);
+    let supports_files = state.sink_supports_files(chat);
+    if !supports_images && !supports_files {
+        return Vec::new();
+    }
+    extract_outbound_attachments(body, &session.workspace_path)
+        .into_iter()
+        .filter(|attachment| match attachment.kind {
+            AgentAttachmentKind::Image => supports_images,
+            AgentAttachmentKind::File => supports_files,
+        })
+        .take(MAX_OUTBOUND_ATTACHMENTS)
+        .collect()
+}
+
+fn send_outbound_attachment(
+    state: &Arc<ImBridgeState>,
+    chat: &ChatKey,
+    attachment: &OutboundAttachment,
+) -> Result<()> {
+    let caption = attachment.display_name.as_deref();
+    match attachment.kind {
+        AgentAttachmentKind::Image => {
+            state.send_image_to_chat(chat, &attachment.path, caption)
+        }
+        AgentAttachmentKind::File => state.send_file_to_chat(chat, &attachment.path, caption),
     }
 }
 

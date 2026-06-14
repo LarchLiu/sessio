@@ -35,9 +35,13 @@ crossbeam-channel = "0.5"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-dialog = "2"
 base64 = "0.22"
+aes = "0.8"
+ecb = "0.1"
+cipher = { version = "0.4", features = ["block-padding", "alloc"] }
+md-5 = "0.10"
 tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "multipart"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
