@@ -9,6 +9,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex, RwLock,
 };
+use std::time::Duration;
 
 use crate::agents::runtime::RuntimeManager;
 use crate::models::Agent;
@@ -68,7 +69,7 @@ pub struct ChannelContext {
 
 /// Buffers an in-flight turn's streamed text so the bridge can post one
 /// consolidated reply on completion rather than a message per delta.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TurnBuffer {
     pub text: String,
     /// Streamed reasoning/thought content shown as a prefix block on flush.
@@ -77,6 +78,21 @@ pub struct TurnBuffer {
     pub tools: Vec<String>,
     /// Human-readable tool summaries, such as TodoWrite checklist updates.
     pub tool_summaries: Vec<String>,
+}
+
+/// Describes a platform-owned streaming text reply. Outbound routing uses this
+/// to decide whether it can update one platform message while a turn streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatStreamMode {
+    /// Ephemeral platform preview; the final answer still needs a normal send.
+    Draft,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ChatStreamCapability {
+    pub mode: ChatStreamMode,
+    pub min_interval: Duration,
+    pub max_chars: usize,
 }
 
 /// Button-style permission prompt sent to a chat platform.
@@ -140,6 +156,89 @@ pub trait ChatSink: Send + Sync {
     /// caller; a failed send must not poison the pump.
     fn send_text(&self, chat_id: &str, text: &str) -> anyhow::Result<()>;
 
+    fn send_text_with_context(
+        &self,
+        chat_id: &str,
+        text: &str,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<()> {
+        self.send_text(chat_id, text)
+    }
+
+    /// Platform-specific streaming text support. Platforms that return a
+    /// capability must implement the three stream reply methods below.
+    fn stream_capability(&self) -> Option<ChatStreamCapability> {
+        None
+    }
+
+    fn stream_capability_with_context(
+        &self,
+        _context: Option<&ChannelContext>,
+    ) -> Option<ChatStreamCapability> {
+        self.stream_capability()
+    }
+
+    /// Create the platform message that will be edited during streaming.
+    fn start_stream_reply(&self, _chat_id: &str, _text: &str) -> anyhow::Result<JsonValue> {
+        Err(anyhow::anyhow!(
+            "platform {} does not support streaming replies",
+            self.platform()
+        ))
+    }
+
+    fn start_stream_reply_with_context(
+        &self,
+        chat_id: &str,
+        text: &str,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<JsonValue> {
+        self.start_stream_reply(chat_id, text)
+    }
+
+    /// Update an in-flight platform message with a new text snapshot.
+    fn update_stream_reply(
+        &self,
+        _chat_id: &str,
+        _message_ref: &JsonValue,
+        _text: &str,
+    ) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "platform {} does not support streaming replies",
+            self.platform()
+        ))
+    }
+
+    fn update_stream_reply_with_context(
+        &self,
+        chat_id: &str,
+        message_ref: &JsonValue,
+        text: &str,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<()> {
+        self.update_stream_reply(chat_id, message_ref, text)
+    }
+
+    /// Finish an in-flight platform message. Defaults to the same update call
+    /// because most edit-message transports have no distinct finalization API.
+    fn finish_stream_reply(
+        &self,
+        chat_id: &str,
+        message_ref: &JsonValue,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        self.update_stream_reply(chat_id, message_ref, text)
+    }
+
+    fn finish_stream_reply_with_context(
+        &self,
+        chat_id: &str,
+        message_ref: &JsonValue,
+        text: &str,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<()> {
+        self.finish_stream_reply(chat_id, message_ref, text)
+    }
+
     /// Upload an image file from local disk. Default falls back to a text note
     /// so the user at least sees the path.
     fn send_image(
@@ -162,6 +261,16 @@ pub trait ChatSink: Send + Sync {
         self.send_text(chat_id, &text)
     }
 
+    fn send_image_with_context(
+        &self,
+        chat_id: &str,
+        path: &std::path::Path,
+        caption: Option<&str>,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<()> {
+        self.send_image(chat_id, path, caption)
+    }
+
     /// Upload a generic file from local disk. Default falls back to a text note.
     fn send_file(
         &self,
@@ -181,6 +290,16 @@ pub trait ChatSink: Send + Sync {
             }
         }
         self.send_text(chat_id, &text)
+    }
+
+    fn send_file_with_context(
+        &self,
+        chat_id: &str,
+        path: &std::path::Path,
+        caption: Option<&str>,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<()> {
+        self.send_file(chat_id, path, caption)
     }
 
     /// Whether this platform can upload images via [`send_image`]. Outbound
@@ -210,6 +329,15 @@ pub trait ChatSink: Send + Sync {
         Ok(None)
     }
 
+    fn send_permission_request_with_context(
+        &self,
+        chat_id: &str,
+        request: &ChatPermissionRequest,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<Option<JsonValue>> {
+        self.send_permission_request(chat_id, request)
+    }
+
     /// Strip interactive controls from a previously sent permission message and
     /// annotate it with the user's choice so the prompt cannot be triggered
     /// twice. Default no-op for platforms that cannot edit messages.
@@ -227,6 +355,14 @@ pub trait ChatSink: Send + Sync {
     /// platforms that support it (Telegram, Discord). Default no-op.
     fn send_typing(&self, _chat_id: &str) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    fn send_typing_with_context(
+        &self,
+        chat_id: &str,
+        _context: Option<&ChannelContext>,
+    ) -> anyhow::Result<()> {
+        self.send_typing(chat_id)
     }
 }
 
@@ -254,8 +390,7 @@ struct Inner {
     pending_permissions: Mutex<HashMap<String, PendingPermissionDecision>>,
     /// sessio runtime session id -> request id -> rendered permission message
     /// so we can edit/clear it after the user (or another channel) resolves it.
-    pending_permission_messages:
-        Mutex<HashMap<String, HashMap<String, PendingPermissionMessage>>>,
+    pending_permission_messages: Mutex<HashMap<String, HashMap<String, PendingPermissionMessage>>>,
     permission_counter: AtomicU64,
     /// registered outbound sinks, keyed by platform tag
     sinks: Mutex<HashMap<&'static str, Arc<dyn ChatSink>>>,
@@ -569,6 +704,12 @@ impl ImBridgeState {
         self.inner.turns.lock().ok()?.remove(session_id)
     }
 
+    /// Snapshot the current turn buffer without clearing it. Used for
+    /// platform-owned streaming previews between terminal turn events.
+    pub fn turn_buffer_snapshot(&self, session_id: &str) -> Option<TurnBuffer> {
+        self.inner.turns.lock().ok()?.get(session_id).cloned()
+    }
+
     /// Queue a prompt behind the chat's active turn. Returns the new 1-based
     /// queue length for user-facing feedback.
     pub fn enqueue_prompt(&self, key: &ChatKey, prompt: QueuedPrompt) -> usize {
@@ -627,7 +768,69 @@ impl ImBridgeState {
             .ok()
             .and_then(|sinks| sinks.get(key.platform).cloned())
             .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
-        sink.send_text(&key.chat_id, text)
+        let context = self.channel_context(key);
+        sink.send_text_with_context(&key.chat_id, text, context.as_ref())
+    }
+
+    /// Return the platform's streaming text capability, when available.
+    pub fn stream_capability_for_chat(&self, key: &ChatKey) -> Option<ChatStreamCapability> {
+        let context = self.channel_context(key);
+        self.inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .and_then(|sink| sink.stream_capability_with_context(context.as_ref()))
+    }
+
+    pub fn start_stream_reply_to_chat(
+        &self,
+        key: &ChatKey,
+        text: &str,
+    ) -> anyhow::Result<JsonValue> {
+        let sink = self
+            .inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
+        let context = self.channel_context(key);
+        sink.start_stream_reply_with_context(&key.chat_id, text, context.as_ref())
+    }
+
+    pub fn update_stream_reply_to_chat(
+        &self,
+        key: &ChatKey,
+        message_ref: &JsonValue,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let sink = self
+            .inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
+        let context = self.channel_context(key);
+        sink.update_stream_reply_with_context(&key.chat_id, message_ref, text, context.as_ref())
+    }
+
+    pub fn finish_stream_reply_to_chat(
+        &self,
+        key: &ChatKey,
+        message_ref: &JsonValue,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        let sink = self
+            .inner
+            .sinks
+            .lock()
+            .ok()
+            .and_then(|sinks| sinks.get(key.platform).cloned())
+            .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
+        let context = self.channel_context(key);
+        sink.finish_stream_reply_with_context(&key.chat_id, message_ref, text, context.as_ref())
     }
 
     /// Send an image file to a chat via its platform sink.
@@ -644,7 +847,8 @@ impl ImBridgeState {
             .ok()
             .and_then(|sinks| sinks.get(key.platform).cloned())
             .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
-        sink.send_image(&key.chat_id, path, caption)
+        let context = self.channel_context(key);
+        sink.send_image_with_context(&key.chat_id, path, caption, context.as_ref())
     }
 
     /// Send a generic file to a chat via its platform sink.
@@ -661,7 +865,8 @@ impl ImBridgeState {
             .ok()
             .and_then(|sinks| sinks.get(key.platform).cloned())
             .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
-        sink.send_file(&key.chat_id, path, caption)
+        let context = self.channel_context(key);
+        sink.send_file_with_context(&key.chat_id, path, caption, context.as_ref())
     }
 
     /// Whether the platform sink for `key` advertises image upload support.
@@ -703,7 +908,9 @@ impl ImBridgeState {
             .ok()
             .and_then(|sinks| sinks.get(key.platform).cloned())
             .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
-        let message_ref = sink.send_permission_request(&key.chat_id, request)?;
+        let context = self.channel_context(key);
+        let message_ref =
+            sink.send_permission_request_with_context(&key.chat_id, request, context.as_ref())?;
         if let Some(message_ref) = message_ref {
             if let Ok(mut messages) = self.inner.pending_permission_messages.lock() {
                 messages
@@ -732,7 +939,8 @@ impl ImBridgeState {
             .ok()
             .and_then(|sinks| sinks.get(key.platform).cloned())
             .ok_or_else(|| anyhow::anyhow!("no sink registered for platform {}", key.platform))?;
-        sink.send_typing(&key.chat_id)
+        let context = self.channel_context(key);
+        sink.send_typing_with_context(&key.chat_id, context.as_ref())
     }
 
     /// Pop the stored permission-message handle for a (session, request) pair.

@@ -1,9 +1,12 @@
 //! Telegram Bot API platform implementation.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc,
+};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::agents::runtime::types::AgentAttachmentKind;
 use crate::models::{Agent, AgentInfo, RuntimeAgentOptionMetadata};
@@ -19,8 +22,8 @@ use super::super::attachments::{
 use super::super::config::TelegramConfig;
 use super::super::router;
 use super::super::state::{
-    ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ImBridgeState,
-    PermissionResolutionOutcome,
+    ChannelContext, ChatKey, ChatPermissionRequest, ChatSink, ChatStreamCapability, ChatStreamMode,
+    ImBridgeState, PermissionResolutionOutcome,
 };
 
 const PLATFORM: &str = "telegram";
@@ -28,6 +31,10 @@ const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 const CALLBACK_PREFIX: &str = "sessio_perm:";
 const ACTION_CALLBACK_PREFIX: &str = "sessio:";
 const TELEGRAM_TEXT_LIMIT: usize = 3900;
+const TELEGRAM_STREAM_LIMIT: usize = 3900;
+const TELEGRAM_STREAM_INTERVAL: Duration = Duration::from_millis(650);
+const TELEGRAM_PARSE_MODE: &str = "HTML";
+static TELEGRAM_DRAFT_COUNTER: AtomicI64 = AtomicI64::new(1);
 
 pub fn spawn(state: Arc<ImBridgeState>) {
     if let Err(error) = thread::Builder::new()
@@ -211,8 +218,7 @@ fn handle_update(
         return;
     }
     let attachments = download_message_attachments(state, sink, &key, &message);
-    let outcome =
-        router::handle_message_with_attachments(state, &key, text, attachments);
+    let outcome = router::handle_message_with_attachments(state, &key, text, attachments);
     if let Some(reply) = outcome.reply {
         if let Err(error) = sink.send_text(&chat_id, &reply) {
             log::warn!("[im-bridge:telegram] failed to send command reply: {error:#}");
@@ -245,12 +251,15 @@ fn download_message_attachments(
     if entries.is_empty() {
         return Vec::new();
     }
-    let workspace = match state.chat_session(key).map(|s| s.workspace_path).or_else(|| {
-        state
-            .config_snapshot()
-            .workspace_for_chat(key.platform, &key.chat_id)
-            .map(str::to_string)
-    }) {
+    let workspace = match state
+        .chat_session(key)
+        .map(|s| s.workspace_path)
+        .or_else(|| {
+            state
+                .config_snapshot()
+                .workspace_for_chat(key.platform, &key.chat_id)
+                .map(str::to_string)
+        }) {
         Some(workspace) => workspace,
         None => {
             log::warn!(
@@ -280,9 +289,12 @@ fn download_message_attachments(
             log::warn!("[im-bridge:telegram] getFile response missing file_path");
             continue;
         };
-        let display = suggested_name
-            .clone()
-            .or_else(|| Path::new(&path).file_name().and_then(|n| n.to_str()).map(str::to_string));
+        let display = suggested_name.clone().or_else(|| {
+            Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        });
         let destination = allocate_attachment_path(&dir, display.as_deref());
         let url = sink.file_download_url(&path);
         if let Err(error) = download_to_file(&sink.client, &url, None, &destination) {
@@ -367,6 +379,8 @@ fn send_agent_menu(
         &key.chat_id,
         "选择 agent。切换到不同 agent 会开启新会话；选择当前 agent 不会新建。",
         Some(json!({ "inline_keyboard": rows })),
+        None,
+        None,
     )
 }
 
@@ -401,6 +415,8 @@ fn send_model_menu(
             agent_info.display_name
         ),
         Some(json!({ "inline_keyboard": rows })),
+        None,
+        None,
     )
 }
 
@@ -435,6 +451,8 @@ fn send_effort_menu(
             agent_info.display_name
         ),
         Some(json!({ "inline_keyboard": rows })),
+        None,
+        None,
     )
 }
 
@@ -461,6 +479,8 @@ fn send_workspace_menu(
         &key.chat_id,
         "选择当前会话的 workspace。会开启同 agent 的新 runtime session，不会修改默认 workspace。",
         Some(json!({ "inline_keyboard": rows })),
+        None,
+        None,
     )
 }
 
@@ -589,6 +609,9 @@ fn telegram_channel_context(
             "lastName": message.chat.last_name.as_deref(),
         }),
     );
+    if let Some(message_thread_id) = message.message_thread_id {
+        metadata.insert("messageThreadId".to_string(), json!(message_thread_id));
+    }
     metadata.insert(
         "telegramUser".to_string(),
         json!({
@@ -602,7 +625,7 @@ fn telegram_channel_context(
         channel_type: message.chat.kind.clone(),
         user_id: Some(from.id.to_string()),
         team_id: None,
-        thread_id: None,
+        thread_id: message.message_thread_id.map(|value| value.to_string()),
         display_name: telegram_chat_display_name(&message.chat)
             .or_else(|| telegram_user_display_name(from)),
         metadata,
@@ -921,12 +944,23 @@ impl TelegramSink {
         response.into_result().map(|_| ())
     }
 
-    fn send_message(&self, chat_id: &str, text: &str, reply_markup: Option<Value>) -> Result<()> {
+    fn send_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+        reply_markup: Option<Value>,
+        parse_mode: Option<&str>,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
         let mut body = json!({
             "chat_id": chat_id,
             "text": text,
             "disable_web_page_preview": true,
         });
+        apply_telegram_context(&mut body, context);
+        if let Some(parse_mode) = parse_mode {
+            body["parse_mode"] = Value::String(parse_mode.to_string());
+        }
         if let Some(reply_markup) = reply_markup {
             body["reply_markup"] = reply_markup;
         }
@@ -941,12 +975,18 @@ impl TelegramSink {
         chat_id: &str,
         text: &str,
         reply_markup: Option<Value>,
+        parse_mode: Option<&str>,
+        context: Option<&ChannelContext>,
     ) -> Result<i64> {
         let mut body = json!({
             "chat_id": chat_id,
             "text": text,
             "disable_web_page_preview": true,
         });
+        apply_telegram_context(&mut body, context);
+        if let Some(parse_mode) = parse_mode {
+            body["parse_mode"] = Value::String(parse_mode.to_string());
+        }
         if let Some(reply_markup) = reply_markup {
             body["reply_markup"] = reply_markup;
         }
@@ -958,22 +998,60 @@ impl TelegramSink {
             .ok_or_else(|| anyhow!("Telegram sendMessage response missing message_id"))
     }
 
-    fn edit_message_text(&self, chat_id: &str, message_id: i64, text: &str) -> Result<()> {
-        let body = json!({
+    fn edit_message_text(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        let mut body = json!({
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text,
             "disable_web_page_preview": true,
         });
+        apply_telegram_context(&mut body, context);
+        if let Some(parse_mode) = parse_mode {
+            body["parse_mode"] = Value::String(parse_mode.to_string());
+        }
         let response: TelegramApiResponse<Value> = self.post_json("editMessageText", &body)?;
         response.into_result().map(|_| ())
     }
 
-    fn send_chat_action(&self, chat_id: &str, action: &str) -> Result<()> {
-        let body = json!({
+    fn send_message_draft(
+        &self,
+        chat_id: &str,
+        draft_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        let mut body = json!({
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": text,
+        });
+        apply_telegram_context(&mut body, context);
+        if let Some(parse_mode) = parse_mode {
+            body["parse_mode"] = Value::String(parse_mode.to_string());
+        }
+        let response: TelegramApiResponse<Value> = self.post_json("sendMessageDraft", &body)?;
+        response.into_result().map(|_| ())
+    }
+
+    fn send_chat_action(
+        &self,
+        chat_id: &str,
+        action: &str,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        let mut body = json!({
             "chat_id": chat_id,
             "action": action,
         });
+        apply_telegram_context(&mut body, context);
         let response: TelegramApiResponse<Value> = self.post_json("sendChatAction", &body)?;
         response.into_result().map(|_| ())
     }
@@ -998,15 +1076,21 @@ impl TelegramSink {
         format!("{}/file/bot{}/{}", self.api_base, self.bot_token, file_path)
     }
 
-    fn send_photo(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+    fn send_photo(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        caption: Option<&str>,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("photo")
             .to_string();
         let mime = guess_image_mime(path);
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("read image {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("read image {}", path.display()))?;
         let part = multipart::Part::bytes(bytes)
             .file_name(file_name)
             .mime_str(mime)
@@ -1014,6 +1098,9 @@ impl TelegramSink {
         let mut form = multipart::Form::new()
             .text("chat_id", chat_id.to_string())
             .part("photo", part);
+        if let Some(message_thread_id) = telegram_message_thread_id(context) {
+            form = form.text("message_thread_id", message_thread_id.to_string());
+        }
         if let Some(caption) = caption {
             if !caption.trim().is_empty() {
                 form = form.text("caption", caption.to_string());
@@ -1032,15 +1119,20 @@ impl TelegramSink {
         response.into_result().map(|_| ())
     }
 
-    fn send_document(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
+    fn send_document(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        caption: Option<&str>,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("file")
             .to_string();
         let mime = guess_file_mime(path);
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("read file {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("read file {}", path.display()))?;
         let part = multipart::Part::bytes(bytes)
             .file_name(file_name)
             .mime_str(mime)
@@ -1048,6 +1140,9 @@ impl TelegramSink {
         let mut form = multipart::Form::new()
             .text("chat_id", chat_id.to_string())
             .part("document", part);
+        if let Some(message_thread_id) = telegram_message_thread_id(context) {
+            form = form.text("message_thread_id", message_thread_id.to_string());
+        }
         if let Some(caption) = caption {
             if !caption.trim().is_empty() {
                 form = form.text("caption", caption.to_string());
@@ -1085,18 +1180,117 @@ impl ChatSink for TelegramSink {
     }
 
     fn send_text(&self, chat_id: &str, text: &str) -> Result<()> {
+        self.send_text_with_context(chat_id, text, None)
+    }
+
+    fn send_text_with_context(
+        &self,
+        chat_id: &str,
+        text: &str,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
         for chunk in split_telegram_text(text) {
-            self.send_message(chat_id, &chunk, None)?;
+            let rendered = telegram_markdown_to_html(&chunk);
+            self.send_message(chat_id, &rendered, None, Some(TELEGRAM_PARSE_MODE), context)?;
         }
         Ok(())
     }
 
+    fn stream_capability(&self) -> Option<ChatStreamCapability> {
+        Some(ChatStreamCapability {
+            mode: ChatStreamMode::Draft,
+            min_interval: TELEGRAM_STREAM_INTERVAL,
+            max_chars: TELEGRAM_STREAM_LIMIT,
+        })
+    }
+
+    fn stream_capability_with_context(
+        &self,
+        context: Option<&ChannelContext>,
+    ) -> Option<ChatStreamCapability> {
+        if context
+            .and_then(telegram_chat_type)
+            .is_some_and(|kind| kind != "private")
+        {
+            return None;
+        }
+        self.stream_capability()
+    }
+
+    fn start_stream_reply_with_context(
+        &self,
+        chat_id: &str,
+        text: &str,
+        context: Option<&ChannelContext>,
+    ) -> Result<Value> {
+        let draft_id = telegram_draft_id();
+        let rendered = telegram_markdown_to_html(text);
+        self.send_message_draft(
+            chat_id,
+            draft_id,
+            &rendered,
+            Some(TELEGRAM_PARSE_MODE),
+            context,
+        )?;
+        Ok(json!({ "draft_id": draft_id }))
+    }
+
+    fn update_stream_reply_with_context(
+        &self,
+        chat_id: &str,
+        message_ref: &Value,
+        text: &str,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        let Some(draft_id) = message_ref.get("draft_id").and_then(Value::as_i64) else {
+            return Ok(());
+        };
+        let rendered = telegram_markdown_to_html(text);
+        self.send_message_draft(
+            chat_id,
+            draft_id,
+            &rendered,
+            Some(TELEGRAM_PARSE_MODE),
+            context,
+        )
+    }
+
+    fn finish_stream_reply_with_context(
+        &self,
+        chat_id: &str,
+        message_ref: &Value,
+        text: &str,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        self.update_stream_reply_with_context(chat_id, message_ref, text, context)
+    }
+
     fn send_image(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
-        self.send_photo(chat_id, path, caption)
+        self.send_image_with_context(chat_id, path, caption, None)
+    }
+
+    fn send_image_with_context(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        caption: Option<&str>,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        self.send_photo(chat_id, path, caption, context)
     }
 
     fn send_file(&self, chat_id: &str, path: &Path, caption: Option<&str>) -> Result<()> {
-        self.send_document(chat_id, path, caption)
+        self.send_file_with_context(chat_id, path, caption, None)
+    }
+
+    fn send_file_with_context(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        caption: Option<&str>,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        self.send_document(chat_id, path, caption, context)
     }
 
     fn supports_images(&self) -> bool {
@@ -1128,7 +1322,7 @@ impl ChatSink for TelegramSink {
         } else {
             Some(json!({ "inline_keyboard": [buttons] }))
         };
-        let message_id = self.send_message_with_id(chat_id, &text, reply_markup)?;
+        let message_id = self.send_message_with_id(chat_id, &text, reply_markup, None, None)?;
         Ok(Some(json!({ "message_id": message_id })))
     }
 
@@ -1147,11 +1341,19 @@ impl ChatSink for TelegramSink {
         text.push_str(&format_permission_outcome(outcome));
         // editMessageText with no reply_markup also drops the inline keyboard,
         // which is exactly what we want: no more callbacks possible.
-        self.edit_message_text(chat_id, message_id, &text)
+        self.edit_message_text(chat_id, message_id, &text, None, None)
     }
 
     fn send_typing(&self, chat_id: &str) -> Result<()> {
-        self.send_chat_action(chat_id, "typing")
+        self.send_typing_with_context(chat_id, None)
+    }
+
+    fn send_typing_with_context(
+        &self,
+        chat_id: &str,
+        context: Option<&ChannelContext>,
+    ) -> Result<()> {
+        self.send_chat_action(chat_id, "typing", context)
     }
 }
 
@@ -1175,6 +1377,40 @@ fn format_permission_outcome(outcome: PermissionResolutionOutcome<'_>) -> String
     }
 }
 
+fn apply_telegram_context(body: &mut Value, context: Option<&ChannelContext>) {
+    if let Some(message_thread_id) = telegram_message_thread_id(context) {
+        body["message_thread_id"] = json!(message_thread_id);
+    }
+}
+
+fn telegram_message_thread_id(context: Option<&ChannelContext>) -> Option<i64> {
+    context.and_then(|context| {
+        context
+            .metadata
+            .get("messageThreadId")
+            .and_then(Value::as_i64)
+            .or_else(|| context.thread_id.as_deref()?.parse::<i64>().ok())
+    })
+}
+
+fn telegram_chat_type(context: &ChannelContext) -> Option<&str> {
+    context
+        .metadata
+        .get("telegramChat")
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str)
+        .or(context.channel_type.as_deref())
+}
+
+fn telegram_draft_id() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
+    let counter = TELEGRAM_DRAFT_COUNTER.fetch_add(1, Ordering::Relaxed) % 1000;
+    (millis % 1_000_000_000) * 1000 + counter
+}
+
 fn split_telegram_text(text: &str) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
@@ -1192,6 +1428,206 @@ fn split_telegram_text(text: &str) -> Vec<String> {
         chunks.push(current);
     }
     chunks
+}
+
+fn telegram_markdown_to_html(text: &str) -> String {
+    let mut out = String::new();
+    let mut lines = text.split('\n').peekable();
+    let mut in_code = false;
+    let mut code = String::new();
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            if in_code {
+                push_code_block(&mut out, &code);
+                code.clear();
+                in_code = false;
+            } else {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                in_code = true;
+            }
+            continue;
+        }
+
+        if in_code {
+            code.push_str(line);
+            if lines.peek().is_some() {
+                code.push('\n');
+            }
+            continue;
+        }
+
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&render_markdown_line(line));
+    }
+
+    if in_code {
+        push_code_block(&mut out, &code);
+    }
+    out
+}
+
+fn push_code_block(out: &mut String, code: &str) {
+    out.push_str("<pre><code>");
+    out.push_str(&escape_telegram_html(code.trim_matches('\n')));
+    out.push_str("</code></pre>");
+}
+
+fn render_markdown_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    if let Some(heading) = markdown_heading_text(trimmed) {
+        return format!("<b>{}</b>", render_inline_markdown(heading.trim()));
+    }
+    if let Some(quote) = trimmed.strip_prefix("> ") {
+        return format!("<blockquote>{}</blockquote>", render_inline_markdown(quote));
+    }
+    render_inline_markdown(line)
+}
+
+fn markdown_heading_text(trimmed: &str) -> Option<&str> {
+    let hashes = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if (1..=6).contains(&hashes) && trimmed.chars().nth(hashes) == Some(' ') {
+        Some(&trimmed[hashes + 1..])
+    } else {
+        None
+    }
+}
+
+fn render_inline_markdown(text: &str) -> String {
+    let mut out = String::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let rest = &text[cursor..];
+        if rest.starts_with('`') {
+            if let Some(end) = rest[1..].find('`') {
+                let inner = &rest[1..1 + end];
+                out.push_str("<code>");
+                out.push_str(&escape_telegram_html(inner));
+                out.push_str("</code>");
+                cursor += end + 2;
+                continue;
+            }
+        }
+
+        if rest.starts_with('[') {
+            if let Some((label, url, consumed)) = parse_markdown_link(rest) {
+                if is_safe_telegram_link(url) {
+                    out.push_str("<a href=\"");
+                    out.push_str(&escape_telegram_html_attr(url));
+                    out.push_str("\">");
+                    out.push_str(&escape_telegram_html(label));
+                    out.push_str("</a>");
+                    cursor += consumed;
+                    continue;
+                }
+            }
+        }
+
+        if let Some((tag, inner, consumed)) = parse_inline_span(rest) {
+            out.push('<');
+            out.push_str(tag);
+            out.push('>');
+            out.push_str(&render_inline_markdown(inner));
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+            cursor += consumed;
+            continue;
+        }
+
+        let ch = rest.chars().next().expect("cursor is in bounds");
+        escape_telegram_html_char(ch, &mut out);
+        cursor += ch.len_utf8();
+    }
+    out
+}
+
+fn parse_markdown_link(rest: &str) -> Option<(&str, &str, usize)> {
+    let close_label = rest.find("](")?;
+    if close_label == 1 {
+        return None;
+    }
+    let after_open = close_label + 2;
+    let close_url = rest[after_open..].find(')')? + after_open;
+    let label = &rest[1..close_label];
+    let url = rest[after_open..close_url].trim();
+    if label.trim().is_empty() || url.is_empty() {
+        return None;
+    }
+    Some((label, url, close_url + 1))
+}
+
+fn parse_inline_span(rest: &str) -> Option<(&'static str, &str, usize)> {
+    for (marker, tag) in [("**", "b"), ("~~", "s"), ("*", "i")] {
+        if !rest.starts_with(marker) {
+            continue;
+        }
+        let inner_start = marker.len();
+        if rest[inner_start..]
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(close_offset) = rest[inner_start..].find(marker) else {
+            continue;
+        };
+        let close = inner_start + close_offset;
+        let inner = &rest[inner_start..close];
+        if inner
+            .chars()
+            .last()
+            .map(char::is_whitespace)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        return Some((tag, inner, close + marker.len()));
+    }
+    None
+}
+
+fn is_safe_telegram_link(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("tg://")
+        || lower.starts_with("mailto:")
+}
+
+fn escape_telegram_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        escape_telegram_html_char(ch, &mut out);
+    }
+    out
+}
+
+fn escape_telegram_html_attr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("&quot;"),
+            _ => escape_telegram_html_char(ch, &mut out),
+        }
+    }
+    out
+}
+
+fn escape_telegram_html_char(ch: char, out: &mut String) {
+    match ch {
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        '&' => out.push_str("&amp;"),
+        _ => out.push(ch),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1237,6 +1673,8 @@ impl TelegramUpdate {
 struct TelegramMessage {
     chat: TelegramChat,
     from: Option<TelegramUser>,
+    #[serde(default)]
+    message_thread_id: Option<i64>,
     text: Option<String>,
     #[serde(default)]
     caption: Option<String>,
@@ -1298,4 +1736,58 @@ struct TelegramCallbackQuery {
 #[derive(Debug, Deserialize)]
 struct TelegramCallbackMessage {
     chat: TelegramChat,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_to_telegram_html_renders_safe_subset() {
+        let input = "# Title\n\n**bold** *em* `x < y` [link](https://example.com?a=1&b=2)\n\n```rust\nlet x = 1 < 2;\n```";
+        let rendered = telegram_markdown_to_html(input);
+
+        assert!(rendered.contains("<b>Title</b>"));
+        assert!(rendered.contains("<b>bold</b> <i>em</i> <code>x &lt; y</code>"));
+        assert!(rendered.contains("<a href=\"https://example.com?a=1&amp;b=2\">link</a>"));
+        assert!(rendered.contains("<pre><code>let x = 1 &lt; 2;</code></pre>"));
+    }
+
+    #[test]
+    fn markdown_to_telegram_html_escapes_unsafe_links() {
+        let rendered = telegram_markdown_to_html("[bad](javascript:alert(1)) <tag>");
+
+        assert!(!rendered.contains("<a "));
+        assert!(rendered.contains("[bad](javascript:alert(1)) &lt;tag&gt;"));
+    }
+
+    #[test]
+    fn telegram_context_preserves_forum_topic_id() {
+        let message = TelegramMessage {
+            chat: TelegramChat {
+                id: -100,
+                kind: Some("supergroup".to_string()),
+                title: Some("Group".to_string()),
+                username: None,
+                first_name: None,
+                last_name: None,
+            },
+            from: Some(TelegramUser {
+                id: 42,
+                username: Some("alex".to_string()),
+                first_name: Some("Alex".to_string()),
+                last_name: None,
+            }),
+            message_thread_id: Some(67890),
+            text: Some("hello".to_string()),
+            caption: None,
+            photo: Vec::new(),
+            document: None,
+        };
+        let context = telegram_channel_context(&message, message.from.as_ref().unwrap(), 123);
+
+        assert_eq!(context.thread_id.as_deref(), Some("67890"));
+        assert_eq!(telegram_message_thread_id(Some(&context)), Some(67890));
+        assert_eq!(telegram_chat_type(&context), Some("supergroup"));
+    }
 }

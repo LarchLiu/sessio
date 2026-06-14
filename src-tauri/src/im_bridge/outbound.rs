@@ -14,7 +14,10 @@ use crate::agents::runtime::types::{
 
 use super::attachments::{extract_outbound_attachments, OutboundAttachment};
 use super::router;
-use super::state::{ChatKey, ChatPermissionOption, ChatPermissionRequest, ImBridgeState};
+use super::state::{
+    ChatKey, ChatPermissionOption, ChatPermissionRequest, ChatStreamCapability, ChatStreamMode,
+    ImBridgeState, TurnBuffer,
+};
 
 /// How often we re-send the platform's "typing" indicator while a turn is in
 /// flight. Telegram's `sendChatAction` expires at ~5s and Discord's typing at
@@ -42,13 +45,14 @@ pub fn spawn(state: Arc<ImBridgeState>) -> Result<()> {
     })?;
 
     let typing = Arc::new(TypingTracker::default());
+    let streaming = Arc::new(StreamReplyTracker::default());
     spawn_typing_refresher(state.clone(), typing.clone());
 
     thread::Builder::new()
         .name("im-bridge-outbound".to_string())
         .spawn(move || {
             while let Ok(event) = receiver.recv() {
-                handle_event(&state, &typing, event);
+                handle_event(&state, &typing, &streaming, event);
             }
             log::warn!("[im-bridge:outbound] runtime event subscription closed");
         })?;
@@ -126,7 +130,39 @@ fn spawn_typing_refresher(state: Arc<ImBridgeState>, typing: Arc<TypingTracker>)
         });
 }
 
-fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: AgentRuntimeEvent) {
+#[derive(Debug, Clone)]
+struct StreamReplyState {
+    chat: ChatKey,
+    capability: ChatStreamCapability,
+    message_ref: Option<Value>,
+    last_sent_at: Option<Instant>,
+    last_text: String,
+    failed: bool,
+}
+
+#[derive(Default)]
+struct StreamReplyTracker {
+    streams: Mutex<HashMap<String, StreamReplyState>>,
+}
+
+impl StreamReplyTracker {
+    fn take(&self, session_id: &str) -> Option<StreamReplyState> {
+        self.streams.lock().ok()?.remove(session_id)
+    }
+
+    fn clear(&self, session_id: &str) {
+        if let Ok(mut streams) = self.streams.lock() {
+            streams.remove(session_id);
+        }
+    }
+}
+
+fn handle_event(
+    state: &Arc<ImBridgeState>,
+    typing: &Arc<TypingTracker>,
+    streaming: &Arc<StreamReplyTracker>,
+    event: AgentRuntimeEvent,
+) {
     match event.payload {
         AgentRuntimeEventPayload::TurnStarted {
             sessio_runtime_session_id,
@@ -134,6 +170,7 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
         } => {
             if let Some(chat) = state.chat_for_session(&sessio_runtime_session_id) {
                 typing.mark_active(&sessio_runtime_session_id);
+                streaming.clear(&sessio_runtime_session_id);
                 // Fire-and-forget initial typing burst so the user sees activity
                 // immediately, rather than waiting up to one refresh interval.
                 if let Err(error) = state.send_typing_to_chat(&chat) {
@@ -148,6 +185,7 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
         } => {
             if state.chat_for_session(&sessio_runtime_session_id).is_some() {
                 state.buffer_text(&sessio_runtime_session_id, &text);
+                maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
             }
         }
         AgentRuntimeEventPayload::ReasoningDelta {
@@ -157,6 +195,7 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
         } => {
             if state.chat_for_session(&sessio_runtime_session_id).is_some() {
                 state.buffer_thought(&sessio_runtime_session_id, &text);
+                maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
             }
         }
         AgentRuntimeEventPayload::ToolStarted {
@@ -176,6 +215,7 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
                 } else {
                     state.buffer_tool(&sessio_runtime_session_id, &name);
                 }
+                maybe_update_stream_reply(state, streaming, &sessio_runtime_session_id, false);
             }
         }
         AgentRuntimeEventPayload::PermissionRequested {
@@ -235,7 +275,7 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
             ..
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
-            flush_turn(state, &sessio_runtime_session_id, "Done.");
+            flush_turn(state, streaming, &sessio_runtime_session_id, "Done.");
             dispatch_next_queued_prompt(state, &sessio_runtime_session_id);
         }
         AgentRuntimeEventPayload::TurnError {
@@ -245,7 +285,7 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
             let fallback = format!("Turn failed: {}", error.message);
-            flush_turn(state, &sessio_runtime_session_id, &fallback);
+            flush_turn(state, streaming, &sessio_runtime_session_id, &fallback);
             dispatch_next_queued_prompt(state, &sessio_runtime_session_id);
         }
         AgentRuntimeEventPayload::TurnCancelled {
@@ -253,13 +293,19 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
             ..
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
-            flush_turn(state, &sessio_runtime_session_id, "Turn cancelled.");
+            flush_turn(
+                state,
+                streaming,
+                &sessio_runtime_session_id,
+                "Turn cancelled.",
+            );
             dispatch_next_queued_prompt(state, &sessio_runtime_session_id);
         }
         AgentRuntimeEventPayload::SessionEnded {
             sessio_runtime_session_id,
         } => {
             typing.mark_inactive(&sessio_runtime_session_id);
+            streaming.clear(&sessio_runtime_session_id);
             if let Some(chat) = state.chat_for_session(&sessio_runtime_session_id) {
                 state.unbind_chat(&chat);
             }
@@ -268,36 +314,152 @@ fn handle_event(state: &Arc<ImBridgeState>, typing: &Arc<TypingTracker>, event: 
     }
 }
 
-fn flush_turn(state: &Arc<ImBridgeState>, session_id: &str, empty_fallback: &str) {
+fn maybe_update_stream_reply(
+    state: &Arc<ImBridgeState>,
+    streaming: &Arc<StreamReplyTracker>,
+    session_id: &str,
+    force: bool,
+) {
+    let Some(chat) = state.chat_for_session(session_id) else {
+        return;
+    };
+    let Some(capability) = state.stream_capability_for_chat(&chat) else {
+        streaming.clear(session_id);
+        return;
+    };
+    let Some(buffer) = state.turn_buffer_snapshot(session_id) else {
+        return;
+    };
+    if matches!(capability.mode, ChatStreamMode::Draft) && buffer.text.trim().is_empty() {
+        return;
+    }
+    let text = truncate_chars(format_turn_text(&buffer, "").trim(), capability.max_chars);
+    if text.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+
+    enum StreamAction {
+        Start {
+            chat: ChatKey,
+            text: String,
+        },
+        Update {
+            chat: ChatKey,
+            message_ref: Value,
+            text: String,
+        },
+    }
+
+    let action = {
+        let mut streams = match streaming.streams.lock() {
+            Ok(streams) => streams,
+            Err(_) => return,
+        };
+        let entry = streams
+            .entry(session_id.to_string())
+            .or_insert_with(|| StreamReplyState {
+                chat: chat.clone(),
+                capability,
+                message_ref: None,
+                last_sent_at: None,
+                last_text: String::new(),
+                failed: false,
+            });
+        entry.chat = chat.clone();
+        entry.capability = capability;
+        if entry.failed {
+            return;
+        }
+        if !force {
+            if let Some(last_sent_at) = entry.last_sent_at {
+                if now.duration_since(last_sent_at) < capability.min_interval {
+                    return;
+                }
+            }
+        }
+        if entry.last_text == text {
+            return;
+        }
+        entry.last_sent_at = Some(now);
+        entry.last_text = text.clone();
+        match entry.message_ref.clone() {
+            Some(message_ref) => StreamAction::Update {
+                chat: chat.clone(),
+                message_ref,
+                text,
+            },
+            None => StreamAction::Start {
+                chat: chat.clone(),
+                text,
+            },
+        }
+    };
+
+    let result = match action {
+        StreamAction::Start { chat, text } => {
+            state.start_stream_reply_to_chat(&chat, &text).map(Some)
+        }
+        StreamAction::Update {
+            chat,
+            message_ref,
+            text,
+        } => state
+            .update_stream_reply_to_chat(&chat, &message_ref, &text)
+            .map(|_| None),
+    };
+
+    if let Ok(message_ref) = result {
+        if let Some(message_ref) = message_ref {
+            if let Ok(mut streams) = streaming.streams.lock() {
+                if let Some(entry) = streams.get_mut(session_id) {
+                    entry.message_ref = Some(message_ref);
+                }
+            }
+        }
+    } else if let Err(error) = result {
+        if let Ok(mut streams) = streaming.streams.lock() {
+            if let Some(entry) = streams.get_mut(session_id) {
+                entry.failed = true;
+            }
+        }
+        log::debug!("[im-bridge:outbound] stream reply update failed: {error:#}");
+    }
+}
+
+fn flush_turn(
+    state: &Arc<ImBridgeState>,
+    streaming: &Arc<StreamReplyTracker>,
+    session_id: &str,
+    empty_fallback: &str,
+) {
     let Some(chat) = state.chat_for_session(session_id) else {
         return;
     };
     let buffer = state.take_turn_buffer(session_id).unwrap_or_default();
+    let stream = streaming.take(session_id);
     let body = buffer.text.trim().to_string();
-    let mut text = String::new();
-    let thought = buffer.thought.trim();
-    if !thought.is_empty() {
-        text.push_str("💭 Thought\n");
-        text.push_str(thought);
-        text.push_str("\n\n");
-    }
-    if body.is_empty() {
-        text.push_str(empty_fallback);
-    } else {
-        text.push_str(&body);
-    }
-    if !buffer.tool_summaries.is_empty() {
-        text.push_str("\n\n");
-        text.push_str(&buffer.tool_summaries.join("\n\n"));
-    }
-    if !buffer.tools.is_empty() {
-        text.push_str("\n\nTools: ");
-        text.push_str(&buffer.tools.join(", "));
-    }
+    let text = format_turn_text(&buffer, empty_fallback);
     // Extract attachments referenced from the body text and dispatch them
     // through the platform sink before the text reply (caption-style). Send
     // text first so platforms without media support still see the message.
     let attachments = collect_outbound_attachments(state, &chat, &body);
+
+    if let Some(stream) = stream.as_ref() {
+        if !stream.failed {
+            if let Some(message_ref) = stream.message_ref.as_ref() {
+                let final_text = truncate_chars(text.trim(), stream.capability.max_chars);
+                if !final_text.is_empty() {
+                    if let Err(error) =
+                        state.finish_stream_reply_to_chat(&stream.chat, message_ref, &final_text)
+                    {
+                        log::debug!("[im-bridge:outbound] stream reply finish failed: {error:#}");
+                    }
+                }
+            }
+        }
+    }
+
     if let Err(error) = state.send_to_chat(&chat, &text) {
         log::warn!("[im-bridge:outbound] failed to send chat reply: {error:#}");
     }
@@ -309,6 +471,38 @@ fn flush_turn(state: &Arc<ImBridgeState>, session_id: &str, empty_fallback: &str
             );
         }
     }
+}
+
+fn format_turn_text(buffer: &TurnBuffer, empty_fallback: &str) -> String {
+    let body = buffer.text.trim();
+    let mut text = String::new();
+    let thought = buffer.thought.trim();
+    if !thought.is_empty() {
+        text.push_str("💭 Thought\n");
+        text.push_str(thought);
+        text.push_str("\n\n");
+    }
+    if body.is_empty() {
+        text.push_str(empty_fallback);
+    } else {
+        text.push_str(body);
+    }
+    if !buffer.tool_summaries.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(&buffer.tool_summaries.join("\n\n"));
+    }
+    if !buffer.tools.is_empty() {
+        text.push_str("\n\nTools: ");
+        text.push_str(&buffer.tools.join(", "));
+    }
+    text
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 || text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    text.chars().take(max_chars).collect()
 }
 
 /// Resolve assistant-referenced attachment paths against the chat's workspace,
@@ -345,9 +539,7 @@ fn send_outbound_attachment(
 ) -> Result<()> {
     let caption = attachment.display_name.as_deref();
     match attachment.kind {
-        AgentAttachmentKind::Image => {
-            state.send_image_to_chat(chat, &attachment.path, caption)
-        }
+        AgentAttachmentKind::Image => state.send_image_to_chat(chat, &attachment.path, caption),
         AgentAttachmentKind::File => state.send_file_to_chat(chat, &attachment.path, caption),
     }
 }
