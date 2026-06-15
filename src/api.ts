@@ -1010,6 +1010,16 @@ export interface AgentAttachment {
   displayName?: string | null;
 }
 
+export interface SavePastedAttachmentRequest {
+  fileName: string | null;
+  mimeType: string | null;
+  dataBase64: string;
+}
+
+export interface SavedPastedAttachment {
+  path: string;
+}
+
 export interface AgentInput {
   text: string;
   attachments?: AgentAttachment[];
@@ -1984,6 +1994,12 @@ export async function updateSessionHistoryCount(
 
 export async function readLocalImageDataUrl(path: string): Promise<string> {
   return invoke<string>("read_local_image_data_url", { path });
+}
+
+export async function savePastedAttachment(
+  req: SavePastedAttachmentRequest,
+): Promise<SavedPastedAttachment> {
+  return invoke<SavedPastedAttachment>("save_pasted_attachment", { req });
 }
 
 export async function readLocalTextFile(path: string): Promise<string> {

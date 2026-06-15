@@ -123,6 +123,20 @@ struct UpdateRuntimeAgentPreferencesRequest {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SavePastedAttachmentRequest {
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    data_base64: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedPastedAttachment {
+    path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateAgentPreferencesRequest {
     agent_id: String,
     display_name: Option<String>,
@@ -2619,6 +2633,68 @@ fn read_local_image_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn save_pasted_attachment(
+    req: SavePastedAttachmentRequest,
+) -> Result<SavedPastedAttachment, String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    const MAX_PASTE_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.data_base64.as_bytes())
+        .map_err(|e| format!("Invalid pasted attachment data: {e}"))?;
+    if bytes.len() > MAX_PASTE_ATTACHMENT_BYTES {
+        return Err("Pasted attachment is too large".to_string());
+    }
+
+    let dir = dirs::home_dir()
+        .ok_or_else(|| "no home dir".to_string())?
+        .join(".sessio")
+        .join("paste-cache");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let file_name = safe_pasted_attachment_file_name(
+        req.file_name.as_deref(),
+        req.mime_type.as_deref(),
+    );
+    let hash = hex::encode(Sha256::digest(&bytes));
+    for index in 0..1000 {
+        let candidate_name = if index == 0 {
+            format!("sha256-{hash}-{file_name}")
+        } else {
+            format!("sha256-{hash}-{index}-{file_name}")
+        };
+        let path = dir.join(candidate_name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(&bytes).map_err(|e| e.to_string())?;
+                return Ok(SavedPastedAttachment {
+                    path: path.to_string_lossy().to_string(),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read(&path)
+                    .map(|existing| existing == bytes)
+                    .unwrap_or(false)
+                {
+                    return Ok(SavedPastedAttachment {
+                        path: path.to_string_lossy().to_string(),
+                    });
+                }
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("Could not allocate pasted attachment path".to_string())
+}
+
+#[tauri::command]
 fn read_local_text_file(path: String) -> Result<String, String> {
     let path_buf = PathBuf::from(&path);
     if !path_buf.is_absolute() {
@@ -2635,6 +2711,65 @@ fn read_local_text_file(path: String) -> Result<String, String> {
         return Err("File is too large to preview".to_string());
     }
     std::fs::read_to_string(&path_buf).map_err(|e| e.to_string())
+}
+
+fn safe_pasted_attachment_file_name(file_name: Option<&str>, mime_type: Option<&str>) -> String {
+    let raw_name = file_name
+        .unwrap_or("")
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .next()
+        .unwrap_or("")
+        .trim();
+    let sanitized: String = raw_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(160)
+        .collect();
+    let mut name = sanitized
+        .trim_matches(|ch| ch == '.' || ch == ' ')
+        .to_string();
+    if name.is_empty() || name == "." || name == ".." {
+        name = match mime_type.and_then(extension_for_pasted_mime) {
+            Some(ext) if ext == "png" => "pasted-image.png".to_string(),
+            Some(ext) => format!("pasted-file.{ext}"),
+            None => "pasted-file".to_string(),
+        };
+    } else if Path::new(&name).extension().is_none() {
+        if let Some(ext) = mime_type.and_then(extension_for_pasted_mime) {
+            name.push('.');
+            name.push_str(ext);
+        }
+    }
+    name
+}
+
+fn extension_for_pasted_mime(mime_type: &str) -> Option<&'static str> {
+    match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "image/svg+xml" => Some("svg"),
+        "image/bmp" => Some("bmp"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
+        "text/plain" => Some("txt"),
+        "text/markdown" => Some("md"),
+        "text/csv" => Some("csv"),
+        "text/html" => Some("html"),
+        "text/css" => Some("css"),
+        "application/json" => Some("json"),
+        "application/xml" => Some("xml"),
+        "application/yaml" | "application/x-yaml" => Some("yaml"),
+        "application/toml" => Some("toml"),
+        _ => None,
+    }
 }
 
 fn local_image_mime(path: &Path) -> Option<&'static str> {
@@ -3610,6 +3745,7 @@ pub fn run() {
             create_pending_session,
             update_session_rename_title,
             read_local_image_data_url,
+            save_pasted_attachment,
             read_local_text_file,
             set_window_appearance,
             get_system_appearance,

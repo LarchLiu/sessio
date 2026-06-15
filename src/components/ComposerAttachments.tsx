@@ -9,6 +9,7 @@ import {
   type AgentAttachment,
   readLocalImageDataUrl,
   type RuntimeCapabilitySet,
+  savePastedAttachment,
 } from "../api";
 import PopupMenu, { type PopupMenuOption, type PopupMenuPlacement } from "./PopupMenu";
 
@@ -77,6 +78,32 @@ const TEXT_ATTACHMENT_EXTENSIONS = [
   "env",
 ];
 
+const TEXT_ATTACHMENT_EXTENSION_SET = new Set(TEXT_ATTACHMENT_EXTENSIONS);
+const TEXT_ATTACHMENT_MIME_TYPES = new Set([
+  "application/json",
+  "application/toml",
+  "application/xml",
+  "application/yaml",
+  "application/x-yaml",
+  "application/javascript",
+  "application/typescript",
+  "application/x-sh",
+  "application/sql",
+]);
+const IMAGE_ATTACHMENT_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "heif"];
+const IMAGE_ATTACHMENT_EXTENSION_SET = new Set(IMAGE_ATTACHMENT_EXTENSIONS);
+const MAX_PASTED_IMAGE_BYTES = 24 * 1024 * 1024;
+const MAX_PASTED_FILE_BYTES = 2 * 1024 * 1024;
+
+type ComposerAttachmentDraft = {
+  path: string;
+  kind: ComposerAttachment["kind"];
+  name?: string;
+  mimeType?: string | null;
+  previewDataUrl?: string | null;
+  displayName?: string | null;
+};
+
 export function useComposerAttachments({
   capabilities,
   onError,
@@ -98,23 +125,29 @@ export function useComposerAttachments({
     );
   }, [supportsEmbeddedContext, supportsImageAttachments]);
 
-  const addAttachmentPaths = useCallback(
-    async (paths: string[], kind: ComposerAttachment["kind"]) => {
-      if (paths.length === 0) return;
-      const next = paths.map((path) => ({
-        kind,
-        path,
-        mimeType: null,
-        name: basename(path),
-        previewDataUrl: null,
+  const addAttachments = useCallback(
+    async (items: ComposerAttachmentDraft[]) => {
+      if (items.length === 0) return;
+      const next = items.map((item) => ({
+        kind: item.kind,
+        path: item.path,
+        mimeType: item.mimeType ?? null,
+        name: item.name ?? basename(item.path),
+        previewDataUrl: item.previewDataUrl ?? null,
+        displayName: item.displayName ?? item.name ?? basename(item.path),
       }));
       setAttachments((current) => dedupeComposerAttachments([...current, ...next]));
-      if (kind !== "image") return;
-      const previews = await Promise.allSettled(paths.map((path) => readLocalImageDataUrl(path)));
+      const imageAttachments = next.filter(
+        (attachment) => attachment.kind === "image" && !attachment.previewDataUrl,
+      );
+      if (imageAttachments.length === 0) return;
+      const previews = await Promise.allSettled(
+        imageAttachments.map((attachment) => readLocalImageDataUrl(attachment.path)),
+      );
       setAttachments((current) =>
         current.map((attachment) => {
           if (attachment.kind !== "image") return attachment;
-          const index = paths.indexOf(attachment.path);
+          const index = imageAttachments.findIndex((item) => item.path === attachment.path);
           if (index < 0) return attachment;
           const preview = previews[index];
           return {
@@ -125,6 +158,21 @@ export function useComposerAttachments({
       );
     },
     [],
+  );
+
+  const addAttachmentPaths = useCallback(
+    async (paths: string[], kind: ComposerAttachment["kind"]) => {
+      await addAttachments(
+        paths.map((path) => ({
+          kind,
+          path,
+          mimeType: null,
+          name: basename(path),
+          previewDataUrl: null,
+        })),
+      );
+    },
+    [addAttachments],
   );
 
   const removeAttachment = useCallback((path: string) => {
@@ -166,6 +214,76 @@ export function useComposerAttachments({
     [addAttachmentPaths, onError],
   );
 
+  const pasteAttachments = useCallback(
+    (clipboardData: DataTransfer | null) => {
+      if (!supportsAttachments) return false;
+      const files = pastedClipboardFiles(clipboardData);
+      if (files.length === 0) return false;
+      void (async () => {
+        try {
+          const drafts: ComposerAttachmentDraft[] = [];
+          const rejected: string[] = [];
+          for (const file of files) {
+            const kind = pastedAttachmentKind(file);
+            const name = file.name || defaultPastedFileName(file);
+            const mimeType = file.type || null;
+            if (kind === "image") {
+              if (!supportsImageAttachments) {
+                rejected.push(`${name}: image attachments are not supported by this agent.`);
+                continue;
+              }
+              if (file.size > MAX_PASTED_IMAGE_BYTES) {
+                rejected.push(`${name}: image is too large.`);
+                continue;
+              }
+            } else if (kind === "file") {
+              if (!supportsEmbeddedContext) {
+                rejected.push(`${name}: file attachments are not supported by this agent.`);
+                continue;
+              }
+              if (file.size > MAX_PASTED_FILE_BYTES) {
+                rejected.push(`${name}: file is too large.`);
+                continue;
+              }
+            } else {
+              rejected.push(`${name}: unsupported pasted file type.`);
+              continue;
+            }
+
+            const { path } = await savePastedAttachment({
+              fileName: name,
+              mimeType,
+              dataBase64: await fileToBase64(file),
+            });
+            drafts.push({
+              path,
+              kind,
+              name,
+              mimeType,
+              previewDataUrl: null,
+              displayName: name,
+            });
+          }
+          if (drafts.length > 0) await addAttachments(drafts);
+          if (rejected.length > 0) {
+            const suffix = rejected.length > 1 ? ` (+${rejected.length - 1} more)` : "";
+            onError(`Some pasted attachments were skipped. ${rejected[0]}${suffix}`);
+          }
+        } catch (error) {
+          onError(`Failed to paste attachment: ${String(error)}`);
+        }
+      })();
+      return true;
+    },
+    [
+      addAttachments,
+      onError,
+      supportsAttachments,
+      supportsEmbeddedContext,
+      supportsImageAttachments,
+    ],
+  );
+
   return {
     attachments,
     supportsAttachments,
@@ -174,6 +292,7 @@ export function useComposerAttachments({
     removeAttachment,
     clearAttachments,
     pickAttachments,
+    pasteAttachments,
   };
 }
 
@@ -344,6 +463,112 @@ function ComposerFileAttachmentCard({
 
 function basename(path: string): string {
   return path.split(/[/\\]/).pop() || path;
+}
+
+function pastedClipboardFiles(clipboardData: DataTransfer | null): File[] {
+  if (!clipboardData) return [];
+  const files: File[] = [];
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  for (const file of Array.from(clipboardData.files ?? [])) {
+    files.push(file);
+  }
+  const seen = new Set<string>();
+  return files.filter((file) => {
+    const key = `${file.name}\0${file.type}\0${file.size}\0${file.lastModified}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function pastedAttachmentKind(file: File): ComposerAttachment["kind"] | null {
+  if (isPastedImageFile(file)) return "image";
+  if (isSupportedPastedTextFile(file)) return "file";
+  return null;
+}
+
+function isPastedImageFile(file: File): boolean {
+  const mimeType = file.type.toLowerCase();
+  if (mimeType.startsWith("image/")) return true;
+  const extension = extensionLower(file.name);
+  return Boolean(extension && IMAGE_ATTACHMENT_EXTENSION_SET.has(extension));
+}
+
+function isSupportedPastedTextFile(file: File): boolean {
+  const mimeType = file.type.toLowerCase();
+  if (mimeType.startsWith("text/") || TEXT_ATTACHMENT_MIME_TYPES.has(mimeType)) return true;
+  const extension = extensionLower(file.name);
+  if (extension && TEXT_ATTACHMENT_EXTENSION_SET.has(extension)) return true;
+  const name = file.name.toLowerCase();
+  return name === "dockerfile" || name === ".gitignore" || name === ".env";
+}
+
+function defaultPastedFileName(file: File): string {
+  const extension = extensionForMime(file.type);
+  if (isPastedImageFile(file)) return `pasted-image.${extension ?? "png"}`;
+  return extension ? `pasted-file.${extension}` : "pasted-file";
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return window.btoa(binary);
+}
+
+function extensionForMime(mimeType: string | null | undefined): string | null {
+  switch (mimeType?.toLowerCase()) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/svg+xml":
+      return "svg";
+    case "image/bmp":
+      return "bmp";
+    case "image/heic":
+      return "heic";
+    case "image/heif":
+      return "heif";
+    case "text/plain":
+      return "txt";
+    case "text/markdown":
+      return "md";
+    case "text/csv":
+      return "csv";
+    case "text/html":
+      return "html";
+    case "text/css":
+      return "css";
+    case "application/json":
+      return "json";
+    case "application/xml":
+      return "xml";
+    case "application/yaml":
+    case "application/x-yaml":
+      return "yaml";
+    case "application/toml":
+      return "toml";
+    default:
+      return null;
+  }
+}
+
+function extensionLower(name: string): string | null {
+  const extension = name.split(".").pop();
+  if (!extension || extension === name) return null;
+  return extension.toLowerCase();
 }
 
 function dedupeComposerAttachments(

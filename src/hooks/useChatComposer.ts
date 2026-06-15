@@ -69,6 +69,7 @@ export interface ChatComposerController {
   supportsEmbeddedContext: boolean;
   removeAttachment: ReturnType<typeof useComposerAttachments>["removeAttachment"];
   pickAttachments: ReturnType<typeof useComposerAttachments>["pickAttachments"];
+  pasteAttachments: ReturnType<typeof useComposerAttachments>["pasteAttachments"];
   sending: boolean;
   composerError: string | null;
   setComposerError: Dispatch<SetStateAction<string | null>>;
@@ -188,6 +189,7 @@ export function useChatComposer({
     removeAttachment,
     clearAttachments,
     pickAttachments,
+    pasteAttachments,
   } = useComposerAttachments({
     capabilities: selectedRuntimeAgent?.capabilities,
     onError: (message) => {
@@ -373,7 +375,12 @@ export function useChatComposer({
         : prompt;
       await sendAgentInput(handle.sessioRuntimeSessionId, {
         text: inputText,
-        attachments: attachments.map(({ path, mimeType, kind }) => ({ path, mimeType, kind })),
+        attachments: attachments.map(({ path, mimeType, kind, displayName }) => ({
+          path,
+          mimeType,
+          kind,
+          displayName,
+        })),
       });
       setText("");
       clearAttachments();
@@ -405,6 +412,7 @@ export function useChatComposer({
     supportsEmbeddedContext,
     removeAttachment,
     pickAttachments,
+    pasteAttachments,
     sending,
     composerError,
     setComposerError,

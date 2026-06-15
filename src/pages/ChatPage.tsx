@@ -70,6 +70,12 @@ import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
 import { renderMarkdownInput } from "../components/markdownInput";
 import {
+  createImeCompositionState,
+  getImeKeyboardDisposition,
+  markImeCompositionEnd,
+  markImeCompositionStart,
+} from "../components/imeInput";
+import {
   agentModelSelectOptions,
   agentModelSelectValue,
   initialRuntimeEffort,
@@ -675,6 +681,7 @@ export function AcpTranscriptPanel({
     removeAttachment,
     clearAttachments,
     pickAttachments,
+    pasteAttachments,
   } = useComposerAttachments({
     capabilities: attachmentCapabilities,
     onError: setComposerError,
@@ -1054,13 +1061,14 @@ export function AcpTranscriptPanel({
     const text = rawText.trim();
     if (!text || sending) return;
     const agentAttachments: AgentAttachment[] = await Promise.all(
-      inputAttachments.map(async ({ path, mimeType, kind, previewDataUrl }) => {
+      inputAttachments.map(async ({ path, mimeType, kind, previewDataUrl, displayName }) => {
         if (kind !== "image" || previewDataUrl) {
           return {
             path,
             mimeType,
             kind,
             previewDataUrl,
+            displayName,
           };
         }
         try {
@@ -1069,6 +1077,7 @@ export function AcpTranscriptPanel({
             mimeType,
             kind,
             previewDataUrl: await readLocalImageDataUrl(path),
+            displayName,
           };
         } catch {
           return {
@@ -1076,6 +1085,7 @@ export function AcpTranscriptPanel({
             mimeType,
             kind,
             previewDataUrl: null,
+            displayName,
           };
         }
       }),
@@ -1341,6 +1351,7 @@ export function AcpTranscriptPanel({
         supportsEmbeddedContext={supportsEmbeddedContext}
         onRemoveAttachment={removeAttachment}
         onPickAttachments={pickAttachments}
+        onPasteAttachments={pasteAttachments}
         onAgentModelChange={handleComposerAgentModelChange}
         onPermissionChange={handleComposerPermissionChange}
         onChange={setComposerText}
@@ -1683,6 +1694,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   supportsEmbeddedContext: boolean;
   onRemoveAttachment: (path: string) => void;
   onPickAttachments: (kind: "images" | "files") => Promise<void>;
+  onPasteAttachments: (clipboardData: DataTransfer | null) => boolean;
   onAgentModelChange: (value: string) => void;
   onPermissionChange: (permissionMode: string) => void;
   onChange: (value: string) => void;
@@ -1706,6 +1718,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     supportsEmbeddedContext,
     onRemoveAttachment,
     onPickAttachments,
+    onPasteAttachments,
     onAgentModelChange,
     onPermissionChange,
     onChange,
@@ -1720,6 +1733,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   const disabledTitle = disabled ? "Select a project-backed session to chat" : undefined;
   const innerRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentButtonRef = useRef<HTMLButtonElement>(null);
+  const imeCompositionRef = useRef(createImeCompositionState());
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const attachmentOptions = attachmentMenuOptions({
     supportsImageAttachments,
@@ -1775,8 +1789,19 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
               onChange(event.target.value);
             }}
             onInput={(event) => resizeTextareaToContent(event.currentTarget)}
+            onPaste={(event) => {
+              if (!onPasteAttachments(event.clipboardData)) return;
+              event.preventDefault();
+            }}
+            onCompositionStart={() => markImeCompositionStart(imeCompositionRef.current)}
+            onCompositionEnd={() => markImeCompositionEnd(imeCompositionRef.current)}
             onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+              const imeDisposition = getImeKeyboardDisposition(event, imeCompositionRef.current);
+              if (imeDisposition.shouldSkipShortcut) {
+                if (imeDisposition.shouldPreventDefault) event.preventDefault();
+                return;
+              }
+              if (event.key !== "Enter" || event.shiftKey) {
                 return;
               }
               event.preventDefault();

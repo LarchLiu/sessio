@@ -19,6 +19,12 @@ import {
 } from "./ComposerAttachments";
 import { RuntimeMenuSelect } from "./RuntimeMenuSelect";
 import Tooltip from "./Tooltip";
+import {
+  createImeCompositionState,
+  getImeKeyboardDisposition,
+  markImeCompositionEnd,
+  markImeCompositionStart,
+} from "./imeInput";
 import { useI18n } from "../i18n";
 import type { ChatComposerController } from "../hooks/useChatComposer";
 
@@ -60,6 +66,7 @@ export default function ChatComposer({
   const { t } = useI18n();
   const [astraSweep, setAstraSweep] = useState(false);
   const previousSendButtonVariantRef = useRef(sendButtonVariant);
+  const imeCompositionRef = useRef(createImeCompositionState());
   const sendEnabled = canSend ?? composer.canSend;
   const sendBusy = sendButtonBusy ?? composer.sending;
   const sendLabel =
@@ -125,9 +132,20 @@ export default function ChatComposer({
             composer.setText(event.target.value);
           }}
           onInput={(event) => resizeTextareaToContent(event.currentTarget)}
+          onPaste={(event) => {
+            if (!composer.pasteAttachments(event.clipboardData)) return;
+            event.preventDefault();
+          }}
+          onCompositionStart={() => markImeCompositionStart(imeCompositionRef.current)}
+          onCompositionEnd={() => markImeCompositionEnd(imeCompositionRef.current)}
           onKeyDown={(event) => {
+            const imeDisposition = getImeKeyboardDisposition(event, imeCompositionRef.current);
+            if (imeDisposition.shouldSkipShortcut) {
+              if (imeDisposition.shouldPreventDefault) event.preventDefault();
+              return;
+            }
             if (onTextareaKeyDown?.(event)) return;
-            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+            if (event.key !== "Enter" || event.shiftKey) {
               return;
             }
             event.preventDefault();
