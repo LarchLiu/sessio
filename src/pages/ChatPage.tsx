@@ -3739,7 +3739,7 @@ function latestTurnWithIds(turns: LiveTurn[], ids: Set<string>): LiveTurn | null
 }
 
 export function liveWorkingIndicatorTurn(liveSession: LiveRuntimeSession | null | undefined): LiveTurn | null {
-  if (!liveSession) return null;
+  if (!liveSession || liveSession.ended) return null;
   for (let index = liveSession.turns.length - 1; index >= 0; index -= 1) {
     const turn = liveSession.turns[index];
     if (isTypewriterTurn(turn)) return turn;

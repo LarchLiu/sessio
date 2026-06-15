@@ -351,10 +351,38 @@ export function liveSessionActivity(
   const latest = latestLiveTurn(session);
   if (!latest) return "idle";
   if (latest.permissions.some((permission) => !permission.cancelled && !permission.selectedOptionId)) return "permission";
-  if (["pending", "streaming", "cancelling"].includes(latest.status)) return "running";
+  if (!session?.ended && ["pending", "streaming", "cancelling"].includes(latest.status)) return "running";
   if (latest.status === "failed") return "failed";
   if (latest.status === "cancelled") return "cancelled";
   return "updated";
+}
+
+const SESSION_ACTIVITY_PRIORITY: Record<LiveSessionActivity, number> = {
+  idle: 0,
+  cancelled: 1,
+  updated: 2,
+  failed: 3,
+  running: 4,
+  permission: 5,
+};
+
+/**
+ * Collapse the activity of several live sessions into one status for rows that
+ * fan out across multiple sessions (e.g. a thread). Surfaces the most
+ * attention-worthy lane: a pending permission on any session outranks a running
+ * one, which outranks a failure. Returns "idle" when nothing is live.
+ */
+export function aggregateLiveSessionActivity(
+  sessions: Array<LiveRuntimeSession | null | undefined>,
+): LiveSessionActivity {
+  let best: LiveSessionActivity = "idle";
+  for (const session of sessions) {
+    const activity = liveSessionActivity(session);
+    if (SESSION_ACTIVITY_PRIORITY[activity] > SESSION_ACTIVITY_PRIORITY[best]) {
+      best = activity;
+    }
+  }
+  return best;
 }
 
 export function liveSessionUpdatedAt(

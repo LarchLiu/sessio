@@ -37,6 +37,7 @@ import {
 import { useI18n } from "../i18n";
 import type { ProjectGroup } from "../navigation";
 import {
+  aggregateLiveSessionActivity,
   liveSessionActivity,
   type LiveRuntimeState,
 } from "../runtimeChat";
@@ -779,12 +780,24 @@ function ProjectSidebarGroup({
           >
             {visibleEntries.map((entry) => {
               if (entry.kind === "thread") {
+                const threadLiveSessions = entry.thread.sessionKeys.map((sessionIdKey) => {
+                  const runtimeId = runtimeSessionAliases[sessionIdKey];
+                  return runtimeId ? liveState.sessions[runtimeId] : undefined;
+                });
+                const threadActivity = aggregateLiveSessionActivity(threadLiveSessions);
+                const threadUnread = entry.thread.sessionKeys.some((sessionIdKey) => {
+                  if (unreadSessionIds.has(sessionIdKey)) return true;
+                  const runtimeId = runtimeSessionAliases[sessionIdKey];
+                  return runtimeId ? unreadSessionIds.has(runtimeId) : false;
+                });
                 return (
                   <SidebarThreadItem
                     key={entry.thread.threadId}
                     thread={threadRefFromIndexItem(entry.thread)}
                     time={entry.time}
                     active={selectedThreadId === entry.thread.threadId}
+                    liveActivity={threadActivity}
+                    unread={threadUnread}
                     onSelect={() => onSelectThread(threadRefFromIndexItem(entry.thread), "threadChat")}
                     onOpenThread={() => onSelectThread(threadRefFromIndexItem(entry.thread), "thread")}
                   />
@@ -941,12 +954,16 @@ function SidebarThreadItem({
   thread,
   time,
   active,
+  liveActivity,
+  unread,
   onSelect,
   onOpenThread,
 }: {
   thread: SidebarThreadRef;
   time?: number;
   active: boolean;
+  liveActivity: ReturnType<typeof liveSessionActivity>;
+  unread: boolean;
   onSelect: () => void;
   onOpenThread?: () => void;
 }) {
@@ -959,10 +976,11 @@ function SidebarThreadItem({
       onClick={onSelect}
       title={thread.goal}
       className={
-        "group flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
+        "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
         (active ? "bg-ink/10 text-ink" : "text-ink/65 hover:bg-ink/5 hover:text-ink")
       }
     >
+      <SidebarSessionStatus activity={liveActivity} unread={unread} />
       <SidebarThreadStatusIcon kind={thread.kind} />
       <span className="min-w-0 flex-1 truncate text-body-sm leading-snug">
         {thread.goal || <span className="text-ink/30">{t("thread.goal_placeholder")}</span>}

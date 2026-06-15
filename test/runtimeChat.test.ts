@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { AgentRuntimeEvent, RuntimeCapabilitySet } from "../src/api";
+import type { AgentRuntimeEvent, RuntimeCapabilitySet, RuntimeTurnStatus } from "../src/api";
 import {
+  aggregateLiveSessionActivity,
   applyRuntimeAction,
   emptyAcpSessionState,
   emptyLiveRuntimeState,
+  liveSessionActivity,
   normalizeRuntimeTurnSnapshot,
+  type AcpPermissionRequest,
   type LiveRuntimeSession,
   type LiveRuntimeTurnSnapshotEvent,
 } from "../src/runtimeChat";
@@ -30,11 +33,15 @@ function session(
     turnId = `${sessioRuntimeSessionId}-turn`,
     text = "hello",
     ended = false,
+    status = "streaming",
+    permissions = [],
   }: {
     agentRuntimeSessionId?: string;
     turnId?: string;
     text?: string;
     ended?: boolean;
+    status?: RuntimeTurnStatus;
+    permissions?: AcpPermissionRequest[];
   } = {},
 ): LiveRuntimeSession {
   return {
@@ -47,7 +54,7 @@ function session(
     turns: [
       {
         turnId,
-        status: "streaming",
+        status,
         blocks: [
           {
             kind: "assistant",
@@ -57,7 +64,7 @@ function session(
           },
         ],
         tools: [],
-        permissions: [],
+        permissions,
         protocolMessages: [],
         stopReason: null,
         error: null,
@@ -144,5 +151,51 @@ describe("runtimeChat", () => {
     };
 
     expect(applyRuntimeAction(current, { type: "runtime-event", event })).toBe(current);
+  });
+
+  it("does not report a running activity for an ended session whose last turn never finalized", () => {
+    expect(liveSessionActivity(session("session-a", { ended: false }))).toBe("running");
+    expect(liveSessionActivity(session("session-a", { ended: true }))).toBe("updated");
+  });
+
+  it("aggregates the most attention-worthy activity across a thread's sessions", () => {
+    const pendingPermission: AcpPermissionRequest = {
+      requestId: "perm-1",
+      toolCall: null,
+      toolName: "bash",
+      input: null,
+      options: [],
+      selectedOptionId: null,
+      cancelled: false,
+      raw: {},
+    };
+
+    expect(aggregateLiveSessionActivity([])).toBe("idle");
+    expect(aggregateLiveSessionActivity([null, undefined])).toBe("idle");
+
+    // A finished lane next to a running one still reads as running.
+    expect(
+      aggregateLiveSessionActivity([
+        session("done", { ended: true }),
+        session("busy"),
+      ]),
+    ).toBe("running");
+
+    // A running lane outranks a failed one.
+    expect(
+      aggregateLiveSessionActivity([
+        session("broken", { status: "failed" }),
+        session("busy"),
+      ]),
+    ).toBe("running");
+
+    // A pending permission on any lane wins over everything else.
+    expect(
+      aggregateLiveSessionActivity([
+        session("busy"),
+        session("broken", { status: "failed" }),
+        session("waiting", { permissions: [pendingPermission] }),
+      ]),
+    ).toBe("permission");
   });
 });
