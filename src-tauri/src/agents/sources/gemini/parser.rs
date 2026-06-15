@@ -366,6 +366,9 @@ fn parse_chat_file(
         partial: false,
         available: true,
         archived: path.components().any(|c| c.as_os_str() == "history"),
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        is_auxiliary: false,
         subagents: Vec::new(),
     }))
 }

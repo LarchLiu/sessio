@@ -707,6 +707,12 @@ fn parse_session(
         partial: false,
         available: true,
         archived,
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        // Guardian sessions are codex internal helpers — mark them auxiliary
+        // so the sidebar filter excludes them on the new origin/auxiliary
+        // rule. Non-guardian rows leave the flag at its default (false).
+        is_auxiliary: internal_guardian_session,
         subagents: Vec::new(),
     };
     if internal_guardian_session {
@@ -2115,6 +2121,9 @@ hello
                 partial: false,
                 available: true,
                 archived: false,
+                origin: crate::models::SessionOrigin::Chat,
+                scheduled_task_id: None,
+                is_auxiliary: false,
                 subagents: Vec::new(),
             },
             parent_thread_id: None,
@@ -2140,6 +2149,9 @@ hello
                 partial: false,
                 available: true,
                 archived: false,
+                origin: crate::models::SessionOrigin::Chat,
+                scheduled_task_id: None,
+                is_auxiliary: false,
                 subagents: Vec::new(),
             },
             parent_thread_id: Some("parent".to_string()),

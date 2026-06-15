@@ -2003,6 +2003,9 @@ mod ancestor_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         }
     }

@@ -125,6 +125,9 @@ pub fn scan_project_dir(project_dir: &Path) -> Result<Vec<SessionInfo>> {
             partial: true,
             available: false,
             archived: true,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents,
         });
     }
@@ -1059,6 +1062,9 @@ fn parse_session(path: &PathBuf) -> Result<Option<SessionInfo>> {
         partial: false,
         available: true,
         archived: false,
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        is_auxiliary: false,
         subagents: Vec::new(),
     }))
 }
@@ -1409,6 +1415,9 @@ fn info_from_index(entry: &IndexEntry, idx: &IndexFile, project_dir: &Path) -> O
         partial: true,
         available,
         archived: !available,
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        is_auxiliary: false,
         subagents,
     })
 }

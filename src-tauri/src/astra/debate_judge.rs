@@ -371,6 +371,8 @@ mod tests {
             stage_id: None,
             kind: ThreadKind::Debate,
             enabled: true,
+            origin: crate::models::ThreadOrigin::Manual,
+            scheduled_task_id: None,
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),

@@ -82,8 +82,62 @@ pub struct SessionInfo {
     pub partial: bool,
     pub available: bool,
     pub archived: bool,
+    /// Where this session was spawned. Determines whether the sidebar shows it
+    /// directly (`Chat` / `Channel`) or expects it to be represented by a
+    /// thread item (`Thread`). Written once at creation time, not mutated as
+    /// the session is later linked elsewhere.
+    #[serde(default)]
+    pub origin: SessionOrigin,
+    /// Set when this session is directly attached to a scheduled task — i.e.
+    /// chat-mode auto task sessions and the summary-push session that posts to
+    /// a channel. Thread-mode auto task sessions live under the thread and do
+    /// NOT carry this field; query `threads.scheduled_task_id` for those.
+    #[serde(default)]
+    pub scheduled_task_id: Option<String>,
+    /// True when the session is a system-internal helper (codex guardian,
+    /// Astra delegated, pi fake, scheduled-task summary push). Auxiliary
+    /// sessions never appear in the sidebar regardless of origin.
+    #[serde(default)]
+    pub is_auxiliary: bool,
     #[serde(default)]
     pub subagents: Vec<SubagentInfo>,
+}
+
+/// Where a session originated. Sidebar shows `Chat` and `Channel` directly;
+/// `Thread` sessions are represented by their parent thread item. Auxiliary
+/// (system-internal) sessions are filtered out via `is_auxiliary`, not via
+/// origin — auxiliary sessions can still legitimately have any origin.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionOrigin {
+    Chat,
+    Thread,
+    Channel,
+}
+
+impl Default for SessionOrigin {
+    fn default() -> Self {
+        SessionOrigin::Chat
+    }
+}
+
+impl SessionOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionOrigin::Chat => "chat",
+            SessionOrigin::Thread => "thread",
+            SessionOrigin::Channel => "channel",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "chat" => Some(SessionOrigin::Chat),
+            "thread" => Some(SessionOrigin::Thread),
+            "channel" => Some(SessionOrigin::Channel),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -629,6 +683,14 @@ pub struct ThreadInfo {
     #[serde(default)]
     pub kind: ThreadKind,
     pub enabled: bool,
+    /// `Manual` for user-created threads, `ScheduledTask` for threads
+    /// spawned by an auto task. Drives the `CalendarClock` badge on the
+    /// sidebar thread item.
+    #[serde(default)]
+    pub origin: ThreadOrigin,
+    /// Populated when `origin == ScheduledTask`. NULL otherwise.
+    #[serde(default)]
+    pub scheduled_task_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(default)]
@@ -639,6 +701,38 @@ pub struct ThreadInfo {
     pub stages: Vec<StageInfo>,
     #[serde(default)]
     pub sessions: Vec<SessionInfo>,
+}
+
+/// Whether a thread was created manually by the user or spawned by an auto
+/// task. Sidebar adds a `CalendarClock` badge on `ScheduledTask` threads.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadOrigin {
+    Manual,
+    ScheduledTask,
+}
+
+impl Default for ThreadOrigin {
+    fn default() -> Self {
+        ThreadOrigin::Manual
+    }
+}
+
+impl ThreadOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThreadOrigin::Manual => "manual",
+            ThreadOrigin::ScheduledTask => "scheduled_task",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "manual" => Some(ThreadOrigin::Manual),
+            "scheduled_task" => Some(ThreadOrigin::ScheduledTask),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -656,6 +750,10 @@ pub struct ThreadIndexItemInfo {
     pub project_id: String,
     pub goal: String,
     pub kind: ThreadKind,
+    #[serde(default)]
+    pub origin: ThreadOrigin,
+    #[serde(default)]
+    pub scheduled_task_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub time: i64,

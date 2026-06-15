@@ -18,9 +18,9 @@ use crate::models::{
     KanbanItem, KanbanStatus, PlanRoundInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus,
     PlanTaskInfo, PlanTaskRisk, PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus,
     ProcessTemplateInfo, ProcessTemplateType, ProjectInfo, ProjectStageInfo, ProjectStageType,
-    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageAssistantInfo, StageInfo,
-    StageIssueInfo, StageStatus, StageType, SubagentInfo, ThreadAgentInfo, ThreadAssistantInfo,
-    ThreadIndexItemInfo, ThreadInfo, ThreadKind,
+    RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, SessionOrigin, StageAssistantInfo,
+    StageInfo, StageIssueInfo, StageStatus, StageType, SubagentInfo, ThreadAgentInfo,
+    ThreadAssistantInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
@@ -78,6 +78,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     available          INTEGER NOT NULL DEFAULT 1,
     archived           INTEGER NOT NULL DEFAULT 0,
     hidden_from_sidebar INTEGER NOT NULL DEFAULT 0,
+    origin             TEXT NOT NULL DEFAULT 'chat',
+    scheduled_task_id  TEXT,
+    is_auxiliary       INTEGER NOT NULL DEFAULT 0,
     last_indexed_at    INTEGER NOT NULL,
     PRIMARY KEY (agent, session_id, scope)
 );
@@ -370,6 +373,8 @@ CREATE TABLE IF NOT EXISTS threads (
     stage_id    TEXT,
     kind        TEXT NOT NULL DEFAULT 'process' CHECK(kind IN ('process', 'teamwork', 'brainstorm', 'debate')),
     enabled     INTEGER NOT NULL DEFAULT 1,
+    origin      TEXT NOT NULL DEFAULT 'manual' CHECK(origin IN ('manual', 'scheduled_task')),
+    scheduled_task_id TEXT,
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
@@ -838,6 +843,33 @@ const SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR: &str = r#"
 ALTER TABLE sessions ADD COLUMN hidden_from_sidebar INTEGER NOT NULL DEFAULT 0;
 "#;
 
+// Current-schema backfill: add session/thread provenance columns.
+//   sessions.origin: 'chat' | 'thread' | 'channel'           (who created it)
+//   sessions.scheduled_task_id: NULL unless the session is directly attached
+//                               to an auto task (chat-mode or summary push)
+//   sessions.is_auxiliary: 1 if the session is system-internal and must be
+//                          hidden from the sidebar (guardian, Astra delegated,
+//                          pi fake, scheduled-task summary push)
+//   threads.origin: 'manual' | 'scheduled_task'
+//   threads.scheduled_task_id: NULL unless the thread was spawned by an auto task
+// All ALTERs are wrapped in execute() and ignore "duplicate column" errors so
+// the migration is idempotent without bumping schema_migrations.
+const SCHEMA_CURRENT_SESSION_ORIGIN: &str = r#"
+ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'chat';
+"#;
+const SCHEMA_CURRENT_SESSION_SCHEDULED_TASK_ID: &str = r#"
+ALTER TABLE sessions ADD COLUMN scheduled_task_id TEXT;
+"#;
+const SCHEMA_CURRENT_SESSION_IS_AUXILIARY: &str = r#"
+ALTER TABLE sessions ADD COLUMN is_auxiliary INTEGER NOT NULL DEFAULT 0;
+"#;
+const SCHEMA_CURRENT_THREAD_ORIGIN: &str = r#"
+ALTER TABLE threads ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual';
+"#;
+const SCHEMA_CURRENT_THREAD_SCHEDULED_TASK_ID: &str = r#"
+ALTER TABLE threads ADD COLUMN scheduled_task_id TEXT;
+"#;
+
 const SCHEMA_CURRENT_ASTRA_RUN_SESSIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS astra_run_sessions (
     run_id        TEXT NOT NULL,
@@ -1001,6 +1033,12 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         seed_builtins(conn)?;
     }
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR);
+    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_ORIGIN);
+    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SCHEDULED_TASK_ID);
+    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_IS_AUXILIARY);
+    let _ = conn.execute_batch(SCHEMA_CURRENT_THREAD_ORIGIN);
+    let _ = conn.execute_batch(SCHEMA_CURRENT_THREAD_SCHEDULED_TASK_ID);
+    backfill_session_is_auxiliary_from_hidden(conn)?;
     ensure_current_astra_run_sessions(conn)?;
     ensure_current_scheduled_tasks(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
@@ -1010,6 +1048,21 @@ fn run_migrations(conn: &Connection) -> Result<()> {
 
 fn ensure_current_astra_run_sessions(conn: &Connection) -> Result<()> {
     Ok(conn.execute_batch(SCHEMA_CURRENT_ASTRA_RUN_SESSIONS)?)
+}
+
+/// Backfill `is_auxiliary` from the legacy `hidden_from_sidebar` column for
+/// existing rows. The new column was added with DEFAULT 0, so any session that
+/// was previously hidden must be flipped over so sidebar filtering keeps
+/// excluding it. Once the legacy column is removed (Step 6), this function can
+/// be deleted along with it.
+fn backfill_session_is_auxiliary_from_hidden(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "UPDATE sessions
+            SET is_auxiliary = 1
+          WHERE hidden_from_sidebar = 1
+            AND is_auxiliary = 0;",
+    )?;
+    Ok(())
 }
 
 fn ensure_current_scheduled_tasks(conn: &Connection) -> Result<()> {
@@ -2749,6 +2802,7 @@ fn thread_stage_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StageInfo>
 
 fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
     let kind_raw: String = row.get(5)?;
+    let origin_raw: String = row.get(9)?;
     Ok(ThreadInfo {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -2759,6 +2813,8 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
         enabled: row.get::<_, i64>(6)? != 0,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        origin: ThreadOrigin::from_db_str(&origin_raw).unwrap_or_default(),
+        scheduled_task_id: row.get(10)?,
         assistants: Vec::new(),
         agent_participants: Vec::new(),
         stages: Vec::new(),
@@ -2768,6 +2824,7 @@ fn thread_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInfo> {
 
 fn thread_index_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadIndexItemInfo> {
     let kind_raw: String = row.get(3)?;
+    let origin_raw: String = row.get(7)?;
     Ok(ThreadIndexItemInfo {
         thread_id: row.get(0)?,
         project_id: row.get(1)?,
@@ -2776,6 +2833,8 @@ fn thread_index_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadInde
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         time: row.get(6)?,
+        origin: ThreadOrigin::from_db_str(&origin_raw).unwrap_or_default(),
+        scheduled_task_id: row.get(8)?,
         session_keys: Vec::new(),
     })
 }
@@ -3109,7 +3168,8 @@ fn load_assistant_by_id(conn: &Connection, assistant_id: &str) -> Result<Assista
 fn load_thread_by_id(conn: &Connection, thread_id: &str) -> Result<ThreadInfo> {
     let mut thread = conn
         .query_row(
-            "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at
+            "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at,
+                    origin, scheduled_task_id
              FROM threads
              WHERE id = ?",
             params![thread_id],
@@ -4599,42 +4659,16 @@ fn load_stage_issue_by_id(conn: &Connection, issue_id: &str) -> Result<StageIssu
 
 fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
-                s.started_at, s.updated_at, s.message_count, s.rename_title, s.title, s.first_user_message,
-                s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
+    let sql = format!(
+        "SELECT {SESSION_INFO_COLUMNS_S}
          FROM kanban_item_sessions kis
          INNER JOIN sessions s ON s.agent = kis.agent AND s.session_id = kis.session_id
          WHERE kis.item_id = ? AND s.available = 1
          ORDER BY s.updated_at DESC, s.started_at DESC",
-    )?;
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let mut sessions: Vec<SessionInfo> = stmt
-        .query_map(params![item_id], |row| {
-            let agent_str: String = row.get(0)?;
-            let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
-            Ok(SessionInfo {
-                id: row.get(1)?,
-                agent,
-                forked_from_agent: row
-                    .get::<_, Option<String>>(15)?
-                    .and_then(|value| Agent::from_db_str(&value)),
-                forked_from_id: row.get(16)?,
-                file_path: row.get(2)?,
-                project_path: row.get(3)?,
-                project_name: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get::<_, i64>(7)? as usize,
-                rename_title: row.get(8)?,
-                title: row.get(9)?,
-                first_user_message: row.get(10)?,
-                file_size: row.get::<_, i64>(11)? as u64,
-                partial: row.get::<_, i64>(12)? != 0,
-                available: row.get::<_, i64>(13)? != 0,
-                archived: row.get::<_, i64>(14)? != 0,
-                subagents: Vec::new(),
-            })
-        })?
+        .query_map(params![item_id], session_info_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     dedupe_sessions(&mut sessions);
     for session in sessions.iter_mut() {
@@ -4647,42 +4681,16 @@ fn load_kanban_item_sessions(conn: &Connection, item_id: &str) -> Result<Vec<Ses
 
 fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
-                s.started_at, s.updated_at, s.message_count, s.rename_title, s.title, s.first_user_message,
-                s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
+    let sql = format!(
+        "SELECT {SESSION_INFO_COLUMNS_S}
          FROM thread_sessions ts
          INNER JOIN sessions s ON s.agent = ts.agent AND s.session_id = ts.session_id
          WHERE ts.thread_id = ? AND s.available = 1
          ORDER BY ts.created_at ASC, s.updated_at DESC, s.started_at DESC",
-    )?;
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let mut sessions: Vec<SessionInfo> = stmt
-        .query_map(params![thread_id], |row| {
-            let agent_str: String = row.get(0)?;
-            let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
-            Ok(SessionInfo {
-                id: row.get(1)?,
-                agent,
-                forked_from_agent: row
-                    .get::<_, Option<String>>(15)?
-                    .and_then(|value| Agent::from_db_str(&value)),
-                forked_from_id: row.get(16)?,
-                file_path: row.get(2)?,
-                project_path: row.get(3)?,
-                project_name: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get::<_, i64>(7)? as usize,
-                rename_title: row.get(8)?,
-                title: row.get(9)?,
-                first_user_message: row.get(10)?,
-                file_size: row.get::<_, i64>(11)? as u64,
-                partial: row.get::<_, i64>(12)? != 0,
-                available: row.get::<_, i64>(13)? != 0,
-                archived: row.get::<_, i64>(14)? != 0,
-                subagents: Vec::new(),
-            })
-        })?
+        .query_map(params![thread_id], session_info_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     dedupe_sessions(&mut sessions);
     for session in sessions.iter_mut() {
@@ -4695,42 +4703,16 @@ fn load_thread_sessions(conn: &Connection, thread_id: &str) -> Result<Vec<Sessio
 
 fn load_stage_sessions(conn: &Connection, thread_stage_id: &str) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
-                s.started_at, s.updated_at, s.message_count, s.rename_title, s.title, s.first_user_message,
-                s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
+    let sql = format!(
+        "SELECT {SESSION_INFO_COLUMNS_S}
          FROM stage_sessions ss
          INNER JOIN sessions s ON s.agent = ss.agent AND s.session_id = ss.session_id
          WHERE ss.thread_stage_id = ? AND s.available = 1
          ORDER BY ss.created_at ASC, s.updated_at DESC, s.started_at DESC",
-    )?;
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let mut sessions: Vec<SessionInfo> = stmt
-        .query_map(params![thread_stage_id], |row| {
-            let agent_str: String = row.get(0)?;
-            let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
-            Ok(SessionInfo {
-                id: row.get(1)?,
-                agent,
-                forked_from_agent: row
-                    .get::<_, Option<String>>(15)?
-                    .and_then(|value| Agent::from_db_str(&value)),
-                forked_from_id: row.get(16)?,
-                file_path: row.get(2)?,
-                project_path: row.get(3)?,
-                project_name: row.get(4)?,
-                started_at: row.get(5)?,
-                updated_at: row.get(6)?,
-                message_count: row.get::<_, i64>(7)? as usize,
-                rename_title: row.get(8)?,
-                title: row.get(9)?,
-                first_user_message: row.get(10)?,
-                file_size: row.get::<_, i64>(11)? as u64,
-                partial: row.get::<_, i64>(12)? != 0,
-                available: row.get::<_, i64>(13)? != 0,
-                archived: row.get::<_, i64>(14)? != 0,
-                subagents: Vec::new(),
-            })
-        })?
+        .query_map(params![thread_stage_id], session_info_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     dedupe_sessions(&mut sessions);
     for session in sessions.iter_mut() {
@@ -5219,9 +5201,26 @@ fn load_all_indexed_subagents_grouped(
     Ok(grouped)
 }
 
+/// Column list for any SELECT that hydrates a [`SessionInfo`] via
+/// [`session_info_from_row`]. Every reader must use the same list — the row
+/// mapper reads by positional index. The `s.` prefix lets this be reused as
+/// either an unaliased or aliased projection (callers concat their own FROM).
+const SESSION_INFO_COLUMNS_S: &str = "s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
+        s.started_at, s.updated_at, s.message_count, s.rename_title, s.title, s.first_user_message,
+        s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id,
+        s.origin, s.scheduled_task_id, s.is_auxiliary";
+
+/// Same projection without the `s.` table alias, for queries that select
+/// directly from `sessions`.
+const SESSION_INFO_COLUMNS: &str = "agent, session_id, file_path, project_path, project_name,
+        started_at, updated_at, message_count, rename_title, title, first_user_message,
+        file_size, partial, available, archived, forked_from_agent, forked_from_id,
+        origin, scheduled_task_id, is_auxiliary";
+
 fn session_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionInfo> {
     let agent_str: String = row.get(0)?;
     let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+    let origin_raw: String = row.get(17)?;
     Ok(SessionInfo {
         id: row.get(1)?,
         agent,
@@ -5242,6 +5241,9 @@ fn session_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionInf
         partial: row.get::<_, i64>(12)? != 0,
         available: row.get::<_, i64>(13)? != 0,
         archived: row.get::<_, i64>(14)? != 0,
+        origin: SessionOrigin::from_db_str(&origin_raw).unwrap_or_default(),
+        scheduled_task_id: row.get(18)?,
+        is_auxiliary: row.get::<_, i64>(19)? != 0,
         subagents: Vec::new(),
     })
 }
@@ -5358,10 +5360,8 @@ fn load_sessions_by_refs(conn: &Connection, refs: &[SessionRef<'_>]) -> Result<V
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let mut sql = String::from(
-        "SELECT agent, session_id, file_path, project_path, project_name,
-                started_at, updated_at, message_count, rename_title, title, first_user_message,
-                file_size, partial, available, archived, forked_from_agent, forked_from_id
+    let mut sql = format!(
+        "SELECT {SESSION_INFO_COLUMNS}
          FROM sessions
          WHERE (agent, session_id) IN (",
     );
@@ -5406,23 +5406,29 @@ fn load_sessions_by_refs(conn: &Connection, refs: &[SessionRef<'_>]) -> Result<V
 
 fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<SessionInfo>> {
     let mut subs_by_parent = load_all_subagents_grouped(conn)?;
+    // Sidebar filter contract: only `chat` and `channel` origin sessions are
+    // shown directly. `thread` origin sessions are represented by their parent
+    // thread item, and auxiliary sessions (guardian, Astra delegated, pi fake,
+    // scheduled-task summary push) are hidden regardless of origin.
     let sql = if user_projects_only {
-        "SELECT s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
-                s.started_at, s.updated_at, s.message_count, s.rename_title, s.title, s.first_user_message,
-                s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id
-         FROM sessions s
-         INNER JOIN projects p ON p.path = s.project_path AND p.archived = 0
-         WHERE s.hidden_from_sidebar = 0
-         ORDER BY s.updated_at DESC"
+        format!(
+            "SELECT {SESSION_INFO_COLUMNS_S}
+             FROM sessions s
+             INNER JOIN projects p ON p.path = s.project_path AND p.archived = 0
+             WHERE s.is_auxiliary = 0 AND s.hidden_from_sidebar = 0
+               AND s.origin IN ('chat', 'channel')
+             ORDER BY s.updated_at DESC"
+        )
     } else {
-        "SELECT agent, session_id, file_path, project_path, project_name,
-                started_at, updated_at, message_count, rename_title, title, first_user_message,
-                file_size, partial, available, archived, forked_from_agent, forked_from_id
-         FROM sessions
-         WHERE hidden_from_sidebar = 0
-         ORDER BY updated_at DESC"
+        format!(
+            "SELECT {SESSION_INFO_COLUMNS}
+             FROM sessions
+             WHERE is_auxiliary = 0 AND hidden_from_sidebar = 0
+               AND origin IN ('chat', 'channel')
+             ORDER BY updated_at DESC"
+        )
     };
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let mut sessions: Vec<SessionInfo> = stmt
         .query_map([], session_info_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -6601,7 +6607,8 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         load_project_by_id(&conn, project_id)?;
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at
+            "SELECT id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at,
+                    origin, scheduled_task_id
              FROM threads
              WHERE project_id = ?
              ORDER BY updated_at DESC, created_at DESC",
@@ -6622,7 +6629,8 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "WITH base AS (
-                SELECT t.id, t.project_id, t.goal, t.kind, t.created_at, t.updated_at
+                SELECT t.id, t.project_id, t.goal, t.kind, t.created_at, t.updated_at,
+                       t.origin, t.scheduled_task_id
                 FROM threads t
                 INNER JOIN projects p ON p.id = t.project_id AND p.archived = 0
                 WHERE (?1 IS NULL OR t.project_id = ?1)
@@ -6648,10 +6656,11 @@ impl SessionStore for SqliteStore {
                 UNION ALL SELECT b.id, ars.created_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id INNER JOIN astra_run_sessions ars ON ars.run_id = ar.run_id
                 UNION ALL SELECT b.id, ars.updated_at FROM base b INNER JOIN astra_runs ar ON ar.thread_id = b.id INNER JOIN astra_run_sessions ars ON ars.run_id = ar.run_id
              )
-             SELECT b.id, b.project_id, b.goal, b.kind, b.created_at, b.updated_at, MAX(tt.time) AS time
+             SELECT b.id, b.project_id, b.goal, b.kind, b.created_at, b.updated_at, MAX(tt.time) AS time,
+                    b.origin, b.scheduled_task_id
              FROM base b
              INNER JOIN thread_times tt ON tt.thread_id = b.id
-             GROUP BY b.id, b.project_id, b.goal, b.kind, b.created_at, b.updated_at
+             GROUP BY b.id, b.project_id, b.goal, b.kind, b.created_at, b.updated_at, b.origin, b.scheduled_task_id
              ORDER BY time DESC, b.updated_at DESC, b.created_at DESC",
         )?;
         let rows = stmt.query_map(params![project_id], thread_index_from_row)?;
@@ -10101,6 +10110,9 @@ mod migration_tests {
             archived: false,
             forked_from_agent: None,
             forked_from_id: None,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         let planner_placeholder = SessionInfo {
@@ -10187,6 +10199,9 @@ mod migration_tests {
             archived: false,
             forked_from_agent: None,
             forked_from_id: None,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         let mut real = placeholder.clone();
@@ -10293,6 +10308,9 @@ mod migration_tests {
             partial: true,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session("", &pending).unwrap();
@@ -10362,6 +10380,9 @@ mod migration_tests {
             partial: true,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session("", &pending).unwrap();
@@ -10419,6 +10440,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session(&indexed.file_path, &indexed).unwrap();
@@ -10506,6 +10530,9 @@ mod migration_tests {
             partial: true,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store
@@ -10611,6 +10638,9 @@ mod migration_tests {
             partial: true,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store
@@ -10663,6 +10693,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store
@@ -10718,6 +10751,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session(&session.file_path, &session).unwrap();
@@ -10773,6 +10809,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store
@@ -10825,6 +10864,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store
@@ -10885,6 +10927,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session(&session.file_path, &session).unwrap();
@@ -11701,6 +11746,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session(&session.file_path, &session).unwrap();
@@ -12228,6 +12276,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         let stage_task_session = SessionInfo {
@@ -12511,6 +12562,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         let stage_runtime_session = SessionInfo {
@@ -12995,6 +13049,9 @@ mod migration_tests {
             partial: true,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session("", &placeholder).unwrap();
@@ -13606,6 +13663,9 @@ mod migration_tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store.upsert_session(&session.file_path, &session).unwrap();

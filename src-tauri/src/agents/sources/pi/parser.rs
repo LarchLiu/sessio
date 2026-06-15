@@ -124,6 +124,9 @@ pub fn parse_session_file(path: &Path) -> Result<Option<SessionInfo>> {
         partial: false,
         available: true,
         archived: false,
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        is_auxiliary: false,
         subagents: Vec::new(),
     }))
 }

@@ -315,6 +315,11 @@ impl PiAcpSessionStore {
             partial: persisted.file_path.trim().is_empty(),
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            // pi fake sessions are runtime-internal helpers; mark them as
+            // auxiliary so the new sidebar filter excludes them.
+            is_auxiliary: persisted.hidden_from_sidebar,
             subagents: Vec::new(),
         };
         let scope = Path::new(&session.file_path)
@@ -376,6 +381,9 @@ fn upsert_finished_session_file(
         partial: false,
         available: true,
         archived: false,
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        is_auxiliary: persisted.hidden_from_sidebar,
         subagents: Vec::new(),
     };
     let scope = Path::new(&file_path)

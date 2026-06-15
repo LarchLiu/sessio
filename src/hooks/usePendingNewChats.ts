@@ -82,6 +82,9 @@ export function usePendingNewChats({
         partial: true,
         available: true,
         archived: false,
+        origin: "chat",
+        scheduledTaskId: null,
+        isAuxiliary: false,
         subagents: [],
       };
       if (pending.historySnapshots && pending.historySnapshots.length > 0) {

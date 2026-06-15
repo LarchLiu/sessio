@@ -65,6 +65,9 @@ describe("betterSessionCandidate", () => {
     partial: true,
     available: true,
     archived: false,
+    origin: "chat",
+    scheduledTaskId: null,
+    isAuxiliary: false,
     subagents: [],
   };
 
@@ -117,6 +120,9 @@ describe("sessionDisplayTitle", () => {
       partial: false,
       available: true,
       archived: false,
+      origin: "chat",
+      scheduledTaskId: null,
+      isAuxiliary: false,
       subagents: [],
     };
 

@@ -436,6 +436,14 @@ export interface ThreadInfo {
   stageId: string | null;
   kind: ThreadKind;
   enabled: boolean;
+  /**
+   * `manual` for user-created threads, `scheduled_task` for threads spawned
+   * by an auto task. The sidebar overlays a `CalendarClock` badge on
+   * `scheduled_task` threads.
+   */
+  origin: ThreadOrigin;
+  /** Populated when `origin === "scheduled_task"`. */
+  scheduledTaskId: string | null;
   createdAt: number;
   updatedAt: number;
   assistants: ThreadAssistantInfo[];
@@ -443,6 +451,8 @@ export interface ThreadInfo {
   stages: StageInfo[];
   sessions: SessionInfo[];
 }
+
+export type ThreadOrigin = "manual" | "scheduled_task";
 
 export interface ThreadWorkState extends ThreadInfo {}
 
@@ -483,6 +493,8 @@ export interface ThreadIndexItemInfo {
   projectId: string;
   goal: string;
   kind: ThreadKind;
+  origin: ThreadOrigin;
+  scheduledTaskId: string | null;
   createdAt: number;
   updatedAt: number;
   time: number;
@@ -695,8 +707,29 @@ export interface SessionInfo {
   partial: boolean;
   available: boolean;
   archived: boolean;
+  /**
+   * Where the session was spawned. Sidebar surfaces `chat` and `channel`
+   * directly; `thread` is represented by the parent thread item. Auxiliary
+   * sessions (see {@link isAuxiliary}) are filtered regardless of origin.
+   */
+  origin: SessionOrigin;
+  /**
+   * Set when the session is directly attached to an auto task — chat-mode
+   * task sessions and the summary-push session that posts to a channel.
+   * Thread-mode auto task sessions live under their thread, so look at
+   * {@link ThreadInfo.scheduledTaskId} instead.
+   */
+  scheduledTaskId: string | null;
+  /**
+   * True for system-internal helpers (codex guardian, Astra delegated, pi
+   * fake, scheduled-task summary push). Auxiliary sessions never appear in
+   * the sidebar.
+   */
+  isAuxiliary: boolean;
   subagents: SubagentInfo[];
 }
+
+export type SessionOrigin = "chat" | "thread" | "channel";
 
 export interface ChannelSessionInfo {
   platform: string;

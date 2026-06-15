@@ -626,6 +626,9 @@ function sessionWithTimes(agent: Agent, id: string, startedAt: number, updatedAt
     partial: false,
     available: true,
     archived: false,
+    origin: "chat",
+    scheduledTaskId: null,
+    isAuxiliary: false,
     subagents: [],
   };
 }

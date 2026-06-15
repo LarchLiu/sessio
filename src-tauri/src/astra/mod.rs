@@ -2449,6 +2449,11 @@ fn record_and_link_ready_delegated_session(
         partial: true,
         available: true,
         archived: false,
+        // Astra-delegated stage/plan sessions are runtime-internal helpers and
+        // must stay out of the sidebar regardless of origin.
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        is_auxiliary: true,
         subagents: Vec::new(),
     };
     store.upsert_session_hidden_from_sidebar(&session.file_path, &session)?;
@@ -2516,6 +2521,9 @@ fn record_ready_internal_planner_session(
         partial: true,
         available: true,
         archived: false,
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: None,
+        is_auxiliary: true,
         subagents: Vec::new(),
     };
     store.upsert_session_hidden_from_sidebar(&session.file_path, &session)
@@ -4799,6 +4807,9 @@ mod tests {
             partial: false,
             available: true,
             archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
             subagents: Vec::new(),
         };
         store
@@ -4949,6 +4960,8 @@ mod tests {
             stage_id: Some(stage.id.clone()),
             kind: crate::models::ThreadKind::Process,
             enabled: true,
+            origin: crate::models::ThreadOrigin::Manual,
+            scheduled_task_id: None,
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
@@ -5392,6 +5405,8 @@ mod tests {
             stage_id: None,
             kind: crate::models::ThreadKind::Process,
             enabled: true,
+            origin: crate::models::ThreadOrigin::Manual,
+            scheduled_task_id: None,
             created_at: 1,
             updated_at: 1,
             assistants: Vec::new(),
