@@ -2470,7 +2470,7 @@ fn record_and_link_ready_delegated_session(
         is_auxiliary: true,
         subagents: Vec::new(),
     };
-    store.upsert_session_hidden_from_sidebar(&session.file_path, &session)?;
+    store.upsert_session(&session.file_path, &session)?;
 
     if let Some(stage_id) = resolved_thread_stage_id {
         store
@@ -2540,7 +2540,7 @@ fn record_ready_internal_planner_session(
         is_auxiliary: true,
         subagents: Vec::new(),
     };
-    store.upsert_session_hidden_from_sidebar(&session.file_path, &session)
+    store.upsert_session(&session.file_path, &session)
 }
 
 #[derive(Debug, Clone)]

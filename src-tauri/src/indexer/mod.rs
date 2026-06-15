@@ -526,7 +526,10 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
                 }
                 for guardian in snapshot.guardians {
                     let scope = guardian.file_path.clone();
-                    store.upsert_session_hidden_from_sidebar(&scope, &guardian)?;
+                    // guardian SessionInfo carries is_auxiliary=true at parse
+                    // time; the regular upsert_session path persists that and
+                    // sidebar filtering keeps it out of the list.
+                    store.upsert_session(&scope, &guardian)?;
                     codex_scopes.insert(scope);
                 }
             }
@@ -693,7 +696,7 @@ fn reindex_codex_file(path: &Path, store: &dyn SessionStore) -> Result<TaskOutco
             }
         }
         Some(crate::agents::sources::codex::parser::CodexParsedFile::Guardian(info)) => {
-            store.upsert_session_hidden_from_sidebar(&info.file_path, &info)?;
+            store.upsert_session(&info.file_path, &info)?;
         }
         None => {
             let path_str = path.to_string_lossy();

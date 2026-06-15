@@ -825,7 +825,6 @@ pub trait SessionStore: Send + Sync {
     fn interrupt_active_astra_runs(&self) -> Result<Vec<AstraRunRecord>>;
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
-    fn upsert_session_hidden_from_sidebar(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     /// Attach a scheduled task lineage to every existing row of an
     /// `(agent, session_id)` identity. Called from `scheduled_tasks` after
     /// `runtime.start_session` returns, so the chat-mode auto task session

@@ -34,7 +34,11 @@ struct PersistedPiSession {
     last_updated_at: i64,
     message_count: usize,
     transcript_lines: Vec<String>,
-    hidden_from_sidebar: bool,
+    /// Tracks the runtime's request to keep this session out of the sidebar
+    /// (fake agent sessions, helper sessions). Persisted via SessionInfo's
+    /// `is_auxiliary` flag — the field name predates that schema and stays
+    /// here as the runtime-side concept.
+    is_auxiliary: bool,
 }
 
 const ENABLE_PI_ACP_TRANSCRIPT_PERSISTENCE: bool = true;
@@ -190,7 +194,7 @@ impl PiAcpSessionStore {
                 &entry.workspace_path,
             )?);
             entry.message_count += 1;
-            entry.hidden_from_sidebar
+            entry.is_auxiliary
                 && !is_fake_agent_session_id(&entry.agent_session_id)
                 && (!had_first_user_message && entry.first_user_message.is_some()
                     || is_turn_terminal_message(message))
@@ -207,7 +211,7 @@ impl PiAcpSessionStore {
         agent_session_id: &str,
         workspace_path: &str,
         timestamp: i64,
-        hidden_from_sidebar: bool,
+        is_auxiliary: bool,
     ) -> Result<()> {
         let should_upsert = {
             let mut sessions = self
@@ -226,18 +230,18 @@ impl PiAcpSessionStore {
                     last_updated_at: timestamp,
                     message_count: 0,
                     transcript_lines: Vec::new(),
-                    hidden_from_sidebar,
+                    is_auxiliary,
                 });
             if !is_fake_agent_session_id(agent_session_id) {
                 entry.agent_session_id = agent_session_id.to_string();
             }
-            entry.hidden_from_sidebar |= hidden_from_sidebar;
+            entry.is_auxiliary |= is_auxiliary;
             if !workspace_path.trim().is_empty() {
                 entry.workspace_path = workspace_path.to_string();
             }
             entry.started_at = entry.started_at.min(timestamp);
             entry.last_updated_at = timestamp.max(entry.last_updated_at);
-            entry.hidden_from_sidebar && !is_fake_agent_session_id(&entry.agent_session_id)
+            entry.is_auxiliary && !is_fake_agent_session_id(&entry.agent_session_id)
         };
         if should_upsert {
             self.upsert_session_row(sessio_runtime_session_id)?;
@@ -319,20 +323,17 @@ impl PiAcpSessionStore {
             scheduled_task_id: None,
             // pi fake sessions are runtime-internal helpers; mark them as
             // auxiliary so the new sidebar filter excludes them.
-            is_auxiliary: persisted.hidden_from_sidebar,
+            is_auxiliary: persisted.is_auxiliary,
             subagents: Vec::new(),
         };
         let scope = Path::new(&session.file_path)
             .parent()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| session.file_path.clone());
-        if persisted.hidden_from_sidebar {
-            self.inner
-                .store
-                .upsert_session_hidden_from_sidebar(&scope, &session)?;
-        } else {
-            self.inner.store.upsert_session(&scope, &session)?;
-        }
+        // is_auxiliary is already encoded on the SessionInfo at construction
+        // time, so the single upsert path is enough — sidebar filtering keeps
+        // pi runtime helpers out without a special API.
+        self.inner.store.upsert_session(&scope, &session)?;
         Ok(())
     }
 }
@@ -383,18 +384,17 @@ fn upsert_finished_session_file(
         archived: false,
         origin: crate::models::SessionOrigin::Chat,
         scheduled_task_id: None,
-        is_auxiliary: persisted.hidden_from_sidebar,
+        is_auxiliary: persisted.is_auxiliary,
         subagents: Vec::new(),
     };
     let scope = Path::new(&file_path)
         .parent()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or(file_path);
-    if persisted.hidden_from_sidebar {
-        store.upsert_session_hidden_from_sidebar(&scope, &session)
-    } else {
-        store.upsert_session(&scope, &session)
-    }
+    // Auxiliary status was carried on the SessionInfo (`is_auxiliary` reads
+    // from `persisted.is_auxiliary`), so the regular upsert path
+    // suffices.
+    store.upsert_session(&scope, &session)
 }
 
 fn is_fake_agent_session_id(value: &str) -> bool {

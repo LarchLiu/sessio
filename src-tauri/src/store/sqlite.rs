@@ -1818,6 +1818,10 @@ fn runtime_agent_order(agent: Agent) -> i64 {
 struct ExistingSessionRow {
     scope: String,
     file_path: String,
+    /// Read but unused: kept on the row mapper so Step 6 can drop the column
+    /// in a single migration commit. Once the column is gone this field and
+    /// the SELECT projection both go too.
+    #[allow(dead_code)]
     hidden_from_sidebar: i64,
     partial: i64,
     available: i64,
@@ -2011,9 +2015,8 @@ fn merged_scheduled_task_id(
     rows.iter().find_map(|row| row.scheduled_task_id.clone())
 }
 
-/// Sticky-OR for auxiliary: incoming OR any existing row sets it. Matches
-/// `merged_hidden_from_sidebar` so the two flags can be removed together in
-/// Step 5/6 without changing semantics in the interim.
+/// Sticky-OR for auxiliary: incoming OR any existing row sets it. Once any
+/// row in the identity set is auxiliary, the merged write keeps it set.
 fn merged_is_auxiliary(rows: &[ExistingSessionRow], incoming: bool) -> i64 {
     (incoming || rows.iter().any(|row| row.is_auxiliary != 0)) as i64
 }
@@ -2023,44 +2026,13 @@ fn delete_duplicate_session_rows(
     agent: Agent,
     session_id: &str,
     keep_scope: &str,
-    hide_from_sidebar: bool,
 ) -> Result<()> {
-    preserve_session_hidden_from_sidebar(conn, agent, session_id, keep_scope, hide_from_sidebar)?;
     conn.execute(
         "DELETE FROM sessions
          WHERE agent = ? AND session_id = ? AND scope != ?",
         params![agent.as_str(), session_id, keep_scope],
     )?;
     Ok(())
-}
-
-fn preserve_session_hidden_from_sidebar(
-    conn: &Connection,
-    agent: Agent,
-    session_id: &str,
-    scope: &str,
-    hide_from_sidebar: bool,
-) -> Result<()> {
-    let existing_hidden: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(hidden_from_sidebar), 0)
-         FROM sessions
-         WHERE agent = ? AND session_id = ?",
-        params![agent.as_str(), session_id],
-        |row| row.get(0),
-    )?;
-    if hide_from_sidebar || existing_hidden != 0 {
-        conn.execute(
-            "UPDATE sessions
-             SET hidden_from_sidebar = 1
-             WHERE agent = ? AND session_id = ? AND scope = ?",
-            params![agent.as_str(), session_id, scope],
-        )?;
-    }
-    Ok(())
-}
-
-fn merged_hidden_from_sidebar(rows: &[ExistingSessionRow], hide_from_sidebar: bool) -> i64 {
-    (hide_from_sidebar || rows.iter().any(|row| row.hidden_from_sidebar != 0)) as i64
 }
 
 fn merge_session_lineage(
@@ -2112,7 +2084,6 @@ fn insert_session(
     conn: &Connection,
     scope: &str,
     s: &SessionInfo,
-    hide_from_sidebar: bool,
 ) -> Result<()> {
     let identity_rows = load_identity_session_rows(conn, s.agent, &s.id)?;
     let incoming_real = is_real_session_file_path(&s.file_path);
@@ -2174,7 +2145,6 @@ fn insert_session(
                 s.agent,
                 &s.id,
                 &existing.scope,
-                hide_from_sidebar,
             )?;
             return Ok(());
         }
@@ -2216,7 +2186,7 @@ fn insert_session(
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
             return Ok(());
         }
         if let Some(existing) = existing_real.clone().filter(|row| row.scope != scope) {
@@ -2255,7 +2225,7 @@ fn insert_session(
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
             return Ok(());
         }
         if let Some(existing) = existing_placeholder(conn, s.agent, &s.id, scope, s)? {
@@ -2268,13 +2238,6 @@ fn insert_session(
                 params![s.agent.as_str(), s.id, scope],
                 |_| Ok(()),
             ).optional()?.is_some() {
-                preserve_session_hidden_from_sidebar(
-                    conn,
-                    s.agent,
-                    &s.id,
-                    scope,
-                    hide_from_sidebar,
-                )?;
                 conn.execute(
                     "DELETE FROM sessions
                      WHERE agent = ? AND session_id = ? AND scope = ?",
@@ -2318,7 +2281,6 @@ fn insert_session(
                     s.agent,
                     &s.id,
                     scope,
-                    hide_from_sidebar,
                 )?;
                 return Ok(());
             }
@@ -2370,10 +2332,11 @@ fn insert_session(
                 existing_same_scope.scope,
             ],
         )?;
-        delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
+        delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
         return Ok(());
     }
     let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+    let aux_value = merged_is_auxiliary(&identity_rows, s.is_auxiliary);
     conn.execute(
         "INSERT OR REPLACE INTO sessions (
             agent, session_id, scope, file_path,
@@ -2403,16 +2366,18 @@ fn insert_session(
             s.partial as i64,
             s.available as i64,
             s.archived as i64,
-            merged_hidden_from_sidebar(&identity_rows, hide_from_sidebar),
+            // hidden_from_sidebar mirrors is_auxiliary while the legacy column
+            // is being phased out; Step 6 drops the column and this argument.
+            aux_value,
             now_ms(),
             forked_from_agent.map(|agent| agent.as_str()),
             forked_from_id,
             merged_origin(&identity_rows, s.origin).as_str(),
             merged_scheduled_task_id(&identity_rows, s.scheduled_task_id.as_deref()),
-            merged_is_auxiliary(&identity_rows, s.is_auxiliary),
+            aux_value,
         ],
     )?;
-    delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
+    delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
     // Subagent rows are written through upsert_subagent so their lifecycle
     // is independent from the parent session's reindex.
     Ok(())
@@ -8630,12 +8595,7 @@ impl SessionStore for SqliteStore {
 
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        insert_session(&conn, scope, session, false)
-    }
-
-    fn upsert_session_hidden_from_sidebar(&self, scope: &str, session: &SessionInfo) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        insert_session(&conn, scope, session, true)
+        insert_session(&conn, scope, session)
     }
 
     fn mark_session_scheduled_task(
@@ -8715,7 +8675,7 @@ impl SessionStore for SqliteStore {
             }
         }
         for s in sessions {
-            insert_session(&tx, scope, s, false)?;
+            insert_session(&tx, scope, s)?;
         }
         tx.commit()?;
         Ok(())
@@ -10700,11 +10660,11 @@ mod migration_tests {
             archived: false,
             origin: crate::models::SessionOrigin::Chat,
             scheduled_task_id: None,
-            is_auxiliary: false,
+            is_auxiliary: true,
             subagents: Vec::new(),
         };
         store
-            .upsert_session_hidden_from_sidebar("", &placeholder)
+            .upsert_session("", &placeholder)
             .unwrap();
         assert!(store.list_sessions().unwrap().is_empty());
         assert!(store.list_all_sessions().unwrap().is_empty());
