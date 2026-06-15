@@ -241,7 +241,24 @@ impl SchedulerState {
                 Value::String(permission_mode.clone()),
             );
         }
-        self.runtime.start_session(req)
+        let handle = self.runtime.start_session(req)?;
+        // Tag the session row with this scheduled task so the sidebar can
+        // render the CalendarClock badge and the task detail view can list
+        // sessions by task. Chat-mode auto task sessions stay user-visible
+        // (`is_auxiliary = false`).
+        if let Err(error) = self.store.mark_session_scheduled_task(
+            handle.agent,
+            &handle.agent_runtime_session_id,
+            &task.id,
+            false,
+        ) {
+            log::warn!(
+                "[scheduled-tasks] failed to mark chat session {} for task {}: {error:#}",
+                handle.agent_runtime_session_id,
+                task.id
+            );
+        }
+        Ok(handle)
     }
 
     fn start_thread_run(&self, task: &ScheduledTask) -> Result<ThreadRunOutcome> {
@@ -319,13 +336,15 @@ impl SchedulerState {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let thread = self.store.create_thread_with_options(
+        let thread = self.store.create_thread_with_origin(
             &project.id,
             goal,
             description,
             kind,
             &assistant_ids,
             &agent_participants,
+            crate::models::ThreadOrigin::ScheduledTask,
+            Some(task.id.as_str()),
         )?;
         let start_result = (|| -> Result<_> {
             if kind == ThreadKind::Process {
@@ -849,9 +868,26 @@ impl SchedulerState {
         let result = (|| -> Result<Option<String>> {
             let source = self.build_run_summary_source(run)?;
             let workspace_path = self.summary_workspace_path(run)?;
-            let summary = self
+            let outcome = self
                 .astra
                 .summarize_auto_task_notification(&workspace_path, &source)?;
+            // The summary helper runtime session is task-internal and must not
+            // appear in the sidebar. Tag it with this task's id and flip the
+            // auxiliary bit; the row is already in `sessions` because the
+            // runtime wrote it on `start_session`.
+            if let Err(error) = self.store.mark_session_scheduled_task(
+                outcome.agent,
+                &outcome.agent_session_id,
+                &run.task_id,
+                true,
+            ) {
+                log::warn!(
+                    "[scheduled-tasks] failed to mark summary session {} for task {}: {error:#}",
+                    outcome.agent_session_id,
+                    run.task_id
+                );
+            }
+            let summary = outcome.summary;
             // Cancellation checkpoint: a concurrent force-unlock flips this run's
             // push out of `summarizing`. Stop before sending so "force-unlock
             // means no more pushes" holds. This shrinks the race window from the

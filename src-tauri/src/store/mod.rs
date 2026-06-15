@@ -12,7 +12,7 @@ use crate::models::{
     PlanTaskSessionInfo, PlanTaskSessionRole, PlanTaskStatus, ProcessTemplateInfo, ProjectInfo,
     ProjectStageInfo, RuntimeAgentOptionMetadata, SessionHistoryTurn, SessionInfo, StageInfo,
     StageIssueInfo, StageStatus, SubagentInfo, ThreadIndexItemInfo, ThreadInfo, ThreadKind,
-    ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo,
+    ThreadOrigin, ThreadReplayInfo, ThreadReplaySessionInfo, ThreadReplaySessionSourceInfo,
     ThreadReplaySessionSourceKind,
 };
 
@@ -582,7 +582,39 @@ pub trait SessionStore: Send + Sync {
         assistant_ids: &[String],
         agent_participants: &[crate::models::ThreadAgentInfo],
     ) -> Result<ThreadInfo> {
-        let _ = (kind, assistant_ids, agent_participants);
+        self.create_thread_with_origin(
+            project_id,
+            goal,
+            description,
+            kind,
+            assistant_ids,
+            agent_participants,
+            ThreadOrigin::Manual,
+            None,
+        )
+    }
+    /// Full thread creation entry point — `create_thread_with_options` forwards
+    /// here with `ThreadOrigin::Manual`. The scheduled-task path in
+    /// `scheduled_tasks::start_thread_run` calls this directly with
+    /// `ThreadOrigin::ScheduledTask` and the originating task id.
+    fn create_thread_with_origin(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+        kind: ThreadKind,
+        assistant_ids: &[String],
+        agent_participants: &[crate::models::ThreadAgentInfo],
+        origin: ThreadOrigin,
+        scheduled_task_id: Option<&str>,
+    ) -> Result<ThreadInfo> {
+        let _ = (
+            kind,
+            assistant_ids,
+            agent_participants,
+            origin,
+            scheduled_task_id,
+        );
         self.create_thread(project_id, goal, description)
     }
     fn update_thread(
@@ -794,6 +826,34 @@ pub trait SessionStore: Send + Sync {
     fn cleanup_partial_astra_sessions(&self, session_ids: &[String]) -> Result<usize>;
     fn upsert_session(&self, scope: &str, session: &SessionInfo) -> Result<()>;
     fn upsert_session_hidden_from_sidebar(&self, scope: &str, session: &SessionInfo) -> Result<()>;
+    /// Attach a scheduled task lineage to every existing row of an
+    /// `(agent, session_id)` identity. Called from `scheduled_tasks` after
+    /// `runtime.start_session` returns, so the chat-mode auto task session
+    /// (and the summary push session, when `is_auxiliary = true`) carry the
+    /// task linkage through subsequent reindexing. Insert paths preserve
+    /// `scheduled_task_id` via `merged_scheduled_task_id`, but the runtime
+    /// has already written its placeholder row by the time we get here, so
+    /// we write directly.
+    fn mark_session_scheduled_task(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        scheduled_task_id: &str,
+        is_auxiliary: bool,
+    ) -> Result<()>;
+    /// Set the session's origin (`thread`/`channel`) on every row of an
+    /// `(agent, session_id)` identity. Called by im-bridge once the channel
+    /// runtime session has been registered, since the runtime writes its
+    /// placeholder before im-bridge knows it's a channel session. Same
+    /// rationale as `mark_session_scheduled_task` — write directly because
+    /// the row already exists. Origin is sticky so calling this with `Chat`
+    /// is a no-op.
+    fn mark_session_origin(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        origin: crate::models::SessionOrigin,
+    ) -> Result<()>;
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()>;
     fn upsert_subagent(
         &self,

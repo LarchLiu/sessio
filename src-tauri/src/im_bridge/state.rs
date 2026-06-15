@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::agents::runtime::RuntimeManager;
-use crate::models::Agent;
+use crate::models::{Agent, SessionOrigin};
 use crate::store::{ChannelSessionRecord, SessionStore};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -616,6 +616,16 @@ impl ImBridgeState {
         };
         if let Err(error) = self.store.upsert_channel_session(&record) {
             log::warn!("[im-bridge] failed to persist channel session: {error:#}");
+        }
+        // Stamp the underlying session row as `channel` origin. The runtime
+        // wrote it as the default `chat` placeholder before this code ran,
+        // and `mark_session_origin` upgrades any `chat`-origin row of the
+        // same identity in place.
+        if let Err(error) =
+            self.store
+                .mark_session_origin(session.agent, agent_session_id, SessionOrigin::Channel)
+        {
+            log::warn!("[im-bridge] failed to stamp channel origin: {error:#}");
         }
     }
 

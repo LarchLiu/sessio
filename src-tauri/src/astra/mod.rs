@@ -361,6 +361,16 @@ pub struct CancelAstraRunRequest {
     pub run_id: String,
 }
 
+/// Output of `summarize_auto_task_notification`. The caller (scheduled-tasks
+/// push) needs the runtime session id alongside the summary so it can stamp
+/// that helper session with `scheduled_task_id` and `is_auxiliary = true`.
+#[derive(Debug, Clone)]
+pub struct SummarizeAutoTaskNotificationOutput {
+    pub summary: String,
+    pub agent: Agent,
+    pub agent_session_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AstraEvent {
@@ -958,7 +968,7 @@ impl AstraService {
         &self,
         workspace_path: &str,
         source: &str,
-    ) -> Result<String> {
+    ) -> Result<SummarizeAutoTaskNotificationOutput> {
         let config = self.astra_backend_config();
         let agent = config.agent.unwrap_or(Agent::AstraPi);
         let runtime_config = runtime_agent_backend::RuntimeAgentBackendConfig {
@@ -987,7 +997,7 @@ impl AstraService {
             );
         }
         let prompt = build_auto_task_notification_summary_prompt(source);
-        let (summary, _) = runtime_agent_backend::execute_agent_prompt(
+        let (summary, agent_session_id) = runtime_agent_backend::execute_agent_prompt(
             &self.inner.runtime,
             &runtime_config,
             workspace_path,
@@ -1002,7 +1012,11 @@ impl AstraService {
                 failure.message
             )
         })?;
-        Ok(summarize_task_output(&summary))
+        Ok(SummarizeAutoTaskNotificationOutput {
+            summary: summarize_task_output(&summary),
+            agent,
+            agent_session_id,
+        })
     }
 
     pub(super) fn create_plan_round_for_astra_tasks(

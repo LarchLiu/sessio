@@ -7,7 +7,7 @@ use crate::models::{
     IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo, PlanTaskInfo,
     PlanTaskSessionInfo, PlanTaskSessionRole, ProcessTemplateInfo, ProjectInfo, ProjectStageInfo,
     SessionInfo, StageInfo, StageIssueInfo, StageStatus, SubagentInfo, ThreadAgentInfo,
-    ThreadIndexItemInfo, ThreadInfo, ThreadKind,
+    ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, ChannelSessionRecord,
@@ -472,6 +472,29 @@ impl SessionStore for CachedStore {
         )
     }
 
+    fn create_thread_with_origin(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+        kind: ThreadKind,
+        assistant_ids: &[String],
+        agent_participants: &[ThreadAgentInfo],
+        origin: ThreadOrigin,
+        scheduled_task_id: Option<&str>,
+    ) -> Result<ThreadInfo> {
+        self.inner.create_thread_with_origin(
+            project_id,
+            goal,
+            description,
+            kind,
+            assistant_ids,
+            agent_participants,
+            origin,
+            scheduled_task_id,
+        )
+    }
+
     fn update_thread(
         &self,
         thread_id: &str,
@@ -876,6 +899,28 @@ impl SessionStore for CachedStore {
         self.inner
             .upsert_session_hidden_from_sidebar(scope, session)?;
         self.upsert_session_snapshot(scope, session)
+    }
+
+    fn mark_session_scheduled_task(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        scheduled_task_id: &str,
+        is_auxiliary: bool,
+    ) -> Result<()> {
+        // CachedStore::list_sessions delegates straight to inner, so the
+        // sqlite UPDATE is enough; no snapshot rewrite needed.
+        self.inner
+            .mark_session_scheduled_task(agent, session_id, scheduled_task_id, is_auxiliary)
+    }
+
+    fn mark_session_origin(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        origin: crate::models::SessionOrigin,
+    ) -> Result<()> {
+        self.inner.mark_session_origin(agent, session_id, origin)
     }
 
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()> {

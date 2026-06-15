@@ -1828,6 +1828,17 @@ struct ExistingSessionRow {
     first_user_message: Option<String>,
     forked_from_agent: Option<Agent>,
     forked_from_id: Option<String>,
+    /// `origin` is written once at session creation and never mutated. When
+    /// merging identity rows we always carry the existing value forward so a
+    /// later reindexer pass that re-encounters this session via the parsed
+    /// jsonl can't downgrade a `thread`/`channel` row back to `chat`.
+    origin: SessionOrigin,
+    /// Sticky for the same reason: auto task placeholder rows write this and
+    /// we want it preserved when the indexer later replaces the row.
+    scheduled_task_id: Option<String>,
+    /// Sticky-OR like `hidden_from_sidebar`: once any row in the identity set
+    /// is auxiliary the merged write keeps it set.
+    is_auxiliary: i64,
 }
 
 fn load_identity_session_rows(
@@ -1837,7 +1848,8 @@ fn load_identity_session_rows(
 ) -> Result<Vec<ExistingSessionRow>> {
     let mut stmt = conn.prepare(
         "SELECT scope, file_path, hidden_from_sidebar, partial, available, archived,
-                message_count, rename_title, title, first_user_message, forked_from_agent, forked_from_id
+                message_count, rename_title, title, first_user_message, forked_from_agent, forked_from_id,
+                origin, scheduled_task_id, is_auxiliary
          FROM sessions
          WHERE agent = ? AND session_id = ?
          ORDER BY
@@ -1851,6 +1863,7 @@ fn load_identity_session_rows(
             let forked_agent = row
                 .get::<_, Option<String>>(10)?
                 .and_then(|value| Agent::from_db_str(&value));
+            let origin_raw: String = row.get(12)?;
             Ok(ExistingSessionRow {
                 scope: row.get(0)?,
                 file_path: row.get(1)?,
@@ -1864,6 +1877,9 @@ fn load_identity_session_rows(
                 first_user_message: row.get(9)?,
                 forked_from_agent: forked_agent,
                 forked_from_id: row.get(11)?,
+                origin: SessionOrigin::from_db_str(&origin_raw).unwrap_or_default(),
+                scheduled_task_id: row.get(13)?,
+                is_auxiliary: row.get(14)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1945,6 +1961,61 @@ fn merged_message_count(rows: &[ExistingSessionRow], incoming: &SessionInfo) -> 
         .max()
         .unwrap_or_default()
         .max(incoming.message_count as i64)
+}
+
+/// Upgrade a session's origin from the default `chat` to `thread` for every
+/// row sharing the `(agent, session_id)` identity. Channel-origin rows are
+/// left intact (a channel-originated message that lands in a thread keeps its
+/// `channel` provenance). Used by `link_thread_session`,
+/// `link_stage_session`, and `link_plan_task_session` so the sidebar filter
+/// hides any session attached to a thread workflow.
+fn upgrade_session_origin_to_thread(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions
+            SET origin = 'thread'
+          WHERE agent = ? AND session_id = ? AND origin = 'chat'",
+        params![agent.as_str(), session_id],
+    )?;
+    Ok(())
+}
+
+
+/// A `chat` incoming row never overwrites an already-recorded `thread` or
+/// `channel` provenance. A `thread`/`channel` incoming row IS allowed to
+/// upgrade a default-`chat` row, since the upstream call site has explicit
+/// new provenance information.
+fn merged_origin(rows: &[ExistingSessionRow], incoming: SessionOrigin) -> SessionOrigin {
+    if incoming != SessionOrigin::Chat {
+        return incoming;
+    }
+    rows.iter()
+        .map(|row| row.origin)
+        .find(|origin| *origin != SessionOrigin::Chat)
+        .unwrap_or(incoming)
+}
+
+/// Sticky scheduled_task_id merge: prefer the incoming value when set, else
+/// preserve any existing value. Once a session is attached to a scheduled
+/// task that link stays for its lifetime.
+fn merged_scheduled_task_id(
+    rows: &[ExistingSessionRow],
+    incoming: Option<&str>,
+) -> Option<String> {
+    if let Some(value) = incoming {
+        return Some(value.to_string());
+    }
+    rows.iter().find_map(|row| row.scheduled_task_id.clone())
+}
+
+/// Sticky-OR for auxiliary: incoming OR any existing row sets it. Matches
+/// `merged_hidden_from_sidebar` so the two flags can be removed together in
+/// Step 5/6 without changing semantics in the interim.
+fn merged_is_auxiliary(rows: &[ExistingSessionRow], incoming: bool) -> i64 {
+    (incoming || rows.iter().any(|row| row.is_auxiliary != 0)) as i64
 }
 
 fn delete_duplicate_session_rows(
@@ -2311,8 +2382,9 @@ fn insert_session(
             message_count, rename_title, title, first_user_message,
             file_size, file_mtime,
             partial, available, archived,
-            hidden_from_sidebar, last_indexed_at, forked_from_agent, forked_from_id
-        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?, ?,?,?, ?,?,?,?)",
+            hidden_from_sidebar, last_indexed_at, forked_from_agent, forked_from_id,
+            origin, scheduled_task_id, is_auxiliary
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?, ?,?,?, ?,?,?,?, ?,?,?)",
         params![
             s.agent.as_str(),
             s.id,
@@ -2335,6 +2407,9 @@ fn insert_session(
             now_ms(),
             forked_from_agent.map(|agent| agent.as_str()),
             forked_from_id,
+            merged_origin(&identity_rows, s.origin).as_str(),
+            merged_scheduled_task_id(&identity_rows, s.scheduled_task_id.as_deref()),
+            merged_is_auxiliary(&identity_rows, s.is_auxiliary),
         ],
     )?;
     delete_duplicate_session_rows(conn, s.agent, &s.id, scope, hide_from_sidebar)?;
@@ -3149,6 +3224,7 @@ fn replace_astra_run_sessions(
             session.created_at,
             session.updated_at,
         ])?;
+        upgrade_session_origin_to_thread(conn, session.agent, &session.session_id)?;
     }
     Ok(())
 }
@@ -6706,6 +6782,29 @@ impl SessionStore for SqliteStore {
         assistant_ids: &[String],
         agent_participants: &[ThreadAgentInfo],
     ) -> Result<ThreadInfo> {
+        self.create_thread_with_origin(
+            project_id,
+            goal,
+            description,
+            kind,
+            assistant_ids,
+            agent_participants,
+            ThreadOrigin::Manual,
+            None,
+        )
+    }
+
+    fn create_thread_with_origin(
+        &self,
+        project_id: &str,
+        goal: &str,
+        description: Option<&str>,
+        kind: ThreadKind,
+        assistant_ids: &[String],
+        agent_participants: &[ThreadAgentInfo],
+        origin: ThreadOrigin,
+        scheduled_task_id: Option<&str>,
+    ) -> Result<ThreadInfo> {
         let goal = goal.trim();
         if goal.is_empty() {
             anyhow::bail!("thread goal cannot be empty");
@@ -6718,9 +6817,20 @@ impl SessionStore for SqliteStore {
         let now = now_ms();
         let id = stable_thread_id(project_id, goal, now);
         tx.execute(
-            "INSERT INTO threads (id, project_id, goal, description, stage_id, kind, enabled, created_at, updated_at)
-             VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?)",
-            params![id, project_id, goal, description, kind.as_str(), now, now],
+            "INSERT INTO threads (id, project_id, goal, description, stage_id, kind, enabled,
+                                  origin, scheduled_task_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?)",
+            params![
+                id,
+                project_id,
+                goal,
+                description,
+                kind.as_str(),
+                origin.as_str(),
+                scheduled_task_id,
+                now,
+                now
+            ],
         )?;
         replace_thread_assistants(&tx, &id, &assistants, now)?;
         replace_thread_agents(&tx, &id, agent_participants, now)?;
@@ -7049,6 +7159,7 @@ impl SessionStore for SqliteStore {
                 now,
             ],
         )?;
+        upgrade_session_origin_to_thread(&conn, session.agent, session.session_id)?;
         conn.query_row(
             "SELECT task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
              FROM thread_plan_task_sessions
@@ -7856,6 +7967,10 @@ impl SessionStore for SqliteStore {
              VALUES (?, ?, ?, ?)",
             params![thread_id, agent.as_str(), session_id, now],
         )?;
+        // Upgrade the session's origin to `thread` so the sidebar filter
+        // hides it (thread item represents these sessions). Sticky: only
+        // `chat`-origin rows get upgraded, channel sessions stay channel.
+        upgrade_session_origin_to_thread(&tx, agent, session_id)?;
         tx.execute(
             "UPDATE threads SET updated_at = ? WHERE id = ?",
             params![now, thread_id],
@@ -7917,6 +8032,7 @@ impl SessionStore for SqliteStore {
              VALUES (?, ?, ?, ?)",
             params![thread_stage_id, agent.as_str(), session_id, now],
         )?;
+        upgrade_session_origin_to_thread(&tx, agent, session_id)?;
         tx.execute(
             "UPDATE thread_stages SET updated_at = ? WHERE id = ?",
             params![now, thread_stage_id],
@@ -8520,6 +8636,58 @@ impl SessionStore for SqliteStore {
     fn upsert_session_hidden_from_sidebar(&self, scope: &str, session: &SessionInfo) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         insert_session(&conn, scope, session, true)
+    }
+
+    fn mark_session_scheduled_task(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        scheduled_task_id: &str,
+        is_auxiliary: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        // OR-ing into is_auxiliary keeps the sticky semantics: marking a
+        // session auxiliary later in its lifetime is allowed, but a chat-mode
+        // task session that was created with is_auxiliary=false must not flip
+        // to auxiliary just because a later mark call lands.
+        let aux_value = if is_auxiliary { 1 } else { 0 };
+        conn.execute(
+            "UPDATE sessions
+                SET scheduled_task_id = ?,
+                    is_auxiliary = MAX(is_auxiliary, ?),
+                    hidden_from_sidebar = MAX(hidden_from_sidebar, ?)
+              WHERE agent = ? AND session_id = ?",
+            params![
+                scheduled_task_id,
+                aux_value,
+                aux_value,
+                agent.as_str(),
+                session_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn mark_session_origin(
+        &self,
+        agent: Agent,
+        session_id: &str,
+        origin: SessionOrigin,
+    ) -> Result<()> {
+        // Sticky origin: only upgrade rows whose stored origin is still the
+        // default `chat`. A `thread` or `channel` row stays put. Marking with
+        // `Chat` is a no-op.
+        if origin == SessionOrigin::Chat {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions
+                SET origin = ?
+              WHERE agent = ? AND session_id = ? AND origin = 'chat'",
+            params![origin.as_str(), agent.as_str(), session_id],
+        )?;
+        Ok(())
     }
 
     fn replace_by_scope(&self, scope: &str, agent: Agent, sessions: &[SessionInfo]) -> Result<()> {
