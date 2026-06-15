@@ -39,8 +39,8 @@ impl AgentSource for OpencodeSource {
     }
 
     fn parse_source(&self, source: &SessionSource) -> Result<SessionRecord> {
-        let info = parser::parse_one(&source.file_path, &source.session_id)?
-            .with_context(|| {
+        let info =
+            parser::parse_one(&source.file_path, &source.session_id)?.with_context(|| {
                 format!(
                     "no opencode session parsed from {} (id={})",
                     source.file_path, source.session_id

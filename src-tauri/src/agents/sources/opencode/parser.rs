@@ -217,8 +217,8 @@ fn first_user_summary(conn: &Connection, session_id: &str) -> Result<Option<Stri
         if role != "user" {
             continue;
         }
-        let mut parts_stmt = conn
-            .prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC")?;
+        let mut parts_stmt =
+            conn.prepare("SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC")?;
         let texts: Vec<String> = parts_stmt
             .query_map([&msg_id], |row| row.get::<_, String>(0))?
             .filter_map(Result::ok)
@@ -567,10 +567,7 @@ fn raw_messages_to_history(
                 "tool" => {
                     flush_reasoning(&mut pending_reasoning, &mut out);
                     flush_text(&mut pending_text, &mut out);
-                    let tool_name = part
-                        .tool_name
-                        .clone()
-                        .unwrap_or_else(|| "tool".to_string());
+                    let tool_name = part.tool_name.clone().unwrap_or_else(|| "tool".to_string());
                     let acp_kind = opencode_tool_to_acp_kind(&tool_name);
                     let raw_input = part.tool_input.clone().unwrap_or(Value::Null);
                     let call_id = part.tool_call_id.clone();
@@ -710,12 +707,17 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let session = parse_sqlite_session(&db, "ses_1").unwrap().expect("session");
+        let session = parse_sqlite_session(&db, "ses_1")
+            .unwrap()
+            .expect("session");
         assert_eq!(session.id, "ses_1");
         assert_eq!(session.agent, Agent::Opencode);
         assert_eq!(session.title.as_deref(), Some("Title 1"));
         assert_eq!(session.project_path.as_deref(), Some("/tmp/proj"));
-        assert_eq!(session.first_user_message.as_deref(), Some("hello opencode"));
+        assert_eq!(
+            session.first_user_message.as_deref(),
+            Some("hello opencode")
+        );
         assert_eq!(session.started_at, Some(1000));
         assert_eq!(session.updated_at, Some(2000));
         assert!(session.file_path.starts_with("sqlite:"));
@@ -817,7 +819,9 @@ mod tests {
         // merge the tool_call_update that follows.
         let call_data = &history[3].message.data;
         assert_eq!(
-            call_data.pointer("/update/toolCallId").and_then(Value::as_str),
+            call_data
+                .pointer("/update/toolCallId")
+                .and_then(Value::as_str),
             Some("call-1")
         );
         // bash maps to ACP `execute`, not the generic `tool_call`.
@@ -855,10 +859,16 @@ mod tests {
         assert_eq!(part.kind, "tool");
         assert_eq!(part.tool_name.as_deref(), Some("bash"));
         assert_eq!(
-            part.tool_input.as_ref().and_then(|v| v.get("cmd")).and_then(Value::as_str),
+            part.tool_input
+                .as_ref()
+                .and_then(|v| v.get("cmd"))
+                .and_then(Value::as_str),
             Some("ls")
         );
-        assert_eq!(part.tool_output.as_ref().and_then(Value::as_str), Some("readme.md\n"));
+        assert_eq!(
+            part.tool_output.as_ref().and_then(Value::as_str),
+            Some("readme.md\n")
+        );
     }
 
     #[test]

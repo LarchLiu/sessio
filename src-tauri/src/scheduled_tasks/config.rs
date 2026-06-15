@@ -147,8 +147,8 @@ impl ScheduledTaskRunStatus {
 }
 
 fn default_run_status() -> ScheduledTaskRunStatus {
-    // Older persisted run records predate explicit completion tracking; treat
-    // them as terminal so they never block task edits after migration.
+    // Missing status should be terminal so a malformed config never blocks
+    // task edits.
     ScheduledTaskRunStatus::Completed
 }
 
@@ -725,8 +725,17 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(value.get("projectId").and_then(serde_json::Value::as_str), Some("project-test"));
-        assert_eq!(value.get("stageIds").and_then(serde_json::Value::as_array).map(Vec::len), Some(2));
+        assert_eq!(
+            value.get("projectId").and_then(serde_json::Value::as_str),
+            Some("project-test")
+        );
+        assert_eq!(
+            value
+                .get("stageIds")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
         assert!(value.get("project_id").is_none());
         assert!(value.get("stage_ids").is_none());
     }

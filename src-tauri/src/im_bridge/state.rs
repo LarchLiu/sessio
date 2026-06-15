@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::Duration;
 
 use crate::agents::runtime::RuntimeManager;
-use crate::models::{Agent, SessionOrigin};
+use crate::models::{Agent, SessionInfo, SessionOrigin};
 use crate::store::{ChannelSessionRecord, SessionStore};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -617,10 +617,42 @@ impl ImBridgeState {
         if let Err(error) = self.store.upsert_channel_session(&record) {
             log::warn!("[im-bridge] failed to persist channel session: {error:#}");
         }
-        // Stamp the underlying session row as `channel` origin. The runtime
-        // wrote it as the default `chat` placeholder before this code ran,
-        // and `mark_session_origin` upgrades any `chat`-origin row of the
-        // same identity in place.
+        // Make sure a sessions row exists carrying `origin = 'channel'`. The
+        // indexer eventually writes this row from the agent's jsonl, but it
+        // can lag long enough that mark_session_origin (a pure UPDATE) lands
+        // on zero rows. The placeholder upsert seeds the identity now;
+        // sticky merge in insert_session preserves origin when the indexer
+        // later fills in real fields.
+        let placeholder = SessionInfo {
+            id: agent_session_id.to_string(),
+            agent: session.agent,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(session.workspace_path.clone()),
+            project_name: None,
+            started_at: Some(now),
+            updated_at: Some(now),
+            message_count: 0,
+            rename_title: None,
+            title: None,
+            first_user_message: None,
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            origin: SessionOrigin::Channel,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        };
+        if let Err(error) = self.store.upsert_session("", &placeholder) {
+            log::warn!(
+                "[im-bridge] failed to upsert placeholder for channel session {agent_session_id}: {error:#}"
+            );
+        }
+        // Defensive mark for the case where the indexer raced ahead and the
+        // row already exists with origin = 'chat'.
         if let Err(error) =
             self.store
                 .mark_session_origin(session.agent, agent_session_id, SessionOrigin::Channel)

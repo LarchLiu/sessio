@@ -2495,8 +2495,7 @@ fn read_session_history_result_from_source(
     session_id: Option<&str>,
 ) -> anyhow::Result<SessionHistoryResult> {
     let path = PathBuf::from(file_path);
-    let is_opencode_sqlite =
-        agent == Agent::Opencode && file_path.starts_with("sqlite:");
+    let is_opencode_sqlite = agent == Agent::Opencode && file_path.starts_with("sqlite:");
     if file_path.is_empty() || (!is_opencode_sqlite && !path.exists()) {
         anyhow::bail!(
             "Session file no longer exists (likely cleaned by {}): {}",
@@ -2669,10 +2668,8 @@ fn save_pasted_attachment(
         .join("paste-cache");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    let file_name = safe_pasted_attachment_file_name(
-        req.file_name.as_deref(),
-        req.mime_type.as_deref(),
-    );
+    let file_name =
+        safe_pasted_attachment_file_name(req.file_name.as_deref(), req.mime_type.as_deref());
     let hash = hex::encode(Sha256::digest(&bytes));
     for index in 0..1000 {
         let candidate_name = if index == 0 {

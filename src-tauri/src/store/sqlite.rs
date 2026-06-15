@@ -54,11 +54,7 @@ impl SqliteStore {
     }
 }
 
-const SCHEMA_V1: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY
-);
-
+const SCHEMA_SESSIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
     agent              TEXT NOT NULL,
     session_id         TEXT NOT NULL,
@@ -77,6 +73,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     partial            INTEGER NOT NULL DEFAULT 0,
     available          INTEGER NOT NULL DEFAULT 1,
     archived           INTEGER NOT NULL DEFAULT 0,
+    forked_from_agent  TEXT,
+    forked_from_id     TEXT,
     origin             TEXT NOT NULL DEFAULT 'chat',
     scheduled_task_id  TEXT,
     is_auxiliary       INTEGER NOT NULL DEFAULT 0,
@@ -114,18 +112,7 @@ CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
 
 const RUNTIME_SELECTION_KEY: &str = "last";
 
-// v2: subagents.available column (subagents can now be soft-deleted
-// independently of their parent session row).
-const SCHEMA_V2: &str = r#"
-ALTER TABLE subagents ADD COLUMN available INTEGER NOT NULL DEFAULT 1;
-CREATE INDEX IF NOT EXISTS idx_subagents_file_path ON subagents(file_path);
-"#;
-
-// V3 is the single post-v0.3.2 upgrade. It adds current memory tables and the
-// initial Codex fork id column introduced after the v0.3.2 release.
-const SCHEMA_V3: &str = r#"
-ALTER TABLE sessions ADD COLUMN forked_from_id TEXT;
-
+const SCHEMA_MEMORY: &str = r#"
 CREATE TABLE IF NOT EXISTS memory_records (
     record_id      TEXT PRIMARY KEY,
     project_key    TEXT NOT NULL,
@@ -233,13 +220,7 @@ CREATE TABLE IF NOT EXISTS memory_jobs (
 CREATE INDEX IF NOT EXISTS idx_memory_jobs_project_status ON memory_jobs(project_key, backend, status);
 "#;
 
-const SCHEMA_V4: &str = r#"
-ALTER TABLE sessions ADD COLUMN title TEXT;
-"#;
-
-const SCHEMA_V5: &str = r#"
-ALTER TABLE sessions ADD COLUMN forked_from_agent TEXT;
-
+const SCHEMA_APP: &str = r#"
 CREATE TABLE IF NOT EXISTS runtime_agent_capabilities (
     agent                TEXT PRIMARY KEY,
     transport_kind       TEXT NOT NULL,
@@ -828,131 +809,6 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_status_push
     ON scheduled_task_runs(status, push_status, started_at_ms);
 "#;
 
-// Backfill for pre-v1 (v0.3.2) databases whose sessions table predates the
-// rename_title column the v1 bootstrap schema now includes. Applied
-// fault-tolerantly inside the v5 migration; a no-op on any v1+ database.
-const SCHEMA_CURRENT_SESSION_RENAME_TITLE: &str = r#"
-ALTER TABLE sessions ADD COLUMN rename_title TEXT;
-"#;
-
-// Current-schema backfill for databases created before thread live sessions
-// gained an internal "hide from ordinary session list" flag. The column has
-// since been replaced by `sessions.is_auxiliary` (see SCHEMA_CURRENT_SESSION_*
-// below); this batch now exists only to make the DROP idempotent on databases
-// that never carried it.
-const SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR: &str = r#"
-ALTER TABLE sessions ADD COLUMN hidden_from_sidebar INTEGER NOT NULL DEFAULT 0;
-"#;
-
-// Current-schema backfill: add session/thread provenance columns.
-//   sessions.origin: 'chat' | 'thread' | 'channel'           (who created it)
-//   sessions.scheduled_task_id: NULL unless the session is directly attached
-//                               to an auto task (chat-mode or summary push)
-//   sessions.is_auxiliary: 1 if the session is system-internal and must be
-//                          hidden from the sidebar (guardian, Astra delegated,
-//                          pi fake, scheduled-task summary push)
-//   threads.origin: 'manual' | 'scheduled_task'
-//   threads.scheduled_task_id: NULL unless the thread was spawned by an auto task
-// All ALTERs are wrapped in execute() and ignore "duplicate column" errors so
-// the migration is idempotent without bumping schema_migrations.
-const SCHEMA_CURRENT_SESSION_ORIGIN: &str = r#"
-ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'chat';
-"#;
-const SCHEMA_CURRENT_SESSION_SCHEDULED_TASK_ID: &str = r#"
-ALTER TABLE sessions ADD COLUMN scheduled_task_id TEXT;
-"#;
-const SCHEMA_CURRENT_SESSION_IS_AUXILIARY: &str = r#"
-ALTER TABLE sessions ADD COLUMN is_auxiliary INTEGER NOT NULL DEFAULT 0;
-"#;
-const SCHEMA_CURRENT_THREAD_ORIGIN: &str = r#"
-ALTER TABLE threads ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual';
-"#;
-const SCHEMA_CURRENT_THREAD_SCHEDULED_TASK_ID: &str = r#"
-ALTER TABLE threads ADD COLUMN scheduled_task_id TEXT;
-"#;
-
-const SCHEMA_CURRENT_ASTRA_RUN_SESSIONS: &str = r#"
-CREATE TABLE IF NOT EXISTS astra_run_sessions (
-    run_id        TEXT NOT NULL,
-    agent         TEXT NOT NULL,
-    session_id    TEXT NOT NULL,
-    role          TEXT NOT NULL DEFAULT 'planner',
-    sort_order    INTEGER NOT NULL DEFAULT 0,
-    created_at    INTEGER NOT NULL,
-    updated_at    INTEGER NOT NULL,
-    PRIMARY KEY(run_id, agent, session_id, role),
-    CHECK(role IN ('planner')),
-    FOREIGN KEY(run_id) REFERENCES astra_runs(run_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_run
-    ON astra_run_sessions(run_id, sort_order, created_at);
-
-CREATE INDEX IF NOT EXISTS idx_astra_run_sessions_session
-    ON astra_run_sessions(agent, session_id);
-"#;
-
-const SCHEMA_CURRENT_SCHEDULED_TASKS: &str = r#"
-CREATE TABLE IF NOT EXISTS scheduled_tasks (
-    id             TEXT PRIMARY KEY,
-    name           TEXT NOT NULL,
-    status         TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'paused')),
-    schedule_json  TEXT NOT NULL,
-    target_json    TEXT NOT NULL,
-    project_id     TEXT NOT NULL,
-    mode           TEXT NOT NULL CHECK(mode IN ('chat', 'process', 'teamwork', 'brainstorm', 'debate')),
-    sort_order     INTEGER NOT NULL DEFAULT 0,
-    created_at_ms  INTEGER NOT NULL,
-    updated_at_ms  INTEGER NOT NULL,
-    last_run_at_ms INTEGER,
-    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
-);
-
-CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_status_order
-    ON scheduled_tasks(status, sort_order, created_at_ms);
-
-CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_project
-    ON scheduled_tasks(project_id, sort_order);
-
-CREATE TABLE IF NOT EXISTS scheduled_task_runs (
-    id             TEXT PRIMARY KEY,
-    task_id        TEXT NOT NULL,
-    mode           TEXT NOT NULL CHECK(mode IN ('chat', 'process', 'teamwork', 'brainstorm', 'debate')),
-    trigger        TEXT NOT NULL DEFAULT 'scheduled' CHECK(trigger IN ('scheduled', 'manual')),
-    status         TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
-    started_at_ms  INTEGER NOT NULL,
-    scheduled_for_ms INTEGER,
-    completed_at_ms INTEGER,
-    task_name      TEXT,
-    target_json    TEXT,
-    session_agent  TEXT,
-    session_id     TEXT,
-    thread_id      TEXT,
-    astra_run_id   TEXT,
-    push_platform  TEXT,
-    push_chat_id   TEXT,
-    push_status    TEXT CHECK(push_status IS NULL OR push_status IN ('pending', 'summarizing', 'sent', 'failed')),
-    push_summary   TEXT,
-    push_error     TEXT,
-    push_sent_at_ms INTEGER,
-    error          TEXT,
-    FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
-    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE SET NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task_started
-    ON scheduled_task_runs(task_id, started_at_ms DESC);
-
-CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_session
-    ON scheduled_task_runs(session_agent, session_id);
-
-CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_thread
-    ON scheduled_task_runs(thread_id);
-
-CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_status_push
-    ON scheduled_task_runs(status, push_status, started_at_ms);
-"#;
-
 const ASTRA_RUN_SELECT: &str = "run_id, thread_id, project_id, project_path, status, mode,
     planner_backend, round_index, round_limit, terminal_reason,
     last_error_code, last_error_message, run_diagnostics_json, error, created_at, updated_at";
@@ -983,143 +839,13 @@ fn unique_suffix() -> String {
     unique_nonce()
 }
 
-fn run_migrations(conn: &Connection) -> Result<()> {
-    let current: Option<i64> = conn
-        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
-            row.get(0)
-        })
-        .optional()
-        .ok()
-        .flatten();
-    let current = current.unwrap_or(0);
-    if current < 1 {
-        conn.execute_batch(SCHEMA_V1)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)",
-            [],
-        )?;
-    }
-    if current < 2 {
-        // The current v1 bootstrap schema already includes this column, so
-        // fresh installs can ignore the duplicate ALTER.
-        let _ = conn.execute_batch(SCHEMA_V2);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)",
-            [],
-        )?;
-    }
-    if current < 3 {
-        conn.execute_batch(SCHEMA_V3)?;
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)",
-            [],
-        )?;
-    }
-    if current < 4 {
-        let _ = conn.execute_batch(SCHEMA_V4);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)",
-            [],
-        )?;
-    }
-    if current < 5 {
-        conn.execute_batch(SCHEMA_V5)?;
-        // v0.3.2 databases predate the rename_title column the v1 bootstrap
-        // schema now includes; backfill it fault-tolerantly (no-op on v1+).
-        let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_RENAME_TITLE);
-        conn.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)",
-            [],
-        )?;
-        seed_builtins(conn)?;
-    }
-    // Order matters here: ADD COLUMN runs first so the legacy column exists
-    // even on databases predating it; backfill copies its values into
-    // is_auxiliary; the DROP at the end removes it for good. Each step is
-    // fault-tolerant so reruns and fresh installs are no-ops.
-    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR);
-    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_ORIGIN);
-    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SCHEDULED_TASK_ID);
-    let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_IS_AUXILIARY);
-    let _ = conn.execute_batch(SCHEMA_CURRENT_THREAD_ORIGIN);
-    let _ = conn.execute_batch(SCHEMA_CURRENT_THREAD_SCHEDULED_TASK_ID);
-    backfill_session_is_auxiliary_from_hidden(conn)?;
-    drop_session_hidden_from_sidebar_column(conn)?;
-    ensure_current_astra_run_sessions(conn)?;
-    ensure_current_scheduled_tasks(conn)?;
+fn initialize_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA_SESSIONS)?;
+    conn.execute_batch(SCHEMA_MEMORY)?;
+    conn.execute_batch(SCHEMA_APP)?;
+    seed_builtins(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
     seed_opencode_builtin_agent(conn, now_ms())?;
-    Ok(())
-}
-
-fn ensure_current_astra_run_sessions(conn: &Connection) -> Result<()> {
-    Ok(conn.execute_batch(SCHEMA_CURRENT_ASTRA_RUN_SESSIONS)?)
-}
-
-/// Backfill `is_auxiliary` from the legacy `hidden_from_sidebar` column for
-/// existing rows. After backfill, `drop_session_hidden_from_sidebar_column`
-/// removes the legacy column. Both helpers are fault-tolerant: fresh installs
-/// have no rows to copy, and a database whose column was already dropped on a
-/// previous launch silently succeeds.
-fn backfill_session_is_auxiliary_from_hidden(conn: &Connection) -> Result<()> {
-    // Skip if the column has already been dropped on a previous launch.
-    if !column_exists(conn, "sessions", "hidden_from_sidebar")? {
-        return Ok(());
-    }
-    conn.execute_batch(
-        "UPDATE sessions
-            SET is_auxiliary = 1
-          WHERE hidden_from_sidebar = 1
-            AND is_auxiliary = 0;",
-    )?;
-    Ok(())
-}
-
-/// SQLite 3.35+ supports `ALTER TABLE ... DROP COLUMN`. rusqlite 0.32 bundles
-/// 3.46, so this works on every install. Idempotent via `column_exists`.
-fn drop_session_hidden_from_sidebar_column(conn: &Connection) -> Result<()> {
-    if !column_exists(conn, "sessions", "hidden_from_sidebar")? {
-        return Ok(());
-    }
-    conn.execute_batch("ALTER TABLE sessions DROP COLUMN hidden_from_sidebar;")?;
-    Ok(())
-}
-
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
-    let exists = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .filter_map(Result::ok)
-        .any(|name| name == column);
-    Ok(exists)
-}
-
-fn ensure_current_scheduled_tasks(conn: &Connection) -> Result<()> {
-    conn.execute_batch(SCHEMA_CURRENT_SCHEDULED_TASKS)?;
-    let _ = conn.execute_batch(
-        "ALTER TABLE scheduled_tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
-    );
-    for sql in [
-        "ALTER TABLE scheduled_task_runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'scheduled';",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN completed_at_ms INTEGER;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN scheduled_for_ms INTEGER;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN task_name TEXT;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN target_json TEXT;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN push_platform TEXT;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN push_chat_id TEXT;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN push_status TEXT;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN push_summary TEXT;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN push_error TEXT;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN push_sent_at_ms INTEGER;",
-        "ALTER TABLE scheduled_task_runs ADD COLUMN error TEXT;",
-    ] {
-        let _ = conn.execute_batch(sql);
-    }
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_status_push
-            ON scheduled_task_runs(status, push_status, started_at_ms);",
-    )?;
     Ok(())
 }
 
@@ -1178,6 +904,13 @@ fn seed_builtin_process_template_stages(conn: &Connection, now: i64) -> Result<(
 }
 
 fn seed_builtin_process_template_stage_assistants(conn: &Connection, now: i64) -> Result<()> {
+    let existing_bindings: i64 =
+        conn.query_row("SELECT count(*) FROM stage_assistants", [], |row| {
+            row.get(0)
+        })?;
+    if existing_bindings > 0 {
+        return Ok(());
+    }
     for (process_template_id, _, _) in BUILTIN_PROCESS_TEMPLATE_SEEDS {
         for (kind, _) in builtin_process_template_stage_seeds(process_template_id) {
             if matches!(kind, StageType::Human | StageType::Done) {
@@ -1736,9 +1469,8 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
     Ok(())
 }
 
-/// OpenCode arrived after schema_v5, so existing databases never went through
-/// `seed_builtins`. We seed (`INSERT OR IGNORE`) on every init so older
-/// installs pick up the OpenCode row without needing a migration.
+/// Seed (`INSERT OR IGNORE`) on every init so the builtin OpenCode row is
+/// always present without clobbering user edits.
 fn seed_opencode_builtin_agent(conn: &Connection, now: i64) -> Result<()> {
     seed_builtin_agent(
         conn,
@@ -1866,6 +1598,12 @@ struct ExistingSessionRow {
     scheduled_task_id: Option<String>,
     /// Sticky-OR: once any row in the identity set is auxiliary, the merged
     /// write keeps it set. Auxiliary rows never appear in the sidebar.
+    is_auxiliary: i64,
+}
+
+struct MergedSessionProvenance {
+    origin: SessionOrigin,
+    scheduled_task_id: Option<String>,
     is_auxiliary: i64,
 }
 
@@ -2010,28 +1748,70 @@ fn upgrade_session_origin_to_thread(
     Ok(())
 }
 
+/// Symmetric counterpart to `upgrade_session_origin_to_thread`. Called from
+/// every `unlink_*` / supersede path: if the `(agent, session_id)` identity has no
+/// remaining thread / stage / plan-task / astra-run reference, downgrade
+/// `origin = 'thread'` rows back to `'chat'` so the session reappears in the
+/// sidebar. Channel-origin rows are not touched; auxiliary rows (Astra
+/// delegated etc.) stay hidden via `is_auxiliary` independently of origin.
+///
+/// The pre-link reverse-join model recomputed visibility on every render,
+/// so unlinking automatically restored sidebar presence. The new sticky
+/// model needs this explicit downgrade to preserve that behaviour.
+fn downgrade_session_origin_when_unlinked(
+    conn: &Connection,
+    agent: Agent,
+    session_id: &str,
+) -> Result<()> {
+    let still_linked: i64 = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM thread_sessions
+            WHERE agent = ?1 AND session_id = ?2
+            UNION ALL
+            SELECT 1 FROM stage_sessions
+            WHERE agent = ?1 AND session_id = ?2
+            UNION ALL
+            SELECT 1 FROM thread_plan_task_sessions
+            WHERE agent = ?1 AND session_id = ?2 AND superseded_at IS NULL
+            UNION ALL
+            SELECT 1 FROM astra_run_sessions
+            WHERE agent = ?1 AND session_id = ?2
+         )",
+        params![agent.as_str(), session_id],
+        |row| row.get(0),
+    )?;
+    if still_linked == 0 {
+        conn.execute(
+            "UPDATE sessions
+                SET origin = 'chat'
+              WHERE agent = ? AND session_id = ? AND origin = 'thread'",
+            params![agent.as_str(), session_id],
+        )?;
+    }
+    Ok(())
+}
 
-/// A `chat` incoming row never overwrites an already-recorded `thread` or
-/// `channel` provenance. A `thread`/`channel` incoming row IS allowed to
-/// upgrade a default-`chat` row, since the upstream call site has explicit
-/// new provenance information.
+/// Preserve any already-recorded non-chat provenance. A `thread`/`channel`
+/// incoming row may only upgrade an identity whose stored rows are still the
+/// default `chat`, matching `mark_session_origin` / `upgrade_*` semantics.
 fn merged_origin(rows: &[ExistingSessionRow], incoming: SessionOrigin) -> SessionOrigin {
+    if let Some(origin) = rows
+        .iter()
+        .map(|row| row.origin)
+        .find(|origin| *origin != SessionOrigin::Chat)
+    {
+        return origin;
+    }
     if incoming != SessionOrigin::Chat {
         return incoming;
     }
-    rows.iter()
-        .map(|row| row.origin)
-        .find(|origin| *origin != SessionOrigin::Chat)
-        .unwrap_or(incoming)
+    incoming
 }
 
 /// Sticky scheduled_task_id merge: prefer the incoming value when set, else
 /// preserve any existing value. Once a session is attached to a scheduled
 /// task that link stays for its lifetime.
-fn merged_scheduled_task_id(
-    rows: &[ExistingSessionRow],
-    incoming: Option<&str>,
-) -> Option<String> {
+fn merged_scheduled_task_id(rows: &[ExistingSessionRow], incoming: Option<&str>) -> Option<String> {
     if let Some(value) = incoming {
         return Some(value.to_string());
     }
@@ -2042,6 +1822,17 @@ fn merged_scheduled_task_id(
 /// row in the identity set is auxiliary, the merged write keeps it set.
 fn merged_is_auxiliary(rows: &[ExistingSessionRow], incoming: bool) -> i64 {
     (incoming || rows.iter().any(|row| row.is_auxiliary != 0)) as i64
+}
+
+fn merge_session_provenance(
+    rows: &[ExistingSessionRow],
+    incoming: &SessionInfo,
+) -> MergedSessionProvenance {
+    MergedSessionProvenance {
+        origin: merged_origin(rows, incoming.origin),
+        scheduled_task_id: merged_scheduled_task_id(rows, incoming.scheduled_task_id.as_deref()),
+        is_auxiliary: merged_is_auxiliary(rows, incoming.is_auxiliary),
+    }
 }
 
 fn delete_duplicate_session_rows(
@@ -2103,11 +1894,7 @@ struct ExistingPlaceholder {
     scope: String,
 }
 
-fn insert_session(
-    conn: &Connection,
-    scope: &str,
-    s: &SessionInfo,
-) -> Result<()> {
+fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()> {
     let identity_rows = load_identity_session_rows(conn, s.agent, &s.id)?;
     let incoming_real = is_real_session_file_path(&s.file_path);
     let existing_real = identity_rows
@@ -2126,6 +1913,7 @@ fn insert_session(
             let title = choose_identity_title(&identity_rows, s, false);
             let first_user_message = choose_identity_first_user(&identity_rows, s, false);
             let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
             conn.execute(
                 "UPDATE sessions
                  SET project_path = COALESCE(project_path, ?),
@@ -2141,7 +1929,10 @@ fn insert_session(
                      archived = ?,
                      last_indexed_at = ?,
                      forked_from_agent = ?,
-                     forked_from_id = ?
+                     forked_from_id = ?,
+                     origin = ?,
+                     scheduled_task_id = ?,
+                     is_auxiliary = ?
                  WHERE agent = ? AND session_id = ? AND scope = ?",
                 params![
                     s.project_path,
@@ -2158,17 +1949,15 @@ fn insert_session(
                     now_ms(),
                     forked_from_agent.map(|agent| agent.as_str()),
                     forked_from_id,
+                    provenance.origin.as_str(),
+                    provenance.scheduled_task_id,
+                    provenance.is_auxiliary,
                     s.agent.as_str(),
                     s.id,
                     existing.scope,
                 ],
             )?;
-            delete_duplicate_session_rows(
-                conn,
-                s.agent,
-                &s.id,
-                &existing.scope,
-            )?;
+            delete_duplicate_session_rows(conn, s.agent, &s.id, &existing.scope)?;
             return Ok(());
         }
     }
@@ -2179,12 +1968,14 @@ fn insert_session(
             let title = choose_identity_title(&identity_rows, s, true);
             let first_user_message = choose_identity_first_user(&identity_rows, s, true);
             let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
             conn.execute(
                 "UPDATE sessions
                  SET file_path = ?, project_path = ?, project_name = ?,
                      started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
                      message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
-                     last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?
+                     last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                     origin = ?, scheduled_task_id = ?, is_auxiliary = ?
                  WHERE agent = ? AND session_id = ? AND scope = ?",
                 params![
                     s.file_path,
@@ -2204,6 +1995,9 @@ fn insert_session(
                     now_ms(),
                     forked_from_agent.map(|agent| agent.as_str()),
                     forked_from_id,
+                    provenance.origin.as_str(),
+                    provenance.scheduled_task_id,
+                    provenance.is_auxiliary,
                     s.agent.as_str(),
                     s.id,
                     existing.scope,
@@ -2217,12 +2011,14 @@ fn insert_session(
             let title = choose_identity_title(&identity_rows, s, true);
             let first_user_message = choose_identity_first_user(&identity_rows, s, true);
             let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
             conn.execute(
                 "UPDATE sessions
                  SET scope = ?, file_path = ?, project_path = ?, project_name = ?,
                      started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
                      message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
-                     last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?
+                     last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                     origin = ?, scheduled_task_id = ?, is_auxiliary = ?
                  WHERE agent = ? AND session_id = ? AND scope = ?",
                 params![
                     scope,
@@ -2243,6 +2039,9 @@ fn insert_session(
                     now_ms(),
                     forked_from_agent.map(|agent| agent.as_str()),
                     forked_from_id,
+                    provenance.origin.as_str(),
+                    provenance.scheduled_task_id,
+                    provenance.is_auxiliary,
                     s.agent.as_str(),
                     s.id,
                     existing.scope,
@@ -2256,11 +2055,27 @@ fn insert_session(
             let title = choose_identity_title(&identity_rows, s, true);
             let first_user_message = choose_identity_first_user(&identity_rows, s, true);
             let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+            let provenance = merge_session_provenance(&identity_rows, s);
             if conn.query_row(
                 "SELECT 1 FROM sessions WHERE agent = ? AND session_id = ? AND scope = ? LIMIT 1",
                 params![s.agent.as_str(), s.id, scope],
                 |_| Ok(()),
             ).optional()?.is_some() {
+                conn.execute(
+                    "UPDATE sessions
+                     SET origin = ?,
+                         scheduled_task_id = ?,
+                         is_auxiliary = ?
+                     WHERE agent = ? AND session_id = ? AND scope = ?",
+                    params![
+                        provenance.origin.as_str(),
+                        provenance.scheduled_task_id,
+                        provenance.is_auxiliary,
+                        s.agent.as_str(),
+                        s.id,
+                        scope,
+                    ],
+                )?;
                 conn.execute(
                     "DELETE FROM sessions
                      WHERE agent = ? AND session_id = ? AND scope = ?",
@@ -2272,7 +2087,8 @@ fn insert_session(
                      SET session_id = ?, scope = ?, file_path = ?, project_path = ?, project_name = ?,
                          started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
                          message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
-                         last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?
+                         last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                         origin = ?, scheduled_task_id = ?, is_auxiliary = ?
                      WHERE agent = ? AND session_id = ? AND scope = ?",
                     params![
                         s.id,
@@ -2294,6 +2110,9 @@ fn insert_session(
                         now_ms(),
                         forked_from_agent.map(|agent| agent.as_str()),
                         forked_from_id,
+                        provenance.origin.as_str(),
+                        provenance.scheduled_task_id,
+                        provenance.is_auxiliary,
                         s.agent.as_str(),
                         existing.session_id,
                         existing.scope,
@@ -2323,12 +2142,14 @@ fn insert_session(
             0
         };
         let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
+        let provenance = merge_session_provenance(&identity_rows, s);
         conn.execute(
             "UPDATE sessions
              SET session_id = ?, scope = ?, file_path = ?, project_path = ?, project_name = ?,
                  started_at = ?, updated_at = ?, rename_title = ?, title = ?, first_user_message = ?,
                  message_count = ?, file_size = ?, file_mtime = ?, partial = ?, available = ?, archived = ?,
-                 last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?
+                 last_indexed_at = ?, forked_from_agent = ?, forked_from_id = ?,
+                 origin = ?, scheduled_task_id = ?, is_auxiliary = ?
              WHERE agent = ? AND session_id = ? AND scope = ?",
             params![
                 s.id,
@@ -2350,6 +2171,9 @@ fn insert_session(
                 now_ms(),
                 forked_from_agent.map(|agent| agent.as_str()),
                 forked_from_id,
+                provenance.origin.as_str(),
+                provenance.scheduled_task_id,
+                provenance.is_auxiliary,
                 s.agent.as_str(),
                 s.id,
                 existing_same_scope.scope,
@@ -2359,7 +2183,7 @@ fn insert_session(
         return Ok(());
     }
     let (forked_from_agent, forked_from_id) = merge_identity_lineage(&identity_rows, s);
-    let aux_value = merged_is_auxiliary(&identity_rows, s.is_auxiliary);
+    let provenance = merge_session_provenance(&identity_rows, s);
     conn.execute(
         "INSERT OR REPLACE INTO sessions (
             agent, session_id, scope, file_path,
@@ -2392,9 +2216,9 @@ fn insert_session(
             now_ms(),
             forked_from_agent.map(|agent| agent.as_str()),
             forked_from_id,
-            merged_origin(&identity_rows, s.origin).as_str(),
-            merged_scheduled_task_id(&identity_rows, s.scheduled_task_id.as_deref()),
-            aux_value,
+            provenance.origin.as_str(),
+            provenance.scheduled_task_id,
+            provenance.is_auxiliary,
         ],
     )?;
     delete_duplicate_session_rows(conn, s.agent, &s.id, scope)?;
@@ -3188,11 +3012,31 @@ fn replace_astra_run_sessions(
     run_id: &str,
     sessions: &[AstraRunSessionRecord],
 ) -> Result<()> {
+    // Capture the existing (agent, session_id) set before the DELETE so we
+    // can downgrade any session whose only thread reference came through
+    // this run. The new INSERTs below will re-upgrade rows that are still
+    // listed, so the net effect is "only sessions actually removed get
+    // downgraded".
+    let prior: Vec<(Agent, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT agent, session_id FROM astra_run_sessions WHERE run_id = ?")?;
+        let rows = stmt
+            .query_map(params![run_id], |row| {
+                let agent_str: String = row.get(0)?;
+                let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+                Ok((agent, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
     conn.execute(
         "DELETE FROM astra_run_sessions WHERE run_id = ?",
         params![run_id],
     )?;
     if sessions.is_empty() {
+        for (agent, session_id) in &prior {
+            downgrade_session_origin_when_unlinked(conn, *agent, session_id)?;
+        }
         return Ok(());
     }
     let mut stmt = conn.prepare(
@@ -3211,6 +3055,12 @@ fn replace_astra_run_sessions(
             session.updated_at,
         ])?;
         upgrade_session_origin_to_thread(conn, session.agent, &session.session_id)?;
+    }
+    // After the re-INSERT we still need to downgrade prior rows that didn't
+    // get re-listed. upgrade/downgrade are idempotent over identity, so it's
+    // safe to call downgrade on the whole prior set.
+    for (agent, session_id) in &prior {
+        downgrade_session_origin_when_unlinked(conn, *agent, session_id)?;
     }
     Ok(())
 }
@@ -5267,7 +5117,8 @@ fn load_all_indexed_subagents_grouped(
 /// [`session_info_from_row`]. Every reader must use the same list — the row
 /// mapper reads by positional index. The `s.` prefix lets this be reused as
 /// either an unaliased or aliased projection (callers concat their own FROM).
-const SESSION_INFO_COLUMNS_S: &str = "s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
+const SESSION_INFO_COLUMNS_S: &str =
+    "s.agent, s.session_id, s.file_path, s.project_path, s.project_name,
         s.started_at, s.updated_at, s.message_count, s.rename_title, s.title, s.first_user_message,
         s.file_size, s.partial, s.available, s.archived, s.forked_from_agent, s.forked_from_id,
         s.origin, s.scheduled_task_id, s.is_auxiliary";
@@ -5504,7 +5355,7 @@ fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<Sess
 impl SessionStore for SqliteStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        run_migrations(&conn)
+        initialize_schema(&conn)
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
@@ -5848,7 +5699,14 @@ impl SessionStore for SqliteStore {
                  completed_at_ms = CASE WHEN ? IS NULL THEN completed_at_ms ELSE ? END,
                  error = CASE WHEN ? IS NULL THEN error ELSE ? END
              WHERE id = ?",
-            params![status, completed_at_ms, completed_at_ms, error, error, run_id],
+            params![
+                status,
+                completed_at_ms,
+                completed_at_ms,
+                error,
+                error,
+                run_id
+            ],
         )?;
         Ok(())
     }
@@ -6899,11 +6757,46 @@ impl SessionStore for SqliteStore {
     }
 
     fn delete_thread(&self, thread_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute("DELETE FROM threads WHERE id = ?", params![thread_id])?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Collect every session this thread references through any link
+        // table. ON DELETE CASCADE on `threads` wipes those rows out for us;
+        // we then call downgrade per identity to restore sidebar visibility
+        // for any session that's no longer attached anywhere.
+        let mut session_refs: HashSet<(Agent, String)> = HashSet::new();
+        for sql in [
+            "SELECT agent, session_id FROM thread_sessions WHERE thread_id = ?",
+            "SELECT s.agent, s.session_id FROM stage_sessions s
+               INNER JOIN thread_stages ts ON ts.id = s.thread_stage_id
+               WHERE ts.thread_id = ?",
+            "SELECT s.agent, s.session_id FROM thread_plan_task_sessions s
+               INNER JOIN thread_plan_tasks t ON t.id = s.task_id
+               INNER JOIN thread_plan_rounds r ON r.id = t.round_id
+               WHERE r.thread_id = ?",
+            "SELECT s.agent, s.session_id FROM astra_run_sessions s
+               INNER JOIN astra_runs r ON r.run_id = s.run_id
+               WHERE r.thread_id = ?",
+        ] {
+            let mut stmt = tx.prepare(sql)?;
+            let rows = stmt
+                .query_map(params![thread_id], |row| {
+                    let agent_str: String = row.get(0)?;
+                    let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+                    Ok((agent, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for entry in rows {
+                session_refs.insert(entry);
+            }
+        }
+        let changed = tx.execute("DELETE FROM threads WHERE id = ?", params![thread_id])?;
         if changed == 0 {
             anyhow::bail!("thread not found: {thread_id}");
         }
+        for (agent, session_id) in &session_refs {
+            downgrade_session_origin_when_unlinked(&tx, *agent, session_id)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -7107,6 +7000,31 @@ impl SessionStore for SqliteStore {
         } else {
             None
         };
+        let superseded_session_refs = {
+            let mut stmt = conn.prepare(
+                "SELECT agent, session_id
+                 FROM thread_plan_task_sessions
+                 WHERE task_id = ? AND agent = ? AND role = ? AND attempt_count = ?
+                   AND session_id != ? AND superseded_at IS NULL",
+            )?;
+            let refs = stmt
+                .query_map(
+                    params![
+                        session.task_id,
+                        session.agent.as_str(),
+                        session.role.as_str(),
+                        attempt_count,
+                        session.session_id,
+                    ],
+                    |row| {
+                        let agent_str: String = row.get(0)?;
+                        let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+                        Ok((agent, row.get::<_, String>(1)?))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            refs
+        };
         conn.execute(
             "UPDATE thread_plan_task_sessions
              SET superseded_at = COALESCE(superseded_at, ?), updated_at = ?
@@ -7144,7 +7062,14 @@ impl SessionStore for SqliteStore {
                 now,
             ],
         )?;
-        upgrade_session_origin_to_thread(&conn, session.agent, session.session_id)?;
+        if superseded_at.is_some() {
+            downgrade_session_origin_when_unlinked(&conn, session.agent, session.session_id)?;
+        } else {
+            upgrade_session_origin_to_thread(&conn, session.agent, session.session_id)?;
+        }
+        for (agent, session_id) in &superseded_session_refs {
+            downgrade_session_origin_when_unlinked(&conn, *agent, session_id)?;
+        }
         conn.query_row(
             "SELECT task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
              FROM thread_plan_task_sessions
@@ -7206,6 +7131,31 @@ impl SessionStore for SqliteStore {
             .as_ref()
             .map(|(_, _, created_at)| *created_at)
             .unwrap_or(now);
+        let superseded_session_refs = {
+            let mut stmt = tx.prepare(
+                "SELECT agent, session_id
+                 FROM thread_plan_task_sessions
+                 WHERE task_id = ? AND agent = ? AND role = ? AND attempt_count = ?
+                   AND session_id != ? AND superseded_at IS NULL",
+            )?;
+            let refs = stmt
+                .query_map(
+                    params![
+                        from.task_id,
+                        from.agent.as_str(),
+                        from.role.as_str(),
+                        attempt_count,
+                        to_session_id,
+                    ],
+                    |row| {
+                        let agent_str: String = row.get(0)?;
+                        let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+                        Ok((agent, row.get::<_, String>(1)?))
+                    },
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            refs
+        };
         tx.execute(
             "UPDATE thread_plan_task_sessions
              SET superseded_at = COALESCE(superseded_at, ?), updated_at = ?
@@ -7242,6 +7192,10 @@ impl SessionStore for SqliteStore {
                 now,
             ],
         )?;
+        upgrade_session_origin_to_thread(&tx, from.agent, to_session_id)?;
+        for (agent, session_id) in &superseded_session_refs {
+            downgrade_session_origin_when_unlinked(&tx, *agent, session_id)?;
+        }
         let linked = tx.query_row(
             "SELECT task_id, agent, session_id, role, attempt_id, attempt_count, superseded_at, created_at, updated_at
              FROM thread_plan_task_sessions
@@ -7884,6 +7838,21 @@ impl SessionStore for SqliteStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let stage = load_thread_stage_by_id(&tx, thread_stage_id)?;
+        let session_refs = {
+            let mut stmt = tx.prepare(
+                "SELECT agent, session_id
+                 FROM stage_sessions
+                 WHERE thread_stage_id = ?",
+            )?;
+            let refs = stmt
+                .query_map(params![thread_stage_id], |row| {
+                    let agent_str: String = row.get(0)?;
+                    let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
+                    Ok((agent, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            refs
+        };
         tx.execute(
             "DELETE FROM thread_stages WHERE id = ?",
             params![thread_stage_id],
@@ -7903,6 +7872,9 @@ impl SessionStore for SqliteStore {
             "UPDATE threads SET stage_id = ?, updated_at = ? WHERE id = ?",
             params![next_stage_id, now_ms(), stage.thread_id],
         )?;
+        for (agent, session_id) in &session_refs {
+            downgrade_session_origin_when_unlinked(&tx, *agent, session_id)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -7979,6 +7951,10 @@ impl SessionStore for SqliteStore {
              WHERE thread_id = ? AND agent = ? AND session_id = ?",
             params![thread_id, agent.as_str(), session_id],
         )?;
+        // If this session no longer appears in any thread / stage / plan / astra
+        // link table, drop its sticky `origin = 'thread'` back to `'chat'`
+        // so it returns to the sidebar.
+        downgrade_session_origin_when_unlinked(&tx, agent, session_id)?;
         tx.execute(
             "UPDATE threads SET updated_at = ? WHERE id = ?",
             params![now_ms(), thread_id],
@@ -8045,6 +8021,9 @@ impl SessionStore for SqliteStore {
              WHERE thread_stage_id = ? AND agent = ? AND session_id = ?",
             params![thread_stage_id, agent.as_str(), session_id],
         )?;
+        // See downgrade_session_origin_when_unlinked: keep sticky `thread`
+        // origin only while at least one link survives.
+        downgrade_session_origin_when_unlinked(&tx, agent, session_id)?;
         let now = now_ms();
         tx.execute(
             "UPDATE thread_stages SET updated_at = ? WHERE id = ?",
@@ -8636,12 +8615,7 @@ impl SessionStore for SqliteStore {
                 SET scheduled_task_id = ?,
                     is_auxiliary = MAX(is_auxiliary, ?)
               WHERE agent = ? AND session_id = ?",
-            params![
-                scheduled_task_id,
-                aux_value,
-                agent.as_str(),
-                session_id,
-            ],
+            params![scheduled_task_id, aux_value, agent.as_str(), session_id,],
         )?;
         Ok(())
     }
@@ -9471,12 +9445,52 @@ fn record_continuation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Rec
 }
 
 #[cfg(test)]
-mod migration_tests {
+mod schema_tests {
     use super::*;
     use crate::models::ThreadReplaySessionSourceKind;
 
     fn unique_db(prefix: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("{prefix}-{}.db", unique_suffix()))
+    }
+
+    fn test_session(project: &ProjectInfo, id: &str, title: &str) -> SessionInfo {
+        SessionInfo {
+            id: id.to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some(project.path.clone()),
+            project_name: Some(project.name.clone()),
+            started_at: Some(10),
+            updated_at: Some(20),
+            message_count: 1,
+            rename_title: None,
+            title: Some(title.to_string()),
+            first_user_message: Some(format!("{title} prompt")),
+            file_path: Path::new(&project.path)
+                .join(format!("{id}.jsonl"))
+                .to_string_lossy()
+                .to_string(),
+            file_size: 1,
+            partial: false,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        }
+    }
+
+    fn visible_session_ids(store: &SqliteStore) -> Vec<String> {
+        let mut ids = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
     }
 
     fn assert_current_astra_run_columns(conn: &Connection) {
@@ -9646,13 +9660,7 @@ mod migration_tests {
         }
     }
 
-    fn assert_revised_v5_process_template_schema(conn: &Connection) {
-        let latest_schema_version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(latest_schema_version, 5);
+    fn assert_current_process_template_schema(conn: &Connection) {
         assert_current_scheduled_task_schema(conn);
 
         let process_templates: i64 = conn
@@ -9731,184 +9739,14 @@ mod migration_tests {
         );
     }
 
-    // Verify a synthetic v0.3.2-era schema migrates cleanly into the current
-    // shape.
     #[test]
-    fn migrates_v032_database_to_current_schema() {
-        let path = unique_db("sessio-mig-prev8");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                r#"
-                CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-                INSERT INTO schema_migrations(version) VALUES (1),(2);
-                CREATE TABLE sessions (
-                    agent TEXT NOT NULL, session_id TEXT NOT NULL, scope TEXT NOT NULL,
-                    file_path TEXT NOT NULL, project_path TEXT, project_name TEXT,
-                    started_at INTEGER, updated_at INTEGER,
-                    message_count INTEGER NOT NULL DEFAULT 0, first_user_message TEXT,
-                    file_size INTEGER NOT NULL DEFAULT 0, file_mtime INTEGER,
-                    partial INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 1,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    last_indexed_at INTEGER NOT NULL,
-                    PRIMARY KEY (agent, session_id, scope)
-                );
-                CREATE TABLE subagents (
-                    parent_agent TEXT NOT NULL, parent_session_id TEXT NOT NULL,
-                    subagent_id TEXT NOT NULL, file_path TEXT NOT NULL,
-                    agent_type TEXT, description TEXT,
-                    started_at INTEGER, updated_at INTEGER,
-                    message_count INTEGER NOT NULL DEFAULT 0, first_user_message TEXT,
-                    file_size INTEGER NOT NULL DEFAULT 0, file_mtime INTEGER,
-                    partial INTEGER NOT NULL DEFAULT 0, available INTEGER NOT NULL DEFAULT 1,
-                    PRIMARY KEY (parent_agent, parent_session_id, subagent_id)
-                );
-                "#,
-            )
-            .unwrap();
-        }
-
+    fn fresh_install_creates_current_schema() {
+        let path = unique_db("sessio-schema-fresh");
         let store = SqliteStore::open(&path).unwrap();
         store.init().unwrap();
 
         let conn = store.conn.lock().unwrap();
-        assert_revised_v5_process_template_schema(&conn);
-
-        let columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(columns.contains(&"record_id".to_string()));
-        assert!(columns.contains(&"kind".to_string()));
-
-        let session_columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(sessions)").unwrap();
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(session_columns.contains(&"forked_from_agent".to_string()));
-        assert!(session_columns.contains(&"forked_from_id".to_string()));
-        assert!(session_columns.contains(&"rename_title".to_string()));
-        assert!(session_columns.contains(&"title".to_string()));
-
-        let thread_columns: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(threads)").unwrap();
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(thread_columns.contains(&"kind".to_string()));
-
-        let thread_agents_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='thread_agents'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(thread_agents_table, 1);
-
-        let plan_task_columns: Vec<String> = {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(thread_plan_tasks)")
-                .unwrap();
-            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
-            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
-        };
-        assert!(plan_task_columns.contains(&"agent_participant_id".to_string()));
-
-        let projects_count: i64 = conn
-            .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(projects_count, 0);
-
-        let artifact_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_artifacts'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(artifact_table, 1);
-
-        let continuations_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='record_continuations'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(continuations_table, 1);
-
-        for removed_table in ["session_history", "session_history_turns"] {
-            let exists: i64 = conn
-                .query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
-                    params![removed_table],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(exists, 0, "{removed_table} should not exist");
-        }
-
-        let snapshot_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='session_history_snapshots'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(snapshot_table, 1);
-
-        let astra_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='astra_runs'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(astra_table, 1);
-
-        assert_current_astra_run_columns(&conn);
-        assert_current_plan_task_session_columns(&conn);
-
-        let thread_assistants_table: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='thread_assistants'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(thread_assistants_table, 1);
-
-        for table in [
-            "thread_plan_rounds",
-            "thread_plan_tasks",
-            "thread_plan_task_sessions",
-        ] {
-            let exists: i64 = conn
-                .query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
-                    params![table],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(exists, 1, "{table} table should exist");
-        }
-
-        drop(conn);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    // Verify a fresh install reaches the current shape.
-    #[test]
-    fn fresh_install_reaches_current_schema() {
-        let path = unique_db("sessio-mig-fresh");
-        let store = SqliteStore::open(&path).unwrap();
-        store.init().unwrap();
-
-        let conn = store.conn.lock().unwrap();
-        assert_revised_v5_process_template_schema(&conn);
+        assert_current_process_template_schema(&conn);
 
         let columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_records)").unwrap();
@@ -9936,7 +9774,6 @@ mod migration_tests {
         };
         assert!(thread_columns.contains(&"kind".to_string()));
 
-        // memory_artifacts table exists from V3 already.
         let artifact_table: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_artifacts'",
@@ -9946,7 +9783,6 @@ mod migration_tests {
             .unwrap();
         assert_eq!(artifact_table, 1);
 
-        // memory_jobs.backend column is present from V3.
         let job_columns: Vec<String> = {
             let mut stmt = conn.prepare("PRAGMA table_info(memory_jobs)").unwrap();
             let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
@@ -10028,6 +9864,55 @@ mod migration_tests {
 
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn deleting_thread_stage_restores_sidebar_session_visibility() {
+        let path = unique_db("sessio-stage-delete-origin");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-stage-delete-origin-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "stage-delete-origin",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Stage delete origin", None)
+            .unwrap();
+        let stage_template = store
+            .list_project_stages(&project.id)
+            .unwrap()
+            .into_iter()
+            .find(|stage| stage.allow_empty_assistants)
+            .unwrap();
+        let stage = store
+            .add_thread_stage(&thread.id, &stage_template.id, &[])
+            .unwrap();
+        let session = test_session(&project, "stage-delete-session", "Stage delete");
+        store.upsert_session(&session.file_path, &session).unwrap();
+        assert_eq!(store.list_sessions().unwrap().len(), 1);
+
+        store
+            .link_stage_session(&stage.id, Agent::Codex, &session.id)
+            .unwrap();
+        assert!(
+            store.list_sessions().unwrap().is_empty(),
+            "stage-linked sessions should be hidden from the ordinary sidebar"
+        );
+
+        store.delete_thread_stage(&stage.id).unwrap();
+        let visible = store.list_sessions().unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, session.id);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]
@@ -10563,6 +10448,249 @@ mod migration_tests {
     }
 
     #[test]
+    fn upserting_existing_scope_preserves_channel_origin() {
+        let path = unique_db("sessio-channel-origin-preserve");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let channel = SessionInfo {
+            id: "channel-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(10),
+            message_count: 0,
+            rename_title: None,
+            title: Some("channel placeholder".to_string()),
+            first_user_message: Some("channel".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Channel,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session("", &channel).unwrap();
+
+        let indexed = SessionInfo {
+            file_path: "/tmp/project/channel-session.jsonl".to_string(),
+            file_size: 128,
+            partial: false,
+            title: Some("indexed".to_string()),
+            first_user_message: Some("indexed prompt".to_string()),
+            origin: crate::models::SessionOrigin::Chat,
+            ..channel
+        };
+        store.upsert_session("", &indexed).unwrap();
+
+        let row = store
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.id == "channel-session")
+            .unwrap();
+        assert_eq!(row.origin, crate::models::SessionOrigin::Channel);
+        assert_eq!(row.file_path, "/tmp/project/channel-session.jsonl");
+        assert!(!row.partial);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn upserting_existing_scope_preserves_scheduled_task_and_auxiliary_flags() {
+        let path = unique_db("sessio-scheduled-flags-preserve");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let session = SessionInfo {
+            id: "summary-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(10),
+            message_count: 0,
+            rename_title: None,
+            title: Some("summary".to_string()),
+            first_user_message: Some("summary".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: Some("task-1".to_string()),
+            is_auxiliary: true,
+            subagents: Vec::new(),
+        };
+        store.upsert_session("", &session).unwrap();
+
+        let reindexed = SessionInfo {
+            file_path: "/tmp/project/summary-session.jsonl".to_string(),
+            file_size: 512,
+            partial: false,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            ..session
+        };
+        store.upsert_session("", &reindexed).unwrap();
+
+        assert!(store.list_all_sessions().unwrap().is_empty());
+        let row = store
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::Codex,
+                session_id: "summary-session",
+            }])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.scheduled_task_id.as_deref(), Some("task-1"));
+        assert!(row.is_auxiliary);
+        assert_eq!(row.file_path, "/tmp/project/summary-session.jsonl");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn chat_task_placeholder_does_not_replace_indexed_session_fields() {
+        let path = unique_db("sessio-chat-task-placeholder-indexed");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let placeholder = SessionInfo {
+            id: "chat-task-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(100),
+            updated_at: Some(100),
+            message_count: 0,
+            rename_title: None,
+            title: Some("Auto task placeholder".to_string()),
+            first_user_message: Some("placeholder prompt".to_string()),
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: Some("task-chat".to_string()),
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session("", &placeholder).unwrap();
+
+        let indexed = SessionInfo {
+            file_path: "/tmp/project/chat-task-session.jsonl".to_string(),
+            file_size: 1024,
+            started_at: Some(10),
+            updated_at: Some(500),
+            message_count: 7,
+            title: Some("Real indexed title".to_string()),
+            first_user_message: Some("real first prompt".to_string()),
+            partial: false,
+            scheduled_task_id: None,
+            ..placeholder
+        };
+        store.upsert_session(&indexed.file_path, &indexed).unwrap();
+
+        let row = store
+            .list_all_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.agent == Agent::Codex && session.id == "chat-task-session")
+            .unwrap();
+        assert_eq!(row.file_path, "/tmp/project/chat-task-session.jsonl");
+        assert_eq!(row.started_at, Some(10));
+        assert_eq!(row.updated_at, Some(500));
+        assert_eq!(row.message_count, 7);
+        assert_eq!(row.title.as_deref(), Some("Real indexed title"));
+        assert_eq!(row.first_user_message.as_deref(), Some("real first prompt"));
+        assert_eq!(row.scheduled_task_id.as_deref(), Some("task-chat"));
+        assert!(!row.partial);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn placeholder_merge_into_existing_real_scope_preserves_provenance() {
+        let path = unique_db("sessio-placeholder-provenance-merge");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        let base = SessionInfo {
+            id: "task-session".to_string(),
+            agent: Agent::Codex,
+            forked_from_agent: None,
+            forked_from_id: None,
+            project_path: Some("/tmp/project".to_string()),
+            project_name: Some("project".to_string()),
+            started_at: Some(10),
+            updated_at: Some(10),
+            message_count: 1,
+            rename_title: None,
+            title: Some("task".to_string()),
+            first_user_message: Some("task".to_string()),
+            file_path: "/tmp/project/task-session.jsonl".to_string(),
+            file_size: 128,
+            partial: false,
+            available: true,
+            archived: false,
+            origin: crate::models::SessionOrigin::Chat,
+            scheduled_task_id: None,
+            is_auxiliary: false,
+            subagents: Vec::new(),
+        };
+        store.upsert_session(&base.file_path, &base).unwrap();
+
+        let placeholder = SessionInfo {
+            file_path: String::new(),
+            file_size: 0,
+            partial: true,
+            scheduled_task_id: Some("task-2".to_string()),
+            is_auxiliary: true,
+            ..base.clone()
+        };
+        store.upsert_session("", &placeholder).unwrap();
+        assert!(store.list_all_sessions().unwrap().is_empty());
+
+        let row_count: i64 = store
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sessions WHERE agent = ? AND session_id = ?",
+                params![Agent::Codex.as_str(), "task-session"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 1);
+        let row = store
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::Codex,
+                session_id: "task-session",
+            }])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(row.file_path, "/tmp/project/task-session.jsonl");
+        assert_eq!(row.scheduled_task_id.as_deref(), Some("task-2"));
+        assert!(row.is_auxiliary);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn pending_session_after_indexed_real_row_does_not_downgrade_file_path() {
         let path = unique_db("sessio-real-row-wins");
         let store = SqliteStore::open(&path).unwrap();
@@ -10681,9 +10809,7 @@ mod migration_tests {
             is_auxiliary: true,
             subagents: Vec::new(),
         };
-        store
-            .upsert_session("", &placeholder)
-            .unwrap();
+        store.upsert_session("", &placeholder).unwrap();
         assert!(store.list_sessions().unwrap().is_empty());
         assert!(store.list_all_sessions().unwrap().is_empty());
         let placeholder_ref = store
@@ -11951,6 +12077,125 @@ mod migration_tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&parent);
         let _ = std::fs::remove_dir_all(&other_parent);
+    }
+
+    #[test]
+    fn plan_task_supersede_and_relink_update_sidebar_visibility() {
+        let path = unique_db("sessio-plan-task-origin");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+        let parent = temp_child_path(&std::env::temp_dir(), "sessio-plan-task-origin-parent");
+        std::fs::create_dir(&parent).unwrap();
+
+        let project = store
+            .create_project(
+                &parent.to_string_lossy(),
+                "plan-task-origin",
+                "code".to_string(),
+                None,
+            )
+            .unwrap();
+        let thread = store
+            .create_thread(&project.id, "Plan task origin", None)
+            .unwrap();
+        let round = store
+            .create_plan_round(NewPlanRound {
+                thread_id: &thread.id,
+                astra_run_id: None,
+                round_index: None,
+                summary: Some("origin round"),
+                mode: PlanRoundMode::Parallel,
+                source: PlanRoundSource::Manual,
+                status: PlanRoundStatus::Planned,
+                tasks: vec![NewPlanTask {
+                    thread_stage_id: None,
+                    assistant_id: None,
+                    agent_participant_id: None,
+                    target_agent: Agent::Codex,
+                    stage_snapshot_json: None,
+                    assistant_snapshot_json: None,
+                    agent_snapshot_json: r#"{"agent":"codex"}"#,
+                    title: "Origin task",
+                    prompt: "Track session origin",
+                    expected_output: None,
+                    risk: PlanTaskRisk::Low,
+                    sort_order: 0,
+                    status: PlanTaskStatus::Running,
+                }],
+            })
+            .unwrap();
+
+        let first = test_session(&project, "runtime-first", "Runtime first");
+        let second = test_session(&project, "runtime-second", "Runtime second");
+        let real = test_session(&project, "agent-real", "Agent real");
+        for session in [&first, &second, &real] {
+            store.upsert_session(&session.file_path, session).unwrap();
+        }
+        assert_eq!(store.list_sessions().unwrap().len(), 3);
+
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: &first.id,
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: Some("attempt-1"),
+                attempt_count: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            visible_session_ids(&store),
+            vec![real.id.clone(), second.id.clone()]
+        );
+
+        store
+            .link_plan_task_session(NewPlanTaskSession {
+                task_id: &round.tasks[0].id,
+                agent: Agent::Codex,
+                session_id: &second.id,
+                role: PlanTaskSessionRole::Runtime,
+                attempt_id: Some("attempt-1"),
+                attempt_count: 1,
+            })
+            .unwrap();
+        let visible_after_supersede = visible_session_ids(&store);
+        assert_eq!(
+            visible_after_supersede,
+            vec![real.id.clone(), first.id.clone()]
+        );
+
+        store
+            .relink_plan_task_session(
+                NewPlanTaskSession {
+                    task_id: &round.tasks[0].id,
+                    agent: Agent::Codex,
+                    session_id: &second.id,
+                    role: PlanTaskSessionRole::Runtime,
+                    attempt_id: Some("attempt-1"),
+                    attempt_count: 1,
+                },
+                &real.id,
+                PlanTaskSessionRole::Delegated,
+            )
+            .unwrap();
+        let visible_after_relink = visible_session_ids(&store);
+        assert_eq!(
+            visible_after_relink,
+            vec![first.id.clone(), second.id.clone()]
+        );
+
+        let real_ref = store
+            .list_sessions_by_refs(&[SessionRef {
+                agent: Agent::Codex,
+                session_id: &real.id,
+            }])
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(real_ref.origin, crate::models::SessionOrigin::Thread);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]

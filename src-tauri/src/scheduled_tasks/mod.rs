@@ -14,20 +14,23 @@ pub use config::{
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::agents::runtime::manager::RuntimeCleanupReport;
 use crate::agents::runtime::types::RuntimeSessionStatus;
-use crate::agents::runtime::types::{AgentSessionHandle, StartAgentSession};
+use crate::agents::runtime::types::{AgentSessionHandle, RuntimeTransportKind, StartAgentSession};
 use crate::agents::runtime::RuntimeManager;
 use crate::astra::{
     AstraHandle, AstraRunStatus, AstraService, CancelAstraRunRequest, CreateAstraRunRequest,
 };
 use crate::im_bridge::ImBridgeService;
-use crate::models::{Agent, ProjectInfo, StageStatus, ThreadAgentInfo, ThreadInfo, ThreadKind};
+use crate::models::{
+    Agent, ProjectInfo, SessionInfo, StageStatus, ThreadAgentInfo, ThreadInfo, ThreadKind,
+};
 use crate::store::{
     ScheduledTaskRecord, ScheduledTaskRunRecord, SessionStore,
     SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
@@ -51,6 +54,172 @@ const RUN_STALL_TIMEOUT_MS: i64 = 60 * 60 * 1000;
 /// Bounded wait when freeing a finished chat run's runtime session. Short so it
 /// never meaningfully delays the watcher/push threads that call it.
 const CHAT_SESSION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Wait for the runtime to surface a real ACP session id before we stamp it
+/// with the scheduled task lineage on the request path. If startup is slower
+/// than this, a background waiter keeps watching so Run Now does not look
+/// stuck in the UI.
+const SCHEDULED_CHAT_STARTUP_INLINE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Upper bound for the background waiter that stamps scheduled task lineage
+/// after a chat session eventually publishes its real ACP session id.
+const SCHEDULED_CHAT_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn log_scheduled_chat_cleanup_issue(session_id: &str, report: &RuntimeCleanupReport) {
+    if report.cancel_error.is_some()
+        || report.dispose_error.is_some()
+        || report.timed_out
+        || report.force_detached
+    {
+        log::warn!(
+            "[scheduled-tasks] cleanup after failed chat session startup {} reported {:?}",
+            session_id,
+            report
+        );
+    }
+}
+
+fn is_runtime_startup_timeout(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("startup timed out"))
+}
+
+fn stamp_started_chat_session(
+    runtime: &RuntimeManager,
+    store: &dyn SessionStore,
+    handle: &AgentSessionHandle,
+    project: &ProjectInfo,
+    task_id: &str,
+    task_name: &str,
+    prompt: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let real_agent_session_id = if handle.transport == RuntimeTransportKind::Acp {
+        wait_for_real_agent_session_id(runtime, &handle.sessio_runtime_session_id, timeout)?
+    } else {
+        handle.agent_runtime_session_id.trim().to_string()
+    };
+    if real_agent_session_id.is_empty() {
+        bail!(
+            "chat session {} has empty agent session id",
+            handle.sessio_runtime_session_id
+        );
+    }
+    stamp_chat_session(
+        store,
+        handle,
+        project,
+        task_id,
+        task_name,
+        prompt,
+        &real_agent_session_id,
+    )
+}
+
+fn wait_for_real_agent_session_id(
+    runtime: &RuntimeManager,
+    sessio_runtime_session_id: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(agent_session_id) = runtime
+            .agent_runtime_session_id_for_session(sessio_runtime_session_id)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty() && !value.starts_with("fake-agent-session"))
+        {
+            return Ok(agent_session_id);
+        }
+
+        match runtime
+            .status_for_session(sessio_runtime_session_id)
+            .with_context(|| format!("unknown runtime session: {sessio_runtime_session_id}"))?
+        {
+            RuntimeSessionStatus::Starting
+            | RuntimeSessionStatus::Active
+            | RuntimeSessionStatus::Idle
+            | RuntimeSessionStatus::Cancelling => {}
+            RuntimeSessionStatus::Errored
+            | RuntimeSessionStatus::Disconnected
+            | RuntimeSessionStatus::Ended
+            | RuntimeSessionStatus::Completed => {
+                runtime.wait_for_session_startup(sessio_runtime_session_id, Duration::ZERO)?;
+                bail!(
+                    "runtime session {} ended before publishing a real agent session id",
+                    sessio_runtime_session_id
+                );
+            }
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            bail!(
+                "runtime session startup timed out after {}ms: {}",
+                timeout.as_millis(),
+                sessio_runtime_session_id
+            );
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
+fn stamp_chat_session(
+    store: &dyn SessionStore,
+    handle: &AgentSessionHandle,
+    project: &ProjectInfo,
+    task_id: &str,
+    task_name: &str,
+    prompt: &str,
+    real_agent_session_id: &str,
+) -> Result<()> {
+    // The indexer may not have picked up the new jsonl yet, so the row
+    // mark_session_scheduled_task targets might not exist. Write a
+    // placeholder SessionInfo first; sticky merge in insert_session preserves
+    // origin/scheduled_task_id when indexer later reindexes.
+    let now = now_ms();
+    let placeholder = SessionInfo {
+        id: real_agent_session_id.to_string(),
+        agent: handle.agent,
+        forked_from_agent: None,
+        forked_from_id: None,
+        project_path: Some(project.path.clone()),
+        project_name: Some(project.name.clone()),
+        started_at: Some(now),
+        updated_at: Some(now),
+        message_count: 0,
+        rename_title: None,
+        title: Some(task_name.to_string()),
+        first_user_message: Some(prompt.to_string()),
+        file_path: String::new(),
+        file_size: 0,
+        partial: true,
+        available: true,
+        archived: false,
+        origin: crate::models::SessionOrigin::Chat,
+        scheduled_task_id: Some(task_id.to_string()),
+        is_auxiliary: false,
+        subagents: Vec::new(),
+    };
+    if let Err(error) = store.upsert_session("", &placeholder) {
+        log::warn!(
+            "[scheduled-tasks] failed to upsert placeholder for chat session {} task {}: {error:#}",
+            real_agent_session_id,
+            task_id
+        );
+    }
+    // Defensive mark: covers the case where the indexer raced ahead and
+    // already wrote a row before our placeholder upsert ran.
+    if let Err(error) =
+        store.mark_session_scheduled_task(handle.agent, real_agent_session_id, task_id, false)
+    {
+        log::warn!(
+            "[scheduled-tasks] failed to mark chat session {} for task {}: {error:#}",
+            real_agent_session_id,
+            task_id
+        );
+    }
+    Ok(())
+}
 
 pub(crate) struct SchedulerState {
     tasks: Mutex<Vec<ScheduledTask>>,
@@ -99,7 +268,8 @@ impl SchedulerState {
         trigger: ScheduledTaskRunTrigger,
         scheduled_for_ms: Option<i64>,
     ) {
-        let run = scheduled_task_run_from_outcome(task, outcome, when_ms, trigger, scheduled_for_ms);
+        let run =
+            scheduled_task_run_from_outcome(task, outcome, when_ms, trigger, scheduled_for_ms);
         match scheduled_task_run_to_record(&run).and_then(|record| {
             self.store.insert_scheduled_task_run(&record)?;
             Ok(record)
@@ -213,15 +383,16 @@ impl SchedulerState {
         else {
             bail!("chat task target is required");
         };
-        if task_chat_prompt(task).is_empty() {
+        let prompt = task_chat_prompt(task).to_string();
+        if prompt.is_empty() {
             bail!("task prompt is empty");
         }
         self.ensure_local_agent_available(*agent)?;
         let project = self.project_by_id(project_id)?;
         let mut req = StartAgentSession {
             agent: *agent,
-            workspace_path: project.path,
-            initial_prompt: Some(task_chat_prompt(task).to_string()),
+            workspace_path: project.path.clone(),
+            initial_prompt: Some(prompt.clone()),
             source_session_id: None,
             source_agent: None,
             options: Default::default(),
@@ -242,23 +413,86 @@ impl SchedulerState {
             );
         }
         let handle = self.runtime.start_session(req)?;
-        // Tag the session row with this scheduled task so the sidebar can
-        // render the CalendarClock badge and the task detail view can list
-        // sessions by task. Chat-mode auto task sessions stay user-visible
-        // (`is_auxiliary = false`).
-        if let Err(error) = self.store.mark_session_scheduled_task(
-            handle.agent,
-            &handle.agent_runtime_session_id,
+        match stamp_started_chat_session(
+            &self.runtime,
+            self.store.as_ref(),
+            &handle,
+            &project,
             &task.id,
-            false,
+            &task.name,
+            &prompt,
+            SCHEDULED_CHAT_STARTUP_INLINE_TIMEOUT,
         ) {
-            log::warn!(
-                "[scheduled-tasks] failed to mark chat session {} for task {}: {error:#}",
-                handle.agent_runtime_session_id,
-                task.id
-            );
+            Ok(()) => {}
+            Err(error) if is_runtime_startup_timeout(&error) => {
+                self.spawn_chat_session_stamp_waiter(
+                    handle.clone(),
+                    project,
+                    task.id.clone(),
+                    task.name.clone(),
+                    prompt,
+                )?;
+            }
+            Err(error) => {
+                let cleanup = self.runtime.cleanup_session_bounded(
+                    &handle.sessio_runtime_session_id,
+                    CHAT_SESSION_CLEANUP_TIMEOUT,
+                );
+                log_scheduled_chat_cleanup_issue(&handle.sessio_runtime_session_id, &cleanup);
+                bail!(
+                    "chat session {} did not finish startup before stamping task {}: {error:#}; cleanup={cleanup:?}",
+                    handle.sessio_runtime_session_id,
+                    task.id
+                );
+            }
         }
         Ok(handle)
+    }
+
+    fn spawn_chat_session_stamp_waiter(
+        &self,
+        handle: AgentSessionHandle,
+        project: ProjectInfo,
+        task_id: String,
+        task_name: String,
+        prompt: String,
+    ) -> Result<()> {
+        let runtime = self.runtime.clone();
+        let store = self.store.clone();
+        let thread_name = format!("scheduled-chat-stamp-{task_id}");
+        let session_id = handle.sessio_runtime_session_id.clone();
+        let context_task_id = task_id.clone();
+        thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                if let Err(error) = stamp_started_chat_session(
+                    &runtime,
+                    store.as_ref(),
+                    &handle,
+                    &project,
+                    &task_id,
+                    &task_name,
+                    &prompt,
+                    SCHEDULED_CHAT_STARTUP_TIMEOUT,
+                ) {
+                    let cleanup = runtime.cleanup_session_bounded(
+                        &handle.sessio_runtime_session_id,
+                        CHAT_SESSION_CLEANUP_TIMEOUT,
+                    );
+                    log_scheduled_chat_cleanup_issue(&handle.sessio_runtime_session_id, &cleanup);
+                    log::warn!(
+                        "[scheduled-tasks] chat session {} did not finish startup before stamping task {}: {error:#}; cleanup={cleanup:?}",
+                        handle.sessio_runtime_session_id,
+                        task_id
+                    );
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "spawn background waiter for scheduled chat session {session_id} task {context_task_id}"
+                )
+            })?;
+        Ok(())
     }
 
     fn start_thread_run(&self, task: &ScheduledTask) -> Result<ThreadRunOutcome> {
@@ -508,7 +742,11 @@ impl SchedulerState {
                     let participant_keys = agent_participants
                         .iter()
                         .map(|participant| {
-                            format!("{}:{}", participant.agent.as_str(), participant.model.trim())
+                            format!(
+                                "{}:{}",
+                                participant.agent.as_str(),
+                                participant.model.trim()
+                            )
                         })
                         .collect::<Vec<_>>();
                     ensure_unique(&participant_keys, "thread participant")?;
@@ -587,9 +825,12 @@ impl SchedulerState {
             // Astra run can't lock the task or keep consuming resources.
             if let Some(reason) = self.run_expiry_reason(&run, now) {
                 self.cancel_run_underlying(&run);
-                if let Err(error) =
-                    self.update_run_status(&run.id, ScheduledTaskRunStatus::Failed, now, Some(reason))
-                {
+                if let Err(error) = self.update_run_status(
+                    &run.id,
+                    ScheduledTaskRunStatus::Failed,
+                    now,
+                    Some(reason),
+                ) {
                     log::warn!(
                         "[scheduled-tasks] failed to fail run {} after TTL: {error:#}",
                         run.id
@@ -871,10 +1112,44 @@ impl SchedulerState {
             let outcome = self
                 .astra
                 .summarize_auto_task_notification(&workspace_path, &source)?;
-            // The summary helper runtime session is task-internal and must not
-            // appear in the sidebar. Tag it with this task's id and flip the
-            // auxiliary bit; the row is already in `sessions` because the
-            // runtime wrote it on `start_session`.
+            // The summary helper runtime session is task-internal and must
+            // not appear in the sidebar. We can't rely on the indexer having
+            // written a sessions row yet — mark_session_scheduled_task is a
+            // pure UPDATE — so write a placeholder first, then re-mark
+            // defensively in case the indexer raced ahead. Sticky merge in
+            // insert_session preserves origin / scheduled_task_id /
+            // is_auxiliary across any later reindex.
+            let now = now_ms();
+            let placeholder = SessionInfo {
+                id: outcome.agent_session_id.clone(),
+                agent: outcome.agent,
+                forked_from_agent: None,
+                forked_from_id: None,
+                project_path: Some(workspace_path.clone()),
+                project_name: None,
+                started_at: Some(now),
+                updated_at: Some(now),
+                message_count: 0,
+                rename_title: Some(format!("Auto task summary: {}", run.task_id)),
+                title: None,
+                first_user_message: None,
+                file_path: String::new(),
+                file_size: 0,
+                partial: true,
+                available: true,
+                archived: false,
+                origin: crate::models::SessionOrigin::Chat,
+                scheduled_task_id: Some(run.task_id.clone()),
+                is_auxiliary: true,
+                subagents: Vec::new(),
+            };
+            if let Err(error) = self.store.upsert_session("", &placeholder) {
+                log::warn!(
+                    "[scheduled-tasks] failed to upsert placeholder for summary session {} task {}: {error:#}",
+                    outcome.agent_session_id,
+                    run.task_id
+                );
+            }
             if let Err(error) = self.store.mark_session_scheduled_task(
                 outcome.agent,
                 &outcome.agent_session_id,
@@ -1635,13 +1910,8 @@ impl ScheduledTasksService {
         }
         let now = now_ms();
         let outcome = self.state.execute(&task)?;
-        self.state.record_run(
-            &task,
-            &outcome,
-            now,
-            ScheduledTaskRunTrigger::Manual,
-            None,
-        );
+        self.state
+            .record_run(&task, &outcome, now, ScheduledTaskRunTrigger::Manual, None);
         self.state.mark_ran(id, now);
         Ok(())
     }
