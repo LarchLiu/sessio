@@ -33,6 +33,7 @@ import {
   type ProjectStageInfo,
   type ThreadIndexItemInfo,
   type ThreadKind,
+  type ThreadOrigin,
 } from "../api";
 import { useI18n } from "../i18n";
 import type { ProjectGroup } from "../navigation";
@@ -73,6 +74,9 @@ type SidebarThreadRef = {
   kind: ThreadKind;
   createdAt: number;
   updatedAt: number;
+  /** `scheduled_task` triggers the CalendarClock badge on the sidebar item. */
+  origin: ThreadOrigin;
+  scheduledTaskId: string | null;
 };
 
 type AppSidebarProps = {
@@ -862,12 +866,18 @@ function SidebarSessionItem({
   const channelLabel = channelPlatformLabel(item.channel?.platform);
   const channelIconClass = channelPlatformIconClass(item.channel?.platform);
   const relativeTime = formatShortRelativeTime(item.updatedAt ?? item.startedAt, t);
+  // Auto task chat-mode sessions carry the originating task id. We badge them
+  // in the sidebar so users can tell a task-triggered chat apart from a
+  // hand-started one.
+  const isScheduledTask = Boolean(item.scheduledTaskId);
+  const taskLabel = isScheduledTask ? t("sidebar.auto_tasks") : null;
+  const tooltip = [title, channelLabel, taskLabel].filter(Boolean).join(" · ");
   return (
     <button
       type="button"
       onClick={onSelect}
       onContextMenu={onContextMenu}
-      title={channelLabel ? `${title} · ${channelLabel}` : title}
+      title={tooltip}
       className={
         "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
         (active
@@ -897,6 +907,7 @@ function SidebarSessionItem({
             }
           />
         )}
+        {isScheduledTask && <ScheduledTaskBadge />}
       </span>
       <span
         className={
@@ -970,18 +981,25 @@ function SidebarThreadItem({
   const { t } = useI18n();
   const relativeTime = formatShortRelativeTime(time ?? thread.updatedAt ?? thread.createdAt, t);
   const showThreadPageButton = Boolean(onOpenThread);
+  const isScheduledTask = thread.origin === "scheduled_task";
+  const tooltip = [thread.goal, isScheduledTask ? t("sidebar.auto_tasks") : null]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <button
       type="button"
       onClick={onSelect}
-      title={thread.goal}
+      title={tooltip}
       className={
         "group relative flex w-full items-center gap-2 rounded-md py-1.5 pl-7 pr-2 text-left transition " +
         (active ? "bg-ink/10 text-ink" : "text-ink/65 hover:bg-ink/5 hover:text-ink")
       }
     >
       <SidebarSessionStatus activity={liveActivity} unread={unread} />
-      <SidebarThreadStatusIcon kind={thread.kind} />
+      <SidebarThreadStatusIcon
+        kind={thread.kind}
+        scheduledTask={isScheduledTask}
+      />
       <span className="min-w-0 flex-1 truncate text-body-sm leading-snug">
         {thread.goal || <span className="text-ink/30">{t("thread.goal_placeholder")}</span>}
       </span>
@@ -1029,14 +1047,38 @@ function threadRefFromIndexItem(item: ThreadIndexItemInfo): SidebarThreadRef {
     kind: item.kind,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
+    origin: item.origin,
+    scheduledTaskId: item.scheduledTaskId,
   };
 }
 
-function SidebarThreadStatusIcon({ kind }: { kind: ThreadKind }) {
+function SidebarThreadStatusIcon({
+  kind,
+  scheduledTask,
+}: {
+  kind: ThreadKind;
+  scheduledTask: boolean;
+}) {
   const Icon = threadKindSidebarIcon(kind);
   return (
-    <span className="flex h-4 w-4 shrink-0 items-center justify-center text-ink">
+    <span className="relative flex h-4 w-4 shrink-0 items-center justify-center text-ink">
       <Icon className="h-3.5 w-3.5" />
+      {scheduledTask && <ScheduledTaskBadge />}
+    </span>
+  );
+}
+
+/// Small CalendarClock overlay rendered in the bottom-right corner of an
+/// agent / channel / thread icon. Marks sessions and threads triggered by
+/// the auto task scheduler. Sized to nest inside the surrounding 16x16 icon
+/// well without bumping line height.
+function ScheduledTaskBadge() {
+  return (
+    <span
+      aria-hidden
+      className="pointer-events-none absolute -bottom-0.5 -right-0.5 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-surface-sidebar text-brand"
+    >
+      <CalendarClock className="h-2.5 w-2.5" strokeWidth={2.5} />
     </span>
   );
 }
