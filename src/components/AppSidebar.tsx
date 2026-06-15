@@ -664,21 +664,19 @@ function ProjectSidebarGroup({
   const projectButtonRef = useRef<HTMLButtonElement>(null);
   const FolderIcon = expanded ? FolderOpen : Folder;
   const sidebarEntries = useMemo<SidebarListEntry[]>(() => {
-    const linkedSessionKeys = new Set<string>();
-    const threadEntries: SidebarThreadChatEntry[] = [];
-    for (const item of threadIndexItems) {
-      for (const key of item.sessionKeys) linkedSessionKeys.add(key);
-      threadEntries.push({
-        kind: "thread",
-        thread: item,
-        time: item.time,
-      });
-    }
+    // No more linkedSessionKeys reverse-join: load_sessions already filters
+    // out origin='thread' rows, so any session arriving here is either chat
+    // or channel and belongs in the list on its own. Threads come in via
+    // threadIndexItems and are rendered as their own entries.
+    const threadEntries: SidebarThreadChatEntry[] = threadIndexItems.map((item) => ({
+      kind: "thread",
+      thread: item,
+      time: item.time,
+    }));
 
     const byKey = new Map<string, SidebarSessionEntry>();
     for (const session of project.sessions) {
       const key = sessionIdentityKey(session);
-      if (linkedSessionKeys.has(key)) continue;
       const time = sessionTime(session);
       const current = byKey.get(key);
       if (!current || time > current.time) {

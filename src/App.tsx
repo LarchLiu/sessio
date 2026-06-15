@@ -374,19 +374,16 @@ export default function App() {
   }, [projects.length, refreshThreadIndex]);
 
   const recentForMenu = useMemo<TrayRecentEntry[]>(() => {
-    const linkedSessionKeys = new Set<string>();
-    const entries: TrayRecentEntry[] = [];
-    for (const item of threadIndexItems) {
-      for (const key of item.sessionKeys) linkedSessionKeys.add(key);
-      entries.push({
-        kind: "thread",
-        thread: item,
-        time: item.time,
-      });
-    }
+    // SQL-side filtering already drops thread/auxiliary sessions, so the tray
+    // recent list only needs to dedupe subagent-only rows. Threads still
+    // arrive separately through threadIndexItems.
+    const entries: TrayRecentEntry[] = threadIndexItems.map((item) => ({
+      kind: "thread",
+      thread: item,
+      time: item.time,
+    }));
     for (const session of availableSessions) {
       if (isSubagentOnly(session)) continue;
-      if (linkedSessionKeys.has(sessionIdentityKey(session))) continue;
       entries.push({
         kind: "session",
         session,
