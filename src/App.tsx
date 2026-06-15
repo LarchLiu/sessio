@@ -107,6 +107,7 @@ export default function App() {
   const [selectedThread, setSelectedThread] = useState<ThreadSelection>(null);
   const [selected, setSelected] = useState<SessionInfo | null>(null);
   const [newChatProjectKey, setNewChatProjectKey] = useState<string | null>(null);
+  const [lastSelectedProjectKey, setLastSelectedProjectKey] = useState<string | null>(null);
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
@@ -305,6 +306,17 @@ export default function App() {
     selected,
   });
 
+  useEffect(() => {
+    if (!lastSelectedProjectKey) return;
+    if (projectGroups.some((project) => project.key === lastSelectedProjectKey)) return;
+    setLastSelectedProjectKey(null);
+  }, [lastSelectedProjectKey, projectGroups]);
+
+  const rememberSidebarProject = useCallback((projectGroup: { key: string } | null | undefined) => {
+    if (!projectGroup) return;
+    setLastSelectedProjectKey(projectGroup.key);
+  }, []);
+
   useSelectedSessionSync({
     availableSessions,
     selected,
@@ -439,6 +451,7 @@ export default function App() {
           ? projects.find((item) => item.path === session.projectPath) ?? null
           : null;
         if (project) {
+          rememberSidebarProject({ key: project.id });
           setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
         }
         setSelectedProject(null);
@@ -451,6 +464,7 @@ export default function App() {
       onSelectThread: (thread) => {
         const project = projects.find((item) => item.id === thread.projectId) ?? null;
         if (project) {
+          rememberSidebarProject({ key: project.id });
           setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
         }
         setSelected(null);
@@ -470,6 +484,7 @@ export default function App() {
     update.installing,
     openUpdateConfirm,
     projects,
+    rememberSidebarProject,
     setFilter,
   ]);
 
@@ -646,7 +661,7 @@ export default function App() {
         setAutoTasksOpen(false);
         setSelectedProject(null);
         setSelectedThread(null);
-        setNewChatProjectKey(null);
+        setNewChatProjectKey(lastSelectedProjectKey);
         setSelected(null);
         setDetailMode("chat");
       }}
@@ -689,6 +704,7 @@ export default function App() {
       }}
       onSelectSession={(projectGroup, session) => {
         setAutoTasksOpen(false);
+        rememberSidebarProject(projectGroup);
         setSelectedProject(null);
         setSelectedThread(null);
         setNewChatProjectKey(null);
@@ -698,6 +714,7 @@ export default function App() {
       }}
       onSelectThread={(projectGroup, thread, source) => {
         setAutoTasksOpen(false);
+        rememberSidebarProject(projectGroup);
         setSelected(null);
         setSelectedProject(null);
         setSelectedThread({ projectId: projectGroup.project.id, threadId: thread.id, goal: thread.goal });

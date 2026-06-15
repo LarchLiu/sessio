@@ -96,6 +96,9 @@ import {
   isNearScrollBottom,
   useMessageStreamScrollController,
 } from "../components/useMessageStreamScrollController";
+import {
+  useComposerInputHistory,
+} from "../hooks/useComposerInputHistory";
 import { localeTag, useI18n } from "../i18n";
 import type { ViewMode } from "../navigation";
 import {
@@ -858,7 +861,6 @@ export function AcpTranscriptPanel({
       liveSessionToAcpViewModel(liveSession),
     );
   }, [ancestorCacheKey, historyKey, historyTurns, liveSession, mergedAncestorTurns, viewMode]);
-
   const liveTurnIdsKey = useMemo(
     () => liveSession?.turns.map((turn) => turn.turnId).join("|") ?? "",
     [liveSession],
@@ -880,6 +882,19 @@ export function AcpTranscriptPanel({
     () => renderItemKeys(visibleDisplayItems),
     [visibleDisplayItems],
   );
+  const composerInputHistoryEntries = useMemo(
+    () => composerInputHistoryEntriesFromRoleNavItems(visibleDisplayItems),
+    [visibleDisplayItems],
+  );
+  const {
+    onKeyDown: handleComposerInputHistoryKeyDown,
+    reset: resetComposerInputHistory,
+  } = useComposerInputHistory({
+    entries: composerInputHistoryEntries,
+    value: composerText,
+    setValue: setComposerText,
+    textareaRef: composerRef,
+  });
   const liveActiveKey = useMemo(() => {
     if (!liveSession) return "";
     return liveSession.turns
@@ -1231,6 +1246,7 @@ export function AcpTranscriptPanel({
         attachments: inputAttachmentsWithContext,
       });
       activeRuntimeTurnIdRef.current = turn.turnId;
+      resetComposerInputHistory();
       if (clearComposer) {
         setComposerText("");
         clearAttachments();
@@ -1242,7 +1258,7 @@ export function AcpTranscriptPanel({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -1355,6 +1371,7 @@ export function AcpTranscriptPanel({
         onAgentModelChange={handleComposerAgentModelChange}
         onPermissionChange={handleComposerPermissionChange}
         onChange={setComposerText}
+        onTextareaKeyDown={handleComposerInputHistoryKeyDown}
         onSend={handleSend}
         onCancel={handleCancelTurn}
       />
@@ -1698,6 +1715,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
   onAgentModelChange: (value: string) => void;
   onPermissionChange: (permissionMode: string) => void;
   onChange: (value: string) => void;
+  onTextareaKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => boolean;
   onSend: () => void;
   onCancel: () => void;
 }>(function ChatComposer(
@@ -1722,6 +1740,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     onAgentModelChange,
     onPermissionChange,
     onChange,
+    onTextareaKeyDown,
     onSend,
     onCancel,
   },
@@ -1801,6 +1820,7 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
                 if (imeDisposition.shouldPreventDefault) event.preventDefault();
                 return;
               }
+              if (onTextareaKeyDown?.(event)) return;
               if (event.key !== "Enter" || event.shiftKey) {
                 return;
               }
@@ -3951,6 +3971,20 @@ function previewTextForAcpItem(item: AcpRenderItem): string {
   return item.block.kind === "user"
     ? stripInjectedContext(text)
     : stripImagePlaceholders(text);
+}
+
+function composerInputHistoryEntriesFromRoleNavItems(items: AcpRenderItem[]): string[] {
+  const seen = new Set<string>();
+  const entries: string[] = [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (renderItemSide(item) !== "user") continue;
+    const text = previewTextForAcpItem(item).trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    entries.push(text);
+  }
+  return entries;
 }
 
 function formatDuration(ms: number): string {
