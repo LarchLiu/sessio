@@ -225,17 +225,46 @@ pub fn history_tool_call_message(
     raw_input: Value,
     timestamp: Option<i64>,
 ) -> AcpProtocolMessage {
+    let title = title.into();
+    let kind = if title == "TodoWrite" {
+        "task_list"
+    } else {
+        "tool_call"
+    };
+    history_tool_call_message_with_kind(tool_call_id, title, kind, raw_input, timestamp)
+}
+
+/// Variant of `history_tool_call_message` that lets the caller specify the
+/// ACP `kind` directly (e.g. `execute` for shell, `read` for file reads).
+/// The frontend renders bodies based on `kind`, so source parsers that know
+/// what the tool semantically is should pass a meaningful value instead of
+/// defaulting to the generic `tool_call`.
+pub fn history_tool_call_message_with_kind(
+    tool_call_id: Option<String>,
+    title: impl Into<String>,
+    kind: impl Into<String>,
+    raw_input: Value,
+    timestamp: Option<i64>,
+) -> AcpProtocolMessage {
     let tool_call_id =
         tool_call_id.unwrap_or_else(|| history_synthetic_id("history-tool", timestamp));
     let title = title.into();
+    let kind = kind.into();
+    // Match the legacy behavior: TodoWrite is always reported as completed
+    // since it has no separate result event.
+    let status = if title == "TodoWrite" {
+        "completed"
+    } else {
+        "pending"
+    };
     history_session_update_message(
         "tool_call",
         json!({
             "sessionUpdate": "tool_call",
             "toolCallId": tool_call_id,
             "title": title,
-            "kind": if title == "TodoWrite" { "task_list" } else { "tool_call" },
-            "status": if title == "TodoWrite" { "completed" } else { "pending" },
+            "kind": kind,
+            "status": status,
             "rawInput": raw_input,
             "meta": history_message_meta(timestamp),
         }),

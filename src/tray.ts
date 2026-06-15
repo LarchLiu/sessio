@@ -19,6 +19,7 @@ const AGENT_ICONS: Record<Agent, MenuIconComponent> = {
   codex: OpenAI as MenuIconComponent,
   claude: Claude.Color as MenuIconComponent,
   gemini: Gemini.Color as MenuIconComponent,
+  opencode: OpenAI as MenuIconComponent,
 };
 
 // NSMenu sizes its width to the widest item, so CJK titles end up much
@@ -160,6 +161,7 @@ async function buildMenu(
     codex: await getAgentIcon("codex", theme),
     claude: await getAgentIcon("claude", theme),
     gemini: await getAgentIcon("gemini", theme),
+    opencode: await getAgentIcon("opencode", theme),
   };
   const threadIconBytes = await getThreadIcon(theme);
 

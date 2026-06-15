@@ -1,6 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type Agent = "astra-pi" | "codex" | "claude" | "gemini";
+export type Agent = "astra-pi" | "codex" | "claude" | "gemini" | "opencode";
+
+/// Single source of truth for runtime agent ids. Keep in sync with the
+/// `Agent` enum on the Rust side. Adding a new agent here is the only TS
+/// place callers should touch — `isAgent`, `Record<Agent, …>` literals,
+/// and AGENTS-driven loops pick up the rest at compile time.
+export const AGENTS = ["astra-pi", "codex", "claude", "gemini", "opencode"] as const;
+
+// Compile-time guard: AGENTS must cover every Agent variant and only contain
+// Agent variants. If either side drifts, TypeScript fails here.
+type _AgentsExhaustive = Exclude<Agent, (typeof AGENTS)[number]> extends never
+  ? Exclude<(typeof AGENTS)[number], Agent> extends never
+    ? true
+    : false
+  : false;
+const _agentsExhaustive: _AgentsExhaustive = true;
+void _agentsExhaustive;
+
+export function isAgent(value: unknown): value is Agent {
+  return typeof value === "string" && (AGENTS as readonly string[]).includes(value);
+}
 
 export type ProcessTemplateType = "builtin" | "custom";
 
@@ -2194,6 +2214,18 @@ export const AGENT_LABEL: Record<Agent, string> = {
   codex: "Codex",
   claude: "Claude Code",
   gemini: "Gemini",
+  opencode: "OpenCode",
+};
+
+/// Short single-word product names used in dense UI chips/dropdowns where the
+/// "Claude Code" / "Gemini CLI" suffixes don't fit. Defaults to AGENT_LABEL
+/// when no override is set.
+export const AGENT_SHORT_LABEL: Record<Agent, string> = {
+  "astra-pi": "Astra Pi",
+  codex: "Codex",
+  claude: "Claude",
+  gemini: "Gemini",
+  opencode: "OpenCode",
 };
 
 const AGENT_COLOR_VAR: Record<Agent, string> = {
@@ -2201,6 +2233,7 @@ const AGENT_COLOR_VAR: Record<Agent, string> = {
   codex: "--color-fg",
   claude: "--color-orange",
   gemini: "--color-blue",
+  opencode: "--color-fg",
 };
 
 export const AGENT_ACCENT: Record<Agent, string> = {
@@ -2208,6 +2241,7 @@ export const AGENT_ACCENT: Record<Agent, string> = {
   codex: `rgb(var(${AGENT_COLOR_VAR.codex}))`,
   claude: `rgb(var(${AGENT_COLOR_VAR.claude}))`,
   gemini: `rgb(var(${AGENT_COLOR_VAR.gemini}))`,
+  opencode: `rgb(var(${AGENT_COLOR_VAR.opencode}))`,
 };
 
 export function agentTint(a: Agent, alpha: number): string {

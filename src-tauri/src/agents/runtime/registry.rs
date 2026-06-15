@@ -41,7 +41,7 @@ impl From<Agent> for AgentKey {
 
 pub fn builtin_runtime_registry() -> RuntimeRegistry {
     let mut registry = RuntimeRegistry::new();
-    for agent in [Agent::AstraPi, Agent::Codex, Agent::Claude, Agent::Gemini] {
+    for agent in Agent::ALL.iter().copied() {
         registry.register(RuntimeRegistration {
             agent,
             transport: RuntimeTransportKind::Fake,

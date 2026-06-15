@@ -352,10 +352,7 @@ fn ensure_current_agent(state: &Arc<ImBridgeState>, key: &ChatKey, agent: Agent)
 }
 
 fn effort_config_id(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Codex => "reasoning_effort",
-        Agent::AstraPi | Agent::Claude | Agent::Gemini => "effort",
-    }
+    agent.effort_config_id()
 }
 
 fn available_agents(state: &Arc<ImBridgeState>) -> Result<Vec<AgentInfo>> {

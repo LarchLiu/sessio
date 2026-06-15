@@ -73,6 +73,9 @@ fn poll_once(
     if enabled_agents.contains(&Agent::AstraPi) {
         poll_pi(&indexed, store.as_ref(), indexer)?;
     }
+    if enabled_agents.contains(&Agent::Opencode) {
+        poll_opencode(&indexed, store.as_ref(), indexer)?;
+    }
     Ok(())
 }
 
@@ -429,6 +432,48 @@ fn poll_pi(
     }
     store.mark_missing_scopes_unavailable(Agent::AstraPi, &seen_scopes)?;
 
+    Ok(())
+}
+
+/// OpenCode persists everything to `opencode.db` via SQLite's WAL. Polling
+/// just stats the db file (and its `-wal` sidecar while writes are in
+/// flight) — whenever either mtime moves we trigger a single
+/// `ReindexOpencodeAll`, which rebuilds the merged scope as one unit. The
+/// indexer's coalescer makes sure we don't run it twice in a tick.
+fn poll_opencode(
+    indexed: &[IndexedSessionRecord],
+    store: &dyn SessionStore,
+    indexer: &IndexerHandle,
+) -> Result<()> {
+    let Some(base) = crate::agents::sources::opencode::parser::base_dir_if_exists()? else {
+        store.mark_missing_scopes_unavailable(Agent::Opencode, &HashSet::new())?;
+        return Ok(());
+    };
+    let scope = crate::agents::sources::opencode::parser::scope_id(&base);
+
+    let mut latest_mtime: Option<i64> = None;
+    for candidate in ["opencode.db", "opencode.db-wal"] {
+        if let Some(mtime) = file_mtime(&base.join(candidate)) {
+            latest_mtime = Some(latest_mtime.map_or(mtime, |existing| existing.max(mtime)));
+        }
+    }
+
+    let highest_indexed = indexed
+        .iter()
+        .filter(|row| row.agent == Agent::Opencode)
+        .map(|row| row.last_indexed_at)
+        .max();
+    let needs_rebuild = match (highest_indexed, latest_mtime) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(indexed_at), Some(mtime)) => mtime >= indexed_at,
+    };
+    if needs_rebuild {
+        indexer.submit(IndexTask::ReindexOpencodeAll)?;
+    }
+    let mut seen_scopes = HashSet::new();
+    seen_scopes.insert(scope);
+    store.mark_missing_scopes_unavailable(Agent::Opencode, &seen_scopes)?;
     Ok(())
 }
 

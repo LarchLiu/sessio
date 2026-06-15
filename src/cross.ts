@@ -59,6 +59,7 @@ export const RESUME_CMD: Record<Agent, (id: string) => string> = {
   codex: (id) => `codex resume ${id}`,
   claude: (id) => `claude --resume ${id}`,
   gemini: (id) => `gemini --resume ${id}`,
+  opencode: (id) => `opencode session resume ${id}`,
 };
 
 function bashQuote(s: string): string {

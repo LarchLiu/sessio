@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, ExternalLink, LoaderCircle, MessagesSquare, Plus, Sparkles, Trash2 } from "lucide-react";
 import type { Agent, AstraEvent, AstraHandle, IssueSeverity, IssueStatus, PlanRoundInfo, PlanTaskInfo, PlanTaskSessionInfo, ProjectInfo, SessionInfo, StageInfo, StageStatus, ThreadInfo, ThreadReplayInfo, ThreadReplaySessionInfo } from "../api";
+import { isAgent } from "../api";
 import {
   AGENT_LABEL,
   createThreadStageIssue,
@@ -1261,7 +1262,7 @@ function safeJsonPreview(value: unknown, maxLength: number): string {
 }
 
 function knownAgent(value: string): Agent | null {
-  return value === "codex" || value === "claude" || value === "gemini" ? value : null;
+  return isAgent(value) ? value : null;
 }
 
 function formatDate(ts: number | null, lang: "en" | "zh"): string | null {

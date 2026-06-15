@@ -11,7 +11,7 @@ import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
 import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
 import type { Agent, AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
-import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
+import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, isAgent, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
@@ -116,7 +116,7 @@ function threadParticipantLabel(participant: ThreadAgentInfo): string {
 }
 
 function isRuntimeAgentId(value: string): value is Agent {
-  return value === "astra-pi" || value === "codex" || value === "claude" || value === "gemini";
+  return isAgent(value);
 }
 
 interface MetaRow {

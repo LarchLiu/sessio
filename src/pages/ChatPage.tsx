@@ -4037,7 +4037,21 @@ function canonicalToolDisplay(name: string, body: unknown, kind?: string): ToolT
 }
 
 function isShellToolName(name: string): boolean {
-  return ["Shell", "Run Shell Command", "run_shell_command"].includes(name);
+  // Shell-style tools across agents:
+  //   - Sessio / older Codex: "Shell", "Run Shell Command", "run_shell_command"
+  //   - OpenCode:             "bash", "terminal"
+  //   - Generic:              "shell"
+  // All of them pass the actual command line through input.cmd / input.command,
+  // so commandToolDisplay can dispatch on the first token (ls → LS, rg → Grep,
+  // cat/sed/tail/head/nl → Read, otherwise Bash).
+  return [
+    "Shell",
+    "Run Shell Command",
+    "run_shell_command",
+    "bash",
+    "shell",
+    "terminal",
+  ].includes(name);
 }
 
 function isReadToolName(name: string): boolean {

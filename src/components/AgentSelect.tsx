@@ -1,4 +1,5 @@
 import type { Agent, RuntimeAgentMetadata, RuntimeAgentOptionMetadata } from "../api";
+import { AGENT_SHORT_LABEL, isAgent } from "../api";
 import { AgentGlyph } from "./AgentIcon";
 import type { InlineMenuSelectGroup, InlineMenuSelectOption } from "./InlineMenuSelect";
 
@@ -50,17 +51,13 @@ export function parseAgentModelSelectValue(
 ): { agent: Agent; model: string } | null {
   try {
     const parsed = JSON.parse(value) as { agent?: unknown; model?: unknown };
-    if (parsed.agent !== "astra-pi" && parsed.agent !== "codex" && parsed.agent !== "claude" && parsed.agent !== "gemini") {
-      return null;
-    }
+    if (!isAgent(parsed.agent)) return null;
     return {
       agent: parsed.agent,
       model: typeof parsed.model === "string" ? parsed.model : "",
     };
   } catch {
-    if (value === "astra-pi" || value === "codex" || value === "claude" || value === "gemini") {
-      return { agent: value, model: "" };
-    }
+    if (isAgent(value)) return { agent: value, model: "" };
     return null;
   }
 }
@@ -85,9 +82,5 @@ function effortLabel(agent: RuntimeAgentMetadata, selectedEffort: string | undef
 }
 
 function agentLabel(agent: Agent): string {
-  if (agent === "astra-pi") return "Astra Pi";
-  if (agent === "codex") return "Codex";
-  if (agent === "claude") return "Claude";
-  if (agent === "gemini") return "Gemini";
-  return agent;
+  return AGENT_SHORT_LABEL[agent] ?? agent;
 }

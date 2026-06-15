@@ -1004,6 +1004,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     ensure_current_astra_run_sessions(conn)?;
     ensure_current_scheduled_tasks(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
+    seed_opencode_builtin_agent(conn, now_ms())?;
     Ok(())
 }
 
@@ -1648,8 +1649,39 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
         },
         now,
     )?;
+    seed_opencode_builtin_agent(conn, now)?;
     seed_builtin_assistants(conn, now)?;
     Ok(())
+}
+
+/// OpenCode arrived after schema_v5, so existing databases never went through
+/// `seed_builtins`. We seed (`INSERT OR IGNORE`) on every init so older
+/// installs pick up the OpenCode row without needing a migration.
+fn seed_opencode_builtin_agent(conn: &Connection, now: i64) -> Result<()> {
+    seed_builtin_agent(
+        conn,
+        Agent::Opencode,
+        BuiltinAgentSeed {
+            model: None,
+            models: Vec::new(),
+            effort: Some("high"),
+            efforts: vec![
+                runtime_option("low", "Low"),
+                runtime_option("medium", "Medium"),
+                runtime_option("high", "High"),
+            ],
+            permission_mode: None,
+            permission_modes: Vec::new(),
+            enabled: false,
+            transport: RuntimeTransportKind::Acp,
+            commands: AgentCommandsInfo {
+                session: vec!["opencode acp".to_string()],
+                version: vec!["opencode --version".to_string()],
+            },
+            ai_providers: vec![],
+        },
+        now,
+    )
 }
 
 fn sync_astra_pi_builtin_agent_defaults(conn: &Connection, now: i64) -> Result<()> {
@@ -1705,6 +1737,7 @@ fn runtime_agent_name(agent: Agent) -> &'static str {
         Agent::Codex => "Codex",
         Agent::Claude => "Claude",
         Agent::Gemini => "Gemini",
+        Agent::Opencode => "OpenCode",
     }
 }
 
@@ -1714,6 +1747,7 @@ fn runtime_agent_display_name(agent: Agent) -> &'static str {
         Agent::Codex => "Codex CLI",
         Agent::Claude => "Claude Code",
         Agent::Gemini => "Gemini CLI",
+        Agent::Opencode => "OpenCode",
     }
 }
 
@@ -1723,6 +1757,7 @@ fn runtime_agent_order(agent: Agent) -> i64 {
         Agent::Codex => 1,
         Agent::Claude => 2,
         Agent::Gemini => 3,
+        Agent::Opencode => 4,
     }
 }
 
@@ -13041,7 +13076,7 @@ mod migration_tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["astra-pi", "codex", "claude", "gemini"]
+            vec!["astra-pi", "codex", "claude", "gemini", "opencode"]
         );
         let codex_agent = agents.iter().find(|agent| agent.id == "codex").unwrap();
         assert_eq!(codex_agent.icon.as_deref(), Some("codex"));

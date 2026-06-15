@@ -2004,6 +2004,7 @@ fn parse_agent(s: &str) -> Result<Agent> {
         "codex" => Ok(Agent::Codex),
         "claude" => Ok(Agent::Claude),
         "gemini" => Ok(Agent::Gemini),
+        "opencode" => Ok(Agent::Opencode),
         _ => bail!("unknown agent '{s}'"),
     }
 }

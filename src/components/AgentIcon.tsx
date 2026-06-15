@@ -1,13 +1,14 @@
 import { type CSSProperties, type ReactNode } from "react";
 import { Claude, Gemini, OpenAI } from "@lobehub/icons";
 import { type Agent } from "../api";
-import { PiIcon } from "./IconifyIcon";
+import { OpencodeIcon, PiIcon } from "./IconifyIcon";
 
 const AGENT_ICON: Record<Agent, (props: { className?: string; style?: CSSProperties }) => ReactNode> = {
   "astra-pi": PiIcon,
   codex: OpenAI,
   claude: Claude.Color,
   gemini: Gemini.Color,
+  opencode: OpencodeIcon,
 };
 
 export function AgentGlyph({

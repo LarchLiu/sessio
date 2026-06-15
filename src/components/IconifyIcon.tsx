@@ -86,3 +86,7 @@ export function CodeXmlIcon({ className, style }: IconifyIconComponentProps) {
 export function PiIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[simple-icons--pi]" className={["scale-90", className ?? ""].filter(Boolean).join(" ")} style={style} />;
 }
+
+export function OpencodeIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[simple-icons--opencode]" className={className} style={style} />;
+}

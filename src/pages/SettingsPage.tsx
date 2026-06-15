@@ -58,6 +58,7 @@ import {
   updateImBridgeConfig,
   updateNetworkConfig,
   updateRuntimeAgentPreferences,
+  isAgent,
 } from "../api";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
@@ -3564,7 +3565,7 @@ function SettingsAgentGlyph({
 }
 
 function isRuntimeAgent(id: string): id is Agent {
-  return id === "astra-pi" || id === "codex" || id === "claude" || id === "gemini";
+  return isAgent(id);
 }
 
 function isSettingsAgent(id: string): boolean {

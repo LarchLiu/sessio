@@ -191,6 +191,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                 },
                 "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
                 "astra-pi" => Some(IndexTask::ReindexPiFile(path)),
+                "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             }
         }
@@ -198,6 +199,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
             let path = PathBuf::from(&scope);
             match agent.as_str() {
                 "claude" => Some(IndexTask::ReindexClaudeProject(path)),
+                "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             }
         }

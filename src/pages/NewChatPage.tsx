@@ -28,6 +28,7 @@ import {
   addThreadStage,
   createAstraRun,
   createThread,
+  isAgent,
   listAssistants,
   listProjectStages,
 } from "../api";
@@ -868,7 +869,7 @@ function parseComposerCommand(text: string): ComposerCommand | null {
 }
 
 function normalizeAssistantAgent(id: string): Agent {
-  return id === "astra-pi" || id === "codex" || id === "claude" || id === "gemini" ? id : "codex";
+  return isAgent(id) ? id : "codex";
 }
 
 function threadKindIcon(kind: ThreadKind, className: string) {
@@ -960,7 +961,7 @@ function participantDraftFromValue(value: string, runtimeAgents: RuntimeAgentMet
     const parsed = JSON.parse(value) as { agent?: unknown; model?: unknown };
     const agent = parsed.agent;
     const model = typeof parsed.model === "string" ? parsed.model : "";
-    if (agent !== "astra-pi" && agent !== "codex" && agent !== "claude" && agent !== "gemini") return null;
+    if (!isAgent(agent)) return null;
     const runtimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
     return {
       agent,

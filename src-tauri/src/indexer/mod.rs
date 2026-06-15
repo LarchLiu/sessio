@@ -29,6 +29,7 @@ pub enum IndexTask {
     ReindexClaudeSubagentFile(PathBuf),
     ReindexGeminiFile(PathBuf),
     ReindexPiFile(PathBuf),
+    ReindexOpencodeAll,
     DeleteFile(PathBuf),
     DeleteSubagentFile(PathBuf),
 }
@@ -367,9 +368,7 @@ fn enabled_agents_for_store(store: &dyn SessionStore, owner: &str) -> HashSet<Ag
         .map(|agents| crate::agents::sources::enabled_builtin_agents(&agents))
         .unwrap_or_else(|e| {
             log::warn!("{owner}: failed to load enabled agents, using all sources: {e}");
-            [Agent::AstraPi, Agent::Codex, Agent::Claude, Agent::Gemini]
-                .into_iter()
-                .collect()
+            Agent::ALL.iter().copied().collect()
         })
 }
 
@@ -380,6 +379,7 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
     let mut seen_claude_subagent: HashSet<PathBuf> = HashSet::new();
     let mut seen_gemini: HashSet<PathBuf> = HashSet::new();
     let mut seen_pi: HashSet<PathBuf> = HashSet::new();
+    let mut seen_opencode = false;
     let mut seen_delete: HashSet<PathBuf> = HashSet::new();
     let mut seen_delete_subagent: HashSet<PathBuf> = HashSet::new();
     let mut full = false;
@@ -416,6 +416,12 @@ fn coalesce(tasks: Vec<IndexTask>) -> Vec<IndexTask> {
             IndexTask::ReindexPiFile(p) => {
                 if seen_pi.insert(p.clone()) {
                     out.push(IndexTask::ReindexPiFile(p));
+                }
+            }
+            IndexTask::ReindexOpencodeAll => {
+                if !seen_opencode {
+                    seen_opencode = true;
+                    out.push(IndexTask::ReindexOpencodeAll);
                 }
             }
             IndexTask::DeleteFile(p) => {
@@ -480,12 +486,16 @@ fn execute(
         IndexTask::ReindexPiFile(path) if enabled_agents.contains(&Agent::AstraPi) => {
             reindex_pi_file(path, store)
         }
+        IndexTask::ReindexOpencodeAll if enabled_agents.contains(&Agent::Opencode) => {
+            reindex_opencode_all(store)
+        }
         IndexTask::ReindexCodexFile(_)
         | IndexTask::ReindexClaudeFile(_)
         | IndexTask::ReindexClaudeProject(_)
         | IndexTask::ReindexClaudeSubagentFile(_)
         | IndexTask::ReindexGeminiFile(_)
-        | IndexTask::ReindexPiFile(_) => Ok(TaskOutcome::default()),
+        | IndexTask::ReindexPiFile(_)
+        | IndexTask::ReindexOpencodeAll => Ok(TaskOutcome::default()),
         IndexTask::DeleteFile(path) => {
             let path_str = path.to_string_lossy();
             store.mark_file_path_unavailable(&path_str)?;
@@ -596,6 +606,45 @@ fn full_rebuild(store: &dyn SessionStore, enabled_agents: &HashSet<Agent>) -> Re
         store.mark_missing_scopes_unavailable(Agent::AstraPi, &pi_scopes)?;
     }
 
+    if enabled_agents.contains(&Agent::Opencode) {
+        rebuild_opencode_scope(store, &mut affected_projects)?;
+    }
+
+    Ok(TaskOutcome {
+        affected_projects: affected_projects.into_values().collect(),
+        affected_sources: Vec::new(),
+    })
+}
+
+/// OpenCode merges SQLite + legacy JSON into a single virtual scope. The
+/// scope key is the OpenCode base directory; replace_by_scope wipes all
+/// previously indexed rows in that scope and reseeds them from the merged
+/// listing, which is the only correct way to reflect cross-source dedupe.
+fn rebuild_opencode_scope(
+    store: &dyn SessionStore,
+    affected_projects: &mut HashMap<String, ProjectRef>,
+) -> Result<()> {
+    let mut scopes: HashSet<String> = HashSet::new();
+    if let Some(base) = crate::agents::sources::opencode::parser::base_dir_if_exists()? {
+        let scope = crate::agents::sources::opencode::parser::scope_id(&base);
+        match crate::agents::sources::opencode::parser::list_sessions() {
+            Ok(sessions) => {
+                for session in &sessions {
+                    insert_session_project(affected_projects, session);
+                }
+                store.replace_by_scope(&scope, Agent::Opencode, &sessions)?;
+                scopes.insert(scope);
+            }
+            Err(e) => log::warn!("opencode list sessions failed: {e}"),
+        }
+    }
+    store.mark_missing_scopes_unavailable(Agent::Opencode, &scopes)?;
+    Ok(())
+}
+
+fn reindex_opencode_all(store: &dyn SessionStore) -> Result<TaskOutcome> {
+    let mut affected_projects = HashMap::new();
+    rebuild_opencode_scope(store, &mut affected_projects)?;
     Ok(TaskOutcome {
         affected_projects: affected_projects.into_values().collect(),
         affected_sources: Vec::new(),
@@ -893,6 +942,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
                 },
                 "gemini" => Some(IndexTask::ReindexGeminiFile(path)),
                 "astra-pi" => Some(IndexTask::ReindexPiFile(path)),
+                "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             };
             if mapped.is_none() {
@@ -908,6 +958,7 @@ fn source_task_to_index_task(task: SourceIndexTask) -> Option<IndexTask> {
             let path = PathBuf::from(&scope);
             let mapped = match agent.as_str() {
                 "claude" => Some(IndexTask::ReindexClaudeProject(path)),
+                "opencode" => Some(IndexTask::ReindexOpencodeAll),
                 _ => None,
             };
             if mapped.is_none() {

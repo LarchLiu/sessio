@@ -1454,9 +1454,16 @@ fn session_config_from_options(
         effort: option_string(options, "effort")
             .or_else(|| option_string(options, "reasoningEffort"))
             .or_else(|| option_string(options, "reasoning_effort")),
-        permission_mode: option_string(options, "permissionMode")
-            .or_else(|| option_string(options, "permission_mode"))
-            .map(|mode| normalize_runtime_permission_mode(agent, &mode)),
+        permission_mode: if agent == Agent::Opencode {
+            // OpenCode `mode` selects a persona / agent mode, not Sessio's
+            // permission-mode concept. Don't forward Sessio permissionMode
+            // values into ACP `session/set_mode` for OpenCode.
+            None
+        } else {
+            option_string(options, "permissionMode")
+                .or_else(|| option_string(options, "permission_mode"))
+                .map(|mode| normalize_runtime_permission_mode(agent, &mode))
+        },
     }
 }
 

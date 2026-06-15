@@ -518,7 +518,7 @@ impl RuntimeResourceLimiter {
 fn delegated_runtime_limit(agent: Agent) -> Option<usize> {
     match agent {
         Agent::AstraPi => Some(ASTRA_PI_DELEGATED_RUNTIME_LIMIT),
-        Agent::Codex | Agent::Claude | Agent::Gemini => None,
+        Agent::Codex | Agent::Claude | Agent::Gemini | Agent::Opencode => None,
     }
 }
 

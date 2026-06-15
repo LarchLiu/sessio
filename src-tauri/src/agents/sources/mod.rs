@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod opencode;
 pub mod pi;
 pub mod registry;
 pub mod shared;
@@ -19,6 +20,7 @@ pub fn list_all() -> Vec<SessionInfo> {
         claude::parser::list_sessions,
         gemini::parser::list_sessions,
         pi::parser::list_sessions,
+        opencode::parser::list_sessions,
     ] {
         match f() {
             Ok(mut v) => out.append(&mut v),
@@ -35,7 +37,7 @@ pub fn system_time_to_millis(t: SystemTime) -> Option<i64> {
 }
 
 pub fn builtin_agent_sources() -> registry::AgentSourceRegistry {
-    builtin_agent_sources_for([Agent::AstraPi, Agent::Codex, Agent::Claude, Agent::Gemini])
+    builtin_agent_sources_for(Agent::ALL.iter().copied())
 }
 
 pub fn builtin_agent_sources_for<I>(agents: I) -> registry::AgentSourceRegistry
@@ -55,6 +57,9 @@ where
     }
     if enabled.contains(&Agent::Gemini) {
         registry.register(gemini::GeminiSource);
+    }
+    if enabled.contains(&Agent::Opencode) {
+        registry.register(opencode::OpencodeSource);
     }
     registry
 }

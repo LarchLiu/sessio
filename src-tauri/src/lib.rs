@@ -2492,7 +2492,9 @@ fn read_session_history_result_from_source(
     session_id: Option<&str>,
 ) -> anyhow::Result<SessionHistoryResult> {
     let path = PathBuf::from(file_path);
-    if file_path.is_empty() || !path.exists() {
+    let is_opencode_sqlite =
+        agent == Agent::Opencode && file_path.starts_with("sqlite:");
+    if file_path.is_empty() || (!is_opencode_sqlite && !path.exists()) {
         anyhow::bail!(
             "Session file no longer exists (likely cleaned by {}): {}",
             match agent {
@@ -2500,6 +2502,7 @@ fn read_session_history_result_from_source(
                 Agent::Codex => "Codex",
                 Agent::Claude => "Claude Code",
                 Agent::Gemini => "Gemini",
+                Agent::Opencode => "OpenCode",
             },
             if file_path.is_empty() {
                 "<empty>"
@@ -2539,6 +2542,15 @@ fn read_session_history_result_from_source(
             let rows =
                 crate::agents::sources::gemini::parser::read_history_acp_messages_with_locations(
                     &path, sid,
+                )?;
+            let count = rows.len();
+            (rows, count)
+        }
+        Agent::Opencode => {
+            let sid = session_id.unwrap_or_default();
+            let rows =
+                crate::agents::sources::opencode::parser::read_history_acp_messages_with_locations(
+                    file_path, sid,
                 )?;
             let count = rows.len();
             (rows, count)

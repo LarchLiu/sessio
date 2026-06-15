@@ -1,6 +1,6 @@
 import { type ReactNode, useMemo } from "react";
 import type { Agent, AgentInfo, AssistantAgentInfo, RuntimeAgentMetadata, RuntimeAgentOptionMetadata } from "../api";
-import { AGENT_LABEL } from "../api";
+import { AGENT_LABEL, isAgent } from "../api";
 import {
   agentModelSelectOptions,
   agentModelSelectValue,
@@ -21,7 +21,7 @@ function optionValue(options: RuntimeAgentOptionMetadata[], fallback: string) {
 
 export function dbAgentsAsRuntimeAgents(agents: AgentInfo[]): RuntimeAgentMetadata[] {
   return agents
-    .filter((agent) => agent.enabled && (agent.id === "astra-pi" || agent.id === "codex" || agent.id === "claude" || agent.id === "gemini"))
+    .filter((agent) => agent.enabled && isAgent(agent.id))
     .map((agent) => ({
       agent: agent.id as Agent,
       enabled: agent.enabled,
@@ -79,7 +79,7 @@ export default function AssistantAgentSelector({
 }) {
   const { t } = useI18n();
   const runtimeAgents = useMemo(() => dbAgentsAsRuntimeAgents(agents), [agents]);
-  const agentKey = (agent.id === "claude" || agent.id === "gemini" ? agent.id : "codex") as Agent;
+  const agentKey: Agent = isAgent(agent.id) ? agent.id : "codex";
   const selectedAgent = runtimeAgents.find((runtimeAgent) => runtimeAgent.agent === agent.id) ?? null;
   const agentModelValue = agentModelSelectValue(agentKey, agent.model);
   const agentModelOptions = agentModelSelectOptions(

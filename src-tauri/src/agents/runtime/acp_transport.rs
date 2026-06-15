@@ -728,7 +728,7 @@ async fn apply_initial_session_config(
         }
     }
     if let Some(effort) = config.effort.as_deref() {
-        let config_id = effort_config_id(agent);
+        let config_id = agent.effort_config_id();
         if let Err(error) = send_session_config_request(
             manager,
             sessio_runtime_session_id,
@@ -749,13 +749,6 @@ async fn apply_initial_session_config(
         }
     }
     Ok(())
-}
-
-fn effort_config_id(agent: Agent) -> &'static str {
-    match agent {
-        Agent::Codex => "reasoning_effort",
-        Agent::AstraPi | Agent::Claude | Agent::Gemini => "effort",
-    }
 }
 
 async fn send_session_config_request(
@@ -1349,6 +1342,7 @@ pub(crate) fn default_acp_command(agent: Agent) -> String {
         Agent::Codex => "npx -y @zed-industries/codex-acp@latest".to_string(),
         Agent::Claude => "npx -y @zed-industries/claude-code-acp@latest".to_string(),
         Agent::Gemini => "npx -y -- @google/gemini-cli@latest --experimental-acp".to_string(),
+        Agent::Opencode => "opencode acp".to_string(),
     }
 }
 
@@ -1543,12 +1537,12 @@ mod tests {
 
     #[test]
     fn codex_effort_uses_reasoning_effort_config_id() {
-        assert_eq!(effort_config_id(Agent::Codex), "reasoning_effort");
+        assert_eq!(Agent::Codex.effort_config_id(), "reasoning_effort");
     }
 
     #[test]
     fn claude_effort_uses_effort_config_id() {
-        assert_eq!(effort_config_id(Agent::Claude), "effort");
+        assert_eq!(Agent::Claude.effort_config_id(), "effort");
     }
 
     #[test]
