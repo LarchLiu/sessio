@@ -5,6 +5,7 @@ import {
   applyRuntimeAction,
   emptyAcpSessionState,
   emptyLiveRuntimeState,
+  liveThreadActivity,
   liveSessionActivity,
   normalizeRuntimeTurnSnapshot,
   type AcpPermissionRequest,
@@ -35,6 +36,7 @@ function session(
     ended = false,
     status = "streaming",
     permissions = [],
+    metadata,
   }: {
     agentRuntimeSessionId?: string;
     turnId?: string;
@@ -42,6 +44,7 @@ function session(
     ended?: boolean;
     status?: RuntimeTurnStatus;
     permissions?: AcpPermissionRequest[];
+    metadata?: Record<string, unknown>;
   } = {},
 ): LiveRuntimeSession {
   return {
@@ -75,6 +78,7 @@ function session(
     sessionState: emptyAcpSessionState(),
     protocolMessages: [],
     ended,
+    metadata,
   };
 }
 
@@ -197,5 +201,40 @@ describe("runtimeChat", () => {
         session("waiting", { permissions: [pendingPermission] }),
       ]),
     ).toBe("permission");
+  });
+
+  it("includes Astra planner sessions in thread activity by metadata", () => {
+    expect(
+      liveThreadActivity(
+        "thread-1",
+        [],
+        {
+          "runtime-planner": session("runtime-planner", {
+            agentRuntimeSessionId: "pending",
+            metadata: {
+              astraInternal: true,
+              astraRunId: "run-1",
+              astraThreadId: "thread-1",
+            },
+          }),
+        },
+        {},
+      ),
+    ).toBe("running");
+  });
+
+  it("includes linked live sessions before runtime aliases are reconciled", () => {
+    expect(
+      liveThreadActivity(
+        "thread-1",
+        ["codex:child-session"],
+        {
+          "runtime-child": session("runtime-child", {
+            agentRuntimeSessionId: "child-session",
+          }),
+        },
+        {},
+      ),
+    ).toBe("running");
   });
 });

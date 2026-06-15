@@ -12,6 +12,7 @@ import type {
 import { AGENT_LABEL } from "./api";
 import type { PendingNewChatSession } from "./navigation";
 import type { LiveRuntimeState } from "./runtimeChat";
+import { isThreadPlannerLiveSession, stringMeta } from "./runtimeChat";
 import { isAstraActive } from "./threadAstraView";
 
 type TFn = (key: string, vars?: Record<string, string | number>) => string;
@@ -534,24 +535,6 @@ function liveSessionStatus(liveSession: LiveRuntimeState["sessions"][string]): T
   if (hasFailure) return "failed";
   if (!hasActiveTurn && liveSession.turns.length > 0) return "history";
   return "live";
-}
-
-function isThreadPlannerLiveSession(
-  liveSession: LiveRuntimeState["sessions"][string],
-  threadId: string | undefined,
-): boolean {
-  if (!threadId) return false;
-  const metadata = liveSession.metadata ?? {};
-  const metadataThreadId = stringMeta(metadata, "astraThreadId")
-    ?? stringMeta(metadata, "threadId");
-  if (metadataThreadId !== threadId) return false;
-  if (stringMeta(metadata, "astraPurpose") === "orchestration") return true;
-  return Boolean(metadata.astraInternal && stringMeta(metadata, "astraRunId"));
-}
-
-function stringMeta(metadata: Record<string, unknown> | undefined, key: string): string | null {
-  const value = metadata?.[key];
-  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function liveSessionTimelineTime(liveSession: LiveRuntimeState["sessions"][string]): number {

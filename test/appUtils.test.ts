@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { betterSessionCandidate, mergeRuntimeSessionAliases, sessionDisplayTitle } from "../src/appUtils";
+import {
+  betterSessionCandidate,
+  mergeRuntimeSessionAliases,
+  sessionDisplayTitle,
+  threadUnreadKeys,
+} from "../src/appUtils";
 import type { SessionInfo } from "../src/api";
+import { emptyAcpSessionState, type LiveRuntimeSession } from "../src/runtimeChat";
 
 describe("mergeRuntimeSessionAliases", () => {
   it("maps a real agent session id back to its live runtime session", () => {
@@ -127,5 +133,58 @@ describe("sessionDisplayTitle", () => {
     };
 
     expect(sessionDisplayTitle(session)).toBe("Renamed");
+  });
+});
+
+describe("threadUnreadKeys", () => {
+  it("covers linked sessions, runtime aliases, and live Astra planner sessions", () => {
+    const planner: LiveRuntimeSession = {
+      sessioRuntimeSessionId: "runtime-planner",
+      agent: "astra-pi",
+      agentRuntimeSessionId: "planner-session",
+      transport: "acp",
+      workspacePath: "/tmp/project",
+      capabilities: {
+        supportsCancel: true,
+        supportsPermissions: true,
+        supportsToolDeltas: true,
+        supportsLoadSession: true,
+        supportsResume: false,
+        supportsFork: false,
+        supportsImageAttachments: false,
+        supportsAudioAttachments: false,
+        supportsEmbeddedContext: false,
+        supportsAttachments: false,
+        supportsModes: false,
+      },
+      metadata: {
+        astraInternal: true,
+        astraRunId: "run-1",
+        astraThreadId: "thread-1",
+      },
+      turns: [],
+      sessionState: emptyAcpSessionState(),
+      protocolMessages: [],
+      ended: false,
+    };
+
+    expect(
+      new Set(
+        threadUnreadKeys(
+          { threadId: "thread-1", sessionKeys: ["codex:child-session"] },
+          { "codex:child-session": "runtime-child" },
+          { "runtime-planner": planner },
+        ),
+      ),
+    ).toEqual(new Set([
+      "thread-1",
+      "thread:thread-1",
+      "codex:child-session",
+      "child-session",
+      "runtime-child",
+      "runtime-planner",
+      "astra-pi:planner-session",
+      "planner-session",
+    ]));
   });
 });

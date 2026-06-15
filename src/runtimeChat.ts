@@ -385,6 +385,55 @@ export function aggregateLiveSessionActivity(
   return best;
 }
 
+export function liveThreadActivity(
+  threadId: string,
+  sessionKeys: string[],
+  liveSessions: Record<string, LiveRuntimeSession>,
+  runtimeSessionAliases: Record<string, string>,
+): LiveSessionActivity {
+  const threadLiveSessions: Array<LiveRuntimeSession | null | undefined> = [];
+  const seenRuntimeSessionIds = new Set<string>();
+  const linkedSessionKeys = new Set(sessionKeys);
+
+  for (const sessionKey of sessionKeys) {
+    const runtimeId = runtimeSessionAliases[sessionKey];
+    if (!runtimeId || seenRuntimeSessionIds.has(runtimeId)) continue;
+    threadLiveSessions.push(liveSessions[runtimeId]);
+    seenRuntimeSessionIds.add(runtimeId);
+  }
+
+  for (const liveSession of Object.values(liveSessions)) {
+    const agentSessionId = liveSession.agentRuntimeSessionId.trim();
+    const matchesLinkedSession = agentSessionId
+      ? linkedSessionKeys.has(`${liveSession.agent}:${agentSessionId}`)
+      : false;
+    if (!matchesLinkedSession && !isThreadPlannerLiveSession(liveSession, threadId)) continue;
+    if (seenRuntimeSessionIds.has(liveSession.sessioRuntimeSessionId)) continue;
+    threadLiveSessions.push(liveSession);
+    seenRuntimeSessionIds.add(liveSession.sessioRuntimeSessionId);
+  }
+
+  return aggregateLiveSessionActivity(threadLiveSessions);
+}
+
+export function isThreadPlannerLiveSession(
+  liveSession: LiveRuntimeSession,
+  threadId: string | undefined,
+): boolean {
+  if (!threadId) return false;
+  const metadata = liveSession.metadata ?? {};
+  const metadataThreadId = stringMeta(metadata, "astraThreadId")
+    ?? stringMeta(metadata, "threadId");
+  if (metadataThreadId !== threadId) return false;
+  if (stringMeta(metadata, "astraPurpose") === "orchestration") return true;
+  return Boolean(metadata.astraInternal && stringMeta(metadata, "astraRunId"));
+}
+
+export function stringMeta(metadata: Record<string, unknown> | undefined, key: string): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 export function liveSessionUpdatedAt(
   session: LiveRuntimeSession | null | undefined,
 ): number | null {

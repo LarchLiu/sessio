@@ -60,6 +60,8 @@ import {
   sessionDisplayTitle,
   sessionIdentityKey,
   sessionKey,
+  deleteUnreadKeys,
+  threadUnreadKeys,
   type Filter,
   type ProjectSelection,
 } from "./appUtils";
@@ -317,6 +319,15 @@ export default function App() {
     setLastSelectedProjectKey(projectGroup.key);
   }, []);
 
+  const clearThreadUnread = useCallback((thread: ThreadIndexItemInfo) => {
+    setUnreadSessionIds((prev) =>
+      deleteUnreadKeys(
+        prev,
+        threadUnreadKeys(thread, runtimeSessionAliases, liveRuntimeState.sessions),
+      ),
+    );
+  }, [liveRuntimeState.sessions, runtimeSessionAliases, setUnreadSessionIds]);
+
   useSelectedSessionSync({
     availableSessions,
     selected,
@@ -430,6 +441,12 @@ export default function App() {
   );
 
   useEffect(() => {
+    if (!selectedThreadId) return;
+    const thread = threadIndexItems.find((item) => item.threadId === selectedThreadId);
+    if (thread) clearThreadUnread(thread);
+  }, [clearThreadUnread, selectedThreadId, threadIndexItems, unreadSessionIds]);
+
+  useEffect(() => {
     syncTrayMenu(recentForMenu, {
       show: t("menubar.show"),
       quit: t("menubar.quit"),
@@ -464,6 +481,7 @@ export default function App() {
           rememberSidebarProject({ key: project.id });
           setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
         }
+        clearThreadUnread(thread);
         setSelected(null);
         setSelectedProject(null);
         setSelectedThread({ projectId: thread.projectId, threadId: thread.threadId, goal: thread.goal });
@@ -482,6 +500,7 @@ export default function App() {
     openUpdateConfirm,
     projects,
     rememberSidebarProject,
+    clearThreadUnread,
     setFilter,
   ]);
 
@@ -710,6 +729,8 @@ export default function App() {
         setDetailMode("chat");
       }}
       onSelectThread={(projectGroup, thread, source) => {
+        const indexItem = threadIndexItems.find((item) => item.threadId === thread.id);
+        if (indexItem) clearThreadUnread(indexItem);
         setAutoTasksOpen(false);
         rememberSidebarProject(projectGroup);
         setSelected(null);

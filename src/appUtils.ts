@@ -4,7 +4,10 @@ import type {
   ProjectInfo,
   SessionInfo,
   SessionScope,
+  ThreadIndexItemInfo,
 } from "./api";
+import type { LiveRuntimeSession } from "./runtimeChat";
+import { isThreadPlannerLiveSession } from "./runtimeChat";
 
 export type Filter =
   | SessionScope
@@ -65,6 +68,40 @@ export function sessionUnreadKeys(
   const keys = new Set<string>([session.id, sessionIdentityKey(session)]);
   const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)];
   if (runtimeSessionId) keys.add(runtimeSessionId);
+  return Array.from(keys);
+}
+
+export function threadUnreadKeys(
+  thread: Pick<ThreadIndexItemInfo, "threadId" | "sessionKeys">,
+  runtimeSessionAliases: Record<string, string>,
+  liveSessions: Record<string, LiveRuntimeSession> = {},
+): string[] {
+  const keys = new Set<string>([thread.threadId, `thread:${thread.threadId}`]);
+
+  const addSessionKey = (sessionKey: string) => {
+    keys.add(sessionKey);
+    const separator = sessionKey.indexOf(":");
+    if (separator >= 0) {
+      const sessionId = sessionKey.slice(separator + 1);
+      if (sessionId) keys.add(sessionId);
+    }
+    const runtimeSessionId = runtimeSessionAliases[sessionKey];
+    if (runtimeSessionId) keys.add(runtimeSessionId);
+  };
+
+  for (const sessionKey of thread.sessionKeys) {
+    addSessionKey(sessionKey);
+  }
+
+  for (const liveSession of Object.values(liveSessions)) {
+    if (!isThreadPlannerLiveSession(liveSession, thread.threadId)) continue;
+    keys.add(liveSession.sessioRuntimeSessionId);
+    const agentSessionId = liveSession.agentRuntimeSessionId.trim();
+    if (!agentSessionId || !isPersistableAgentSessionId(agentSessionId)) continue;
+    keys.add(agentSessionId);
+    addSessionKey(sessionIdentity(liveSession.agent, agentSessionId));
+  }
+
   return Array.from(keys);
 }
 

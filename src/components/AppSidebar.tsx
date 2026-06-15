@@ -38,11 +38,17 @@ import {
 import { useI18n } from "../i18n";
 import type { ProjectGroup } from "../navigation";
 import {
-  aggregateLiveSessionActivity,
   liveSessionActivity,
+  liveThreadActivity,
   type LiveRuntimeState,
 } from "../runtimeChat";
-import { sessionDisplayTitle } from "../appUtils";
+import {
+  intersectsSet,
+  sessionDisplayTitle,
+  sessionIdentityKey,
+  sessionUnreadKeys,
+  threadUnreadKeys,
+} from "../appUtils";
 import { useUpdateCheck } from "../updater";
 import { AgentGlyph } from "./AgentIcon";
 import IconifyIcon, { HashIcon, PeopleTeam24RegularIcon } from "./IconifyIcon";
@@ -782,16 +788,16 @@ function ProjectSidebarGroup({
           >
             {visibleEntries.map((entry) => {
               if (entry.kind === "thread") {
-                const threadLiveSessions = entry.thread.sessionKeys.map((sessionIdKey) => {
-                  const runtimeId = runtimeSessionAliases[sessionIdKey];
-                  return runtimeId ? liveState.sessions[runtimeId] : undefined;
-                });
-                const threadActivity = aggregateLiveSessionActivity(threadLiveSessions);
-                const threadUnread = entry.thread.sessionKeys.some((sessionIdKey) => {
-                  if (unreadSessionIds.has(sessionIdKey)) return true;
-                  const runtimeId = runtimeSessionAliases[sessionIdKey];
-                  return runtimeId ? unreadSessionIds.has(runtimeId) : false;
-                });
+                const threadActivity = liveThreadActivity(
+                  entry.thread.threadId,
+                  entry.thread.sessionKeys,
+                  liveState.sessions,
+                  runtimeSessionAliases,
+                );
+                const threadUnread = intersectsSet(
+                  threadUnreadKeys(entry.thread, runtimeSessionAliases, liveState.sessions),
+                  unreadSessionIds,
+                );
                 return (
                   <SidebarThreadItem
                     key={entry.thread.threadId}
@@ -1136,29 +1142,8 @@ function sessionKey(s: SessionInfo): string {
   return `${s.agent}:${s.filePath}:${s.id}`;
 }
 
-function sessionIdentityKey(s: SessionInfo): string {
-  return `${s.agent}:${s.id}`;
-}
-
 function sessionTime(session: SessionInfo): number {
   return session.updatedAt ?? session.startedAt ?? 0;
-}
-
-function sessionUnreadKeys(
-  session: SessionInfo,
-  runtimeSessionAliases: Record<string, string>,
-): string[] {
-  const keys = new Set<string>([session.id, sessionIdentityKey(session)]);
-  const runtimeSessionId = runtimeSessionAliases[sessionIdentityKey(session)];
-  if (runtimeSessionId) keys.add(runtimeSessionId);
-  return Array.from(keys);
-}
-
-function intersectsSet(keys: Iterable<string>, lookup: Set<string>): boolean {
-  for (const key of keys) {
-    if (lookup.has(key)) return true;
-  }
-  return false;
 }
 
 function formatShortRelativeTime(ts: number | null, t: (key: string, vars?: Record<string, string | number>) => string): string {
