@@ -1588,10 +1588,10 @@ struct ExistingSessionRow {
     first_user_message: Option<String>,
     forked_from_agent: Option<Agent>,
     forked_from_id: Option<String>,
-    /// `origin` is written once at session creation and never mutated. When
-    /// merging identity rows we always carry the existing value forward so a
-    /// later reindexer pass that re-encounters this session via the parsed
-    /// jsonl can't downgrade a `thread`/`channel` row back to `chat`.
+    /// `origin` is provenance plus sidebar routing. Link/unlink paths may
+    /// upgrade/downgrade `chat <-> thread`, and merge logic carries the
+    /// existing non-chat value forward so a later parser pass can't downgrade
+    /// `thread`/`channel` back to `chat`.
     origin: SessionOrigin,
     /// Sticky for the same reason: auto task placeholder rows write this and
     /// we want it preserved when the indexer later replaces the row.
@@ -1919,7 +1919,7 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                  SET project_path = COALESCE(project_path, ?),
                      project_name = COALESCE(project_name, ?),
                      started_at = COALESCE(started_at, ?),
-                     updated_at = COALESCE(?, updated_at),
+                     updated_at = COALESCE(updated_at, ?),
                      rename_title = ?,
                      title = ?,
                      first_user_message = ?,
@@ -1927,7 +1927,6 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                      partial = ?,
                      available = ?,
                      archived = ?,
-                     last_indexed_at = ?,
                      forked_from_agent = ?,
                      forked_from_id = ?,
                      origin = ?,
@@ -1946,7 +1945,6 @@ fn insert_session(conn: &Connection, scope: &str, s: &SessionInfo) -> Result<()>
                     partial,
                     available,
                     archived,
-                    now_ms(),
                     forked_from_agent.map(|agent| agent.as_str()),
                     forked_from_id,
                     provenance.origin.as_str(),
@@ -10657,6 +10655,11 @@ mod schema_tests {
             file_path: String::new(),
             file_size: 0,
             partial: true,
+            started_at: Some(100),
+            updated_at: Some(100),
+            message_count: 0,
+            title: Some("placeholder title".to_string()),
+            first_user_message: Some("placeholder prompt".to_string()),
             scheduled_task_id: Some("task-2".to_string()),
             is_auxiliary: true,
             ..base.clone()
@@ -10684,6 +10687,11 @@ mod schema_tests {
             .pop()
             .unwrap();
         assert_eq!(row.file_path, "/tmp/project/task-session.jsonl");
+        assert_eq!(row.started_at, Some(10));
+        assert_eq!(row.updated_at, Some(10));
+        assert_eq!(row.message_count, 1);
+        assert_eq!(row.title.as_deref(), Some("task"));
+        assert_eq!(row.first_user_message.as_deref(), Some("task"));
         assert_eq!(row.scheduled_task_id.as_deref(), Some("task-2"));
         assert!(row.is_auxiliary);
 

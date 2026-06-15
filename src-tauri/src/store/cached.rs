@@ -10,11 +10,11 @@ use crate::models::{
     ThreadIndexItemInfo, ThreadInfo, ThreadKind, ThreadOrigin,
 };
 use crate::store::{
-    AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, ChannelSessionRecord,
-    IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound, NewPlanTaskSession,
-    PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord, RuntimeAgentSelection,
-    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
-    SessionStore, ThreadWorkSnapshotRecord,
+    is_real_session_file_path, AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord,
+    ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
+    NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
+    RuntimeAgentSelection, ScheduledTaskRecord, ScheduledTaskRunRecord,
+    SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -103,6 +103,16 @@ impl CachedStore {
             new_rec.scope.clone(),
         );
         let mut snap = self.snapshot.write().unwrap();
+        if !is_real_session_file_path(&new_rec.file_path)
+            && snap.by_pk.iter().any(|((agent, session_id, _), rec)| {
+                *agent == new_rec.agent
+                    && session_id == &new_rec.session_id
+                    && is_real_session_file_path(&rec.file_path)
+            })
+        {
+            drop(snap);
+            return self.refresh_from_inner();
+        }
         let placeholder_key = snap
             .by_pk
             .iter()

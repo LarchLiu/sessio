@@ -84,8 +84,9 @@ pub struct SessionInfo {
     pub archived: bool,
     /// Where this session was spawned. Determines whether the sidebar shows it
     /// directly (`Chat` / `Channel`) or expects it to be represented by a
-    /// thread item (`Thread`). Written once at creation time, not mutated as
-    /// the session is later linked elsewhere.
+    /// thread item (`Thread`). Link/unlink paths may upgrade or downgrade
+    /// chat/thread routing; parser reindex passes must not erase a non-chat
+    /// value already written by runtime/channel/thread code.
     #[serde(default)]
     pub origin: SessionOrigin,
     /// Set when this session is directly attached to a scheduled task — i.e.
