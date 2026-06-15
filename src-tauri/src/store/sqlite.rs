@@ -77,7 +77,6 @@ CREATE TABLE IF NOT EXISTS sessions (
     partial            INTEGER NOT NULL DEFAULT 0,
     available          INTEGER NOT NULL DEFAULT 1,
     archived           INTEGER NOT NULL DEFAULT 0,
-    hidden_from_sidebar INTEGER NOT NULL DEFAULT 0,
     origin             TEXT NOT NULL DEFAULT 'chat',
     scheduled_task_id  TEXT,
     is_auxiliary       INTEGER NOT NULL DEFAULT 0,
@@ -837,8 +836,10 @@ ALTER TABLE sessions ADD COLUMN rename_title TEXT;
 "#;
 
 // Current-schema backfill for databases created before thread live sessions
-// gained an internal "hide from ordinary session list" flag. This is applied
-// fault-tolerantly without bumping schema_migrations.
+// gained an internal "hide from ordinary session list" flag. The column has
+// since been replaced by `sessions.is_auxiliary` (see SCHEMA_CURRENT_SESSION_*
+// below); this batch now exists only to make the DROP idempotent on databases
+// that never carried it.
 const SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR: &str = r#"
 ALTER TABLE sessions ADD COLUMN hidden_from_sidebar INTEGER NOT NULL DEFAULT 0;
 "#;
@@ -1032,6 +1033,10 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
         seed_builtins(conn)?;
     }
+    // Order matters here: ADD COLUMN runs first so the legacy column exists
+    // even on databases predating it; backfill copies its values into
+    // is_auxiliary; the DROP at the end removes it for good. Each step is
+    // fault-tolerant so reruns and fresh installs are no-ops.
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_HIDDEN_FROM_SIDEBAR);
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_ORIGIN);
     let _ = conn.execute_batch(SCHEMA_CURRENT_SESSION_SCHEDULED_TASK_ID);
@@ -1039,6 +1044,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch(SCHEMA_CURRENT_THREAD_ORIGIN);
     let _ = conn.execute_batch(SCHEMA_CURRENT_THREAD_SCHEDULED_TASK_ID);
     backfill_session_is_auxiliary_from_hidden(conn)?;
+    drop_session_hidden_from_sidebar_column(conn)?;
     ensure_current_astra_run_sessions(conn)?;
     ensure_current_scheduled_tasks(conn)?;
     sync_astra_pi_builtin_agent_defaults(conn, now_ms())?;
@@ -1051,11 +1057,15 @@ fn ensure_current_astra_run_sessions(conn: &Connection) -> Result<()> {
 }
 
 /// Backfill `is_auxiliary` from the legacy `hidden_from_sidebar` column for
-/// existing rows. The new column was added with DEFAULT 0, so any session that
-/// was previously hidden must be flipped over so sidebar filtering keeps
-/// excluding it. Once the legacy column is removed (Step 6), this function can
-/// be deleted along with it.
+/// existing rows. After backfill, `drop_session_hidden_from_sidebar_column`
+/// removes the legacy column. Both helpers are fault-tolerant: fresh installs
+/// have no rows to copy, and a database whose column was already dropped on a
+/// previous launch silently succeeds.
 fn backfill_session_is_auxiliary_from_hidden(conn: &Connection) -> Result<()> {
+    // Skip if the column has already been dropped on a previous launch.
+    if !column_exists(conn, "sessions", "hidden_from_sidebar")? {
+        return Ok(());
+    }
     conn.execute_batch(
         "UPDATE sessions
             SET is_auxiliary = 1
@@ -1063,6 +1073,25 @@ fn backfill_session_is_auxiliary_from_hidden(conn: &Connection) -> Result<()> {
             AND is_auxiliary = 0;",
     )?;
     Ok(())
+}
+
+/// SQLite 3.35+ supports `ALTER TABLE ... DROP COLUMN`. rusqlite 0.32 bundles
+/// 3.46, so this works on every install. Idempotent via `column_exists`.
+fn drop_session_hidden_from_sidebar_column(conn: &Connection) -> Result<()> {
+    if !column_exists(conn, "sessions", "hidden_from_sidebar")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE sessions DROP COLUMN hidden_from_sidebar;")?;
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == column);
+    Ok(exists)
 }
 
 fn ensure_current_scheduled_tasks(conn: &Connection) -> Result<()> {
@@ -1818,11 +1847,6 @@ fn runtime_agent_order(agent: Agent) -> i64 {
 struct ExistingSessionRow {
     scope: String,
     file_path: String,
-    /// Read but unused: kept on the row mapper so Step 6 can drop the column
-    /// in a single migration commit. Once the column is gone this field and
-    /// the SELECT projection both go too.
-    #[allow(dead_code)]
-    hidden_from_sidebar: i64,
     partial: i64,
     available: i64,
     archived: i64,
@@ -1840,8 +1864,8 @@ struct ExistingSessionRow {
     /// Sticky for the same reason: auto task placeholder rows write this and
     /// we want it preserved when the indexer later replaces the row.
     scheduled_task_id: Option<String>,
-    /// Sticky-OR like `hidden_from_sidebar`: once any row in the identity set
-    /// is auxiliary the merged write keeps it set.
+    /// Sticky-OR: once any row in the identity set is auxiliary, the merged
+    /// write keeps it set. Auxiliary rows never appear in the sidebar.
     is_auxiliary: i64,
 }
 
@@ -1851,7 +1875,7 @@ fn load_identity_session_rows(
     session_id: &str,
 ) -> Result<Vec<ExistingSessionRow>> {
     let mut stmt = conn.prepare(
-        "SELECT scope, file_path, hidden_from_sidebar, partial, available, archived,
+        "SELECT scope, file_path, partial, available, archived,
                 message_count, rename_title, title, first_user_message, forked_from_agent, forked_from_id,
                 origin, scheduled_task_id, is_auxiliary
          FROM sessions
@@ -1865,25 +1889,24 @@ fn load_identity_session_rows(
     let rows = stmt
         .query_map(params![agent.as_str(), session_id], |row| {
             let forked_agent = row
-                .get::<_, Option<String>>(10)?
+                .get::<_, Option<String>>(9)?
                 .and_then(|value| Agent::from_db_str(&value));
-            let origin_raw: String = row.get(12)?;
+            let origin_raw: String = row.get(11)?;
             Ok(ExistingSessionRow {
                 scope: row.get(0)?,
                 file_path: row.get(1)?,
-                hidden_from_sidebar: row.get(2)?,
-                partial: row.get(3)?,
-                available: row.get(4)?,
-                archived: row.get(5)?,
-                message_count: row.get(6)?,
-                rename_title: row.get(7)?,
-                title: row.get(8)?,
-                first_user_message: row.get(9)?,
+                partial: row.get(2)?,
+                available: row.get(3)?,
+                archived: row.get(4)?,
+                message_count: row.get(5)?,
+                rename_title: row.get(6)?,
+                title: row.get(7)?,
+                first_user_message: row.get(8)?,
                 forked_from_agent: forked_agent,
-                forked_from_id: row.get(11)?,
+                forked_from_id: row.get(10)?,
                 origin: SessionOrigin::from_db_str(&origin_raw).unwrap_or_default(),
-                scheduled_task_id: row.get(13)?,
-                is_auxiliary: row.get(14)?,
+                scheduled_task_id: row.get(12)?,
+                is_auxiliary: row.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2345,9 +2368,9 @@ fn insert_session(
             message_count, rename_title, title, first_user_message,
             file_size, file_mtime,
             partial, available, archived,
-            hidden_from_sidebar, last_indexed_at, forked_from_agent, forked_from_id,
+            last_indexed_at, forked_from_agent, forked_from_id,
             origin, scheduled_task_id, is_auxiliary
-        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?, ?,?,?, ?,?,?,?, ?,?,?)",
+        ) VALUES (?,?,?,?, ?,?, ?,?, ?,?,?,?, ?,?, ?,?,?, ?,?,?, ?,?,?)",
         params![
             s.agent.as_str(),
             s.id,
@@ -2366,9 +2389,6 @@ fn insert_session(
             s.partial as i64,
             s.available as i64,
             s.archived as i64,
-            // hidden_from_sidebar mirrors is_auxiliary while the legacy column
-            // is being phased out; Step 6 drops the column and this argument.
-            aux_value,
             now_ms(),
             forked_from_agent.map(|agent| agent.as_str()),
             forked_from_id,
@@ -2994,7 +3014,8 @@ fn load_project_by_id(conn: &Connection, project_id: &str) -> Result<ProjectInfo
         "SELECT p.id, p.path, p.name, p.process_template_id, p.created_at, p.updated_at,
                 COUNT(s.session_id) AS session_count
          FROM projects p
-         LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.hidden_from_sidebar = 0
+         LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
+                              AND s.is_auxiliary = 0 AND s.origin IN ('chat', 'channel')
          WHERE p.id = ? AND p.archived = 0
          GROUP BY p.id",
         params![project_id],
@@ -5456,16 +5477,14 @@ fn load_sessions(conn: &Connection, user_projects_only: bool) -> Result<Vec<Sess
             "SELECT {SESSION_INFO_COLUMNS_S}
              FROM sessions s
              INNER JOIN projects p ON p.path = s.project_path AND p.archived = 0
-             WHERE s.is_auxiliary = 0 AND s.hidden_from_sidebar = 0
-               AND s.origin IN ('chat', 'channel')
+             WHERE s.is_auxiliary = 0 AND s.origin IN ('chat', 'channel')
              ORDER BY s.updated_at DESC"
         )
     } else {
         format!(
             "SELECT {SESSION_INFO_COLUMNS}
              FROM sessions
-             WHERE is_auxiliary = 0 AND hidden_from_sidebar = 0
-               AND origin IN ('chat', 'channel')
+             WHERE is_auxiliary = 0 AND origin IN ('chat', 'channel')
              ORDER BY updated_at DESC"
         )
     };
@@ -6071,7 +6090,8 @@ impl SessionStore for SqliteStore {
             "SELECT p.id, p.path, p.name, p.process_template_id, p.created_at, p.updated_at,
                     COUNT(s.session_id) AS session_count
              FROM projects p
-             LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1 AND s.hidden_from_sidebar = 0
+             LEFT JOIN sessions s ON s.project_path = p.path AND s.available = 1
+                                  AND s.is_auxiliary = 0 AND s.origin IN ('chat', 'channel')
              WHERE p.archived = 0
              GROUP BY p.id
              ORDER BY p.updated_at DESC, p.name COLLATE NOCASE ASC",
@@ -8614,12 +8634,10 @@ impl SessionStore for SqliteStore {
         conn.execute(
             "UPDATE sessions
                 SET scheduled_task_id = ?,
-                    is_auxiliary = MAX(is_auxiliary, ?),
-                    hidden_from_sidebar = MAX(hidden_from_sidebar, ?)
+                    is_auxiliary = MAX(is_auxiliary, ?)
               WHERE agent = ? AND session_id = ?",
             params![
                 scheduled_task_id,
-                aux_value,
                 aux_value,
                 agent.as_str(),
                 session_id,
@@ -10706,17 +10724,17 @@ mod migration_tests {
         assert!(!visible_by_ref.partial);
         assert_eq!(visible_by_ref.message_count, 4);
 
-        let hidden_from_sidebar: i64 = store
+        let is_auxiliary: i64 = store
             .conn
             .lock()
             .unwrap()
             .query_row(
-                "SELECT hidden_from_sidebar FROM sessions WHERE agent = ? AND session_id = ?",
+                "SELECT is_auxiliary FROM sessions WHERE agent = ? AND session_id = ?",
                 params![Agent::AstraPi.as_str(), "pi-live-session"],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(hidden_from_sidebar, 1);
+        assert_eq!(is_auxiliary, 1);
         let stored = store
             .conn
             .lock()
