@@ -175,13 +175,15 @@ export default function ChatComposer({
                 </button>
               </Tooltip>
             )}
-            <RuntimeMenuSelect
-              ariaLabel="Default permissions"
-              value={composer.permissionMode}
-              onChange={(value) => void composer.handlePermissionModeChange(value)}
-              disabled={runtimeControlsDisabled || !composer.selectedRuntimeAgent}
-              options={composer.permissionOptions}
-            />
+            {composer.permissionOptions.length > 0 && (
+              <RuntimeMenuSelect
+                ariaLabel="Default permissions"
+                value={composer.permissionMode}
+                onChange={(value) => void composer.handlePermissionModeChange(value)}
+                disabled={runtimeControlsDisabled || !composer.selectedRuntimeAgent}
+                options={composer.permissionOptions}
+              />
+            )}
             {modeActions}
           </div>
           <div className="flex shrink-0 items-center gap-2.5">

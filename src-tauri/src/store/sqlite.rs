@@ -1456,8 +1456,12 @@ fn seed_builtin_agents(conn: &Connection, now: i64) -> Result<()> {
                 runtime_option("medium", "Medium"),
                 runtime_option("high", "High"),
             ],
-            permission_mode: None,
-            permission_modes: Vec::new(),
+            permission_mode: Some("default"),
+            permission_modes: vec![
+                runtime_option("default", "Default"),
+                runtime_option("autoEdit", "Auto Edit"),
+                runtime_option("yolo", "YOLO"),
+            ],
             enabled: false,
             transport: RuntimeTransportKind::Acp,
             commands: AgentCommandsInfo {

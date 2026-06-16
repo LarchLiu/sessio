@@ -2864,7 +2864,7 @@ function AgentEditor({
                   />
                 </AgentPreferenceRow>
               )}
-              {!isAstra && (
+              {agent.permissionModes.length > 0 && (
                 <AgentPreferenceRow label={t("assistant.permission_mode")}>
                   <AgentInlineSelect
                     value={permissionMode}

@@ -1850,14 +1850,16 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
                   </button>
                 </Tooltip>
               )}
-              <RuntimeMenuSelect
-                value={permissionMode}
-                options={permissionOptions}
-                disabled={disabled}
-                ariaLabel="Default permissions"
-                onChange={onPermissionChange}
-                menuPlacement="top"
-              />
+              {permissionOptions.length > 0 && (
+                <RuntimeMenuSelect
+                  value={permissionMode}
+                  options={permissionOptions}
+                  disabled={disabled}
+                  ariaLabel="Default permissions"
+                  onChange={onPermissionChange}
+                  menuPlacement="top"
+                />
+              )}
             </div>
             <div className="flex shrink-0 items-center gap-2.5">
               <RuntimeMenuSelect
