@@ -39,12 +39,14 @@ export default function ThreadPage({
   onSelectSession,
   onOpenMultiSessionChat,
   onError,
+  transparent = false,
 }: {
   project: ProjectInfo;
   threadId: string;
   onSelectSession: (session: SessionInfo) => void;
   onOpenMultiSessionChat: () => void;
   onError: (error: string | null) => void;
+  transparent?: boolean;
 }) {
   const { t, lang } = useI18n();
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
@@ -95,7 +97,12 @@ export default function ThreadPage({
     [thread?.stages],
   );
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
+    <div
+      className={
+        "flex h-full min-h-0 flex-1 flex-col overflow-hidden " +
+        (transparent ? "bg-transparent" : "bg-surface-panel")
+      }
+    >
       <ScrollArea className="min-h-0 flex-1" viewportClassName="px-6 py-5">
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-16 text-body-sm text-ink/45">

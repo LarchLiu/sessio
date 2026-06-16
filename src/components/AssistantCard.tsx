@@ -15,12 +15,14 @@ const textareaClassName = "min-w-0 resize-none rounded-md border border-input-bo
 export default function AssistantCard({
   assistant,
   agents,
+  sidebarMode = false,
   onUpdated,
   onDeleted,
   onError,
 }: {
   assistant: AssistantInfo;
   agents: AgentInfo[];
+  sidebarMode?: boolean;
   onUpdated: (assistant: AssistantInfo) => void;
   onDeleted: (assistantId: string) => void;
   onError: (error: string | null) => void;
@@ -72,7 +74,7 @@ export default function AssistantCard({
   };
 
   return (
-    <div className={`rounded-lg border border-card-border/[0.12] bg-card p-3 ${assistant.enabled ? "" : "opacity-45"}`}>
+    <div className={`rounded-lg border border-card-border/[0.12] p-3 ${sidebarMode ? "bg-ink/[0.025]" : "bg-card"} ${assistant.enabled ? "" : "opacity-45"}`}>
       {editing ? (
         <div className="grid gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} className={inputClassName} />

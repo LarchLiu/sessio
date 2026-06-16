@@ -1,9 +1,17 @@
-import { PanelRightOpen, Info } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import type { ComponentType } from "react";
+import { FolderOpen, Info, PanelRightOpen, Workflow, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
 import ThreadPage from "../pages/ThreadPage";
-import { ProjectWorkbenchPage } from "../pages/ProjectPage";
+import { ProjectWorkbenchPage, type ProjectView } from "../pages/ProjectPage";
+import { BitcoinHashesOutlineIcon, HashtagChatLinearIcon, Robot3LineIcon } from "./IconifyIcon";
 import Tooltip from "./Tooltip";
+
+type IconComponent = LucideIcon | ComponentType<{ className?: string }>;
+type RightTab =
+  | { kind: "thread" }
+  | { kind: "project"; view: ProjectView };
 
 interface AppRightSidebarProps {
   // Context that decides what fills the panel.
@@ -15,6 +23,12 @@ interface AppRightSidebarProps {
   onOpenThreadMultiSessionChat: () => void;
   onClose: () => void;
   onError: (message: string | null) => void;
+}
+
+function sameTab(a: RightTab, b: RightTab) {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "project" && b.kind === "project") return a.view === b.view;
+  return true;
 }
 
 export default function AppRightSidebar({
@@ -30,27 +44,103 @@ export default function AppRightSidebar({
 
   const threadProject = selectedThreadProject;
   const threadId = selectedThread?.threadId ?? null;
-  const sessionProject = !selectedThread ? selectedSessionProject : null;
-
   const hasThread = Boolean(threadProject && threadId);
-  const hasProject = !hasThread && Boolean(sessionProject);
+  // Prefer the thread's project (when a thread is selected) so the project
+  // tabs operate on the same context. Fall back to the session's project.
+  const project = threadProject ?? selectedSessionProject ?? null;
+  const hasProject = Boolean(project);
+
+  const tabs = useMemo(() => {
+    const items: { id: string; label: string; icon: IconComponent; tab: RightTab }[] = [];
+    if (hasThread) {
+      items.push({
+        id: "thread",
+        label: t("sidebar.right_tab_thread"),
+        icon: HashtagChatLinearIcon,
+        tab: { kind: "thread" },
+      });
+    }
+    if (hasProject) {
+      items.push(
+        {
+          id: "files",
+          label: t("project.files"),
+          icon: FolderOpen,
+          tab: { kind: "project", view: "files" },
+        },
+        {
+          id: "threads",
+          label: t("thread.title"),
+          icon: BitcoinHashesOutlineIcon,
+          tab: { kind: "project", view: "threads" },
+        },
+        {
+          id: "workflows",
+          label: t("project.processTemplateId"),
+          icon: Workflow,
+          tab: { kind: "project", view: "stages" },
+        },
+        {
+          id: "assistants",
+          label: t("assistant.title"),
+          icon: Robot3LineIcon,
+          tab: { kind: "project", view: "assistants" },
+        },
+      );
+    }
+    return items;
+  }, [hasProject, hasThread, t]);
+
+  const defaultTab: RightTab | null = useMemo(() => {
+    if (hasProject) return { kind: "project", view: "files" };
+    if (hasThread) return { kind: "thread" };
+    return null;
+  }, [hasProject, hasThread]);
+
+  const [activeTab, setActiveTab] = useState<RightTab | null>(defaultTab);
+
+  // Keep `activeTab` valid as the available tab set changes (e.g. user
+  // switches between selecting a session and selecting a thread).
+  useEffect(() => {
+    if (!defaultTab) {
+      if (activeTab !== null) setActiveTab(null);
+      return;
+    }
+    if (!activeTab || !tabs.some((item) => sameTab(item.tab, activeTab))) {
+      setActiveTab(defaultTab);
+    }
+  }, [activeTab, defaultTab, tabs]);
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
       <div
         data-tauri-drag-region
-        className="relative flex h-12 shrink-0 items-center justify-between border-b border-ink/10 px-5 select-none"
+        className="relative flex h-12 shrink-0 items-center justify-between gap-2 border-b border-ink/10 px-3 select-none"
       >
-        <span
-          data-tauri-drag-region
-          className="truncate text-body-sm font-medium leading-none text-ink/72"
-        >
-          {hasThread
-            ? selectedThread?.goal ?? t("sidebar.right_empty_title")
-            : hasProject
-              ? sessionProject?.name ?? t("sidebar.right_empty_title")
-              : t("sidebar.right_empty_title")}
-        </span>
+        <div className="flex min-w-0 items-center gap-1">
+          {tabs.map(({ id, label, icon: Icon, tab }) => {
+            const active = activeTab !== null && sameTab(tab, activeTab);
+            return (
+              <Tooltip key={id} content={label} placement="bottom">
+                <button
+                  type="button"
+                  aria-label={label}
+                  aria-pressed={active}
+                  data-tauri-drag-region="false"
+                  onClick={() => setActiveTab(tab)}
+                  className={
+                    "inline-flex h-8 w-8 items-center justify-center rounded-md transition " +
+                    (active
+                      ? "bg-ink/[0.08] text-ink"
+                      : "text-ink/55 hover:bg-ink/5 hover:text-ink/85")
+                  }
+                >
+                  <Icon className="h-4 w-4" />
+                </button>
+              </Tooltip>
+            );
+          })}
+        </div>
         <Tooltip content={t("sidebar.right_close")} placement="bottom">
           <button
             type="button"
@@ -64,17 +154,20 @@ export default function AppRightSidebar({
         </Tooltip>
       </div>
       <div className="flex flex-1 min-h-0 flex-col overflow-hidden">
-        {hasThread && threadProject && threadId ? (
+        {activeTab?.kind === "thread" && threadProject && threadId ? (
           <ThreadPage
             project={threadProject}
             threadId={threadId}
+            transparent
             onSelectSession={onSelectThreadChatSession}
             onOpenMultiSessionChat={onOpenThreadMultiSessionChat}
             onError={onError}
           />
-        ) : hasProject && sessionProject ? (
+        ) : activeTab?.kind === "project" && project ? (
           <ProjectWorkbenchPage
-            project={sessionProject}
+            project={project}
+            view={activeTab.view}
+            hideTabs
             onSelectThreadChatSession={onSelectThreadChatSession}
             onError={onError}
           />

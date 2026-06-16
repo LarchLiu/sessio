@@ -1,4 +1,5 @@
 import {
+  type CSSProperties,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -29,7 +30,7 @@ import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTab
 import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { sessionDisplayTitle } from "../appUtils";
 
-type ProjectView = "threads" | "stages" | "assistants" | "files";
+export type ProjectView = "threads" | "stages" | "assistants" | "files";
 type ThreadPanelView = "threads" | "thread-chats";
 const THREAD_KINDS: ThreadKind[] = ["process", "teamwork", "brainstorm", "debate"];
 const AGENT_PARTICIPANT_KINDS = new Set<ThreadKind>(["brainstorm", "debate"]);
@@ -285,10 +286,16 @@ export function ProjectWorkbenchPage({
   project,
   onSelectThreadChatSession,
   onError,
+  view: viewProp,
+  onViewChange,
+  hideTabs = false,
 }: {
   project: ProjectInfo;
   onSelectThreadChatSession: (session: SessionInfo) => void;
   onError: (error: string | null) => void;
+  view?: ProjectView;
+  onViewChange?: (view: ProjectView) => void;
+  hideTabs?: boolean;
 }) {
   const { t } = useI18n();
   const projectViewTabs = useMemo<SegmentedTabItem<ProjectView>[]>(
@@ -305,7 +312,12 @@ export function ProjectWorkbenchPage({
   const [assistants, setAssistants] = useState<AssistantInfo[]>([]);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [processLoading, setProcessTemplateLoading] = useState(true);
-  const [activeView, setActiveView] = useState<ProjectView>("threads");
+  const [internalView, setInternalView] = useState<ProjectView>("threads");
+  const activeView = viewProp ?? internalView;
+  const setActiveView = (next: ProjectView) => {
+    if (onViewChange) onViewChange(next);
+    if (viewProp === undefined) setInternalView(next);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -365,24 +377,31 @@ export function ProjectWorkbenchPage({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
+    <div
+      className={
+        "flex h-full min-h-0 flex-1 flex-col overflow-hidden " +
+        (hideTabs ? "bg-transparent" : "bg-surface-panel")
+      }
+    >
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div className="flex shrink-0 items-center gap-4 px-5 pt-5">
-          <SegmentedTabs
-            items={projectViewTabs}
-            value={activeView}
-            onChange={setActiveView}
-            itemWidth={116}
-            itemHeight={32}
-            padding={4}
-          />
-        </div>
+        {!hideTabs && (
+          <div className="flex shrink-0 items-center gap-4 px-5 pt-5">
+            <SegmentedTabs
+              items={projectViewTabs}
+              value={activeView}
+              onChange={setActiveView}
+              itemWidth={116}
+              itemHeight={32}
+              padding={4}
+            />
+          </div>
+        )}
         {activeView === "files" ? (
-          <ProjectFilesPanel project={project} />
+          <ProjectFilesPanel project={project} hideTabs={hideTabs} />
         ) : (
           <ScrollArea
             className="min-h-0 flex-1"
-            viewportClassName="px-5 pb-5 pt-4"
+            viewportClassName={hideTabs ? "px-5 pb-5 pt-5" : "px-5 pb-5 pt-4"}
           >
             {activeView === "threads" && (
               <ThreadProcessTemplatePanel
@@ -392,6 +411,7 @@ export function ProjectWorkbenchPage({
                 assistants={assistants}
                 agents={agents}
                 loading={processLoading}
+                compact={hideTabs}
                 onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
                 onThreadUpdated={patchThread}
                 onThreadDeleted={(threadId) => setThreads((prev) => prev.filter((thread) => thread.id !== threadId))}
@@ -424,6 +444,7 @@ export function ProjectWorkbenchPage({
                 project={project}
                 stages={projectStages}
                 assistants={assistants}
+                compact={hideTabs}
                 onCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
                 onUpdated={patchProjectStage}
                 onDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
@@ -439,6 +460,7 @@ export function ProjectWorkbenchPage({
                 assistants={assistants}
                 agents={agents}
                 loading={processLoading}
+                sidebarMode={hideTabs}
                 onAssistantCreated={(assistant) => setAssistants((prev) => [...prev, assistant])}
                 onAssistantUpdated={patchAssistant}
                 onAssistantDeleted={(assistantId) => setAssistants((prev) => prev.filter((assistant) => assistant.id !== assistantId))}
@@ -452,7 +474,7 @@ export function ProjectWorkbenchPage({
   );
 }
 
-function ProjectFilesPanel({ project }: { project: ProjectInfo }) {
+function ProjectFilesPanel({ project, hideTabs = false }: { project: ProjectInfo; hideTabs?: boolean }) {
   const { t } = useI18n();
   const [paths, setPaths] = useState<string[] | null>(null);
   const [gitStatus, setGitStatus] = useState<ProjectGitStatusEntry[]>([]);
@@ -493,24 +515,22 @@ function ProjectFilesPanel({ project }: { project: ProjectInfo }) {
   }, [project.path, t]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 pb-5 pt-4">
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-card-border/[0.12] bg-ink/[0.025]">
-        {loading ? (
-          <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
-            {t("project.files_loading")}
-          </div>
-        ) : error ? (
-          <div className="flex flex-1 items-center justify-center px-4 text-center text-body-sm text-ink/45">
-            {error}
-          </div>
-        ) : paths && paths.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
-            {t("project.files_empty")}
-          </div>
-        ) : (
-          <ProjectFilesTree paths={paths ?? []} gitStatus={gitStatus} />
-        )}
-      </div>
+    <div className={"flex min-h-0 flex-1 flex-col overflow-hidden py-4 "}>
+      {loading ? (
+        <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
+          {t("project.files_loading")}
+        </div>
+      ) : error ? (
+        <div className="flex flex-1 items-center justify-center px-4 text-center text-body-sm text-ink/45">
+          {error}
+        </div>
+      ) : paths && paths.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
+          {t("project.files_empty")}
+        </div>
+      ) : (
+        <ProjectFilesTree paths={paths ?? []} gitStatus={gitStatus} />
+      )}
     </div>
   );
 }
@@ -525,15 +545,32 @@ function ProjectFilesTree({
   const { model } = useFileTree({
     paths,
     initialExpansion: "closed",
-    flattenEmptyDirectories: true,
+    flattenEmptyDirectories: false,
     search: true,
     gitStatus,
   });
+  const treeStyle: CSSProperties & Record<string, string> = {
+    height: "100%",
+    width: "100%",
+    backgroundColor: "transparent",
+    "--trees-bg-override": "transparent",
+    "--trees-bg-muted-override": "rgb(var(--color-fg) / 0.045)",
+    "--trees-input-bg-override": "transparent",
+    "--trees-search-bg-override": "transparent",
+    "--trees-selected-bg-override": "rgb(var(--color-fg) / 0.08)",
+    "--trees-border-color-override": "rgb(var(--color-fg) / 0.10)",
+    "--trees-fg-override": "rgb(var(--color-fg) / 0.78)",
+    "--trees-fg-muted-override": "rgb(var(--color-fg) / 0.42)",
+    "--trees-search-fg-override": "rgb(var(--color-fg) / 0.78)",
+    "--trees-selected-fg-override": "rgb(var(--color-fg) / 0.88)",
+    "--trees-selected-focused-border-color-override": "rgb(var(--color-fg) / 0.16)",
+    "--trees-focus-ring-color-override": "rgb(var(--color-fg) / 0.18)",
+  };
   return (
     <FileTree
       model={model}
       className="flex-1"
-      style={{ height: "100%", width: "100%" }}
+      style={treeStyle}
     />
   );
 }
@@ -587,6 +624,7 @@ function ThreadProcessTemplatePanel({
   assistants,
   agents,
   loading,
+  compact = false,
   onThreadCreated,
   onThreadUpdated,
   onThreadDeleted,
@@ -602,6 +640,7 @@ function ThreadProcessTemplatePanel({
   assistants: AssistantInfo[];
   agents: AgentInfo[];
   loading: boolean;
+  compact?: boolean;
   onThreadCreated: (thread: ThreadInfo) => void;
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
@@ -799,7 +838,7 @@ function ThreadProcessTemplatePanel({
   };
 
   return (
-    <div className="min-w-0 rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5">
+    <div className={compact ? "min-w-0" : "min-w-0 rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5"}>
         <SegmentedTabs
           items={threadPanelTabs}
           value={panelView}
@@ -931,6 +970,7 @@ function ThreadProcessTemplatePanel({
         ) : panelView === "thread-chats" ? (
           <ThreadChatList
             sessions={threadChatSessions}
+            compact={compact}
             onSelectThreadChatSession={onSelectThreadChatSession}
           />
         ) : threads.length === 0 ? (
@@ -946,6 +986,7 @@ function ThreadProcessTemplatePanel({
                 projectStages={projectStages}
                 assistants={assistants}
                 agents={agents}
+                compact={compact}
                 onThreadUpdated={onThreadUpdated}
                 onThreadDeleted={onThreadDeleted}
                 onStageAdded={onStageAdded}
@@ -966,9 +1007,11 @@ function ThreadProcessTemplatePanel({
 
 function ThreadChatList({
   sessions,
+  compact = false,
   onSelectThreadChatSession,
 }: {
   sessions: SessionInfo[];
+  compact?: boolean;
   onSelectThreadChatSession: (session: SessionInfo) => void;
 }) {
   const { t } = useI18n();
@@ -986,7 +1029,10 @@ function ThreadChatList({
           key={sessionIdentityKey(session)}
           type="button"
           onClick={() => onSelectThreadChatSession(session)}
-          className="flex min-w-0 items-center gap-3 rounded-lg border border-ink/10 bg-surface-panel px-3 py-2 text-left transition hover:bg-ink/[0.035]"
+          className={
+            "flex min-w-0 items-center gap-3 rounded-lg border border-ink/10 px-3 py-2 text-left transition hover:bg-ink/[0.035] " +
+            (compact ? "bg-ink/[0.025]" : "bg-surface-panel")
+          }
         >
           <AgentGlyph agent={session.agent} className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1">
@@ -1159,6 +1205,7 @@ function ThreadCard({
   projectStages,
   assistants,
   agents,
+  compact = false,
   onThreadUpdated,
   onThreadDeleted,
   onStageAdded,
@@ -1171,6 +1218,7 @@ function ThreadCard({
   projectStages: ProjectStageInfo[];
   assistants: AssistantInfo[];
   agents: AgentInfo[];
+  compact?: boolean;
   onThreadUpdated: (thread: ThreadInfo) => void;
   onThreadDeleted: (threadId: string) => void;
   onStageAdded: (stage: StageInfo) => void;
@@ -1370,7 +1418,12 @@ function ThreadCard({
   }, [availableProjectStages]);
 
   return (
-    <section className="rounded-lg border border-ink/10 bg-surface-panel p-3 shadow-sm">
+    <section
+      className={
+        "rounded-lg border border-ink/10 p-3 shadow-sm " +
+        (compact ? "bg-ink/[0.025]" : "bg-surface-panel")
+      }
+    >
       {editing ? (
         <div className="grid gap-2">
           <div className="flex items-center gap-3">
@@ -1586,6 +1639,7 @@ function ProjectStagePicker({
   project,
   stages,
   assistants,
+  compact = false,
   onCreated,
   onUpdated,
   onDeleted,
@@ -1595,6 +1649,7 @@ function ProjectStagePicker({
   project: ProjectInfo;
   stages: ProjectStageInfo[];
   assistants: AssistantInfo[];
+  compact?: boolean;
   onCreated: (stage: ProjectStageInfo) => void;
   onUpdated: (stage: ProjectStageInfo) => void;
   onDeleted: (stageId: string) => void;
@@ -1613,7 +1668,7 @@ function ProjectStagePicker({
   );
 
   return (
-    <div className="mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-5">
+    <div className={compact ? "" : "mb-3 rounded-lg border border-ink/10 bg-ink/[0.025] p-5"}>
       <div className="grid gap-3">
         <div className="flex items-center justify-between gap-3">
           <div className="text-body-sm font-semibold text-card-fg/85">{t("stage.project_stages")}</div>
@@ -1627,6 +1682,7 @@ function ProjectStagePicker({
           assistants={enabledAssistants}
           loading={false}
           dragGroup="project-stages"
+          sidebarMode={compact}
           onUpdated={onUpdated}
           onDeleted={onDeleted}
           onReload={onReload}
@@ -1651,6 +1707,7 @@ function AssistantManagementPanel({
   agents,
   loading,
   compact = false,
+  sidebarMode = false,
   onAssistantCreated,
   onAssistantUpdated,
   onAssistantDeleted,
@@ -1661,6 +1718,7 @@ function AssistantManagementPanel({
   agents: AgentInfo[];
   loading: boolean;
   compact?: boolean;
+  sidebarMode?: boolean;
   onAssistantCreated: (assistant: AssistantInfo) => void;
   onAssistantUpdated: (assistant: AssistantInfo) => void;
   onAssistantDeleted: (assistantId: string) => void;
@@ -1679,7 +1737,7 @@ function AssistantManagementPanel({
       {loading ? (
         <div className="py-8 text-center text-body-sm text-ink/40">{t("memory_search.searching")}</div>
       ) : (
-        <div className="rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5">
+        <div className={sidebarMode ? "" : "rounded-lg border border-card-border/[0.12] bg-ink/[0.025] p-5"}>
           <SegmentedTabs
             items={[
               { value: "builtin", label: t("assistant.builtin"), badge: builtin.length },
@@ -1704,6 +1762,7 @@ function AssistantManagementPanel({
                 key={assistant.id}
                 assistant={assistant}
                 agents={agents}
+                sidebarMode={sidebarMode}
                 onUpdated={onAssistantUpdated}
                 onDeleted={onAssistantDeleted}
                 onError={onError}

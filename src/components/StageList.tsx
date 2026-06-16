@@ -22,6 +22,7 @@ export default function StageList({
   assistants,
   loading,
   dragGroup = "project-stages",
+  sidebarMode = false,
   onUpdated,
   onDeleted,
   onReload,
@@ -31,6 +32,7 @@ export default function StageList({
   assistants: AssistantInfo[];
   loading: boolean;
   dragGroup?: string;
+  sidebarMode?: boolean;
   onUpdated: (stage: ProjectStageInfo) => void;
   onDeleted: (stageId: string) => void;
   onReload: () => Promise<void>;
@@ -83,6 +85,7 @@ export default function StageList({
             index={index}
             assistants={assistants}
             dragGroup={dragGroup}
+            sidebarMode={sidebarMode}
             onMove={moveStage}
             onUpdated={onUpdated}
             onDeleted={onDeleted}
@@ -100,6 +103,7 @@ function StageListItem({
   index,
   assistants,
   dragGroup,
+  sidebarMode,
   onMove,
   onUpdated,
   onDeleted,
@@ -109,6 +113,7 @@ function StageListItem({
   index: number;
   assistants: AssistantInfo[];
   dragGroup: string;
+  sidebarMode: boolean;
   onMove: (stage: ProjectStageInfo, direction: -1 | 1) => Promise<void>;
   onUpdated: (stage: ProjectStageInfo) => void;
   onDeleted: (stageId: string) => void;
@@ -198,10 +203,10 @@ function StageListItem({
       className={
         "relative rounded-lg border p-3 transition duration-150 " +
         (isDragSource
-          ? "z-20 cursor-grabbing border-card-border/25 bg-card shadow-[0_16px_36px_rgba(0,0,0,0.24)]"
+          ? `z-20 cursor-grabbing border-card-border/25 ${sidebarMode ? "bg-ink/[0.025]" : "bg-card"} shadow-[0_16px_36px_rgba(0,0,0,0.24)]`
           : isDropTarget
-            ? "border-card-border/45 bg-card-active shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.38),0_8px_24px_rgba(0,0,0,0.18)]"
-            : "border-card-border/[0.12] bg-card")
+            ? `border-card-border/45 ${sidebarMode ? "bg-ink/[0.045]" : "bg-card-active"} shadow-[inset_3px_0_0_rgb(var(--color-card-fg)/0.38),0_8px_24px_rgba(0,0,0,0.18)]`
+            : `border-card-border/[0.12] ${sidebarMode ? "bg-ink/[0.025]" : "bg-card"}`)
       }
     >
       <div className="flex items-start gap-3">
@@ -215,7 +220,7 @@ function StageListItem({
             <span className="rounded bg-card-chip/8 px-1.5 py-0.5 text-meta text-card-chip-fg/55">{stage.type}</span>
           </div>
           {stage.description && <div className="mt-1 line-clamp-2 text-caption leading-relaxed text-card-muted/60">{stage.description}</div>}
-          <AssistantSummary assistants={stage.assistants} />
+          <AssistantSummary assistants={stage.assistants} sidebarMode={sidebarMode} />
         </button>
         <div className="flex shrink-0 items-center gap-1">
           <button type="button" onClick={() => void onMove(stage, -1)} className="rounded p-1 text-card-subtle/45 hover:bg-card-action-hover/5 hover:text-card-fg/75"><ChevronDown className="h-4 w-4 rotate-180" /></button>
@@ -251,7 +256,7 @@ function StageListItem({
               {assistantOptions.map((option) => {
                 const active = selectedAssistantIds.includes(option.value);
                 return (
-                  <button key={option.value} type="button" onClick={() => void toggleAssistant(option.value)} className={"inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " + (active ? "border-card-border/[0.22] bg-surface text-card-fg/92" : "border-card-border/[0.10] bg-card-chip/[0.06] text-card-muted/60 hover:border-card-border/[0.16] hover:bg-card-chip/[0.08] hover:text-card-fg")}>
+                  <button key={option.value} type="button" onClick={() => void toggleAssistant(option.value)} className={"inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-caption transition " + (active ? `border-card-border/[0.22] ${sidebarMode ? "bg-ink/[0.045]" : "bg-surface"} text-card-fg/92` : "border-card-border/[0.10] bg-card-chip/[0.06] text-card-muted/60 hover:border-card-border/[0.16] hover:bg-card-chip/[0.08] hover:text-card-fg")}>
                     {active && <Check className="h-3 w-3 shrink-0" />}
                     <AssistantBotIcon color={option.color} className="h-3.5 w-3.5 shrink-0" />
                     {option.label}
@@ -297,7 +302,13 @@ function StageToggle({
   );
 }
 
-function AssistantSummary({ assistants }: { assistants: StageAssistantInfo[] }) {
+function AssistantSummary({
+  assistants,
+  sidebarMode = false,
+}: {
+  assistants: StageAssistantInfo[];
+  sidebarMode?: boolean;
+}) {
   const { t } = useI18n();
   if (assistants.length === 0) {
     return <div className="mt-1 text-caption text-card-subtle/55">{t("assistant.empty")}</div>;
@@ -305,7 +316,7 @@ function AssistantSummary({ assistants }: { assistants: StageAssistantInfo[] }) 
   return (
     <div className="mt-2 flex flex-wrap gap-1.5">
       {assistants.map((assistant) => (
-        <span key={assistant.assistantId} className="inline-flex h-7 items-center rounded-md border border-card-border/[0.22] bg-surface px-2 text-caption text-card-fg/92">
+        <span key={assistant.assistantId} className={`inline-flex h-7 items-center rounded-md border border-card-border/[0.22] px-2 text-caption text-card-fg/92 ${sidebarMode ? "bg-ink/[0.045]" : "bg-surface"}`}>
           <AssistantBotIcon color={assistant.color} className="mr-1.5 h-3.5 w-3.5 shrink-0" />
           {assistant.name}
         </span>

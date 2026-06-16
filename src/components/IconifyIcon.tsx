@@ -31,6 +31,10 @@ export function HashIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[mynaui--hash]" className={className} style={style} />;
 }
 
+export function BitcoinHashesOutlineIcon({ className, style }: IconifyIconComponentProps) {
+  return <IconifyIcon iconClassName="icon-[bitcoin-icons--hashes-filled]" className={className} style={style} />;
+}
+
 export function Robot3LineIcon({ className, style }: IconifyIconComponentProps) {
   return <IconifyIcon iconClassName="icon-[ri--robot-3-line]" className={className} style={style} />;
 }

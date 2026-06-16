@@ -75,6 +75,9 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
     devDependencies:
+      '@iconify-json/bitcoin-icons':
+        specifier: ^1.2.5
+        version: 1.2.5
       '@iconify-json/fluent':
         specifier: ^1.2.49
         version: 1.2.49
@@ -587,6 +590,9 @@ packages:
     peerDependencies:
       react: ^16 || ^17 || ^18 || ^19
       react-dom: ^16 || ^17 || ^18 || ^19
+
+  '@iconify-json/bitcoin-icons@1.2.5':
+    resolution: {integrity: sha512-PLJhnyxRLm8Xko4/sspTxjSvlJnZuObM/RJ/1/iGm3WjPITyIYJclQhYmSUXKJQsb0P/KRQHKgQUnaNCHj4O1g==}
 
   '@iconify-json/fluent@1.2.49':
     resolution: {integrity: sha512-FYRYT/w+1wVAwX6aMNug1oKpuPCXdMadv0qx81t4j//ZtV2D0EGQFfHt9WdcRckym1Z2qiBslRHTUd79qo6kIQ==}
@@ -4094,6 +4100,10 @@ snapshots:
       giscus: 1.6.0
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
+
+  '@iconify-json/bitcoin-icons@1.2.5':
+    dependencies:
+      '@iconify/types': 2.0.0
 
   '@iconify-json/fluent@1.2.49':
     dependencies:

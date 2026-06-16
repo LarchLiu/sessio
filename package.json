@@ -61,6 +61,7 @@
     "shiki": "^4.1.0"
   },
   "devDependencies": {
+    "@iconify-json/bitcoin-icons": "^1.2.5",
     "@iconify-json/fluent": "^1.2.49",
     "@iconify-json/icon-park-outline": "^1.2.4",
     "@iconify-json/material-symbols": "^1.2.76",
