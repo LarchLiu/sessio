@@ -910,7 +910,20 @@ export default function App() {
         header={autoTasksOpen ? autoTasksHeader : header}
         sidebarOpen={sidebarOpen}
         rightSidebar={
-          <AppRightSidebar onClose={() => setRightSidebarOpen(false)} />
+          <AppRightSidebar
+            selectedThread={selectedThread}
+            selectedSessionProject={selectedSessionProject}
+            selectedThreadProject={activeThreadProject}
+            onSelectThreadChatSession={(session) => {
+              setSelectedProject(null);
+              setSelectedThread(null);
+              setSelected(session);
+              setDetailMode("threadChat");
+            }}
+            onOpenThreadMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
+            onClose={() => setRightSidebarOpen(false)}
+            onError={setError}
+          />
         }
         rightSidebarOpen={rightSidebarOpen}
         overlays={overlays}
