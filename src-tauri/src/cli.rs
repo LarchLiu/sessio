@@ -1,4 +1,5 @@
 use crate::agents::sources::shared::convert::project_key_for_path_or_name;
+use crate::app_paths;
 use crate::config;
 use crate::memory::build::MemoryBuildOptions;
 use crate::memory::qmd;
@@ -318,7 +319,10 @@ fn run_config(cmd: ConfigCommand) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&memory)?);
             } else {
-                println!("saved memory config to ~/.sessio/config.toml");
+                println!(
+                    "saved memory config to {}/config.toml",
+                    app_paths::app_home_display()
+                );
             }
             Ok(())
         }
@@ -2020,10 +2024,7 @@ fn open_store(db_path: Option<&str>) -> Result<SqliteStore> {
     if let Some(db_path) = db_path {
         return SqliteStore::open(&PathBuf::from(db_path));
     }
-    let data_dir = dirs::home_dir()
-        .context("no home dir")?
-        .join(".sessio")
-        .join("db-data");
+    let data_dir = app_paths::db_data_dir()?;
     std::fs::create_dir_all(&data_dir).ok();
     SqliteStore::open(&data_dir.join("sessio-index.db"))
 }

@@ -26,6 +26,7 @@ use sha2::Sha256;
 // the `Md5Digest` alias above, which makes `Sha256::update`/`finalize` work
 // without an extra trait import.
 
+use crate::app_paths;
 use crate::agents::runtime::types::AgentAttachmentKind;
 
 use super::super::attachments::{allocate_attachment_path, attachment_dir, InboundAttachment};
@@ -1257,13 +1258,12 @@ fn normalized_optional(value: &Option<String>) -> Option<String> {
 }
 
 fn sync_cursor_path(bot_token: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
     let mut hasher = Sha256::new();
     hasher.update(bot_token.trim().as_bytes());
     let digest = hex::encode(hasher.finalize());
     Some(
-        home.join(".sessio")
-            .join("im-bridge")
+        app_paths::im_bridge_state_dir()
+            .ok()?
             .join(format!("wechat-sync-{}.json", &digest[..12])),
     )
 }

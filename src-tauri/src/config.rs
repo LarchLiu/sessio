@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::app_paths;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -478,8 +480,7 @@ fn merge_option<T>(target: &mut Option<T>, default: Option<T>, changed: &mut boo
 }
 
 fn config_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("no home dir")?;
-    Ok(home.join(".sessio").join("config.toml"))
+    app_paths::config_path()
 }
 
 fn write_default_config_file(path: &Path) -> Result<()> {

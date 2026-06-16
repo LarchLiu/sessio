@@ -9,6 +9,9 @@ export default defineConfig(async () => ({
   clearScreen: false,
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_IS_DEV__: JSON.stringify(
+      process.env.SESSIO_APP_VARIANT === "dev" || process.env.NODE_ENV !== "production",
+    ),
   },
   server: {
     port: 1420,

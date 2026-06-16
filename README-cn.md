@@ -79,7 +79,12 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 - Astra Pi（Sessio 自身创建的会话）
   - `~/.sessio/astra-pi-agent/sessions`
 
-应用数据存放在 `~/.sessio` 下：
+应用数据存放目录：
+
+- release 正式版：`~/.sessio`
+- debug / 本地开发版：`~/.sessio-dev`
+
+例如：
 
 - `~/.sessio/db-data/sessio-index.db` — SQLite 索引
 - `~/.sessio/config.toml` — memory / 索引 / 代理 / 调试配置
@@ -97,7 +102,7 @@ Sessio 直接读取本机已有的会话文件，不依赖云端服务。
 
 在设置 → Agents 中可以启用 / 禁用各 agent，并编辑模型目录、默认模型、推理强度和权限模式。Astra 编排器使用的 agent 也在同一设置区域单独配置。
 
-Channels 可在设置 → Workflows → Channels 中配置。Sessio 会把各平台默认值和 workspace allowlist 写入 `~/.sessio/im-bridge.yaml`，活跃 chat 绑定则保存在本地 SQLite 索引中。由于 channel 可以驱动能运行本机工具的 agent，启用前请限制允许的用户 / 聊天和工作区。
+Channels 可在设置 → Workflows → Channels 中配置。Sessio 会把各平台默认值和 workspace allowlist 写入当前应用目录下的 `im-bridge.yaml`，活跃 chat 绑定则保存在本地 SQLite 索引中。由于 channel 可以驱动能运行本机工具的 agent，启用前请限制允许的用户 / 聊天和工作区。
 
 ## 技术栈
 

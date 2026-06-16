@@ -305,6 +305,11 @@ function SidebarFooter({
               <Settings className="w-4 h-4" />
             </button>
           </Tooltip>
+          {__APP_IS_DEV__ && (
+            <span className="inline-flex items-center rounded-full border border-amber-500/25 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-amber-700">
+              Dev
+            </span>
+          )}
         </div>
         <div className="shrink-0 flex items-center justify-end gap-1">
           {update.hasUpdate && update.latestVersion && (

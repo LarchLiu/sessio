@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use crate::app_paths;
 use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, RuntimeMetadata,
     StartAgentSession,
@@ -559,17 +560,12 @@ fn bundled_astra_pi_acp_config() -> Option<AstraPiAcpConfig> {
 }
 
 fn astra_session_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".sessio")
-        .join(ASTRA_SESSION_DIR_NAME)
+    app_paths::astra_runtime_session_dir()
+        .unwrap_or_else(|_| PathBuf::from(".").join(ASTRA_SESSION_DIR_NAME))
 }
 
 fn astra_agent_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".sessio")
-        .join("astra-pi-agent")
+    app_paths::astra_agent_dir().unwrap_or_else(|_| PathBuf::from(".").join("astra-pi-agent"))
 }
 
 pub fn bundled_astra_pi_acp_command() -> Option<String> {

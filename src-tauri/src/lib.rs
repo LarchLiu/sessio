@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod app_paths;
 pub mod astra;
 pub mod cli;
 pub mod config;
@@ -34,6 +35,10 @@ use indexer::{IndexTask, IndexerHandle};
 use memory::qmd::{query_project, search_project, QmdOptions};
 use memory::service::MemoryService;
 use memory::{MemoryBackendStatus, MemoryStore};
+use app_paths::{
+    app_home, cross_context_dir, db_path as default_db_path, paste_cache_dir, projects_dir,
+    removed_sessions_dir,
+};
 use models::{
     Agent, AgentAiProviderInfo, AgentInfo, AssistantAgentInfo, AssistantInfo, AssistantType,
     AstraConfig, IssueSeverity, IssueStatus, KanbanItem, KanbanStatus, PlanRoundInfo,
@@ -420,10 +425,7 @@ fn create_default_project(
     app: AppHandle,
     store: State<'_, Arc<dyn SessionStore>>,
 ) -> Result<ProjectInfo, String> {
-    let parent = dirs::home_dir()
-        .ok_or_else(|| "home directory not found".to_string())?
-        .join(".sessio")
-        .join("projects");
+    let parent = projects_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
     let project = store
         .create_project(
@@ -2186,7 +2188,7 @@ fn matches_scope(scope: &SessionScope, session: &SessionInfo) -> bool {
 
 fn remove_session_files_inner(session: SessionInfo) -> anyhow::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-    let removed_root = home.join(".sessio").join("removed-sessions");
+    let removed_root = removed_sessions_dir()?;
 
     if session.agent == Agent::Gemini {
         if crate::agents::sources::gemini::parser::remove_session_from_logs(
@@ -2662,10 +2664,7 @@ fn save_pasted_attachment(
         return Err("Pasted attachment is too large".to_string());
     }
 
-    let dir = dirs::home_dir()
-        .ok_or_else(|| "no home dir".to_string())?
-        .join(".sessio")
-        .join("paste-cache");
+    let dir = paste_cache_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let file_name =
@@ -2990,11 +2989,7 @@ fn write_cross_prompt(session_id: String, content: String) -> Result<String, Str
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let dir = dirs::home_dir()
-        .ok_or_else(|| "home directory not found".to_string())?
-        .join(".sessio")
-        .join("projects")
-        .join(".cross-context");
+    let dir = cross_context_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(format!("sessio-cross-context-{}-{}.md", safe_id, ts));
     std::fs::OpenOptions::new()
@@ -3607,7 +3602,7 @@ fn reveal_main_window(app: AppHandle) {
     show_main_window(&app);
 }
 
-/// Expose the running app binary through a stable path (~/.sessio/bin/sessio)
+/// Expose the running app binary through a stable path under the current app home
 /// so agents working inside a project can invoke the Sessio CLI without knowing
 /// where the app was installed. Best-effort: failures only warn.
 fn link_cli_binary(sessio_home: &std::path::Path) {
@@ -3691,13 +3686,11 @@ pub fn run() {
             }
             shell_env::import_login_shell_env();
 
-            let sessio_home = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("no home dir"))?
-                .join(".sessio");
+            let sessio_home = app_home()?;
             let data_dir = sessio_home.join("db-data");
             std::fs::create_dir_all(&data_dir).ok();
             link_cli_binary(&sessio_home);
-            let db_path = data_dir.join("sessio-index.db");
+            let db_path = default_db_path()?;
             let sqlite = Arc::new(SqliteStore::open(&db_path)?);
             sqlite.init()?;
             let inner: Arc<dyn SessionStore> = sqlite.clone();

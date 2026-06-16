@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 
+use crate::app_paths;
 use super::acp_transport;
 use super::types::{RuntimeCapabilitySet, RuntimeTransportKind};
 use crate::models::{Agent, AgentInfo, AgentType, RuntimeAgentMetadata};
@@ -208,12 +209,7 @@ fn run_shell_command(command: &str) -> Result<String> {
 }
 
 fn ensure_probe_workspace(agent: Agent) -> Result<String> {
-    let home = dirs::home_dir().context("no home dir")?;
-    let dir = home
-        .join(".sessio")
-        .join("projects")
-        .join(format!(".{}", agent.as_str()))
-        .join("tmp-agent-capabilities");
+    let dir = app_paths::agent_probe_workspace_dir(agent.as_str())?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create probe workspace {}", dir.display()))?;
     Ok(dir.to_string_lossy().to_string())

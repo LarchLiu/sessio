@@ -1,4 +1,4 @@
-//! IM bridge configuration, loaded from `~/.sessio/im-bridge.yaml`.
+//! IM bridge configuration, loaded from the current app home's `im-bridge.yaml`.
 //!
 //! Kept separate from the app's hand-written `config.toml` parser: the bridge
 //! config is nested and platform-shaped, so it leans on `serde_yaml` (already a
@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::app_paths;
 use crate::models::Agent;
 
 /// Top-level IM bridge configuration.
@@ -728,17 +729,16 @@ fn push_unique_ref<'a>(values: &mut Vec<&'a str>, value: &'a str) {
     }
 }
 
-/// Path to the bridge config file: `~/.sessio/im-bridge.yaml`.
+/// Path to the bridge config file under the current app home.
 fn config_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("no home dir")?;
-    Ok(home.join(".sessio").join("im-bridge.yaml"))
+    app_paths::im_bridge_config_path()
 }
 
 /// Best-effort display string for the config path, for log messages.
 pub fn config_path_display() -> String {
     config_path()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "~/.sessio/im-bridge.yaml".to_string())
+        .unwrap_or_else(|_| format!("{}/im-bridge.yaml", app_paths::app_home_display()))
 }
 
 /// Load the config file. Returns `Ok(None)` when the file does not exist so the

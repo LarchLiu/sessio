@@ -79,7 +79,12 @@ By default it scans:
 - Astra Pi (sessions created by Sessio itself)
   - `~/.sessio/astra-pi-agent/sessions`
 
-App data lives under `~/.sessio`:
+App data lives under:
+
+- release builds: `~/.sessio`
+- debug / local dev builds: `~/.sessio-dev`
+
+Examples:
 
 - `~/.sessio/db-data/sessio-index.db` — SQLite index
 - `~/.sessio/config.toml` — memory / index / proxy / debug configuration
@@ -97,7 +102,7 @@ Live chats spawn agents as ACP subprocesses. Default commands:
 
 Agents can be enabled / disabled in Settings → Agents, where you can also edit each agent's model catalog, default model, reasoning effort, and permission mode. The orchestrator agent used by Astra is configured separately in the same settings section.
 
-Channels can be configured in Settings → Workflows → Channels. Sessio stores per-platform defaults and workspace allowlists in `~/.sessio/im-bridge.yaml`, while active chat bindings live in the local SQLite index. Because a channel can drive agents that run local tools, restrict allowed users / chats and workspaces before enabling it.
+Channels can be configured in Settings → Workflows → Channels. Sessio stores per-platform defaults and workspace allowlists in the active app-home `im-bridge.yaml`, while active chat bindings live in the local SQLite index. Because a channel can drive agents that run local tools, restrict allowed users / chats and workspaces before enabling it.
 
 ## Tech Stack
 

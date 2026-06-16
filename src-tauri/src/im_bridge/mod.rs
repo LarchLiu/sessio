@@ -56,7 +56,7 @@ impl ImBridgeService {
         Self { state }
     }
 
-    /// Load config from `~/.sessio/im-bridge.yaml` and construct the service.
+    /// Load config from the current app home's `im-bridge.yaml` and construct the service.
     /// Returns `None` (after logging) when the bridge is disabled or unconfigured,
     /// so the caller can skip startup without treating it as an error.
     pub fn from_config_file(

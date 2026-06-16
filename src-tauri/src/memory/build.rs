@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::app_paths;
 use crate::agents::sources::registry::AgentSourceRegistry;
 use crate::agents::sources::types::{MessageEvent, MessageRole, SessionSource};
 use crate::memory::artifacts::{MarkdownArtifactSink, MemoryArtifactSink};
@@ -362,9 +363,8 @@ pub fn build_source_memory_with_backend(
 }
 
 pub fn default_artifacts_root() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("no home dir")?;
-    remove_legacy_qmd_memory_root(&home)?;
-    Ok(home.join(".sessio").join("memory"))
+    remove_legacy_qmd_memory_root()?;
+    app_paths::memory_dir()
 }
 
 fn finalize_record_unavailable(
@@ -613,8 +613,8 @@ fn suppress_reason(source: &SessionSource, dedupe_match: &DedupeMatch) -> String
     )
 }
 
-fn remove_legacy_qmd_memory_root(home: &Path) -> Result<()> {
-    let path = home.join(".sessio").join("qmd-memory");
+fn remove_legacy_qmd_memory_root() -> Result<()> {
+    let path = app_paths::legacy_qmd_memory_dir()?;
     match fs::remove_dir_all(&path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
