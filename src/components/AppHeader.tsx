@@ -1,4 +1,4 @@
-import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, type LucideIcon } from "lucide-react";
+import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
 import { AgentGlyph } from "./AgentIcon";
@@ -18,8 +18,10 @@ interface AppHeaderProps {
     partial: boolean;
   } | null;
   metaPopoverOpen: boolean;
+  rightSidebarOpen?: boolean;
   onOpenSidebar: () => void;
   onToggleMetaPopover: () => void;
+  onToggleRightSidebar?: () => void;
 }
 
 export default function AppHeader({
@@ -32,10 +34,16 @@ export default function AppHeader({
   projectContext,
   activeMessageMeta,
   metaPopoverOpen,
+  rightSidebarOpen,
   onOpenSidebar,
   onToggleMetaPopover,
+  onToggleRightSidebar,
 }: AppHeaderProps) {
   const { t } = useI18n();
+
+  const rightPanelLabel = rightSidebarOpen
+    ? t("sidebar.right_close")
+    : t("sidebar.right_open");
 
   return (
     <div
@@ -115,7 +123,25 @@ export default function AppHeader({
           <HeaderContextTitle title={contextTitle} project={projectContext} />
         ) : null}
       </div>
-      <div className="flex h-full items-center justify-self-end" data-tauri-drag-region="false" />
+      <div className="flex h-full items-center justify-self-end gap-1" data-tauri-drag-region="false">
+        {onToggleRightSidebar && (
+          <Tooltip content={rightPanelLabel} placement="bottom">
+            <button
+              type="button"
+              aria-label={rightPanelLabel}
+              aria-pressed={rightSidebarOpen ?? false}
+              data-tauri-drag-region="false"
+              onClick={onToggleRightSidebar}
+              className={
+                "rounded-md p-1 text-ink/55 transition-opacity duration-300 hover:bg-ink/5 hover:text-ink " +
+                (rightSidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
+              }
+            >
+              <PanelRightClose className="h-4 w-4" />
+            </button>
+          </Tooltip>
+        )}
+      </div>
       <div className="absolute top-0 right-0 z-20">
         <WindowControls />
       </div>

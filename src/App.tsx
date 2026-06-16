@@ -29,6 +29,7 @@ import AppHeader from "./components/AppHeader";
 import AppMain from "./components/AppMain";
 import AppOverlays, { type DeleteTarget } from "./components/AppOverlays";
 import AppSidebar from "./components/AppSidebar";
+import AppRightSidebar from "./components/AppRightSidebar";
 import ToastStack from "./components/ToastStack";
 import UpdateConfirmDialog from "./components/UpdateConfirmDialog";
 import SettingsPage from "./pages/SettingsPage";
@@ -67,6 +68,7 @@ import {
 } from "./appUtils";
 
 const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
+const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "sessio.rightSidebarOpen";
 
 type ThreadSelection = { projectId: string; threadId: string; goal: string } | null;
 
@@ -74,6 +76,11 @@ function readViewMode(): ViewMode {
   if (typeof localStorage === "undefined") return "native";
   const v = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
   return v === "cross" ? "cross" : "native";
+}
+
+function readRightSidebarOpen(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  return localStorage.getItem(RIGHT_SIDEBAR_OPEN_STORAGE_KEY) === "1";
 }
 
 const IS_MAC =
@@ -112,6 +119,9 @@ export default function App() {
   const [lastSelectedProjectKey, setLastSelectedProjectKey] = useState<string | null>(null);
   const [expandProject, setExpandProject] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [rightSidebarOpen, setRightSidebarOpen] = useState<boolean>(() =>
+    readRightSidebarOpen(),
+  );
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -219,6 +229,13 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(VIEW_MODE_STORAGE_KEY, viewMode);
   }, [viewMode]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      RIGHT_SIDEBAR_OPEN_STORAGE_KEY,
+      rightSidebarOpen ? "1" : "0",
+    );
+  }, [rightSidebarOpen]);
 
   useRuntimeEventSubscription({
     selected,
@@ -777,8 +794,10 @@ export default function App() {
       projectContext={headerProjectContext}
       activeMessageMeta={activeMessageMeta}
       metaPopoverOpen={metaPopoverOpen}
+      rightSidebarOpen={rightSidebarOpen}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => setMetaPopoverOpen((open) => !open)}
+      onToggleRightSidebar={() => setRightSidebarOpen((open) => !open)}
     />
   );
 
@@ -793,8 +812,10 @@ export default function App() {
       projectContext={null}
       activeMessageMeta={null}
       metaPopoverOpen={false}
+      rightSidebarOpen={rightSidebarOpen}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => {}}
+      onToggleRightSidebar={() => setRightSidebarOpen((open) => !open)}
     />
   );
 
@@ -888,6 +909,10 @@ export default function App() {
         sidebar={sidebar}
         header={autoTasksOpen ? autoTasksHeader : header}
         sidebarOpen={sidebarOpen}
+        rightSidebar={
+          <AppRightSidebar onClose={() => setRightSidebarOpen(false)} />
+        }
+        rightSidebarOpen={rightSidebarOpen}
         overlays={overlays}
       >
         {autoTasksOpen ? (
