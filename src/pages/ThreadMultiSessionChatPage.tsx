@@ -81,12 +81,14 @@ import {
 import { projectStageIcon, projectStageLabel } from "../utils/stageDisplay";
 import {
   AcpRenderItems,
-  acpViewModelToRenderItems,
   liveWorkingIndicatorTurn,
-  renderItemKeys,
-  type AcpRenderItem,
   type MarkdownImage,
 } from "./ChatPage";
+import {
+  acpViewModelToRenderItems,
+  renderItemKeys,
+  type AcpRenderItem,
+} from "../acpRenderItems";
 
 const THREAD_REFRESH_ASTRA_EVENTS = new Set(["delegated", "stage_update_result", "task_dispatch"]);
 const THREAD_CONTEXT_NAV_SETTLE_MS = 140;

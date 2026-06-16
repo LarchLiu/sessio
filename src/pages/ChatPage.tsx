@@ -50,7 +50,6 @@ import {
   SessionInfo,
   RuntimeAgentMetadata,
   RuntimeCapabilitySet,
-  RuntimeError,
   SubagentInfo,
   ensureAgentRuntimeSession,
   getSessionHistory,
@@ -132,6 +131,11 @@ import {
   threadPromptDisplayContentBlocks,
   type ThreadPromptDisplayMeta,
 } from "../threadPromptDisplay";
+import {
+  acpViewModelToRenderItems,
+  renderItemKeys,
+  type AcpRenderItem,
+} from "../acpRenderItems";
 
 export interface ChatPageProps {
   session: SessionInfo;
@@ -3670,95 +3674,6 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export type AcpRenderItem =
-  | { kind: "turnStatus"; turn: LiveTurn }
-  | { kind: "workingIndicator"; turn: LiveTurn }
-  | { kind: "block"; turn: LiveTurn; block: AcpRenderBlock }
-  | { kind: "tool"; turn: LiveTurn; tool: AcpToolCall; history: boolean }
-  | { kind: "toolGroup"; turn: LiveTurn; tools: AcpToolCall[] }
-  | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
-  | { kind: "error"; turn: LiveTurn; error: RuntimeError };
-
-export function acpViewModelToRenderItems(
-  viewModel: AcpViewModel,
-  liveTurnIds: Set<string>,
-  workingIndicatorTurnId: string,
-): AcpRenderItem[] {
-  const items: AcpRenderItem[] = [];
-  const latestLiveTurn = latestTurnWithIds(viewModel.turns, liveTurnIds);
-  let lastUserIndex = -1;
-  for (const turn of viewModel.turns) {
-    const renderedTools = new Set<string>();
-    const renderedPermissions = new Set<string>();
-    const groupHistoryTools = !liveTurnIds.has(turn.turnId);
-    let pendingTools: AcpToolCall[] = [];
-    const pendingFileEditBlocks: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>[] = [];
-    const flushPendingTools = () => {
-      if (pendingTools.length === 0) return;
-      if (pendingTools.length === 1) {
-        items.push({ kind: "tool", turn, tool: pendingTools[0], history: true });
-      } else {
-        items.push({ kind: "toolGroup", turn, tools: pendingTools });
-      }
-      pendingTools = [];
-    };
-    turn.blocks.forEach((block) => {
-      if (block.kind === "tool") {
-        const originalTool = turn.tools.find((item) => item.toolId === block.toolId);
-        if (!originalTool || renderedTools.has(originalTool.toolId)) return;
-        renderedTools.add(originalTool.toolId);
-        if (groupHistoryTools) {
-          pendingTools.push(originalTool);
-        } else {
-          items.push({ kind: "tool", turn, tool: originalTool, history: false });
-        }
-        return;
-      }
-      flushPendingTools();
-      if (block.kind === "permission") {
-        const permission = turn.permissions.find((item) => item.requestId === block.requestId);
-        if (!permission || renderedPermissions.has(permission.requestId)) return;
-        renderedPermissions.add(permission.requestId);
-        items.push({ kind: "permission", turn, permission });
-        return;
-      }
-      if (block.kind === "error") return;
-      if (block.kind === "sessionUpdate" && block.updateType === "file_edit") {
-        pendingFileEditBlocks.push(block);
-        return;
-      }
-      items.push({ kind: "block", turn, block });
-      if (block.kind === "user") {
-        lastUserIndex = items.length - 1;
-      }
-    });
-    flushPendingTools();
-    const fileEditBlock = mergedFileEditRenderBlock(pendingFileEditBlocks);
-    if (fileEditBlock) {
-      items.push({ kind: "block", turn, block: fileEditBlock });
-    }
-    if (turn.error) {
-      items.push({ kind: "error", turn, error: turn.error });
-    }
-    if (turn.turnId === workingIndicatorTurnId) {
-      items.push({ kind: "workingIndicator", turn });
-    }
-  }
-  if (latestLiveTurn) {
-    const insertAt = lastUserIndex >= 0 ? lastUserIndex : 0;
-    items.splice(insertAt, 0, { kind: "turnStatus", turn: latestLiveTurn });
-  }
-  return items;
-}
-
-function latestTurnWithIds(turns: LiveTurn[], ids: Set<string>): LiveTurn | null {
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
-    const turn = turns[index];
-    if (ids.has(turn.turnId)) return turn;
-  }
-  return null;
-}
-
 export function liveWorkingIndicatorTurn(liveSession: LiveRuntimeSession | null | undefined): LiveTurn | null {
   if (!liveSession || liveSession.ended) return null;
   for (let index = liveSession.turns.length - 1; index >= 0; index -= 1) {
@@ -3886,28 +3801,6 @@ function liveTurnStatusText(turn: LiveTurn, now: number): string {
   const elapsedMs = Math.max(0, (running ? now : turn.updatedAt) - turn.startedAt);
   const state = running ? "running" : turn.status === "completed" ? "completed" : "done";
   return `${state}|${formatDuration(elapsedMs)}`;
-}
-
-export function renderItemKeys(items: AcpRenderItem[]): string[] {
-  const blockCounts = new Map<string, number>();
-  return items.map((item) => {
-    if (item.kind !== "block") return renderItemKey(item);
-    const count = blockCounts.get(item.turn.turnId) ?? 0;
-    blockCounts.set(item.turn.turnId, count + 1);
-    return `acp:${item.turn.turnId}:block:${count}`;
-  });
-}
-
-function renderItemKey(item: AcpRenderItem): string {
-  if (item.kind === "turnStatus") return `acp:${item.turn.turnId}:status`;
-  if (item.kind === "workingIndicator") return `acp:${item.turn.turnId}:working`;
-  if (item.kind === "block") return `acp:${item.turn.turnId}:block`;
-  if (item.kind === "tool") return `acp:${item.turn.turnId}:tool:${item.tool.toolId}`;
-  if (item.kind === "toolGroup") {
-    return `acp:${item.turn.turnId}:tool-group:${item.tools.map((tool) => tool.toolId).join(":")}`;
-  }
-  if (item.kind === "permission") return `acp:${item.turn.turnId}:permission:${item.permission.requestId}`;
-  return `acp:${item.turn.turnId}:error`;
 }
 
 function renderItemSide(item: AcpRenderItem): "assistant" | "user" | "other" {
@@ -4713,35 +4606,6 @@ function stableDisplayText(value: unknown): string {
   } catch {
     return String(value);
   }
-}
-
-function mergedFileEditRenderBlock(
-  blocks: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>[],
-): Extract<AcpRenderBlock, { kind: "sessionUpdate" }> | null {
-  if (blocks.length === 0) return null;
-  if (blocks.length === 1) return blocks[0];
-  const summaries = blocks.map((block) => parseFileEditSummary(block.data));
-  if (summaries.some((summary) => !summary)) {
-    return blocks[blocks.length - 1];
-  }
-  const edits: FileEditItem[] = [];
-  for (const summary of summaries) {
-    for (const edit of summary?.edits ?? []) {
-      mergeFileEditItem(edits, edit);
-    }
-  }
-  const source = summaries.find((summary) => summary?.source)?.source ?? "session";
-  const data: FileEditSummary = {
-    source,
-    files: edits.length,
-    additions: sumEditNumber(edits, "additions"),
-    deletions: sumEditNumber(edits, "deletions"),
-    edits,
-  };
-  return {
-    ...blocks[blocks.length - 1],
-    data,
-  };
 }
 
 function mergeFileEditItem(edits: FileEditItem[], next: FileEditItem) {
