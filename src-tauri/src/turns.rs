@@ -1360,7 +1360,11 @@ fn tool_diff_file_edits(turn: &SessionHistoryTurn) -> Vec<Value> {
     turn.tools
         .iter()
         .filter(|tool| tool_diff_file_edit_succeeded(tool))
-        .flat_map(|tool| tool.content.iter().filter_map(tool_content_to_file_edit))
+        .flat_map(|tool| {
+            tool.content
+                .iter()
+                .filter_map(move |content| tool_content_to_file_edit(tool, content))
+        })
         .collect()
 }
 
@@ -1417,7 +1421,7 @@ fn tool_output_indicates_failed_edit(output: &Value) -> bool {
     }
 }
 
-fn tool_content_to_file_edit(content: &Value) -> Option<Value> {
+fn tool_content_to_file_edit(tool: &SessionHistoryToolCall, content: &Value) -> Option<Value> {
     if string_field(content, "type").as_deref() != Some("diff") {
         return None;
     }
@@ -1429,12 +1433,16 @@ fn tool_content_to_file_edit(content: &Value) -> Option<Value> {
     if path.is_none() && old_content.is_none() && new_content.is_none() {
         return None;
     }
+    let patch = path.as_deref().and_then(|value| {
+        synthetic_tool_diff_patch(value, old_content.as_deref(), new_content.as_deref(), tool, content)
+    });
     Some(json!({
         "path": path.clone().unwrap_or_else(|| "file".to_string()),
         "displayPath": path.clone().unwrap_or_else(|| "file".to_string()),
         "kind": if old_content.is_none() { "create" } else { "modify" },
         "additions": count_non_empty_lines(new_content.as_deref()),
         "deletions": count_non_empty_lines(old_content.as_deref()),
+        "patch": patch,
         "oldContent": old_content,
         "newContent": new_content,
         "detail": if path.is_none() {
@@ -1449,6 +1457,124 @@ fn count_non_empty_lines(value: Option<&str>) -> i64 {
     value
         .map(|text| text.lines().filter(|line| !line.is_empty()).count() as i64)
         .unwrap_or(0)
+}
+
+fn synthetic_tool_diff_patch(
+    path: &str,
+    old_content: Option<&str>,
+    new_content: Option<&str>,
+    tool: &SessionHistoryToolCall,
+    content: &Value,
+) -> Option<String> {
+    let (old_start, new_start) = tool_diff_start_lines(tool, content, path)?;
+    let old_count = patch_line_count(old_content);
+    let new_count = patch_line_count(new_content);
+    let normalized = patch_display_path(path);
+    let mut out = format!(
+        "diff --git a/{normalized} b/{normalized}\n--- a/{normalized}\n+++ b/{normalized}\n@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+    );
+    for line in patch_lines(old_content) {
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in patch_lines(new_content) {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn tool_diff_start_lines(
+    tool: &SessionHistoryToolCall,
+    content: &Value,
+    path: &str,
+) -> Option<(i64, i64)> {
+    value_field(content, "meta")
+        .or_else(|| value_field(content, "_meta"))
+        .and_then(|meta| start_lines_from_value(&meta))
+        .or_else(|| start_lines_from_value(content))
+        .or_else(|| start_lines_from_tool_input(&tool.raw_input, path))
+        .or_else(|| matching_tool_location_line(&tool.locations, path).map(|line| (line, line)))
+}
+
+fn start_lines_from_tool_input(value: &Value, path: &str) -> Option<(i64, i64)> {
+    let input_path = string_field(value, "path")
+        .or_else(|| string_field(value, "filePath"))
+        .or_else(|| string_field(value, "file_path"));
+    if let Some(input_path) = input_path {
+        if !same_file_path(&input_path, path) {
+            return None;
+        }
+    }
+    start_lines_from_value(value)
+}
+
+fn start_lines_from_value(value: &Value) -> Option<(i64, i64)> {
+    let start = number_field(value, "startLine")
+        .or_else(|| number_field(value, "start_line"))
+        .or_else(|| number_field(value, "lineStart"))
+        .or_else(|| number_field(value, "line"))
+        .or_else(|| number_field(value, "offset"));
+    let old_start = number_field(value, "oldStart").or(start);
+    let new_start = number_field(value, "newStart").or(start);
+    match (old_start, new_start) {
+        (Some(old_start), Some(new_start)) if old_start > 0 && new_start > 0 => Some((old_start, new_start)),
+        _ => None,
+    }
+}
+
+fn matching_tool_location_line(locations: &[Value], path: &str) -> Option<i64> {
+    let exact = locations.iter().find_map(|location| {
+        let location_path = string_field(location, "path")?;
+        if same_file_path(&location_path, path) {
+            number_field(location, "line").filter(|line| *line > 0)
+        } else {
+            None
+        }
+    });
+    if exact.is_some() {
+        return exact;
+    }
+    if locations.len() == 1 {
+        return number_field(&locations[0], "line").filter(|line| *line > 0);
+    }
+    None
+}
+
+fn same_file_path(left: &str, right: &str) -> bool {
+    let left = left.replace('\\', "/");
+    let right = right.replace('\\', "/");
+    left == right
+        || left.ends_with(&format!("/{right}"))
+        || right.ends_with(&format!("/{left}"))
+}
+
+fn patch_display_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches('/').to_string()
+}
+
+fn patch_line_count(value: Option<&str>) -> usize {
+    value.map_or(0, |text| {
+        if text.is_empty() {
+            0
+        } else {
+            text.lines().count()
+        }
+    })
+}
+
+fn patch_lines(value: Option<&str>) -> Vec<&str> {
+    value
+        .map(|text| {
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                text.lines().collect()
+            }
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -3080,6 +3206,7 @@ mod tests {
         assert_eq!(data["edits"][0]["path"], "src/main.rs");
         assert_eq!(data["edits"][0]["additions"], 2);
         assert_eq!(data["edits"][0]["deletions"], 1);
+        assert_eq!(data["edits"][0]["patch"], Value::Null);
     }
 
     #[test]
@@ -3143,6 +3270,128 @@ mod tests {
         let data = file_edits[0].data.as_ref().unwrap();
         assert_eq!(data["files"], 1);
         assert_eq!(data["edits"][0]["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn runtime_builder_generates_patch_for_tool_diff_when_start_line_is_available() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call",
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "title": "edit",
+                        "status": "completed",
+                        "rawInput": {
+                            "path": "src/main.rs",
+                            "startLine": 10
+                        },
+                        "content": [{
+                            "type": "diff",
+                            "path": "src/main.rs",
+                            "oldText": "old\nline\n",
+                            "newText": "new\nline\nmore\n"
+                        }]
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+
+        let file_edit = state.turns[0]
+            .blocks
+            .iter()
+            .find(|block| block.update_type.as_deref() == Some("file_edit"))
+            .expect("file_edit block");
+        let data = file_edit.data.as_ref().unwrap();
+        let patch = data["edits"][0]["patch"]
+            .as_str()
+            .expect("generated patch");
+        assert!(patch.contains("@@ -10,2 +10,3 @@"));
+        assert!(patch.contains("--- a/src/main.rs"));
+        assert!(patch.contains("+++ b/src/main.rs"));
+    }
+
+    #[test]
+    fn runtime_builder_generates_patch_for_tool_diff_from_location_line() {
+        let mut state = RuntimeTurnState::new(
+            "runtime-1",
+            Agent::Codex,
+            "agent-1",
+            RuntimeTransportKind::Acp,
+            "/tmp/project",
+            RuntimeCapabilitySet::fake(),
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::TurnStarted {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            },
+            10,
+        );
+        apply_runtime_event_to_state(
+            &mut state,
+            &AgentRuntimeEventPayload::AcpProtocolMessage {
+                sessio_runtime_session_id: "runtime-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                message: history_session_update_message(
+                    "tool_call",
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "tool-1",
+                        "title": "edit",
+                        "status": "completed",
+                        "locations": [{
+                            "path": "src/main.rs",
+                            "line": 24
+                        }],
+                        "content": [{
+                            "type": "diff",
+                            "path": "src/main.rs",
+                            "oldText": "old\nline\n",
+                            "newText": "new\nline\n"
+                        }]
+                    }),
+                    Some(20),
+                ),
+            },
+            20,
+        );
+
+        let file_edit = state.turns[0]
+            .blocks
+            .iter()
+            .find(|block| block.update_type.as_deref() == Some("file_edit"))
+            .expect("file_edit block");
+        let data = file_edit.data.as_ref().unwrap();
+        let patch = data["edits"][0]["patch"]
+            .as_str()
+            .expect("generated patch");
+        assert!(patch.contains("@@ -24,2 +24,2 @@"));
+        assert!(patch.contains("--- a/src/main.rs"));
+        assert!(patch.contains("+++ b/src/main.rs"));
     }
 
     #[test]
