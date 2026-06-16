@@ -397,7 +397,7 @@ export function ProjectWorkbenchPage({
           </div>
         )}
         {activeView === "files" ? (
-          <ProjectFilesPanel project={project} hideTabs={hideTabs} />
+          <ProjectFilesPanel project={project} />
         ) : (
           <ScrollArea
             className="min-h-0 flex-1"
@@ -474,7 +474,7 @@ export function ProjectWorkbenchPage({
   );
 }
 
-function ProjectFilesPanel({ project, hideTabs = false }: { project: ProjectInfo; hideTabs?: boolean }) {
+function ProjectFilesPanel({ project}: { project: ProjectInfo; hideTabs?: boolean }) {
   const { t } = useI18n();
   const [paths, setPaths] = useState<string[] | null>(null);
   const [gitStatus, setGitStatus] = useState<ProjectGitStatusEntry[]>([]);

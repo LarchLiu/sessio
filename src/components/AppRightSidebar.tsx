@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ComponentType } from "react";
-import { FolderOpen, Info, PanelRightOpen, Workflow, type LucideIcon } from "lucide-react";
+import { Files, Info, PanelRightOpen, Workflow, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
 import ThreadPage from "../pages/ThreadPage";
 import { ProjectWorkbenchPage, type ProjectView } from "../pages/ProjectPage";
-import { BitcoinHashesOutlineIcon, HashtagChatLinearIcon, Robot3LineIcon } from "./IconifyIcon";
+import { BitcoinHashesOutlineIcon, HashIcon, Robot3LineIcon } from "./IconifyIcon";
 import Tooltip from "./Tooltip";
 
 type IconComponent = LucideIcon | ComponentType<{ className?: string }>;
@@ -56,7 +56,7 @@ export default function AppRightSidebar({
       items.push({
         id: "thread",
         label: t("sidebar.right_tab_thread"),
-        icon: HashtagChatLinearIcon,
+        icon: HashIcon,
         tab: { kind: "thread" },
       });
     }
@@ -65,7 +65,7 @@ export default function AppRightSidebar({
         {
           id: "files",
           label: t("project.files"),
-          icon: FolderOpen,
+          icon: Files,
           tab: { kind: "project", view: "files" },
         },
         {
