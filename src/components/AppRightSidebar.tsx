@@ -52,14 +52,6 @@ export default function AppRightSidebar({
 
   const tabs = useMemo(() => {
     const items: { id: string; label: string; icon: IconComponent; tab: RightTab }[] = [];
-    if (hasThread) {
-      items.push({
-        id: "thread",
-        label: t("sidebar.right_tab_thread"),
-        icon: HashIcon,
-        tab: { kind: "thread" },
-      });
-    }
     if (hasProject) {
       items.push(
         {
@@ -87,6 +79,14 @@ export default function AppRightSidebar({
           tab: { kind: "project", view: "assistants" },
         },
       );
+    }
+    if (hasThread) {
+      items.push({
+        id: "thread",
+        label: t("sidebar.right_tab_thread"),
+        icon: HashIcon,
+        tab: { kind: "thread" },
+      });
     }
     return items;
   }, [hasProject, hasThread, t]);
