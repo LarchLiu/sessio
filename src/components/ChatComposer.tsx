@@ -8,7 +8,6 @@ import {
   ArrowUp,
   ChevronDown,
   LoaderCircle,
-  Mic,
   Plus,
   Sparkles,
   type LucideIcon,
@@ -193,7 +192,6 @@ export default function ChatComposer({
               disabled={runtimeControlsDisabled || composer.agentModelOptions.length === 0}
               options={composer.agentModelOptions}
             />
-            <NewChatMenuButton icon={Mic} label={t("new_chat.voice")} />
             <Tooltip content={sendLabel} placement="top">
               <button
                 type="button"

@@ -13,7 +13,7 @@ import {
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, Mic, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench, type LucideIcon } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -1868,7 +1868,6 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
                 onChange={onAgentModelChange}
                 menuPlacement="top"
               />
-              <ChatComposerMenuButton icon={Mic} label={t("new_chat.voice")} disabled={disabled} />
               <button
                 type="button"
                 disabled={active ? !canCancel : !canSend}
@@ -1895,34 +1894,6 @@ const ChatComposer = forwardRef<HTMLTextAreaElement, {
     </div>
   );
 });
-
-function ChatComposerMenuButton({
-  icon: Icon,
-  label,
-  disabled,
-  text,
-}: {
-  icon: LucideIcon;
-  label: string;
-  disabled?: boolean;
-  text?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      className={
-        "flex min-w-0 items-center gap-1.5 rounded-md py-1 text-body-sm text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45 " +
-        (text ? "max-w-[220px] px-1.5" : "h-7 w-7 justify-center px-0")
-      }
-      aria-label={label}
-    >
-      <Icon className="h-4 w-4 shrink-0" />
-      {text && <span className="truncate">{label}</span>}
-      {text && <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-    </button>
-  );
-}
 
 function resizeTextareaToContent(el: HTMLTextAreaElement) {
   el.style.height = "auto";
