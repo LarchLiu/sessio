@@ -173,7 +173,7 @@ body {
   background: rgb(var(--color-fg) / 0.12);
 }
 
-.app-layout-sidebar-closed .app-sidebar-resize-handle {
+.app-layout-sidebar-closed #app-sidebar-resize-handle {
   pointer-events: none;
 }
 

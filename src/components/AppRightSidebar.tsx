@@ -39,7 +39,7 @@ export default function AppRightSidebar({
     <div className="flex h-full min-h-0 w-full flex-col">
       <div
         data-tauri-drag-region
-        className="relative flex h-12 shrink-0 items-center justify-between border-b border-ink/10 px-3 select-none"
+        className="relative flex h-12 shrink-0 items-center justify-between border-b border-ink/10 px-5 select-none"
       >
         <span
           data-tauri-drag-region

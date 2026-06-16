@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -68,6 +69,24 @@ export default function AppLayout({
         setDragging(false);
       }
     }
+  }, [rightSidebarOpen]);
+
+  // When the right sidebar reopens, the saved width may now exceed what the
+  // current content row can give it (e.g. window shrunk while it was closed).
+  // Clamp before paint so main always keeps its minimum and the right panel
+  // doesn't pop in oversized and squash main to nothing.
+  useLayoutEffect(() => {
+    if (!rightSidebarOpen) return;
+    const rowWidth =
+      contentRowRef.current?.getBoundingClientRect().width ?? null;
+    if (rowWidth == null) return;
+    const maxAllowed = Math.max(
+      RIGHT_SIDEBAR_MIN_WIDTH,
+      rowWidth - MAIN_MIN_WIDTH - 1,
+    );
+    setRightSidebarWidth((current) =>
+      current > maxAllowed ? maxAllowed : current,
+    );
   }, [rightSidebarOpen]);
 
   // Distribute window-size changes across main and the right sidebar in the
