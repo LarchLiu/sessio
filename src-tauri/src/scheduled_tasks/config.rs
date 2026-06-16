@@ -66,6 +66,11 @@ pub struct ScheduledTaskRun {
     pub session_agent: Option<Agent>,
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Real ACP / jsonl session id stamped after the runtime publishes it.
+    /// `session_id` carries the runtime's internal handle (dies with the
+    /// process); this column survives restarts and joins back to `sessions`.
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
     #[serde(default)]
     pub thread_id: Option<String>,
     #[serde(default)]

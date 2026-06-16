@@ -269,6 +269,11 @@ pub struct ScheduledTaskRunRecord {
     pub target_json: Option<String>,
     pub session_agent: Option<Agent>,
     pub session_id: Option<String>,
+    /// Real ACP / jsonl session id stamped on the `sessions` row. Differs
+    /// from `session_id` (which carries the runtime's internal handle).
+    /// Populated only after the runtime publishes the agent session id; null
+    /// for thread runs and for chat runs whose stamp never completed.
+    pub agent_session_id: Option<String>,
     pub thread_id: Option<String>,
     pub astra_run_id: Option<String>,
     pub push_platform: Option<String>,
@@ -324,6 +329,15 @@ pub trait SessionStore: Send + Sync {
         status: &str,
         completed_at_ms: Option<i64>,
         error: Option<&str>,
+    ) -> Result<()>;
+    /// Stamp the real ACP / jsonl session id on a chat-mode run after the
+    /// runtime publishes it. Lets historical runs (whose `session_id` is the
+    /// runtime's handle, dead after restart) join back to the `sessions`
+    /// table.
+    fn update_scheduled_task_run_agent_session_id(
+        &self,
+        run_id: &str,
+        agent_session_id: &str,
     ) -> Result<()>;
     fn update_scheduled_task_run_push(
         &self,

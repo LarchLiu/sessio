@@ -268,6 +268,15 @@ impl SessionStore for CachedStore {
             .update_scheduled_task_run_status(run_id, status, completed_at_ms, error)
     }
 
+    fn update_scheduled_task_run_agent_session_id(
+        &self,
+        run_id: &str,
+        agent_session_id: &str,
+    ) -> Result<()> {
+        self.inner
+            .update_scheduled_task_run_agent_session_id(run_id, agent_session_id)
+    }
+
     fn update_scheduled_task_run_push(
         &self,
         run_id: &str,

@@ -91,6 +91,7 @@ fn stamp_started_chat_session(
     task_id: &str,
     task_name: &str,
     prompt: &str,
+    run_id: &str,
     timeout: Duration,
 ) -> Result<()> {
     let real_agent_session_id = if handle.transport == RuntimeTransportKind::Acp {
@@ -112,7 +113,18 @@ fn stamp_started_chat_session(
         task_name,
         prompt,
         &real_agent_session_id,
-    )
+    )?;
+    // Backfill the run row's agent_session_id so the run survives a restart
+    // (its `session_id` carries the runtime's internal handle, dead after
+    // shutdown). Best-effort: a logged warning is fine, run already ran.
+    if let Err(error) =
+        store.update_scheduled_task_run_agent_session_id(run_id, &real_agent_session_id)
+    {
+        log::warn!(
+            "[scheduled-tasks] failed to stamp run {run_id} with agent session id {real_agent_session_id}: {error:#}"
+        );
+    }
+    Ok(())
 }
 
 fn wait_for_real_agent_session_id(
@@ -267,7 +279,7 @@ impl SchedulerState {
         when_ms: i64,
         trigger: ScheduledTaskRunTrigger,
         scheduled_for_ms: Option<i64>,
-    ) {
+    ) -> Option<ScheduledTaskRun> {
         let run =
             scheduled_task_run_from_outcome(task, outcome, when_ms, trigger, scheduled_for_ms);
         match scheduled_task_run_to_record(&run).and_then(|record| {
@@ -277,14 +289,16 @@ impl SchedulerState {
             Ok(_) => {
                 if let Ok(mut guard) = self.tasks.lock() {
                     if let Some(task) = guard.iter_mut().find(|candidate| candidate.id == task.id) {
-                        task.runs.insert(0, run);
+                        task.runs.insert(0, run.clone());
                         task.runs
                             .truncate(SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK);
                     }
                 }
+                Some(run)
             }
             Err(error) => {
                 log::warn!("[scheduled-tasks] failed to record task run: {error:#}");
+                None
             }
         }
     }
@@ -317,7 +331,7 @@ impl SchedulerState {
         }
     }
 
-    fn tick(&self, now: i64) {
+    fn tick(self: &Arc<Self>, now: i64) {
         for task in self.snapshot() {
             if task.status != ScheduledTaskStatus::Active {
                 continue;
@@ -333,7 +347,7 @@ impl SchedulerState {
         }
     }
 
-    fn run(&self, task: &ScheduledTask, now: i64, scheduled_for_ms: i64) {
+    fn run(self: &Arc<Self>, task: &ScheduledTask, now: i64, scheduled_for_ms: i64) {
         if task_has_running_run(task) {
             log::info!(
                 "[scheduled-tasks] skipped task {} ({}) because a previous run is still active",
@@ -345,14 +359,19 @@ impl SchedulerState {
         match self.execute(task) {
             Ok(outcome) => {
                 log::info!("[scheduled-tasks] ran task {} ({})", task.id, task.name);
-                self.record_run(
+                let recorded = self.record_run(
                     task,
                     &outcome,
                     now,
                     ScheduledTaskRunTrigger::Scheduled,
                     Some(scheduled_for_ms),
                 );
-                self.mark_ran(&task.id, now);
+                if let Some(run) = recorded {
+                    self.mark_ran(&task.id, now);
+                    self.kick_off_chat_stamp(task, &outcome, &run.id);
+                } else {
+                    self.cleanup_unrecorded_outcome(&outcome);
+                }
             }
             Err(error) => {
                 log::warn!(
@@ -412,26 +431,67 @@ impl SchedulerState {
                 Value::String(permission_mode.clone()),
             );
         }
-        let handle = self.runtime.start_session(req)?;
+        // Stamping (waiting for a real ACP session id, then writing the
+        // sessions placeholder + run.agent_session_id backfill) happens after
+        // record_run lands; callers invoke `kick_off_chat_stamp` with the
+        // freshly-recorded run id.
+        self.runtime.start_session(req)
+    }
+
+    /// Drive the post-record stamp: try inline first, fall back to a
+    /// background waiter on startup-timeout, and on any other failure cancel
+    /// the runtime session + mark the run failed with the error reason.
+    fn kick_off_chat_stamp(
+        self: &Arc<Self>,
+        task: &ScheduledTask,
+        outcome: &TaskRunOutcome,
+        run_id: &str,
+    ) {
+        let TaskRunOutcome::Chat(handle) = outcome else {
+            return;
+        };
+        let TaskTarget::Chat { project_id, .. } = &task.target else {
+            return;
+        };
+        let project = match self.project_by_id(project_id) {
+            Ok(project) => project,
+            Err(error) => {
+                self.fail_run_with_stamp_error(run_id, &format!("{error:#}"));
+                return;
+            }
+        };
+        let prompt = task_chat_prompt(task).to_string();
         match stamp_started_chat_session(
             &self.runtime,
             self.store.as_ref(),
-            &handle,
+            handle,
             &project,
             &task.id,
             &task.name,
             &prompt,
+            run_id,
             SCHEDULED_CHAT_STARTUP_INLINE_TIMEOUT,
         ) {
             Ok(()) => {}
             Err(error) if is_runtime_startup_timeout(&error) => {
-                self.spawn_chat_session_stamp_waiter(
+                if let Err(spawn_error) = self.spawn_chat_session_stamp_waiter(
                     handle.clone(),
                     project,
                     task.id.clone(),
                     task.name.clone(),
                     prompt,
-                )?;
+                    run_id.to_string(),
+                ) {
+                    let cleanup = self.runtime.cleanup_session_bounded(
+                        &handle.sessio_runtime_session_id,
+                        CHAT_SESSION_CLEANUP_TIMEOUT,
+                    );
+                    log_scheduled_chat_cleanup_issue(&handle.sessio_runtime_session_id, &cleanup);
+                    self.fail_run_with_stamp_error(
+                        run_id,
+                        &format!("failed to spawn stamp waiter: {spawn_error:#}; cleanup={cleanup:?}"),
+                    );
+                }
             }
             Err(error) => {
                 let cleanup = self.runtime.cleanup_session_bounded(
@@ -439,26 +499,39 @@ impl SchedulerState {
                     CHAT_SESSION_CLEANUP_TIMEOUT,
                 );
                 log_scheduled_chat_cleanup_issue(&handle.sessio_runtime_session_id, &cleanup);
-                bail!(
+                let reason = format!(
                     "chat session {} did not finish startup before stamping task {}: {error:#}; cleanup={cleanup:?}",
-                    handle.sessio_runtime_session_id,
-                    task.id
+                    handle.sessio_runtime_session_id, task.id
                 );
+                log::warn!("[scheduled-tasks] {reason}");
+                self.fail_run_with_stamp_error(run_id, &reason);
             }
         }
-        Ok(handle)
+    }
+
+    fn fail_run_with_stamp_error(&self, run_id: &str, reason: &str) {
+        if let Err(error) = self.update_run_status(
+            run_id,
+            ScheduledTaskRunStatus::Failed,
+            now_ms(),
+            Some(reason),
+        ) {
+            log::warn!(
+                "[scheduled-tasks] failed to mark run {run_id} failed after stamp error: {error:#}"
+            );
+        }
     }
 
     fn spawn_chat_session_stamp_waiter(
-        &self,
+        self: &Arc<Self>,
         handle: AgentSessionHandle,
         project: ProjectInfo,
         task_id: String,
         task_name: String,
         prompt: String,
+        run_id: String,
     ) -> Result<()> {
-        let runtime = self.runtime.clone();
-        let store = self.store.clone();
+        let state = Arc::clone(self);
         let thread_name = format!("scheduled-chat-stamp-{task_id}");
         let session_id = handle.sessio_runtime_session_id.clone();
         let context_task_id = task_id.clone();
@@ -466,25 +539,32 @@ impl SchedulerState {
             .name(thread_name)
             .spawn(move || {
                 if let Err(error) = stamp_started_chat_session(
-                    &runtime,
-                    store.as_ref(),
+                    &state.runtime,
+                    state.store.as_ref(),
                     &handle,
                     &project,
                     &task_id,
                     &task_name,
                     &prompt,
+                    &run_id,
                     SCHEDULED_CHAT_STARTUP_TIMEOUT,
                 ) {
-                    let cleanup = runtime.cleanup_session_bounded(
+                    let cleanup = state.runtime.cleanup_session_bounded(
                         &handle.sessio_runtime_session_id,
                         CHAT_SESSION_CLEANUP_TIMEOUT,
                     );
                     log_scheduled_chat_cleanup_issue(&handle.sessio_runtime_session_id, &cleanup);
-                    log::warn!(
-                        "[scheduled-tasks] chat session {} did not finish startup before stamping task {}: {error:#}; cleanup={cleanup:?}",
+                    let reason = format!(
+                        "chat session {} did not finish startup before stamping task {task_id}: {error:#}; cleanup={cleanup:?}",
                         handle.sessio_runtime_session_id,
-                        task_id
                     );
+                    log::warn!("[scheduled-tasks] {reason}");
+                    // Route through update_run_status so the in-memory snapshot
+                    // (consulted by task_has_running_run on the next tick) is
+                    // updated together with the DB row. Bypassing this and
+                    // writing the status straight to the store would leave the
+                    // task locked as "running" until the next list/UI refresh.
+                    state.fail_run_with_stamp_error(&run_id, &reason);
                 }
             })
             .with_context(|| {
@@ -1062,6 +1142,39 @@ impl SchedulerState {
                 if let Some(run) = task.runs.iter_mut().find(|run| run.id == run_id) {
                     update(run);
                     return;
+                }
+            }
+        }
+    }
+
+    fn cleanup_unrecorded_outcome(&self, outcome: &TaskRunOutcome) {
+        match outcome {
+            TaskRunOutcome::Chat(handle) => {
+                let report = self.runtime.cleanup_session_bounded(
+                    &handle.sessio_runtime_session_id,
+                    CHAT_SESSION_CLEANUP_TIMEOUT,
+                );
+                log_scheduled_chat_cleanup_issue(&handle.sessio_runtime_session_id, &report);
+                log::warn!(
+                    "[scheduled-tasks] cleaned up unrecorded chat session {} after run record failure: {:?}",
+                    handle.sessio_runtime_session_id,
+                    report
+                );
+            }
+            TaskRunOutcome::Thread(outcome) => {
+                if let Err(error) = self.astra.cancel_astra_run(CancelAstraRunRequest {
+                    run_id: outcome.run.run_id.clone(),
+                }) {
+                    log::warn!(
+                        "[scheduled-tasks] failed to cancel unrecorded Astra run {} after run record failure: {error:#}",
+                        outcome.run.run_id
+                    );
+                }
+                if let Err(error) = self.store.delete_thread(&outcome.thread.id) {
+                    log::warn!(
+                        "[scheduled-tasks] failed to delete unrecorded thread {} after run record failure: {error:#}",
+                        outcome.thread.id
+                    );
                 }
             }
         }
@@ -1707,6 +1820,7 @@ fn scheduled_task_run_from_record(record: ScheduledTaskRunRecord) -> Result<Sche
         task_target,
         session_agent: record.session_agent,
         session_id: record.session_id,
+        agent_session_id: record.agent_session_id,
         thread_id: record.thread_id,
         astra_run_id: record.astra_run_id,
         push_platform: record.push_platform,
@@ -1737,6 +1851,7 @@ fn scheduled_task_run_to_record(run: &ScheduledTaskRun) -> Result<ScheduledTaskR
             .transpose()?,
         session_agent: run.session_agent,
         session_id: run.session_id.clone(),
+        agent_session_id: run.agent_session_id.clone(),
         thread_id: run.thread_id.clone(),
         astra_run_id: run.astra_run_id.clone(),
         push_platform: run.push_platform.clone(),
@@ -1787,6 +1902,9 @@ fn scheduled_task_run_from_outcome(
             task_target: Some(task.target.clone()),
             session_agent: Some(handle.agent),
             session_id: Some(handle.sessio_runtime_session_id.clone()),
+            // Real ACP id is unknown until stamp completes; the stamp helper
+            // backfills this column via update_scheduled_task_run_agent_session_id.
+            agent_session_id: None,
             thread_id: None,
             astra_run_id: None,
             push_platform,
@@ -1812,6 +1930,7 @@ fn scheduled_task_run_from_outcome(
                 task_target: Some(task.target.clone()),
                 session_agent: None,
                 session_id: None,
+                agent_session_id: None,
                 thread_id: Some(outcome.thread.id.clone()),
                 astra_run_id: Some(outcome.run.run_id.clone()),
                 push_platform,
@@ -1910,9 +2029,15 @@ impl ScheduledTasksService {
         }
         let now = now_ms();
         let outcome = self.state.execute(&task)?;
-        self.state
-            .record_run(&task, &outcome, now, ScheduledTaskRunTrigger::Manual, None);
-        self.state.mark_ran(id, now);
+        let recorded =
+            self.state
+                .record_run(&task, &outcome, now, ScheduledTaskRunTrigger::Manual, None);
+        if let Some(run) = recorded {
+            self.state.mark_ran(id, now);
+            self.state.kick_off_chat_stamp(&task, &outcome, &run.id);
+        } else {
+            self.state.cleanup_unrecorded_outcome(&outcome);
+        }
         Ok(())
     }
 

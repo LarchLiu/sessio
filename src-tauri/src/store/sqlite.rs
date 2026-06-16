@@ -783,6 +783,7 @@ CREATE TABLE IF NOT EXISTS scheduled_task_runs (
     target_json    TEXT,
     session_agent  TEXT,
     session_id     TEXT,
+    agent_session_id TEXT,
     thread_id      TEXT,
     astra_run_id   TEXT,
     push_platform  TEXT,
@@ -801,6 +802,9 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task_started
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_session
     ON scheduled_task_runs(session_agent, session_id);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_agent_session
+    ON scheduled_task_runs(session_agent, agent_session_id);
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_thread
     ON scheduled_task_runs(thread_id);
@@ -1795,17 +1799,10 @@ fn downgrade_session_origin_when_unlinked(
 /// incoming row may only upgrade an identity whose stored rows are still the
 /// default `chat`, matching `mark_session_origin` / `upgrade_*` semantics.
 fn merged_origin(rows: &[ExistingSessionRow], incoming: SessionOrigin) -> SessionOrigin {
-    if let Some(origin) = rows
-        .iter()
+    rows.iter()
         .map(|row| row.origin)
         .find(|origin| *origin != SessionOrigin::Chat)
-    {
-        return origin;
-    }
-    if incoming != SessionOrigin::Chat {
-        return incoming;
-    }
-    incoming
+        .unwrap_or(incoming)
 }
 
 /// Sticky scheduled_task_id merge: prefer the incoming value when set, else
@@ -3010,12 +3007,12 @@ fn replace_astra_run_sessions(
     run_id: &str,
     sessions: &[AstraRunSessionRecord],
 ) -> Result<()> {
-    // Capture the existing (agent, session_id) set before the DELETE so we
-    // can downgrade any session whose only thread reference came through
-    // this run. The new INSERTs below will re-upgrade rows that are still
-    // listed, so the net effect is "only sessions actually removed get
-    // downgraded".
-    let prior: Vec<(Agent, String)> = {
+    // Capture the prior (agent, session_id) set before the DELETE. We only
+    // need to downgrade entries that don't reappear in `sessions`; the new
+    // INSERTs below re-upgrade everything that's still listed. Computing the
+    // set difference up front avoids redundant `still_linked` queries when
+    // prior and sessions overlap heavily.
+    let prior: HashSet<(Agent, String)> = {
         let mut stmt =
             conn.prepare("SELECT agent, session_id FROM astra_run_sessions WHERE run_id = ?")?;
         let rows = stmt
@@ -3024,40 +3021,37 @@ fn replace_astra_run_sessions(
                 let agent = Agent::from_db_str(&agent_str).unwrap_or(Agent::Codex);
                 Ok((agent, row.get::<_, String>(1)?))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<rusqlite::Result<HashSet<_>>>()?;
         rows
     };
+    let next: HashSet<(Agent, String)> = sessions
+        .iter()
+        .map(|session| (session.agent, session.session_id.clone()))
+        .collect();
     conn.execute(
         "DELETE FROM astra_run_sessions WHERE run_id = ?",
         params![run_id],
     )?;
-    if sessions.is_empty() {
-        for (agent, session_id) in &prior {
-            downgrade_session_origin_when_unlinked(conn, *agent, session_id)?;
+    if !sessions.is_empty() {
+        let mut stmt = conn.prepare(
+            "INSERT INTO astra_run_sessions (
+                run_id, agent, session_id, role, sort_order, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )?;
+        for session in sessions {
+            stmt.execute(params![
+                run_id,
+                session.agent.as_str(),
+                session.session_id,
+                session.role.as_str(),
+                session.sort_order,
+                session.created_at,
+                session.updated_at,
+            ])?;
+            upgrade_session_origin_to_thread(conn, session.agent, &session.session_id)?;
         }
-        return Ok(());
     }
-    let mut stmt = conn.prepare(
-        "INSERT INTO astra_run_sessions (
-            run_id, agent, session_id, role, sort_order, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )?;
-    for session in sessions {
-        stmt.execute(params![
-            run_id,
-            session.agent.as_str(),
-            session.session_id,
-            session.role.as_str(),
-            session.sort_order,
-            session.created_at,
-            session.updated_at,
-        ])?;
-        upgrade_session_origin_to_thread(conn, session.agent, &session.session_id)?;
-    }
-    // After the re-INSERT we still need to downgrade prior rows that didn't
-    // get re-listed. upgrade/downgrade are idempotent over identity, so it's
-    // safe to call downgrade on the whole prior set.
-    for (agent, session_id) in &prior {
+    for (agent, session_id) in prior.difference(&next) {
         downgrade_session_origin_when_unlinked(conn, *agent, session_id)?;
     }
     Ok(())
@@ -5243,15 +5237,16 @@ fn scheduled_task_run_record_from_row(
         target_json: row.get(9)?,
         session_agent: session_agent_raw.as_deref().and_then(Agent::from_db_str),
         session_id: row.get(11)?,
-        thread_id: row.get(12)?,
-        astra_run_id: row.get(13)?,
-        push_platform: row.get(14)?,
-        push_chat_id: row.get(15)?,
-        push_status: row.get(16)?,
-        push_summary: row.get(17)?,
-        push_error: row.get(18)?,
-        push_sent_at_ms: row.get(19)?,
-        error: row.get(20)?,
+        agent_session_id: row.get(12)?,
+        thread_id: row.get(13)?,
+        astra_run_id: row.get(14)?,
+        push_platform: row.get(15)?,
+        push_chat_id: row.get(16)?,
+        push_status: row.get(17)?,
+        push_summary: row.get(18)?,
+        push_error: row.get(19)?,
+        push_sent_at_ms: row.get(20)?,
+        error: row.get(21)?,
     })
 }
 
@@ -5550,12 +5545,12 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
-                    task_name, target_json, session_agent, session_id,
+                    task_name, target_json, session_agent, session_id, agent_session_id,
                     thread_id, astra_run_id, push_platform, push_chat_id,
                     push_status, push_summary, push_error, push_sent_at_ms, error
              FROM (
                 SELECT id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
-                       task_name, target_json, session_agent, session_id,
+                       task_name, target_json, session_agent, session_id, agent_session_id,
                        thread_id, astra_run_id, push_platform, push_chat_id,
                        push_status, push_summary, push_error, push_sent_at_ms, error,
                        ROW_NUMBER() OVER (
@@ -5582,7 +5577,7 @@ impl SessionStore for SqliteStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
-                    task_name, target_json, session_agent, session_id,
+                    task_name, target_json, session_agent, session_id, agent_session_id,
                     thread_id, astra_run_id, push_platform, push_chat_id,
                     push_status, push_summary, push_error, push_sent_at_ms, error
              FROM scheduled_task_runs
@@ -5652,9 +5647,9 @@ impl SessionStore for SqliteStore {
         conn.execute(
             "INSERT INTO scheduled_task_runs (
                 id, task_id, mode, trigger, status, started_at_ms, scheduled_for_ms, completed_at_ms,
-                task_name, target_json, session_agent, session_id, thread_id, astra_run_id,
+                task_name, target_json, session_agent, session_id, agent_session_id, thread_id, astra_run_id,
                 push_platform, push_chat_id, push_status, push_summary, push_error, push_sent_at_ms, error
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO NOTHING",
             params![
                 run.id.as_str(),
@@ -5669,6 +5664,7 @@ impl SessionStore for SqliteStore {
                 run.target_json.as_deref(),
                 run.session_agent.map(|agent| agent.as_str().to_string()),
                 run.session_id.as_deref(),
+                run.agent_session_id.as_deref(),
                 run.thread_id.as_deref(),
                 run.astra_run_id.as_deref(),
                 run.push_platform.as_deref(),
@@ -5705,6 +5701,21 @@ impl SessionStore for SqliteStore {
                 error,
                 run_id
             ],
+        )?;
+        Ok(())
+    }
+
+    fn update_scheduled_task_run_agent_session_id(
+        &self,
+        run_id: &str,
+        agent_session_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE scheduled_task_runs
+             SET agent_session_id = ?
+             WHERE id = ?",
+            params![agent_session_id, run_id],
         )?;
         Ok(())
     }

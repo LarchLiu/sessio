@@ -146,6 +146,12 @@ export interface ScheduledTaskRun {
   completedAtMs: number | null;
   sessionAgent: Agent | null;
   sessionId: string | null;
+  /**
+   * Real ACP / jsonl session id stamped after the runtime publishes it. Use
+   * this when joining back to `SessionInfo` (the `sessionId` field carries the
+   * runtime's internal handle, dead after a process restart).
+   */
+  agentSessionId: string | null;
   threadId: string | null;
   astraRunId: string | null;
   pushPlatform: string | null;

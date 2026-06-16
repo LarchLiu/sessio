@@ -444,10 +444,14 @@ export default function AutoTasksPage({ onError }: { onError: (error: string | n
     const push = run.pushStatus ? ` · ${t(`autoTasks.push_status.${run.pushStatus}`)}` : "";
     const failure = run.status === "failed" && run.error ? ` · ${run.error}` : "";
     const suffix = `${push}${failure}`;
-    if (run.sessionId) {
+    // Prefer the real ACP / jsonl session id (`agentSessionId`) so historical
+    // runs survive a restart — `sessionId` carries the runtime's internal
+    // handle, which becomes a dead reference once the process restarts.
+    const chatSessionId = run.agentSessionId ?? run.sessionId;
+    if (chatSessionId) {
       return `${status} · ${t("autoTasks.run_output.chat", {
         agent: run.sessionAgent ? AGENT_LABEL[run.sessionAgent] : t("new_chat.mode.chat"),
-        id: shortRef(run.sessionId),
+        id: shortRef(chatSessionId),
       })}${suffix}`;
     }
     if (run.threadId) {
