@@ -9,9 +9,10 @@ import {
 import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { Check, ChevronDown, Copy, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
-import type { Agent, AgentInfo, AssistantInfo, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
-import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, isAgent, listAgents, listAssistants, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
+import { Check, ChevronDown, Copy, FolderOpen, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
+import { FileTree, useFileTree } from "@pierre/trees/react";
+import type { Agent, AgentInfo, AssistantInfo, ProjectGitStatusEntry, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
+import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, getProjectGitStatus, isAgent, listAgents, listAssistants, listProjectFiles, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
@@ -28,7 +29,7 @@ import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTab
 import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { sessionDisplayTitle } from "../appUtils";
 
-type ProjectView = "threads" | "stages" | "assistants";
+type ProjectView = "threads" | "stages" | "assistants" | "files";
 type ThreadPanelView = "threads" | "thread-chats";
 const THREAD_KINDS: ThreadKind[] = ["process", "teamwork", "brainstorm", "debate"];
 const AGENT_PARTICIPANT_KINDS = new Set<ThreadKind>(["brainstorm", "debate"]);
@@ -295,6 +296,7 @@ export function ProjectWorkbenchPage({
       { value: "threads", label: t("thread.title"), icon: HashIcon },
       { value: "stages", label: t("project.processTemplateId"), icon: Workflow },
       { value: "assistants", label: t("assistant.title"), icon: Robot3LineIcon },
+      { value: "files", label: t("project.files"), icon: FolderOpen },
     ],
     [t],
   );
@@ -375,74 +377,164 @@ export function ProjectWorkbenchPage({
             padding={4}
           />
         </div>
-        <ScrollArea
-          className="min-h-0 flex-1"
-          viewportClassName="px-5 pb-5 pt-4"
-        >
-          {activeView === "threads" && (
-            <ThreadProcessTemplatePanel
-              project={project}
-              threads={threads}
-              projectStages={projectStages}
-              assistants={assistants}
-              agents={agents}
-              loading={processLoading}
-              onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
-              onThreadUpdated={patchThread}
-              onThreadDeleted={(threadId) => setThreads((prev) => prev.filter((thread) => thread.id !== threadId))}
-              onStageAdded={(stage) =>
-                setThreads((prev) =>
-                  prev.map((thread) =>
-                    thread.id === stage.threadId
-                      ? {
-                          ...thread,
-                          stages: [...thread.stages, stage].sort((a, b) => a.order - b.order),
-                        }
-                      : thread,
-                  ),
-                )
-              }
-              onStageUpdated={patchStage}
-              onStageDeleted={(threadId, stageId) =>
-                setThreads((prev) =>
-                  prev.map((thread) =>
-                    thread.id === threadId ? removeStageFromThread(thread, stageId) : thread,
-                  ),
-                )
-              }
-              onSelectThreadChatSession={onSelectThreadChatSession}
-              onError={onError}
-            />
-          )}
-          {activeView === "stages" && (
-            <ProjectStagePicker
-              project={project}
-              stages={projectStages}
-              assistants={assistants}
-              onCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
-              onUpdated={patchProjectStage}
-              onDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
-              onReload={async () => {
-                setProjectStages((await listProjectStages(project.id)).sort((a, b) => a.order - b.order));
-              }}
-              onError={onError}
-            />
-          )}
-          {activeView === "assistants" && (
-            <AssistantManagementPanel
-              project={project}
-              assistants={assistants}
-              agents={agents}
-              loading={processLoading}
-              onAssistantCreated={(assistant) => setAssistants((prev) => [...prev, assistant])}
-              onAssistantUpdated={patchAssistant}
-              onAssistantDeleted={(assistantId) => setAssistants((prev) => prev.filter((assistant) => assistant.id !== assistantId))}
-              onError={onError}
-            />
-          )}
-        </ScrollArea>
+        {activeView === "files" ? (
+          <ProjectFilesPanel project={project} />
+        ) : (
+          <ScrollArea
+            className="min-h-0 flex-1"
+            viewportClassName="px-5 pb-5 pt-4"
+          >
+            {activeView === "threads" && (
+              <ThreadProcessTemplatePanel
+                project={project}
+                threads={threads}
+                projectStages={projectStages}
+                assistants={assistants}
+                agents={agents}
+                loading={processLoading}
+                onThreadCreated={(thread) => setThreads((prev) => [thread, ...prev])}
+                onThreadUpdated={patchThread}
+                onThreadDeleted={(threadId) => setThreads((prev) => prev.filter((thread) => thread.id !== threadId))}
+                onStageAdded={(stage) =>
+                  setThreads((prev) =>
+                    prev.map((thread) =>
+                      thread.id === stage.threadId
+                        ? {
+                            ...thread,
+                            stages: [...thread.stages, stage].sort((a, b) => a.order - b.order),
+                          }
+                        : thread,
+                    ),
+                  )
+                }
+                onStageUpdated={patchStage}
+                onStageDeleted={(threadId, stageId) =>
+                  setThreads((prev) =>
+                    prev.map((thread) =>
+                      thread.id === threadId ? removeStageFromThread(thread, stageId) : thread,
+                    ),
+                  )
+                }
+                onSelectThreadChatSession={onSelectThreadChatSession}
+                onError={onError}
+              />
+            )}
+            {activeView === "stages" && (
+              <ProjectStagePicker
+                project={project}
+                stages={projectStages}
+                assistants={assistants}
+                onCreated={(stage) => setProjectStages((prev) => [...prev, stage].sort((a, b) => a.order - b.order))}
+                onUpdated={patchProjectStage}
+                onDeleted={(stageId) => setProjectStages((prev) => prev.filter((stage) => stage.id !== stageId))}
+                onReload={async () => {
+                  setProjectStages((await listProjectStages(project.id)).sort((a, b) => a.order - b.order));
+                }}
+                onError={onError}
+              />
+            )}
+            {activeView === "assistants" && (
+              <AssistantManagementPanel
+                project={project}
+                assistants={assistants}
+                agents={agents}
+                loading={processLoading}
+                onAssistantCreated={(assistant) => setAssistants((prev) => [...prev, assistant])}
+                onAssistantUpdated={patchAssistant}
+                onAssistantDeleted={(assistantId) => setAssistants((prev) => prev.filter((assistant) => assistant.id !== assistantId))}
+                onError={onError}
+              />
+            )}
+          </ScrollArea>
+        )}
       </div>
     </div>
+  );
+}
+
+function ProjectFilesPanel({ project }: { project: ProjectInfo }) {
+  const { t } = useI18n();
+  const [paths, setPaths] = useState<string[] | null>(null);
+  const [gitStatus, setGitStatus] = useState<ProjectGitStatusEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!project.path) {
+      setPaths([]);
+      setGitStatus([]);
+      setError(t("project.files_path_missing"));
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      listProjectFiles(project.path),
+      getProjectGitStatus(project.path).catch(() => []),
+    ])
+      .then(([rows, status]) => {
+        if (cancelled) return;
+        setPaths(rows);
+        setGitStatus(status);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(String(err));
+        setPaths([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.path, t]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-5 pb-5 pt-4">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-card-border/[0.12] bg-ink/[0.025]">
+        {loading ? (
+          <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
+            {t("project.files_loading")}
+          </div>
+        ) : error ? (
+          <div className="flex flex-1 items-center justify-center px-4 text-center text-body-sm text-ink/45">
+            {error}
+          </div>
+        ) : paths && paths.length === 0 ? (
+          <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
+            {t("project.files_empty")}
+          </div>
+        ) : (
+          <ProjectFilesTree paths={paths ?? []} gitStatus={gitStatus} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProjectFilesTree({
+  paths,
+  gitStatus,
+}: {
+  paths: string[];
+  gitStatus: ProjectGitStatusEntry[];
+}) {
+  const { model } = useFileTree({
+    paths,
+    initialExpansion: "closed",
+    flattenEmptyDirectories: true,
+    search: true,
+    gitStatus,
+  });
+  return (
+    <FileTree
+      model={model}
+      className="flex-1"
+      style={{ height: "100%", width: "100%" }}
+    />
   );
 }
 

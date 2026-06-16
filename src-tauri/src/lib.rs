@@ -2707,6 +2707,153 @@ fn save_pasted_attachment(
 }
 
 #[tauri::command]
+fn list_project_files(path: String) -> Result<Vec<String>, String> {
+    const MAX_FILES: usize = 20_000;
+    const MAX_DEPTH: usize = 12;
+    const IGNORED_DIR_NAMES: &[&str] = &[
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        ".pnpm",
+        ".yarn",
+        "target",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        ".turbo",
+        ".cache",
+        ".parcel-cache",
+        ".vercel",
+        ".vite",
+        ".output",
+        ".idea",
+        ".vscode",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".tox",
+        ".venv",
+        "venv",
+        ".gradle",
+        ".angular",
+        ".terraform",
+        "DerivedData",
+        ".DS_Store",
+    ];
+
+    let root = PathBuf::from(&path);
+    if !root.is_absolute() {
+        return Err("Project path must be absolute".to_string());
+    }
+    let meta = std::fs::metadata(&root).map_err(|e| e.to_string())?;
+    if !meta.is_dir() {
+        return Err("Project path is not a directory".to_string());
+    }
+
+    let mut entries: Vec<String> = Vec::new();
+    let walker = walkdir::WalkDir::new(&root)
+        .max_depth(MAX_DEPTH)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let name = entry.file_name().to_string_lossy();
+            if IGNORED_DIR_NAMES.iter().any(|n| name == *n) {
+                return false;
+            }
+            true
+        });
+
+    for entry in walker.flatten() {
+        if entry.depth() == 0 {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(&root) else {
+            continue;
+        };
+        // Convert to POSIX-style separators for @pierre/trees.
+        let mut rel_str = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        if rel_str.is_empty() {
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            rel_str.push('/');
+        } else if !entry.file_type().is_file() {
+            // Skip symlinks, sockets, etc.
+            continue;
+        }
+        entries.push(rel_str);
+        if entries.len() >= MAX_FILES {
+            break;
+        }
+    }
+
+    entries.sort();
+    Ok(entries)
+}
+
+#[tauri::command]
+fn get_project_git_status(path: String) -> Result<Vec<GitStatusRow>, String> {
+    let root = PathBuf::from(&path);
+    if !root.is_absolute() || !root.is_dir() {
+        return Err("Invalid project path".to_string());
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .args(["status", "--porcelain=v1", "-uall"])
+        .output()
+        .map_err(|e| format!("Failed to run git: {e}"))?;
+    if !output.status.success() {
+        // Not a git repo or git not available — return empty rather than error.
+        return Ok(Vec::new());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries: Vec<GitStatusRow> = Vec::new();
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let xy = &line[..2];
+        let file_path = &line[3..];
+        // Handle renames: "R  old -> new"
+        let rel = if let Some(arrow_pos) = file_path.find(" -> ") {
+            &file_path[arrow_pos + 4..]
+        } else {
+            file_path
+        };
+        let status = match xy.trim() {
+            "M" | "MM" | "AM" => "modified",
+            "A" => "added",
+            "D" => "deleted",
+            "R" | "RM" => "renamed",
+            "??" => "untracked",
+            "!!" => "ignored",
+            _ => "modified",
+        };
+        entries.push(GitStatusRow {
+            path: rel.to_string(),
+            status: status.to_string(),
+        });
+    }
+    Ok(entries)
+}
+
+#[derive(serde::Serialize)]
+struct GitStatusRow {
+    path: String,
+    status: String,
+}
+
+#[tauri::command]
 fn read_local_text_file(path: String) -> Result<String, String> {
     let path_buf = PathBuf::from(&path);
     if !path_buf.is_absolute() {
@@ -3759,6 +3906,8 @@ pub fn run() {
             read_local_image_data_url,
             save_pasted_attachment,
             read_local_text_file,
+            list_project_files,
+            get_project_git_status,
             set_window_appearance,
             get_system_appearance,
             reveal_main_window,

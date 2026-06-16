@@ -1236,6 +1236,21 @@ export async function listProjects(): Promise<ProjectInfo[]> {
   return invoke<ProjectInfo[]>("list_projects");
 }
 
+export async function listProjectFiles(path: string): Promise<string[]> {
+  return invoke<string[]>("list_project_files", { path });
+}
+
+export type ProjectGitStatus = "added" | "deleted" | "ignored" | "modified" | "renamed" | "untracked";
+
+export interface ProjectGitStatusEntry {
+  path: string;
+  status: ProjectGitStatus;
+}
+
+export async function getProjectGitStatus(path: string): Promise<ProjectGitStatusEntry[]> {
+  return invoke<ProjectGitStatusEntry[]>("get_project_git_status", { path });
+}
+
 export async function listProcessTemplates(): Promise<ProcessTemplateInfo[]> {
   return invoke<ProcessTemplateInfo[]>("list_process_templates");
 }
