@@ -36,7 +36,11 @@ export default function SessionFileEditsCard({
             edit.patches?.join("\n") ?? "",
             edit.oldContent ?? "",
             edit.newContent ?? "",
+            edit.contentDiffs
+              ?.map((diff) => `${diff.oldContent ?? ""}\u0000${diff.newContent ?? ""}`)
+              .join("\n") ?? "",
             edit.detail ?? "",
+            edit.details?.join("\n") ?? "",
           ].join("\u0001"),
         )
         .join("\u0002"),
@@ -147,7 +151,7 @@ export default function SessionFileEditsCard({
           {visibleEdits.map((edit, index) => {
             const label = edit.displayPath || edit.path || "(unknown file)";
             const detailKey = `${index}:${edit.path || edit.displayPath || label}`;
-            const detail = typeof edit.detail === "string" ? edit.detail : "";
+            const detail = normalizeEditDetails(edit).join("\n\n");
             const hasDetail = hasRenderableEditDetail(edit);
             const detailOpen = openDetails.has(detailKey);
             const rowContent = (
@@ -242,7 +246,7 @@ function hasRenderableEditDetail(edit: FileEditItem): boolean {
   return Boolean(
     (typeof edit.patch === "string" && edit.patch.trim()) ||
       normalizeEditPatches(edit).length > 0 ||
-      (typeof edit.detail === "string" && edit.detail.trim()) ||
+      normalizeEditDetails(edit).length > 0 ||
       normalizeContentDiffs(edit).length > 0 ||
       typeof edit.oldContent === "string" ||
       typeof edit.newContent === "string",
@@ -325,7 +329,17 @@ function normalizeEditPatches(edit: FileEditItem): string[] {
   if (typeof edit.patch === "string" && edit.patch.trim()) {
     patches.push(edit.patch);
   }
-  return patches;
+  return Array.from(new Set(patches));
+}
+
+function normalizeEditDetails(edit: FileEditItem): string[] {
+  const details = Array.isArray(edit.details)
+    ? edit.details.filter((item): item is string => Boolean(item.trim()))
+    : [];
+  if (typeof edit.detail === "string" && edit.detail.trim()) {
+    details.push(edit.detail);
+  }
+  return Array.from(new Set(details));
 }
 
 function normalizeContentDiffs(edit: FileEditItem): FileEditContentDiff[] {
@@ -345,7 +359,13 @@ function normalizeContentDiffs(edit: FileEditItem): FileEditContentDiff[] {
       newContent: edit.newContent,
     });
   }
-  return diffs;
+  const seen = new Set<string>();
+  return diffs.filter((diff) => {
+    const key = `${diff.oldContent ?? ""}\u0000${diff.newContent ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function findScroller(el: HTMLElement | null): HTMLElement | null {

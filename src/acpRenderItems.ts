@@ -31,6 +31,7 @@ export interface FileEditItem {
   additions?: number;
   deletions?: number;
   detail?: string;
+  details?: string[];
   patch?: string | null;
   patches?: string[];
   oldContent?: string | null;
@@ -263,10 +264,19 @@ function mergeFileEditItem(edits: FileEditItem[], next: FileEditItem) {
   const key = fileEditKey(next);
   const existing = edits.find((edit) => fileEditKey(edit) === key);
   if (!existing) {
-    edits.push({ ...next });
+    edits.push(normalizeFileEditItem(next));
     return;
   }
   mergeFileEditValues(existing, next);
+}
+
+function normalizeFileEditItem(edit: FileEditItem): FileEditItem {
+  return {
+    ...edit,
+    patches: mergeTextVariants(edit.patches, edit.patch),
+    details: mergeTextVariants(edit.details, edit.detail),
+    contentDiffs: mergeContentDiffs(edit.contentDiffs, contentDiffFromEdit(edit)),
+  };
 }
 
 function mergeFileEditValues(existing: FileEditItem, next: FileEditItem) {
@@ -276,11 +286,24 @@ function mergeFileEditValues(existing: FileEditItem, next: FileEditItem) {
   existing.additions = (existing.additions ?? 0) + (next.additions ?? 0);
   existing.deletions = (existing.deletions ?? 0) + (next.deletions ?? 0);
   existing.patch = mergeOptionalText(existing.patch, next.patch);
-  existing.patches = mergeStringArrays(existing.patches, next.patches);
+  existing.patches = mergeTextVariants(
+    mergeTextVariants(existing.patches, existing.patch),
+    mergeTextVariants(next.patches, next.patch),
+  );
   existing.detail = mergeOptionalText(existing.detail, next.detail);
-  existing.oldContent = mergeOptionalText(existing.oldContent, next.oldContent);
-  existing.newContent = mergeOptionalText(existing.newContent, next.newContent);
-  existing.contentDiffs = mergeContentDiffs(existing.contentDiffs, next.contentDiffs);
+  existing.details = mergeTextVariants(
+    mergeTextVariants(existing.details, existing.detail),
+    mergeTextVariants(next.details, next.detail),
+  );
+  existing.contentDiffs = mergeContentDiffs(
+    mergeContentDiffs(
+      existing.contentDiffs,
+      contentDiffFromEdit(existing),
+    ),
+    mergeContentDiffs(next.contentDiffs, contentDiffFromEdit(next)),
+  );
+  existing.oldContent = mergeOptionalContent(existing.oldContent, next.oldContent);
+  existing.newContent = mergeOptionalContent(existing.newContent, next.newContent);
   existing.displayPath ??= next.displayPath;
   existing.path ??= next.path;
 }
@@ -291,17 +314,70 @@ function mergeOptionalText(current: string | null | undefined, next: string | nu
   return undefined;
 }
 
-function mergeStringArrays(left?: string[], right?: string[]): string[] | undefined {
-  if ((!left || left.length === 0) && (!right || right.length === 0)) return undefined;
-  return Array.from(new Set([...(left ?? []), ...(right ?? [])]));
+function mergeOptionalContent(current: string | null | undefined, next: string | null | undefined): string | undefined {
+  if (typeof current === "string") return current;
+  if (typeof next === "string") return next;
+  return undefined;
+}
+
+function mergeTextVariants(
+  left?: string[] | string | null,
+  right?: string[] | string | null,
+): string[] | undefined {
+  const values = [...normalizeTextVariants(left), ...normalizeTextVariants(right)];
+  if (values.length === 0) return undefined;
+  return Array.from(new Set(values));
 }
 
 function mergeContentDiffs(
-  left?: FileEditContentDiff[],
-  right?: FileEditContentDiff[],
+  left?: FileEditContentDiff[] | FileEditContentDiff | null,
+  right?: FileEditContentDiff[] | FileEditContentDiff | null,
 ): FileEditContentDiff[] | undefined {
-  if ((!left || left.length === 0) && (!right || right.length === 0)) return undefined;
-  return [...(left ?? []), ...(right ?? [])];
+  const diffs = [...normalizeContentDiffs(left), ...normalizeContentDiffs(right)];
+  if (diffs.length === 0) return undefined;
+  return dedupeContentDiffs(diffs);
+}
+
+function normalizeTextVariants(value?: string[] | string | null): string[] {
+  const values = Array.isArray(value) ? value : value == null ? [] : [value];
+  return values.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function contentDiffFromEdit(edit: FileEditItem): FileEditContentDiff | undefined {
+  if (
+    typeof edit.oldContent !== "string" &&
+    typeof edit.newContent !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    oldContent: edit.oldContent,
+    newContent: edit.newContent,
+  };
+}
+
+function normalizeContentDiffs(
+  value?: FileEditContentDiff[] | FileEditContentDiff | null,
+): FileEditContentDiff[] {
+  const values = Array.isArray(value) ? value : value == null ? [] : [value];
+  return values.filter(
+    (item): item is FileEditContentDiff =>
+      Boolean(item) &&
+      (typeof item.oldContent === "string" ||
+        typeof item.newContent === "string"),
+  );
+}
+
+function dedupeContentDiffs(diffs: FileEditContentDiff[]): FileEditContentDiff[] {
+  const seen = new Set<string>();
+  const result: FileEditContentDiff[] = [];
+  for (const diff of diffs) {
+    const key = `${diff.oldContent ?? ""}\u0001${diff.newContent ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(diff);
+  }
+  return result;
 }
 
 function sumEditNumber(edits: FileEditItem[], key: "additions" | "deletions"): number {

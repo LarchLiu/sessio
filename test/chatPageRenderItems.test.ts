@@ -1,8 +1,62 @@
 import { describe, expect, it } from "vitest";
-import { acpViewModelToRenderItems, renderItemKeys } from "../src/acpRenderItems";
+import { acpViewModelToRenderItems, parseFileEditSummary, renderItemKeys } from "../src/acpRenderItems";
 import type { AcpViewModel, AcpPermissionRequest } from "../src/runtimeChat";
 
 describe("acpViewModelToRenderItems", () => {
+  it("keeps all same-file file_edit details when summaries are merged", () => {
+    const summary = parseFileEditSummary({
+      source: "session",
+      edits: [
+        {
+          path: "src/example.ts",
+          additions: 1,
+          deletions: 1,
+          kind: "modified",
+          patch: "@@ -1 +1 @@\n-old\n+new",
+          detail: "first edit",
+          oldContent: "old",
+          newContent: "new",
+        },
+        {
+          path: "src/example.ts",
+          additions: 2,
+          deletions: 0,
+          kind: "modified",
+          patch: "@@ -3,0 +4,2 @@\n+next\n+lines",
+          detail: "second edit",
+          oldContent: "new",
+          newContent: "new\nnext\nlines",
+        },
+      ],
+    });
+
+    expect(summary).not.toBeNull();
+    const edit = summary?.edits?.[0];
+    expect(summary).toMatchObject({
+      files: 1,
+      additions: 3,
+      deletions: 1,
+    });
+    expect(edit).toMatchObject({
+      path: "src/example.ts",
+      additions: 3,
+      deletions: 1,
+      patch: "@@ -1 +1 @@\n-old\n+new",
+      detail: "first edit",
+      oldContent: "old",
+      newContent: "new",
+    });
+    expect(edit?.patches).toEqual([
+      "@@ -1 +1 @@\n-old\n+new",
+      "@@ -3,0 +4,2 @@\n+next\n+lines",
+    ]);
+    expect(edit?.details).toEqual(["first edit", "second edit"]);
+    expect(edit?.contentDiffs).toEqual([
+      { oldContent: "old", newContent: "new" },
+      { oldContent: "new", newContent: "new\nnext\nlines" },
+    ]);
+  });
+
   it("renders unresolved option permissions after edited files within the same turn", () => {
     const permission: AcpPermissionRequest = {
       requestId: "perm-1",
