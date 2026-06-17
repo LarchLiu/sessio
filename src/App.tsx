@@ -136,7 +136,7 @@ export default function App() {
   const [metaPopoverMounted, setMetaPopoverMounted] = useState(false);
   const [activeMessageMeta, setActiveMessageMeta] =
     useState<ActiveMessageMeta | null>(null);
-  const [chatViewBySession, setChatViewBySession] = useState<Record<string, ChatView>>({});
+  const [chatView, setChatView] = useState<ChatView>("chat");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [liveRuntimeState, dispatchLiveRuntimeEvent] = useReducer(
     applyRuntimeAction,
@@ -792,16 +792,14 @@ export default function App() {
     />
   );
 
-  const currentChatView: ChatView =
-    selected ? chatViewBySession[selected.id] ?? "chat" : "chat";
+  const currentChatView: ChatView = chatView;
   const chatViewToggleVisible =
     Boolean(selected) && detailMode === "chat";
   const handleChatViewChange = useCallback(
     (next: ChatView) => {
-      if (!selected) return;
-      setChatViewBySession((prev) => ({ ...prev, [selected.id]: next }));
+      setChatView(next);
     },
-    [selected],
+    [],
   );
   const currentSessionIdentity = selected ? sessionIdentityKey(selected) : null;
   const currentProjectFileSelection =

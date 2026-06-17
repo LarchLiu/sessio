@@ -1,16 +1,21 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FileDiff, LoaderCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { AcpViewModel, LiveTurn, AcpToolCall } from "../runtimeChat";
 import { useI18n } from "../i18n";
+import Tooltip from "./Tooltip";
 
 export interface MinimalStripItem {
   icon?: LucideIcon | null;
   text: string;
   busy: boolean;
+  lines?: string[];
+  fullText?: string | null;
+  streamKey?: string | null;
+  scrollOnce?: boolean;
 }
 
-const MAX_TEXT_LENGTH = 240;
+const STRIP_LINE_ADVANCE_MS = 1100;
 
 export function pickLatestStripItem(
   viewModel: AcpViewModel,
@@ -41,8 +46,24 @@ function pickFromTurn(turn: LiveTurn, workingTurnId: string | null): MinimalStri
       if (text) return { icon: null, text: clampText(text), busy };
       continue;
     }
-    if (block.kind === "assistant" || block.kind === "thought") {
-      const text = contentBlocksToText(block.blocks);
+    if (block.kind === "assistant") {
+      const lines = contentBlocksToLines(block.blocks);
+      if (lines.length > 0) {
+        const isLiveAssistant = busy;
+        return {
+          icon: null,
+          text: lines[lines.length - 1],
+          lines: isLiveAssistant ? lines : undefined,
+          fullText: lines.join("\n"),
+          busy,
+          scrollOnce: isLiveAssistant && lines.length > 1,
+          streamKey: `${turn.turnId}:assistant:${i}`,
+        };
+      }
+      continue;
+    }
+    if (block.kind === "thought") {
+      const text = contentBlocksToLastLine(block.blocks);
       if (text.trim()) return { icon: null, text: clampText(text), busy };
     }
   }
@@ -92,23 +113,30 @@ function sessionUpdateText(data: unknown): string {
   return "";
 }
 
-function contentBlocksToText(blocks: unknown): string {
-  if (!Array.isArray(blocks)) return "";
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const block = blocks[i] as Record<string, unknown> | undefined;
+function contentBlocksToLines(blocks: unknown): string[] {
+  if (!Array.isArray(blocks)) return [];
+  const lines: string[] = [];
+  for (const entry of blocks) {
+    const block = entry as Record<string, unknown> | undefined;
     if (!block || typeof block !== "object") continue;
     const text = block.text;
-    if (typeof text === "string" && text.trim()) {
-      return text.split("\n").filter((line) => line.trim()).pop() ?? text;
+    if (typeof text !== "string" || !text.trim()) continue;
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      lines.push(clampText(trimmed));
     }
   }
-  return "";
+  return lines;
+}
+
+function contentBlocksToLastLine(blocks: unknown): string {
+  const lines = contentBlocksToLines(blocks);
+  return lines[lines.length - 1] ?? "";
 }
 
 function clampText(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.length <= MAX_TEXT_LENGTH) return trimmed;
-  return trimmed.slice(0, MAX_TEXT_LENGTH - 1) + "…";
+  return text.trim();
 }
 
 /**
@@ -151,11 +179,56 @@ export function MinimalMessageStrip({
     () => pickLatestStripItem(viewModel, workingTurnId),
     [viewModel, workingTurnId],
   );
+  const lines = item?.lines?.length ? item.lines : item ? [item.text] : [];
+  const [activeLineIndex, setActiveLineIndex] = useState(0);
+  const lastStreamKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!item?.scrollOnce) {
+      lastStreamKeyRef.current = item?.streamKey ?? null;
+      setActiveLineIndex(0);
+      return;
+    }
+    if (lastStreamKeyRef.current !== item.streamKey) {
+      lastStreamKeyRef.current = item.streamKey ?? null;
+      setActiveLineIndex(0);
+      return;
+    }
+    setActiveLineIndex((current) => Math.min(current, Math.max(0, lines.length - 1)));
+  }, [item?.scrollOnce, item?.streamKey, lines.length]);
+
+  useEffect(() => {
+    if (!item?.scrollOnce || lines.length <= 1) return;
+    if (activeLineIndex >= lines.length - 1) return;
+    const timer = window.setTimeout(() => {
+      setActiveLineIndex((current) => Math.min(current + 1, lines.length - 1));
+    }, STRIP_LINE_ADVANCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [activeLineIndex, item?.scrollOnce, lines, lines.length]);
+
   if (!item) return null;
+  const activeText = lines[activeLineIndex] ?? item.text;
+  const textNode = (
+    <span className="min-w-0 truncate">{activeText}</span>
+  );
   return (
     <div className="flex h-7 w-full items-center gap-2 px-3 text-caption text-ink/60">
       {item.busy && <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-ink/45" />}
-      <span className="min-w-0 truncate">{item.text}</span>
+      {item.fullText ? (
+        <Tooltip
+          content={
+            <div className="max-w-[min(70vw,720px)] whitespace-pre-wrap break-words font-mono text-caption leading-relaxed">
+              {item.fullText}
+            </div>
+          }
+          placement="top"
+          delayMs={250}
+        >
+          <div className="min-w-0 flex-1">{textNode}</div>
+        </Tooltip>
+      ) : (
+        <div className="min-w-0 flex-1">{textNode}</div>
+      )}
     </div>
   );
 }

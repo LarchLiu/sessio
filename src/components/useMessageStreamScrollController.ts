@@ -19,6 +19,7 @@ interface UseMessageStreamScrollControllerArgs {
   sourceKey: string;
   available: boolean;
   filePath: string;
+  viewportActive: boolean;
   skipHistoryLoad: boolean;
   loading: boolean;
   visibleDisplayItemCount: number;
@@ -76,6 +77,7 @@ export function useMessageStreamScrollController({
   sourceKey,
   available,
   filePath,
+  viewportActive,
   skipHistoryLoad,
   loading,
   visibleDisplayItemCount,
@@ -467,6 +469,7 @@ export function useMessageStreamScrollController({
   }, []);
 
   useEffect(() => {
+    if (!viewportActive) return;
     const vp = viewportRef.current;
     if (!vp) return;
     let frameId: number | null = null;
@@ -508,9 +511,10 @@ export function useMessageStreamScrollController({
       vp.removeEventListener("touchmove", handleUserScrollIntent);
       vp.removeEventListener("keydown", handleUserScrollIntent);
     };
-  }, [saveScrollSnapshot, setScrollToBottomButtonVisibility]);
+  }, [saveScrollSnapshot, setScrollToBottomButtonVisibility, viewportActive]);
 
   useLayoutEffect(() => {
+    if (!viewportActive) return;
     const vp = viewportRef.current;
     const content = chatContentRef.current;
     if (!vp || !content) return;
@@ -547,9 +551,11 @@ export function useMessageStreamScrollController({
     sourceKey,
     stickToBottomAfterLayoutChange,
     updateScrollToBottomButton,
+    viewportActive,
   ]);
 
   useLayoutEffect(() => {
+    if (!viewportActive) return;
     const vp = viewportRef.current;
     const mode = pendingInitialPositionRef.current;
     if (!vp || mode === null || loading) return;
@@ -618,9 +624,11 @@ export function useMessageStreamScrollController({
     scrollChatToBottom,
     sourceKey,
     visibleDisplayItemCount,
+    viewportActive,
   ]);
 
   useLayoutEffect(() => {
+    if (!viewportActive) return;
     const vp = viewportRef.current;
     if (!vp || visibleDisplayItemCount === 0 || !initialPositionAppliedRef.current) {
       return;
@@ -648,9 +656,11 @@ export function useMessageStreamScrollController({
     setScrollToBottomButtonVisibility,
     sourceKey,
     visibleDisplayItemCount,
+    viewportActive,
   ]);
 
   useEffect(() => {
+    if (!viewportActive) return;
     if (!keepInitialBottomLockRef.current) return;
     if (loading || visibleDisplayItemCount === 0) return;
     return scrollChatToBottomUntilSettled();
@@ -658,17 +668,20 @@ export function useMessageStreamScrollController({
     loading,
     scrollChatToBottomUntilSettled,
     visibleDisplayItemCount,
+    viewportActive,
   ]);
 
   useLayoutEffect(() => {
+    if (!viewportActive) return;
     if (!liveCacheKey || !followLiveStreamRef.current) return;
     keepInitialBottomLockRef.current = true;
     return scrollChatToBottomUntilSettled();
-  }, [liveCacheKey, scrollChatToBottomUntilSettled]);
+  }, [liveCacheKey, scrollChatToBottomUntilSettled, viewportActive]);
 
   useLayoutEffect(() => {
+    if (!viewportActive) return;
     updateScrollToBottomButton();
-  }, [loading, updateScrollToBottomButton, visibleDisplayItemCount]);
+  }, [loading, updateScrollToBottomButton, visibleDisplayItemCount, viewportActive]);
 
   return {
     bubbleRefs,

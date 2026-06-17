@@ -935,6 +935,8 @@ export function AcpTranscriptPanel({
       )
       .join("|");
   }, [liveSession]);
+  const isFilesView = chatView === "code" || chatView === "plain";
+  const filesSubview: "code" | "plain" = chatView === "plain" ? "plain" : "code";
   const initialPositionMode = useMemo(() => {
     if (!available || !filePath || skipHistoryLoad) {
       return skipHistoryLoad ? "bottom" : null;
@@ -956,6 +958,7 @@ export function AcpTranscriptPanel({
     sourceKey,
     available,
     filePath,
+    viewportActive: !isFilesView,
     skipHistoryLoad,
     loading: loading || ancestorsLoading,
     visibleDisplayItemCount: visibleDisplayItems.length,
@@ -1323,8 +1326,6 @@ export function AcpTranscriptPanel({
     }
     return permissions;
   }, [acpViewModel]);
-  const isFilesView = chatView === "code" || chatView === "plain";
-  const filesSubview: "code" | "plain" = chatView === "plain" ? "plain" : "code";
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
