@@ -2107,6 +2107,24 @@ export async function readWorkspaceTextFile(
   });
 }
 
+export interface WorkspaceTextFileWrite {
+  mtimeMs: number;
+}
+
+export async function writeWorkspaceTextFile(
+  workspacePath: string,
+  path: string,
+  content: string,
+  expectedMtimeMs: number,
+): Promise<WorkspaceTextFileWrite> {
+  return invoke<WorkspaceTextFileWrite>("write_workspace_text_file", {
+    workspacePath,
+    path,
+    content,
+    expectedMtimeMs,
+  });
+}
+
 export async function watchPreviewFile(path: string): Promise<void> {
   return invoke<void>("watch_preview_file", { path });
 }

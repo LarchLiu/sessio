@@ -198,6 +198,13 @@ export interface FileViewerProps {
   text: string;
   language: string;
   mode: "code" | "plain";
+  workspacePath?: string | null;
+  path?: string | null;
+  mtimeMs?: number | null;
+  contentVersion?: string;
+  editingLocked?: boolean;
+  onSaved?: (content: string, mtimeMs: number) => void;
+  onFlushHandleChange?: (handle: (() => Promise<boolean>) | null) => void;
   gitDiff?: FileGitDiff | null;
   savedScrollTop?: number;
   onScrollTopChange?: (scrollTop: number) => void;
@@ -208,6 +215,13 @@ export default function FileViewer({
   text,
   language,
   mode,
+  workspacePath = null,
+  path = null,
+  mtimeMs = null,
+  contentVersion = "",
+  editingLocked = false,
+  onSaved = () => {},
+  onFlushHandleChange,
   gitDiff = null,
   savedScrollTop = 0,
   onScrollTopChange,
@@ -221,7 +235,17 @@ export default function FileViewer({
           </div>
         }
       >
-        <NotionView fileKey={fileKey} text={text} />
+        <NotionView
+          fileKey={fileKey}
+          text={text}
+          workspacePath={workspacePath}
+          path={path}
+          mtimeMs={mtimeMs}
+          contentVersion={contentVersion}
+          editingLocked={editingLocked}
+          onSaved={onSaved}
+          onFlushHandleChange={onFlushHandleChange}
+        />
       </Suspense>
     );
   }

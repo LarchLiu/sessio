@@ -1971,6 +1971,7 @@ mod ancestor_tests {
         history_assistant_message, history_session_update_message, history_tool_call_message,
         history_tool_result_message, history_user_message,
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn row(message: AcpProtocolMessage, timestamp: Option<i64>) -> HistoryAcpMessage {
         HistoryAcpMessage {
@@ -2011,6 +2012,118 @@ mod ancestor_tests {
             is_auxiliary: false,
             subagents: Vec::new(),
         }
+    }
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("sessio-{name}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("create temp workspace");
+        dir
+    }
+
+    fn write_until_mtime_changes(path: &Path, previous_mtime_ms: u64, content: &str) {
+        for _ in 0..20 {
+            std::fs::write(path, content).expect("write changed content");
+            let meta = std::fs::metadata(path).expect("metadata after write");
+            if file_mtime_ms(&meta).expect("mtime after write") != previous_mtime_ms {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("mtime did not change after repeated writes");
+    }
+
+    #[test]
+    fn workspace_text_file_write_updates_content_and_mtime() {
+        let workspace = temp_workspace("write-ok");
+        let path = workspace.join("note.txt");
+        std::fs::write(&path, "old").expect("write file");
+
+        let loaded = read_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            path.to_string_lossy().into_owned(),
+        )
+        .expect("read workspace file");
+        let saved = write_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            path.to_string_lossy().into_owned(),
+            "new".to_string(),
+            loaded.mtime_ms,
+        )
+        .expect("write workspace file");
+
+        assert_eq!(std::fs::read_to_string(&path).expect("read saved file"), "new");
+        assert!(saved.mtime_ms >= loaded.mtime_ms);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn workspace_text_file_write_rejects_mtime_conflict() {
+        let workspace = temp_workspace("write-conflict");
+        let path = workspace.join("note.txt");
+        std::fs::write(&path, "old").expect("write file");
+
+        let loaded = read_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            path.to_string_lossy().into_owned(),
+        )
+        .expect("read workspace file");
+        write_until_mtime_changes(&path, loaded.mtime_ms, "external");
+
+        let err = write_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            path.to_string_lossy().into_owned(),
+            "new".to_string(),
+            loaded.mtime_ms,
+        )
+        .expect_err("mtime conflict should fail");
+        assert!(err.contains("changed on disk"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read conflicted file"),
+            "external"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn workspace_text_file_path_rejects_outside_workspace() {
+        let workspace = temp_workspace("path-guard");
+        let outside = temp_workspace("outside").join("note.txt");
+        std::fs::write(&outside, "outside").expect("write outside file");
+
+        let err = read_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            outside.to_string_lossy().into_owned(),
+        )
+        .expect_err("outside workspace should fail");
+        assert!(err.contains("outside the workspace"));
+        let _ = std::fs::remove_dir_all(workspace);
+        if let Some(parent) = outside.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_text_file_path_rejects_symlink_escape() {
+        let workspace = temp_workspace("symlink-guard");
+        let outside_dir = temp_workspace("symlink-outside");
+        let outside = outside_dir.join("note.txt");
+        let link = workspace.join("linked.txt");
+        std::fs::write(&outside, "outside").expect("write outside file");
+        std::os::unix::fs::symlink(&outside, &link).expect("create symlink");
+
+        let err = read_workspace_text_file(
+            workspace.to_string_lossy().into_owned(),
+            link.to_string_lossy().into_owned(),
+        )
+        .expect_err("symlink escape should fail");
+        assert!(err.contains("outside the workspace"));
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(outside_dir);
     }
 
     #[test]
@@ -2860,12 +2973,20 @@ struct FileGitDiff {
     patch: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceTextFile {
     content: String,
     mtime_ms: u64,
 }
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTextFileWrite {
+    mtime_ms: u64,
+}
+
+const MAX_EDITOR_TEXT_BYTES: u64 = 10 * 1024 * 1024;
 
 #[tauri::command]
 fn get_file_git_diff(workspace_path: String, file_path: String) -> Result<FileGitDiff, String> {
@@ -3021,20 +3142,41 @@ fn read_workspace_text_file(
     if !meta.is_file() {
         return Err("Path is not a file".to_string());
     }
-    const MAX_EDITOR_TEXT_BYTES: u64 = 10 * 1024 * 1024;
     if meta.len() > MAX_EDITOR_TEXT_BYTES {
         return Err("File is too large to edit".to_string());
     }
-    let modified = meta.modified().map_err(|e| e.to_string())?;
-    let mtime_ms = u64::try_from(
-        modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_millis(),
-    )
-    .map_err(|_| "File modified time is too large".to_string())?;
+    let mtime_ms = file_mtime_ms(&meta)?;
     let content = std::fs::read_to_string(&path_buf).map_err(|e| e.to_string())?;
     Ok(WorkspaceTextFile { content, mtime_ms })
+}
+
+#[tauri::command]
+fn write_workspace_text_file(
+    workspace_path: String,
+    path: String,
+    content: String,
+    expected_mtime_ms: u64,
+) -> Result<WorkspaceTextFileWrite, String> {
+    let path_buf = workspace_text_file_path(&workspace_path, &path)?;
+    let _mime =
+        text_file_mime(&path_buf).ok_or_else(|| "Unsupported text file type".to_string())?;
+    if content.as_bytes().len() as u64 > MAX_EDITOR_TEXT_BYTES {
+        return Err("File is too large to edit".to_string());
+    }
+    let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Path is not a file".to_string());
+    }
+    let current_mtime_ms = file_mtime_ms(&meta)?;
+    if current_mtime_ms != expected_mtime_ms {
+        return Err("File changed on disk; reload before saving".to_string());
+    }
+
+    std::fs::write(&path_buf, content).map_err(|e| e.to_string())?;
+    let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
+    Ok(WorkspaceTextFileWrite {
+        mtime_ms: file_mtime_ms(&meta)?,
+    })
 }
 
 fn workspace_text_file_path(workspace_path: &str, path: &str) -> Result<PathBuf, String> {
@@ -3053,6 +3195,17 @@ fn workspace_text_file_path(workspace_path: &str, path: &str) -> Result<PathBuf,
         return Err("File path is outside the workspace".to_string());
     }
     Ok(file)
+}
+
+fn file_mtime_ms(meta: &std::fs::Metadata) -> Result<u64, String> {
+    let modified = meta.modified().map_err(|e| e.to_string())?;
+    u64::try_from(
+        modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis(),
+    )
+    .map_err(|_| "File modified time is too large".to_string())
 }
 
 #[tauri::command]
@@ -4113,6 +4266,7 @@ pub fn run() {
             save_pasted_attachment,
             read_local_text_file,
             read_workspace_text_file,
+            write_workspace_text_file,
             get_file_git_diff,
             watch_preview_file,
             unwatch_preview_file,

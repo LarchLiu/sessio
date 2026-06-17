@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, Files } from "lucide-react";
 import type { FileEditItem } from "../acpRenderItems";
@@ -16,6 +16,7 @@ export interface ChatFilesViewProps {
   workspacePath: string | null;
   /** "code" enables syntax highlighting; "plain" renders raw text. */
   subview: ChatFilesSubview;
+  editingLocked?: boolean;
   requestedSelection?: {
     key: string;
     requestId: number;
@@ -27,6 +28,7 @@ export default function ChatFilesView({
   edits,
   workspacePath,
   subview,
+  editingLocked = false,
   requestedSelection = null,
   reloadKey = 0,
 }: ChatFilesViewProps) {
@@ -37,17 +39,26 @@ export default function ChatFilesView({
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerAnchorRef = useRef<HTMLButtonElement>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
+  const flushPlainViewRef = useRef<(() => Promise<boolean>) | null>(null);
+
+  const selectFile = useCallback(async (key: string): Promise<boolean> => {
+    if (key === selectedKey) return true;
+    if (subview === "plain" && flushPlainViewRef.current) {
+      const flushed = await flushPlainViewRef.current();
+      if (!flushed) return false;
+    }
+    setSelectedKey(key);
+    return true;
+  }, [selectedKey, subview]);
 
   useEffect(() => {
     if (edits.length === 0) {
       setSelectedKey(null);
       return;
     }
-    setSelectedKey((current) => {
-      if (current && edits.some((edit) => fileEditKey(edit) === current)) return current;
-      return fileEditKey(edits[0]);
-    });
-  }, [edits]);
+    if (selectedKey && edits.some((edit) => fileEditKey(edit) === selectedKey)) return;
+    void selectFile(fileEditKey(edits[0]));
+  }, [edits, selectedKey, selectFile]);
 
   useEffect(() => {
     if (!requestedSelection) return;
@@ -55,8 +66,15 @@ export default function ChatFilesView({
       fileEditMatchesPath(edit, requestedSelection.key),
     );
     if (!matchedEdit) return;
-    setSelectedKey(fileEditKey(matchedEdit));
-  }, [edits, requestedSelection?.key, requestedSelection?.requestId]);
+    void selectFile(fileEditKey(matchedEdit));
+  }, [edits, requestedSelection?.key, requestedSelection?.requestId, selectFile]);
+
+  useEffect(
+    () => () => {
+      void flushPlainViewRef.current?.();
+    },
+    [],
+  );
 
   const selected = useMemo(
     () =>
@@ -121,6 +139,15 @@ export default function ChatFilesView({
             text={fileContent.text}
             language={languageFromPath(selected.displayPath || selected.path || "")}
             mode={subview}
+            workspacePath={workspacePath}
+            path={fileContent.path}
+            mtimeMs={fileContent.mtimeMs}
+            contentVersion={fileContent.contentVersion}
+            editingLocked={editingLocked}
+            onSaved={fileContent.applyLocalSave}
+            onFlushHandleChange={(handle) => {
+              flushPlainViewRef.current = handle;
+            }}
             gitDiff={fileGitDiff.diff}
             savedScrollTop={
               selectedKey ? (scrollPositionsRef.current[selectedKey] ?? 0) : 0
@@ -138,8 +165,9 @@ export default function ChatFilesView({
           edits={edits}
           selectedKey={selectedKey}
           onSelect={(key) => {
-            setSelectedKey(key);
-            setPickerOpen(false);
+            void selectFile(key).then((selectedNext) => {
+              if (selectedNext) setPickerOpen(false);
+            });
           }}
           onClose={() => setPickerOpen(false)}
         />

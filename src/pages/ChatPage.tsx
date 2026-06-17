@@ -1351,6 +1351,7 @@ export function AcpTranscriptPanel({
               edits={fileViewEdits}
               workspacePath={workspacePath}
               subview={filesSubview}
+              editingLocked={Boolean(activeTurnId)}
               reloadKey={projectFilesReloadKey}
               requestedSelection={
                 selectedProjectFilePath
