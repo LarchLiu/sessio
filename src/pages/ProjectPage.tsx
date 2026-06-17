@@ -623,6 +623,14 @@ function ProjectFilesTree({
   const lastOpenedFileRef = useRef<string | null>(null);
 
   useEffect(() => {
+    model.resetPaths(paths);
+  }, [model, paths]);
+
+  useEffect(() => {
+    model.setGitStatus(gitStatus);
+  }, [gitStatus, model]);
+
+  useEffect(() => {
     const selectedPath = selectedPaths[0];
     if (!selectedPath || !onOpenFile) {
       lastOpenedFileRef.current = null;
