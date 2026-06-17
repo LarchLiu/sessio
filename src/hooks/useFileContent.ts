@@ -15,15 +15,30 @@ const EMPTY_RESULT: FileContentResult = {
   error: null,
 };
 
+const MAX_FILE_CACHE_ENTRIES = 32;
+const fileContentCache = new Map<string, string>();
+
+function getCachedFileContent(path: string): string | null {
+  const cached = fileContentCache.get(path);
+  if (cached === undefined) return null;
+  fileContentCache.delete(path);
+  fileContentCache.set(path, cached);
+  return cached;
+}
+
+function setCachedFileContent(path: string, text: string) {
+  if (fileContentCache.has(path)) fileContentCache.delete(path);
+  fileContentCache.set(path, text);
+  while (fileContentCache.size > MAX_FILE_CACHE_ENTRIES) {
+    const oldest = fileContentCache.keys().next().value;
+    if (!oldest) break;
+    fileContentCache.delete(oldest);
+  }
+}
+
 function editInvalidationKey(edit: FileEditItem | null | undefined): string {
   if (!edit) return "";
-  return [
-    edit.path ?? "",
-    edit.displayPath ?? "",
-    edit.additions ?? 0,
-    edit.deletions ?? 0,
-    edit.patches?.length ?? 0,
-  ].join(":");
+  return [edit.path ?? "", edit.displayPath ?? ""].join(":");
 }
 
 /**
@@ -56,21 +71,25 @@ export function useFileContent(
     let cancelled = false;
     let removeListener: (() => void) | null = null;
     let unwatchRequested = false;
-    setResult((prev) => ({
-      ...prev,
-      loading: true,
+    const cachedText = getCachedFileContent(absolute);
+    setResult({
+      loading: cachedText === null,
+      text: cachedText,
       error: null,
-    }));
+    });
 
-    const refresh = () => {
-      setResult((prev) => ({
-        ...prev,
-        loading: true,
-        error: null,
-      }));
+    const refresh = (showLoading: boolean) => {
+      if (showLoading) {
+        setResult((prev) => ({
+          ...prev,
+          loading: true,
+          error: null,
+        }));
+      }
       readLocalTextFile(absolute)
         .then((text) => {
           if (cancelled) return;
+          setCachedFileContent(absolute, text);
           setResult({
             loading: false,
             text,
@@ -87,13 +106,13 @@ export function useFileContent(
         });
     };
 
-    refresh();
+    refresh(cachedText === null);
 
     watchPreviewFile(absolute)
       .then(() =>
         listen<{ path: string }>("preview_file_changed", (event) => {
           if (event.payload.path !== absolute) return;
-          refresh();
+          refresh(false);
         }),
       )
       .then((unlisten) => {

@@ -10,8 +10,8 @@ import {
 import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { Check, ChevronDown, Copy, FolderOpen, GripVertical, Link2, LoaderCircle, Pencil, Plus, Trash2, Workflow, X } from "lucide-react";
-import { FileTree, useFileTree } from "@pierre/trees/react";
+import { Check, ChevronDown, Copy, FolderOpen, GripVertical, Link2, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2, Workflow, X } from "lucide-react";
+import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelection } from "@pierre/trees/react";
 import type { Agent, AgentInfo, AssistantInfo, ProjectGitStatusEntry, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
 import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, getProjectGitStatus, isAgent, listAgents, listAssistants, listProjectFiles, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
@@ -289,6 +289,8 @@ export function ProjectWorkbenchPage({
   view: viewProp,
   onViewChange,
   hideTabs = false,
+  filesReloadKey = 0,
+  onOpenFile,
 }: {
   project: ProjectInfo;
   onSelectThreadChatSession: (session: SessionInfo) => void;
@@ -296,6 +298,8 @@ export function ProjectWorkbenchPage({
   view?: ProjectView;
   onViewChange?: (view: ProjectView) => void;
   hideTabs?: boolean;
+  filesReloadKey?: number;
+  onOpenFile?: (path: string) => void;
 }) {
   const { t } = useI18n();
   const projectViewTabs = useMemo<SegmentedTabItem<ProjectView>[]>(
@@ -397,7 +401,11 @@ export function ProjectWorkbenchPage({
           </div>
         )}
         {activeView === "files" ? (
-          <ProjectFilesPanel project={project} />
+          <ProjectFilesPanel
+            project={project}
+            reloadKey={filesReloadKey}
+            onOpenFile={onOpenFile}
+          />
         ) : (
           <ScrollArea
             className="min-h-0 flex-1"
@@ -474,62 +482,109 @@ export function ProjectWorkbenchPage({
   );
 }
 
-function ProjectFilesPanel({ project}: { project: ProjectInfo; hideTabs?: boolean }) {
+function ProjectFilesPanel({
+  project,
+  reloadKey = 0,
+  onOpenFile,
+}: {
+  project: ProjectInfo;
+  reloadKey?: number;
+  onOpenFile?: (path: string) => void;
+}) {
   const { t } = useI18n();
   const [paths, setPaths] = useState<string[] | null>(null);
   const [gitStatus, setGitStatus] = useState<ProjectGitStatusEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const pathsRef = useRef<string[] | null>(null);
+  const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    pathsRef.current = paths;
+  }, [paths]);
 
   useEffect(() => {
     if (!project.path) {
-      setPaths([]);
+      setPaths(null);
       setGitStatus([]);
       setError(t("project.files_path_missing"));
       setLoading(false);
-      return;
+      setRefreshing(false);
     }
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    Promise.all([
-      listProjectFiles(project.path),
-      getProjectGitStatus(project.path).catch(() => []),
-    ])
-      .then(([rows, status]) => {
-        if (cancelled) return;
-        setPaths(rows);
-        setGitStatus(status);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(String(err));
-        setPaths([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
   }, [project.path, t]);
+
+  const loadProjectFiles = async ({ background }: { background: boolean }) => {
+    const currentRequestId = requestIdRef.current + 1;
+    requestIdRef.current = currentRequestId;
+    if (!project.path) return;
+
+    if (background) setRefreshing(true);
+    else {
+      setLoading(true);
+      setError(null);
+    }
+
+    try {
+      const [rows, status] = await Promise.all([
+        listProjectFiles(project.path),
+        getProjectGitStatus(project.path).catch(() => []),
+      ]);
+      if (requestIdRef.current !== currentRequestId) return;
+      setPaths(rows);
+      setGitStatus(status);
+      setError(null);
+    } catch (err) {
+      if (requestIdRef.current !== currentRequestId) return;
+      setError(String(err));
+      if (!background || pathsRef.current === null) {
+        setPaths([]);
+        setGitStatus([]);
+      }
+    } finally {
+      if (requestIdRef.current !== currentRequestId) return;
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!project.path) return;
+    setPaths(null);
+    pathsRef.current = null;
+    setGitStatus([]);
+    setError(null);
+    setLoading(true);
+    setRefreshing(false);
+    void loadProjectFiles({ background: false });
+  }, [project.path]);
+
+  useEffect(() => {
+    if (!project.path || pathsRef.current === null) return;
+    void loadProjectFiles({ background: true });
+  }, [project.path, reloadKey]);
 
   return (
     <div className={"flex min-h-0 flex-1 flex-col overflow-hidden py-4 "}>
-      {loading ? (
+      {loading && paths === null ? (
         <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
           {t("project.files_loading")}
         </div>
-      ) : error ? (
+      ) : error && paths === null ? (
         <div className="flex flex-1 items-center justify-center px-4 text-center text-body-sm text-ink/45">
           {error}
         </div>
-      ) : paths && paths.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center text-body-sm text-ink/40">
-          {t("project.files_empty")}
-        </div>
       ) : (
-        <ProjectFilesTree paths={paths ?? []} gitStatus={gitStatus} />
+        <ProjectFilesTree
+          paths={paths ?? []}
+          gitStatus={gitStatus}
+          refreshing={refreshing}
+          error={error}
+          onRefresh={() => {
+            void loadProjectFiles({ background: pathsRef.current !== null });
+          }}
+          onOpenFile={onOpenFile}
+        />
       )}
     </div>
   );
@@ -538,17 +593,51 @@ function ProjectFilesPanel({ project}: { project: ProjectInfo; hideTabs?: boolea
 function ProjectFilesTree({
   paths,
   gitStatus,
+  refreshing,
+  error,
+  onRefresh,
+  onOpenFile,
 }: {
   paths: string[];
   gitStatus: ProjectGitStatusEntry[];
+  refreshing: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  onOpenFile?: (path: string) => void;
 }) {
+  const { t } = useI18n();
   const { model } = useFileTree({
     paths,
     initialExpansion: "closed",
     flattenEmptyDirectories: false,
     search: true,
     gitStatus,
+    unsafeCSS: `
+      [data-file-tree-search-container] {
+        display: none !important;
+      }
+    `,
   });
+  const search = useFileTreeSearch(model);
+  const selectedPaths = useFileTreeSelection(model);
+  const lastOpenedFileRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const selectedPath = selectedPaths[0];
+    if (!selectedPath || !onOpenFile) {
+      lastOpenedFileRef.current = null;
+      return;
+    }
+    const item = model.getItem(selectedPath);
+    if (!item || item.isDirectory()) {
+      lastOpenedFileRef.current = null;
+      return;
+    }
+    if (lastOpenedFileRef.current === selectedPath) return;
+    lastOpenedFileRef.current = selectedPath;
+    onOpenFile(selectedPath);
+  }, [model, onOpenFile, selectedPaths]);
+
   const treeStyle: CSSProperties & Record<string, string> = {
     height: "100%",
     width: "100%",
@@ -567,11 +656,60 @@ function ProjectFilesTree({
     "--trees-focus-ring-color-override": "rgb(var(--color-fg) / 0.18)",
   };
   return (
-    <FileTree
-      model={model}
-      className="flex-1"
-      style={treeStyle}
-    />
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-0 px-4 pb-3">
+        <label className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-md border border-ink/10 bg-surface-panel px-2.5 text-ink/70 transition-colors focus-within:border-ink/18 focus-within:text-ink/90">
+          <Search className="h-4 w-4 shrink-0 text-ink/35" />
+          <input
+            type="search"
+            value={search.value}
+            onFocus={() => {
+              if (!search.isOpen) search.open(search.value || undefined);
+            }}
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value && !search.isOpen) search.open(value);
+              search.setValue(value || null);
+              if (!value) search.close();
+            }}
+            placeholder={t("header.search")}
+            aria-label={t("header.search")}
+            className="min-w-0 flex-1 bg-transparent text-body-sm text-ink outline-none placeholder:text-ink/30"
+          />
+        </label>
+        <Tooltip content={t("project.files_refresh")} placement="bottom">
+          <button
+            type="button"
+            aria-label={t("project.files_refresh")}
+            onClick={onRefresh}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-surface-panel text-ink/55 transition-colors hover:bg-ink/[0.04] hover:text-ink/85"
+          >
+            {refreshing ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+          </button>
+        </Tooltip>
+      </div>
+      {error ? (
+        <div className="mx-3 mb-3 rounded-md border border-status-error/30 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
+          {error}
+        </div>
+      ) : null}
+      <div className="relative min-h-0 flex-1">
+        <FileTree
+          model={model}
+          className="h-full flex-1"
+          style={treeStyle}
+        />
+        {paths.length === 0 ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-body-sm text-ink/40">
+            {t("project.files_empty")}
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

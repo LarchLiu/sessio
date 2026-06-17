@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, FolderTree } from "lucide-react";
+import { ChevronDown, Files } from "lucide-react";
 import type { FileEditItem } from "../acpRenderItems";
-import { fileEditKey } from "../acpRenderItems";
+import { fileEditKey, fileEditMatchesPath } from "../acpRenderItems";
 import { useFileContent, languageFromPath } from "../hooks/useFileContent";
 import { useI18n } from "../i18n";
 import FileViewer from "./FileViewer";
@@ -15,15 +15,25 @@ export interface ChatFilesViewProps {
   workspacePath: string | null;
   /** "code" enables syntax highlighting; "plain" renders raw text. */
   subview: ChatFilesSubview;
+  requestedSelection?: {
+    key: string;
+    requestId: number;
+  } | null;
 }
 
-export default function ChatFilesView({ edits, workspacePath, subview }: ChatFilesViewProps) {
+export default function ChatFilesView({
+  edits,
+  workspacePath,
+  subview,
+  requestedSelection = null,
+}: ChatFilesViewProps) {
   const { t } = useI18n();
   const [selectedKey, setSelectedKey] = useState<string | null>(() =>
     edits[0] ? fileEditKey(edits[0]) : null,
   );
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerAnchorRef = useRef<HTMLButtonElement>(null);
+  const scrollPositionsRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     if (edits.length === 0) {
@@ -35,6 +45,15 @@ export default function ChatFilesView({ edits, workspacePath, subview }: ChatFil
       return fileEditKey(edits[0]);
     });
   }, [edits]);
+
+  useEffect(() => {
+    if (!requestedSelection) return;
+    const matchedEdit = edits.find((edit) =>
+      fileEditMatchesPath(edit, requestedSelection.key),
+    );
+    if (!matchedEdit) return;
+    setSelectedKey(fileEditKey(matchedEdit));
+  }, [edits, requestedSelection?.key, requestedSelection?.requestId]);
 
   const selected = useMemo(
     () =>
@@ -60,7 +79,7 @@ export default function ChatFilesView({ edits, workspacePath, subview }: ChatFil
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-ink/5 px-3">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-ink/5 px-10">
         <button
           ref={pickerAnchorRef}
           type="button"
@@ -73,7 +92,7 @@ export default function ChatFilesView({ edits, workspacePath, subview }: ChatFil
             (pickerOpen ? "bg-ink/[0.07] text-ink/85" : "")
           }
         >
-          <FolderTree className="h-3.5 w-3.5" />
+          <Files className="h-3.5 w-3.5" />
           <ChevronDown className="h-3 w-3 opacity-70" />
         </button>
         <div className="min-w-0 flex-1 truncate font-mono text-caption text-ink/72">
@@ -94,9 +113,17 @@ export default function ChatFilesView({ edits, workspacePath, subview }: ChatFil
         )}
         {!fileContent.loading && !fileContent.error && fileContent.text !== null && selected && (
           <FileViewer
+            fileKey={selectedKey ?? ""}
             text={fileContent.text}
             language={languageFromPath(selected.displayPath || selected.path || "")}
             mode={subview}
+            savedScrollTop={
+              selectedKey ? (scrollPositionsRef.current[selectedKey] ?? 0) : 0
+            }
+            onScrollTopChange={(nextTop) => {
+              if (!selectedKey) return;
+              scrollPositionsRef.current[selectedKey] = nextTop;
+            }}
           />
         )}
       </div>
@@ -130,7 +157,21 @@ function FilePickerPopover({
   onClose: () => void;
 }) {
   const popoverRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
+  const [pos, setPos] = useState<{
+    top: number;
+    left: number;
+    maxHeight: number;
+    width: number;
+  } | null>(null);
+
+  const longestLabel = useMemo(
+    () =>
+      edits.reduce((max, edit) => {
+        const label = edit.displayPath || edit.path || "(unknown file)";
+        return Math.max(max, label.length);
+      }, 0),
+    [edits],
+  );
 
   useLayoutEffect(() => {
     const update = () => {
@@ -138,9 +179,15 @@ function FilePickerPopover({
       const gap = 6;
       const margin = 8;
       const maxHeight = Math.max(160, window.innerHeight - rect.bottom - gap - margin);
+      const maxWidth = Math.max(320, window.innerWidth - margin * 2);
+      const estimatedWidth = Math.max(360, Math.round(longestLabel * 7.4) + 132);
+      const width = Math.min(maxWidth, estimatedWidth);
       const top = rect.bottom + gap;
-      const left = Math.max(margin, rect.left);
-      setPos({ top, left, maxHeight });
+      const left = Math.min(
+        Math.max(margin, rect.left),
+        window.innerWidth - margin - width,
+      );
+      setPos({ top, left, maxHeight, width });
     };
     update();
     window.addEventListener("resize", update);
@@ -149,7 +196,7 @@ function FilePickerPopover({
       window.removeEventListener("resize", update);
       window.removeEventListener("scroll", update, true);
     };
-  }, [anchor]);
+  }, [anchor, longestLabel]);
 
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
@@ -176,7 +223,12 @@ function FilePickerPopover({
     <div
       ref={popoverRef}
       role="listbox"
-      style={{ top: pos.top, left: pos.left, maxHeight: pos.maxHeight, width: 360 }}
+      style={{
+        top: pos.top,
+        left: pos.left,
+        maxHeight: pos.maxHeight,
+        width: pos.width,
+      }}
       className="fixed z-50 overflow-hidden rounded-md border border-ink/[0.10] bg-surface-panel shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
     >
       <ScrollArea
@@ -189,6 +241,7 @@ function FilePickerPopover({
             const key = fileEditKey(edit);
             const label = edit.displayPath || edit.path || "(unknown file)";
             const active = key === selectedKey;
+            const hasStats = edit.additions != null || edit.deletions != null;
             return (
               <li key={key}>
                 <button
@@ -198,18 +251,22 @@ function FilePickerPopover({
                   onClick={() => onSelect(key)}
                   title={label}
                   className={
-                    "grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-left text-body-sm transition-colors " +
+                    "grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 px-2.5 py-1.5 text-left text-body-sm transition-colors " +
                     (active
                       ? "bg-ink/[0.07] text-ink/90"
                       : "text-ink/72 hover:bg-ink/[0.04] hover:text-ink/90")
                   }
                 >
-                  <span className="min-w-0 truncate font-mono">{label}</span>
-                  <span className="shrink-0 font-mono text-caption">
-                    <span className="text-[rgb(var(--color-emerald))]">+{edit.additions ?? 0}</span>
-                    <span className="text-ink/25"> </span>
-                    <span className="text-status-error">-{edit.deletions ?? 0}</span>
+                  <span className="min-w-0 whitespace-pre-wrap break-all font-mono leading-relaxed">
+                    {label}
                   </span>
+                  {hasStats ? (
+                    <span className="shrink-0 pt-0.5 font-mono text-caption">
+                      <span className="text-[rgb(var(--color-emerald))]">+{edit.additions ?? 0}</span>
+                      <span className="text-ink/25"> </span>
+                      <span className="text-status-error">-{edit.deletions ?? 0}</span>
+                    </span>
+                  ) : null}
                 </button>
               </li>
             );

@@ -22,6 +22,7 @@ export default function AppMain({
   detailRoute,
   viewMode,
   chatView,
+  selectedProjectFileRequest,
   liveState,
   runtimeAgents,
   lastRuntimeAgentSelection,
@@ -54,6 +55,10 @@ export default function AppMain({
   detailRoute: DetailMode;
   viewMode: ViewMode;
   chatView: ChatView;
+  selectedProjectFileRequest?: {
+    path: string;
+    requestId: number;
+  } | null;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
@@ -196,6 +201,7 @@ export default function AppMain({
             session={selected}
             viewMode={viewMode}
             chatView={chatView}
+            selectedProjectFileRequest={selectedProjectFileRequest}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}

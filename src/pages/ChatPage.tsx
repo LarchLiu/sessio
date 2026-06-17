@@ -120,6 +120,7 @@ import {
 import {
   acpViewModelToRenderItems,
   aggregateSessionFileEdits,
+  fileEditMatchesPath,
   renderItemKeys,
   type AcpRenderItem,
 } from "../acpRenderItems";
@@ -134,6 +135,10 @@ export interface ChatPageProps {
   session: SessionInfo;
   viewMode: ViewMode;
   chatView?: ChatView;
+  selectedProjectFileRequest?: {
+    path: string;
+    requestId: number;
+  } | null;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -286,6 +291,7 @@ function ChatPage({
   session,
   viewMode,
   chatView = "chat",
+  selectedProjectFileRequest = null,
   liveState,
   runtimeAgents,
   rememberRuntimeAgentSelection,
@@ -423,6 +429,7 @@ function ChatPage({
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
+          selectedProjectFileRequest={selectedProjectFileRequest}
           skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
           beforeMessages={tab.kind === "main" ? beforeMessages : null}
           showThreadPromptPlaceholders={showThreadPromptPlaceholders}
@@ -521,6 +528,10 @@ export interface AcpTranscriptPanelProps {
   ) => boolean;
   messageCount: number;
   workspacePath: string | null;
+  selectedProjectFileRequest?: {
+    path: string;
+    requestId: number;
+  } | null;
   skipHistoryLoad?: boolean;
   scrollKey?: string;
   beforeMessages?: ReactNode | null;
@@ -550,6 +561,7 @@ export function AcpTranscriptPanel({
   onMessageCount,
   messageCount,
   workspacePath,
+  selectedProjectFileRequest = null,
   skipHistoryLoad = false,
   scrollKey,
   beforeMessages = null,
@@ -1285,6 +1297,21 @@ export function AcpTranscriptPanel({
     () => aggregateSessionFileEdits(acpViewModel),
     [acpViewModel],
   );
+  const selectedProjectFilePath = selectedProjectFileRequest?.path.trim() || null;
+  const fileViewEdits = useMemo(() => {
+    if (!selectedProjectFilePath) return sessionFileEdits.edits;
+    const exists = sessionFileEdits.edits.some((edit) =>
+      fileEditMatchesPath(edit, selectedProjectFilePath),
+    );
+    if (exists) return sessionFileEdits.edits;
+    return [
+      {
+        path: selectedProjectFilePath,
+        displayPath: selectedProjectFilePath,
+      },
+      ...sessionFileEdits.edits,
+    ];
+  }, [selectedProjectFilePath, sessionFileEdits.edits]);
   const pendingPermissions = useMemo(() => {
     const permissions: AcpPermissionRequest[] = [];
     for (const turn of acpViewModel.turns) {
@@ -1315,9 +1342,17 @@ export function AcpTranscriptPanel({
               </div>
             )}
             <ChatFilesView
-              edits={sessionFileEdits.edits}
+              edits={fileViewEdits}
               workspacePath={workspacePath}
               subview={filesSubview}
+              requestedSelection={
+                selectedProjectFilePath
+                  ? {
+                      key: selectedProjectFilePath,
+                      requestId: selectedProjectFileRequest?.requestId ?? 0,
+                    }
+                  : null
+              }
             />
           </div>
         ) : (

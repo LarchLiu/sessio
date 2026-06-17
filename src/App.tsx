@@ -71,6 +71,7 @@ const VIEW_MODE_STORAGE_KEY = "sessio.viewMode";
 const RIGHT_SIDEBAR_OPEN_STORAGE_KEY = "sessio.rightSidebarOpen";
 
 type ThreadSelection = { projectId: string; threadId: string; goal: string } | null;
+type ProjectFileSelectionRequest = { path: string; requestId: number };
 
 function readViewMode(): ViewMode {
   if (typeof localStorage === "undefined") return "native";
@@ -122,6 +123,7 @@ export default function App() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState<boolean>(() =>
     readRightSidebarOpen(),
   );
+  const [rightSidebarFilesReloadKey, setRightSidebarFilesReloadKey] = useState(0);
   const [memorySearchOpen, setMemorySearchOpen] = useState(false);
   const [memorySearchMounted, setMemorySearchMounted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -147,6 +149,7 @@ export default function App() {
   } | null>(null);
   const [pendingNewChats, setPendingNewChats] = useState<Record<string, PendingNewChatSession>>({});
   const [runtimeSessionAliases, setRuntimeSessionAliases] = useState<Record<string, string>>({});
+  const [projectFileSelectionBySession, setProjectFileSelectionBySession] = useState<Record<string, ProjectFileSelectionRequest>>({});
   const [threadIndexItems, setThreadIndexItems] = useState<ThreadIndexItemInfo[]>([]);
   const { mode, setMode } = useTheme();
   const [systemAppearance, setSystemAppearance] = useState<"light" | "dark">("dark");
@@ -236,6 +239,11 @@ export default function App() {
       RIGHT_SIDEBAR_OPEN_STORAGE_KEY,
       rightSidebarOpen ? "1" : "0",
     );
+  }, [rightSidebarOpen]);
+
+  useEffect(() => {
+    if (!rightSidebarOpen) return;
+    setRightSidebarFilesReloadKey((current) => current + 1);
   }, [rightSidebarOpen]);
 
   useRuntimeEventSubscription({
@@ -795,6 +803,28 @@ export default function App() {
     },
     [selected],
   );
+  const currentSessionIdentity = selected ? sessionIdentityKey(selected) : null;
+  const currentProjectFileSelection =
+    currentSessionIdentity ? projectFileSelectionBySession[currentSessionIdentity] ?? null : null;
+  const handleOpenProjectFile = useCallback(
+    (path: string) => {
+      if (!selected || detailMode !== "chat") return;
+      if (currentChatView !== "code" && currentChatView !== "plain") return;
+      const identity = sessionIdentityKey(selected);
+      setProjectFileSelectionBySession((prev) => {
+        const currentSelection = prev[identity];
+        if (currentSelection?.path === path) return prev;
+        return {
+          ...prev,
+          [identity]: {
+            path,
+            requestId: (currentSelection?.requestId ?? 0) + 1,
+          },
+        };
+      });
+    },
+    [currentChatView, detailMode, selected],
+  );
 
   const header = (
     <AppHeader
@@ -930,6 +960,9 @@ export default function App() {
             selectedThread={selectedThread}
             selectedSessionProject={selectedSessionProject}
             selectedThreadProject={activeThreadProject}
+            open={rightSidebarOpen}
+            liveState={liveRuntimeState}
+            filesReloadKey={rightSidebarFilesReloadKey}
             onSelectThreadChatSession={(session) => {
               setSelectedProject(null);
               setSelectedThread(null);
@@ -937,6 +970,7 @@ export default function App() {
               setDetailMode("threadChat");
             }}
             onOpenThreadMultiSessionChat={() => setDetailMode("threadMultiSessionChat")}
+            onOpenProjectFile={handleOpenProjectFile}
             onClose={() => setRightSidebarOpen(false)}
             onError={setError}
           />
@@ -955,6 +989,7 @@ export default function App() {
           detailRoute={detailRoute}
           viewMode={viewMode}
           chatView={currentChatView}
+          selectedProjectFileRequest={currentProjectFileSelection}
           liveState={liveRuntimeState}
           runtimeAgents={runtimeAgents}
           lastRuntimeAgentSelection={lastRuntimeAgentSelection}

@@ -134,22 +134,21 @@ export default function AppHeader({
         {chatViewVisible && onChatViewChange && (
           <ChatViewToggle value={chatView} onChange={onChatViewChange} />
         )}
-        {onToggleRightSidebar && (
-          <Tooltip content={rightPanelLabel} placement="bottom">
-            <button
-              type="button"
-              aria-label={rightPanelLabel}
-              aria-pressed={rightSidebarOpen ?? false}
-              data-tauri-drag-region="false"
-              onClick={onToggleRightSidebar}
-              className={
-                "rounded-md p-1 text-ink/55 transition-opacity duration-300 hover:bg-ink/5 hover:text-ink " +
-                (rightSidebarOpen ? "opacity-0 pointer-events-none" : "opacity-100")
-              }
-            >
-              <PanelRightClose className="h-4 w-4" />
-            </button>
-          </Tooltip>
+        {onToggleRightSidebar && !rightSidebarOpen && (
+          <div className={isMac ? "" : "mr-[138px]"}>
+            <Tooltip content={rightPanelLabel} placement="bottom">
+              <button
+                type="button"
+                aria-label={rightPanelLabel}
+                aria-pressed={rightSidebarOpen ?? false}
+                data-tauri-drag-region="false"
+                onClick={onToggleRightSidebar}
+                className="rounded-md p-1 text-ink/55 transition-opacity duration-300 hover:bg-ink/5 hover:text-ink"
+              >
+                <PanelRightClose className="h-4 w-4" />
+              </button>
+            </Tooltip>
+          </div>
         )}
       </div>
       <div className="absolute top-0 right-0 z-20">

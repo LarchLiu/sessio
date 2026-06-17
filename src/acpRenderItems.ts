@@ -47,6 +47,15 @@ export function fileEditKey(edit: FileEditItem): string {
   return edit.path || edit.displayPath || "(unknown file)";
 }
 
+export function fileEditMatchesPath(edit: FileEditItem, path: string): boolean {
+  if (!path) return false;
+  return (
+    fileEditKey(edit) === path ||
+    edit.path === path ||
+    edit.displayPath === path
+  );
+}
+
 export function aggregateSessionFileEdits(viewModel: AcpViewModel): {
   edits: FileEditItem[];
   additions: number;
