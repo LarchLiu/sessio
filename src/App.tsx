@@ -987,6 +987,7 @@ export default function App() {
           detailRoute={detailRoute}
           viewMode={viewMode}
           chatView={currentChatView}
+          projectFilesReloadKey={rightSidebarFilesReloadKey}
           selectedProjectFileRequest={currentProjectFileSelection}
           liveState={liveRuntimeState}
           runtimeAgents={runtimeAgents}

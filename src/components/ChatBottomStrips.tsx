@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { FileDiff, LoaderCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import type { FileEditItem } from "../acpRenderItems";
 import type { AcpViewModel, LiveTurn, AcpToolCall } from "../runtimeChat";
 import { useI18n } from "../i18n";
+import ScrollArea from "./ScrollArea";
+import SessionFileEditsCard from "./SessionFileEditsCard";
 import Tooltip from "./Tooltip";
 
 export interface MinimalStripItem {
@@ -217,17 +221,19 @@ export function MinimalMessageStrip({
       {item.fullText ? (
         <Tooltip
           content={
-            <div className="max-w-[min(70vw,720px)] whitespace-pre-wrap break-words font-mono text-caption leading-relaxed">
+            <div className="whitespace-pre-wrap break-words font-mono text-caption leading-relaxed">
               {item.fullText}
             </div>
           }
           placement="top"
           delayMs={250}
+          interactive
+          matchAnchorWidth
         >
-          <div className="min-w-0 flex-1">{textNode}</div>
+          <div className="min-w-0 flex-1 overflow-hidden">{textNode}</div>
         </Tooltip>
       ) : (
-        <div className="min-w-0 flex-1">{textNode}</div>
+        <div className="min-w-0 flex-1 overflow-hidden">{textNode}</div>
       )}
     </div>
   );
@@ -237,36 +243,180 @@ export function EditedFilesBar({
   fileCount,
   additions,
   deletions,
+  edits = [],
   onClick,
 }: {
   fileCount: number;
   additions: number;
   deletions: number;
+  edits?: FileEditItem[];
   onClick?: () => void;
 }) {
   const { t } = useI18n();
+  const anchorRef = useRef<HTMLButtonElement | HTMLDivElement | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+  const popupContentRef = useRef<HTMLDivElement | null>(null);
+  const hideTimerRef = useRef<number | null>(null);
+  const [hoverOpen, setHoverOpen] = useState(false);
+  const [popupPos, setPopupPos] = useState<{
+    top: number;
+    left: number;
+    width: number;
+    height: number;
+  } | null>(null);
+
+  const clearHideTimer = () => {
+    if (hideTimerRef.current === null) return;
+    window.clearTimeout(hideTimerRef.current);
+    hideTimerRef.current = null;
+  };
+
+  const scheduleHide = () => {
+    clearHideTimer();
+    hideTimerRef.current = window.setTimeout(() => {
+      hideTimerRef.current = null;
+      setHoverOpen(false);
+    }, 120);
+  };
+
+  const openHover = () => {
+    clearHideTimer();
+    if (edits.length > 0) setHoverOpen(true);
+  };
+
+  const closeIfOutside = () => {
+    if (popupRef.current?.matches(":hover")) return;
+    scheduleHide();
+  };
+
+  useLayoutEffect(() => {
+    if (!hoverOpen) return;
+    const updatePosition = () => {
+      const anchor = anchorRef.current;
+      const popup = popupRef.current;
+      if (!anchor || !popup) return;
+      const rect = anchor.getBoundingClientRect();
+      const margin = 12;
+      const gap = 8;
+      const availableBelow = window.innerHeight - margin - rect.bottom - gap;
+      const availableAbove = rect.top - margin - gap;
+      const width = Math.min(rect.width, window.innerWidth - margin * 2);
+
+      popup.style.width = `${width}px`;
+      const content = popupContentRef.current;
+      const computed = window.getComputedStyle(popup);
+      const verticalPadding =
+        Number.parseFloat(computed.paddingTop || "0") +
+        Number.parseFloat(computed.paddingBottom || "0");
+      const naturalHeight = content
+        ? content.scrollHeight + verticalPadding
+        : popup.scrollHeight;
+      const fitsBelow = naturalHeight <= availableBelow;
+      const fitsAbove = naturalHeight <= availableAbove;
+      const placeBelow = fitsBelow || (!fitsAbove && availableBelow >= availableAbove);
+      const availableHeight = Math.max(0, placeBelow ? availableBelow : availableAbove);
+      const finalHeight = Math.min(520, availableHeight, naturalHeight);
+
+      popup.style.height = `${finalHeight}px`;
+      popup.style.maxHeight = `${finalHeight}px`;
+
+      const left = Math.min(
+        Math.max(margin, rect.left + rect.width / 2 - width / 2),
+        window.innerWidth - margin - width,
+      );
+      const top = placeBelow
+        ? Math.min(rect.bottom + gap, window.innerHeight - margin - finalHeight)
+        : Math.max(margin, rect.top - gap - finalHeight);
+
+      setPopupPos({
+        top,
+        left,
+        width,
+        height: finalHeight,
+      });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    const content = popupContentRef.current;
+    const ro = content ? new ResizeObserver(() => updatePosition()) : null;
+    if (content && ro) ro.observe(content);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      ro?.disconnect();
+    };
+  }, [hoverOpen]);
+
+  useEffect(() => {
+    return () => {
+      clearHideTimer();
+    };
+  }, []);
+
   if (fileCount === 0) return null;
   const label =
     fileCount === 1
       ? t("chat.files.count_one")
       : t("chat.files.count", { count: fileCount });
   const Tag = onClick ? "button" : "div";
+  const popupStyle = popupPos ?? { top: 0, left: 0, width: 0, height: 0 };
+
   return (
-    <Tag
-      type={onClick ? "button" : undefined}
-      onClick={onClick}
-      className={
-        "flex h-7 w-full items-center gap-2 px-3 text-caption text-ink/65 transition-colors " +
-        (onClick ? "cursor-pointer text-left hover:text-ink/85" : "")
-      }
-    >
-      <FileDiff className="h-3.5 w-3.5 shrink-0 text-ink/45" />
-      <span className="shrink-0 font-medium">{label}</span>
-      <span className="shrink-0 font-mono">
-        <span className="text-[rgb(var(--color-emerald))]">+{additions}</span>
-        <span className="text-ink/25"> </span>
-        <span className="text-status-error">-{deletions}</span>
-      </span>
-    </Tag>
+    <>
+      <Tag
+        ref={anchorRef as never}
+        type={onClick ? "button" : undefined}
+        onClick={onClick}
+        onMouseEnter={openHover}
+        onMouseLeave={closeIfOutside}
+        onFocus={openHover}
+        onBlur={scheduleHide}
+        className={
+          "flex h-7 w-full items-center gap-2 px-3 text-caption text-ink/65 transition-colors " +
+          (onClick ? "cursor-pointer text-left hover:text-ink/85" : "hover:text-ink/85")
+        }
+      >
+        <FileDiff className="h-3.5 w-3.5 shrink-0 text-ink/45" />
+        <span className="shrink-0 font-medium">{label}</span>
+        <span className="shrink-0 font-mono">
+          <span className="text-[rgb(var(--color-emerald))]">+{additions}</span>
+          <span className="text-ink/25"> </span>
+          <span className="text-status-error">-{deletions}</span>
+        </span>
+      </Tag>
+      {hoverOpen && edits.length > 0
+        ? createPortal(
+            <div
+              ref={popupRef}
+              style={{
+                position: "fixed",
+                top: popupStyle.top,
+                left: popupStyle.left,
+                width: popupStyle.width,
+                height: popupStyle.height,
+                visibility: popupPos ? "visible" : "hidden",
+              }}
+              onMouseEnter={openHover}
+              onMouseLeave={closeIfOutside}
+              className="chat-bottom-edited-files-popup z-50 min-h-0 overflow-hidden rounded-xl border border-ink/[0.10] bg-surface-panel p-2 shadow-[0_16px_48px_rgba(0,0,0,0.22)]"
+            >
+              <ScrollArea className="h-full" persistScrollbars>
+                <div ref={popupContentRef}>
+                  <SessionFileEditsCard
+                    edits={edits}
+                    additions={additions}
+                    deletions={deletions}
+                    fileCount={fileCount}
+                    compact
+                    showAllFiles
+                  />
+                </div>
+              </ScrollArea>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }

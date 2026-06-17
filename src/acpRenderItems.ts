@@ -227,7 +227,7 @@ function mergedFileEditRenderBlock(
   };
 }
 
-function parseFileEditSummary(value: unknown): FileEditSummary | null {
+export function parseFileEditSummary(value: unknown): FileEditSummary | null {
   let parsed = value;
   if (typeof parsed === "string") {
     try {

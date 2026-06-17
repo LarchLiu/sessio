@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import ScrollArea from "./ScrollArea";
 
 export type Placement = "top" | "bottom" | "left" | "right";
 
@@ -19,6 +20,8 @@ interface TooltipProps {
   placement?: Placement;
   offset?: number;
   delayMs?: number;
+  interactive?: boolean;
+  matchAnchorWidth?: boolean;
   children: ReactElement<any>;
 }
 
@@ -29,6 +32,8 @@ export default function Tooltip({
   placement = "top",
   offset = 8,
   delayMs = 800,
+  interactive = false,
+  matchAnchorWidth = false,
   children,
 }: TooltipProps) {
   const [open, setOpen] = useState(false);
@@ -36,16 +41,26 @@ export default function Tooltip({
   const anchorRef = useRef<HTMLElement | null>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   const openTimerRef = useRef<number | undefined>(undefined);
+  const closeTimerRef = useRef<number | undefined>(undefined);
 
   const updatePosition = useCallback(() => {
     const anchor = anchorRef.current;
     const tip = tipRef.current;
     if (!anchor || !tip) return;
     const ar = anchor.getBoundingClientRect();
-    const tw = tip.offsetWidth;
-    const th = tip.offsetHeight;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    if (matchAnchorWidth) {
+      const maxWidth = Math.max(
+        0,
+        Math.min(ar.width, vw - VIEWPORT_MARGIN * 2),
+      );
+      tip.style.maxWidth = `${maxWidth}px`;
+    } else {
+      tip.style.removeProperty("max-width");
+    }
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
 
     let top = 0;
     let left = 0;
@@ -74,7 +89,7 @@ export default function Tooltip({
     if (top + th > vh - VIEWPORT_MARGIN) top = vh - VIEWPORT_MARGIN - th;
 
     setPos({ top, left });
-  }, [placement, offset]);
+  }, [matchAnchorWidth, placement, offset]);
 
   useLayoutEffect(() => {
     if (open) updatePosition();
@@ -95,6 +110,9 @@ export default function Tooltip({
     return () => {
       if (openTimerRef.current !== undefined) {
         window.clearTimeout(openTimerRef.current);
+      }
+      if (closeTimerRef.current !== undefined) {
+        window.clearTimeout(closeTimerRef.current);
       }
     };
   }, []);
@@ -123,8 +141,15 @@ export default function Tooltip({
     openTimerRef.current = undefined;
   };
 
+  const clearCloseTimer = () => {
+    if (closeTimerRef.current === undefined) return;
+    window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = undefined;
+  };
+
   const openWithDelay = () => {
     clearOpenTimer();
+    clearCloseTimer();
     if (delayMs <= 0) {
       setOpen(true);
       return;
@@ -135,9 +160,17 @@ export default function Tooltip({
     }, delayMs);
   };
 
-  const closeNow = () => {
+  const scheduleClose = () => {
     clearOpenTimer();
-    setOpen(false);
+    clearCloseTimer();
+    if (!interactive) {
+      setOpen(false);
+      return;
+    }
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = undefined;
+      setOpen(false);
+    }, 120);
   };
 
   const merged = cloneElement(children, {
@@ -148,15 +181,25 @@ export default function Tooltip({
     },
     onMouseLeave: (e: React.MouseEvent) => {
       childProps.onMouseLeave?.(e);
-      closeNow();
+      if (
+        interactive &&
+        tipRef.current &&
+        e.relatedTarget instanceof Node &&
+        tipRef.current.contains(e.relatedTarget)
+      ) {
+        clearCloseTimer();
+        return;
+      }
+      scheduleClose();
     },
     onFocus: (e: React.FocusEvent) => {
       childProps.onFocus?.(e);
+      clearCloseTimer();
       setOpen(true);
     },
     onBlur: (e: React.FocusEvent) => {
       childProps.onBlur?.(e);
-      closeNow();
+      scheduleClose();
     },
   } as Partial<typeof children.props>);
 
@@ -173,9 +216,36 @@ export default function Tooltip({
               left: pos?.left ?? -9999,
               visibility: pos ? "visible" : "hidden",
             }}
-            className="z-50 w-max max-w-[calc(100vw-16px)] bg-tooltip-bg border border-ink/10 text-tooltip-fg text-body-sm px-2 py-1 rounded-md shadow-lg leading-snug pointer-events-none"
+            onMouseEnter={() => {
+              if (!interactive) return;
+              clearCloseTimer();
+            }}
+            onMouseLeave={(e) => {
+              if (!interactive) return;
+              if (
+                anchorRef.current &&
+                e.relatedTarget instanceof Node &&
+                anchorRef.current.contains(e.relatedTarget)
+              ) {
+                clearCloseTimer();
+                return;
+              }
+              scheduleClose();
+            }}
+            className={
+              "z-50 w-max bg-tooltip-bg border border-ink/10 text-tooltip-fg text-body-sm rounded-md shadow-lg leading-snug " +
+              (interactive ? "pointer-events-auto" : "pointer-events-none overflow-hidden")
+            }
           >
-            {content}
+            {interactive ? (
+              <ScrollArea className="max-h-[min(60vh,480px)]" viewportClassName="px-2 py-1">
+                {content}
+              </ScrollArea>
+            ) : (
+              <div className="max-h-[min(60vh,480px)] overflow-hidden px-2 py-1">
+                {content}
+              </div>
+            )}
           </div>,
           document.body,
         )}

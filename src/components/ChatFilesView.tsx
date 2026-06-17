@@ -4,6 +4,7 @@ import { ChevronDown, Files } from "lucide-react";
 import type { FileEditItem } from "../acpRenderItems";
 import { fileEditKey, fileEditMatchesPath } from "../acpRenderItems";
 import { useFileContent, languageFromPath } from "../hooks/useFileContent";
+import { useFileGitDiff } from "../hooks/useFileGitDiff";
 import { useI18n } from "../i18n";
 import FileViewer from "./FileViewer";
 import ScrollArea from "./ScrollArea";
@@ -19,6 +20,7 @@ export interface ChatFilesViewProps {
     key: string;
     requestId: number;
   } | null;
+  reloadKey?: number;
 }
 
 export default function ChatFilesView({
@@ -26,6 +28,7 @@ export default function ChatFilesView({
   workspacePath,
   subview,
   requestedSelection = null,
+  reloadKey = 0,
 }: ChatFilesViewProps) {
   const { t } = useI18n();
   const [selectedKey, setSelectedKey] = useState<string | null>(() =>
@@ -63,7 +66,8 @@ export default function ChatFilesView({
     [edits, selectedKey],
   );
 
-  const fileContent = useFileContent(selected, workspacePath);
+  const fileContent = useFileContent(selected, workspacePath, reloadKey);
+  const fileGitDiff = useFileGitDiff(selected, workspacePath, reloadKey);
 
   if (edits.length === 0) {
     return (
@@ -117,6 +121,7 @@ export default function ChatFilesView({
             text={fileContent.text}
             language={languageFromPath(selected.displayPath || selected.path || "")}
             mode={subview}
+            gitDiff={fileGitDiff.diff}
             savedScrollTop={
               selectedKey ? (scrollPositionsRef.current[selectedKey] ?? 0) : 0
             }

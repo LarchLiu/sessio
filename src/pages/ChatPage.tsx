@@ -12,8 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileDiff, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
+import { ArrowDownToLine, ArrowUp, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -78,7 +77,6 @@ import {
 } from "../components/ComposerAttachments";
 import {
   hasMessageStreamScrollSnapshot,
-  isNearScrollBottom,
   useMessageStreamScrollController,
 } from "../components/useMessageStreamScrollController";
 import {
@@ -121,6 +119,7 @@ import {
   acpViewModelToRenderItems,
   aggregateSessionFileEdits,
   fileEditMatchesPath,
+  parseFileEditSummary as parseSharedFileEditSummary,
   renderItemKeys,
   type AcpRenderItem,
 } from "../acpRenderItems";
@@ -130,11 +129,13 @@ import {
   EditedFilesBar,
   MinimalMessageStrip,
 } from "../components/ChatBottomStrips";
+import SessionFileEditsCard from "../components/SessionFileEditsCard";
 
 export interface ChatPageProps {
   session: SessionInfo;
   viewMode: ViewMode;
   chatView?: ChatView;
+  projectFilesReloadKey?: number;
   selectedProjectFileRequest?: {
     path: string;
     requestId: number;
@@ -291,6 +292,7 @@ function ChatPage({
   session,
   viewMode,
   chatView = "chat",
+  projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
   liveState,
   runtimeAgents,
@@ -429,6 +431,7 @@ function ChatPage({
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
+          projectFilesReloadKey={projectFilesReloadKey}
           selectedProjectFileRequest={selectedProjectFileRequest}
           skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
           beforeMessages={tab.kind === "main" ? beforeMessages : null}
@@ -528,6 +531,7 @@ export interface AcpTranscriptPanelProps {
   ) => boolean;
   messageCount: number;
   workspacePath: string | null;
+  projectFilesReloadKey?: number;
   selectedProjectFileRequest?: {
     path: string;
     requestId: number;
@@ -561,6 +565,7 @@ export function AcpTranscriptPanel({
   onMessageCount,
   messageCount,
   workspacePath,
+  projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
   skipHistoryLoad = false,
   scrollKey,
@@ -1346,6 +1351,7 @@ export function AcpTranscriptPanel({
               edits={fileViewEdits}
               workspacePath={workspacePath}
               subview={filesSubview}
+              reloadKey={projectFilesReloadKey}
               requestedSelection={
                 selectedProjectFilePath
                   ? {
@@ -1447,6 +1453,7 @@ export function AcpTranscriptPanel({
             fileCount={sessionFileEdits.edits.length}
             additions={sessionFileEdits.additions}
             deletions={sessionFileEdits.deletions}
+            edits={sessionFileEdits.edits}
           />
         </ComposerTopAttachments>
       )}
@@ -4442,273 +4449,22 @@ function toolGroupCountPartForKey(
   return toolGroupCountPart(count, verb, label.noun);
 }
 
-interface FileEditSummary {
-  source?: string;
-  files?: number;
-  additions?: number;
-  deletions?: number;
-  edits?: FileEditItem[];
-}
-
-interface FileEditItem {
-  path?: string;
-  displayPath?: string;
-  kind?: string;
-  additions?: number;
-  deletions?: number;
-  detail?: string;
-  patch?: string | null;
-  patches?: string[];
-  oldContent?: string | null;
-  newContent?: string | null;
-  contentDiffs?: FileEditContentDiff[];
-}
-
-interface FileEditContentDiff {
-  oldContent?: string | null;
-  newContent?: string | null;
-}
-
 function FileEditContent({ value }: { value: unknown }) {
-  const summary = parseFileEditSummary(value);
+  const summary = parseSharedFileEditSummary(value);
   const text = stableDisplayText(value);
   if (!summary) return <PlainTextContent text={text} />;
   const edits = summary.edits ?? [];
   const fileCount = summary.files ?? edits.length;
   const additions = summary.additions ?? sumEditNumber(edits, "additions");
   const deletions = summary.deletions ?? sumEditNumber(edits, "deletions");
-  const [expandedState, setExpandedState] = useState(() => ({
-    text,
-    expanded: edits.length <= 3,
-  }));
-  const expanded =
-    expandedState.text === text ? expandedState.expanded : edits.length <= 3;
-  const [openDetails, setOpenDetails] = useState<Set<string>>(() => new Set());
-  const pendingScrollKeyRef = useRef<string | null>(null);
-  const pendingBottomStickRef = useRef(false);
-  const fileEditBlockRef = useRef<HTMLDivElement>(null);
-  const detailRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const visibleEdits = expanded ? edits : edits.slice(0, 3);
-  const hiddenCount = Math.max(0, edits.length - visibleEdits.length);
-  const setExpanded = (nextExpanded: boolean) => {
-    setExpandedState({ text, expanded: nextExpanded });
-  };
-
-  useEffect(() => {
-    setOpenDetails(new Set());
-    pendingScrollKeyRef.current = null;
-    pendingBottomStickRef.current = false;
-    detailRefs.current.clear();
-  }, [text]);
-
-  const toggleDetail = (key: string) => {
-    setOpenDetails((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        const scroller = findScroller(fileEditBlockRef.current);
-        pendingBottomStickRef.current = scroller instanceof HTMLDivElement
-          ? isNearScrollBottom(scroller)
-          : false;
-        pendingScrollKeyRef.current = key;
-        next.add(key);
-      }
-      return next;
-    });
-  };
-
-  useLayoutEffect(() => {
-    const key = pendingScrollKeyRef.current;
-    if (!key || !openDetails.has(key)) return;
-    pendingScrollKeyRef.current = null;
-    const node = detailRefs.current.get(key);
-    if (!node) return;
-    const stickToBottom = pendingBottomStickRef.current;
-    pendingBottomStickRef.current = false;
-    const align = () => {
-      const scroller = findScroller(node);
-      if (!scroller) {
-        node.scrollIntoView({ block: "end", behavior: "auto" });
-        return;
-      }
-      if (stickToBottom) {
-        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-        return;
-      }
-      const nodeBottom = node.getBoundingClientRect().bottom;
-      const scrollerBottom = scroller.getBoundingClientRect().bottom;
-      const delta = nodeBottom - scrollerBottom + 12;
-      if (delta > 0) {
-        scroller.scrollTop += delta;
-      }
-    };
-    window.requestAnimationFrame(() => {
-      align();
-      window.requestAnimationFrame(align);
-    });
-    const timers = [80, 180, 360].map((delay) => window.setTimeout(align, delay));
-    return () => {
-      timers.forEach((timer) => window.clearTimeout(timer));
-    };
-  }, [openDetails]);
-
   return (
-    <div ref={fileEditBlockRef} className="overflow-hidden rounded-md bg-ink/[0.035]">
-      <div className="flex items-center justify-between gap-3 px-2.5 py-2">
-        <div className="flex min-w-0 items-center gap-2.5">
-          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-bg-panel text-ink/70">
-            <FileDiff className="h-4 w-4" />
-          </span>
-          <div className="min-w-0">
-            <div className="text-body-sm font-medium text-ink/80">
-              Edited {fileCount} {fileCount === 1 ? "file" : "files"}
-            </div>
-            <div className="font-mono text-caption leading-tight">
-              <span className="text-[rgb(var(--color-emerald))]">
-                +{additions}
-              </span>
-              <span className="text-ink/25"> </span>
-              <span className="text-status-error">-{deletions}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-      {edits.length > 0 && (
-        <div className="border-t border-ink/[0.07]">
-          {visibleEdits.map((edit, i) => {
-            const label = edit.displayPath || edit.path || "(unknown file)";
-            const detailKey = `${i}:${edit.path || edit.displayPath || label}`;
-            const detail = typeof edit.detail === "string" ? edit.detail : "";
-            const hasDetail = hasRenderableEditDetail(edit);
-            const detailOpen = openDetails.has(detailKey);
-            const rowContent = (
-              <>
-                <span className="min-w-0 truncate text-ink/80">
-                  {label}
-                </span>
-                <div className="flex shrink-0 items-center gap-2">
-                  <span className="font-mono text-caption">
-                    <span className="text-[rgb(var(--color-emerald))]">
-                      +{edit.additions ?? 0}
-                    </span>
-                    <span className="text-ink/25"> </span>
-                    <span className="text-status-error">
-                      -{edit.deletions ?? 0}
-                    </span>
-                  </span>
-                  {hasDetail && (
-                    <ChevronDown
-                      className={
-                        "h-3.5 w-3.5 text-ink/55 transition-transform " +
-                        (detailOpen ? "rotate-180" : "")
-                      }
-                    />
-                  )}
-                </div>
-              </>
-            );
-            return (
-              <div key={`${label}-${i}`}>
-                {hasDetail ? (
-                  <button
-                    type="button"
-                    className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-left text-body-sm hover:bg-ink/[0.04]"
-                    data-no-toggle
-                    aria-expanded={detailOpen}
-                    aria-label={
-                      detailOpen
-                        ? `Hide changes for ${label}`
-                        : `Show changes for ${label}`
-                    }
-                    onClick={() => toggleDetail(detailKey)}
-                  >
-                    {rowContent}
-                  </button>
-                ) : (
-                  <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-2.5 py-1.5 text-body-sm">
-                    {rowContent}
-                  </div>
-                )}
-                {detailOpen && hasDetail && (
-                  <div
-                    ref={(node) => {
-                      if (node) {
-                        detailRefs.current.set(detailKey, node);
-                      } else {
-                        detailRefs.current.delete(detailKey);
-                      }
-                    }}
-                  >
-                    <DiffPreview edit={edit} fallback={detail} />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-          {hiddenCount > 0 && (
-            <button
-              type="button"
-              className="flex w-full items-center gap-1 px-2.5 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
-              data-no-toggle
-              onClick={() => setExpanded(true)}
-            >
-              <span>
-                Show {hiddenCount} more {hiddenCount === 1 ? "file" : "files"}
-              </span>
-              <ChevronDown className="h-3.5 w-3.5" />
-            </button>
-          )}
-          {expanded && edits.length > 3 && (
-            <button
-              type="button"
-              className="flex w-full items-center gap-1 px-2.5 py-1.5 text-left text-body-sm text-ink/75 hover:bg-ink/[0.04]"
-              data-no-toggle
-              onClick={() => {
-                scrollBlockStartIntoView(fileEditBlockRef.current);
-                setExpanded(false);
-              }}
-            >
-              <span>Collapse files</span>
-              <ChevronDown className="h-3.5 w-3.5 rotate-180" />
-            </button>
-          )}
-        </div>
-      )}
-    </div>
+    <SessionFileEditsCard
+      edits={edits}
+      additions={additions}
+      deletions={deletions}
+      fileCount={fileCount}
+    />
   );
-}
-
-function parseFileEditSummary(value: unknown): FileEditSummary | null {
-  let parsed = value;
-  if (typeof parsed === "string") {
-    try {
-      parsed = JSON.parse(parsed) as unknown;
-    } catch {
-      return null;
-    }
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return null;
-  }
-  const record = parsed as FileEditSummary & { text?: unknown };
-  if (Array.isArray(record.edits)) return normalizeFileEditSummary(record);
-  if (typeof record.text === "string") return parseFileEditSummary(record.text);
-  return null;
-}
-
-function normalizeFileEditSummary(summary: FileEditSummary): FileEditSummary {
-  const edits: FileEditItem[] = [];
-  for (const edit of summary.edits ?? []) {
-    mergeFileEditItem(edits, edit);
-  }
-  return {
-    ...summary,
-    files: edits.length,
-    additions: sumEditNumber(edits, "additions"),
-    deletions: sumEditNumber(edits, "deletions"),
-    edits,
-  };
 }
 
 function stableDisplayText(value: unknown): string {
@@ -4720,173 +4476,14 @@ function stableDisplayText(value: unknown): string {
   }
 }
 
-function mergeFileEditItem(edits: FileEditItem[], next: FileEditItem) {
-  const key = fileEditKey(next);
-  const existing = edits.find((edit) => fileEditKey(edit) === key);
-  if (!existing) {
-    edits.push({ ...next });
-    return;
-  }
-  mergeFileEditValues(existing, next);
-}
-
-function fileEditKey(edit: FileEditItem): string {
-  return edit.path || edit.displayPath || "(unknown file)";
-}
-
-function mergeFileEditValues(existing: FileEditItem, next: FileEditItem) {
-  if (existing.kind && next.kind && existing.kind !== next.kind) {
-    existing.kind = "mixed";
-  }
-  existing.additions = (existing.additions ?? 0) + (next.additions ?? 0);
-  existing.deletions = (existing.deletions ?? 0) + (next.deletions ?? 0);
-  existing.detail = mergeOptionalText(existing.detail, next.detail);
-  const patches = mergeStringLists(
-    normalizeEditPatches(existing),
-    normalizeEditPatches(next),
-  );
-  if (patches.length > 0) {
-    existing.patches = patches;
-    existing.patch = null;
-  }
-  const contentDiffs = [
-    ...normalizeContentDiffs(existing),
-    ...normalizeContentDiffs(next),
-  ];
-  if (contentDiffs.length > 0) {
-    existing.contentDiffs = contentDiffs;
-    existing.oldContent = null;
-    existing.newContent = null;
-  }
-}
-
-function mergeOptionalText(left?: string, right?: string): string | undefined {
-  const parts = [left, right]
-    .map((value) => value?.trim())
-    .filter((value): value is string => Boolean(value));
-  if (parts.length === 0) return undefined;
-  return Array.from(new Set(parts)).join("\n\n");
-}
-
-function mergeStringLists(left: string[], right: string[]): string[] {
-  return Array.from(new Set([...left, ...right]));
-}
-
-function sumEditNumber(edits: FileEditItem[], key: "additions" | "deletions"): number {
+function sumEditNumber(
+  edits: Array<{ additions?: number; deletions?: number }>,
+  key: "additions" | "deletions",
+): number {
   return edits.reduce((sum, edit) => {
     const value = edit[key];
     return sum + (typeof value === "number" ? value : 0);
   }, 0);
-}
-
-function hasRenderableEditDetail(edit: FileEditItem): boolean {
-  return Boolean(
-    (typeof edit.patch === "string" && edit.patch.trim()) ||
-      normalizeEditPatches(edit).length > 0 ||
-      (typeof edit.detail === "string" && edit.detail.trim()) ||
-      normalizeContentDiffs(edit).length > 0 ||
-      typeof edit.oldContent === "string" ||
-      typeof edit.newContent === "string",
-  );
-}
-
-function diffPreviewOptions(themeType: "light" | "dark") {
-  return {
-  diffStyle: "unified" as const,
-  overflow: "scroll" as const,
-  theme: {
-    dark: "github-dark",
-    light: "github-light",
-  },
-    themeType,
-  disableFileHeader: true,
-  hunkSeparators: "line-info-basic" as const,
-  lineDiffType: "word" as const,
-  };
-}
-
-function DiffPreview({
-  edit,
-  fallback,
-}: {
-  edit: FileEditItem;
-  fallback: string;
-}) {
-  const name = edit.displayPath || edit.path || "file";
-  const themeType = useEffectiveThemeType();
-  const options = useMemo(() => diffPreviewOptions(themeType), [themeType]);
-  const contentDiffs = normalizeContentDiffs(edit);
-  const patch = typeof edit.patch === "string" ? edit.patch : "";
-  const patches = normalizeEditPatches(edit);
-  return (
-    <ScrollArea
-      className="mx-2.5 mb-2 max-h-72 rounded bg-bg-panel-alt"
-      viewportClassName="p-0"
-      orientation="both"
-      persistScrollbars
-    >
-      <div className="min-w-max text-caption sessio-diff-preview">
-        {patches.length > 0 || patch.trim() ? (
-          <>
-            {(patches.length > 0 ? patches : [patch]).map((patchItem, i) => (
-              <PatchDiff
-                key={i}
-                patch={patchItem}
-                options={options}
-                disableWorkerPool
-              />
-            ))}
-          </>
-        ) : contentDiffs.length > 0 ? (
-          <>
-            {contentDiffs.map((contentDiff, i) => (
-              <MultiFileDiff
-                key={i}
-                oldFile={{ name, contents: contentDiff.oldContent ?? "" }}
-                newFile={{ name, contents: contentDiff.newContent ?? "" }}
-                options={options}
-                disableWorkerPool
-              />
-            ))}
-          </>
-        ) : (
-          <pre className="px-2.5 py-2 font-mono text-caption leading-relaxed text-ink/75">
-            <code>{fallback}</code>
-          </pre>
-        )}
-      </div>
-    </ScrollArea>
-  );
-}
-
-function normalizeEditPatches(edit: FileEditItem): string[] {
-  const patches = Array.isArray(edit.patches)
-    ? edit.patches.filter((item): item is string => Boolean(item.trim()))
-    : [];
-  if (typeof edit.patch === "string" && edit.patch.trim()) {
-    patches.push(edit.patch);
-  }
-  return patches;
-}
-
-function normalizeContentDiffs(edit: FileEditItem): FileEditContentDiff[] {
-  const diffs = Array.isArray(edit.contentDiffs)
-    ? edit.contentDiffs.filter(
-        (item) =>
-          typeof item.oldContent === "string" ||
-          typeof item.newContent === "string",
-      )
-    : [];
-  if (
-    typeof edit.oldContent === "string" ||
-    typeof edit.newContent === "string"
-  ) {
-    diffs.push({
-      oldContent: edit.oldContent,
-      newContent: edit.newContent,
-    });
-  }
-  return diffs;
 }
 
 export interface MarkdownImage {

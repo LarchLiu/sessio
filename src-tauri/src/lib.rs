@@ -2853,6 +2853,136 @@ struct GitStatusRow {
     status: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileGitDiff {
+    status: String,
+    patch: Option<String>,
+}
+
+#[tauri::command]
+fn get_file_git_diff(workspace_path: String, file_path: String) -> Result<FileGitDiff, String> {
+    let workspace = PathBuf::from(&workspace_path);
+    if !workspace.is_absolute() || !workspace.is_dir() {
+        return Err("Invalid workspace path".to_string());
+    }
+
+    let file = PathBuf::from(&file_path);
+    if !file.is_absolute() {
+        return Err("Only absolute file paths are supported".to_string());
+    }
+
+    let relative = file
+        .strip_prefix(&workspace)
+        .map_err(|_| "File path is outside the workspace".to_string())?;
+    let relative_string = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+
+    let status_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&workspace_path)
+        .args(["status", "--porcelain=v1", "-uall", "--"])
+        .arg(&relative_string)
+        .output()
+        .map_err(|e| format!("Failed to run git status: {e}"))?;
+    if !status_output.status.success() {
+        return Ok(FileGitDiff {
+            status: "clean".to_string(),
+            patch: None,
+        });
+    }
+
+    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+    let first_status_line = status_stdout.lines().next().unwrap_or("").trim_end();
+    if first_status_line.is_empty() {
+        return Ok(FileGitDiff {
+            status: "clean".to_string(),
+            patch: None,
+        });
+    }
+
+    let status = parse_git_status_kind(first_status_line);
+    if status == "untracked" {
+        let patch = build_untracked_file_patch(&file, &relative_string)?;
+        return Ok(FileGitDiff {
+            status,
+            patch: Some(patch),
+        });
+    }
+
+    let diff_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&workspace_path)
+        .args(["diff", "--no-ext-diff", "--no-color", "--unified=0", "HEAD", "--"])
+        .arg(&relative_string)
+        .output()
+        .map_err(|e| format!("Failed to run git diff: {e}"))?;
+
+    if !diff_output.status.success() {
+        return Ok(FileGitDiff {
+            status,
+            patch: None,
+        });
+    }
+
+    let patch = String::from_utf8_lossy(&diff_output.stdout).to_string();
+    Ok(FileGitDiff {
+        status,
+        patch: if patch.trim().is_empty() { None } else { Some(patch) },
+    })
+}
+
+fn parse_git_status_kind(line: &str) -> String {
+    if line.starts_with("?? ") {
+        return "untracked".to_string();
+    }
+    if line.starts_with("!! ") {
+        return "ignored".to_string();
+    }
+    let xy = line.chars().take(2).collect::<String>();
+    let x = xy.chars().next().unwrap_or(' ');
+    let y = xy.chars().nth(1).unwrap_or(' ');
+    if x == 'R' || y == 'R' {
+        return "renamed".to_string();
+    }
+    if x == 'D' || y == 'D' {
+        return "deleted".to_string();
+    }
+    if x == 'A' || y == 'A' {
+        return "added".to_string();
+    }
+    "modified".to_string()
+}
+
+fn build_untracked_file_patch(file: &Path, relative: &str) -> Result<String, String> {
+    let contents = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let line_count = if contents.is_empty() {
+        0
+    } else {
+        contents.lines().count()
+    };
+    let mut patch = String::new();
+    patch.push_str(&format!("diff --git a/{relative} b/{relative}\n"));
+    patch.push_str("new file mode 100644\n");
+    patch.push_str("index 0000000..0000000\n");
+    patch.push_str("--- /dev/null\n");
+    patch.push_str(&format!("+++ b/{relative}\n"));
+    patch.push_str(&format!("@@ -0,0 +1,{} @@\n", line_count));
+    for line in contents.lines() {
+        patch.push('+');
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    if contents.ends_with('\n') || contents.is_empty() {
+        return Ok(patch);
+    }
+    patch.push_str("\\ No newline at end of file\n");
+    Ok(patch)
+}
+
 #[tauri::command]
 fn read_local_text_file(path: String) -> Result<String, String> {
     let path_buf = PathBuf::from(&path);
@@ -3927,6 +4057,7 @@ pub fn run() {
             read_local_image_data_url,
             save_pasted_attachment,
             read_local_text_file,
+            get_file_git_diff,
             watch_preview_file,
             unwatch_preview_file,
             list_project_files,

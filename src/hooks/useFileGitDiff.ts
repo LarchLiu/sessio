@@ -1,38 +1,38 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { readLocalTextFile, unwatchPreviewFile, watchPreviewFile } from "../api";
 import type { FileEditItem } from "../acpRenderItems";
+import { getFileGitDiff, type FileGitDiff, unwatchPreviewFile, watchPreviewFile } from "../api";
 
-export interface FileContentResult {
+export interface FileGitDiffResult {
   loading: boolean;
-  text: string | null;
+  diff: FileGitDiff | null;
   error: string | null;
 }
 
-const EMPTY_RESULT: FileContentResult = {
+const EMPTY_RESULT: FileGitDiffResult = {
   loading: false,
-  text: null,
+  diff: null,
   error: null,
 };
 
-const MAX_FILE_CACHE_ENTRIES = 32;
-const fileContentCache = new Map<string, string>();
+const MAX_DIFF_CACHE_ENTRIES = 32;
+const diffCache = new Map<string, FileGitDiff>();
 
-function getCachedFileContent(path: string): string | null {
-  const cached = fileContentCache.get(path);
-  if (cached === undefined) return null;
-  fileContentCache.delete(path);
-  fileContentCache.set(path, cached);
+function getCachedDiff(path: string): FileGitDiff | null {
+  const cached = diffCache.get(path);
+  if (!cached) return null;
+  diffCache.delete(path);
+  diffCache.set(path, cached);
   return cached;
 }
 
-function setCachedFileContent(path: string, text: string) {
-  if (fileContentCache.has(path)) fileContentCache.delete(path);
-  fileContentCache.set(path, text);
-  while (fileContentCache.size > MAX_FILE_CACHE_ENTRIES) {
-    const oldest = fileContentCache.keys().next().value;
+function setCachedDiff(path: string, diff: FileGitDiff) {
+  if (diffCache.has(path)) diffCache.delete(path);
+  diffCache.set(path, diff);
+  while (diffCache.size > MAX_DIFF_CACHE_ENTRIES) {
+    const oldest = diffCache.keys().next().value;
     if (!oldest) break;
-    fileContentCache.delete(oldest);
+    diffCache.delete(oldest);
   }
 }
 
@@ -41,20 +41,17 @@ function editInvalidationKey(edit: FileEditItem | null | undefined): string {
   return [edit.path ?? "", edit.displayPath ?? ""].join(":");
 }
 
-/**
- * Resolve the editable file content for the file edit picked in Files view.
- */
-export function useFileContent(
+export function useFileGitDiff(
   edit: FileEditItem | null,
   workspacePath: string | null,
   reloadKey = 0,
-): FileContentResult {
-  const [result, setResult] = useState<FileContentResult>(EMPTY_RESULT);
+): FileGitDiffResult {
+  const [result, setResult] = useState<FileGitDiffResult>(EMPTY_RESULT);
   const invalidation = editInvalidationKey(edit);
   const path = edit?.path || edit?.displayPath || "";
 
   useEffect(() => {
-    if (!edit) {
+    if (!edit || !workspacePath) {
       setResult(EMPTY_RESULT);
       return;
     }
@@ -63,7 +60,7 @@ export function useFileContent(
     if (!absolute) {
       setResult({
         loading: false,
-        text: null,
+        diff: null,
         error: "no-path",
       });
       return;
@@ -72,10 +69,10 @@ export function useFileContent(
     let cancelled = false;
     let removeListener: (() => void) | null = null;
     let unwatchRequested = false;
-    const cachedText = getCachedFileContent(absolute);
+    const cachedDiff = getCachedDiff(absolute);
     setResult({
-      loading: cachedText === null,
-      text: cachedText,
+      loading: cachedDiff === null,
+      diff: cachedDiff,
       error: null,
     });
 
@@ -87,13 +84,13 @@ export function useFileContent(
           error: null,
         }));
       }
-      readLocalTextFile(absolute)
-        .then((text) => {
+      getFileGitDiff(workspacePath, absolute)
+        .then((diff) => {
           if (cancelled) return;
-          setCachedFileContent(absolute, text);
+          setCachedDiff(absolute, diff);
           setResult({
             loading: false,
-            text,
+            diff,
             error: null,
           });
         })
@@ -101,13 +98,13 @@ export function useFileContent(
           if (cancelled) return;
           setResult({
             loading: false,
-            text: null,
+            diff: null,
             error: String(err),
           });
         });
     };
 
-    refresh(cachedText === null);
+    refresh(cachedDiff === null || reloadKey > 0);
 
     watchPreviewFile(absolute)
       .then(() =>
@@ -129,7 +126,7 @@ export function useFileContent(
       })
       .catch((err) => {
         if (cancelled) return;
-        console.warn("watch preview file failed", err);
+        console.warn("watch preview file for git diff failed", err);
       });
 
     return () => {
@@ -140,7 +137,7 @@ export function useFileContent(
         void unwatchPreviewFile(absolute).catch(() => {});
       }
     };
-  }, [invalidation, path, reloadKey, workspacePath]);
+  }, [edit, invalidation, path, reloadKey, workspacePath]);
 
   return result;
 }
@@ -153,12 +150,4 @@ function resolveAbsolutePath(path: string, workspacePath: string | null): string
   const trimmedRoot = workspacePath.replace(/[\\/]+$/, "");
   const trimmedPath = path.replace(/^[\\/]+/, "");
   return `${trimmedRoot}${sep}${trimmedPath}`;
-}
-
-export function languageFromPath(path: string): string {
-  const lower = path.toLowerCase();
-  const dot = lower.lastIndexOf(".");
-  if (dot < 0) return "";
-  const ext = lower.slice(dot + 1);
-  return ext;
 }

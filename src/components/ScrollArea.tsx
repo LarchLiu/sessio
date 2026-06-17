@@ -214,13 +214,14 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
 
   return (
     <div
-      className={"relative flex flex-col " + (className ?? "")}
+      className={"relative flex min-h-0 flex-col overflow-hidden " + (className ?? "")}
       onPointerEnter={onRootPointerEnter}
       onPointerLeave={onRootPointerLeave}
     >
       <div
         ref={viewportRef}
         onScroll={handleScroll}
+        style={{ maxHeight: "inherit" }}
         className={
           viewportFlexClass +
           " min-h-0 w-full hide-native-scrollbar " +

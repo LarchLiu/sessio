@@ -1251,6 +1251,18 @@ export async function getProjectGitStatus(path: string): Promise<ProjectGitStatu
   return invoke<ProjectGitStatusEntry[]>("get_project_git_status", { path });
 }
 
+export interface FileGitDiff {
+  status: ProjectGitStatus | "clean";
+  patch: string | null;
+}
+
+export async function getFileGitDiff(
+  workspacePath: string,
+  filePath: string,
+): Promise<FileGitDiff> {
+  return invoke<FileGitDiff>("get_file_git_diff", { workspacePath, filePath });
+}
+
 export async function listProcessTemplates(): Promise<ProcessTemplateInfo[]> {
   return invoke<ProcessTemplateInfo[]>("list_process_templates");
 }

@@ -22,6 +22,7 @@ export default function AppMain({
   detailRoute,
   viewMode,
   chatView,
+  projectFilesReloadKey,
   selectedProjectFileRequest,
   liveState,
   runtimeAgents,
@@ -55,6 +56,7 @@ export default function AppMain({
   detailRoute: DetailMode;
   viewMode: ViewMode;
   chatView: ChatView;
+  projectFilesReloadKey: number;
   selectedProjectFileRequest?: {
     path: string;
     requestId: number;
@@ -201,6 +203,7 @@ export default function AppMain({
             session={selected}
             viewMode={viewMode}
             chatView={chatView}
+            projectFilesReloadKey={projectFilesReloadKey}
             selectedProjectFileRequest={selectedProjectFileRequest}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
@@ -226,6 +229,7 @@ export default function AppMain({
           <ThreadChatPage
             session={selected}
             viewMode={viewMode}
+            projectFilesReloadKey={projectFilesReloadKey}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
