@@ -39,13 +39,14 @@ export default function ChatFilesView({
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerAnchorRef = useRef<HTMLButtonElement>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
-  const flushPlainViewRef = useRef<(() => Promise<boolean>) | null>(null);
+  const plainEditorLeaveCheckRef = useRef<(() => Promise<boolean>) | null>(null);
+  const handledSelectionRequestRef = useRef<string | null>(null);
 
   const selectFile = useCallback(async (key: string): Promise<boolean> => {
     if (key === selectedKey) return true;
-    if (subview === "plain" && flushPlainViewRef.current) {
-      const flushed = await flushPlainViewRef.current();
-      if (!flushed) return false;
+    if (subview === "plain" && plainEditorLeaveCheckRef.current) {
+      const canLeave = await plainEditorLeaveCheckRef.current();
+      if (!canLeave) return false;
     }
     setSelectedKey(key);
     return true;
@@ -62,19 +63,15 @@ export default function ChatFilesView({
 
   useEffect(() => {
     if (!requestedSelection) return;
+    const requestKey = `${requestedSelection.requestId}:${requestedSelection.key}`;
+    if (handledSelectionRequestRef.current === requestKey) return;
     const matchedEdit = edits.find((edit) =>
       fileEditMatchesPath(edit, requestedSelection.key),
     );
     if (!matchedEdit) return;
+    handledSelectionRequestRef.current = requestKey;
     void selectFile(fileEditKey(matchedEdit));
   }, [edits, requestedSelection?.key, requestedSelection?.requestId, selectFile]);
-
-  useEffect(
-    () => () => {
-      void flushPlainViewRef.current?.();
-    },
-    [],
-  );
 
   const selected = useMemo(
     () =>
@@ -145,8 +142,8 @@ export default function ChatFilesView({
             contentVersion={fileContent.contentVersion}
             editingLocked={editingLocked}
             onSaved={fileContent.applyLocalSave}
-            onFlushHandleChange={(handle) => {
-              flushPlainViewRef.current = handle;
+            onPlainEditorLeaveCheckChange={(handle) => {
+              plainEditorLeaveCheckRef.current = handle;
             }}
             gitDiff={fileGitDiff.diff}
             savedScrollTop={

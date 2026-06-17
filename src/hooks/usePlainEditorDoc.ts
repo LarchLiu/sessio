@@ -6,17 +6,17 @@ import {
   normalizeEditorText,
   roundTripMatches,
   serializeSourceLineBlocks,
-  type NotionParseMode,
-} from "./notionSerialization";
+  type PlainEditorParseMode,
+} from "./plainEditorSerialization";
 
 type BlockNoteEditor = ReturnType<typeof useCreateBlockNote>;
 
-export interface ParsedNotionDoc {
+export interface ParsedPlainEditorDoc {
   blocks: PartialBlock[];
   usedSourceFallback: boolean;
 }
 
-export type NotionSaveStatus =
+export type PlainEditorSaveStatus =
   | "clean"
   | "dirty"
   | "saving"
@@ -25,7 +25,7 @@ export type NotionSaveStatus =
   | "conflict"
   | "error";
 
-export interface UseNotionDocOptions {
+export interface UsePlainEditorDocOptions {
   fileKey: string;
   text: string;
   workspacePath: string | null;
@@ -36,17 +36,19 @@ export interface UseNotionDocOptions {
   onSaved: (content: string, mtimeMs: number) => void;
 }
 
-export interface UseNotionDocResult {
+export interface UsePlainEditorDocResult {
   usedSourceFallback: boolean;
   editable: boolean;
-  status: NotionSaveStatus;
+  status: PlainEditorSaveStatus;
   messageKey: string | null;
   messageDetail: string | null;
+  saveable: boolean;
   hasPendingChanges: () => boolean;
-  flushPendingSave: () => Promise<boolean>;
+  saveNow: () => Promise<boolean>;
+  canLeaveDocument: () => Promise<boolean>;
 }
 
-export function useNotionDoc(
+export function usePlainEditorDoc(
   editor: BlockNoteEditor,
   {
     fileKey,
@@ -57,29 +59,28 @@ export function useNotionDoc(
     contentVersion,
     editingLocked,
     onSaved,
-  }: UseNotionDocOptions,
-): UseNotionDocResult {
+  }: UsePlainEditorDocOptions,
+): UsePlainEditorDocResult {
   const [usedSourceFallback, setUsedSourceFallback] = useState(false);
   const [roundTripSafe, setRoundTripSafe] = useState(true);
   const [saveBlocked, setSaveBlocked] = useState(false);
-  const [status, setStatusState] = useState<NotionSaveStatus>("clean");
+  const [status, setStatusState] = useState<PlainEditorSaveStatus>("clean");
   const [messageKey, setMessageKey] = useState<string | null>(null);
   const [messageDetail, setMessageDetail] = useState<string | null>(null);
 
-  const parseModeRef = useRef<NotionParseMode>("markdown");
+  const parseModeRef = useRef<PlainEditorParseMode>("markdown");
   const expectedMtimeRef = useRef<number | null>(mtimeMs);
   const loadedVersionRef = useRef("");
   const baselineContentRef = useRef("");
-  const statusRef = useRef<NotionSaveStatus>("clean");
+  const statusRef = useRef<PlainEditorSaveStatus>("clean");
   const dirtyRef = useRef(false);
   const applyingBlocksRef = useRef(false);
   const canEditRef = useRef(false);
-  const debounceRef = useRef<number | null>(null);
   const savingRef = useRef<Promise<boolean> | null>(null);
-  const flushPendingSaveRef = useRef<() => Promise<boolean>>(async () => true);
+  const saveNowRef = useRef<() => Promise<boolean>>(async () => true);
 
   const setStatus = useCallback(
-    (nextStatus: NotionSaveStatus, nextMessageKey: string | null = null, detail: string | null = null) => {
+    (nextStatus: PlainEditorSaveStatus, nextMessageKey: string | null = null, detail: string | null = null) => {
       statusRef.current = nextStatus;
       setStatusState(nextStatus);
       setMessageKey(nextMessageKey);
@@ -88,25 +89,10 @@ export function useNotionDoc(
     [],
   );
 
-  const clearDebounce = useCallback(() => {
-    if (debounceRef.current !== null) {
-      window.clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
-  }, []);
-
-  const scheduleSave = useCallback(() => {
-    clearDebounce();
-    debounceRef.current = window.setTimeout(() => {
-      debounceRef.current = null;
-      void flushPendingSaveRef.current();
-    }, 500);
-  }, [clearDebounce]);
-
   const effectiveVersion = contentVersion || fileKey;
 
   const hasPendingChanges = useCallback(
-    () => dirtyRef.current || debounceRef.current !== null || savingRef.current !== null,
+    () => dirtyRef.current || savingRef.current !== null,
     [],
   );
 
@@ -123,7 +109,6 @@ export function useNotionDoc(
 
   const loadDocument = useCallback(
     (nextText: string, nextVersion: string, nextMtimeMs: number | null) => {
-      clearDebounce();
       dirtyRef.current = false;
       setSaveBlocked(false);
       const parsed = parseMarkdownBlocksWithFallback(editor, nextText);
@@ -147,7 +132,7 @@ export function useNotionDoc(
       }
       setStatus("clean");
     },
-    [applyParsedBlocks, clearDebounce, editor, setStatus],
+    [applyParsedBlocks, editor, setStatus],
   );
 
   useEffect(() => {
@@ -177,11 +162,10 @@ export function useNotionDoc(
     return normalizeEditorText(editor.blocksToMarkdownLossy(editor.document));
   }, [editor, setStatus]);
 
-  const flushPendingSave = useCallback(async () => {
-    clearDebounce();
+  const saveNow = useCallback(async () => {
     if (savingRef.current) {
       return savingRef.current.then(() => {
-        if (dirtyRef.current) return flushPendingSaveRef.current();
+        if (dirtyRef.current) return saveNowRef.current();
         return statusRef.current !== "conflict" && statusRef.current !== "error";
       });
     }
@@ -214,7 +198,6 @@ export function useNotionDoc(
         if (latest !== serialized) {
           dirtyRef.current = true;
           setStatus("dirty", "chat.files.editor_unsaved");
-          scheduleSave();
           return false;
         }
         dirtyRef.current = false;
@@ -238,18 +221,24 @@ export function useNotionDoc(
     setStatus("saving", "chat.files.editor_saving");
     return savePromise;
   }, [
-    clearDebounce,
     onSaved,
     path,
     serializeCurrentDocument,
     setStatus,
-    scheduleSave,
     workspacePath,
   ]);
 
-  const editable = useMemo(
+  const canLeaveDocument = useCallback(async () => {
+    if (savingRef.current) return savingRef.current;
+    if (!dirtyRef.current) {
+      return statusRef.current !== "conflict" && statusRef.current !== "error";
+    }
+    setStatus("dirty", "chat.files.editor_leave_blocked_unsaved");
+    return false;
+  }, [setStatus]);
+
+  const saveable = useMemo(
     () =>
-      !editingLocked &&
       roundTripSafe &&
       !saveBlocked &&
       status !== "readonly" &&
@@ -258,7 +247,12 @@ export function useNotionDoc(
       workspacePath !== null &&
       path !== null &&
       mtimeMs !== null,
-    [editingLocked, mtimeMs, path, roundTripSafe, saveBlocked, status, workspacePath],
+    [mtimeMs, path, roundTripSafe, saveBlocked, status, workspacePath],
+  );
+
+  const editable = useMemo(
+    () => !editingLocked && saveable,
+    [editingLocked, saveable],
   );
 
   useEffect(() => {
@@ -270,27 +264,13 @@ export function useNotionDoc(
       if (applyingBlocksRef.current || !canEditRef.current) return;
       dirtyRef.current = true;
       setStatus("dirty", "chat.files.editor_unsaved");
-      scheduleSave();
     });
     return () => unsubscribe();
-  }, [editor, scheduleSave, setStatus]);
+  }, [editor, setStatus]);
 
   useEffect(() => {
-    if (editingLocked && hasPendingChanges()) {
-      void flushPendingSave();
-    }
-  }, [editingLocked, flushPendingSave, hasPendingChanges]);
-
-  useEffect(() => {
-    flushPendingSaveRef.current = flushPendingSave;
-  }, [flushPendingSave]);
-
-  useEffect(
-    () => () => {
-      void flushPendingSaveRef.current();
-    },
-    [],
-  );
+    saveNowRef.current = saveNow;
+  }, [saveNow]);
 
   return {
     usedSourceFallback,
@@ -298,15 +278,17 @@ export function useNotionDoc(
     status,
     messageKey,
     messageDetail,
+    saveable,
     hasPendingChanges,
-    flushPendingSave,
+    saveNow,
+    canLeaveDocument,
   };
 }
 
 export function parseMarkdownBlocksWithFallback(
   editor: BlockNoteEditor,
   text: string,
-): ParsedNotionDoc {
+): ParsedPlainEditorDoc {
   try {
     const blocks = editor.tryParseMarkdownToBlocks(text);
     if (blocks.length > 0 || text.length === 0) {

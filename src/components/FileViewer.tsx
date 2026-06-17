@@ -17,7 +17,7 @@ import { shell } from "@codemirror/legacy-modes/mode/shell";
 import type { FileGitDiff } from "../api";
 import { useEffectiveThemeType } from "./shikiHighlight";
 
-const NotionView = lazy(() => import("./NotionView"));
+const PlainEditorView = lazy(() => import("./PlainEditorView"));
 
 const languageCompartment = new Compartment();
 const themeCompartment = new Compartment();
@@ -204,7 +204,7 @@ export interface FileViewerProps {
   contentVersion?: string;
   editingLocked?: boolean;
   onSaved?: (content: string, mtimeMs: number) => void;
-  onFlushHandleChange?: (handle: (() => Promise<boolean>) | null) => void;
+  onPlainEditorLeaveCheckChange?: (handle: (() => Promise<boolean>) | null) => void;
   gitDiff?: FileGitDiff | null;
   savedScrollTop?: number;
   onScrollTopChange?: (scrollTop: number) => void;
@@ -221,7 +221,7 @@ export default function FileViewer({
   contentVersion = "",
   editingLocked = false,
   onSaved = () => {},
-  onFlushHandleChange,
+  onPlainEditorLeaveCheckChange,
   gitDiff = null,
   savedScrollTop = 0,
   onScrollTopChange,
@@ -235,7 +235,7 @@ export default function FileViewer({
           </div>
         }
       >
-        <NotionView
+        <PlainEditorView
           fileKey={fileKey}
           text={text}
           workspacePath={workspacePath}
@@ -244,7 +244,7 @@ export default function FileViewer({
           contentVersion={contentVersion}
           editingLocked={editingLocked}
           onSaved={onSaved}
-          onFlushHandleChange={onFlushHandleChange}
+          onPlainEditorLeaveCheckChange={onPlainEditorLeaveCheckChange}
         />
       </Suspense>
     );

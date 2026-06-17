@@ -811,7 +811,6 @@ export default function App() {
       const identity = sessionIdentityKey(selected);
       setProjectFileSelectionBySession((prev) => {
         const currentSelection = prev[identity];
-        if (currentSelection?.path === path) return prev;
         return {
           ...prev,
           [identity]: {

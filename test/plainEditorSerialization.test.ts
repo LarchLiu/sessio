@@ -4,9 +4,9 @@ import {
   normalizeEditorText,
   roundTripMatches,
   serializeSourceLineBlocks,
-} from "../src/hooks/notionSerialization";
+} from "../src/hooks/plainEditorSerialization";
 
-describe("notionSerialization", () => {
+describe("plainEditorSerialization", () => {
   it("serializes source fallback paragraphs back to original lines", () => {
     const blocks: PartialBlock[] = [
       {
@@ -62,5 +62,34 @@ describe("notionSerialization", () => {
       safe: true,
       serialized: "a\nb",
     });
+  });
+
+  it("allows safe Markdown formatting changes from the BlockNote serializer", () => {
+    expect(roundTripMatches("- item\n- [ ] task\n", "* item\n* [ ] task\n")).toMatchObject({
+      safe: true,
+    });
+    expect(roundTripMatches("- first\n- second\n", "* first\n\n* second\n")).toMatchObject({
+      safe: true,
+    });
+    expect(roundTripMatches("---\n", "***\n")).toMatchObject({
+      safe: true,
+    });
+    expect(roundTripMatches("```text\nplain\n```\n", "```\nplain\n```\n")).toMatchObject({
+      safe: true,
+    });
+  });
+
+  it("still rejects Markdown changes that lose document semantics", () => {
+    expect(roundTripMatches("---\ntitle: Test\n---\n\n# Test\n", "***\n\n## title: Test\n\n# Test\n"))
+      .toMatchObject({
+        safe: false,
+      });
+    expect(roundTripMatches("<div>x</div>\n", "")).toMatchObject({
+      safe: false,
+    });
+    expect(roundTripMatches("```ts\nconst x = 1;\n```\n", "```\nconst x = 1;\n```\n"))
+      .toMatchObject({
+        safe: false,
+      });
   });
 });
