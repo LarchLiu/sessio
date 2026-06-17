@@ -1,5 +1,6 @@
-import { ListChevronsDownUp, ListChevronsUpDown, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
+import { Code2, FileText, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
+import type { ChatView } from "../navigation";
 import { useI18n } from "../i18n";
 import { AgentGlyph } from "./AgentIcon";
 import Tooltip from "./Tooltip";
@@ -19,9 +20,12 @@ interface AppHeaderProps {
   } | null;
   metaPopoverOpen: boolean;
   rightSidebarOpen?: boolean;
+  chatView?: ChatView;
+  chatViewVisible?: boolean;
   onOpenSidebar: () => void;
   onToggleMetaPopover: () => void;
   onToggleRightSidebar?: () => void;
+  onChatViewChange?: (view: ChatView) => void;
 }
 
 export default function AppHeader({
@@ -35,9 +39,12 @@ export default function AppHeader({
   activeMessageMeta,
   metaPopoverOpen,
   rightSidebarOpen,
+  chatView = "chat",
+  chatViewVisible = false,
   onOpenSidebar,
   onToggleMetaPopover,
   onToggleRightSidebar,
+  onChatViewChange,
 }: AppHeaderProps) {
   const { t } = useI18n();
 
@@ -123,7 +130,10 @@ export default function AppHeader({
           <HeaderContextTitle title={contextTitle} project={projectContext} />
         ) : null}
       </div>
-      <div className="flex h-full items-center justify-self-end gap-1" data-tauri-drag-region="false">
+      <div className="flex h-full items-center justify-self-end gap-2" data-tauri-drag-region="false">
+        {chatViewVisible && onChatViewChange && (
+          <ChatViewToggle value={chatView} onChange={onChatViewChange} />
+        )}
         {onToggleRightSidebar && (
           <Tooltip content={rightPanelLabel} placement="bottom">
             <button
@@ -145,6 +155,51 @@ export default function AppHeader({
       <div className="absolute top-0 right-0 z-20">
         <WindowControls />
       </div>
+    </div>
+  );
+}
+
+function ChatViewToggle({
+  value,
+  onChange,
+}: {
+  value: ChatView;
+  onChange: (next: ChatView) => void;
+}) {
+  const { t } = useI18n();
+  const items: { value: ChatView; icon: LucideIcon; label: string }[] = [
+    { value: "chat", icon: MessageSquare, label: t("header.view_chat") },
+    { value: "code", icon: Code2, label: t("header.view_code") },
+    { value: "plain", icon: FileText, label: t("header.view_plain") },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label={t("header.view_label")}
+      className="inline-flex items-center rounded-md bg-ink/[0.07] p-0.5"
+    >
+      {items.map(({ value: itemValue, icon: Icon, label }) => {
+        const active = itemValue === value;
+        return (
+          <Tooltip key={itemValue} content={label} placement="bottom">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-label={label}
+              onClick={() => onChange(itemValue)}
+              className={
+                "flex h-6 w-7 items-center justify-center rounded transition-colors " +
+                (active
+                  ? "bg-surface text-ink/85 shadow-[0_1px_2px_rgba(0,0,0,0.18)]"
+                  : "text-ink/55 hover:text-ink/80")
+              }
+            >
+              <Icon className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+        );
+      })}
     </div>
   );
 }

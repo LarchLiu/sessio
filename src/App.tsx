@@ -51,7 +51,7 @@ import {
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
 import { CalendarClock, Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
-import type { DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
+import type { ChatView, DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
   isSubagentOnly,
   matchesScope,
@@ -134,6 +134,7 @@ export default function App() {
   const [metaPopoverMounted, setMetaPopoverMounted] = useState(false);
   const [activeMessageMeta, setActiveMessageMeta] =
     useState<ActiveMessageMeta | null>(null);
+  const [chatViewBySession, setChatViewBySession] = useState<Record<string, ChatView>>({});
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [liveRuntimeState, dispatchLiveRuntimeEvent] = useReducer(
     applyRuntimeAction,
@@ -783,6 +784,18 @@ export default function App() {
     />
   );
 
+  const currentChatView: ChatView =
+    selected ? chatViewBySession[selected.id] ?? "chat" : "chat";
+  const chatViewToggleVisible =
+    Boolean(selected) && detailMode === "chat";
+  const handleChatViewChange = useCallback(
+    (next: ChatView) => {
+      if (!selected) return;
+      setChatViewBySession((prev) => ({ ...prev, [selected.id]: next }));
+    },
+    [selected],
+  );
+
   const header = (
     <AppHeader
       isMac={IS_MAC}
@@ -795,9 +808,12 @@ export default function App() {
       activeMessageMeta={activeMessageMeta}
       metaPopoverOpen={metaPopoverOpen}
       rightSidebarOpen={rightSidebarOpen}
+      chatView={currentChatView}
+      chatViewVisible={chatViewToggleVisible}
       onOpenSidebar={() => setSidebarOpen(true)}
       onToggleMetaPopover={() => setMetaPopoverOpen((open) => !open)}
       onToggleRightSidebar={() => setRightSidebarOpen((open) => !open)}
+      onChatViewChange={handleChatViewChange}
     />
   );
 
@@ -938,6 +954,7 @@ export default function App() {
           selectedSessionProject={selectedSessionProject}
           detailRoute={detailRoute}
           viewMode={viewMode}
+          chatView={currentChatView}
           liveState={liveRuntimeState}
           runtimeAgents={runtimeAgents}
           lastRuntimeAgentSelection={lastRuntimeAgentSelection}

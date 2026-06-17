@@ -21,24 +21,10 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { createHighlighterCore, type HighlighterCore, type ThemedToken } from "shiki/core";
-import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
-import cssLang from "shiki/langs/css.mjs";
-import htmlLang from "shiki/langs/html.mjs";
-import javascriptLang from "shiki/langs/javascript.mjs";
-import jsonLang from "shiki/langs/json.mjs";
-import jsoncLang from "shiki/langs/jsonc.mjs";
-import jsxLang from "shiki/langs/jsx.mjs";
-import markdownLang from "shiki/langs/markdown.mjs";
-import pythonLang from "shiki/langs/python.mjs";
-import rustLang from "shiki/langs/rust.mjs";
-import shellLang from "shiki/langs/shellscript.mjs";
-import tsxLang from "shiki/langs/tsx.mjs";
-import typescriptLang from "shiki/langs/typescript.mjs";
-import xmlLang from "shiki/langs/xml.mjs";
-import yamlLang from "shiki/langs/yaml.mjs";
-import githubDarkTheme from "shiki/themes/github-dark.mjs";
-import githubLightTheme from "shiki/themes/github-light.mjs";
+import {
+  useEffectiveThemeType,
+  useShikiHighlightedCode,
+} from "../components/shikiHighlight";
 import type { Options as SanitizeSchema } from "rehype-sanitize";
 import "katex/dist/katex.min.css";
 import {
@@ -99,7 +85,7 @@ import {
   useComposerInputHistory,
 } from "../hooks/useComposerInputHistory";
 import { localeTag, useI18n } from "../i18n";
-import type { ViewMode } from "../navigation";
+import type { ChatView, ViewMode } from "../navigation";
 import {
   type AcpViewModel,
   type AcpAvailableCommand,
@@ -133,13 +119,21 @@ import {
 } from "../threadPromptDisplay";
 import {
   acpViewModelToRenderItems,
+  aggregateSessionFileEdits,
   renderItemKeys,
   type AcpRenderItem,
 } from "../acpRenderItems";
+import ChatFilesView from "../components/ChatFilesView";
+import {
+  ComposerTopAttachments,
+  EditedFilesBar,
+  MinimalMessageStrip,
+} from "../components/ChatBottomStrips";
 
 export interface ChatPageProps {
   session: SessionInfo;
   viewMode: ViewMode;
+  chatView?: ChatView;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -291,6 +285,7 @@ function snapshotGroupsToAncestorHistoryGroups(
 function ChatPage({
   session,
   viewMode,
+  chatView = "chat",
   liveState,
   runtimeAgents,
   rememberRuntimeAgentSelection,
@@ -414,6 +409,7 @@ function ChatPage({
               : t("detail.subagent_unreadable")
           }
           viewMode={viewMode}
+          chatView={chatView}
           liveState={liveState}
           runtimeAgents={runtimeAgents}
           rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
@@ -506,6 +502,7 @@ export interface AcpTranscriptPanelProps {
   available: boolean;
   emptyHint: string;
   viewMode: ViewMode;
+  chatView?: ChatView;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -539,6 +536,7 @@ export function AcpTranscriptPanel({
   available,
   emptyHint,
   viewMode,
+  chatView = "chat",
   liveState,
   runtimeAgents,
   rememberRuntimeAgentSelection,
@@ -1283,79 +1281,139 @@ export function AcpTranscriptPanel({
     }
   }, [activeTurnId, runtimeSessionId]);
 
+  const sessionFileEdits = useMemo(
+    () => aggregateSessionFileEdits(acpViewModel),
+    [acpViewModel],
+  );
+  const pendingPermissions = useMemo(() => {
+    const permissions: AcpPermissionRequest[] = [];
+    for (const turn of acpViewModel.turns) {
+      for (const permission of turn.permissions) {
+        if (permission.options.length === 0) continue;
+        if (permission.selectedOptionId || permission.cancelled) continue;
+        permissions.push(permission);
+      }
+    }
+    return permissions;
+  }, [acpViewModel]);
+  const isFilesView = chatView === "code" || chatView === "plain";
+  const filesSubview: "code" | "plain" = chatView === "plain" ? "plain" : "code";
+
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="relative flex flex-1 min-h-0 flex-col">
-        <ScrollArea
-          ref={viewportRef}
-          className="flex-1 min-h-0"
-          viewportClassName={
-            "px-10 py-4 session-chat-scroll-viewport transition-opacity duration-75 " +
-            (positionReady || isLiveSessionVisible ? "opacity-100" : "opacity-0")
-          }
-          onScroll={saveScrollSnapshot}
-        >
-          {!available && (
-            <div className="text-status-warn text-body bg-status-warn/[0.10] border border-status-warn/30 rounded p-3 leading-relaxed">
-              {emptyHint}
-            </div>
-          )}
-          {error && (
-            <div className="text-status-error text-body-sm bg-status-error/10 rounded p-3">
-              {error}
-            </div>
-          )}
-          {!loading && !error && available && !skipHistoryLoad && visibleDisplayItems.length === 0 && (
-            <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
-          )}
-          <div ref={chatContentRef} className="flex flex-col gap-2">
-            {beforeMessages}
-            <AcpSessionStatePanel
-              state={acpViewModel.sessionState}
-              sessioRuntimeSessionId={sessionStateRuntimeSessionId}
-              debugAcpConfig={debugAcpConfig}
-              onRunCommand={handleSendText}
-            />
-            <AcpRenderItems
-              items={visibleDisplayItems}
-              itemKeys={visibleDisplayItemKeys}
-              bubbleRefs={bubbleRefs}
-              sessioRuntimeSessionId={runtimeSessionId}
-              now={runtimeNow}
-              showThreadPromptPlaceholders={showThreadPromptPlaceholders}
-              threadPromptFallbacks={threadPromptFallbacks}
-              onPreviewImage={onPreviewImage}
-              onPreviewFile={onPreviewFile}
-              onFilePreviewError={onFilePreviewError}
-              onPermissionResponse={respondAgentPermission}
+        {isFilesView ? (
+          <div className="flex flex-1 min-h-0 flex-col">
+            {!available && (
+              <div className="m-3 rounded border border-status-warn/30 bg-status-warn/[0.10] p-3 text-body leading-relaxed text-status-warn">
+                {emptyHint}
+              </div>
+            )}
+            {error && (
+              <div className="m-3 rounded bg-status-error/10 p-3 text-body-sm text-status-error">
+                {error}
+              </div>
+            )}
+            <ChatFilesView
+              edits={sessionFileEdits.edits}
+              workspacePath={workspacePath}
+              subview={filesSubview}
             />
           </div>
-        </ScrollArea>
-        <RoleNav
-          sideKind="assistant"
-          side="left"
-          items={visibleDisplayItems}
-          refs={bubbleRefs}
-          viewportRef={viewportRef}
-        />
-        <RoleNav
-          sideKind="user"
-          side="right"
-          items={visibleDisplayItems}
-          refs={bubbleRefs}
-          viewportRef={viewportRef}
-        />
-        {showScrollToBottom && (
-          <button
-            type="button"
-            onClick={() => scrollChatToBottom()}
-            className="absolute bottom-3 left-1/2 z-20 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-ink/15 bg-surface-panel/95 text-ink/85 shadow-sm transition hover:border-ink/25 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
-            aria-label="Scroll to bottom"
-          >
-            <ArrowDownToLine className="h-5 w-5" />
-          </button>
+        ) : (
+          <>
+            <ScrollArea
+              ref={viewportRef}
+              className="flex-1 min-h-0"
+              viewportClassName={
+                "px-10 py-4 session-chat-scroll-viewport transition-opacity duration-75 " +
+                (positionReady || isLiveSessionVisible ? "opacity-100" : "opacity-0")
+              }
+              onScroll={saveScrollSnapshot}
+            >
+              {!available && (
+                <div className="text-status-warn text-body bg-status-warn/[0.10] border border-status-warn/30 rounded p-3 leading-relaxed">
+                  {emptyHint}
+                </div>
+              )}
+              {error && (
+                <div className="text-status-error text-body-sm bg-status-error/10 rounded p-3">
+                  {error}
+                </div>
+              )}
+              {!loading && !error && available && !skipHistoryLoad && visibleDisplayItems.length === 0 && (
+                <div className="text-ink/40 text-body">{t("detail.no_messages")}</div>
+              )}
+              <div ref={chatContentRef} className="flex flex-col gap-2">
+                {beforeMessages}
+                <AcpSessionStatePanel
+                  state={acpViewModel.sessionState}
+                  sessioRuntimeSessionId={sessionStateRuntimeSessionId}
+                  debugAcpConfig={debugAcpConfig}
+                  onRunCommand={handleSendText}
+                />
+                <AcpRenderItems
+                  items={visibleDisplayItems}
+                  itemKeys={visibleDisplayItemKeys}
+                  bubbleRefs={bubbleRefs}
+                  sessioRuntimeSessionId={runtimeSessionId}
+                  now={runtimeNow}
+                  showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+                  threadPromptFallbacks={threadPromptFallbacks}
+                  onPreviewImage={onPreviewImage}
+                  onPreviewFile={onPreviewFile}
+                  onFilePreviewError={onFilePreviewError}
+                  onPermissionResponse={respondAgentPermission}
+                />
+              </div>
+            </ScrollArea>
+            <RoleNav
+              sideKind="assistant"
+              side="left"
+              items={visibleDisplayItems}
+              refs={bubbleRefs}
+              viewportRef={viewportRef}
+            />
+            <RoleNav
+              sideKind="user"
+              side="right"
+              items={visibleDisplayItems}
+              refs={bubbleRefs}
+              viewportRef={viewportRef}
+            />
+            {showScrollToBottom && (
+              <button
+                type="button"
+                onClick={() => scrollChatToBottom()}
+                className="absolute bottom-3 left-1/2 z-20 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-ink/15 bg-surface-panel/95 text-ink/85 shadow-sm transition hover:border-ink/25 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink/20"
+                aria-label="Scroll to bottom"
+              >
+                <ArrowDownToLine className="h-5 w-5" />
+              </button>
+            )}
+          </>
         )}
       </div>
+      {isFilesView && (
+        <ComposerTopAttachments>
+          {pendingPermissions.map((permission) => (
+            <FilesPermissionRow
+              key={permission.requestId}
+              sessioRuntimeSessionId={runtimeSessionId}
+              permission={permission}
+            />
+          ))}
+          <MinimalMessageStrip
+            viewModel={acpViewModel}
+            workingTurnId={liveWorkingIndicatorTurnId || null}
+          />
+          <EditedFilesBar
+            fileCount={sessionFileEdits.edits.length}
+            additions={sessionFileEdits.additions}
+            deletions={sessionFileEdits.deletions}
+          />
+        </ComposerTopAttachments>
+      )}
       <ChatComposer
         ref={composerRef}
         value={composerText}
@@ -3576,6 +3634,24 @@ function permissionOptionButtonClass(kind: string): string {
   return "block w-full border-b border-status-warn/25 px-3 py-2 text-left text-caption font-medium text-ink/70 transition last:border-b-0 hover:bg-status-warn/[0.08] hover:text-ink/85 disabled:cursor-not-allowed disabled:opacity-55";
 }
 
+function FilesPermissionRow({
+  sessioRuntimeSessionId,
+  permission,
+}: {
+  sessioRuntimeSessionId: string;
+  permission: AcpPermissionRequest;
+}) {
+  return (
+    <div className="shrink-0 border-t border-ink/[0.05] bg-status-warn/[0.04] px-3 py-2">
+      <AcpPermissionCard
+        sessioRuntimeSessionId={sessioRuntimeSessionId}
+        permission={permission}
+        onRespond={respondAgentPermission}
+      />
+    </div>
+  );
+}
+
 function permissionStatusText(permission: AcpPermissionRequest, pendingChoice: string | null): string {
   if (pendingChoice) return "Applying permission decision";
   if (permission.cancelled) return "Cancelled";
@@ -4777,28 +4853,6 @@ function normalizeContentDiffs(edit: FileEditItem): FileEditContentDiff[] {
   return diffs;
 }
 
-function useEffectiveThemeType(): "light" | "dark" {
-  const [themeType, setThemeType] = useState<"light" | "dark">(() =>
-    document.documentElement.getAttribute("data-theme") === "light"
-      ? "light"
-      : "dark",
-  );
-  useEffect(() => {
-    const root = document.documentElement;
-    const update = () => {
-      setThemeType(root.getAttribute("data-theme") === "light" ? "light" : "dark");
-    };
-    update();
-    const observer = new MutationObserver(update);
-    observer.observe(root, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    return () => observer.disconnect();
-  }, []);
-  return themeType;
-}
-
 export interface MarkdownImage {
   alt: string;
   src: string;
@@ -5524,138 +5578,6 @@ function MarkdownCodeBlock({
       </CodeScrollArea>
     </div>
   );
-}
-
-type ShikiHighlightedLine = ThemedToken[];
-
-let shikiHighlighterPromise: Promise<HighlighterCore> | null = null;
-
-function useShikiHighlightedCode(
-  code: string,
-  language: string,
-  themeType: "light" | "dark",
-): ReactNode[] | null {
-  const [lines, setLines] = useState<ShikiHighlightedLine[] | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const lang = shikiLanguage(language);
-    const theme = shikiTheme(themeType);
-    setLines(null);
-    getShikiHighlighter()
-      .then((highlighter) => {
-        const tokens = highlighter.codeToTokensBase(code, { lang, theme });
-        if (!cancelled) setLines(tokens);
-      })
-      .catch((err) => {
-        console.error("highlight code block failed", err);
-        if (!cancelled) setLines(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [code, language, themeType]);
-
-  return useMemo(() => {
-    if (!lines) return null;
-    return renderShikiLines(lines);
-  }, [lines]);
-}
-
-function getShikiHighlighter(): Promise<HighlighterCore> {
-  shikiHighlighterPromise ??= createHighlighterCore({
-    themes: [githubLightTheme, githubDarkTheme],
-    langs: [
-      cssLang,
-      htmlLang,
-      javascriptLang,
-      jsonLang,
-      jsoncLang,
-      jsxLang,
-      markdownLang,
-      pythonLang,
-      rustLang,
-      shellLang,
-      tsxLang,
-      typescriptLang,
-      xmlLang,
-      yamlLang,
-    ],
-    engine: createJavaScriptRegexEngine(),
-  });
-  return shikiHighlighterPromise;
-}
-
-function shikiTheme(themeType: "light" | "dark"): string {
-  return themeType === "light" ? "github-light" : "github-dark";
-}
-
-function shikiLanguage(language: string): string {
-  return shikiLanguageAlias(language) ?? "shell";
-}
-
-function shikiLanguageAlias(language: string): string | null {
-  const normalized = language.trim().toLowerCase();
-  if (!normalized) return null;
-  const aliases: Record<string, string> = {
-    bash: "shell",
-    shell: "shell",
-    sh: "shell",
-    zsh: "shell",
-    js: "javascript",
-    jsx: "jsx",
-    ts: "typescript",
-    tsx: "tsx",
-    py: "python",
-    rs: "rust",
-    md: "markdown",
-    yml: "yaml",
-  };
-  const supported = new Set([
-    "css",
-    "html",
-    "javascript",
-    "json",
-    "jsonc",
-    "jsx",
-    "markdown",
-    "python",
-    "rust",
-    "shell",
-    "tsx",
-    "typescript",
-    "xml",
-    "yaml",
-  ]);
-  const mapped = aliases[normalized] ?? normalized;
-  return supported.has(mapped) ? mapped : null;
-}
-
-function renderShikiLines(lines: ShikiHighlightedLine[]): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  lines.forEach((line, lineIndex) => {
-    if (lineIndex > 0) nodes.push("\n");
-    if (!line.length) return;
-    line.forEach((token, tokenIndex) => {
-      nodes.push(
-        <span
-          key={`${lineIndex}-${tokenIndex}`}
-          style={{
-            color: token.color,
-            fontStyle: shikiFontStyle(token.fontStyle),
-            fontWeight: token.fontStyle !== undefined && (token.fontStyle & 2) ? 600 : undefined,
-            textDecorationLine: token.fontStyle !== undefined && (token.fontStyle & 4) ? "underline" : undefined,
-          }}
-        >
-          {token.content}
-        </span>,
-      );
-    });
-  });
-  return nodes;
-}
-
-function shikiFontStyle(fontStyle?: number): React.CSSProperties["fontStyle"] {
-  return fontStyle !== undefined && (fontStyle & 1) ? "italic" : undefined;
 }
 
 function codeLanguageFromClassName(className?: string): string {

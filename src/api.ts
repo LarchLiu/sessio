@@ -2080,6 +2080,14 @@ export async function readLocalTextFile(path: string): Promise<string> {
   return invoke<string>("read_local_text_file", { path });
 }
 
+export async function watchPreviewFile(path: string): Promise<void> {
+  return invoke<void>("watch_preview_file", { path });
+}
+
+export async function unwatchPreviewFile(path: string): Promise<void> {
+  return invoke<void>("unwatch_preview_file", { path });
+}
+
 export async function writeCrossPrompt(
   sessionId: string,
   content: string,

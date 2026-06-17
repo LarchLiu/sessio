@@ -16,7 +16,7 @@ export type AcpRenderItem =
   | { kind: "permission"; turn: LiveTurn; permission: AcpPermissionRequest }
   | { kind: "error"; turn: LiveTurn; error: RuntimeError };
 
-interface FileEditSummary {
+export interface FileEditSummary {
   source?: string;
   files?: number;
   additions?: number;
@@ -24,7 +24,7 @@ interface FileEditSummary {
   edits?: FileEditItem[];
 }
 
-interface FileEditItem {
+export interface FileEditItem {
   path?: string;
   displayPath?: string;
   kind?: string;
@@ -38,9 +38,37 @@ interface FileEditItem {
   contentDiffs?: FileEditContentDiff[];
 }
 
-interface FileEditContentDiff {
+export interface FileEditContentDiff {
   oldContent?: string | null;
   newContent?: string | null;
+}
+
+export function fileEditKey(edit: FileEditItem): string {
+  return edit.path || edit.displayPath || "(unknown file)";
+}
+
+export function aggregateSessionFileEdits(viewModel: AcpViewModel): {
+  edits: FileEditItem[];
+  additions: number;
+  deletions: number;
+} {
+  const edits: FileEditItem[] = [];
+  for (const turn of viewModel.turns) {
+    for (const block of turn.blocks) {
+      if (block.kind !== "sessionUpdate") continue;
+      if (block.updateType !== "file_edit") continue;
+      const summary = parseFileEditSummary(block.data);
+      if (!summary?.edits) continue;
+      for (const edit of summary.edits) {
+        mergeFileEditItem(edits, edit);
+      }
+    }
+  }
+  return {
+    edits,
+    additions: sumEditNumber(edits, "additions"),
+    deletions: sumEditNumber(edits, "deletions"),
+  };
 }
 
 export function acpViewModelToRenderItems(
@@ -230,10 +258,6 @@ function mergeFileEditItem(edits: FileEditItem[], next: FileEditItem) {
     return;
   }
   mergeFileEditValues(existing, next);
-}
-
-function fileEditKey(edit: FileEditItem): string {
-  return edit.path || edit.displayPath || "(unknown file)";
 }
 
 function mergeFileEditValues(existing: FileEditItem, next: FileEditItem) {

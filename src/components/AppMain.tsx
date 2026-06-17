@@ -8,7 +8,7 @@ import ThreadPage from "../pages/ThreadPage";
 import ThreadChatPage from "../pages/ThreadChatPage";
 import ThreadMultiSessionChatPage from "../pages/ThreadMultiSessionChatPage";
 import { projectFilterKey, type Filter } from "../appUtils";
-import type { DetailMode, PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
+import type { ChatView, DetailMode, PendingNewChatSession, ViewMode, ProjectGroup } from "../navigation";
 import type {
   LiveRuntimeAction,
   LiveRuntimeState,
@@ -21,6 +21,7 @@ export default function AppMain({
   selectedSessionProject,
   detailRoute,
   viewMode,
+  chatView,
   liveState,
   runtimeAgents,
   lastRuntimeAgentSelection,
@@ -52,6 +53,7 @@ export default function AppMain({
   selectedSessionProject: ProjectInfo | null;
   detailRoute: DetailMode;
   viewMode: ViewMode;
+  chatView: ChatView;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
@@ -193,6 +195,7 @@ export default function AppMain({
           <ChatPage
             session={selected}
             viewMode={viewMode}
+            chatView={chatView}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}

@@ -3,6 +3,7 @@ pub mod app_paths;
 pub mod astra;
 pub mod cli;
 pub mod config;
+pub mod file_preview_watch;
 pub mod im_bridge;
 pub mod indexer;
 pub mod memory;
@@ -2871,6 +2872,30 @@ fn read_local_text_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path_buf).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn watch_preview_file(
+    path: String,
+    watcher: State<'_, file_preview_watch::PreviewFileWatcher>,
+) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_absolute() {
+        return Err("Only absolute file paths can be watched".to_string());
+    }
+    watcher.watch_path(&path_buf).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn unwatch_preview_file(
+    path: String,
+    watcher: State<'_, file_preview_watch::PreviewFileWatcher>,
+) -> Result<(), String> {
+    let path_buf = PathBuf::from(&path);
+    if !path_buf.is_absolute() {
+        return Err("Only absolute file paths can be unwatched".to_string());
+    }
+    watcher.unwatch_path(&path_buf).map_err(|e| e.to_string())
+}
+
 fn safe_pasted_attachment_file_name(file_name: Option<&str>, mime_type: Option<&str>) -> String {
     let raw_name = file_name
         .unwrap_or("")
@@ -3700,6 +3725,9 @@ pub fn run() {
             network::apply_network_proxy_env(&app_config.network.proxy);
             let runtime = RuntimeManager::new(app.handle().clone());
             app.manage(runtime.clone());
+            let preview_file_watcher =
+                file_preview_watch::PreviewFileWatcher::new(app.handle().clone())?;
+            app.manage(preview_file_watcher);
             let indexer_handle = indexer::spawn(
                 app.handle().clone(),
                 store.clone(),
@@ -3899,6 +3927,8 @@ pub fn run() {
             read_local_image_data_url,
             save_pasted_attachment,
             read_local_text_file,
+            watch_preview_file,
+            unwatch_preview_file,
             list_project_files,
             get_project_git_status,
             set_window_appearance,
