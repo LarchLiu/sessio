@@ -232,8 +232,10 @@ async fn run_session(
         runtime_config,
         start,
     } = spec;
-    let acp_agent = AcpAgent::from_str(&command)
-        .with_context(|| format!("failed to parse ACP command: {command}"))?;
+    let launch_command = workspace_wrapped_acp_command(&command, &workspace_path);
+    let acp_agent = AcpAgent::from_str(&launch_command).with_context(|| {
+        format!("failed to parse ACP command: {launch_command}")
+    })?;
     let current_turn_id = Arc::new(Mutex::new(None::<String>));
     let turn_activity = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
     let notification_manager = manager.clone();
@@ -676,6 +678,36 @@ fn new_session_request(
     );
     request.meta = Some(meta);
     request
+}
+
+fn workspace_wrapped_acp_command(command: &str, workspace_path: &str) -> String {
+    if cfg!(target_os = "windows") {
+        let workspace = windows_cmd_quote(workspace_path);
+        let script = format!("cd /d {workspace} && {command}");
+        return format!("cmd /C {}", posix_single_quote(&script));
+    }
+
+    let workspace = posix_single_quote(workspace_path);
+    let script = format!("cd -- {workspace} && exec {command}");
+    format!("/bin/sh -lc {}", posix_single_quote(&script))
+}
+
+fn posix_single_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\"'\"'");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn windows_cmd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 async fn apply_initial_session_config(
@@ -1472,6 +1504,45 @@ mod tests {
         let command = command_from_options(Agent::Codex, &options);
 
         assert_eq!(command, "npx -y @zed-industries/codex-acp@latest");
+    }
+
+    #[test]
+    fn workspace_wrapped_command_uses_workspace_as_process_cwd() {
+        let wrapped = workspace_wrapped_acp_command(
+            "npx -y @zed-industries/codex-acp@latest",
+            "/tmp/demo workspace",
+        );
+
+        if cfg!(target_os = "windows") {
+            let agent = AcpAgent::from_str(&wrapped).expect("parse wrapped command");
+            match agent.server() {
+                agent_client_protocol::schema::McpServer::Stdio(stdio) => {
+                    assert_eq!(stdio.command.to_string_lossy(), "cmd");
+                    assert_eq!(stdio.args.first().map(String::as_str), Some("/C"));
+                    let script = stdio.args.get(1).map(String::as_str).unwrap_or_default();
+                    assert!(script.contains("cd /d \"/tmp/demo workspace\""));
+                    assert!(script.contains("&& npx -y @zed-industries/codex-acp@latest"));
+                }
+                _ => panic!("expected stdio server"),
+            }
+        } else {
+            let agent = AcpAgent::from_str(&wrapped).expect("parse wrapped command");
+            match agent.server() {
+                agent_client_protocol::schema::McpServer::Stdio(stdio) => {
+                    assert_eq!(stdio.command.to_string_lossy(), "/bin/sh");
+                    assert_eq!(stdio.args.first().map(String::as_str), Some("-lc"));
+                    let script = stdio.args.get(1).map(String::as_str).unwrap_or_default();
+                    assert!(script.contains("cd -- '/tmp/demo workspace'"));
+                    assert!(script.contains("&& exec npx -y @zed-industries/codex-acp@latest"));
+                }
+                _ => panic!("expected stdio server"),
+            }
+        }
+    }
+
+    #[test]
+    fn posix_single_quote_escapes_embedded_quotes() {
+        assert_eq!(posix_single_quote("/tmp/it's here"), "'/tmp/it'\"'\"'s here'");
     }
 
     #[test]
