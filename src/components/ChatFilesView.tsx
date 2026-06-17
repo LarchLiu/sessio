@@ -117,7 +117,7 @@ export default function ChatFilesView({
         )}
         {!fileContent.loading && !fileContent.error && fileContent.text !== null && selected && (
           <FileViewer
-            fileKey={selectedKey ?? ""}
+            fileKey={`${selectedKey ?? ""}:${fileContent.mtimeMs ?? "unknown"}`}
             text={fileContent.text}
             language={languageFromPath(selected.displayPath || selected.path || "")}
             mode={subview}

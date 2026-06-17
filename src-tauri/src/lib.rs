@@ -2860,6 +2860,13 @@ struct FileGitDiff {
     patch: Option<String>,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTextFile {
+    content: String,
+    mtime_ms: u64,
+}
+
 #[tauri::command]
 fn get_file_git_diff(workspace_path: String, file_path: String) -> Result<FileGitDiff, String> {
     let workspace = PathBuf::from(&workspace_path);
@@ -3003,6 +3010,52 @@ fn read_local_text_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn read_workspace_text_file(
+    workspace_path: String,
+    path: String,
+) -> Result<WorkspaceTextFile, String> {
+    let path_buf = workspace_text_file_path(&workspace_path, &path)?;
+    let _mime =
+        text_file_mime(&path_buf).ok_or_else(|| "Unsupported text file type".to_string())?;
+    let meta = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Path is not a file".to_string());
+    }
+    const MAX_EDITOR_TEXT_BYTES: u64 = 10 * 1024 * 1024;
+    if meta.len() > MAX_EDITOR_TEXT_BYTES {
+        return Err("File is too large to edit".to_string());
+    }
+    let modified = meta.modified().map_err(|e| e.to_string())?;
+    let mtime_ms = u64::try_from(
+        modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis(),
+    )
+    .map_err(|_| "File modified time is too large".to_string())?;
+    let content = std::fs::read_to_string(&path_buf).map_err(|e| e.to_string())?;
+    Ok(WorkspaceTextFile { content, mtime_ms })
+}
+
+fn workspace_text_file_path(workspace_path: &str, path: &str) -> Result<PathBuf, String> {
+    let workspace = PathBuf::from(workspace_path);
+    if !workspace.is_absolute() || !workspace.is_dir() {
+        return Err("Invalid workspace path".to_string());
+    }
+    let file = PathBuf::from(path);
+    if !file.is_absolute() {
+        return Err("Only absolute file paths can be loaded".to_string());
+    }
+
+    let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+    let file = file.canonicalize().map_err(|e| e.to_string())?;
+    if !file.starts_with(&workspace) {
+        return Err("File path is outside the workspace".to_string());
+    }
+    Ok(file)
+}
+
+#[tauri::command]
 fn watch_preview_file(
     path: String,
     watcher: State<'_, file_preview_watch::PreviewFileWatcher>,
@@ -3110,6 +3163,7 @@ fn text_file_mime(path: &Path) -> Option<&'static str> {
         .as_deref()
     {
         Some("txt") => Some("text/plain"),
+        Some("log") => Some("text/plain"),
         Some("md") | Some("markdown") => Some("text/markdown"),
         Some("json") | Some("jsonl") => Some("application/json"),
         Some("yaml") | Some("yml") => Some("application/yaml"),
@@ -3124,6 +3178,7 @@ fn text_file_mime(path: &Path) -> Option<&'static str> {
         | Some("pl") | Some("r") | Some("ex") | Some("exs") | Some("erl") | Some("clj")
         | Some("scala") | Some("dart") | Some("vue") | Some("svelte") | Some("dockerfile")
         | Some("gitignore") | Some("env") => Some("text/plain"),
+        None => Some("text/plain"),
         _ => None,
     }
 }
@@ -4057,6 +4112,7 @@ pub fn run() {
             read_local_image_data_url,
             save_pasted_attachment,
             read_local_text_file,
+            read_workspace_text_file,
             get_file_git_diff,
             watch_preview_file,
             unwatch_preview_file,

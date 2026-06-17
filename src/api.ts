@@ -2092,6 +2092,21 @@ export async function readLocalTextFile(path: string): Promise<string> {
   return invoke<string>("read_local_text_file", { path });
 }
 
+export interface WorkspaceTextFile {
+  content: string;
+  mtimeMs: number;
+}
+
+export async function readWorkspaceTextFile(
+  workspacePath: string,
+  path: string,
+): Promise<WorkspaceTextFile> {
+  return invoke<WorkspaceTextFile>("read_workspace_text_file", {
+    workspacePath,
+    path,
+  });
+}
+
 export async function watchPreviewFile(path: string): Promise<void> {
   return invoke<void>("watch_preview_file", { path });
 }

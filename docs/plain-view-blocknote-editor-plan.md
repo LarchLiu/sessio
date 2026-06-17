@@ -62,6 +62,8 @@ ChatPage (isFilesView 路由, 不动)
   必须迁移项。需要看 diff 或逐行源码时,用户仍切回 code view。
 - 因此 `FileViewer` 可以保留 code view 的 CodeMirror 实现,plain 分支单独切到
   `NotionView`。
+- 评审中提到的行号、diff gutter/overview、源码预览、逐行阅读等能力都归 code view,
+  不列入 plain view 的缺口;plain view 不做 CodeMirror feature parity。
 
 ## 风险点
 
@@ -84,6 +86,19 @@ ChatPage (isFilesView 路由, 不动)
    的 peer 依赖还包含 `@mantine/hooks`,安装命令不能漏。
 10. **大文件性能**:后端可允许读取 2–10MB 文本,但这不等于 BlockNote 对 10MB 文档可流畅
     交互。验收要分开验证「能读取」和「可编辑体验」,必要时对超大文件显示性能提示或只读。
+11. **编辑对象范围**:首版只编辑 files view 已选中的**既有工作区文本文件**。不在本计划内支持
+    新建文件、重命名、删除、移动文件,也不把附件预览文件纳入写回范围。
+12. **保存状态机必须显式**:阶段 2 需要在前端区分 clean / dirty / saving / saved /
+    conflict / error,避免「防抖保存中切换文件或 agent 启动」时丢改动。切换文件、卸载视图、
+    agent 开始运行前,应先 flush pending save 或给出明确阻断/提示。
+13. **换行与末尾 newline**:round-trip 守卫不能只比较 JS 字符串默认输出,需要明确 LF/CRLF
+    和末尾 newline 策略。若 serializer 无法保持该策略,该文件应进入只读/冲突提示路径。
+14. **fallback 编辑限制**:source-fallback 文档只有在线性 paragraph 文本可序列化时才允许保存。
+    用户粘贴/插入表格、图片、嵌套 block 等无法用 source-line serializer 表达的内容时,
+    必须阻止该操作或把文件转为不可保存状态并提示,不能静默丢结构。
+15. **测试覆盖边界**:后端至少覆盖 workspace 逃逸、symlink 逃逸、非文本拒绝、大小限制、
+    mtime 冲突;前端至少覆盖 markdown/source-fallback serializer、round-trip 只读、
+    fileKey 切换重灌、active agent 锁定和 own-save watcher 吸收。
 
 ## 大文件与解析回退(对齐 tolaria 做法)
 
@@ -206,6 +221,7 @@ attachment 那条路径**(预览大附件没必要、且涉及内存)。
   不把「能读取」等同于「大文件可流畅编辑」。
 - 亮/暗主题正常,样式不漏到 chat 区。
 - 打包分析确认 BlockNote 在独立 chunk。
+- 本阶段必须保持只读:不注册写命令、不暴露保存 UI、不产生磁盘写入。
 
 ### 阶段 2 — 可编辑 + 写回磁盘(3–4 天,独立 PR,风险集中)
 
@@ -224,8 +240,14 @@ attachment 那条路径**(预览大附件没必要、且涉及内存)。
 - `NotionView` 解除 `editable={false}`;`useNotionDoc` 增加 `editor.onChange` →
   防抖 500ms → 选择 serializer(markdown: `blocksToMarkdownLossy`;source-fallback:
   source-line serializer) → 写回。
+- 引入显式保存状态机:dirty 后进入 debounced pending,写入时 saving,成功后 saved 并更新
+  `mtimeMs`,失败时进入 error/conflict。切换文件、关闭 plain view、agent 从 idle 进入
+  active 时,不能让 pending dirty change 静默丢失。
 - **round-trip 守卫**:首次解析后立即用对应 serializer 比对原文(需明确处理 CRLF/LF、
   trailing newline 的策略),不一致则该文件强制只读 + 提示(有损警告)。
+- **source-fallback 守卫**:fallback 模式下只允许保存可线性化的顶层 paragraph 文本。若用户
+  产生无法 `join("\n")` 的 block 结构,保存前必须拦截并提示,不能调用 lossy markdown
+  serializer 兜底。
 - **agent 活跃锁**:`activeTurnId` 非空时 `editable={false}` + 提示
   「agent 运行中,暂不可编辑」。实现上需把状态从
   `ChatPage -> ChatFilesView -> FileViewer/NotionView` 下传。
@@ -243,6 +265,8 @@ attachment 那条路径**(预览大附件没必要、且涉及内存)。
 - 有损文件(frontmatter、HTML、特殊 fence、GFM 边界、CRLF/trailing newline 策略不一致)
   → 自动只读 + 提示。
 - 本机保存触发 watcher 时不重置光标/选择区;外部改动才提示或刷新。
+- dirty pending 时切换文件/视图不会丢改动:要么 flush 成功,要么阻断并展示错误。
+- fallback 文档插入无法线性保存的富 block 时不会静默丢内容。
 
 ### 阶段 3 — 富 block 增强(可选,按需)
 

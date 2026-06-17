@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 import { Compartment, EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, GutterMarker, WidgetType, gutter, keymap, lineNumbers } from "@codemirror/view";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -16,6 +16,8 @@ import { StreamLanguage } from "@codemirror/language";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import type { FileGitDiff } from "../api";
 import { useEffectiveThemeType } from "./shikiHighlight";
+
+const NotionView = lazy(() => import("./NotionView"));
 
 const languageCompartment = new Compartment();
 const themeCompartment = new Compartment();
@@ -191,12 +193,6 @@ const lightTheme = EditorView.theme({
   },
 });
 
-const plainTheme = EditorView.theme({
-  ".cm-content": {
-    whiteSpace: "pre-wrap",
-  },
-});
-
 export interface FileViewerProps {
   fileKey: string;
   text: string;
@@ -216,14 +212,48 @@ export default function FileViewer({
   savedScrollTop = 0,
   onScrollTopChange,
 }: FileViewerProps) {
+  if (mode === "plain") {
+    return (
+      <Suspense
+        fallback={
+          <div className="flex h-full min-h-0 min-w-0 items-center justify-center text-body-sm text-ink/45">
+            Loading...
+          </div>
+        }
+      >
+        <NotionView fileKey={fileKey} text={text} />
+      </Suspense>
+    );
+  }
+
+  return (
+    <CodeMirrorFileViewer
+      fileKey={fileKey}
+      text={text}
+      language={language}
+      gitDiff={gitDiff}
+      savedScrollTop={savedScrollTop}
+      onScrollTopChange={onScrollTopChange}
+    />
+  );
+}
+
+function CodeMirrorFileViewer({
+  fileKey,
+  text,
+  language,
+  gitDiff = null,
+  savedScrollTop = 0,
+  onScrollTopChange,
+}: Omit<FileViewerProps, "mode">) {
   const themeType = useEffectiveThemeType();
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const scrollViewportRef = useRef<HTMLElement | null>(null);
   const lastAppliedFileKeyRef = useRef<string>("");
   const codeExtension = useMemo<Extension>(
-    () => (mode === "code" ? languageExtension(language) : []),
-    [language, mode],
+    () => languageExtension(language),
+    [language],
   );
   const diffExtension = useMemo<Extension>(
     () => buildGitDiffExtension(text, gitDiff),
@@ -235,10 +265,9 @@ export default function FileViewer({
   );
   const activeTheme = useMemo<Extension[]>(() => {
     const extensions: Extension[] = [baseTheme];
-    if (mode === "plain") extensions.push(plainTheme);
     extensions.push(themeType === "dark" ? oneDark : lightTheme);
     return extensions;
-  }, [mode, themeType]);
+  }, [themeType]);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -305,9 +334,9 @@ export default function FileViewer({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: languageCompartment.reconfigure(mode === "code" ? languageExtension(language) : []),
+      effects: languageCompartment.reconfigure(languageExtension(language)),
     });
-  }, [codeExtension, language, mode]);
+  }, [codeExtension, language]);
 
   useEffect(() => {
     const view = viewRef.current;

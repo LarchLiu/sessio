@@ -1,24 +1,31 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { readLocalTextFile, unwatchPreviewFile, watchPreviewFile } from "../api";
+import {
+  readWorkspaceTextFile,
+  unwatchPreviewFile,
+  watchPreviewFile,
+  type WorkspaceTextFile,
+} from "../api";
 import type { FileEditItem } from "../acpRenderItems";
 
 export interface FileContentResult {
   loading: boolean;
   text: string | null;
+  mtimeMs: number | null;
   error: string | null;
 }
 
 const EMPTY_RESULT: FileContentResult = {
   loading: false,
   text: null,
+  mtimeMs: null,
   error: null,
 };
 
 const MAX_FILE_CACHE_ENTRIES = 32;
-const fileContentCache = new Map<string, string>();
+const fileContentCache = new Map<string, WorkspaceTextFile>();
 
-function getCachedFileContent(path: string): string | null {
+function getCachedFileContent(path: string): WorkspaceTextFile | null {
   const cached = fileContentCache.get(path);
   if (cached === undefined) return null;
   fileContentCache.delete(path);
@@ -26,9 +33,9 @@ function getCachedFileContent(path: string): string | null {
   return cached;
 }
 
-function setCachedFileContent(path: string, text: string) {
+function setCachedFileContent(path: string, content: WorkspaceTextFile) {
   if (fileContentCache.has(path)) fileContentCache.delete(path);
-  fileContentCache.set(path, text);
+  fileContentCache.set(path, content);
   while (fileContentCache.size > MAX_FILE_CACHE_ENTRIES) {
     const oldest = fileContentCache.keys().next().value;
     if (!oldest) break;
@@ -60,10 +67,11 @@ export function useFileContent(
     }
 
     const absolute = resolveAbsolutePath(path, workspacePath);
-    if (!absolute) {
+    if (!absolute || !workspacePath) {
       setResult({
         loading: false,
         text: null,
+        mtimeMs: null,
         error: "no-path",
       });
       return;
@@ -75,7 +83,8 @@ export function useFileContent(
     const cachedText = getCachedFileContent(absolute);
     setResult({
       loading: cachedText === null,
-      text: cachedText,
+      text: cachedText?.content ?? null,
+      mtimeMs: cachedText?.mtimeMs ?? null,
       error: null,
     });
 
@@ -87,13 +96,14 @@ export function useFileContent(
           error: null,
         }));
       }
-      readLocalTextFile(absolute)
-        .then((text) => {
+      readWorkspaceTextFile(workspacePath, absolute)
+        .then((file) => {
           if (cancelled) return;
-          setCachedFileContent(absolute, text);
+          setCachedFileContent(absolute, file);
           setResult({
             loading: false,
-            text,
+            text: file.content,
+            mtimeMs: file.mtimeMs,
             error: null,
           });
         })
@@ -102,6 +112,7 @@ export function useFileContent(
           setResult({
             loading: false,
             text: null,
+            mtimeMs: null,
             error: String(err),
           });
         });
