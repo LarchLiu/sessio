@@ -1,9 +1,32 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { FileDiff, LoaderCircle } from "lucide-react";
+import {
+  BookOpen,
+  Brain,
+  ClipboardList,
+  Code2,
+  FileDiff,
+  FileSearch,
+  FolderOpen,
+  Globe,
+  Image as ImageIcon,
+  ListChecks,
+  ListTodo,
+  LoaderCircle,
+  MessageCircleQuestionMark,
+  MoveRight,
+  Pen,
+  Search,
+  SearchCheck,
+  SquareTerminal,
+  Trash2,
+  UserKey,
+  Wrench,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { FileEditItem } from "../acpRenderItems";
-import type { AcpViewModel, LiveTurn, AcpToolCall } from "../runtimeChat";
+import type { AcpViewModel, LiveTurn } from "../runtimeChat";
+import { acpToolStripDisplay, type AcpToolStripDisplay } from "../toolDisplay";
 import { useI18n } from "../i18n";
 import ScrollArea from "./ScrollArea";
 import SessionFileEditsCard from "./SessionFileEditsCard";
@@ -13,6 +36,7 @@ export interface MinimalStripItem {
   icon?: LucideIcon | null;
   text: string;
   busy: boolean;
+  tool?: AcpToolStripDisplay | null;
   lines?: string[];
   fullText?: string | null;
   streamKey?: string | null;
@@ -20,6 +44,7 @@ export interface MinimalStripItem {
 }
 
 const STRIP_LINE_ADVANCE_MS = 1100;
+const EDITED_FILES_POPUP_HOVER_DELAY_MS = 600;
 
 export function pickLatestStripItem(
   viewModel: AcpViewModel,
@@ -41,7 +66,15 @@ function pickFromTurn(turn: LiveTurn, workingTurnId: string | null): MinimalStri
     if (block.kind === "tool") {
       const tool = turn.tools.find((t) => t.toolId === block.toolId);
       if (!tool) continue;
-      return { icon: null, text: toolStripText(tool), busy };
+      const display = acpToolStripDisplay(tool);
+      if (display.hidden) continue;
+      return {
+        icon: null,
+        text: display.tooltip ?? display.name,
+        tool: display,
+        fullText: display.tooltip,
+        busy,
+      };
     }
     if (block.kind === "user") continue;
     if (block.kind === "sessionUpdate") {
@@ -73,38 +106,17 @@ function pickFromTurn(turn: LiveTurn, workingTurnId: string | null): MinimalStri
   }
   if (turn.tools.length > 0) {
     const tool = turn.tools[turn.tools.length - 1];
-    return { icon: null, text: toolStripText(tool), busy };
+    const display = acpToolStripDisplay(tool);
+    if (display.hidden) return null;
+    return {
+      icon: null,
+      text: display.tooltip ?? display.name,
+      tool: display,
+      fullText: display.tooltip,
+      busy,
+    };
   }
   return null;
-}
-
-function toolStripText(tool: AcpToolCall): string {
-  const name = tool.title || tool.kind || "tool";
-  const detail = pickToolDetail(tool);
-  return detail ? `${name} · ${detail}` : name;
-}
-
-function pickToolDetail(tool: AcpToolCall): string {
-  const raw = tool.rawInput;
-  if (!raw || typeof raw !== "object") return "";
-  const record = raw as Record<string, unknown>;
-  const candidates = [
-    "file_path",
-    "filePath",
-    "path",
-    "command",
-    "query",
-    "pattern",
-    "url",
-    "description",
-  ];
-  for (const key of candidates) {
-    const value = record[key];
-    if (typeof value === "string" && value.trim()) {
-      return clampText(value.trim().split("\n")[0]);
-    }
-  }
-  return "";
 }
 
 function sessionUpdateText(data: unknown): string {
@@ -162,7 +174,10 @@ export function ComposerTopAttachments({ children }: { children: React.ReactNode
         {visibleChildren.map((child, index) => (
           <div
             key={index}
-            className={index > 0 ? "border-t border-ink/[0.06]" : ""}
+            className={
+              (index > 0 ? "border-t border-ink/[0.06] " : "") +
+              (index === visibleChildren.length - 1 ? "pb-2" : "")
+            }
           >
             {child}
           </div>
@@ -212,7 +227,9 @@ export function MinimalMessageStrip({
 
   if (!item) return null;
   const activeText = lines[activeLineIndex] ?? item.text;
-  const textNode = (
+  const textNode = item.tool ? (
+    <ToolStripContent tool={item.tool} />
+  ) : (
     <span className="min-w-0 truncate">{activeText}</span>
   );
   return (
@@ -226,7 +243,7 @@ export function MinimalMessageStrip({
             </div>
           }
           placement="top"
-          delayMs={250}
+          delayMs={600}
           interactive
           matchAnchorWidth
         >
@@ -237,6 +254,71 @@ export function MinimalMessageStrip({
       )}
     </div>
   );
+}
+
+function ToolStripContent({ tool }: { tool: AcpToolStripDisplay }) {
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+      <span className="flex w-3.5 shrink-0 justify-center text-ink/45">
+        <ToolStripIcon name={tool.iconName} />
+      </span>
+      <span className="shrink-0 font-medium text-ink/72">{tool.name}</span>
+      {tool.description && (
+        <span className="min-w-0 truncate text-ink/48">{tool.description}</span>
+      )}
+    </span>
+  );
+}
+
+function ToolStripIcon({ name }: { name: string }) {
+  const className = "h-3.5 w-3.5";
+  switch (name) {
+    case "TodoWrite":
+      return <ListTodo className={className} aria-label="Todo" />;
+    case "Read":
+      return <BookOpen className={className} aria-label="Read" />;
+    case "Write":
+    case "Edit":
+    case "MultiEdit":
+      return <Pen className={className} aria-label="Edit" />;
+    case "Delete":
+      return <Trash2 className={className} aria-label="Delete" />;
+    case "Move":
+      return <MoveRight className={className} aria-label="Move" />;
+    case "Bash":
+      return <SquareTerminal className={className} aria-label="Terminal" />;
+    case "Search":
+    case "Grep":
+      return <Search className={className} aria-label="Search" />;
+    case "Glob":
+      return <FileSearch className={className} aria-label="Find files" />;
+    case "LS":
+    case "List":
+      return <FolderOpen className={className} aria-label="List files" />;
+    case "WebFetch":
+    case "WebSearch":
+      return <Globe className={className} aria-label="Web" />;
+    case "NotebookEdit":
+      return <Code2 className={className} aria-label="Notebook edit" />;
+    case "ToolSearch":
+      return <SearchCheck className={className} aria-label="Tool search" />;
+    case "AskUserQuestion":
+      return <MessageCircleQuestionMark className={className} aria-label="Ask user" />;
+    case "TaskUpdate":
+      return <ListChecks className={className} aria-label="Task update" />;
+    case "Permission":
+      return <UserKey className={className} aria-label="Permission" />;
+    case "View Image":
+      return <ImageIcon className={className} aria-label="View image" />;
+    case "Task":
+      return <ClipboardList className={className} aria-label="Task" />;
+    case "Think":
+      return <Brain className={className} aria-label="Think" />;
+    case "Switch Mode":
+      return <ClipboardList className={className} aria-label="Switch mode" />;
+    default:
+      return <Wrench className={className} aria-label={name || "Tool"} />;
+  }
 }
 
 export function EditedFilesBar({
@@ -256,6 +338,7 @@ export function EditedFilesBar({
   const anchorRef = useRef<HTMLButtonElement | HTMLDivElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
   const popupContentRef = useRef<HTMLDivElement | null>(null);
+  const showTimerRef = useRef<number | null>(null);
   const hideTimerRef = useRef<number | null>(null);
   const [hoverOpen, setHoverOpen] = useState(false);
   const [popupPos, setPopupPos] = useState<{
@@ -271,7 +354,14 @@ export function EditedFilesBar({
     hideTimerRef.current = null;
   };
 
+  const clearShowTimer = () => {
+    if (showTimerRef.current === null) return;
+    window.clearTimeout(showTimerRef.current);
+    showTimerRef.current = null;
+  };
+
   const scheduleHide = () => {
+    clearShowTimer();
     clearHideTimer();
     hideTimerRef.current = window.setTimeout(() => {
       hideTimerRef.current = null;
@@ -280,11 +370,23 @@ export function EditedFilesBar({
   };
 
   const openHover = () => {
+    clearShowTimer();
     clearHideTimer();
     if (edits.length > 0) setHoverOpen(true);
   };
 
+  const scheduleOpenHover = () => {
+    clearHideTimer();
+    clearShowTimer();
+    if (edits.length === 0) return;
+    showTimerRef.current = window.setTimeout(() => {
+      showTimerRef.current = null;
+      setHoverOpen(true);
+    }, EDITED_FILES_POPUP_HOVER_DELAY_MS);
+  };
+
   const closeIfOutside = () => {
+    clearShowTimer();
     if (popupRef.current?.matches(":hover")) return;
     scheduleHide();
   };
@@ -350,6 +452,7 @@ export function EditedFilesBar({
 
   useEffect(() => {
     return () => {
+      clearShowTimer();
       clearHideTimer();
     };
   }, []);
@@ -368,7 +471,7 @@ export function EditedFilesBar({
         ref={anchorRef as never}
         type={onClick ? "button" : undefined}
         onClick={onClick}
-        onMouseEnter={openHover}
+        onMouseEnter={scheduleOpenHover}
         onMouseLeave={closeIfOutside}
         onFocus={openHover}
         onBlur={scheduleHide}
