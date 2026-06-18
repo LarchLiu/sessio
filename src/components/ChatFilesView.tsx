@@ -271,7 +271,6 @@ function FilePickerPopover({
             const key = fileEditKey(edit);
             const label = edit.displayPath || edit.path || "(unknown file)";
             const active = key === selectedKey;
-            const hasStats = edit.additions != null || edit.deletions != null;
             return (
               <li key={key}>
                 <button
@@ -281,7 +280,7 @@ function FilePickerPopover({
                   onClick={() => onSelect(key)}
                   title={label}
                   className={
-                    "grid w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3 px-2.5 py-1.5 text-left text-body-sm transition-colors " +
+                    "block w-full px-2.5 py-1.5 text-left text-body-sm transition-colors " +
                     (active
                       ? "bg-ink/[0.07] text-ink/90"
                       : "text-ink/72 hover:bg-ink/[0.04] hover:text-ink/90")
@@ -290,13 +289,6 @@ function FilePickerPopover({
                   <span className="min-w-0 whitespace-pre-wrap break-all font-mono leading-relaxed">
                     {label}
                   </span>
-                  {hasStats ? (
-                    <span className="shrink-0 pt-0.5 font-mono text-caption">
-                      <span className="text-[rgb(var(--color-emerald))]">+{edit.additions ?? 0}</span>
-                      <span className="text-ink/25"> </span>
-                      <span className="text-status-error">-{edit.deletions ?? 0}</span>
-                    </span>
-                  ) : null}
                 </button>
               </li>
             );
