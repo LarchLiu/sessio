@@ -7,7 +7,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use agent_client_protocol::schema::RequestPermissionRequest;
 
@@ -24,9 +24,10 @@ use super::types::{
     RuntimeTransportKind, RuntimeTurnStatus, StartAgentSession,
 };
 use crate::models::Agent;
+use crate::store::{RuntimeAgentSessionConfigRecord, SessionStore};
 use crate::turns::{
-    apply_optimistic_user_message, apply_runtime_event_to_state, LiveRuntimeTurnSnapshotEvent,
-    RuntimeTurnState,
+    apply_optimistic_user_message, apply_runtime_event_to_state, AcpCanonicalSessionState,
+    LiveRuntimeTurnSnapshotEvent, RuntimeTurnState,
 };
 
 #[derive(Clone)]
@@ -1123,6 +1124,9 @@ impl RuntimeManager {
         } else {
             None
         };
+        if let Some(session_id) = snapshot_session_id.as_deref() {
+            let _ = self.persist_runtime_session_config_if_needed(session_id);
+        }
         self.notify_event_listeners(&event);
         if should_emit_runtime_event {
             self.inner
@@ -1168,6 +1172,46 @@ impl RuntimeManager {
             apply_runtime_event_to_state(&mut state.turn_state, &event.payload, event.timestamp);
         }
         Some(sessio_runtime_session_id.to_string())
+    }
+
+    fn persist_runtime_session_config_if_needed(&self, sessio_runtime_session_id: &str) -> Result<()> {
+        let Some(store) = self.inner.app.try_state::<Arc<dyn SessionStore>>() else {
+            return Ok(());
+        };
+        let (agent, session_state) = {
+            let sessions = self
+                .inner
+                .sessions
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime session lock poisoned"))?;
+            let Some(state) = sessions.get(sessio_runtime_session_id) else {
+                return Ok(());
+            };
+            (state.handle.agent, state.turn_state.session_state.clone())
+        };
+        if session_state.available_commands.is_empty() && session_state.config_options.is_empty() {
+            return Ok(());
+        }
+        let Some(capability) = store.get_runtime_agent_capability(agent)? else {
+            return Ok(());
+        };
+        let Some(adapter_version) = capability.version.as_deref().map(str::trim) else {
+            return Ok(());
+        };
+        if adapter_version.is_empty() {
+            return Ok(());
+        }
+        let current = store.get_runtime_agent_session_config(agent, adapter_version)?;
+        let Some(record) = build_runtime_session_config_record(
+            agent,
+            adapter_version,
+            &session_state,
+            current.as_ref(),
+            now_ms(),
+        )? else {
+            return Ok(());
+        };
+        store.upsert_runtime_agent_session_config(&record)
     }
 
     fn queue_turn_snapshot(
@@ -1507,9 +1551,64 @@ fn input_option_bool(options: &super::types::RuntimeMetadata, key: &str) -> bool
         .unwrap_or(false)
 }
 
+fn build_runtime_session_config_record(
+    agent: Agent,
+    adapter_version: &str,
+    session_state: &AcpCanonicalSessionState,
+    current: Option<&RuntimeAgentSessionConfigRecord>,
+    now: i64,
+) -> Result<Option<RuntimeAgentSessionConfigRecord>> {
+    if session_state.available_commands.is_empty() && session_state.config_options.is_empty() {
+        return Ok(None);
+    }
+
+    let current_has_commands = current
+        .map(|record| !json_array_is_empty(&record.available_commands_json))
+        .unwrap_or(false);
+    let current_has_config = current
+        .map(|record| !json_array_is_empty(&record.config_options_json))
+        .unwrap_or(false);
+    let next_has_commands = !session_state.available_commands.is_empty();
+    let next_has_config = !session_state.config_options.is_empty();
+    if current_has_commands && current_has_config {
+        return Ok(None);
+    }
+
+    let available_commands_json = if next_has_commands {
+        serde_json::to_string(&session_state.available_commands)?
+    } else {
+        current
+            .map(|record| record.available_commands_json.clone())
+            .unwrap_or_else(|| "[]".to_string())
+    };
+    let config_options_json = if next_has_config {
+        serde_json::to_string(&session_state.config_options)?
+    } else {
+        current
+            .map(|record| record.config_options_json.clone())
+            .unwrap_or_else(|| "[]".to_string())
+    };
+
+    Ok(Some(RuntimeAgentSessionConfigRecord {
+        agent,
+        adapter_version: adapter_version.to_string(),
+        available_commands_json,
+        config_options_json,
+        created_at: current.map(|record| record.created_at).unwrap_or(now),
+        updated_at: now,
+    }))
+}
+
+fn json_array_is_empty(value: &str) -> bool {
+    serde_json::from_str::<Vec<serde_json::Value>>(value)
+        .map(|items| items.is_empty())
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn fake_capabilities_are_stream_ready() {
@@ -1534,5 +1633,70 @@ mod tests {
             normalize_runtime_permission_mode(Agent::Codex, "full-access"),
             "full-access"
         );
+    }
+
+    #[test]
+    fn session_config_record_backfills_until_commands_and_config_exist() {
+        let mut state = AcpCanonicalSessionState::default();
+        let first = build_runtime_session_config_record(
+            Agent::Codex,
+            "codex-cli 0.134.0",
+            &state,
+            None,
+            10,
+        )
+        .unwrap();
+        assert!(first.is_none());
+
+        state.config_options = vec![crate::turns::AcpSessionConfigOption {
+            id: "mode".to_string(),
+            name: "Mode".to_string(),
+            description: None,
+            category: Some("mode".to_string()),
+            option_type: Some("select".to_string()),
+            current_value: json!("auto"),
+            options: Vec::new(),
+            groups: Vec::new(),
+            meta: json!(null),
+            raw: json!({ "id": "mode" }),
+        }];
+        let second = build_runtime_session_config_record(
+            Agent::Codex,
+            "codex-cli 0.134.0",
+            &state,
+            None,
+            11,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(second.available_commands_json, "[]");
+        assert!(second.config_options_json.contains("\"mode\""));
+
+        state.available_commands = vec![crate::turns::AcpAvailableCommand {
+            name: "plan".to_string(),
+            description: "Plan".to_string(),
+            input: json!(null),
+            meta: json!(null),
+        }];
+        let third = build_runtime_session_config_record(
+            Agent::Codex,
+            "codex-cli 0.134.0",
+            &state,
+            Some(&second),
+            12,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(third.available_commands_json.contains("\"plan\""));
+        assert!(third.config_options_json.contains("\"mode\""));
+        let fourth = build_runtime_session_config_record(
+            Agent::Codex,
+            "codex-cli 0.134.0",
+            &state,
+            Some(&third),
+            13,
+        )
+        .unwrap();
+        assert!(fourth.is_none());
     }
 }

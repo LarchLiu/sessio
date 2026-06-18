@@ -94,8 +94,15 @@ pub fn startup_probe_runtime_agents(
         let probe_command = startup_probe_command(runtime_agent, &agent);
         let version_command = agent.commands.version.first().cloned();
         let cached = store.get_runtime_agent_capability(runtime_agent)?;
-
-        let should_probe = cached.is_none();
+        let detected_adapter_version = version_command
+            .as_deref()
+            .and_then(run_version_command)
+            .or_else(|| cached.as_ref().and_then(|record| record.version.clone()));
+        let should_probe = cached.is_none()
+            || cached
+                .as_ref()
+                .map(|record| record.version != detected_adapter_version)
+                .unwrap_or(false);
         let capability_record = if should_probe {
             let workspace_path = ensure_probe_workspace(runtime_agent)?;
             match detect_capabilities_with_initialize_only(
@@ -108,13 +115,19 @@ pub fn startup_probe_runtime_agents(
                     let record = RuntimeAgentCapabilityRecord {
                         agent: runtime_agent,
                         transport: agent.transport,
-                        version: None,
+                        version: detected_adapter_version.clone(),
                         protocol_version: Some(probe.protocol_version),
                         raw_initialize_response_json: probe.raw_initialize_response_json,
                         raw_capabilities_json: probe.raw_capabilities_json,
                         updated_at: now_ms(),
                     };
                     store.upsert_runtime_agent_capability(&record)?;
+                    if let Some(adapter_version) = record.version.as_deref() {
+                        store.mark_runtime_agent_session_config_needs_refresh(
+                            runtime_agent,
+                            adapter_version,
+                        )?;
+                    }
                     Some(record)
                 }
                 Err(error) => {

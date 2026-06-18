@@ -29,6 +29,7 @@ import "katex/dist/katex.min.css";
 import {
   type AgentAttachment,
   type Agent,
+  getRuntimeAgentSessionConfig,
   type SessionHistorySnapshotGroup,
   type SessionHistoryTurn,
   type SetRuntimeAgentSelectionRequest,
@@ -52,6 +53,7 @@ import {
 } from "../api";
 import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
+import ComposerCommandMenu, { type ComposerCommandItem } from "../components/ComposerCommandMenu";
 import { renderMarkdownInput } from "../components/markdownInput";
 import {
   createImeCompositionState,
@@ -102,6 +104,12 @@ import {
   type LiveTurn,
 } from "../runtimeChat";
 import { buildCrossPromptFromTurns } from "../cross";
+import {
+  filterChatSlashCommands,
+  formatChatSlashCommandText,
+  parseChatSlashCommandTrigger,
+  parseRuntimeSessionAvailableCommands,
+} from "../chatSlashCommands";
 import {
   contentBlocksText,
   forkVisibleHistoryTurns,
@@ -638,6 +646,9 @@ export function AcpTranscriptPanel({
   const [composerModel, setComposerModel] = useState("");
   const [composerEffort, setComposerEffort] = useState("");
   const [composerPermissionMode, setComposerPermissionMode] = useState("");
+  const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
+  const [commandActiveIndex, setCommandActiveIndex] = useState(0);
+  const [commandDismissedFor, setCommandDismissedFor] = useState<string | null>(null);
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -721,6 +732,62 @@ export function AcpTranscriptPanel({
     capabilities: attachmentCapabilities,
     onError: setComposerError,
   });
+  const slashTrigger = useMemo(
+    () => parseChatSlashCommandTrigger(composerText),
+    [composerText],
+  );
+  const slashSourceCommands = cachedAvailableCommands;
+  const slashCommands = useMemo(
+    () => filterChatSlashCommands(slashSourceCommands, slashTrigger?.query ?? ""),
+    [slashSourceCommands, slashTrigger?.query],
+  );
+  const slashCommandItems = useMemo<ComposerCommandItem[]>(
+    () =>
+      slashCommands.map((command) => ({
+        key: command.name,
+        label: `/${command.name}`,
+        description: command.description || command.input?.hint || undefined,
+        icon: <SquareTerminal className="h-4 w-4" />,
+      })),
+    [slashCommands],
+  );
+  const slashMenuOpen =
+    !activeTurnId &&
+    !sending &&
+    slashTrigger !== null &&
+    commandDismissedFor !== slashTrigger.raw &&
+    (slashCommandItems.length > 0 || slashTrigger.query.length === 0);
+
+  const refreshCachedCommands = useCallback(() => {
+    let cancelled = false;
+    setCachedAvailableCommands([]);
+    getRuntimeAgentSessionConfig(composerAgent)
+      .then((config) => {
+        if (cancelled) return;
+        setCachedAvailableCommands(parseRuntimeSessionAvailableCommands(config));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("load runtime session config failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [composerAgent]);
+
+  useEffect(() => {
+    return refreshCachedCommands();
+  }, [refreshCachedCommands]);
+
+  useEffect(() => {
+    if (cachedAvailableCommands.length > 0) return;
+    if (!liveSession) return;
+    return refreshCachedCommands();
+  }, [
+    cachedAvailableCommands.length,
+    liveSession,
+    refreshCachedCommands,
+  ]);
 
   useEffect(() => {
     if (!available || !filePath || skipHistoryLoad) return;
@@ -1028,6 +1095,20 @@ export function AcpTranscriptPanel({
   }, [activeTurnId]);
 
   useEffect(() => {
+    setCommandActiveIndex(0);
+  }, [slashTrigger?.raw]);
+
+  useEffect(() => {
+    if (commandActiveIndex >= slashCommandItems.length) setCommandActiveIndex(0);
+  }, [commandActiveIndex, slashCommandItems.length]);
+
+  useEffect(() => {
+    if (!slashTrigger) {
+      setCommandDismissedFor(null);
+    }
+  }, [slashTrigger]);
+
+  useEffect(() => {
     const runtimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
     setComposerAgent(agent);
     setComposerModel(initialRuntimeModel(runtimeAgent));
@@ -1298,6 +1379,57 @@ export function AcpTranscriptPanel({
     await handleSendText(composerText, true, attachments);
   }, [attachments, composerText, handleSendText]);
 
+  const handleSlashCommandSelect = useCallback((name: string) => {
+    const command = slashSourceCommands.find((item) => item.name === name);
+    if (!command) return;
+    setComposerText(formatChatSlashCommandText(command));
+    setCommandDismissedFor(null);
+    window.requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      resizeTextareaToContent(el);
+      const pos = el.value.length;
+      el.setSelectionRange(pos, pos);
+    });
+  }, [slashSourceCommands]);
+
+  const handleComposerKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashMenuOpen && slashCommandItems.length > 0) {
+      if (event.nativeEvent.isComposing) return false;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setCommandActiveIndex((index) => (index + 1) % slashCommandItems.length);
+        return true;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setCommandActiveIndex((index) => (index - 1 + slashCommandItems.length) % slashCommandItems.length);
+        return true;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        const item = slashCommandItems[commandActiveIndex];
+        if (!item) return false;
+        event.preventDefault();
+        handleSlashCommandSelect(item.key);
+        return true;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setCommandDismissedFor(slashTrigger?.raw ?? null);
+        return true;
+      }
+    }
+    return handleComposerInputHistoryKeyDown(event);
+  }, [
+    commandActiveIndex,
+    handleComposerInputHistoryKeyDown,
+    handleSlashCommandSelect,
+    slashCommandItems,
+    slashMenuOpen,
+    slashTrigger?.raw,
+  ]);
+
   const handleCancelTurn = useCallback(async () => {
     if (!activeTurnId) return;
     const turnId = activeRuntimeTurnIdRef.current ?? activeTurnId;
@@ -1490,10 +1622,22 @@ export function AcpTranscriptPanel({
         onAgentModelChange={handleComposerAgentModelChange}
         onPermissionChange={handleComposerPermissionChange}
         onChange={setComposerText}
-        onTextareaKeyDown={handleComposerInputHistoryKeyDown}
+        onTextareaKeyDown={handleComposerKeyDown}
         onSend={handleSend}
         onCancel={handleCancelTurn}
       />
+      {slashMenuOpen && slashTrigger && composerRef.current && (
+        <ComposerCommandMenu
+          anchor={composerRef.current}
+          items={slashCommandItems}
+          activeIndex={commandActiveIndex}
+          header={t("chat.command.header")}
+          emptyText={t("chat.command.empty")}
+          onActiveIndexChange={setCommandActiveIndex}
+          onSelect={handleSlashCommandSelect}
+          onClose={() => setCommandDismissedFor(slashTrigger.raw)}
+        />
+      )}
     </div>
   );
 }

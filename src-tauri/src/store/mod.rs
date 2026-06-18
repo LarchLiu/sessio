@@ -180,10 +180,22 @@ pub struct IndexedSessionRecord {
 pub struct RuntimeAgentCapabilityRecord {
     pub agent: Agent,
     pub transport: RuntimeTransportKind,
+    /// Detected ACP adapter version for this runtime agent, typically sourced
+    /// from the adapter's configured `commands.version` probe.
     pub version: Option<String>,
     pub protocol_version: Option<String>,
     pub raw_initialize_response_json: String,
     pub raw_capabilities_json: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeAgentSessionConfigRecord {
+    pub agent: Agent,
+    pub adapter_version: String,
+    pub available_commands_json: String,
+    pub config_options_json: String,
+    pub created_at: i64,
     pub updated_at: i64,
 }
 
@@ -803,6 +815,22 @@ pub trait SessionStore: Send + Sync {
         agent: Agent,
     ) -> Result<Option<RuntimeAgentCapabilityRecord>>;
     fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()>;
+    fn get_runtime_agent_session_config(
+        &self,
+        agent: Agent,
+        adapter_version: &str,
+    ) -> Result<Option<RuntimeAgentSessionConfigRecord>>;
+    fn list_runtime_agent_session_configs(&self, agent: Agent)
+        -> Result<Vec<RuntimeAgentSessionConfigRecord>>;
+    fn mark_runtime_agent_session_config_needs_refresh(
+        &self,
+        agent: Agent,
+        adapter_version: &str,
+    ) -> Result<()>;
+    fn upsert_runtime_agent_session_config(
+        &self,
+        record: &RuntimeAgentSessionConfigRecord,
+    ) -> Result<()>;
     fn get_session_history_snapshots(
         &self,
         child_agent: Agent,

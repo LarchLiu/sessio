@@ -26,9 +26,9 @@ use crate::store::{
     AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord, AstraRunSessionRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTask, NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch,
-    RuntimeAgentCapabilityRecord, RuntimeAgentSelection, ScheduledTaskRecord,
-    ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
-    ThreadWorkSnapshotRecord, SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
+    RuntimeAgentCapabilityRecord, RuntimeAgentSelection, RuntimeAgentSessionConfigRecord,
+    ScheduledTaskRecord, ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef,
+    SessionStore, ThreadWorkSnapshotRecord, SCHEDULED_TASK_RUN_HISTORY_LIMIT_PER_TASK,
 };
 
 pub struct SqliteStore {
@@ -230,6 +230,19 @@ CREATE TABLE IF NOT EXISTS runtime_agent_capabilities (
     raw_capabilities_json TEXT NOT NULL,
     updated_at           INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS runtime_agent_session_configs (
+    agent                TEXT NOT NULL,
+    adapter_version      TEXT NOT NULL,
+    available_commands_json TEXT NOT NULL DEFAULT '[]',
+    config_options_json  TEXT NOT NULL DEFAULT '[]',
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+    PRIMARY KEY (agent, adapter_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_agent_session_configs_agent_updated
+    ON runtime_agent_session_configs(agent, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS runtime_agent_selections (
     key             TEXT PRIMARY KEY,
@@ -836,6 +849,11 @@ fn unique_nonce() -> String {
         .unwrap_or(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{nanos}-{count}")
+}
+
+fn normalize_adapter_version_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -2594,6 +2612,20 @@ fn agent_info_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentInfo> {
         order: row.get(16)?,
         created_at: row.get(17)?,
         updated_at: row.get(18)?,
+    })
+}
+
+fn runtime_agent_session_config_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RuntimeAgentSessionConfigRecord> {
+    let agent_raw: String = row.get(0)?;
+    Ok(RuntimeAgentSessionConfigRecord {
+        agent: Agent::from_db_str(&agent_raw).unwrap_or(Agent::Codex),
+        adapter_version: row.get(1)?,
+        available_commands_json: row.get(2)?,
+        config_options_json: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
     })
 }
 
@@ -8262,6 +8294,93 @@ impl SessionStore for SqliteStore {
                 record.protocol_version,
                 record.raw_initialize_response_json,
                 record.raw_capabilities_json,
+                record.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_runtime_agent_session_config(
+        &self,
+        agent: Agent,
+        adapter_version: &str,
+    ) -> Result<Option<RuntimeAgentSessionConfigRecord>> {
+        let Some(adapter_version) = normalize_adapter_version_key(adapter_version) else {
+            return Ok(None);
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT agent, adapter_version, available_commands_json,
+                    config_options_json, created_at, updated_at
+             FROM runtime_agent_session_configs
+             WHERE agent = ? AND adapter_version = ?",
+            params![agent.as_str(), adapter_version],
+            runtime_agent_session_config_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    fn list_runtime_agent_session_configs(
+        &self,
+        agent: Agent,
+    ) -> Result<Vec<RuntimeAgentSessionConfigRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT agent, adapter_version, available_commands_json,
+                    config_options_json, created_at, updated_at
+             FROM runtime_agent_session_configs
+             WHERE agent = ?
+             ORDER BY updated_at DESC, adapter_version ASC",
+        )?;
+        let rows = stmt.query_map(params![agent.as_str()], runtime_agent_session_config_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    fn mark_runtime_agent_session_config_needs_refresh(
+        &self,
+        agent: Agent,
+        adapter_version: &str,
+    ) -> Result<()> {
+        let Some(adapter_version) = normalize_adapter_version_key(adapter_version) else {
+            return Ok(());
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM runtime_agent_session_configs
+             WHERE agent = ? AND adapter_version = ?",
+            params![agent.as_str(), adapter_version],
+        )?;
+        Ok(())
+    }
+
+    fn upsert_runtime_agent_session_config(
+        &self,
+        record: &RuntimeAgentSessionConfigRecord,
+    ) -> Result<()> {
+        let Some(adapter_version) = normalize_adapter_version_key(&record.adapter_version) else {
+            return Ok(());
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO runtime_agent_session_configs (
+                agent, adapter_version, available_commands_json,
+                config_options_json, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent, adapter_version) DO UPDATE SET
+                available_commands_json = excluded.available_commands_json,
+                config_options_json = excluded.config_options_json,
+                updated_at = excluded.updated_at",
+            params![
+                record.agent.as_str(),
+                adapter_version,
+                record.available_commands_json,
+                record.config_options_json,
+                record.created_at,
                 record.updated_at,
             ],
         )?;
@@ -14336,6 +14455,48 @@ mod schema_tests {
         assert_eq!(loaded.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(loaded.effort.as_deref(), Some("high"));
         assert_eq!(loaded.permission_mode.as_deref(), Some("read-only"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn runtime_agent_session_config_roundtrip() {
+        let path = unique_db("sessio-runtime-session-config");
+        let store = SqliteStore::open(&path).unwrap();
+        store.init().unwrap();
+
+        store
+            .mark_runtime_agent_session_config_needs_refresh(
+                Agent::Codex,
+                "codex-acp@1.2.3",
+            )
+            .unwrap();
+        assert!(store
+            .get_runtime_agent_session_config(Agent::Codex, "codex-acp@1.2.3")
+            .unwrap()
+            .is_none());
+
+        store
+            .upsert_runtime_agent_session_config(&RuntimeAgentSessionConfigRecord {
+                agent: Agent::Codex,
+                adapter_version: "codex-acp@1.2.3".to_string(),
+                available_commands_json: r#"[{"name":"plan"}]"#.to_string(),
+                config_options_json: r#"[{"id":"model"}]"#.to_string(),
+                created_at: 10,
+                updated_at: 11,
+            })
+            .unwrap();
+
+        let loaded = store
+            .get_runtime_agent_session_config(Agent::Codex, "codex-acp@1.2.3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.available_commands_json, r#"[{"name":"plan"}]"#);
+        assert_eq!(loaded.config_options_json, r#"[{"id":"model"}]"#);
+
+        let rows = store.list_runtime_agent_session_configs(Agent::Codex).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].adapter_version, "codex-acp@1.2.3");
 
         let _ = std::fs::remove_file(&path);
     }

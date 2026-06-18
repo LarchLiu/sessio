@@ -13,8 +13,9 @@ use crate::store::{
     is_real_session_file_path, AgentPreferencesPatch, AstraConfigPatch, AstraRunRecord,
     ChannelSessionRecord, IndexedSessionRecord, IndexedSubagentRecord, NewAssistant, NewPlanRound,
     NewPlanTaskSession, PlanTaskStatusPatch, ProjectStagePatch, RuntimeAgentCapabilityRecord,
-    RuntimeAgentSelection, ScheduledTaskRecord, ScheduledTaskRunRecord,
-    SessionHistorySnapshotRecord, SessionRef, SessionStore, ThreadWorkSnapshotRecord,
+    RuntimeAgentSelection, RuntimeAgentSessionConfigRecord, ScheduledTaskRecord,
+    ScheduledTaskRunRecord, SessionHistorySnapshotRecord, SessionRef, SessionStore,
+    ThreadWorkSnapshotRecord,
 };
 
 // In-memory snapshot of the indexed-session view. polling reads this on every
@@ -825,6 +826,38 @@ impl SessionStore for CachedStore {
 
     fn upsert_runtime_agent_capability(&self, record: &RuntimeAgentCapabilityRecord) -> Result<()> {
         self.inner.upsert_runtime_agent_capability(record)
+    }
+
+    fn get_runtime_agent_session_config(
+        &self,
+        agent: Agent,
+        adapter_version: &str,
+    ) -> Result<Option<RuntimeAgentSessionConfigRecord>> {
+        self.inner
+            .get_runtime_agent_session_config(agent, adapter_version)
+    }
+
+    fn list_runtime_agent_session_configs(
+        &self,
+        agent: Agent,
+    ) -> Result<Vec<RuntimeAgentSessionConfigRecord>> {
+        self.inner.list_runtime_agent_session_configs(agent)
+    }
+
+    fn mark_runtime_agent_session_config_needs_refresh(
+        &self,
+        agent: Agent,
+        adapter_version: &str,
+    ) -> Result<()> {
+        self.inner
+            .mark_runtime_agent_session_config_needs_refresh(agent, adapter_version)
+    }
+
+    fn upsert_runtime_agent_session_config(
+        &self,
+        record: &RuntimeAgentSessionConfigRecord,
+    ) -> Result<()> {
+        self.inner.upsert_runtime_agent_session_config(record)
     }
 
     fn get_session_history_snapshots(

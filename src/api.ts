@@ -976,6 +976,15 @@ export interface RuntimeAgentMetadata {
   updatedAt: number | null;
 }
 
+export interface RuntimeAgentSessionConfig {
+  agent: Agent;
+  adapterVersion: string;
+  availableCommandsJson: string;
+  configOptionsJson: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface DebugConfig {
   acpConfig: boolean;
   updatePreview: boolean;
@@ -2146,6 +2155,12 @@ export async function getAgentRuntimeStatus(agent: Agent): Promise<RuntimeStatus
 
 export async function listRuntimeAgents(): Promise<RuntimeAgentMetadata[]> {
   return invoke<RuntimeAgentMetadata[]>("list_runtime_agents");
+}
+
+export async function getRuntimeAgentSessionConfig(
+  agent: Agent,
+): Promise<RuntimeAgentSessionConfig | null> {
+  return invoke<RuntimeAgentSessionConfig | null>("get_runtime_agent_session_config", { agent });
 }
 
 export async function getLastRuntimeAgentSelection(): Promise<RuntimeAgentSelection | null> {

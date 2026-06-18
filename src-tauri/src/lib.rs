@@ -74,6 +74,17 @@ struct ThreadsUpdatedPayload {
     thread_id: Option<String>,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeAgentSessionConfigDto {
+    agent: Agent,
+    adapter_version: String,
+    available_commands_json: String,
+    config_options_json: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
 fn emit_threads_updated(
     app: &AppHandle,
     project_id: Option<String>,
@@ -568,6 +579,19 @@ fn runtime_agent_selection_to_dto(
         effort: selection.effort,
         permission_mode: selection.permission_mode,
         updated_at: selection.updated_at,
+    }
+}
+
+fn runtime_agent_session_config_to_dto(
+    record: store::RuntimeAgentSessionConfigRecord,
+) -> RuntimeAgentSessionConfigDto {
+    RuntimeAgentSessionConfigDto {
+        agent: record.agent,
+        adapter_version: record.adapter_version,
+        available_commands_json: record.available_commands_json,
+        config_options_json: record.config_options_json,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
     }
 }
 
@@ -3394,6 +3418,29 @@ fn get_last_runtime_agent_selection(
 }
 
 #[tauri::command]
+fn get_runtime_agent_session_config(
+    agent: Agent,
+    cache: State<'_, RuntimeAgentsCache>,
+    store: State<'_, Arc<dyn SessionStore>>,
+) -> Result<Option<RuntimeAgentSessionConfigDto>, String> {
+    let detected_version = cache
+        .get()
+        .into_iter()
+        .find(|item| item.agent == agent)
+        .and_then(|item| item.detected_version);
+    let Some(adapter_version) = detected_version.as_deref().map(str::trim) else {
+        return Ok(None);
+    };
+    if adapter_version.is_empty() {
+        return Ok(None);
+    }
+    store
+        .get_runtime_agent_session_config(agent, adapter_version)
+        .map(|record| record.map(runtime_agent_session_config_to_dto))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn set_last_runtime_agent_selection(
     req: SetRuntimeAgentSelectionRequest,
     store: State<'_, Arc<dyn SessionStore>>,
@@ -4282,6 +4329,7 @@ pub fn run() {
             write_cross_prompt,
             get_agent_runtime_status,
             list_runtime_agents,
+            get_runtime_agent_session_config,
             get_last_runtime_agent_selection,
             set_last_runtime_agent_selection,
             get_debug_config,
