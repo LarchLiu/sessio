@@ -2,6 +2,8 @@ import {
   type CSSProperties,
   useEffect,
   useLayoutEffect,
+  type MouseEvent,
+  type ReactNode,
   useMemo,
   type RefObject,
   useRef,
@@ -10,10 +12,71 @@ import {
 import { createPortal } from "react-dom";
 import { DragDropProvider, type DragEndEvent } from "@dnd-kit/react";
 import { isSortable, useSortable } from "@dnd-kit/react/sortable";
-import { Check, ChevronDown, Copy, FolderOpen, GripVertical, Link2, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2, Workflow, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  GitBranch,
+  GitCommitHorizontal,
+  GitCompareArrows,
+  GitPullRequestArrow,
+  FolderOpen,
+  GripVertical,
+  Link2,
+  LoaderCircle,
+  Minus,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  Undo2,
+  Upload,
+  Workflow,
+  X,
+} from "lucide-react";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelection } from "@pierre/trees/react";
-import type { Agent, AgentInfo, AssistantInfo, ProjectGitStatusEntry, ProjectInfo, ProjectStageInfo, SessionInfo, StageInfo, ThreadAgentInfo, ThreadInfo, ThreadKind } from "../api";
-import { AGENT_LABEL, addThreadStage, createThread, deleteThread, deleteThreadStage, getProjectGitStatus, isAgent, listAgents, listAssistants, listProjectFiles, listProjectStages, listThreads, updateThread, updateThreadStage } from "../api";
+import type {
+  Agent,
+  AgentInfo,
+  AssistantInfo,
+  ProjectGitAction,
+  ProjectGitChange,
+  ProjectGitCommit,
+  ProjectGitState,
+  ProjectGitStatus,
+  ProjectGitStatusEntry,
+  ProjectInfo,
+  ProjectStageInfo,
+  SessionInfo,
+  StageInfo,
+  ThreadAgentInfo,
+  ThreadInfo,
+  ThreadKind,
+} from "../api";
+import {
+  AGENT_LABEL,
+  addThreadStage,
+  createThread,
+  deleteThread,
+  deleteThreadStage,
+  getProjectGitStatus,
+  getProjectGitSummary,
+  getProjectGitState,
+  isAgent,
+  listAgents,
+  listAssistants,
+  listProjectFiles,
+  listProjectStages,
+  listProjectGitCommits,
+  listThreads,
+  runProjectGitAction,
+  updateThread,
+  updateThreadStage,
+} from "../api";
 import { AgentGlyph } from "../components/AgentIcon";
 import CreateAssistantDialog from "../components/CreateAssistantDialog";
 import CreateStageDialog from "../components/CreateStageDialog";
@@ -30,10 +93,11 @@ import SegmentedTabs, { type SegmentedTabItem } from "../components/SegmentedTab
 import { projectStageIcon, projectStageLabel, stageStatusVisual } from "../utils/stageDisplay";
 import { sessionDisplayTitle } from "../appUtils";
 
-export type ProjectView = "threads" | "stages" | "assistants" | "files";
+export type ProjectView = "threads" | "stages" | "assistants" | "files" | "sourceControl";
 type ThreadPanelView = "threads" | "thread-chats";
 const THREAD_KINDS: ThreadKind[] = ["process", "teamwork", "brainstorm", "debate"];
 const AGENT_PARTICIPANT_KINDS = new Set<ThreadKind>(["brainstorm", "debate"]);
+const GIT_COMMIT_PAGE_SIZE = 20;
 
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
@@ -254,6 +318,16 @@ function formatDate(ts: number | null, lang: "en" | "zh"): string | null {
   });
 }
 
+function formatShortDate(ts: number | null, lang: string): string {
+  if (!ts) return "";
+  return new Date(ts).toLocaleString(localeTag(lang === "zh" ? "zh" : "en"), {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -291,6 +365,8 @@ export function ProjectWorkbenchPage({
   hideTabs = false,
   filesReloadKey = 0,
   onOpenFile,
+  projectHasGit,
+  onProjectGitRepoDetected,
 }: {
   project: ProjectInfo;
   onSelectThreadChatSession: (session: SessionInfo) => void;
@@ -300,6 +376,8 @@ export function ProjectWorkbenchPage({
   hideTabs?: boolean;
   filesReloadKey?: number;
   onOpenFile?: (path: string) => void;
+  projectHasGit?: boolean;
+  onProjectGitRepoDetected?: (projectPath: string, isRepo: boolean) => void;
 }) {
   const { t } = useI18n();
   const projectViewTabs = useMemo<SegmentedTabItem<ProjectView>[]>(
@@ -308,6 +386,7 @@ export function ProjectWorkbenchPage({
       { value: "stages", label: t("project.processTemplateId"), icon: Workflow },
       { value: "assistants", label: t("assistant.title"), icon: Robot3LineIcon },
       { value: "files", label: t("project.files"), icon: FolderOpen },
+      { value: "sourceControl", label: t("project.source_control"), icon: GitBranch },
     ],
     [t],
   );
@@ -405,6 +484,16 @@ export function ProjectWorkbenchPage({
             project={project}
             reloadKey={filesReloadKey}
             onOpenFile={onOpenFile}
+            projectHasGit={projectHasGit}
+            onProjectGitRepoDetected={onProjectGitRepoDetected}
+          />
+        ) : activeView === "sourceControl" ? (
+          <ProjectSourceControlPanel
+            project={project}
+            reloadKey={filesReloadKey}
+            onOpenFile={onOpenFile}
+            onError={onError}
+            onProjectGitRepoDetected={onProjectGitRepoDetected}
           />
         ) : (
           <ScrollArea
@@ -486,10 +575,14 @@ function ProjectFilesPanel({
   project,
   reloadKey = 0,
   onOpenFile,
+  projectHasGit,
+  onProjectGitRepoDetected,
 }: {
   project: ProjectInfo;
   reloadKey?: number;
   onOpenFile?: (path: string) => void;
+  projectHasGit?: boolean;
+  onProjectGitRepoDetected?: (projectPath: string, isRepo: boolean) => void;
 }) {
   const { t } = useI18n();
   const [paths, setPaths] = useState<string[] | null>(null);
@@ -514,7 +607,13 @@ function ProjectFilesPanel({
     }
   }, [project.path, t]);
 
-  const loadProjectFiles = async ({ background }: { background: boolean }) => {
+  const loadProjectFiles = async ({
+    background,
+    detectGit,
+  }: {
+    background: boolean;
+    detectGit?: boolean;
+  }) => {
     const currentRequestId = requestIdRef.current + 1;
     requestIdRef.current = currentRequestId;
     if (!project.path) return;
@@ -526,13 +625,17 @@ function ProjectFilesPanel({
     }
 
     try {
-      const [rows, status] = await Promise.all([
+      const [rows, gitStatusResult, gitSummary] = await Promise.all([
         listProjectFiles(project.path),
-        getProjectGitStatus(project.path).catch(() => []),
+        projectHasGit ? getProjectGitStatus(project.path).catch(() => [] as ProjectGitStatusEntry[]) : Promise.resolve([] as ProjectGitStatusEntry[]),
+        detectGit && !projectHasGit
+          ? getProjectGitSummary(project.path).catch(() => null)
+          : Promise.resolve(null),
       ]);
       if (requestIdRef.current !== currentRequestId) return;
       setPaths(rows);
-      setGitStatus(status);
+      setGitStatus(gitStatusResult);
+      if (gitSummary) onProjectGitRepoDetected?.(project.path, gitSummary.isRepo);
       setError(null);
     } catch (err) {
       if (requestIdRef.current !== currentRequestId) return;
@@ -556,12 +659,12 @@ function ProjectFilesPanel({
     setError(null);
     setLoading(true);
     setRefreshing(false);
-    void loadProjectFiles({ background: false });
+    void loadProjectFiles({ background: false, detectGit: false });
   }, [project.path]);
 
   useEffect(() => {
     if (!project.path || pathsRef.current === null) return;
-    void loadProjectFiles({ background: true });
+    void loadProjectFiles({ background: true, detectGit: false });
   }, [project.path, reloadKey]);
 
   return (
@@ -581,7 +684,7 @@ function ProjectFilesPanel({
           refreshing={refreshing}
           error={error}
           onRefresh={() => {
-            void loadProjectFiles({ background: pathsRef.current !== null });
+            void loadProjectFiles({ background: pathsRef.current !== null, detectGit: true });
           }}
           onOpenFile={onOpenFile}
         />
@@ -719,6 +822,711 @@ function ProjectFilesTree({
       </div>
     </div>
   );
+}
+
+function ProjectSourceControlPanel({
+  project,
+  reloadKey = 0,
+  onOpenFile,
+  onError,
+  onProjectGitRepoDetected,
+}: {
+  project: ProjectInfo;
+  reloadKey?: number;
+  onOpenFile?: (path: string) => void;
+  onError: (error: string | null) => void;
+  onProjectGitRepoDetected?: (projectPath: string, isRepo: boolean) => void;
+}) {
+  const { lang, t } = useI18n();
+  const [state, setState] = useState<ProjectGitState | null>(null);
+  const [commits, setCommits] = useState<ProjectGitCommit[]>([]);
+  const [hasMoreCommits, setHasMoreCommits] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({
+    staged: true,
+    changes: true,
+    untracked: true,
+    history: true,
+  });
+  const requestIdRef = useRef(0);
+  const graphOffsetRef = useRef(0);
+
+  const loadSourceControl = async ({ background }: { background: boolean }) => {
+    const currentRequestId = requestIdRef.current + 1;
+    requestIdRef.current = currentRequestId;
+    if (!project.path) {
+      setState(null);
+      setCommits([]);
+      setHasMoreCommits(false);
+      setError(t("project.files_path_missing"));
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
+
+    if (background) setRefreshing(true);
+    else {
+      setLoading(true);
+      setError(null);
+    }
+
+    try {
+      const [nextState, page] = await Promise.all([
+        getProjectGitState(project.path),
+        listProjectGitCommits(project.path, 0, GIT_COMMIT_PAGE_SIZE),
+      ]);
+      if (requestIdRef.current !== currentRequestId) return;
+      setState(nextState);
+      setCommits(page.commits);
+      setHasMoreCommits(page.hasMore);
+      graphOffsetRef.current = page.commits.length;
+      onProjectGitRepoDetected?.(project.path, nextState.summary.isRepo);
+      setError(null);
+    } catch (err) {
+      if (requestIdRef.current !== currentRequestId) return;
+      setError(String(err));
+      if (!background || state === null) {
+        setState(null);
+        setCommits([]);
+        setHasMoreCommits(false);
+        graphOffsetRef.current = 0;
+      }
+    } finally {
+      if (requestIdRef.current !== currentRequestId) return;
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    setState(null);
+    setCommits([]);
+    setHasMoreCommits(false);
+    graphOffsetRef.current = 0;
+    setError(null);
+    setLoading(true);
+    setRefreshing(false);
+    void loadSourceControl({ background: false });
+  }, [project.path]);
+
+  useEffect(() => {
+    if (!project.path || state === null) return;
+    void loadSourceControl({ background: true });
+  }, [project.path, reloadKey]);
+
+  const staged = useMemo(
+    () => (state?.changes ?? []).filter((change) => change.staged),
+    [state?.changes],
+  );
+  const trackedChanges = useMemo(
+    () => (state?.changes ?? []).filter((change) => !change.staged && change.status !== "untracked"),
+    [state?.changes],
+  );
+  const untrackedChanges = useMemo(
+    () => (state?.changes ?? []).filter((change) => !change.staged && change.status === "untracked"),
+    [state?.changes],
+  );
+
+  const runAction = async (
+    action: ProjectGitAction,
+    options: { paths?: string[]; message?: string | null } = {},
+  ) => {
+    if (!project.path) return;
+    try {
+      onError(null);
+      await runProjectGitAction(project.path, action, options);
+      if (action === "commit") setMessage("");
+      await loadSourceControl({ background: true });
+    } catch (err) {
+      onError(String(err));
+    }
+  };
+
+  const loadMoreCommits = async () => {
+    if (!project.path || loadingMore || !hasMoreCommits) return;
+    setLoadingMore(true);
+    try {
+      const page = await listProjectGitCommits(
+        project.path,
+        graphOffsetRef.current,
+        GIT_COMMIT_PAGE_SIZE,
+      );
+      setCommits((current) => [...current, ...page.commits]);
+      graphOffsetRef.current += page.commits.length;
+      setHasMoreCommits(page.hasMore);
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const handleGraphScroll = (viewport: HTMLDivElement) => {
+    if (
+      hasMoreCommits &&
+      !loadingMore &&
+      viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 56
+    ) {
+      void loadMoreCommits();
+    }
+  };
+
+  const toggleSection = (key: string) => {
+    setExpanded((current) => ({ ...current, [key]: !current[key] }));
+  };
+
+  const summary = state?.summary ?? null;
+  const canCommit = Boolean(message.trim()) && staged.length > 0;
+
+  if (loading && state === null) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center text-body-sm text-ink/40">
+        {t("project.source_control_loading")}
+      </div>
+    );
+  }
+
+  if (error && state === null) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-body-sm text-ink/45">
+        {error}
+      </div>
+    );
+  }
+
+  if (!summary?.isRepo) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-body-sm text-ink/45">
+        <GitBranch className="h-5 w-5 text-ink/35" />
+        <div>{t("project.source_control_not_repo")}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden py-4">
+      <div className="shrink-0 px-4">
+        <div className="rounded-lg border border-ink/10 bg-ink/[0.025] p-3">
+          <div className="flex min-w-0 flex-col gap-2">
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2 text-body-sm font-medium text-ink/85">
+                  <GitBranch className="h-4 w-4 shrink-0 text-ink/45" />
+                  <span className="min-w-0 truncate">{summary.branch ?? summary.head ?? "HEAD"}</span>
+                  {summary.ahead > 0 ? (
+                    <span className="inline-flex items-center gap-0.5 rounded bg-ink/[0.06] px-1.5 py-0.5 text-caption text-ink/60">
+                      <ArrowUp className="h-3 w-3" />
+                      {summary.ahead}
+                    </span>
+                  ) : null}
+                  {summary.behind > 0 ? (
+                    <span className="inline-flex items-center gap-0.5 rounded bg-ink/[0.06] px-1.5 py-0.5 text-caption text-ink/60">
+                      <ArrowDown className="h-3 w-3" />
+                      {summary.behind}
+                    </span>
+                  ) : null}
+                </div>
+                <GitIconButton
+                  label={t("project.source_control_refresh")}
+                  disabled={refreshing}
+                  onClick={() => void loadSourceControl({ background: true })}
+                  icon={refreshing ? LoaderCircle : RefreshCw}
+                  spin={refreshing}
+                />
+              </div>
+              <div className="mt-1 min-w-0 truncate text-caption text-ink/45">
+                {[
+                  summary.upstream,
+                  t("project.source_control_change_count", { count: state?.changes.length ?? 0 }),
+                  summary.head,
+                ].filter(Boolean).join(" · ")}
+              </div>
+            </div>
+            <div className="flex items-center gap-1 leading-none">
+              <GitIconButton
+                label={t("project.source_control_fetch")}
+                onClick={() => void runAction("fetch")}
+                icon={ArrowDown}
+                className="h-6 w-8"
+              />
+              <GitIconButton
+                label={t("project.source_control_sync")}
+                onClick={() => void runAction("sync")}
+                icon={GitCompareArrows}
+                className="h-6 w-8"
+              />
+              <GitIconButton
+                label={t("project.source_control_pull")}
+                onClick={() => void runAction("pull")}
+                icon={GitPullRequestArrow}
+                className="h-6 w-8"
+              />
+              <GitIconButton
+                label={t("project.source_control_push")}
+                onClick={() => void runAction("push")}
+                icon={Upload}
+                className="h-6 w-8"
+              />
+            </div>
+          </div>
+          <div className="mt-3 grid gap-2">
+            <textarea
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canCommit) {
+                  event.preventDefault();
+                  void runAction("commit", { message });
+                }
+              }}
+              rows={2}
+              placeholder={t("project.source_control_commit_placeholder")}
+              className="min-h-[44px] min-w-0 resize-none rounded-md border border-ink/10 bg-surface-panel px-3 py-2 text-body-sm leading-5 text-ink outline-none placeholder:text-ink/35 focus:border-ink/22"
+            />
+            <Tooltip content={t("project.source_control_commit")} placement="bottom">
+              <button
+                type="button"
+                disabled={!canCommit}
+                onClick={() => void runAction("commit", { message })}
+                className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] transition hover:opacity-90 disabled:opacity-30"
+                aria-label={t("project.source_control_commit")}
+              >
+                <Check className="h-4 w-4" />
+                <span>{t("project.source_control_commit")}</span>
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+        {error ? (
+          <div className="mt-3 rounded-md border border-status-error/30 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
+            {error}
+          </div>
+        ) : null}
+      </div>
+
+      <ScrollArea className="mt-3 min-h-0 flex-1" viewportClassName="px-4 pb-4">
+        <GitChangeSection
+          id="staged"
+          title={t("project.source_control_staged")}
+          count={staged.length}
+          expanded={expanded.staged}
+          onToggle={() => toggleSection("staged")}
+          actions={
+            staged.length > 0 ? (
+              <>
+                <GitIconButton
+                  label={t("project.source_control_unstage_all")}
+                  onClick={() => void runAction("unstageAll")}
+                  icon={Minus}
+                />
+              </>
+            ) : null
+          }
+        >
+          {staged.length > 0 ? (
+            staged.map((change) => (
+              <GitChangeRow
+                key={`staged:${change.path}:${change.status}`}
+                change={change}
+                onOpenFile={onOpenFile}
+                actions={
+                  <>
+                    <GitIconButton
+                      label={t("project.source_control_unstage")}
+                      onClick={() => void runAction("unstage", { paths: [change.path] })}
+                      icon={Minus}
+                    />
+                  </>
+                }
+              />
+            ))
+          ) : (
+            <div className="px-2 py-2 text-caption text-ink/35">{t("project.source_control_empty_staged")}</div>
+          )}
+        </GitChangeSection>
+
+        <GitChangeSection
+          id="changes"
+          title={t("project.source_control_changes")}
+          count={trackedChanges.length}
+          expanded={expanded.changes}
+          onToggle={() => toggleSection("changes")}
+          actions={
+            trackedChanges.length > 0 ? (
+              <>
+                <GitIconButton
+                  label={t("project.source_control_stage_all")}
+                  onClick={() => void runAction("stageAll")}
+                  icon={Plus}
+                />
+                <ConfirmTooltip>
+                  {(confirm) => (
+                    <GitIconButton
+                      label={t("project.source_control_discard_all")}
+                      onClick={(event) =>
+                        confirm(event, {
+                          title: t("project.source_control_discard_all_confirm"),
+                          confirmLabel: t("confirm.ok"),
+                          placement: "bottom",
+                          onConfirm: () => runAction("discardAll"),
+                        })
+                      }
+                      icon={Undo2}
+                    />
+                  )}
+                </ConfirmTooltip>
+              </>
+            ) : null
+          }
+        >
+          {trackedChanges.length > 0 ? (
+            trackedChanges.map((change) => (
+              <GitChangeRow
+                key={`unstaged:${change.path}:${change.status}`}
+                change={change}
+                onOpenFile={onOpenFile}
+                actions={
+                  <>
+                    <GitIconButton
+                      label={t("project.source_control_stage")}
+                      onClick={() => void runAction("stage", { paths: [change.path] })}
+                      icon={Plus}
+                    />
+                    <ConfirmTooltip>
+                      {(confirm) => (
+                        <GitIconButton
+                          label={t("project.source_control_discard")}
+                          onClick={(event) =>
+                            confirm(event, {
+                              title: t("project.source_control_discard_confirm"),
+                              body: change.path,
+                              confirmLabel: t("confirm.ok"),
+                              placement: "bottom",
+                              onConfirm: () => runAction("discard", { paths: [change.path] }),
+                            })
+                          }
+                          icon={Undo2}
+                        />
+                      )}
+                    </ConfirmTooltip>
+                  </>
+                }
+              />
+            ))
+          ) : (
+            <div className="px-2 py-2 text-caption text-ink/35">{t("project.source_control_empty_changes")}</div>
+          )}
+        </GitChangeSection>
+
+        <GitChangeSection
+          id="untracked"
+          title={t("project.source_control_untracked")}
+          count={untrackedChanges.length}
+          expanded={expanded.untracked}
+          onToggle={() => toggleSection("untracked")}
+          actions={
+            untrackedChanges.length > 0 ? (
+              <>
+                <GitIconButton
+                  label={t("project.source_control_stage_all_untracked")}
+                  onClick={() => void runAction("stage", { paths: untrackedChanges.map((change) => change.path) })}
+                  icon={Plus}
+                />
+                <ConfirmTooltip>
+                  {(confirm) => (
+                    <GitIconButton
+                      label={t("project.source_control_clean_all")}
+                      onClick={(event) =>
+                        confirm(event, {
+                          title: t("project.source_control_clean_all_confirm"),
+                          confirmLabel: t("confirm.ok"),
+                          placement: "bottom",
+                          onConfirm: () => runAction("cleanAll"),
+                        })
+                      }
+                      icon={Trash2}
+                    />
+                  )}
+                </ConfirmTooltip>
+              </>
+            ) : null
+          }
+        >
+          {untrackedChanges.length > 0 ? (
+            untrackedChanges.map((change) => (
+              <GitChangeRow
+                key={`untracked:${change.path}:${change.status}`}
+                change={change}
+                onOpenFile={onOpenFile}
+                actions={
+                  <>
+                    <GitIconButton
+                      label={t("project.source_control_stage")}
+                      onClick={() => void runAction("stage", { paths: [change.path] })}
+                      icon={Plus}
+                    />
+                    <ConfirmTooltip>
+                      {(confirm) => (
+                        <GitIconButton
+                          label={t("project.source_control_clean")}
+                          onClick={(event) =>
+                            confirm(event, {
+                              title: t("project.source_control_clean_confirm"),
+                              body: change.path,
+                              confirmLabel: t("confirm.ok"),
+                              placement: "bottom",
+                              onConfirm: () => runAction("clean", { paths: [change.path] }),
+                            })
+                          }
+                          icon={Trash2}
+                        />
+                      )}
+                    </ConfirmTooltip>
+                  </>
+                }
+              />
+            ))
+          ) : (
+            <div className="px-2 py-2 text-caption text-ink/35">{t("project.source_control_empty_untracked")}</div>
+          )}
+        </GitChangeSection>
+
+        <GitChangeSection
+          id="history"
+          title={t("project.source_control_history")}
+          count={commits.length}
+          expanded={expanded.history}
+          onToggle={() => toggleSection("history")}
+        >
+          <ScrollArea
+            className="max-h-[420px] min-h-[220px] rounded-md border border-ink/[0.08] bg-ink/[0.018]"
+            viewportClassName="py-1"
+            onScroll={handleGraphScroll}
+          >
+            {commits.length > 0 ? (
+              commits.map((commit, index) => (
+                <GitCommitRow
+                  key={commit.hash}
+                  commit={commit}
+                  lang={lang}
+                  first={index === 0}
+                  last={index === commits.length - 1 && !hasMoreCommits}
+                />
+              ))
+            ) : (
+              <div className="px-3 py-6 text-center text-body-sm text-ink/35">
+                {t("project.source_control_history_empty")}
+              </div>
+            )}
+            {loadingMore ? (
+              <div className="flex items-center justify-center gap-2 px-3 py-3 text-caption text-ink/40">
+                <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                {t("project.source_control_loading_more")}
+              </div>
+            ) : hasMoreCommits ? (
+              <button
+                type="button"
+                onClick={() => void loadMoreCommits()}
+                className="flex w-full items-center justify-center px-3 py-3 text-caption text-ink/45 transition hover:bg-ink/[0.04] hover:text-ink/70"
+              >
+                {t("project.source_control_load_more")}
+              </button>
+            ) : null}
+          </ScrollArea>
+        </GitChangeSection>
+      </ScrollArea>
+    </div>
+  );
+}
+
+function GitChangeSection({
+  id,
+  title,
+  count,
+  expanded,
+  actions,
+  onToggle,
+  children,
+}: {
+  id: string;
+  title: string;
+  count: number;
+  expanded: boolean;
+  actions?: ReactNode;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="mb-3 overflow-hidden rounded-lg border border-ink/[0.08] bg-ink/[0.018]" aria-labelledby={`git-section-${id}`}>
+      <div className="flex h-9 items-center gap-1 border-b border-ink/[0.06] px-1.5">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-caption font-medium uppercase text-ink/55 transition hover:bg-ink/[0.04] hover:text-ink/75"
+          aria-expanded={expanded}
+          id={`git-section-${id}`}
+        >
+          {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          <span className="min-w-0 truncate">{title}</span>
+          <span className="text-ink/35">{count}</span>
+        </button>
+        {actions ? <div className="flex shrink-0 items-center gap-0.5">{actions}</div> : null}
+      </div>
+      {expanded ? <div className="py-1">{children}</div> : null}
+    </section>
+  );
+}
+
+function GitChangeRow({
+  change,
+  actions,
+  onOpenFile,
+}: {
+  change: ProjectGitChange;
+  actions: ReactNode;
+  onOpenFile?: (path: string) => void;
+}) {
+  return (
+    <div className="group flex min-h-8 items-center gap-2 px-2 py-1 text-body-sm text-ink/72 hover:bg-ink/[0.045]">
+      <span className={"w-4 shrink-0 text-center text-caption font-semibold " + gitStatusTextClass(change.status)}>
+        {gitStatusLetter(change.status)}
+      </span>
+      <button
+        type="button"
+        onClick={() => onOpenFile?.(change.path)}
+        className="min-w-0 flex-1 text-left"
+      >
+        <span className="block min-w-0 truncate">{change.path}</span>
+        {change.originalPath ? (
+          <span className="block min-w-0 truncate text-caption text-ink/35">{change.originalPath}</span>
+        ) : null}
+      </button>
+      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+        {actions}
+      </div>
+    </div>
+  );
+}
+
+function GitCommitRow({
+  commit,
+  lang,
+  first,
+  last,
+}: {
+  commit: ProjectGitCommit;
+  lang: string;
+  first: boolean;
+  last: boolean;
+}) {
+  const nodeClass = commit.pushed
+    ? "border-[rgb(var(--color-emerald)/0.55)] bg-[rgb(var(--color-emerald)/0.18)]"
+    : "border-amber-500/65 bg-amber-500/20";
+  const lineClass = commit.pushed ? "bg-[rgb(var(--color-emerald)/0.22)]" : "bg-amber-500/[0.28]";
+  return (
+    <Tooltip content={commit.message || commit.subject} placement="left" maxWidth={420}>
+      <div className="grid grid-cols-[28px_minmax(0,1fr)] gap-2 px-3 py-2 text-body-sm hover:bg-ink/[0.035]">
+        <div className="relative flex min-h-[38px] justify-center">
+          <span
+            className={
+              "absolute left-1/2 w-px -translate-x-1/2 " +
+              (first ? "top-[14px] " : "top-[-8px] ") +
+              (last ? "bottom-[24px] " : "bottom-[-10px] ") +
+              lineClass
+            }
+            aria-hidden
+          />
+          <span className={"relative z-10 mt-[9px] h-2.5 w-2.5 rounded-full border shadow-[0_0_0_2px_rgb(var(--color-bg-panel))] " + nodeClass} aria-hidden />
+        </div>
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <GitCommitHorizontal className="h-3.5 w-3.5 shrink-0 text-ink/35" />
+            <span className="min-w-0 flex-1 truncate text-ink/78">{commit.subject}</span>
+            <span className="shrink-0 rounded bg-ink/[0.06] px-1.5 py-0.5 font-mono text-[11px] text-ink/45">
+              {commit.shortHash}
+            </span>
+          </div>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-caption text-ink/38">
+            <span className="truncate">{commit.author}</span>
+            <span>{formatShortDate(commit.timestamp, lang)}</span>
+            {commit.refs.slice(0, 3).map((ref) => (
+              <span key={ref} className="max-w-[140px] truncate rounded bg-ink/[0.055] px-1.5 py-0.5 text-ink/50">
+                {ref}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </Tooltip>
+  );
+}
+
+function GitIconButton({
+  label,
+  icon: Icon,
+  onClick,
+  disabled,
+  spin,
+  className = "h-7 w-7",
+}: {
+  label: string;
+  icon: typeof RefreshCw;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
+  disabled?: boolean;
+  spin?: boolean;
+  className?: string;
+}) {
+  return (
+    <Tooltip content={label} placement="bottom">
+      <button
+        type="button"
+        aria-label={label}
+        disabled={disabled}
+        onClick={onClick}
+        className={"inline-flex items-center justify-center rounded-md text-ink/45 transition hover:bg-ink/[0.055] hover:text-ink/78 disabled:opacity-35 " + className}
+      >
+        <Icon className={"h-3.5 w-3.5 " + (spin ? "animate-spin" : "")} />
+      </button>
+    </Tooltip>
+  );
+}
+
+function gitStatusLetter(status: ProjectGitStatus): string {
+  switch (status) {
+    case "added":
+      return "A";
+    case "deleted":
+      return "D";
+    case "ignored":
+      return "I";
+    case "modified":
+      return "M";
+    case "renamed":
+      return "R";
+    case "untracked":
+      return "U";
+  }
+}
+
+function gitStatusTextClass(status: ProjectGitStatus): string {
+  switch (status) {
+    case "added":
+      return "text-[rgb(var(--color-emerald))]";
+    case "deleted":
+      return "text-status-error";
+    case "renamed":
+      return "text-sky-500";
+    case "untracked":
+      return "text-amber-500";
+    case "ignored":
+      return "text-ink/30";
+    case "modified":
+      return "text-[rgb(var(--color-brand))]";
+  }
 }
 
 function removeStageFromThread(thread: ThreadInfo, stageId: string): ThreadInfo {

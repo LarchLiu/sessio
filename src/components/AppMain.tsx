@@ -27,6 +27,8 @@ export default function AppMain({
   filesSubview,
   onFilesSubviewChange,
   projectFilesReloadKey,
+  projectGitRepos,
+  onProjectGitRepoDetected,
   selectedProjectFileRequest,
   onOpenProjectFile,
   liveState,
@@ -64,6 +66,8 @@ export default function AppMain({
   filesSubview: ChatFilesSubview;
   onFilesSubviewChange: (subview: ChatFilesSubview) => void;
   projectFilesReloadKey: number;
+  projectGitRepos: Record<string, boolean>;
+  onProjectGitRepoDetected: (projectPath: string, isRepo: boolean) => void;
   selectedProjectFileRequest?: {
     path: string;
     requestId: number;
@@ -130,6 +134,8 @@ export default function AppMain({
       setSelected(session);
       setDetailMode("threadChat");
     },
+    projectHasGit: projectGitRepos[project.path] === true,
+    onProjectGitRepoDetected,
     onError,
   });
 

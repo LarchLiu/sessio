@@ -1260,6 +1260,100 @@ export async function getProjectGitStatus(path: string): Promise<ProjectGitStatu
   return invoke<ProjectGitStatusEntry[]>("get_project_git_status", { path });
 }
 
+export interface ProjectGitSummary {
+  isRepo: boolean;
+  root: string | null;
+  branch: string | null;
+  head: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  hasChanges: boolean;
+  stagedCount: number;
+  unstagedCount: number;
+  untrackedCount: number;
+}
+
+export interface ProjectGitChange {
+  path: string;
+  originalPath: string | null;
+  status: ProjectGitStatus;
+  staged: boolean;
+  indexStatus: string;
+  worktreeStatus: string;
+}
+
+export interface ProjectGitState {
+  summary: ProjectGitSummary;
+  changes: ProjectGitChange[];
+}
+
+export interface ProjectGitCommit {
+  hash: string;
+  shortHash: string;
+  parents: string[];
+  author: string;
+  timestamp: number;
+  refs: string[];
+  subject: string;
+  message: string;
+  pushed: boolean;
+}
+
+export interface ProjectGitCommitPage {
+  commits: ProjectGitCommit[];
+  hasMore: boolean;
+}
+
+export type ProjectGitAction =
+  | "fetch"
+  | "pull"
+  | "push"
+  | "sync"
+  | "stage"
+  | "unstage"
+  | "discard"
+  | "clean"
+  | "stageAll"
+  | "unstageAll"
+  | "discardAll"
+  | "cleanAll"
+  | "commit";
+
+export interface ProjectGitActionResult {
+  stdout: string;
+  stderr: string;
+}
+
+export async function getProjectGitSummary(path: string): Promise<ProjectGitSummary> {
+  return invoke<ProjectGitSummary>("get_project_git_summary", { path });
+}
+
+export async function getProjectGitState(path: string): Promise<ProjectGitState> {
+  return invoke<ProjectGitState>("get_project_git_state", { path });
+}
+
+export async function listProjectGitCommits(
+  path: string,
+  offset: number,
+  limit: number,
+): Promise<ProjectGitCommitPage> {
+  return invoke<ProjectGitCommitPage>("list_project_git_commits", { path, offset, limit });
+}
+
+export async function runProjectGitAction(
+  path: string,
+  action: ProjectGitAction,
+  options: { paths?: string[]; message?: string | null } = {},
+): Promise<ProjectGitActionResult> {
+  return invoke<ProjectGitActionResult>("run_project_git_action", {
+    path,
+    action,
+    paths: options.paths ?? null,
+    message: options.message ?? null,
+  });
+}
+
 export interface FileGitDiff {
   status: ProjectGitStatus | "clean";
   patch: string | null;

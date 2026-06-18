@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
-import { FolderTree, Info, PanelRightOpen, Workflow, type LucideIcon } from "lucide-react";
+import { FolderTree, GitBranch, Info, PanelRightOpen, Workflow, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import { useI18n } from "../i18n";
 import type { LiveRuntimeState } from "../runtimeChat";
@@ -22,6 +22,8 @@ interface AppRightSidebarProps {
   open: boolean;
   liveState: LiveRuntimeState;
   filesReloadKey: number;
+  projectGitRepos: Record<string, boolean>;
+  onProjectGitRepoDetected: (projectPath: string, isRepo: boolean) => void;
   // Actions wired from App.tsx so navigation from these pages keeps working.
   onSelectThreadChatSession: (session: SessionInfo) => void;
   onOpenThreadMultiSessionChat: () => void;
@@ -43,6 +45,8 @@ export default function AppRightSidebar({
   open,
   liveState,
   filesReloadKey,
+  projectGitRepos,
+  onProjectGitRepoDetected,
   onSelectThreadChatSession,
   onOpenThreadMultiSessionChat,
   onOpenProjectFile,
@@ -58,17 +62,26 @@ export default function AppRightSidebar({
   // tabs operate on the same context. Fall back to the session's project.
   const project = threadProject ?? selectedSessionProject ?? null;
   const hasProject = Boolean(project);
+  const projectHasGit = project?.path ? projectGitRepos[project.path] === true : false;
 
   const tabs = useMemo(() => {
     const items: { id: string; label: string; icon: IconComponent; tab: RightTab }[] = [];
     if (hasProject) {
+      items.push({
+        id: "files",
+        label: t("project.files"),
+        icon: FolderTree,
+        tab: { kind: "project", view: "files" },
+      });
+      if (projectHasGit) {
+        items.push({
+          id: "source-control",
+          label: t("project.source_control"),
+          icon: GitBranch,
+          tab: { kind: "project", view: "sourceControl" },
+        });
+      }
       items.push(
-        {
-          id: "files",
-          label: t("project.files"),
-          icon: FolderTree,
-          tab: { kind: "project", view: "files" },
-        },
         {
           id: "threads",
           label: t("thread.title"),
@@ -98,7 +111,7 @@ export default function AppRightSidebar({
       });
     }
     return items;
-  }, [hasProject, hasThread, t]);
+  }, [hasProject, hasThread, projectHasGit, t]);
 
   const defaultTab: RightTab | null = useMemo(() => {
     if (hasProject) return { kind: "project", view: "files" };
@@ -128,13 +141,13 @@ export default function AppRightSidebar({
     }
   }, [activeTab, defaultTab, tabs]);
 
-  const filesTabVisible =
+  const projectFileActivityVisible =
     open &&
     Boolean(project) &&
     activeTab?.kind === "project" &&
-    activeTab.view === "files";
+    (activeTab.view === "files" || activeTab.view === "sourceControl");
   const projectLiveFileEditMarker = useMemo(() => {
-    if (!filesTabVisible || !project?.path) return "";
+    if (!projectFileActivityVisible || !project?.path) return "";
     let fileEditCount = 0;
     let latestTimestamp = 0;
     let latestKey = "";
@@ -156,10 +169,10 @@ export default function AppRightSidebar({
     }
     if (fileEditCount === 0) return "";
     return `${fileEditCount}:${latestTimestamp}:${latestKey}`;
-  }, [filesTabVisible, liveState.sessions, project?.path]);
+  }, [projectFileActivityVisible, liveState.sessions, project?.path]);
 
   useEffect(() => {
-    if (!filesTabVisible || !project?.path) {
+    if (!projectFileActivityVisible || !project?.path) {
       projectLiveFileEditRef.current = {
         projectPath: null,
         marker: null,
@@ -186,7 +199,7 @@ export default function AppRightSidebar({
     };
     if (!projectLiveFileEditMarker) return;
     setLiveFilesReloadKey((value) => value + 1);
-  }, [filesTabVisible, project?.path, projectLiveFileEditMarker]);
+  }, [projectFileActivityVisible, project?.path, projectLiveFileEditMarker]);
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
@@ -247,6 +260,8 @@ export default function AppRightSidebar({
             hideTabs
             filesReloadKey={filesReloadKey + liveFilesReloadKey}
             onOpenFile={onOpenProjectFile}
+            projectHasGit={project.path ? projectGitRepos[project.path] === true : false}
+            onProjectGitRepoDetected={onProjectGitRepoDetected}
             onSelectThreadChatSession={onSelectThreadChatSession}
             onError={onError}
           />

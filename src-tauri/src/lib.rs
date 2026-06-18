@@ -2939,48 +2939,26 @@ fn list_project_files(path: String) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 fn get_project_git_status(path: String) -> Result<Vec<GitStatusRow>, String> {
-    let root = PathBuf::from(&path);
-    if !root.is_absolute() || !root.is_dir() {
-        return Err("Invalid project path".to_string());
-    }
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&path)
-        .args(["status", "--porcelain=v1", "-uall"])
-        .output()
+    let root = validate_project_dir(&path)?;
+    let output = run_git(&root, &["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
         .map_err(|e| format!("Failed to run git: {e}"))?;
     if !output.status.success() {
         // Not a git repo or git not available — return empty rather than error.
         return Ok(Vec::new());
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut by_path: HashMap<String, String> = HashMap::new();
+    for change in parse_git_status_stdout(&stdout) {
+        by_path.entry(change.path).or_insert(change.status);
+    }
     let mut entries: Vec<GitStatusRow> = Vec::new();
-    for line in stdout.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let xy = &line[..2];
-        let file_path = &line[3..];
-        // Handle renames: "R  old -> new"
-        let rel = if let Some(arrow_pos) = file_path.find(" -> ") {
-            &file_path[arrow_pos + 4..]
-        } else {
-            file_path
-        };
-        let status = match xy.trim() {
-            "M" | "MM" | "AM" => "modified",
-            "A" => "added",
-            "D" => "deleted",
-            "R" | "RM" => "renamed",
-            "??" => "untracked",
-            "!!" => "ignored",
-            _ => "modified",
-        };
+    for (path, status) in by_path {
         entries.push(GitStatusRow {
-            path: rel.to_string(),
-            status: status.to_string(),
+            path,
+            status,
         });
     }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
 }
 
@@ -2988,6 +2966,581 @@ fn get_project_git_status(path: String) -> Result<Vec<GitStatusRow>, String> {
 struct GitStatusRow {
     path: String,
     status: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGitSummary {
+    is_repo: bool,
+    root: Option<String>,
+    branch: Option<String>,
+    head: Option<String>,
+    upstream: Option<String>,
+    ahead: i64,
+    behind: i64,
+    has_changes: bool,
+    staged_count: usize,
+    unstaged_count: usize,
+    untracked_count: usize,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGitChange {
+    path: String,
+    original_path: Option<String>,
+    status: String,
+    staged: bool,
+    index_status: String,
+    worktree_status: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGitState {
+    summary: ProjectGitSummary,
+    changes: Vec<ProjectGitChange>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGitCommit {
+    hash: String,
+    short_hash: String,
+    parents: Vec<String>,
+    author: String,
+    timestamp: i64,
+    refs: Vec<String>,
+    subject: String,
+    message: String,
+    pushed: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGitCommitPage {
+    commits: Vec<ProjectGitCommit>,
+    has_more: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectGitActionResult {
+    stdout: String,
+    stderr: String,
+}
+
+#[tauri::command]
+fn get_project_git_summary(path: String) -> Result<ProjectGitSummary, String> {
+    let project = validate_project_dir(&path)?;
+    let Some(root) = discover_git_root(&project)? else {
+        return Ok(empty_project_git_summary());
+    };
+    let changes = load_project_git_changes(&root)?;
+    Ok(build_project_git_summary(&root, &changes))
+}
+
+#[tauri::command]
+fn get_project_git_state(path: String) -> Result<ProjectGitState, String> {
+    let project = validate_project_dir(&path)?;
+    let Some(root) = discover_git_root(&project)? else {
+        return Ok(ProjectGitState {
+            summary: empty_project_git_summary(),
+            changes: Vec::new(),
+        });
+    };
+    let changes = load_project_git_changes(&root)?;
+    let summary = build_project_git_summary(&root, &changes);
+    Ok(ProjectGitState { summary, changes })
+}
+
+#[tauri::command]
+fn list_project_git_commits(
+    path: String,
+    offset: usize,
+    limit: usize,
+) -> Result<ProjectGitCommitPage, String> {
+    let project = validate_project_dir(&path)?;
+    let Some(root) = discover_git_root(&project)? else {
+        return Ok(ProjectGitCommitPage {
+            commits: Vec::new(),
+            has_more: false,
+        });
+    };
+    let safe_limit = limit.clamp(1, 100);
+    let request_limit = safe_limit + 1;
+    let pushed_hashes = pushed_commit_hashes(&root);
+    let args = vec![
+        "log".to_string(),
+        "--topo-order".to_string(),
+        "--all".to_string(),
+        "--skip".to_string(),
+        offset.to_string(),
+        "-n".to_string(),
+        request_limit.to_string(),
+        "--pretty=format:%x1e%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1f%B%x1d".to_string(),
+    ];
+    let output = run_git_owned(&root, &args).map_err(|e| format!("Failed to run git log: {e}"))?;
+    if !output.status.success() {
+        return Err(git_output_error(&output, "Failed to load git commits"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut commits = parse_git_log_commits(&stdout, &pushed_hashes);
+    let has_more = commits.len() > safe_limit;
+    commits.truncate(safe_limit);
+    Ok(ProjectGitCommitPage { commits, has_more })
+}
+
+#[tauri::command]
+fn run_project_git_action(
+    path: String,
+    action: String,
+    paths: Option<Vec<String>>,
+    message: Option<String>,
+) -> Result<ProjectGitActionResult, String> {
+    let project = validate_project_dir(&path)?;
+    let root = git_root_or_error(&project)?;
+    match action.as_str() {
+        "fetch" => run_git_action(&root, &["fetch", "--prune"]),
+        "pull" => run_git_action(&root, &["pull", "--ff-only"]),
+        "push" => run_git_action(&root, &["push"]),
+        "sync" => {
+            let mut combined = ProjectGitActionResult {
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+            append_git_action_result(&mut combined, run_git_action(&root, &["pull", "--ff-only"])?);
+            append_git_action_result(&mut combined, run_git_action(&root, &["push"])?);
+            Ok(combined)
+        }
+        "stageAll" => run_git_action(&root, &["add", "-A"]),
+        "unstageAll" => run_git_action(&root, &["restore", "--staged", "."]),
+        "discardAll" => {
+            let mut combined = ProjectGitActionResult {
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+            append_git_action_result(&mut combined, run_git_action(&root, &["restore", "--worktree", "."])?);
+            Ok(combined)
+        }
+        "cleanAll" => run_git_action(&root, &["clean", "-fd", "--", "."]),
+        "stage" => {
+            let paths = validate_git_relative_paths(paths, true)?;
+            let mut args = vec!["add".to_string(), "--".to_string()];
+            args.extend(paths);
+            run_git_action_owned(&root, &args)
+        }
+        "unstage" => {
+            let paths = validate_git_relative_paths(paths, true)?;
+            let mut args = vec!["restore".to_string(), "--staged".to_string(), "--".to_string()];
+            args.extend(paths);
+            run_git_action_owned(&root, &args)
+        }
+        "discard" => {
+            let paths = validate_git_relative_paths(paths, true)?;
+            let mut combined = ProjectGitActionResult {
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+            for path in paths {
+                let result = discard_git_path(&root, &path)?;
+                append_git_action_result(&mut combined, result);
+            }
+            Ok(combined)
+        }
+        "clean" => {
+            let paths = validate_git_relative_paths(paths, true)?;
+            let mut args = vec!["clean".to_string(), "-fd".to_string(), "--".to_string()];
+            args.extend(paths);
+            run_git_action_owned(&root, &args)
+        }
+        "commit" => {
+            let message = message.unwrap_or_default().trim().to_string();
+            if message.is_empty() {
+                return Err("Commit message is required".to_string());
+            }
+            run_git_action_owned(&root, &["commit".to_string(), "-m".to_string(), message])
+        }
+        _ => Err(format!("Unsupported git action: {action}")),
+    }
+}
+
+fn validate_project_dir(path: &str) -> Result<PathBuf, String> {
+    let root = PathBuf::from(path);
+    if !root.is_absolute() || !root.is_dir() {
+        return Err("Invalid project path".to_string());
+    }
+    Ok(root)
+}
+
+fn run_git(root: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+}
+
+fn run_git_owned(root: &Path, args: &[String]) -> std::io::Result<std::process::Output> {
+    let mut command = std::process::Command::new("git");
+    command.arg("-C").arg(root);
+    for arg in args {
+        command.arg(arg);
+    }
+    command.output()
+}
+
+fn discover_git_root(project: &Path) -> Result<Option<PathBuf>, String> {
+    let output = match run_git(project, &["rev-parse", "--show-toplevel"]) {
+        Ok(output) => output,
+        Err(_) => return Ok(None),
+    };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(stdout)))
+}
+
+fn git_root_or_error(project: &Path) -> Result<PathBuf, String> {
+    discover_git_root(project)?.ok_or_else(|| "Not a git repository".to_string())
+}
+
+fn git_stdout_optional(root: &Path, args: &[&str]) -> Option<String> {
+    let output = run_git(root, args).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn git_output_error(output: &std::process::Output, fallback: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return stdout;
+    }
+    fallback.to_string()
+}
+
+fn empty_project_git_summary() -> ProjectGitSummary {
+    ProjectGitSummary {
+        is_repo: false,
+        root: None,
+        branch: None,
+        head: None,
+        upstream: None,
+        ahead: 0,
+        behind: 0,
+        has_changes: false,
+        staged_count: 0,
+        unstaged_count: 0,
+        untracked_count: 0,
+    }
+}
+
+fn load_project_git_changes(root: &Path) -> Result<Vec<ProjectGitChange>, String> {
+    let output = run_git(root, &["-c", "core.quotePath=false", "status", "--porcelain=v1", "-uall"])
+        .map_err(|e| format!("Failed to run git status: {e}"))?;
+    if !output.status.success() {
+        return Err(git_output_error(&output, "Failed to load git status"));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_git_status_stdout(&stdout))
+}
+
+fn build_project_git_summary(root: &Path, changes: &[ProjectGitChange]) -> ProjectGitSummary {
+    let branch = git_stdout_optional(root, &["branch", "--show-current"]);
+    let head = git_stdout_optional(root, &["rev-parse", "--short", "HEAD"]);
+    let upstream = git_stdout_optional(root, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+    let (ahead, behind) = if upstream.is_some() {
+        git_stdout_optional(root, &["rev-list", "--left-right", "--count", "HEAD...@{u}"])
+            .and_then(|value| {
+                let mut parts = value.split_whitespace();
+                let ahead = parts.next()?.parse::<i64>().ok()?;
+                let behind = parts.next()?.parse::<i64>().ok()?;
+                Some((ahead, behind))
+            })
+            .unwrap_or((0, 0))
+    } else {
+        (0, 0)
+    };
+    let staged_count = changes.iter().filter(|change| change.staged).count();
+    let unstaged_count = changes.iter().filter(|change| !change.staged).count();
+    let untracked_count = changes
+        .iter()
+        .filter(|change| !change.staged && change.status == "untracked")
+        .count();
+    ProjectGitSummary {
+        is_repo: true,
+        root: Some(root.to_string_lossy().to_string()),
+        branch,
+        head,
+        upstream,
+        ahead,
+        behind,
+        has_changes: !changes.is_empty(),
+        staged_count,
+        unstaged_count,
+        untracked_count,
+    }
+}
+
+fn parse_git_status_stdout(stdout: &str) -> Vec<ProjectGitChange> {
+    let mut changes = Vec::new();
+    for line in stdout.lines() {
+        changes.extend(parse_git_status_line(line));
+    }
+    changes.sort_by(|a, b| {
+        a.staged
+            .cmp(&b.staged)
+            .reverse()
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.status.cmp(&b.status))
+    });
+    changes
+}
+
+fn parse_git_status_line(line: &str) -> Vec<ProjectGitChange> {
+    if line.len() < 4 {
+        return Vec::new();
+    }
+    let mut chars = line.chars();
+    let index = chars.next().unwrap_or(' ');
+    let worktree = chars.next().unwrap_or(' ');
+    let raw_path = &line[3..];
+    let (path, original_path) = if let Some(arrow_pos) = raw_path.find(" -> ") {
+        (
+            raw_path[arrow_pos + 4..].to_string(),
+            Some(raw_path[..arrow_pos].to_string()),
+        )
+    } else {
+        (raw_path.to_string(), None)
+    };
+
+    if index == '?' && worktree == '?' {
+        return vec![ProjectGitChange {
+            path,
+            original_path,
+            status: "untracked".to_string(),
+            staged: false,
+            index_status: index.to_string(),
+            worktree_status: worktree.to_string(),
+        }];
+    }
+
+    if index == '!' && worktree == '!' {
+        return vec![ProjectGitChange {
+            path,
+            original_path,
+            status: "ignored".to_string(),
+            staged: false,
+            index_status: index.to_string(),
+            worktree_status: worktree.to_string(),
+        }];
+    }
+
+    let mut changes = Vec::new();
+    if index != ' ' {
+        changes.push(ProjectGitChange {
+            path: path.clone(),
+            original_path: original_path.clone(),
+            status: git_status_from_code(index).to_string(),
+            staged: true,
+            index_status: index.to_string(),
+            worktree_status: worktree.to_string(),
+        });
+    }
+    if worktree != ' ' {
+        changes.push(ProjectGitChange {
+            path,
+            original_path,
+            status: git_status_from_code(worktree).to_string(),
+            staged: false,
+            index_status: index.to_string(),
+            worktree_status: worktree.to_string(),
+        });
+    }
+    changes
+}
+
+fn git_status_from_code(code: char) -> &'static str {
+    match code {
+        'A' => "added",
+        'D' => "deleted",
+        'R' => "renamed",
+        '?' => "untracked",
+        '!' => "ignored",
+        _ => "modified",
+    }
+}
+
+fn pushed_commit_hashes(root: &Path) -> HashSet<String> {
+    let output = match run_git(root, &["rev-list", "--remotes"]) {
+        Ok(output) => output,
+        Err(_) => return HashSet::new(),
+    };
+    if !output.status.success() {
+        return HashSet::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn parse_git_log_commits(stdout: &str, pushed_hashes: &HashSet<String>) -> Vec<ProjectGitCommit> {
+    const RECORD: char = '\x1e';
+    const FIELD: char = '\x1f';
+    const END: char = '\x1d';
+    let mut commits = Vec::new();
+    for record in stdout.split(END) {
+        let record = record.trim_start_matches('\n');
+        let Some(record) = record.strip_prefix(RECORD) else {
+            continue;
+        };
+        let fields: Vec<&str> = record.split(FIELD).collect();
+        if fields.len() < 8 {
+            continue;
+        }
+        let timestamp = fields[4].parse::<i64>().unwrap_or(0) * 1000;
+        let refs = fields[5]
+            .split(", ")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        commits.push(ProjectGitCommit {
+            hash: fields[0].to_string(),
+            short_hash: fields[1].to_string(),
+            parents: fields[2]
+                .split_whitespace()
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect(),
+            author: fields[3].to_string(),
+            timestamp,
+            refs,
+            subject: fields[6].to_string(),
+            message: fields[7].trim().to_string(),
+            pushed: pushed_hashes.contains(fields[0]),
+        });
+    }
+    commits
+}
+
+fn validate_git_relative_paths(
+    paths: Option<Vec<String>>,
+    require_non_empty: bool,
+) -> Result<Vec<String>, String> {
+    let paths = paths.unwrap_or_default();
+    if require_non_empty && paths.is_empty() {
+        return Err("Select at least one file".to_string());
+    }
+    for path in &paths {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err("Invalid git path".to_string());
+        }
+        let path_buf = Path::new(trimmed);
+        if path_buf.is_absolute()
+            || path_buf.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err("Git path must stay inside the repository".to_string());
+        }
+    }
+    Ok(paths)
+}
+
+fn run_git_action(root: &Path, args: &[&str]) -> Result<ProjectGitActionResult, String> {
+    let output = run_git(root, args).map_err(|e| format!("Failed to run git: {e}"))?;
+    git_action_result(output)
+}
+
+fn run_git_action_owned(root: &Path, args: &[String]) -> Result<ProjectGitActionResult, String> {
+    let output = run_git_owned(root, args).map_err(|e| format!("Failed to run git: {e}"))?;
+    git_action_result(output)
+}
+
+fn git_action_result(output: std::process::Output) -> Result<ProjectGitActionResult, String> {
+    if !output.status.success() {
+        return Err(git_output_error(&output, "Git command failed"));
+    }
+    Ok(ProjectGitActionResult {
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn append_git_action_result(target: &mut ProjectGitActionResult, result: ProjectGitActionResult) {
+    if !result.stdout.is_empty() {
+        if !target.stdout.is_empty() {
+            target.stdout.push('\n');
+        }
+        target.stdout.push_str(&result.stdout);
+    }
+    if !result.stderr.is_empty() {
+        if !target.stderr.is_empty() {
+            target.stderr.push('\n');
+        }
+        target.stderr.push_str(&result.stderr);
+    }
+}
+
+fn discard_git_path(root: &Path, path: &str) -> Result<ProjectGitActionResult, String> {
+    let status_args = vec![
+        "-c".to_string(),
+        "core.quotePath=false".to_string(),
+        "status".to_string(),
+        "--porcelain=v1".to_string(),
+        "-uall".to_string(),
+        "--".to_string(),
+        path.to_string(),
+    ];
+    let output = run_git_owned(root, &status_args).map_err(|e| format!("Failed to run git status: {e}"))?;
+    if !output.status.success() {
+        return Err(git_output_error(&output, "Failed to inspect git path"));
+    }
+    let status = String::from_utf8_lossy(&output.stdout);
+    let untracked = status.lines().any(|line| line.starts_with("?? "));
+    if untracked {
+        run_git_action_owned(
+            root,
+            &[
+                "clean".to_string(),
+                "-fd".to_string(),
+                "--".to_string(),
+                path.to_string(),
+            ],
+        )
+    } else {
+        run_git_action_owned(
+            root,
+            &[
+                "restore".to_string(),
+                "--worktree".to_string(),
+                "--".to_string(),
+                path.to_string(),
+            ],
+        )
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -4319,6 +4872,10 @@ pub fn run() {
             unwatch_preview_file,
             list_project_files,
             get_project_git_status,
+            get_project_git_summary,
+            get_project_git_state,
+            list_project_git_commits,
+            run_project_git_action,
             set_window_appearance,
             get_system_appearance,
             reveal_main_window,

@@ -22,6 +22,7 @@ interface TooltipProps {
   delayMs?: number;
   interactive?: boolean;
   matchAnchorWidth?: boolean;
+  maxWidth?: number;
   children: ReactElement<any>;
 }
 
@@ -34,6 +35,7 @@ export default function Tooltip({
   delayMs = 800,
   interactive = false,
   matchAnchorWidth = false,
+  maxWidth = 360,
   children,
 }: TooltipProps) {
   const [open, setOpen] = useState(false);
@@ -57,7 +59,7 @@ export default function Tooltip({
       );
       tip.style.maxWidth = `${maxWidth}px`;
     } else {
-      tip.style.removeProperty("max-width");
+      tip.style.maxWidth = `${Math.max(120, Math.min(maxWidth, vw - VIEWPORT_MARGIN * 2))}px`;
     }
     const tw = tip.offsetWidth;
     const th = tip.offsetHeight;
@@ -233,7 +235,7 @@ export default function Tooltip({
               scheduleClose();
             }}
             className={
-              "z-50 w-max bg-tooltip-bg border border-ink/10 text-tooltip-fg text-body-sm rounded-md shadow-lg leading-snug " +
+              "z-50 w-max max-w-[calc(100vw-16px)] bg-tooltip-bg border border-ink/10 text-tooltip-fg text-body-sm rounded-md shadow-lg leading-snug break-words whitespace-pre-wrap " +
               (interactive ? "pointer-events-auto" : "pointer-events-none overflow-hidden")
             }
           >

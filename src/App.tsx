@@ -3,6 +3,7 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -14,6 +15,7 @@ import { LogicalPosition } from "@tauri-apps/api/dpi";
 import {
   Agent,
   getDebugConfig,
+  getProjectGitSummary,
   listThreadIndex,
   SessionInfo,
   removeSessionsByScope,
@@ -140,6 +142,9 @@ export default function App() {
   const [chatView, setChatView] = useState<ChatView>("chat");
   const [filesSubview, setFilesSubview] = useState<ChatFilesSubview>("code");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [projectGitRepos, setProjectGitRepos] = useState<Record<string, boolean>>({});
+  const projectGitReposRef = useRef<Record<string, boolean>>({});
+  const projectGitRepoProbeRef = useRef<Set<string>>(new Set());
   const [liveRuntimeState, dispatchLiveRuntimeEvent] = useReducer(
     applyRuntimeAction,
     emptyLiveRuntimeState,
@@ -204,6 +209,73 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  const handleProjectGitRepoDetected = useCallback((projectPath: string, isRepo: boolean) => {
+    if (!projectPath) return;
+    setProjectGitRepos((current) => {
+      if (current[projectPath] === isRepo) return current;
+      const next = { ...current, [projectPath]: isRepo };
+      projectGitReposRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const projectGitProbePathsKey = useMemo(
+    () => Array.from(new Set(projects.map((project) => project.path).filter(Boolean))).sort().join("\n"),
+    [projects],
+  );
+
+  useEffect(() => {
+    const paths = projectGitProbePathsKey ? projectGitProbePathsKey.split("\n") : [];
+    if (paths.length === 0) {
+      setProjectGitRepos((current) => {
+        if (Object.keys(current).length === 0) return current;
+        projectGitReposRef.current = {};
+        return {};
+      });
+      projectGitRepoProbeRef.current.clear();
+      return;
+    }
+
+    setProjectGitRepos((current) => {
+      const pathSet = new Set(paths);
+      let changed = false;
+      const next: Record<string, boolean> = {};
+      for (const path of paths) {
+        if (Object.prototype.hasOwnProperty.call(current, path)) {
+          next[path] = current[path];
+        }
+      }
+      for (const path of Object.keys(current)) {
+        if (!pathSet.has(path)) changed = true;
+      }
+      for (const path of Array.from(projectGitRepoProbeRef.current)) {
+        if (!pathSet.has(path)) projectGitRepoProbeRef.current.delete(path);
+      }
+      if (!changed) return current;
+      projectGitReposRef.current = next;
+      return next;
+    });
+
+    const missing = paths.filter(
+      (path) => projectGitReposRef.current[path] === undefined && !projectGitRepoProbeRef.current.has(path),
+    );
+    if (missing.length === 0) return;
+
+    for (const path of missing) {
+      projectGitRepoProbeRef.current.add(path);
+      getProjectGitSummary(path)
+        .then((summary) => {
+          handleProjectGitRepoDetected(path, summary.isRepo);
+        })
+        .catch(() => {
+          handleProjectGitRepoDetected(path, false);
+        })
+        .finally(() => {
+          projectGitRepoProbeRef.current.delete(path);
+        });
+    }
+  }, [handleProjectGitRepoDetected, projectGitProbePathsKey]);
 
   const {
     unreadSessionIds,
@@ -962,6 +1034,8 @@ export default function App() {
             open={rightSidebarOpen}
             liveState={liveRuntimeState}
             filesReloadKey={rightSidebarFilesReloadKey}
+            projectGitRepos={projectGitRepos}
+            onProjectGitRepoDetected={handleProjectGitRepoDetected}
             onSelectThreadChatSession={(session) => {
               setSelectedProject(null);
               setSelectedThread(null);
@@ -991,6 +1065,8 @@ export default function App() {
           filesSubview={filesSubview}
           onFilesSubviewChange={setFilesSubview}
           projectFilesReloadKey={rightSidebarFilesReloadKey}
+          projectGitRepos={projectGitRepos}
+          onProjectGitRepoDetected={handleProjectGitRepoDetected}
           selectedProjectFileRequest={currentProjectFileSelection}
           onOpenProjectFile={handleOpenProjectFile}
           liveState={liveRuntimeState}
