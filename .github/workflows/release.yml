@@ -24,7 +24,8 @@ permissions:
   contents: read
 
 env:
-  SESSIO_PI_AGENT_RUST_VERSION: v0.1.17
+  SESSIO_ASTRA_PI_AGENT_RUST_VERSION: v0.1.18
+  NODE_OPTIONS: --max-old-space-size=6144
 
 jobs:
   build-macos:

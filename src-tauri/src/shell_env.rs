@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 #[cfg(windows)]
 use std::path::Path;
 use std::process::{Command, Stdio};
+#[cfg(not(windows))]
 use std::time::Duration;
 #[cfg(not(windows))]
 use std::time::Instant;
@@ -9,6 +10,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 
 const SHELL_ENV_TIMEOUT_NOTE: &str = "shell env import skipped";
+#[cfg(not(windows))]
 const SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn import_login_shell_env() {
@@ -217,6 +219,7 @@ fn merged_path_with_separator(
     (!parts.is_empty()).then(|| parts.join(&separator.to_string()))
 }
 
+#[cfg(not(windows))]
 fn parse_env0(bytes: &[u8]) -> BTreeMap<String, String> {
     bytes
         .split(|byte| *byte == 0)
