@@ -859,7 +859,7 @@ function ProjectSourceControlPanel({
     staged: true,
     changes: true,
     untracked: true,
-    history: true,
+    history: false,
   });
   const requestIdRef = useRef(0);
   const graphOffsetRef = useRef(0);
