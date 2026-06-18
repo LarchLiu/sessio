@@ -1,5 +1,5 @@
-import { type Dispatch, type SetStateAction } from "react";
-import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo } from "../api";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import type { Agent, AssistantInfo, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo } from "../api";
 import type { ActiveMessageMeta } from "../pages/ChatPage";
 import type { ChatFilesSubview } from "./ChatFilesView";
 import ChatPage from "../pages/ChatPage";
@@ -14,6 +14,7 @@ import type {
   LiveRuntimeAction,
   LiveRuntimeState,
 } from "../runtimeChat";
+import { listAssistants } from "../api";
 
 export default function AppMain({
   activeProject,
@@ -96,6 +97,7 @@ export default function AppMain({
   onActiveMessageMeta: (meta: ActiveMessageMeta) => void;
   onError: (error: string | null) => void;
 }) {
+  const [projectAssistants, setProjectAssistants] = useState<Record<string, AssistantInfo[]>>({});
   const addPendingSession = (pending: PendingNewChatSession) => {
     setPendingNewChats((prev) => ({
       ...prev,
@@ -129,12 +131,39 @@ export default function AppMain({
     onError,
   });
 
+  useEffect(() => {
+    const projectIds = Array.from(new Set([
+      activeProject?.id,
+      selectedSessionProject?.id,
+    ].filter((value): value is string => Boolean(value))));
+    if (projectIds.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      projectIds.map(async (projectId) => [projectId, await listAssistants(projectId)] as const),
+    )
+      .then((entries) => {
+        if (cancelled) return;
+        setProjectAssistants((current) => {
+          const next = { ...current };
+          for (const [projectId, assistants] of entries) next[projectId] = assistants;
+          return next;
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) onError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject?.id, onError, selectedSessionProject?.id]);
+
   if (activeProject) {
     return (
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {selectedThreadId && detailRoute === "threadMultiSessionChat" ? (
           <ThreadMultiSessionChatPage
             project={activeProject}
+            assistants={projectAssistants[activeProject.id] ?? []}
             threadId={selectedThreadId}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
@@ -207,6 +236,7 @@ export default function AppMain({
         {detailRoute !== "threadChat" && (
           <ChatPage
             session={selected}
+            assistants={selectedSessionProject ? (projectAssistants[selectedSessionProject.id] ?? []) : []}
             viewMode={viewMode}
             chatView={chatView}
             filesSubview={filesSubview}
@@ -236,6 +266,7 @@ export default function AppMain({
         {detailRoute === "threadChat" && (
           <ThreadChatPage
             session={selected}
+            assistants={selectedSessionProject ? (projectAssistants[selectedSessionProject.id] ?? []) : []}
             viewMode={viewMode}
             projectFilesReloadKey={projectFilesReloadKey}
             liveState={liveState}

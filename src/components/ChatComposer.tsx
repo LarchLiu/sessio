@@ -9,6 +9,7 @@ import {
   ChevronDown,
   LoaderCircle,
   Plus,
+  Square,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
@@ -41,8 +42,11 @@ export default function ChatComposer({
   sendButtonLabel,
   sendButtonBusy,
   bottomRow,
+  className,
   runtimeControlsDisabled = false,
   canSend,
+  active = false,
+  onCancel,
   onSend,
   onTextareaKeyDown,
 }: {
@@ -57,8 +61,11 @@ export default function ChatComposer({
   sendButtonLabel?: string;
   sendButtonBusy?: boolean;
   bottomRow?: ReactNode;
+  className?: string;
   runtimeControlsDisabled?: boolean;
   canSend?: boolean;
+  active?: boolean;
+  onCancel?: () => void;
   onSend: () => void;
   onTextareaKeyDown?: (event: import("react").KeyboardEvent<HTMLTextAreaElement>) => boolean;
 }) {
@@ -68,8 +75,15 @@ export default function ChatComposer({
   const imeCompositionRef = useRef(createImeCompositionState());
   const sendEnabled = canSend ?? composer.canSend;
   const sendBusy = sendButtonBusy ?? composer.sending;
+  const canCancel = active && !sendBusy;
   const sendLabel =
-    sendButtonLabel ?? (sendBusy ? t("new_chat.sending") : t("new_chat.send"));
+    sendButtonLabel ?? (
+      active
+        ? "Stop"
+        : sendBusy
+          ? t("new_chat.sending")
+          : t("new_chat.send")
+    );
   const attachmentOptions = attachmentMenuOptions({
     supportsImageAttachments: composer.supportsImageAttachments,
     supportsEmbeddedContext: composer.supportsEmbeddedContext,
@@ -77,6 +91,7 @@ export default function ChatComposer({
     fileLabel: t("new_chat.add_files"),
   });
   const outerClassName = variant === "chat" ? "w-full" : "w-full max-w-[730px]";
+  const rootClassName = className ? `${outerClassName} ${className}` : outerClassName;
   const controlsClassName =
     "flex h-12 items-center justify-between gap-3 px-3 pb-2 " +
     (bottomRow ? "border-b border-ink/10" : "");
@@ -101,7 +116,7 @@ export default function ChatComposer({
   }, [composer, runtimeControlsDisabled]);
 
   return (
-    <div className={outerClassName}>
+    <div className={rootClassName}>
       {title && (
         <h1 className="mb-11 text-center text-[28px] font-medium leading-tight tracking-normal text-ink/92">
           {title}
@@ -197,8 +212,8 @@ export default function ChatComposer({
             <Tooltip content={sendLabel} placement="top">
               <button
                 type="button"
-                disabled={!sendEnabled}
-                onClick={onSend}
+                disabled={active ? !canCancel : !sendEnabled}
+                onClick={active ? onCancel : onSend}
                 className={
                   sendButtonVariant === "astra"
                     ? "astra-send-button relative flex h-7 w-7 items-center justify-center overflow-hidden rounded-full " +
@@ -207,7 +222,9 @@ export default function ChatComposer({
                 }
                 aria-label={sendLabel}
               >
-                {sendBusy ? (
+                {active ? (
+                  <Square className={(sendButtonVariant === "astra" ? "relative z-10 h-3.5 w-3.5 fill-current" : "h-3.5 w-3.5 fill-current")} />
+                ) : sendBusy ? (
                   <LoaderCircle className={(sendButtonVariant === "astra" ? "relative z-10 h-4 w-4" : "h-5 w-5") + " animate-spin"} />
                 ) : sendButtonVariant === "astra" ? (
                   <Sparkles className="relative z-10 h-4 w-4" />

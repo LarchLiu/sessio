@@ -52,6 +52,7 @@ export interface ChatComposerStartOptions {
   workspacePath: string;
   projectName: string;
   extraContext?: string | null;
+  assistantPrompt?: string | null;
   pendingSession?: PendingSessionExtras;
   onPendingCreated?: (session: PendingNewChatSession) => void;
 }
@@ -371,13 +372,15 @@ export function useChatComposer({
       };
       onPendingSession(pendingSession);
       options.onPendingCreated?.(pendingSession);
-      const assistantPrompt = options.extraContext?.trim()
-        ? buildSessioAssistantPromptBlock(options.extraContext, {
+      const assistantPrompt = options.assistantPrompt?.trim()
+        ? buildSessioAssistantPromptBlock(options.assistantPrompt, {
           source: "assistant",
         })
         : "";
-      const inputText = assistantPrompt
-        ? `${assistantPrompt}\n\n---\n\n${prompt}`
+      const visibleContext = options.extraContext?.trim() || "";
+      const contextBlocks = [assistantPrompt, visibleContext].filter(Boolean);
+      const inputText = contextBlocks.length > 0
+        ? `${contextBlocks.join("\n\n")}\n\n---\n\n${prompt}`
         : prompt;
       await sendAgentInput(handle.sessioRuntimeSessionId, {
         text: inputText,

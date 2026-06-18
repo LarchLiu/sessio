@@ -321,7 +321,7 @@ export default function NewChatPage({
       await composer.runStartSession(prompt, {
         workspacePath,
         projectName: project.label,
-        extraContext: selectedAssistant?.systemPrompt?.trim() || undefined,
+        assistantPrompt: selectedAssistant?.systemPrompt?.trim() || undefined,
       });
       return;
     }

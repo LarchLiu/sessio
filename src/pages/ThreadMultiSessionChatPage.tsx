@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import type {
   Agent,
+  AssistantInfo,
   AstraEvent,
   AstraHandle,
   PlanRoundInfo,
@@ -95,6 +96,7 @@ const THREAD_CONTEXT_NAV_SETTLE_MS = 140;
 
 export default function ThreadMultiSessionChatPage({
   project,
+  assistants: _assistants,
   threadId,
   liveState,
   runtimeAgents,
@@ -107,6 +109,7 @@ export default function ThreadMultiSessionChatPage({
   onError,
 }: {
   project: ProjectInfo;
+  assistants: AssistantInfo[];
   threadId: string;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];

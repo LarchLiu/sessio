@@ -1,11 +1,13 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { AtSign, Hash, SquareTerminal } from "lucide-react";
 
 export interface ComposerCommandItem {
   key: string;
   label: string;
   description?: string;
   icon?: ReactNode;
+  iconKey?: "slash" | "assistant" | "thread";
 }
 
 export default function ComposerCommandMenu({
@@ -90,9 +92,9 @@ export default function ComposerCommandMenu({
                 (index === activeIndex ? "bg-ink/[0.08] text-ink" : "text-ink/72 hover:text-ink")
               }
             >
-              {item.icon && (
+              {(item.icon || item.iconKey) && (
                 <span className="flex h-4 w-4 shrink-0 items-center justify-center text-ink/55">
-                  {item.icon}
+                  {item.icon ?? defaultCommandItemIcon(item.iconKey)}
                 </span>
               )}
               <span className="min-w-0 flex-1">
@@ -110,4 +112,10 @@ export default function ComposerCommandMenu({
     </>,
     document.body,
   );
+}
+
+function defaultCommandItemIcon(kind: ComposerCommandItem["iconKey"]): ReactNode {
+  if (kind === "assistant") return <AtSign className="h-4 w-4" />;
+  if (kind === "thread") return <Hash className="h-4 w-4" />;
+  return <SquareTerminal className="h-4 w-4" />;
 }

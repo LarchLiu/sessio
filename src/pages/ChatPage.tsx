@@ -2,7 +2,6 @@ import {
   memo,
   isValidElement,
   startTransition,
-  forwardRef,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -12,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ArrowDownToLine, ArrowUp, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Plus, Search, SearchCheck, Square, Pen, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
+import { ArrowDownToLine, BookOpen, Brain, Check, CheckSquare, ChevronDown, ChevronRight, ClipboardList, Code2, Copy, FileSearch, FileText, FolderOpen, Globe, Image as ImageIcon, ListChecks, ListTodo, LoaderCircle, MessageCircleQuestionMark, MoveRight, Pen, Search, SearchCheck, Square, SquareTerminal, Trash2, UserKey, Wrench } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
@@ -29,6 +28,7 @@ import "katex/dist/katex.min.css";
 import {
   type AgentAttachment,
   type Agent,
+  type AssistantInfo,
   getRuntimeAgentSessionConfig,
   type SessionHistorySnapshotGroup,
   type SessionHistoryTurn,
@@ -53,14 +53,9 @@ import {
 } from "../api";
 import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
+import SharedChatComposer, { resizeTextareaToContent } from "../components/ChatComposer";
 import ComposerCommandMenu, { type ComposerCommandItem } from "../components/ComposerCommandMenu";
 import { renderMarkdownInput } from "../components/markdownInput";
-import {
-  createImeCompositionState,
-  getImeKeyboardDisposition,
-  markImeCompositionEnd,
-  markImeCompositionStart,
-} from "../components/imeInput";
 import {
   agentModelSelectOptions,
   agentModelSelectValue,
@@ -68,13 +63,9 @@ import {
   parseAgentModelSelectValue,
   runtimeEffortOptions,
 } from "../components/AgentSelect";
-import type { InlineMenuSelectOption } from "../components/InlineMenuSelect";
-import { RuntimeEffortControl, RuntimeMenuSelect, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
+import { RuntimeEffortControl, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
 import {
-  attachmentMenuOptions,
   type ComposerAttachment,
-  ComposerAttachmentMenu,
-  ComposerAttachmentPreviewList,
   useComposerAttachments,
 } from "../components/ComposerAttachments";
 import {
@@ -84,6 +75,7 @@ import {
 import {
   useComposerInputHistory,
 } from "../hooks/useComposerInputHistory";
+import type { ChatComposerController } from "../hooks/useChatComposer";
 import { localeTag, useI18n } from "../i18n";
 import type { ChatView, ViewMode } from "../navigation";
 import {
@@ -142,6 +134,7 @@ import SessionFileEditsCard from "../components/SessionFileEditsCard";
 
 export interface ChatPageProps {
   session: SessionInfo;
+  assistants?: AssistantInfo[];
   viewMode: ViewMode;
   chatView?: ChatView;
   filesSubview?: ChatFilesSubview;
@@ -653,6 +646,7 @@ export function AcpTranscriptPanel({
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const composerAttachmentButtonRef = useRef<HTMLButtonElement>(null);
   const activeRuntimeTurnIdRef = useRef<string | null>(null);
   const fallbackRuntimeSequenceRef = useRef(0);
   const liveSession = runtimeSessionId
@@ -1450,6 +1444,62 @@ export function AcpTranscriptPanel({
       setComposerError(String(err));
     }
   }, [activeTurnId, runtimeSessionId]);
+  const chatComposerController = useMemo<ChatComposerController>(() => ({
+    text: composerText,
+    setText: setComposerText,
+    textareaRef: composerRef,
+    attachmentButtonRef: composerAttachmentButtonRef,
+    attachmentMenuOpen: false,
+    setAttachmentMenuOpen: () => undefined,
+    attachmentPreview: null,
+    attachments,
+    supportsAttachments,
+    supportsImageAttachments,
+    supportsEmbeddedContext,
+    removeAttachment,
+    pickAttachments,
+    pasteAttachments,
+    sending,
+    composerError,
+    setComposerError,
+    canSend: composerText.trim().length > 0 && !sending && !activeTurnId,
+    canSendWithWorkspace: (path: string | null | undefined) => Boolean(path),
+    selectedAgent: composerAgent,
+    selectedRuntimeAgent: selectedComposerAgent,
+    selectedModel: composerModel,
+    selectedEffort: composerEffort,
+    selectedAgentModelValue,
+    permissionMode: composerPermissionMode,
+    agentModelOptions,
+    permissionOptions: composerPermissionOptions,
+    handleAgentModelChange: handleComposerAgentModelChange,
+    handlePermissionModeChange: handleComposerPermissionChange,
+    applyAgentSelection: () => undefined,
+    runStartSession: async () => false,
+  }), [
+    activeTurnId,
+    agentModelOptions,
+    attachments,
+    composerAttachmentButtonRef,
+    composerAgent,
+    composerEffort,
+    composerError,
+    composerModel,
+    composerPermissionMode,
+    composerText,
+    composerPermissionOptions,
+    handleComposerAgentModelChange,
+    handleComposerPermissionChange,
+    pasteAttachments,
+    pickAttachments,
+    removeAttachment,
+    selectedAgentModelValue,
+    selectedComposerAgent,
+    sending,
+    supportsAttachments,
+    supportsEmbeddedContext,
+    supportsImageAttachments,
+  ]);
 
   const sessionFileEdits = useMemo(
     () => aggregateSessionFileEdits(acpViewModel),
@@ -1609,31 +1659,16 @@ export function AcpTranscriptPanel({
           />
         </ComposerTopAttachments>
       )}
-      <ChatComposer
-        ref={composerRef}
-        value={composerText}
-        disabled={sending}
+      <SharedChatComposer
+        composer={chatComposerController}
+        variant="chat"
+        className="shrink-0 px-10 pb-4 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80"
+        canSend={composerText.trim().length > 0 && !sending && !activeTurnId}
         active={Boolean(activeTurnId)}
-        sending={sending}
-        error={composerError}
-        agentModelValue={selectedAgentModelValue}
-        agentModelOptions={agentModelOptions}
-        permissionMode={composerPermissionMode}
-        permissionOptions={composerPermissionOptions}
+        onCancel={() => void handleCancelTurn()}
         placeholder="Ask, Search or Chat..."
-        attachments={attachments}
-        supportsAttachments={supportsAttachments}
-        supportsImageAttachments={supportsImageAttachments}
-        supportsEmbeddedContext={supportsEmbeddedContext}
-        onRemoveAttachment={removeAttachment}
-        onPickAttachments={pickAttachments}
-        onPasteAttachments={pasteAttachments}
-        onAgentModelChange={handleComposerAgentModelChange}
-        onPermissionChange={handleComposerPermissionChange}
-        onChange={setComposerText}
         onTextareaKeyDown={handleComposerKeyDown}
         onSend={handleSend}
-        onCancel={handleCancelTurn}
       />
       {slashMenuOpen && slashTrigger && composerRef.current && (
         <ComposerCommandMenu
@@ -1964,216 +1999,6 @@ function RoleNav({
       })}
     </div>
   );
-}
-
-const ChatComposer = forwardRef<HTMLTextAreaElement, {
-  value: string;
-  disabled: boolean;
-  active: boolean;
-  sending: boolean;
-  error: string | null;
-  agentModelValue: string;
-  agentModelOptions: InlineMenuSelectOption[];
-  permissionMode: string;
-  permissionOptions: InlineMenuSelectOption[];
-  placeholder: string;
-  attachments: ComposerAttachment[];
-  supportsAttachments: boolean;
-  supportsImageAttachments: boolean;
-  supportsEmbeddedContext: boolean;
-  onRemoveAttachment: (path: string) => void;
-  onPickAttachments: (kind: "images" | "files") => Promise<void>;
-  onPasteAttachments: (clipboardData: DataTransfer | null) => boolean;
-  onAgentModelChange: (value: string) => void;
-  onPermissionChange: (permissionMode: string) => void;
-  onChange: (value: string) => void;
-  onTextareaKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => boolean;
-  onSend: () => void;
-  onCancel: () => void;
-}>(function ChatComposer(
-  {
-    value,
-    disabled,
-    active,
-    sending,
-    error,
-    agentModelValue,
-    agentModelOptions,
-    permissionMode,
-    permissionOptions,
-    placeholder,
-    attachments,
-    supportsAttachments,
-    supportsImageAttachments,
-    supportsEmbeddedContext,
-    onRemoveAttachment,
-    onPickAttachments,
-    onPasteAttachments,
-    onAgentModelChange,
-    onPermissionChange,
-    onChange,
-    onTextareaKeyDown,
-    onSend,
-    onCancel,
-  },
-  ref,
-) {
-  const { t } = useI18n();
-  const canSend = value.trim().length > 0 && !disabled && !sending && !active;
-  const canCancel = active && !disabled && !sending;
-  const disabledTitle = disabled ? "Select a project-backed session to chat" : undefined;
-  const innerRef = useRef<HTMLTextAreaElement | null>(null);
-  const attachmentButtonRef = useRef<HTMLButtonElement>(null);
-  const imeCompositionRef = useRef(createImeCompositionState());
-  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
-  const attachmentOptions = attachmentMenuOptions({
-    supportsImageAttachments,
-    supportsEmbeddedContext,
-    imageLabel: t("new_chat.add_images"),
-    fileLabel: t("new_chat.add_files"),
-  });
-
-  useEffect(() => {
-    if (!supportsAttachments) setAttachmentMenuOpen(false);
-  }, [supportsAttachments]);
-  useLayoutEffect(() => {
-    if (innerRef.current) resizeTextareaToContent(innerRef.current);
-  }, [value]);
-  const setTextareaRef = (el: HTMLTextAreaElement | null) => {
-    innerRef.current = el;
-    if (typeof ref === "function") {
-      ref(el);
-    } else if (ref) {
-      ref.current = el;
-    }
-    if (el) resizeTextareaToContent(el);
-  };
-  return (
-    <div className="shrink-0 px-10 pb-4 bg-gradient-to-t from-surface-panel via-surface-panel to-surface-panel/80">
-      <div className="w-full">
-        {error && (
-          <div className="mb-2 rounded-md border border-status-error/25 bg-status-error/10 px-3 py-2 text-body-sm text-status-error">
-            {error}
-          </div>
-        )}
-        <div
-          className={
-            "overflow-hidden rounded-2xl bg-ink/[0.055] shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.08)] transition-shadow " +
-            (error
-              ? "shadow-[inset_0_0_0_1px_rgb(var(--color-status-error)/0.35)]"
-              : "focus-within:shadow-[inset_0_0_0_1px_rgb(var(--color-ink)/0.20)]")
-          }
-          title={disabledTitle}
-        >
-          <ComposerAttachmentPreviewList
-            attachments={attachments}
-            onRemove={onRemoveAttachment}
-          />
-          <textarea
-            ref={setTextareaRef}
-            value={value}
-            disabled={disabled}
-            placeholder={placeholder}
-            rows={2}
-            onChange={(event) => {
-              resizeTextareaToContent(event.currentTarget);
-              onChange(event.target.value);
-            }}
-            onInput={(event) => resizeTextareaToContent(event.currentTarget)}
-            onPaste={(event) => {
-              if (!onPasteAttachments(event.clipboardData)) return;
-              event.preventDefault();
-            }}
-            onCompositionStart={() => markImeCompositionStart(imeCompositionRef.current)}
-            onCompositionEnd={() => markImeCompositionEnd(imeCompositionRef.current)}
-            onKeyDown={(event) => {
-              const imeDisposition = getImeKeyboardDisposition(event, imeCompositionRef.current);
-              if (imeDisposition.shouldSkipShortcut) {
-                if (imeDisposition.shouldPreventDefault) event.preventDefault();
-                return;
-              }
-              if (onTextareaKeyDown?.(event)) return;
-              if (event.key !== "Enter" || event.shiftKey) {
-                return;
-              }
-              event.preventDefault();
-              if (canSend) onSend();
-            }}
-            className="chat-composer-textarea block w-full resize-none bg-transparent px-3.5 py-3.5 text-body leading-5 text-ink/88 placeholder:text-ink/38 outline-none disabled:cursor-not-allowed disabled:opacity-55"
-          />
-          <div className="flex h-12 items-center justify-between gap-3 px-3 pb-2">
-            <div className="flex min-w-0 items-center gap-3">
-              {supportsAttachments && (
-                <Tooltip content={t("new_chat.add_context")} placement="top">
-                  <button
-                    ref={attachmentButtonRef}
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => setAttachmentMenuOpen((open) => !open)}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink/55 transition hover:bg-ink/8 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
-                    aria-label={t("new_chat.add_context")}
-                    aria-expanded={attachmentMenuOpen}
-                    aria-haspopup="menu"
-                  >
-                    <Plus className="h-5 w-5" />
-                  </button>
-                </Tooltip>
-              )}
-              {permissionOptions.length > 0 && (
-                <RuntimeMenuSelect
-                  value={permissionMode}
-                  options={permissionOptions}
-                  disabled={disabled}
-                  ariaLabel="Default permissions"
-                  onChange={onPermissionChange}
-                  menuPlacement="top"
-                />
-              )}
-            </div>
-            <div className="flex shrink-0 items-center gap-2.5">
-              <RuntimeMenuSelect
-                value={agentModelValue}
-                options={agentModelOptions}
-                disabled={disabled || sending || active}
-                ariaLabel={t("new_chat.agent")}
-                onChange={onAgentModelChange}
-                menuPlacement="top"
-              />
-              <button
-                type="button"
-                disabled={active ? !canCancel : !canSend}
-                onClick={active ? onCancel : onSend}
-                className="flex h-7 w-7 items-center justify-center rounded-full bg-ink/70 text-[rgb(var(--color-bg-panel))] transition hover:bg-ink disabled:cursor-not-allowed disabled:bg-ink/25 disabled:text-[rgb(var(--color-bg-panel)/0.7)]"
-                aria-label={active ? "Stop" : sending ? t("new_chat.sending") : t("new_chat.send")}
-              >
-                {active ? <Square className="h-3.5 w-3.5 fill-current" /> : <ArrowUp className="h-5 w-5" />}
-              </button>
-            </div>
-          </div>
-        </div>
-        {attachmentMenuOpen && attachmentButtonRef.current && (
-          <ComposerAttachmentMenu
-            anchor={attachmentButtonRef.current}
-            options={attachmentOptions}
-            onClose={() => setAttachmentMenuOpen(false)}
-            onSelect={(key) => {
-              void onPickAttachments(key);
-            }}
-          />
-        )}
-      </div>
-    </div>
-  );
-});
-
-function resizeTextareaToContent(el: HTMLTextAreaElement) {
-  el.style.height = "auto";
-  const lineHeight = parseFloat(getComputedStyle(el).lineHeight) || 20;
-  const minHeight = lineHeight * 2;
-  const maxHeight = lineHeight * 6;
-  const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
-  el.style.height = `${nextHeight}px`;
-  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
 }
 
 function AcpSessionStatePanel({
