@@ -364,13 +364,13 @@ function FilePickerPopover({
       style={{
         top: pos.top,
         left: pos.left,
-        maxHeight: pos.maxHeight,
         width: pos.width,
       }}
       className="fixed z-50 overflow-hidden rounded-md border border-ink/[0.10] bg-surface-panel shadow-[0_8px_24px_rgba(0,0,0,0.18)]"
     >
       <ScrollArea
-        className="max-h-full"
+        className="overscroll-contain"
+        style={{ maxHeight: Math.min(pos.maxHeight, 360) }}
         viewportClassName="py-1"
         persistScrollbars
       >

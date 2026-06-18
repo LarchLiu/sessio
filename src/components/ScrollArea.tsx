@@ -1,6 +1,7 @@
 import {
+  type CSSProperties,
   forwardRef,
-  ReactNode,
+  type ReactNode,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -22,6 +23,7 @@ type DragState = {
 
 type Props = {
   className?: string;
+  style?: CSSProperties;
   viewportClassName?: string;
   children: ReactNode;
   persistScrollbars?: boolean;
@@ -32,6 +34,7 @@ type Props = {
 const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
   {
     className,
+    style,
     viewportClassName,
     children,
     persistScrollbars = false,
@@ -214,6 +217,7 @@ const ScrollArea = forwardRef<HTMLDivElement, Props>(function ScrollArea(
 
   return (
     <div
+      style={style}
       className={"relative flex min-h-0 flex-col overflow-hidden " + (className ?? "")}
       onPointerEnter={onRootPointerEnter}
       onPointerLeave={onRootPointerLeave}
