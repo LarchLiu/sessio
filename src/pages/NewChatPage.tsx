@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Brain,
   Check,
@@ -68,6 +68,7 @@ interface NewChatPageProps {
   liveState: LiveRuntimeState;
   dispatchLiveEvent: React.Dispatch<LiveRuntimeAction>;
   onError: (error: string | null) => void;
+  onProjectChange?: (projectKey: string | null) => void;
   onPendingSession: (session: PendingNewChatSession) => void;
   onThreadCreated: (project: ProjectGroup, thread: ThreadInfo) => void;
 }
@@ -81,11 +82,13 @@ export default function NewChatPage({
   liveState,
   dispatchLiveEvent,
   onError,
+  onProjectChange,
   onPendingSession,
   onThreadCreated,
 }: NewChatPageProps) {
   const { t } = useI18n();
   const [projectKeyValue, setProjectKeyValue] = useState(() => initialProjectKey ?? projects[0]?.key ?? "");
+  const lastAppliedInitialProjectKeyRef = useRef<string | null>(null);
   const [mode, setMode] = useState<NewChatMode>("chat");
   const [projectStages, setProjectStages] = useState<ProjectStageInfo[]>([]);
   const [stageOrder, setStageOrder] = useState<string[]>([]);
@@ -224,14 +227,29 @@ export default function NewChatPage({
     if (commandActiveIndex >= commandItems.length) setCommandActiveIndex(0);
   }, [commandActiveIndex, commandItems.length]);
 
+  const projectKeys = useMemo(() => new Set(projects.map((p) => p.key)), [projects]);
+  const handleProjectChange = useCallback((nextProjectKey: string) => {
+    setProjectKeyValue(nextProjectKey);
+    onProjectChange?.(nextProjectKey || null);
+  }, [onProjectChange]);
+
   useEffect(() => {
-    if (initialProjectKey && projects.some((p) => p.key === initialProjectKey)) {
-      setProjectKeyValue(initialProjectKey);
+    if (!initialProjectKey) {
+      lastAppliedInitialProjectKeyRef.current = null;
       return;
     }
-    if (projectKeyValue && projects.some((p) => p.key === projectKeyValue)) return;
-    setProjectKeyValue(projects[0]?.key ?? "");
-  }, [initialProjectKey, projectKeyValue, projects]);
+    if (!projectKeys.has(initialProjectKey)) return;
+    if (initialProjectKey === lastAppliedInitialProjectKeyRef.current) return;
+    lastAppliedInitialProjectKeyRef.current = initialProjectKey;
+    setProjectKeyValue(initialProjectKey);
+  }, [initialProjectKey, projectKeys]);
+
+  useEffect(() => {
+    if (projectKeyValue && projectKeys.has(projectKeyValue)) return;
+    const fallbackProjectKey = projects[0]?.key ?? "";
+    setProjectKeyValue(fallbackProjectKey);
+    onProjectChange?.(fallbackProjectKey || null);
+  }, [onProjectChange, projectKeyValue, projectKeys, projects]);
 
   useEffect(() => {
     let cancelled = false;
@@ -452,7 +470,7 @@ export default function NewChatPage({
                 <RuntimeMenuSelect
                   ariaLabel={t("new_chat.project")}
                   value={projectKeyValue}
-                  onChange={setProjectKeyValue}
+                  onChange={handleProjectChange}
                   disabled={projects.length === 0}
                   options={projects.map((p) => ({
                     value: p.key,

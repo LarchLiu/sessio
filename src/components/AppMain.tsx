@@ -167,6 +167,7 @@ export default function AppMain({
         liveState={liveState}
         dispatchLiveEvent={dispatchLiveEvent}
         onError={onError}
+        onProjectChange={setNewChatProjectKey}
         onPendingSession={addPendingSession}
         onThreadCreated={(projectGroup, thread) => {
           setSelected(null);
