@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, Code2, Eye, Files, FileText, Pencil } from "lucide-react";
+import { ChevronDown, Code2, Eye, Files, Pencil } from "lucide-react";
 import type { FileEditItem } from "../acpRenderItems";
 import { fileEditKey, fileEditMatchesPath } from "../acpRenderItems";
 import {
   isPlainEditorEditableDocumentPath,
+  isPlainEditorMarkdownDocumentPath,
 } from "../hooks/plainEditorFileTypes";
 import { useFileContent, languageFromPath } from "../hooks/useFileContent";
 import { useFileGitDiff } from "../hooks/useFileGitDiff";
@@ -16,6 +17,7 @@ import Tooltip from "./Tooltip";
 import "./plain-editor-theme.css";
 
 export type ChatFilesSubview = "code" | "plain";
+type ChatFilesDisplayMode = "code" | PlainEditorMode;
 
 export interface ChatFilesViewProps {
   edits: FileEditItem[];
@@ -46,7 +48,6 @@ export default function ChatFilesView({
   );
   const [pickerOpen, setPickerOpen] = useState(false);
   const [plainEditorMode, setPlainEditorMode] = useState<PlainEditorMode>("edit");
-  const [plainPreviewAvailable, setPlainPreviewAvailable] = useState(false);
   const pickerAnchorRef = useRef<HTMLButtonElement>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
   const plainEditorLeaveCheckRef = useRef<(() => Promise<boolean>) | null>(null);
@@ -98,9 +99,13 @@ export default function ChatFilesView({
     : "";
   const selectedPath = fileContent.path ?? selected?.displayPath ?? selected?.path ?? null;
   const documentFile = isPlainEditorEditableDocumentPath(selectedPath);
+  const previewDocument = isPlainEditorMarkdownDocumentPath(selectedPath);
   const effectiveSubview: ChatFilesSubview = documentFile ? subview : "code";
+  const effectivePlainEditorMode: PlainEditorMode =
+    previewDocument ? plainEditorMode : "edit";
+  const displayMode: ChatFilesDisplayMode =
+    effectiveSubview === "plain" ? effectivePlainEditorMode : "code";
   const showDocumentControls = documentFile;
-  const showPlainPreviewControls = effectiveSubview === "plain" && plainPreviewAvailable;
 
   useEffect(() => {
     if (effectiveSubview !== "plain" && plainEditorMode !== "edit") {
@@ -109,8 +114,30 @@ export default function ChatFilesView({
   }, [effectiveSubview, plainEditorMode]);
 
   useEffect(() => {
-    setPlainPreviewAvailable(false);
-  }, [selectedKey, effectiveSubview]);
+    if (!previewDocument && plainEditorMode === "preview") {
+      setPlainEditorMode("edit");
+    }
+  }, [plainEditorMode, previewDocument]);
+
+  const handleDisplayModeChange = useCallback(async (nextMode: ChatFilesDisplayMode) => {
+    if (nextMode === displayMode) return;
+    if (nextMode === "preview" && !previewDocument) return;
+
+    if (nextMode === "code") {
+      if (effectiveSubview === "plain" && plainEditorLeaveCheckRef.current) {
+        const canLeave = await plainEditorLeaveCheckRef.current();
+        if (!canLeave) return;
+      }
+      setPlainEditorMode("edit");
+      onSubviewChange?.("code");
+      return;
+    }
+
+    setPlainEditorMode(nextMode);
+    if (effectiveSubview !== "plain") {
+      onSubviewChange?.("plain");
+    }
+  }, [displayMode, effectiveSubview, onSubviewChange, previewDocument]);
 
   if (edits.length === 0) {
     return (
@@ -143,16 +170,13 @@ export default function ChatFilesView({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {showDocumentControls && (
-            <FileModeToggle
-              value={effectiveSubview}
+            <FileDisplayModeToggle
+              value={displayMode}
+              previewAvailable={previewDocument}
               disabled={!onSubviewChange}
-              onChange={(next) => onSubviewChange?.(next)}
-            />
-          )}
-          {showPlainPreviewControls && (
-            <PlainEditorModeToggle
-              value={plainEditorMode}
-              onChange={setPlainEditorMode}
+              onChange={(next) => {
+                void handleDisplayModeChange(next);
+              }}
             />
           )}
         </div>
@@ -180,12 +204,11 @@ export default function ChatFilesView({
             mtimeMs={fileContent.mtimeMs}
             contentVersion={fileContent.contentVersion}
             editingLocked={editingLocked}
-            plainEditorMode={plainEditorMode}
+            plainEditorMode={effectivePlainEditorMode}
             onSaved={fileContent.applyLocalSave}
             onPlainEditorLeaveCheckChange={(handle) => {
               plainEditorLeaveCheckRef.current = handle;
             }}
-            onPlainEditorModeAvailabilityChange={setPlainPreviewAvailable}
             gitDiff={fileGitDiff.diff}
             savedScrollTop={
               selectedKey ? (scrollPositionsRef.current[selectedKey] ?? 0) : 0
@@ -214,78 +237,46 @@ export default function ChatFilesView({
   );
 }
 
-function FileModeToggle({
+function FileDisplayModeToggle({
   value,
+  previewAvailable,
   disabled = false,
   onChange,
 }: {
-  value: ChatFilesSubview;
+  value: ChatFilesDisplayMode;
+  previewAvailable: boolean;
   disabled?: boolean;
-  onChange: (value: ChatFilesSubview) => void;
+  onChange: (value: ChatFilesDisplayMode) => void;
 }) {
   const { t } = useI18n();
+  const options: Array<{
+    value: ChatFilesDisplayMode;
+    label: string;
+    Icon: typeof Code2;
+  }> = [
+    { value: "code", label: t("header.view_code"), Icon: Code2 },
+    { value: "edit", label: t("chat.files.editor_edit_mode"), Icon: Pencil },
+  ];
+  if (previewAvailable) {
+    options.push({ value: "preview", label: t("chat.files.editor_preview_mode"), Icon: Eye });
+  }
+
   return (
     <div className="sessio-file-row-toggle" role="group" aria-label={t("chat.files.file_mode")}>
-      <Tooltip content={t("header.view_code")} placement="bottom">
-        <button
-          type="button"
-          aria-label={t("header.view_code")}
-          aria-pressed={value === "code"}
-          disabled={disabled}
-          className="sessio-file-row-toggle-button"
-          onClick={() => onChange("code")}
-        >
-          <Code2 aria-hidden="true" className="h-3.5 w-3.5" />
-        </button>
-      </Tooltip>
-      <Tooltip content={t("header.view_plain")} placement="bottom">
-        <button
-          type="button"
-          aria-label={t("header.view_plain")}
-          aria-pressed={value === "plain"}
-          disabled={disabled}
-          className="sessio-file-row-toggle-button"
-          onClick={() => onChange("plain")}
-        >
-          <FileText aria-hidden="true" className="h-3.5 w-3.5" />
-        </button>
-      </Tooltip>
-    </div>
-  );
-}
-
-function PlainEditorModeToggle({
-  value,
-  onChange,
-}: {
-  value: PlainEditorMode;
-  onChange: (value: PlainEditorMode) => void;
-}) {
-  const { t } = useI18n();
-  return (
-    <div className="sessio-file-row-toggle" role="group" aria-label={t("chat.files.editor_mode")}>
-      <Tooltip content={t("chat.files.editor_edit_mode")} placement="bottom">
-        <button
-          type="button"
-          aria-label={t("chat.files.editor_edit_mode")}
-          aria-pressed={value === "edit"}
-          className="sessio-file-row-toggle-button"
-          onClick={() => onChange("edit")}
-        >
-          <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
-        </button>
-      </Tooltip>
-      <Tooltip content={t("chat.files.editor_preview_mode")} placement="bottom">
-        <button
-          type="button"
-          aria-label={t("chat.files.editor_preview_mode")}
-          aria-pressed={value === "preview"}
-          className="sessio-file-row-toggle-button"
-          onClick={() => onChange("preview")}
-        >
-          <Eye aria-hidden="true" className="h-3.5 w-3.5" />
-        </button>
-      </Tooltip>
+      {options.map(({ value: optionValue, label, Icon }) => (
+        <Tooltip key={optionValue} content={label} placement="bottom">
+          <button
+            type="button"
+            aria-label={label}
+            aria-pressed={value === optionValue}
+            disabled={disabled}
+            className="sessio-file-row-toggle-button"
+            onClick={() => onChange(optionValue)}
+          >
+            <Icon aria-hidden="true" className="h-3.5 w-3.5" />
+          </button>
+        </Tooltip>
+      ))}
     </div>
   );
 }

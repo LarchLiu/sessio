@@ -10,12 +10,16 @@ import { Check, Save } from "lucide-react";
 import { Compartment, EditorState, Transaction, type Extension } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
-import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import {
+  HighlightStyle,
+  defaultHighlightStyle,
+  syntaxHighlighting,
+  type TagStyle,
+} from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { writeWorkspaceTextFile } from "../api";
 import {
   isPlainEditorEditableDocumentPath,
-  isPlainEditorMarkdownDocumentPath,
 } from "../hooks/plainEditorFileTypes";
 import { useI18n } from "../i18n";
 import PlainMarkdownPreview from "./PlainMarkdownPreview";
@@ -34,7 +38,6 @@ export interface PlainEditorViewProps {
   editorMode?: PlainEditorMode;
   onSaved: (content: string, mtimeMs: number) => void;
   onPlainEditorLeaveCheckChange?: (handle: (() => Promise<boolean>) | null) => void;
-  onEditorModeAvailabilityChange?: (available: boolean) => void;
 }
 
 type PlainEditorSaveStatus =
@@ -50,66 +53,174 @@ export type PlainEditorMode = "edit" | "preview";
 
 const languageCompartment = new Compartment();
 const editableCompartment = new Compartment();
+const themeCompartment = new Compartment();
 
-const plainEditorTheme = EditorView.theme({
-  "&": {
-    height: "100%",
-    backgroundColor: "transparent",
-    color: "var(--plain-editor-text)",
-    fontFamily: "var(--plain-editor-font-family)",
-    fontSize: "var(--plain-editor-font-size)",
-  },
-  ".cm-scroller": {
-    overflow: "auto",
-    lineHeight: "var(--plain-editor-line-height)",
-    fontFamily: "inherit",
-    scrollbarWidth: "thin",
-    scrollbarColor: "rgb(var(--color-fg) / 0.28) transparent",
-  },
-  ".cm-scroller::-webkit-scrollbar": {
-    width: "8px",
-    height: "8px",
-  },
-  ".cm-scroller::-webkit-scrollbar-track": {
-    backgroundColor: "transparent",
-  },
-  ".cm-scroller::-webkit-scrollbar-thumb": {
-    borderRadius: "999px",
-    backgroundColor: "rgb(var(--color-fg) / 0.28)",
-  },
-  ".cm-scroller::-webkit-scrollbar-thumb:hover": {
-    backgroundColor: "rgb(var(--color-fg) / 0.42)",
-  },
-  ".cm-content": {
-    boxSizing: "border-box",
-    minHeight: "100%",
-    width: "min(var(--plain-editor-max-width), 100%)",
-    margin: "0 auto",
-    padding:
-      "var(--plain-editor-padding-y) var(--plain-editor-padding-x) calc(var(--plain-editor-padding-y) + 40px)",
-    whiteSpace: "pre-wrap",
-    wordBreak: "break-word",
-    caretColor: "var(--plain-editor-heading)",
-  },
-  ".cm-line": {
-    padding: "0",
-  },
-  ".cm-gutters": {
-    display: "none",
-  },
-  ".cm-activeLine, .cm-activeLineGutter": {
-    backgroundColor: "transparent",
-  },
-  ".cm-selectionBackground, ::selection": {
-    backgroundColor: "var(--plain-editor-selection) !important",
-  },
-  ".cm-focused": {
-    outline: "none",
-  },
-  ".cm-cursor, .cm-dropCursor": {
-    borderLeftColor: "var(--plain-editor-heading)",
-  },
-}, { dark: false });
+function plainEditorThemeExtension(themeType: "light" | "dark"): Extension {
+  return [
+    plainEditorBaseTheme(themeType),
+    syntaxHighlighting(plainEditorHighlightStyle(themeType)),
+  ];
+}
+
+function plainEditorBaseTheme(themeType: "light" | "dark"): Extension {
+  return EditorView.theme({
+    "&": {
+      height: "100%",
+      backgroundColor: "transparent",
+      color: "var(--plain-editor-text)",
+      fontFamily: "var(--plain-editor-font-family)",
+      fontSize: "var(--plain-editor-font-size)",
+    },
+    ".cm-scroller": {
+      overflow: "auto",
+      lineHeight: "var(--plain-editor-line-height)",
+      fontFamily: "inherit",
+      scrollbarWidth: "thin",
+      scrollbarColor: "rgb(var(--color-fg) / 0.28) transparent",
+    },
+    ".cm-scroller::-webkit-scrollbar": {
+      width: "8px",
+      height: "8px",
+    },
+    ".cm-scroller::-webkit-scrollbar-track": {
+      backgroundColor: "transparent",
+    },
+    ".cm-scroller::-webkit-scrollbar-thumb": {
+      borderRadius: "999px",
+      backgroundColor: "rgb(var(--color-fg) / 0.28)",
+    },
+    ".cm-scroller::-webkit-scrollbar-thumb:hover": {
+      backgroundColor: "rgb(var(--color-fg) / 0.42)",
+    },
+    ".cm-content": {
+      boxSizing: "border-box",
+      minHeight: "100%",
+      width: "min(var(--plain-editor-max-width), 100%)",
+      margin: "0 auto",
+      padding:
+        "var(--plain-editor-padding-y) var(--plain-editor-padding-x) calc(var(--plain-editor-padding-y) + 40px)",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-word",
+      caretColor: "var(--plain-editor-heading)",
+    },
+    ".cm-line": {
+      padding: "0",
+    },
+    ".cm-gutters": {
+      display: "none",
+    },
+    ".cm-activeLine, .cm-activeLineGutter": {
+      backgroundColor: "transparent",
+    },
+    ".cm-selectionBackground, ::selection": {
+      backgroundColor: "var(--plain-editor-selection) !important",
+    },
+    ".cm-focused": {
+      outline: "none",
+    },
+    ".cm-cursor, .cm-dropCursor": {
+      borderLeftColor: "var(--plain-editor-heading)",
+    },
+  }, { dark: themeType === "dark" });
+}
+
+function plainEditorHighlightStyle(themeType: "light" | "dark"): HighlightStyle {
+  const colors = plainEditorHighlightColors(themeType);
+  const specs: TagStyle[] = defaultHighlightStyle.specs.map((spec) => {
+    const tagName = highlightTagName(spec.tag);
+    if (tagName === "meta") {
+      return { tag: spec.tag, color: colors.syntaxMuted };
+    }
+    if (tagName === "link") {
+      return {
+        tag: spec.tag,
+        color: colors.link,
+        textDecoration: "underline",
+        textDecorationColor: colors.linkUnderline,
+        textUnderlineOffset: "2px",
+      };
+    }
+    if (tagName === "heading") {
+      return {
+        tag: spec.tag,
+        color: colors.heading,
+        fontWeight: "650",
+        textDecoration: "none",
+      };
+    }
+    if (tagName === "emphasis") {
+      return { tag: spec.tag, color: colors.text, fontStyle: "italic" };
+    }
+    if (tagName === "strong") {
+      return { tag: spec.tag, color: colors.heading, fontWeight: "650" };
+    }
+    if (tagName === "strikethrough") {
+      return { tag: spec.tag, color: colors.text, textDecoration: "line-through" };
+    }
+    if (tagName.includes("url") || tagName.includes("labelName")) {
+      return { tag: spec.tag, color: colors.link };
+    }
+    if (tagName.includes("deleted")) {
+      return { tag: spec.tag, color: colors.red };
+    }
+    if (tagName.includes("string")) {
+      return { tag: spec.tag, color: colors.string };
+    }
+    if (tagName.includes("literal") || tagName.includes("inserted")) {
+      return { tag: spec.tag, color: colors.green };
+    }
+    if (tagName.includes("comment")) {
+      return { tag: spec.tag, color: colors.syntaxMuted };
+    }
+    if (tagName.includes("invalid")) {
+      return { tag: spec.tag, color: colors.red };
+    }
+    if (tagName.includes("variableName") || tagName.includes("propertyName")) {
+      return { tag: spec.tag, color: colors.link };
+    }
+    if (tagName.includes("keyword")) {
+      return { tag: spec.tag, color: colors.purple };
+    }
+    return { tag: spec.tag, color: colors.accent };
+  });
+
+  return HighlightStyle.define(specs);
+}
+
+function plainEditorHighlightColors(themeType: "light" | "dark") {
+  if (themeType === "light") {
+    return {
+      accent: "rgb(var(--color-blue) / 0.84)",
+      green: "rgb(var(--color-emerald) / 0.88)",
+      heading: "var(--plain-editor-heading)",
+      link: "rgb(var(--color-blue) / 0.82)",
+      linkUnderline: "rgb(var(--color-blue) / 0.28)",
+      purple: "rgb(var(--color-accent-purple) / 0.86)",
+      red: "rgb(var(--color-status-error) / 0.88)",
+      string: "rgb(var(--color-orange) / 0.88)",
+      syntaxMuted: "rgb(var(--color-fg) / 0.44)",
+      text: "var(--plain-editor-text)",
+    };
+  }
+
+  return {
+    accent: "rgb(var(--color-blue) / 0.78)",
+    green: "rgb(var(--color-emerald) / 0.86)",
+    heading: "var(--plain-editor-heading)",
+    link: "rgb(var(--color-blue) / 0.82)",
+    linkUnderline: "rgb(var(--color-blue) / 0.28)",
+    purple: "rgb(var(--color-accent-purple) / 0.78)",
+    red: "rgb(var(--color-status-error) / 0.78)",
+    string: "rgb(var(--color-orange) / 0.82)",
+    syntaxMuted: "rgb(var(--color-fg) / 0.36)",
+    text: "var(--plain-editor-text)",
+  };
+}
+
+function highlightTagName(tag: TagStyle["tag"]): string {
+  if (Array.isArray(tag)) return tag.map((item) => String(item)).join("|");
+  return String(tag);
+}
 
 function plainLanguageExtension(path: string | null): Extension {
   const lower = (path ?? "").toLowerCase();
@@ -145,7 +256,6 @@ export default function PlainEditorView({
   editorMode = "edit",
   onSaved,
   onPlainEditorLeaveCheckChange,
-  onEditorModeAvailabilityChange,
 }: PlainEditorViewProps) {
   const { t } = useI18n();
   const themeType = useEffectiveThemeType();
@@ -169,10 +279,6 @@ export default function PlainEditorView({
   const [previewText, setPreviewText] = useState(() => normalizeEditorText(text));
 
   const effectiveVersion = contentVersion || fileKey;
-  const previewableDocument = useMemo(
-    () => isPlainEditorMarkdownDocumentPath(path),
-    [path],
-  );
   const saveable =
     editableDocument &&
     workspacePath !== null &&
@@ -340,8 +446,7 @@ export default function PlainEditorView({
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         EditorView.lineWrapping,
-        plainEditorTheme,
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        themeCompartment.of(plainEditorThemeExtension(themeType)),
         languageCompartment.of(plainLanguageExtension(path)),
         editableCompartment.of([
           EditorState.readOnly.of(!editable),
@@ -381,6 +486,14 @@ export default function PlainEditorView({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
+      effects: themeCompartment.reconfigure(plainEditorThemeExtension(themeType)),
+    });
+  }, [themeType]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
       effects: languageCompartment.reconfigure(plainLanguageExtension(path)),
     });
   }, [path]);
@@ -395,11 +508,6 @@ export default function PlainEditorView({
       ]),
     });
   }, [editable]);
-
-  useEffect(() => {
-    onEditorModeAvailabilityChange?.(previewableDocument);
-    return () => onEditorModeAvailabilityChange?.(false);
-  }, [onEditorModeAvailabilityChange, previewableDocument]);
 
   useEffect(() => {
     if (editorMode === "preview") {

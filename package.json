@@ -44,6 +44,7 @@
     "bundle": "tauri build"
   },
   "dependencies": {
+    "@antv/infographic": "0.2.19",
     "@codemirror/commands": "^6.10.0",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.11",
@@ -69,8 +70,10 @@
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-process": "~2.3.1",
     "@tauri-apps/plugin-updater": "~2.10.1",
+    "@viz-js/viz": "3.28.0",
     "katex": "^0.16.47",
     "lucide-react": "^1.14.0",
+    "mermaid": "11.15.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
@@ -80,7 +83,11 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "shiki": "^4.1.0"
+    "shiki": "^4.1.0",
+    "vega": "6.2.0",
+    "vega-embed": "7.1.0",
+    "vega-interpreter": "2.2.1",
+    "vega-lite": "6.4.3"
   },
   "devDependencies": {
     "@iconify-json/bitcoin-icons": "^1.2.5",

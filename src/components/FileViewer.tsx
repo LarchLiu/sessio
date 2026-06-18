@@ -207,7 +207,6 @@ export interface FileViewerProps {
   plainEditorMode?: PlainEditorMode;
   onSaved?: (content: string, mtimeMs: number) => void;
   onPlainEditorLeaveCheckChange?: (handle: (() => Promise<boolean>) | null) => void;
-  onPlainEditorModeAvailabilityChange?: (available: boolean) => void;
   gitDiff?: FileGitDiff | null;
   savedScrollTop?: number;
   onScrollTopChange?: (scrollTop: number) => void;
@@ -226,7 +225,6 @@ export default function FileViewer({
   plainEditorMode = "edit",
   onSaved = () => {},
   onPlainEditorLeaveCheckChange,
-  onPlainEditorModeAvailabilityChange,
   gitDiff = null,
   savedScrollTop = 0,
   onScrollTopChange,
@@ -251,7 +249,6 @@ export default function FileViewer({
           editorMode={plainEditorMode}
           onSaved={onSaved}
           onPlainEditorLeaveCheckChange={onPlainEditorLeaveCheckChange}
-          onEditorModeAvailabilityChange={onPlainEditorModeAvailabilityChange}
         />
       </Suspense>
     );

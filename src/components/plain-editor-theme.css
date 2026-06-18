@@ -128,6 +128,10 @@
   line-height: var(--plain-editor-line-height);
 }
 
+.sessio-plain-editor-preview-content[data-theme-type="dark"] {
+  color-scheme: dark;
+}
+
 .sessio-plain-editor-preview-content > :first-child {
   margin-top: 0;
 }
@@ -225,6 +229,62 @@
 .sessio-plain-editor-preview-code code {
   background: transparent;
   padding: 0;
+}
+
+.sessio-plain-editor-html-fit {
+  max-width: none;
+  transform-origin: top left;
+}
+
+.sessio-plain-editor-html-fit-inner {
+  transform-origin: top left;
+}
+
+.sessio-plain-editor-diagram,
+.sessio-plain-editor-diagram-error {
+  margin: 0.85em 0;
+}
+
+.sessio-plain-editor-diagram {
+  overflow-x: auto;
+  border-radius: 6px;
+  background: rgb(var(--color-fg) / 0.035);
+  padding: 14px;
+}
+
+.sessio-plain-editor-diagram-host {
+  min-width: 0;
+  text-align: center;
+}
+
+.sessio-plain-editor-diagram-host:empty {
+  min-height: 42px;
+}
+
+.sessio-plain-editor-diagram-host > svg,
+.sessio-plain-editor-diagram-host svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.sessio-plain-editor-preview-content[data-theme-type="dark"] .sessio-plain-editor-diagram-host svg text {
+  fill: var(--plain-editor-heading);
+}
+
+.sessio-plain-editor-preview-content[data-theme-type="dark"] .katex {
+  color: var(--plain-editor-heading);
+}
+
+.sessio-plain-editor-diagram-host .vega-embed {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.sessio-plain-editor-diagram-loading {
+  padding: 10px 0;
+  color: var(--plain-editor-muted);
+  font-size: 0.9em;
+  text-align: center;
 }
 
 .sessio-plain-editor-preview-content hr {
