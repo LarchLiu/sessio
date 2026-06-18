@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, Files } from "lucide-react";
+import { ChevronDown, Code2, Eye, Files, FileText, Pencil } from "lucide-react";
 import type { FileEditItem } from "../acpRenderItems";
 import { fileEditKey, fileEditMatchesPath } from "../acpRenderItems";
+import {
+  isPlainEditorEditableDocumentPath,
+} from "../hooks/plainEditorFileTypes";
 import { useFileContent, languageFromPath } from "../hooks/useFileContent";
 import { useFileGitDiff } from "../hooks/useFileGitDiff";
 import { useI18n } from "../i18n";
 import FileViewer from "./FileViewer";
+import type { PlainEditorMode } from "./PlainEditorView";
 import ScrollArea from "./ScrollArea";
+import Tooltip from "./Tooltip";
+import "./plain-editor-theme.css";
 
 export type ChatFilesSubview = "code" | "plain";
 
@@ -16,6 +22,7 @@ export interface ChatFilesViewProps {
   workspacePath: string | null;
   /** "code" enables syntax highlighting; "plain" renders raw text. */
   subview: ChatFilesSubview;
+  onSubviewChange?: (subview: ChatFilesSubview) => void;
   editingLocked?: boolean;
   requestedSelection?: {
     key: string;
@@ -28,6 +35,7 @@ export default function ChatFilesView({
   edits,
   workspacePath,
   subview,
+  onSubviewChange,
   editingLocked = false,
   requestedSelection = null,
   reloadKey = 0,
@@ -37,6 +45,8 @@ export default function ChatFilesView({
     edits[0] ? fileEditKey(edits[0]) : null,
   );
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [plainEditorMode, setPlainEditorMode] = useState<PlainEditorMode>("edit");
+  const [plainPreviewAvailable, setPlainPreviewAvailable] = useState(false);
   const pickerAnchorRef = useRef<HTMLButtonElement>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
   const plainEditorLeaveCheckRef = useRef<(() => Promise<boolean>) | null>(null);
@@ -83,6 +93,24 @@ export default function ChatFilesView({
 
   const fileContent = useFileContent(selected, workspacePath, reloadKey);
   const fileGitDiff = useFileGitDiff(selected, workspacePath, reloadKey);
+  const selectedLabel = selected
+    ? selected.displayPath || selected.path || ""
+    : "";
+  const selectedPath = fileContent.path ?? selected?.displayPath ?? selected?.path ?? null;
+  const documentFile = isPlainEditorEditableDocumentPath(selectedPath);
+  const effectiveSubview: ChatFilesSubview = documentFile ? subview : "code";
+  const showDocumentControls = documentFile;
+  const showPlainPreviewControls = effectiveSubview === "plain" && plainPreviewAvailable;
+
+  useEffect(() => {
+    if (effectiveSubview !== "plain" && plainEditorMode !== "edit") {
+      setPlainEditorMode("edit");
+    }
+  }, [effectiveSubview, plainEditorMode]);
+
+  useEffect(() => {
+    setPlainPreviewAvailable(false);
+  }, [selectedKey, effectiveSubview]);
 
   if (edits.length === 0) {
     return (
@@ -92,13 +120,9 @@ export default function ChatFilesView({
     );
   }
 
-  const selectedLabel = selected
-    ? selected.displayPath || selected.path || ""
-    : "";
-
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-ink/5 px-10">
+      <div className="flex h-9 shrink-0 items-center gap-2 px-10">
         <button
           ref={pickerAnchorRef}
           type="button"
@@ -116,6 +140,21 @@ export default function ChatFilesView({
         </button>
         <div className="min-w-0 flex-1 truncate font-mono text-caption text-ink/72">
           {selectedLabel}
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {showDocumentControls && (
+            <FileModeToggle
+              value={effectiveSubview}
+              disabled={!onSubviewChange}
+              onChange={(next) => onSubviewChange?.(next)}
+            />
+          )}
+          {showPlainPreviewControls && (
+            <PlainEditorModeToggle
+              value={plainEditorMode}
+              onChange={setPlainEditorMode}
+            />
+          )}
         </div>
       </div>
       <div className="relative flex min-h-0 flex-1 flex-col">
@@ -135,16 +174,18 @@ export default function ChatFilesView({
             fileKey={`${selectedKey ?? ""}:${fileContent.mtimeMs ?? "unknown"}`}
             text={fileContent.text}
             language={languageFromPath(selected.displayPath || selected.path || "")}
-            mode={subview}
+            mode={effectiveSubview}
             workspacePath={workspacePath}
             path={fileContent.path}
             mtimeMs={fileContent.mtimeMs}
             contentVersion={fileContent.contentVersion}
             editingLocked={editingLocked}
+            plainEditorMode={plainEditorMode}
             onSaved={fileContent.applyLocalSave}
             onPlainEditorLeaveCheckChange={(handle) => {
               plainEditorLeaveCheckRef.current = handle;
             }}
+            onPlainEditorModeAvailabilityChange={setPlainPreviewAvailable}
             gitDiff={fileGitDiff.diff}
             savedScrollTop={
               selectedKey ? (scrollPositionsRef.current[selectedKey] ?? 0) : 0
@@ -169,6 +210,82 @@ export default function ChatFilesView({
           onClose={() => setPickerOpen(false)}
         />
       )}
+    </div>
+  );
+}
+
+function FileModeToggle({
+  value,
+  disabled = false,
+  onChange,
+}: {
+  value: ChatFilesSubview;
+  disabled?: boolean;
+  onChange: (value: ChatFilesSubview) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="sessio-file-row-toggle" role="group" aria-label={t("chat.files.file_mode")}>
+      <Tooltip content={t("header.view_code")} placement="bottom">
+        <button
+          type="button"
+          aria-label={t("header.view_code")}
+          aria-pressed={value === "code"}
+          disabled={disabled}
+          className="sessio-file-row-toggle-button"
+          onClick={() => onChange("code")}
+        >
+          <Code2 aria-hidden="true" className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
+      <Tooltip content={t("header.view_plain")} placement="bottom">
+        <button
+          type="button"
+          aria-label={t("header.view_plain")}
+          aria-pressed={value === "plain"}
+          disabled={disabled}
+          className="sessio-file-row-toggle-button"
+          onClick={() => onChange("plain")}
+        >
+          <FileText aria-hidden="true" className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
+    </div>
+  );
+}
+
+function PlainEditorModeToggle({
+  value,
+  onChange,
+}: {
+  value: PlainEditorMode;
+  onChange: (value: PlainEditorMode) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="sessio-file-row-toggle" role="group" aria-label={t("chat.files.editor_mode")}>
+      <Tooltip content={t("chat.files.editor_edit_mode")} placement="bottom">
+        <button
+          type="button"
+          aria-label={t("chat.files.editor_edit_mode")}
+          aria-pressed={value === "edit"}
+          className="sessio-file-row-toggle-button"
+          onClick={() => onChange("edit")}
+        >
+          <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
+      <Tooltip content={t("chat.files.editor_preview_mode")} placement="bottom">
+        <button
+          type="button"
+          aria-label={t("chat.files.editor_preview_mode")}
+          aria-pressed={value === "preview"}
+          className="sessio-file-row-toggle-button"
+          onClick={() => onChange("preview")}
+        >
+          <Eye aria-hidden="true" className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
     </div>
   );
 }

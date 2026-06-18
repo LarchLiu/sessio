@@ -123,7 +123,7 @@ import {
   renderItemKeys,
   type AcpRenderItem,
 } from "../acpRenderItems";
-import ChatFilesView from "../components/ChatFilesView";
+import ChatFilesView, { type ChatFilesSubview } from "../components/ChatFilesView";
 import {
   ComposerTopAttachments,
   EditedFilesBar,
@@ -135,6 +135,8 @@ export interface ChatPageProps {
   session: SessionInfo;
   viewMode: ViewMode;
   chatView?: ChatView;
+  filesSubview?: ChatFilesSubview;
+  onFilesSubviewChange?: (subview: ChatFilesSubview) => void;
   projectFilesReloadKey?: number;
   selectedProjectFileRequest?: {
     path: string;
@@ -292,6 +294,8 @@ function ChatPage({
   session,
   viewMode,
   chatView = "chat",
+  filesSubview = "code",
+  onFilesSubviewChange = () => {},
   projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
   liveState,
@@ -418,6 +422,8 @@ function ChatPage({
           }
           viewMode={viewMode}
           chatView={chatView}
+          filesSubview={filesSubview}
+          onFilesSubviewChange={onFilesSubviewChange}
           liveState={liveState}
           runtimeAgents={runtimeAgents}
           rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
@@ -513,6 +519,8 @@ export interface AcpTranscriptPanelProps {
   emptyHint: string;
   viewMode: ViewMode;
   chatView?: ChatView;
+  filesSubview?: ChatFilesSubview;
+  onFilesSubviewChange?: (subview: ChatFilesSubview) => void;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -552,6 +560,8 @@ export function AcpTranscriptPanel({
   emptyHint,
   viewMode,
   chatView = "chat",
+  filesSubview = "code",
+  onFilesSubviewChange = () => {},
   liveState,
   runtimeAgents,
   rememberRuntimeAgentSelection,
@@ -940,8 +950,7 @@ export function AcpTranscriptPanel({
       )
       .join("|");
   }, [liveSession]);
-  const isFilesView = chatView === "code" || chatView === "plain";
-  const filesSubview: "code" | "plain" = chatView === "plain" ? "plain" : "code";
+  const isFilesView = chatView === "file";
   const initialPositionMode = useMemo(() => {
     if (!available || !filePath || skipHistoryLoad) {
       return skipHistoryLoad ? "bottom" : null;
@@ -1351,6 +1360,7 @@ export function AcpTranscriptPanel({
               edits={fileViewEdits}
               workspacePath={workspacePath}
               subview={filesSubview}
+              onSubviewChange={onFilesSubviewChange}
               editingLocked={Boolean(activeTurnId)}
               reloadKey={projectFilesReloadKey}
               requestedSelection={

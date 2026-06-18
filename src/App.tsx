@@ -51,6 +51,7 @@ import {
 } from "./runtimeChat";
 import { useRuntimeAgents } from "./runtimeAgents";
 import { CalendarClock, Folder, Goal, Hash, Kanban, MessagesSquare, MessageSquare, MessageSquareText } from "lucide-react";
+import type { ChatFilesSubview } from "./components/ChatFilesView";
 import type { ChatView, DetailMode, PendingNewChatSession, ViewMode } from "./navigation";
 import {
   isSubagentOnly,
@@ -137,6 +138,7 @@ export default function App() {
   const [activeMessageMeta, setActiveMessageMeta] =
     useState<ActiveMessageMeta | null>(null);
   const [chatView, setChatView] = useState<ChatView>("chat");
+  const [filesSubview, setFilesSubview] = useState<ChatFilesSubview>("code");
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [liveRuntimeState, dispatchLiveRuntimeEvent] = useReducer(
     applyRuntimeAction,
@@ -807,7 +809,7 @@ export default function App() {
   const handleOpenProjectFile = useCallback(
     (path: string) => {
       if (!selected || detailMode !== "chat") return;
-      if (currentChatView !== "code" && currentChatView !== "plain") return;
+      if (currentChatView !== "file") setChatView("file");
       const identity = sessionIdentityKey(selected);
       setProjectFileSelectionBySession((prev) => {
         const currentSelection = prev[identity];
@@ -986,6 +988,8 @@ export default function App() {
           detailRoute={detailRoute}
           viewMode={viewMode}
           chatView={currentChatView}
+          filesSubview={filesSubview}
+          onFilesSubviewChange={setFilesSubview}
           projectFilesReloadKey={rightSidebarFilesReloadKey}
           selectedProjectFileRequest={currentProjectFileSelection}
           liveState={liveRuntimeState}

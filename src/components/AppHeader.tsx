@@ -1,4 +1,4 @@
-import { Code2, FileText, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
+import { FileCodeCorner, ListChevronsDownUp, ListChevronsUpDown, MessageSquare, PanelLeftOpen, PanelRightClose, type LucideIcon } from "lucide-react";
 import type { ProjectInfo, SessionInfo } from "../api";
 import type { ChatView } from "../navigation";
 import { useI18n } from "../i18n";
@@ -168,8 +168,7 @@ function ChatViewToggle({
   const { t } = useI18n();
   const items: { value: ChatView; icon: LucideIcon; label: string }[] = [
     { value: "chat", icon: MessageSquare, label: t("header.view_chat") },
-    { value: "code", icon: Code2, label: t("header.view_code") },
-    { value: "plain", icon: FileText, label: t("header.view_plain") },
+    { value: "file", icon: FileCodeCorner, label: t("header.view_file") },
   ];
   return (
     <div

@@ -1,6 +1,7 @@
 import { type Dispatch, type SetStateAction } from "react";
 import type { Agent, ProjectInfo, RuntimeAgentMetadata, RuntimeAgentSelection, SetRuntimeAgentSelectionRequest, SessionInfo } from "../api";
 import type { ActiveMessageMeta } from "../pages/ChatPage";
+import type { ChatFilesSubview } from "./ChatFilesView";
 import ChatPage from "../pages/ChatPage";
 import NewChatPage from "../pages/NewChatPage";
 import { ProjectWorkbenchPage } from "../pages/ProjectPage";
@@ -22,6 +23,8 @@ export default function AppMain({
   detailRoute,
   viewMode,
   chatView,
+  filesSubview,
+  onFilesSubviewChange,
   projectFilesReloadKey,
   selectedProjectFileRequest,
   liveState,
@@ -56,6 +59,8 @@ export default function AppMain({
   detailRoute: DetailMode;
   viewMode: ViewMode;
   chatView: ChatView;
+  filesSubview: ChatFilesSubview;
+  onFilesSubviewChange: (subview: ChatFilesSubview) => void;
   projectFilesReloadKey: number;
   selectedProjectFileRequest?: {
     path: string;
@@ -204,6 +209,8 @@ export default function AppMain({
             session={selected}
             viewMode={viewMode}
             chatView={chatView}
+            filesSubview={filesSubview}
+            onFilesSubviewChange={onFilesSubviewChange}
             projectFilesReloadKey={projectFilesReloadKey}
             selectedProjectFileRequest={selectedProjectFileRequest}
             liveState={liveState}

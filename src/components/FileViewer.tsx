@@ -15,6 +15,7 @@ import { yamlLanguage } from "@codemirror/lang-yaml";
 import { StreamLanguage } from "@codemirror/language";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import type { FileGitDiff } from "../api";
+import type { PlainEditorMode } from "./PlainEditorView";
 import { useEffectiveThemeType } from "./shikiHighlight";
 
 const PlainEditorView = lazy(() => import("./PlainEditorView"));
@@ -203,8 +204,10 @@ export interface FileViewerProps {
   mtimeMs?: number | null;
   contentVersion?: string;
   editingLocked?: boolean;
+  plainEditorMode?: PlainEditorMode;
   onSaved?: (content: string, mtimeMs: number) => void;
   onPlainEditorLeaveCheckChange?: (handle: (() => Promise<boolean>) | null) => void;
+  onPlainEditorModeAvailabilityChange?: (available: boolean) => void;
   gitDiff?: FileGitDiff | null;
   savedScrollTop?: number;
   onScrollTopChange?: (scrollTop: number) => void;
@@ -220,8 +223,10 @@ export default function FileViewer({
   mtimeMs = null,
   contentVersion = "",
   editingLocked = false,
+  plainEditorMode = "edit",
   onSaved = () => {},
   onPlainEditorLeaveCheckChange,
+  onPlainEditorModeAvailabilityChange,
   gitDiff = null,
   savedScrollTop = 0,
   onScrollTopChange,
@@ -243,8 +248,10 @@ export default function FileViewer({
           mtimeMs={mtimeMs}
           contentVersion={contentVersion}
           editingLocked={editingLocked}
+          editorMode={plainEditorMode}
           onSaved={onSaved}
           onPlainEditorLeaveCheckChange={onPlainEditorLeaveCheckChange}
+          onEditorModeAvailabilityChange={onPlainEditorModeAvailabilityChange}
         />
       </Suspense>
     );

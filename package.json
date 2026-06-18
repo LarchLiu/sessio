@@ -24,23 +24,6 @@
     }
   },
   "pnpm": {
-    "overrides": {
-      "@tiptap/core": "3.26.1",
-      "@tiptap/extension-bold": "3.26.1",
-      "@tiptap/extension-bubble-menu": "3.26.1",
-      "@tiptap/extension-code": "3.26.1",
-      "@tiptap/extension-floating-menu": "3.26.1",
-      "@tiptap/extension-horizontal-rule": "3.26.1",
-      "@tiptap/extension-italic": "3.26.1",
-      "@tiptap/extension-link": "3.26.1",
-      "@tiptap/extension-paragraph": "3.26.1",
-      "@tiptap/extension-strike": "3.26.1",
-      "@tiptap/extension-text": "3.26.1",
-      "@tiptap/extension-underline": "3.26.1",
-      "@tiptap/extensions": "3.26.1",
-      "@tiptap/pm": "3.26.1",
-      "@tiptap/react": "3.26.1"
-    },
     "peerDependencyRules": {
       "allowedVersions": {
         "react": "19"
@@ -61,9 +44,7 @@
     "bundle": "tauri build"
   },
   "dependencies": {
-    "@blocknote/core": "^0.46.2",
-    "@blocknote/mantine": "^0.46.2",
-    "@blocknote/react": "^0.46.2",
+    "@codemirror/commands": "^6.10.0",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.11",
     "@codemirror/lang-javascript": "^6.2.5",
@@ -80,8 +61,6 @@
     "@codemirror/view": "^6.43.1",
     "@dnd-kit/react": "^0.4.0",
     "@lobehub/icons": "^5.8.0",
-    "@mantine/core": "^8.3.18",
-    "@mantine/hooks": "^8.3.18",
     "@pierre/diffs": "^1.1.22",
     "@pierre/trees": "1.0.0-beta.4",
     "@rc-component/qrcode": "^1.1.1",
