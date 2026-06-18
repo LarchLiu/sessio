@@ -2473,16 +2473,14 @@ function AcpLiveItem({
       />
     );
   }
+  const messageFinished = isAcpMessageBlockFinished(item.turn, item.block);
   return (
     <AcpContentBlockGroup
       block={item.block}
       timestamp={item.block.timestamp ?? item.turn.updatedAt}
-      typewriterActive={
-        isTypewriterTurn(item.turn) &&
-        (item.block.kind === "assistant" || item.block.kind === "thought")
-      }
+      typewriterActive={isTypewriterBlockActive(item.turn, item.block, messageFinished)}
       typewriterKey={`${item.turn.turnId}:${item.block.kind}`}
-      messageFinished={isAcpMessageBlockFinished(item.turn, item.block)}
+      messageFinished={messageFinished}
       defaultMessageExpanded={defaultMessageExpanded}
       showThreadPromptPlaceholders={showThreadPromptPlaceholders}
       threadPromptFallbacks={threadPromptFallbacks}
@@ -3946,6 +3944,18 @@ function isTurnFinished(turn: LiveTurn): boolean {
 
 function isTypewriterTurn(turn: LiveTurn): boolean {
   return turn.status === "pending" || turn.status === "streaming" || turn.status === "cancelling";
+}
+
+function isTypewriterBlockActive(
+  turn: LiveTurn,
+  block: AcpRenderBlock,
+  messageFinished = isAcpMessageBlockFinished(turn, block),
+): boolean {
+  return (
+    isTypewriterTurn(turn) &&
+    !messageFinished &&
+    (block.kind === "assistant" || block.kind === "thought")
+  );
 }
 
 function isAcpMessageBlockFinished(turn: LiveTurn, block: AcpRenderBlock): boolean {
