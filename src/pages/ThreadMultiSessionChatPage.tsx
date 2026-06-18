@@ -32,6 +32,7 @@ import {
   cancelAstraRun,
   createAstraRun,
   createPlanRound,
+  getRuntimeAgentSessionConfig,
   getSessionHistory,
   getThreadReplay,
   getThreadWorkState,
@@ -40,16 +41,34 @@ import {
   respondAgentPermission,
   updatePlanTaskStatus,
 } from "../api";
-import ChatComposer from "../components/ChatComposer";
+import ChatComposer, {
+  AssistantModeChip,
+  resizeTextareaToContent,
+} from "../components/ChatComposer";
 import { AgentGlyph } from "../components/AgentIcon";
 import AssistantBotIcon from "../components/AssistantBotIcon";
+import ComposerCommandMenu from "../components/ComposerCommandMenu";
 import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
 import { HashIcon } from "../components/IconifyIcon";
+import {
+  filterAssistantCommandItems,
+  filterComposerSlashCommands,
+  formatSlashCommandText,
+  normalizeAssistantAgent,
+  parseComposerCommandTrigger,
+  slashCommandItems,
+  useComposerCommandMenuState,
+} from "../composerCommands";
 import { useChatComposer } from "../hooks/useChatComposer";
 import { useI18n } from "../i18n";
 import type { PendingNewChatSession } from "../navigation";
 import {
+  parseRuntimeSessionAvailableCommands,
+  parseSelectedSlashCommandName,
+} from "../chatSlashCommands";
+import {
+  type AcpAvailableCommand,
   historyTurnsToAcpViewModel,
   liveSessionToAcpViewModel,
   type AcpRenderBlock,
@@ -96,7 +115,7 @@ const THREAD_CONTEXT_NAV_SETTLE_MS = 140;
 
 export default function ThreadMultiSessionChatPage({
   project,
-  assistants: _assistants,
+  assistants,
   threadId,
   liveState,
   runtimeAgents,
@@ -136,6 +155,8 @@ export default function ThreadMultiSessionChatPage({
   const [astraBusy, setAstraBusy] = useState<"start" | "cancel" | null>(null);
   const [astraRuns, setAstraRuns] = useState<AstraHandle[]>([]);
   const [planRounds, setPlanRounds] = useState<PlanRoundInfo[]>([]);
+  const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
+  const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const composer = useChatComposer({
     runtimeAgents,
     lastRuntimeAgentSelection,
@@ -145,6 +166,39 @@ export default function ThreadMultiSessionChatPage({
     onError,
     onPendingSession,
   });
+  const commandTrigger = useMemo(
+    () => parseComposerCommandTrigger(composer.text, ["slash", "assistant"]),
+    [composer.text],
+  );
+  const commandItems = useMemo(() => {
+    if (!commandTrigger) return [];
+    if (commandTrigger.kind === "slash") {
+      return slashCommandItems(
+        filterComposerSlashCommands(cachedAvailableCommands, commandTrigger.query),
+      );
+    }
+    return filterAssistantCommandItems(assistants, project.id, commandTrigger.query);
+  }, [assistants, cachedAvailableCommands, commandTrigger, project.id]);
+  const commandMenu = useComposerCommandMenuState({
+    trigger: commandTrigger,
+    items: commandItems,
+    disabled: stageTaskBusy || composer.sending,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    getRuntimeAgentSessionConfig(composer.selectedAgent ?? "codex")
+      .then((config) => {
+        if (cancelled) return;
+        setCachedAvailableCommands(parseRuntimeSessionAvailableCommands(config));
+      })
+      .catch(() => {
+        if (!cancelled) setCachedAvailableCommands([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [composer.selectedAgent]);
 
   const load = useCallback(async () => {
     const nextThread = await getThreadWorkState(threadId);
@@ -396,6 +450,14 @@ export default function ThreadMultiSessionChatPage({
   const handleSend = async () => {
     const prompt = composer.text.trim();
     if (!prompt) return;
+    const slashName = parseSelectedSlashCommandName(prompt);
+    if (slashName) {
+      const slashCommand = cachedAvailableCommands.find((item) => item.name === slashName);
+      if (slashCommand && (slashCommand.commandType ?? "agent_builtin") !== "agent_builtin") {
+        composer.setComposerError(`Unsupported app command: ${slashCommand.name}`);
+        return;
+      }
+    }
     if (!thread) {
       composer.setComposerError(t("thread.not_found"));
       return;
@@ -443,6 +505,7 @@ export default function ThreadMultiSessionChatPage({
       const sent = await composer.runStartSession(prompt, {
         workspacePath: project.path,
         projectName: project.name,
+        assistantPrompt: selectedAssistant?.systemPrompt?.trim() || undefined,
         extraContext,
         pendingSession: {
           suppressAutoSelect: true,
@@ -463,6 +526,7 @@ export default function ThreadMultiSessionChatPage({
           pendingRuntimeCreated = true;
         },
       });
+      if (sent) setSelectedAssistant(null);
       if (!sent && manualTask) {
         await updatePlanTaskStatus(manualTask.id, {
           status: "failed",
@@ -483,6 +547,39 @@ export default function ThreadMultiSessionChatPage({
       setStageTaskBusy(false);
     }
   };
+
+  const handleCommandSelect = useCallback((key: string) => {
+    if (!commandTrigger) return;
+    if (commandTrigger.kind === "slash") {
+      const command = cachedAvailableCommands.find((item) => item.name === key);
+      if (!command) return;
+      composer.setText(formatSlashCommandText(command));
+    } else {
+      const assistant = assistants.find((item) => item.id === key);
+      if (!assistant) return;
+      setSelectedAssistant(assistant);
+      composer.applyAgentSelection({
+        agent: normalizeAssistantAgent(assistant.agent.id),
+        model: assistant.agent.model,
+        effort: assistant.agent.effort,
+        permissionMode: assistant.agent.mode,
+      });
+      composer.setText(commandTrigger.rest);
+    }
+    commandMenu.resetDismissed();
+    window.requestAnimationFrame(() => {
+      const el = composer.textareaRef.current;
+      if (!el) return;
+      el.focus();
+      resizeTextareaToContent(el);
+      const pos = el.value.length;
+      el.setSelectionRange(pos, pos);
+    });
+  }, [assistants, cachedAvailableCommands, commandMenu, commandTrigger, composer]);
+
+  const handleComposerKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    return commandMenu.handleKeyDown(event, handleCommandSelect);
+  }, [commandMenu, handleCommandSelect]);
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-surface-panel">
@@ -559,8 +656,16 @@ export default function ThreadMultiSessionChatPage({
               !stageTaskBusy
             }
             onSend={() => void handleSend()}
+            onTextareaKeyDown={handleComposerKeyDown}
             modeActions={
               <>
+                {selectedAssistant ? (
+                  <AssistantModeChip
+                    icon={<AssistantBotIcon color={selectedAssistant.color} className="h-4 w-4 shrink-0" />}
+                    name={selectedAssistant.name}
+                    onRemove={() => setSelectedAssistant(null)}
+                  />
+                ) : null}
                 {thread?.kind === "process" && (
                   <Tooltip content={t("thread.stage_task_mode")} placement="top">
                     <button
@@ -623,6 +728,18 @@ export default function ThreadMultiSessionChatPage({
               ) : null
             }
           />
+          {commandMenu.open && commandTrigger && composer.textareaRef.current && (
+            <ComposerCommandMenu
+              anchor={composer.textareaRef.current}
+              items={commandItems}
+              activeIndex={commandMenu.activeIndex}
+              header={commandTrigger.kind === "slash" ? t("chat.command.header") : t("new_chat.command.assistant_header")}
+              emptyText={commandTrigger.kind === "slash" ? t("chat.command.empty") : t("new_chat.command.no_assistant")}
+              onActiveIndexChange={commandMenu.setActiveIndex}
+              onSelect={handleCommandSelect}
+              onClose={() => commandMenu.setDismissedFor(commandTrigger.raw)}
+            />
+          )}
         </div>
       </div>
     </div>

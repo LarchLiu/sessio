@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { createElement, useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import type { ComposerCommandItem } from "./components/ComposerCommandMenu";
 import type { Agent, AssistantInfo } from "./api";
 import { AGENT_LABEL, isAgent } from "./api";
 import type { AcpAvailableCommand } from "./runtimeChat";
+import AssistantBotIcon from "./components/AssistantBotIcon";
 
 export type ComposerCommandTriggerKind = "slash" | "assistant" | "thread";
 
@@ -68,13 +69,13 @@ export function filterAssistantCommandItems(
 ): ComposerCommandItem[] {
   const normalized = query.trim().toLowerCase();
   return assistants
-    .filter((assistant) => assistant.projectId === projectId && assistant.enabled)
+    .filter((assistant) => (!projectId || assistant.projectId === projectId) && assistant.enabled)
     .filter((assistant) => assistant.name.toLowerCase().includes(normalized))
     .map((assistant) => ({
       key: assistant.id,
       label: assistant.name,
       description: AGENT_LABEL[normalizeAssistantAgent(assistant.agent.id)],
-      iconKey: "assistant",
+      icon: createElement(AssistantBotIcon, { color: assistant.color, className: "h-4 w-4" }),
     }));
 }
 
@@ -117,9 +118,13 @@ export function useComposerCommandMenuState({
     if (activeIndex >= items.length) setActiveIndex(0);
   }, [activeIndex, items.length]);
 
+  useEffect(() => {
+    if (!trigger) setDismissedFor(null);
+  }, [trigger]);
+
   const handleKeyDown = useCallback(
     (
-      event: React.KeyboardEvent<HTMLTextAreaElement>,
+      event: KeyboardEvent<HTMLTextAreaElement>,
       onSelect: (key: string) => void,
       fallback?: () => boolean,
     ): boolean => {

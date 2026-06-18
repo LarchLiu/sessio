@@ -11,6 +11,7 @@ import {
   Plus,
   Square,
   Sparkles,
+  Trash2,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -340,4 +341,31 @@ export function resizeTextareaToContent(el: HTMLTextAreaElement) {
   const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
   el.style.height = `${nextHeight}px`;
   el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
+export function AssistantModeChip({
+  icon,
+  name,
+  onRemove,
+}: {
+  icon: ReactNode;
+  name: string;
+  onRemove: () => void;
+}) {
+  return (
+    <span className="inline-flex h-7 max-w-[200px] items-center gap-1.5 rounded-md border border-ink/[0.12] bg-ink/[0.048] px-1.5 text-caption text-ink/70">
+      {icon}
+      <span className="min-w-0 truncate">{name}</span>
+      <Tooltip content="Remove" placement="top">
+        <button
+          type="button"
+          onClick={onRemove}
+          className="shrink-0 rounded p-0.5 text-ink/35 transition hover:bg-ink/6 hover:text-ink/70"
+          aria-label="Remove assistant"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </Tooltip>
+    </span>
+  );
 }

@@ -53,8 +53,12 @@ import {
 } from "../api";
 import ScrollArea from "../components/ScrollArea";
 import Tooltip from "../components/Tooltip";
-import SharedChatComposer, { resizeTextareaToContent } from "../components/ChatComposer";
-import ComposerCommandMenu, { type ComposerCommandItem } from "../components/ComposerCommandMenu";
+import AssistantBotIcon from "../components/AssistantBotIcon";
+import SharedChatComposer, {
+  AssistantModeChip,
+  resizeTextareaToContent,
+} from "../components/ChatComposer";
+import ComposerCommandMenu from "../components/ComposerCommandMenu";
 import { renderMarkdownInput } from "../components/markdownInput";
 import {
   agentModelSelectOptions,
@@ -97,13 +101,20 @@ import {
 } from "../runtimeChat";
 import { buildCrossPromptFromTurns } from "../cross";
 import {
-  filterChatSlashCommands,
-  formatChatSlashCommandText,
-  parseChatSlashCommandTrigger,
   parseSelectedSlashCommandName,
   parseRuntimeSessionAvailableCommands,
 } from "../chatSlashCommands";
 import {
+  filterAssistantCommandItems,
+  filterComposerSlashCommands,
+  formatSlashCommandText,
+  normalizeAssistantAgent,
+  parseComposerCommandTrigger,
+  slashCommandItems,
+  useComposerCommandMenuState,
+} from "../composerCommands";
+import {
+  buildSessioAssistantPromptBlock,
   contentBlocksText,
   forkVisibleHistoryTurns,
   mergeHistoryWithLiveTurns,
@@ -294,6 +305,7 @@ function snapshotGroupsToAncestorHistoryGroups(
 
 function ChatPage({
   session,
+  assistants = [],
   viewMode,
   chatView = "chat",
   filesSubview = "code",
@@ -403,6 +415,7 @@ function ChatPage({
         )}
 
         <AcpTranscriptPanel
+          assistants={assistants}
           key={
             tab.kind === "main"
               ? mainMessageStreamKey
@@ -513,6 +526,7 @@ function TabButton({
 }
 
 export interface AcpTranscriptPanelProps {
+  assistants?: AssistantInfo[];
   agent: SessionInfo["agent"];
   filePath: string;
   sessionId: string;
@@ -554,6 +568,7 @@ export interface AcpTranscriptPanelProps {
 }
 
 export function AcpTranscriptPanel({
+  assistants = [],
   agent,
   filePath,
   sessionId,
@@ -641,8 +656,7 @@ export function AcpTranscriptPanel({
   const [composerEffort, setComposerEffort] = useState("");
   const [composerPermissionMode, setComposerPermissionMode] = useState("");
   const [cachedAvailableCommands, setCachedAvailableCommands] = useState<AcpAvailableCommand[]>([]);
-  const [commandActiveIndex, setCommandActiveIndex] = useState(0);
-  const [commandDismissedFor, setCommandDismissedFor] = useState<string | null>(null);
+  const [selectedAssistant, setSelectedAssistant] = useState<AssistantInfo | null>(null);
   const [historyRenderReady, setHistoryRenderReady] = useState(hasCachedHistory);
   const [runtimeNow, setRuntimeNow] = useState(() => Date.now());
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -727,31 +741,24 @@ export function AcpTranscriptPanel({
     capabilities: attachmentCapabilities,
     onError: setComposerError,
   });
-  const slashTrigger = useMemo(
-    () => parseChatSlashCommandTrigger(composerText),
+  const commandTrigger = useMemo(
+    () => parseComposerCommandTrigger(composerText, ["slash", "assistant"]),
     [composerText],
   );
-  const slashSourceCommands = cachedAvailableCommands;
-  const slashCommands = useMemo(
-    () => filterChatSlashCommands(slashSourceCommands, slashTrigger?.query ?? ""),
-    [slashSourceCommands, slashTrigger?.query],
-  );
-  const slashCommandItems = useMemo<ComposerCommandItem[]>(
-    () =>
-      slashCommands.map((command) => ({
-        key: command.name,
-        label: `/${command.name}`,
-        description: command.description || command.input?.hint || undefined,
-        icon: <SquareTerminal className="h-4 w-4" />,
-      })),
-    [slashCommands],
-  );
-  const slashMenuOpen =
-    !activeTurnId &&
-    !sending &&
-    slashTrigger !== null &&
-    commandDismissedFor !== slashTrigger.raw &&
-    (slashCommandItems.length > 0 || slashTrigger.query.length === 0);
+  const commandItems = useMemo(() => {
+    if (!commandTrigger) return [];
+    if (commandTrigger.kind === "slash") {
+      return slashCommandItems(
+        filterComposerSlashCommands(cachedAvailableCommands, commandTrigger.query),
+      );
+    }
+    return filterAssistantCommandItems(assistants, null, commandTrigger.query);
+  }, [assistants, cachedAvailableCommands, commandTrigger]);
+  const commandMenu = useComposerCommandMenuState({
+    trigger: commandTrigger,
+    items: commandItems,
+    disabled: Boolean(activeTurnId) || sending,
+  });
 
   const refreshCachedCommands = useCallback(() => {
     let cancelled = false;
@@ -1090,20 +1097,6 @@ export function AcpTranscriptPanel({
   }, [activeTurnId]);
 
   useEffect(() => {
-    setCommandActiveIndex(0);
-  }, [slashTrigger?.raw]);
-
-  useEffect(() => {
-    if (commandActiveIndex >= slashCommandItems.length) setCommandActiveIndex(0);
-  }, [commandActiveIndex, slashCommandItems.length]);
-
-  useEffect(() => {
-    if (!slashTrigger) {
-      setCommandDismissedFor(null);
-    }
-  }, [slashTrigger]);
-
-  useEffect(() => {
     const runtimeAgent = runtimeAgents.find((item) => item.agent === agent) ?? null;
     setComposerAgent(agent);
     setComposerModel(initialRuntimeModel(runtimeAgent));
@@ -1187,7 +1180,7 @@ export function AcpTranscriptPanel({
     if (!text || sending) return;
     const slashName = parseSelectedSlashCommandName(text);
     if (slashName) {
-      const slashCommand = slashSourceCommands.find((item) => item.name === slashName);
+      const slashCommand = cachedAvailableCommands.find((item) => item.name === slashName);
       if (slashCommand && (slashCommand.commandType ?? "agent_builtin") !== "agent_builtin") {
         setComposerError(`Unsupported app command: ${slashCommand.name}`);
         return;
@@ -1376,17 +1369,25 @@ export function AcpTranscriptPanel({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, sending, sessionId, slashSourceCommands, workspacePath]);
+  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, sending, sessionId, cachedAvailableCommands, workspacePath]);
 
-  const handleSend = useCallback(async () => {
-    await handleSendText(composerText, true, attachments);
-  }, [attachments, composerText, handleSendText]);
-
-  const handleSlashCommandSelect = useCallback((name: string) => {
-    const command = slashSourceCommands.find((item) => item.name === name);
-    if (!command) return;
-    setComposerText(formatChatSlashCommandText(command));
-    setCommandDismissedFor(null);
+  const handleCommandSelect = useCallback((key: string) => {
+    if (!commandTrigger) return;
+    if (commandTrigger.kind === "slash") {
+      const command = cachedAvailableCommands.find((item) => item.name === key);
+      if (!command) return;
+      setComposerText(formatSlashCommandText(command));
+    } else {
+      const assistant = assistants.find((item) => item.id === key);
+      if (!assistant) return;
+      setSelectedAssistant(assistant);
+      setComposerAgent(normalizeAssistantAgent(assistant.agent.id));
+      setComposerModel(assistant.agent.model);
+      setComposerEffort(assistant.agent.effort);
+      setComposerPermissionMode(assistant.agent.mode);
+      setComposerText(commandTrigger.rest);
+    }
+    commandMenu.resetDismissed();
     window.requestAnimationFrame(() => {
       const el = composerRef.current;
       if (!el) return;
@@ -1395,42 +1396,26 @@ export function AcpTranscriptPanel({
       const pos = el.value.length;
       el.setSelectionRange(pos, pos);
     });
-  }, [slashSourceCommands]);
+  }, [assistants, cachedAvailableCommands, commandMenu, commandTrigger]);
+
+  const handleSend = useCallback(async () => {
+    const prompt = selectedAssistant?.systemPrompt?.trim()
+      ? `${buildSessioAssistantPromptBlock(selectedAssistant.systemPrompt.trim(), { source: "assistant" })}\n\n---\n\n${composerText}`
+      : composerText;
+    await handleSendText(prompt, true, attachments);
+    setSelectedAssistant(null);
+  }, [attachments, composerText, handleSendText, selectedAssistant]);
 
   const handleComposerKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (slashMenuOpen && slashCommandItems.length > 0) {
-      if (event.nativeEvent.isComposing) return false;
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        setCommandActiveIndex((index) => (index + 1) % slashCommandItems.length);
-        return true;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        setCommandActiveIndex((index) => (index - 1 + slashCommandItems.length) % slashCommandItems.length);
-        return true;
-      }
-      if (event.key === "Enter" || event.key === "Tab") {
-        const item = slashCommandItems[commandActiveIndex];
-        if (!item) return false;
-        event.preventDefault();
-        handleSlashCommandSelect(item.key);
-        return true;
-      }
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setCommandDismissedFor(slashTrigger?.raw ?? null);
-        return true;
-      }
-    }
-    return handleComposerInputHistoryKeyDown(event);
+    return commandMenu.handleKeyDown(
+      event,
+      handleCommandSelect,
+      () => handleComposerInputHistoryKeyDown(event),
+    );
   }, [
-    commandActiveIndex,
+    commandMenu,
     handleComposerInputHistoryKeyDown,
-    handleSlashCommandSelect,
-    slashCommandItems,
-    slashMenuOpen,
-    slashTrigger?.raw,
+    handleCommandSelect,
   ]);
 
   const handleCancelTurn = useCallback(async () => {
@@ -1669,17 +1654,26 @@ export function AcpTranscriptPanel({
         placeholder="Ask, Search or Chat..."
         onTextareaKeyDown={handleComposerKeyDown}
         onSend={handleSend}
+        modeActions={
+          selectedAssistant ? (
+            <AssistantModeChip
+              icon={<AssistantBotIcon color={selectedAssistant.color} className="h-4 w-4 shrink-0" />}
+              name={selectedAssistant.name}
+              onRemove={() => setSelectedAssistant(null)}
+            />
+          ) : undefined
+        }
       />
-      {slashMenuOpen && slashTrigger && composerRef.current && (
+      {commandMenu.open && commandTrigger && composerRef.current && (
         <ComposerCommandMenu
           anchor={composerRef.current}
-          items={slashCommandItems}
-          activeIndex={commandActiveIndex}
-          header={t("chat.command.header")}
-          emptyText={t("chat.command.empty")}
-          onActiveIndexChange={setCommandActiveIndex}
-          onSelect={handleSlashCommandSelect}
-          onClose={() => setCommandDismissedFor(slashTrigger.raw)}
+          items={commandItems}
+          activeIndex={commandMenu.activeIndex}
+          header={commandTrigger.kind === "slash" ? t("chat.command.header") : t("new_chat.command.assistant_header")}
+          emptyText={commandTrigger.kind === "slash" ? t("chat.command.empty") : t("new_chat.command.no_assistant")}
+          onActiveIndexChange={commandMenu.setActiveIndex}
+          onSelect={handleCommandSelect}
+          onClose={() => commandMenu.setDismissedFor(commandTrigger.raw)}
         />
       )}
     </div>
