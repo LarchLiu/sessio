@@ -234,6 +234,7 @@ export interface AcpPlanEntry {
 export interface AcpAvailableCommand {
   name: string;
   description: string;
+  commandType?: "agent_builtin" | "app";
   input?: AcpAvailableCommandInput | null;
   meta?: unknown | null;
 }

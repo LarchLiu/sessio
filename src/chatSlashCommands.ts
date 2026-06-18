@@ -29,6 +29,14 @@ export function formatChatSlashCommandText(
   return `/${command.name}${command.input?.kind === "unstructured" ? " " : ""}`;
 }
 
+export function parseSelectedSlashCommandName(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) return null;
+  const match = /^\/([^\s]+)/.exec(trimmed);
+  const name = match?.[1]?.trim() ?? "";
+  return name || null;
+}
+
 export function parseRuntimeSessionAvailableCommands(
   config: Pick<RuntimeAgentSessionConfig, "availableCommandsJson"> | null,
 ): AcpAvailableCommand[] {
@@ -49,9 +57,11 @@ function normalizeAvailableCommand(value: unknown): AcpAvailableCommand | null {
   if (!isRecord(value)) return null;
   const name = typeof value.name === "string" ? value.name.trim() : "";
   if (!name) return null;
+  const commandType = value.commandType === "app" ? "app" : "agent_builtin";
   return {
     name,
     description: typeof value.description === "string" ? value.description : "",
+    commandType,
     input: normalizeAvailableCommandInput(value.input),
     meta: value.meta ?? null,
   };

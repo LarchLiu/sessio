@@ -1,5 +1,6 @@
 import type { AcpContentBlock } from "./runtimeChat";
 import {
+  stripSessioAssistantPromptBlocks,
   sessioThreadPromptBlockMetas,
   stripSessioThreadPromptBlocks,
 } from "./historyMerge";
@@ -29,7 +30,9 @@ export function threadPromptDisplayContentBlocks(
         })),
       );
     }
-    const text = stripSessioThreadPromptBlocks(block.text);
+    const text = stripSessioAssistantPromptBlocks(
+      stripSessioThreadPromptBlocks(block.text),
+    );
     if (text.trim()) out.push({ ...block, text });
   }
   if (showThreadPromptPlaceholders && out.length === 0 && hiddenPrompts.length > 0) {

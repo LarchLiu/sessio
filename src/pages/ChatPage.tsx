@@ -108,6 +108,7 @@ import {
   filterChatSlashCommands,
   formatChatSlashCommandText,
   parseChatSlashCommandTrigger,
+  parseSelectedSlashCommandName,
   parseRuntimeSessionAvailableCommands,
 } from "../chatSlashCommands";
 import {
@@ -1190,6 +1191,14 @@ export function AcpTranscriptPanel({
   ) => {
     const text = rawText.trim();
     if (!text || sending) return;
+    const slashName = parseSelectedSlashCommandName(text);
+    if (slashName) {
+      const slashCommand = slashSourceCommands.find((item) => item.name === slashName);
+      if (slashCommand && (slashCommand.commandType ?? "agent_builtin") !== "agent_builtin") {
+        setComposerError(`Unsupported app command: ${slashCommand.name}`);
+        return;
+      }
+    }
     const agentAttachments: AgentAttachment[] = await Promise.all(
       inputAttachments.map(async ({ path, mimeType, kind, previewDataUrl, displayName }) => {
         if (kind !== "image" || previewDataUrl) {
@@ -1373,7 +1382,7 @@ export function AcpTranscriptPanel({
     } finally {
       setSending(false);
     }
-  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, sending, sessionId, workspacePath]);
+  }, [agent, beginFollowingLiveStream, clearAttachments, composerAgent, composerEffort, composerModel, composerPermissionMode, dispatchLiveEvent, fallbackComposerCapabilities, filePath, historyTurns, liveSession, liveState.lastSequence, liveState.sessions, mergedAncestorTurns, onPendingSession, rememberRuntimeAgentSelection, resetComposerInputHistory, runtimeSessionId, scrollChatToBottom, sending, sessionId, slashSourceCommands, workspacePath]);
 
   const handleSend = useCallback(async () => {
     await handleSendText(composerText, true, attachments);
@@ -2237,6 +2246,10 @@ function AcpCommandsMenu({
   const [error, setError] = useState<string | null>(null);
   const runCommand = (command: AcpAvailableCommand) => {
     if (pendingCommand) return;
+    if ((command.commandType ?? "agent_builtin") !== "agent_builtin") {
+      setError(`Unsupported app command: ${command.name}`);
+      return;
+    }
     const extra = inputs[command.name]?.trim();
     const text = extra ? `/${command.name} ${extra}` : `/${command.name}`;
     setPendingCommand(command.name);

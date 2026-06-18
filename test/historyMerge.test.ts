@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { LiveTurn } from "../src/runtimeChat";
 import {
+  buildSessioAssistantPromptBlock,
   buildSessioThreadPromptBlock,
   forkVisibleHistoryTurns,
   mergeHistoryWithLiveTurns,
   sanitizeSessioAttachmentText,
+  stripInjectedContext,
+  stripSessioAssistantPromptBlocks,
   sessioThreadPromptBlockMetas,
   stripSessioThreadPromptBlocks,
 } from "../src/historyMerge";
@@ -363,6 +366,16 @@ describe("mergeHistoryWithLiveTurns", () => {
     };
 
     expect(mergeHistoryWithLiveTurns(history, [replayWithTool])).toEqual([replayWithTool]);
+  });
+});
+
+describe("assistant prompt blocks", () => {
+  it("strips hidden assistant prompt blocks from visible user text", () => {
+    const block = buildSessioAssistantPromptBlock("You are my assistant", {
+      source: "assistant",
+    });
+    expect(stripSessioAssistantPromptBlocks(`visible\n${block}\nrest`)).toBe("visible\n\nrest");
+    expect(stripInjectedContext(`${block}\n\n---\n\nhello`)).toBe("hello");
   });
 });
 

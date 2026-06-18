@@ -2361,13 +2361,22 @@ fn normalize_task_list_update_value(value: Value, source: &str) -> Value {
 }
 
 fn normalize_available_command(value: &Value) -> AcpAvailableCommand {
+    let mut meta = value_field(value, "meta")
+        .or_else(|| value_field(value, "_meta"))
+        .unwrap_or(Value::Null);
+    let command_type = string_field(value, "commandType")
+        .or_else(|| string_field(value, "command_type"))
+        .unwrap_or_else(|| "agent_builtin".to_string());
+    if let Some(meta_obj) = meta.as_object_mut() {
+        meta_obj
+            .entry("commandType".to_string())
+            .or_insert_with(|| Value::String(command_type.clone()));
+    }
     AcpAvailableCommand {
         name: string_field(value, "name").unwrap_or_else(|| "command".to_string()),
         description: string_field(value, "description").unwrap_or_default(),
         input: normalize_available_command_input(value_field(value, "input")),
-        meta: value_field(value, "meta")
-            .or_else(|| value_field(value, "_meta"))
-            .unwrap_or(Value::Null),
+        meta,
     }
 }
 

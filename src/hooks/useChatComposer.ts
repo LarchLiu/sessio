@@ -33,6 +33,7 @@ import {
   useComposerAttachments,
 } from "../components/ComposerAttachments";
 import { RuntimeEffortControl, runtimePermissionModeOptions } from "../components/RuntimeMenuSelect";
+import { buildSessioAssistantPromptBlock } from "../historyMerge";
 import type { PendingNewChatSession } from "../navigation";
 import { dispatchSessionStartedFallback, type LiveRuntimeAction, type LiveRuntimeState } from "../runtimeChat";
 import {
@@ -370,8 +371,13 @@ export function useChatComposer({
       };
       onPendingSession(pendingSession);
       options.onPendingCreated?.(pendingSession);
-      const inputText = options.extraContext
-        ? `${options.extraContext}\n\n---\n\n${prompt}`
+      const assistantPrompt = options.extraContext?.trim()
+        ? buildSessioAssistantPromptBlock(options.extraContext, {
+          source: "assistant",
+        })
+        : "";
+      const inputText = assistantPrompt
+        ? `${assistantPrompt}\n\n---\n\n${prompt}`
         : prompt;
       await sendAgentInput(handle.sessioRuntimeSessionId, {
         text: inputText,

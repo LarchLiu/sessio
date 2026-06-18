@@ -3,6 +3,7 @@ import {
   filterChatSlashCommands,
   formatChatSlashCommandText,
   parseChatSlashCommandTrigger,
+  parseSelectedSlashCommandName,
   parseRuntimeSessionAvailableCommands,
 } from "../src/chatSlashCommands";
 
@@ -48,6 +49,12 @@ describe("chatSlashCommands", () => {
     ).toBe("/status");
   });
 
+  it("extracts the selected slash command name from the active token", () => {
+    expect(parseSelectedSlashCommandName("/plan")).toBe("plan");
+    expect(parseSelectedSlashCommandName("/plan now")).toBe("plan");
+    expect(parseSelectedSlashCommandName("hello")).toBeNull();
+  });
+
   it("parses persisted runtime commands JSON", () => {
     expect(
       parseRuntimeSessionAvailableCommands({
@@ -73,6 +80,7 @@ describe("chatSlashCommands", () => {
       {
         name: "plan",
         description: "Plan the work",
+        commandType: "agent_builtin",
         input: {
           kind: "unstructured",
           hint: "What should I plan?",
@@ -87,6 +95,7 @@ describe("chatSlashCommands", () => {
       {
         name: "status",
         description: "Show status",
+        commandType: "agent_builtin",
         input: null,
         meta: null,
       },
@@ -96,5 +105,27 @@ describe("chatSlashCommands", () => {
         availableCommandsJson: "{not json}",
       }),
     ).toEqual([]);
+  });
+
+  it("preserves explicit app command type from cached config", () => {
+    expect(
+      parseRuntimeSessionAvailableCommands({
+        availableCommandsJson: JSON.stringify([
+          {
+            name: "new",
+            description: "Create",
+            commandType: "app",
+          },
+        ]),
+      }),
+    ).toEqual([
+      {
+        name: "new",
+        description: "Create",
+        commandType: "app",
+        input: null,
+        meta: null,
+      },
+    ]);
   });
 });

@@ -7,9 +7,16 @@ import type {
 const SESSIO_ATTACHMENT_MARKER = "__sessio_attachment__:";
 const SESSIO_THREAD_PROMPT_START = "<!-- sessio-thread-prompt:start";
 const SESSIO_THREAD_PROMPT_END = "<!-- sessio-thread-prompt:end";
+const SESSIO_ASSISTANT_PROMPT_START = "<!-- sessio-assistant-prompt:start";
+const SESSIO_ASSISTANT_PROMPT_END = "<!-- sessio-assistant-prompt:end";
 
 export interface SessioThreadPromptBlockMeta {
   kind: string | null;
+  attrs: Record<string, string>;
+  content: string;
+}
+
+export interface SessioAssistantPromptBlockMeta {
   attrs: Record<string, string>;
   content: string;
 }
@@ -40,6 +47,24 @@ export function buildSessioThreadPromptBlock(
     .map(([key, value]) => ` ${key}="${htmlAttr(value)}"`)
     .join("");
   return `${SESSIO_THREAD_PROMPT_START}${attrText} -->\n\n${body}\n\n${SESSIO_THREAD_PROMPT_END} nonce="${htmlAttr(nonce)}" -->`;
+}
+
+export function buildSessioAssistantPromptBlock(
+  content: string,
+  attrs: Record<string, string | null | undefined> = {},
+): string {
+  const body = content.trim();
+  if (!body) return "";
+  const nonce = threadPromptNonce();
+  const attrText = [
+    ["nonce", nonce],
+    ...Object.entries(attrs),
+  ]
+    .filter((entry): entry is [string, string] =>
+      /^[A-Za-z_][A-Za-z0-9_-]*$/.test(entry[0]) && Boolean(entry[1]?.trim()))
+    .map(([key, value]) => ` ${key}="${htmlAttr(value)}"`)
+    .join("");
+  return `${SESSIO_ASSISTANT_PROMPT_START}${attrText} -->\n\n${body}\n\n${SESSIO_ASSISTANT_PROMPT_END} nonce="${htmlAttr(nonce)}" -->`;
 }
 
 function threadPromptNonce(): string {
@@ -124,6 +149,75 @@ export function stripSessioThreadPromptBlocks(input: string): string {
     .trim();
 }
 
+export function sessioAssistantPromptBlockMetas(input: string): SessioAssistantPromptBlockMeta[] {
+  const metas: SessioAssistantPromptBlockMeta[] = [];
+  let cursor = 0;
+  for (;;) {
+    const start = input.indexOf(SESSIO_ASSISTANT_PROMPT_START, cursor);
+    if (start < 0) break;
+    const startCommentEnd = input.indexOf("-->", start);
+    if (startCommentEnd < 0) break;
+    const startComment = input.slice(start, startCommentEnd + "-->".length);
+    const nonce = commentAttr(startComment, "nonce");
+    if (!nonce) {
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    const endMarker = `${SESSIO_ASSISTANT_PROMPT_END} nonce="${nonce}" -->`;
+    const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
+    if (end < 0) {
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    metas.push({
+      attrs: commentAttrs(startComment),
+      content: input.slice(startCommentEnd + "-->".length, end).trim(),
+    });
+    cursor = end + endMarker.length;
+  }
+  return metas;
+}
+
+export function stripSessioAssistantPromptBlocks(input: string): string {
+  let out = "";
+  let cursor = 0;
+  let changed = false;
+  for (;;) {
+    const start = input.indexOf(SESSIO_ASSISTANT_PROMPT_START, cursor);
+    if (start < 0) {
+      out += input.slice(cursor);
+      break;
+    }
+    const startCommentEnd = input.indexOf("-->", start);
+    if (startCommentEnd < 0) {
+      out += input.slice(cursor);
+      break;
+    }
+    const startComment = input.slice(start, startCommentEnd + "-->".length);
+    const nonce = commentAttr(startComment, "nonce");
+    if (!nonce) {
+      out += input.slice(cursor, startCommentEnd + "-->".length);
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    const endMarker = `${SESSIO_ASSISTANT_PROMPT_END} nonce="${nonce}" -->`;
+    const end = input.indexOf(endMarker, startCommentEnd + "-->".length);
+    if (end < 0) {
+      out += input.slice(cursor, startCommentEnd + "-->".length);
+      cursor = startCommentEnd + "-->".length;
+      continue;
+    }
+    changed = true;
+    out += input.slice(cursor, start);
+    cursor = end + endMarker.length;
+  }
+  if (!changed) return input;
+  return out
+    .replace(/^\s*---+\s*/, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function commentAttr(comment: string, key: string): string | null {
   const match = new RegExp(`\\s${key}="([^"]*)"`).exec(comment);
   return match?.[1] ?? null;
@@ -173,7 +267,9 @@ export function stripInjectedContext(s: string): string {
   const MARKER = "## My request for Codex:";
   const idx = text.indexOf(MARKER);
   if (idx >= 0) text = text.slice(idx + MARKER.length);
-  return stripSessioThreadPromptBlocks(stripImagePlaceholders(text)).trim();
+  return stripSessioAssistantPromptBlocks(
+    stripSessioThreadPromptBlocks(stripImagePlaceholders(text)),
+  ).trim();
 }
 
 export function stripSessioUploadWrapper(text: string): string {
