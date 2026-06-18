@@ -99,6 +99,12 @@ const THREAD_KINDS: ThreadKind[] = ["process", "teamwork", "brainstorm", "debate
 const AGENT_PARTICIPANT_KINDS = new Set<ThreadKind>(["brainstorm", "debate"]);
 const GIT_COMMIT_PAGE_SIZE = 20;
 
+function resizeGitCommitMessage(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  el.style.height = `${Math.max(el.scrollHeight, 44)}px`;
+  el.style.overflowY = "hidden";
+}
+
 function sessionIdentityKey(s: SessionInfo): string {
   return `${s.agent}:${s.id}`;
 }
@@ -848,6 +854,7 @@ function ProjectSourceControlPanel({
   const [message, setMessage] = useState("");
   const [activeGitAction, setActiveGitAction] = useState<ProjectGitAction | null>(null);
   const activeGitActionRef = useRef<ProjectGitAction | null>(null);
+  const commitMessageRef = useRef<HTMLTextAreaElement>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     staged: true,
     changes: true,
@@ -919,6 +926,10 @@ function ProjectSourceControlPanel({
     if (!project.path || state === null) return;
     void loadSourceControl({ background: true });
   }, [project.path, reloadKey]);
+
+  useLayoutEffect(() => {
+    if (commitMessageRef.current) resizeGitCommitMessage(commitMessageRef.current);
+  }, [message]);
 
   const staged = useMemo(
     () => (state?.changes ?? []).filter((change) => change.staged),
@@ -1091,25 +1102,36 @@ function ProjectSourceControlPanel({
             </div>
           </div>
           <div className="mt-3 grid gap-2">
-            <textarea
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canCommit && !gitActionBusy) {
-                  event.preventDefault();
-                  void runAction("commit", { message });
-                }
-              }}
-              rows={2}
-              placeholder={t("project.source_control_commit_placeholder")}
-              className="min-h-[44px] min-w-0 resize-none rounded-md border border-ink/10 bg-surface-panel px-3 py-2 text-body-sm leading-5 text-ink outline-none placeholder:text-ink/35 focus:border-ink/22"
-            />
+            <ScrollArea
+              className="min-h-[44px] max-h-[96px] rounded-md border border-ink/10 bg-surface-panel transition-colors focus-within:border-ink/22"
+              viewportClassName="max-h-[96px]"
+              persistScrollbars
+            >
+              <textarea
+                ref={commitMessageRef}
+                value={message}
+                onChange={(event) => {
+                  resizeGitCommitMessage(event.currentTarget);
+                  setMessage(event.target.value);
+                }}
+                onInput={(event) => resizeGitCommitMessage(event.currentTarget)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canCommit && !gitActionBusy) {
+                    event.preventDefault();
+                    void runAction("commit", { message });
+                  }
+                }}
+                rows={2}
+                placeholder={t("project.source_control_commit_placeholder")}
+                className="block min-h-[44px] w-full resize-none overflow-hidden bg-transparent px-3 py-2 pr-6 text-body-sm leading-5 text-ink outline-none placeholder:text-ink/35"
+              />
+            </ScrollArea>
             <Tooltip content={t("project.source_control_commit")} placement="bottom">
               <button
                 type="button"
                 disabled={!canCommit || gitActionBusy}
                 onClick={() => void runAction("commit", { message })}
-                className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-3 text-body-sm font-medium text-ink/76 transition hover:border-[rgb(var(--color-emerald)/0.36)] hover:bg-[rgb(var(--color-emerald)/0.17)] hover:text-ink/86 disabled:border-ink/10 disabled:bg-ink/[0.035] disabled:text-ink/22"
+                className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-transparent bg-ink/[0.1] px-3 text-body-sm font-medium text-ink/88 shadow-[inset_0_1px_0_rgb(var(--color-ink)/0.08)] transition hover:bg-ink/[0.14] hover:text-ink/95 disabled:bg-ink/[0.025] disabled:text-ink/45 disabled:shadow-none"
                 aria-label={t("project.source_control_commit")}
               >
                 <Check className="h-4 w-4" />
