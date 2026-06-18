@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MultiFileDiff, PatchDiff } from "@pierre/diffs/react";
-import { ChevronDown, FileDiff } from "lucide-react";
+import { ArrowUpRight, ChevronDown, FileDiff } from "lucide-react";
 import type { FileEditContentDiff, FileEditItem } from "../acpRenderItems";
 import ScrollArea from "./ScrollArea";
 import { useEffectiveThemeType } from "./shikiHighlight";
 import { isNearScrollBottom } from "./useMessageStreamScrollController";
+import Tooltip from "./Tooltip";
 
 export interface SessionFileEditsCardProps {
   edits: FileEditItem[];
@@ -13,6 +14,7 @@ export interface SessionFileEditsCardProps {
   fileCount?: number;
   compact?: boolean;
   showAllFiles?: boolean;
+  onOpenFile?: (path: string) => void;
 }
 
 export default function SessionFileEditsCard({
@@ -22,6 +24,7 @@ export default function SessionFileEditsCard({
   fileCount = edits.length,
   compact = false,
   showAllFiles = false,
+  onOpenFile,
 }: SessionFileEditsCardProps) {
   const stateKey = useMemo(
     () =>
@@ -154,6 +157,7 @@ export default function SessionFileEditsCard({
             const detail = normalizeEditDetails(edit).join("\n\n");
             const hasDetail = hasRenderableEditDetail(edit);
             const detailOpen = openDetails.has(detailKey);
+            const openPath = edit.path || edit.displayPath || "";
             const rowContent = (
               <>
                 <span className="min-w-0 truncate text-ink/80">{label}</span>
@@ -163,6 +167,21 @@ export default function SessionFileEditsCard({
                     <span className="text-ink/25"> </span>
                     <span className="text-status-error">-{edit.deletions ?? 0}</span>
                   </span>
+                  {openPath && onOpenFile && (
+                    <Tooltip content={`Open ${label}`} placement="top">
+                      <button
+                        type="button"
+                        className="flex h-5 w-5 items-center justify-center rounded text-ink/45 transition hover:bg-ink/[0.06] hover:text-ink/80"
+                        aria-label={`Open ${label}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onOpenFile(openPath);
+                        }}
+                      >
+                        <ArrowUpRight className="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
+                  )}
                   {hasDetail && (
                     <ChevronDown
                       className={

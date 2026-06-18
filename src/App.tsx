@@ -992,6 +992,7 @@ export default function App() {
           onFilesSubviewChange={setFilesSubview}
           projectFilesReloadKey={rightSidebarFilesReloadKey}
           selectedProjectFileRequest={currentProjectFileSelection}
+          onOpenProjectFile={handleOpenProjectFile}
           liveState={liveRuntimeState}
           runtimeAgents={runtimeAgents}
           lastRuntimeAgentSelection={lastRuntimeAgentSelection}

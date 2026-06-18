@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { acpViewModelToRenderItems, parseFileEditSummary, renderItemKeys } from "../src/acpRenderItems";
+import {
+  acpViewModelToRenderItems,
+  liveOrLatestTurnFileEdits,
+  parseFileEditSummary,
+  renderItemKeys,
+} from "../src/acpRenderItems";
 import type { AcpViewModel, AcpPermissionRequest } from "../src/runtimeChat";
 
 describe("acpViewModelToRenderItems", () => {
@@ -245,5 +250,142 @@ describe("acpViewModelToRenderItems", () => {
         updateType: "file_edit",
       },
     });
+  });
+
+  it("prefers the live turn for edited files when that turn has file changes", () => {
+    const viewModel: AcpViewModel = {
+      turns: [
+        {
+          turnId: "turn-1",
+          status: "completed",
+          blocks: [
+            {
+              kind: "sessionUpdate",
+              updateType: "file_edit",
+              data: {
+                source: "session",
+                edits: [{ path: "src/old.ts", additions: 1, deletions: 0 }],
+              },
+              timestamp: 1,
+            },
+          ],
+          tools: [],
+          permissions: [],
+          protocolMessages: [],
+          stopReason: null,
+          error: null,
+          startedAt: 1,
+          updatedAt: 1,
+        },
+        {
+          turnId: "turn-2",
+          status: "streaming",
+          blocks: [
+            {
+              kind: "sessionUpdate",
+              updateType: "file_edit",
+              data: {
+                source: "session",
+                edits: [{ path: "src/live.ts", additions: 2, deletions: 1 }],
+              },
+              timestamp: 2,
+            },
+          ],
+          tools: [],
+          permissions: [],
+          protocolMessages: [],
+          stopReason: null,
+          error: null,
+          startedAt: 2,
+          updatedAt: 2,
+        },
+      ],
+      sessionState: {
+        plan: null,
+        availableCommands: [],
+        currentModeId: null,
+        configOptions: [],
+        sessionInfo: null,
+      },
+      protocolMessages: [],
+      ended: false,
+    };
+
+    const summary = liveOrLatestTurnFileEdits(viewModel, new Set(["turn-2"]));
+
+    expect(summary).toMatchObject({
+      source: "live",
+      turnId: "turn-2",
+      additions: 2,
+      deletions: 1,
+    });
+    expect(summary.edits.map((edit) => edit.path)).toEqual(["src/live.ts"]);
+  });
+
+  it("falls back to the last turn only and hides edited files when that turn has no file changes", () => {
+    const viewModel: AcpViewModel = {
+      turns: [
+        {
+          turnId: "turn-1",
+          status: "completed",
+          blocks: [
+            {
+              kind: "sessionUpdate",
+              updateType: "file_edit",
+              data: {
+                source: "session",
+                edits: [{ path: "src/older.ts", additions: 3, deletions: 0 }],
+              },
+              timestamp: 1,
+            },
+          ],
+          tools: [],
+          permissions: [],
+          protocolMessages: [],
+          stopReason: null,
+          error: null,
+          startedAt: 1,
+          updatedAt: 1,
+        },
+        {
+          turnId: "turn-2",
+          status: "completed",
+          blocks: [
+            {
+              kind: "assistant",
+              blocks: [{ type: "text", text: "No edits here" }],
+              raw: {},
+              timestamp: 2,
+            },
+          ],
+          tools: [],
+          permissions: [],
+          protocolMessages: [],
+          stopReason: null,
+          error: null,
+          startedAt: 2,
+          updatedAt: 2,
+        },
+      ],
+      sessionState: {
+        plan: null,
+        availableCommands: [],
+        currentModeId: null,
+        configOptions: [],
+        sessionInfo: null,
+      },
+      protocolMessages: [],
+      ended: false,
+    };
+
+    const summary = liveOrLatestTurnFileEdits(viewModel, new Set());
+
+    expect(summary).toMatchObject({
+      source: "none",
+      turnId: "turn-2",
+      additions: 0,
+      deletions: 0,
+    });
+    expect(summary.edits).toEqual([]);
   });
 });

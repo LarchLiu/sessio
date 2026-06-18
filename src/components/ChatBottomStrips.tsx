@@ -327,12 +327,14 @@ export function EditedFilesBar({
   deletions,
   edits = [],
   onClick,
+  onOpenFile,
 }: {
   fileCount: number;
   additions: number;
   deletions: number;
   edits?: FileEditItem[];
   onClick?: () => void;
+  onOpenFile?: (path: string) => void;
 }) {
   const { t } = useI18n();
   const anchorRef = useRef<HTMLButtonElement | HTMLDivElement | null>(null);
@@ -410,14 +412,22 @@ export function EditedFilesBar({
       const verticalPadding =
         Number.parseFloat(computed.paddingTop || "0") +
         Number.parseFloat(computed.paddingBottom || "0");
+      const verticalBorder =
+        Number.parseFloat(computed.borderTopWidth || "0") +
+        Number.parseFloat(computed.borderBottomWidth || "0");
       const naturalHeight = content
-        ? content.scrollHeight + verticalPadding
+        ? content.scrollHeight + verticalPadding + verticalBorder
         : popup.scrollHeight;
       const fitsBelow = naturalHeight <= availableBelow;
       const fitsAbove = naturalHeight <= availableAbove;
-      const placeBelow = fitsBelow || (!fitsAbove && availableBelow >= availableAbove);
+      const placeBelow =
+        fitsBelow && !fitsAbove
+          ? true
+          : !fitsBelow && fitsAbove
+            ? false
+            : availableBelow > availableAbove;
       const availableHeight = Math.max(0, placeBelow ? availableBelow : availableAbove);
-      const finalHeight = Math.min(520, availableHeight, naturalHeight);
+      const finalHeight = Math.ceil(Math.min(520, availableHeight, naturalHeight));
 
       popup.style.height = `${finalHeight}px`;
       popup.style.maxHeight = `${finalHeight}px`;
@@ -426,9 +436,13 @@ export function EditedFilesBar({
         Math.max(margin, rect.left + rect.width / 2 - width / 2),
         window.innerWidth - margin - width,
       );
-      const top = placeBelow
+      const unclampedTop = placeBelow
         ? Math.min(rect.bottom + gap, window.innerHeight - margin - finalHeight)
         : Math.max(margin, rect.top - gap - finalHeight);
+      const top = Math.min(
+        Math.max(margin, unclampedTop),
+        Math.max(margin, window.innerHeight - margin - finalHeight),
+      );
 
       setPopupPos({
         top,
@@ -513,6 +527,7 @@ export function EditedFilesBar({
                     fileCount={fileCount}
                     compact
                     showAllFiles
+                    onOpenFile={onOpenFile}
                   />
                 </div>
               </ScrollArea>

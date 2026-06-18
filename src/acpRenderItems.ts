@@ -81,6 +81,61 @@ export function aggregateSessionFileEdits(viewModel: AcpViewModel): {
   };
 }
 
+export function latestTurnFileEdits(viewModel: AcpViewModel): {
+  edits: FileEditItem[];
+  additions: number;
+  deletions: number;
+  turnId: string | null;
+} {
+  const turn = viewModel.turns.at(-1) ?? null;
+  if (turn) {
+    const summary = aggregateTurnFileEdits(turn);
+    return {
+      ...summary,
+      turnId: turn.turnId,
+    };
+  }
+  return {
+    edits: [],
+    additions: 0,
+    deletions: 0,
+    turnId: null,
+  };
+}
+
+export function liveOrLatestTurnFileEdits(
+  viewModel: AcpViewModel,
+  liveTurnIds: Set<string>,
+): {
+  edits: FileEditItem[];
+  additions: number;
+  deletions: number;
+  turnId: string | null;
+  source: "live" | "latest" | "none";
+} {
+  for (let index = viewModel.turns.length - 1; index >= 0; index -= 1) {
+    const turn = viewModel.turns[index];
+    if (!liveTurnIds.has(turn.turnId)) continue;
+    const summary = aggregateTurnFileEdits(turn);
+    return {
+      ...summary,
+      turnId: turn.turnId,
+      source: summary.edits.length > 0 ? "live" : "none",
+    };
+  }
+  const latest = latestTurnFileEdits(viewModel);
+  if (latest.edits.length === 0) {
+    return {
+      ...latest,
+      source: "none",
+    };
+  }
+  return {
+    ...latest,
+    source: "latest",
+  };
+}
+
 export function acpViewModelToRenderItems(
   viewModel: AcpViewModel,
   liveTurnIds: Set<string>,
@@ -185,6 +240,28 @@ function latestTurnWithIds(turns: LiveTurn[], ids: Set<string>): LiveTurn | null
     if (ids.has(turn.turnId)) return turn;
   }
   return null;
+}
+
+function aggregateTurnFileEdits(turn: LiveTurn): {
+  edits: FileEditItem[];
+  additions: number;
+  deletions: number;
+} {
+  const edits: FileEditItem[] = [];
+  for (const block of turn.blocks) {
+    if (block.kind !== "sessionUpdate") continue;
+    if (block.updateType !== "file_edit") continue;
+    const summary = parseFileEditSummary(block.data);
+    if (!summary?.edits) continue;
+    for (const edit of summary.edits) {
+      mergeFileEditItem(edits, edit);
+    }
+  }
+  return {
+    edits,
+    additions: sumEditNumber(edits, "additions"),
+    deletions: sumEditNumber(edits, "deletions"),
+  };
 }
 
 function renderItemKey(item: AcpRenderItem): string {

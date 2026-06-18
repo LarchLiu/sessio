@@ -28,6 +28,7 @@ export default function AppMain({
   onFilesSubviewChange,
   projectFilesReloadKey,
   selectedProjectFileRequest,
+  onOpenProjectFile,
   liveState,
   runtimeAgents,
   lastRuntimeAgentSelection,
@@ -67,6 +68,7 @@ export default function AppMain({
     path: string;
     requestId: number;
   } | null;
+  onOpenProjectFile: (path: string) => void;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   lastRuntimeAgentSelection: RuntimeAgentSelection | null;
@@ -243,6 +245,7 @@ export default function AppMain({
             onFilesSubviewChange={onFilesSubviewChange}
             projectFilesReloadKey={projectFilesReloadKey}
             selectedProjectFileRequest={selectedProjectFileRequest}
+            onOpenProjectFile={onOpenProjectFile}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}
@@ -268,7 +271,12 @@ export default function AppMain({
             session={selected}
             assistants={selectedSessionProject ? (projectAssistants[selectedSessionProject.id] ?? []) : []}
             viewMode={viewMode}
+            chatView={chatView}
+            filesSubview={filesSubview}
+            onFilesSubviewChange={onFilesSubviewChange}
             projectFilesReloadKey={projectFilesReloadKey}
+            selectedProjectFileRequest={selectedProjectFileRequest}
+            onOpenProjectFile={onOpenProjectFile}
             liveState={liveState}
             runtimeAgents={runtimeAgents}
             rememberRuntimeAgentSelection={rememberRuntimeAgentSelection}

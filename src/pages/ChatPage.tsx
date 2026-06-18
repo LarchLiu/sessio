@@ -131,6 +131,7 @@ import {
   acpViewModelToRenderItems,
   aggregateSessionFileEdits,
   fileEditMatchesPath,
+  liveOrLatestTurnFileEdits,
   parseFileEditSummary as parseSharedFileEditSummary,
   renderItemKeys,
   type AcpRenderItem,
@@ -155,6 +156,7 @@ export interface ChatPageProps {
     path: string;
     requestId: number;
   } | null;
+  onOpenProjectFile?: (path: string) => void;
   liveState: LiveRuntimeState;
   runtimeAgents: RuntimeAgentMetadata[];
   rememberRuntimeAgentSelection?: (selection: SetRuntimeAgentSelectionRequest) => Promise<void>;
@@ -312,6 +314,7 @@ function ChatPage({
   onFilesSubviewChange = () => {},
   projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
+  onOpenProjectFile,
   liveState,
   runtimeAgents,
   rememberRuntimeAgentSelection,
@@ -414,8 +417,8 @@ function ChatPage({
           </ScrollArea>
         )}
 
-        <AcpTranscriptPanel
-          assistants={assistants}
+          <AcpTranscriptPanel
+            assistants={assistants}
           key={
             tab.kind === "main"
               ? mainMessageStreamKey
@@ -452,11 +455,12 @@ function ChatPage({
           onMessageCount={onMessageCount}
           messageCount={activeMessageMeta.count}
           workspacePath={session.projectPath}
-          projectFilesReloadKey={projectFilesReloadKey}
-          selectedProjectFileRequest={selectedProjectFileRequest}
-          skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
-          beforeMessages={tab.kind === "main" ? beforeMessages : null}
-          showThreadPromptPlaceholders={showThreadPromptPlaceholders}
+            projectFilesReloadKey={projectFilesReloadKey}
+            selectedProjectFileRequest={selectedProjectFileRequest}
+            onOpenProjectFile={onOpenProjectFile}
+            skipHistoryLoad={tab.kind === "main" && !session.filePath && hasMainLiveSession}
+            beforeMessages={tab.kind === "main" ? beforeMessages : null}
+            showThreadPromptPlaceholders={showThreadPromptPlaceholders}
           threadPromptFallbacks={tab.kind === "main" ? threadPromptFallbacks : []}
         />
 
@@ -560,6 +564,7 @@ export interface AcpTranscriptPanelProps {
     path: string;
     requestId: number;
   } | null;
+  onOpenProjectFile?: (path: string) => void;
   skipHistoryLoad?: boolean;
   scrollKey?: string;
   beforeMessages?: ReactNode | null;
@@ -594,6 +599,7 @@ export function AcpTranscriptPanel({
   workspacePath,
   projectFilesReloadKey = 0,
   selectedProjectFileRequest = null,
+  onOpenProjectFile,
   skipHistoryLoad = false,
   scrollKey,
   beforeMessages = null,
@@ -964,6 +970,10 @@ export function AcpTranscriptPanel({
   }, [ancestorCacheKey, historyKey, historyTurns, liveSession, mergedAncestorTurns, viewMode]);
   const liveTurnIdsKey = useMemo(
     () => liveSession?.turns.map((turn) => turn.turnId).join("|") ?? "",
+    [liveSession],
+  );
+  const liveTurnIds = useMemo(
+    () => new Set(liveSession?.turns.map((turn) => turn.turnId) ?? []),
     [liveSession],
   );
   const liveWorkingIndicatorTurnId = useMemo(
@@ -1490,6 +1500,10 @@ export function AcpTranscriptPanel({
     () => aggregateSessionFileEdits(acpViewModel),
     [acpViewModel],
   );
+  const currentTurnFileEdits = useMemo(
+    () => liveOrLatestTurnFileEdits(acpViewModel, liveTurnIds),
+    [acpViewModel, liveTurnIds],
+  );
   const selectedProjectFilePath = selectedProjectFileRequest?.path.trim() || null;
   const fileViewEdits = useMemo(() => {
     if (!selectedProjectFilePath) return sessionFileEdits.edits;
@@ -1592,6 +1606,7 @@ export function AcpTranscriptPanel({
                   onPreviewImage={onPreviewImage}
                   onPreviewFile={onPreviewFile}
                   onFilePreviewError={onFilePreviewError}
+                  onOpenProjectFile={onOpenProjectFile}
                   onPermissionResponse={respondAgentPermission}
                 />
               </div>
@@ -1637,10 +1652,11 @@ export function AcpTranscriptPanel({
             workingTurnId={liveWorkingIndicatorTurnId || null}
           />
           <EditedFilesBar
-            fileCount={sessionFileEdits.edits.length}
-            additions={sessionFileEdits.additions}
-            deletions={sessionFileEdits.deletions}
-            edits={sessionFileEdits.edits}
+            fileCount={currentTurnFileEdits.edits.length}
+            additions={currentTurnFileEdits.additions}
+            deletions={currentTurnFileEdits.deletions}
+            edits={currentTurnFileEdits.edits}
+            onOpenFile={onOpenProjectFile}
           />
         </ComposerTopAttachments>
       )}
@@ -2334,6 +2350,7 @@ export function AcpRenderItems({
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
+  onOpenProjectFile,
   onPermissionResponse,
 }: {
   items: AcpRenderItem[];
@@ -2347,6 +2364,7 @@ export function AcpRenderItems({
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
+  onOpenProjectFile?: (path: string) => void;
   onPermissionResponse: (
     sessioRuntimeSessionId: string,
     requestId: string,
@@ -2373,6 +2391,7 @@ export function AcpRenderItems({
             onPreviewImage={onPreviewImage}
             onPreviewFile={onPreviewFile}
             onFilePreviewError={onFilePreviewError}
+            onOpenProjectFile={onOpenProjectFile}
             onPermissionResponse={onPermissionResponse}
           />
         </div>
@@ -2391,6 +2410,7 @@ function AcpLiveItem({
   onPreviewImage,
   onPreviewFile,
   onFilePreviewError,
+  onOpenProjectFile,
   onPermissionResponse,
 }: {
   item: AcpRenderItem;
@@ -2402,6 +2422,7 @@ function AcpLiveItem({
   onPreviewImage: (image: MarkdownImage) => void;
   onPreviewFile: (file: FilePreview) => void;
   onFilePreviewError: (message: string) => void;
+  onOpenProjectFile?: (path: string) => void;
   onPermissionResponse: (
     sessioRuntimeSessionId: string,
     requestId: string,
@@ -2448,6 +2469,7 @@ function AcpLiveItem({
       <AcpSessionUpdateView
         update={item.block}
         locale={localeTag(lang)}
+        onOpenProjectFile={onOpenProjectFile}
       />
     );
   }
@@ -2474,9 +2496,11 @@ function AcpLiveItem({
 function AcpSessionUpdateView({
   update,
   locale,
+  onOpenProjectFile,
 }: {
   update: Extract<AcpRenderBlock, { kind: "sessionUpdate" }>;
   locale: string;
+  onOpenProjectFile?: (path: string) => void;
 }) {
   const data = asRecord(update.data);
   const text = typeof data.text === "string" ? data.text : "";
@@ -2485,7 +2509,7 @@ function AcpSessionUpdateView({
   if (update.updateType === "file_edit") {
     return (
       <div className="text-body leading-relaxed break-words py-1">
-        <FileEditContent value={update.data} />
+        <FileEditContent value={update.data} onOpenProjectFile={onOpenProjectFile} />
       </div>
     );
   }
@@ -4436,7 +4460,13 @@ function toolGroupCountPartForKey(
   return toolGroupCountPart(count, verb, label.noun);
 }
 
-function FileEditContent({ value }: { value: unknown }) {
+function FileEditContent({
+  value,
+  onOpenProjectFile,
+}: {
+  value: unknown;
+  onOpenProjectFile?: (path: string) => void;
+}) {
   const summary = parseSharedFileEditSummary(value);
   const text = stableDisplayText(value);
   if (!summary) return <PlainTextContent text={text} />;
@@ -4450,6 +4480,7 @@ function FileEditContent({ value }: { value: unknown }) {
       additions={additions}
       deletions={deletions}
       fileCount={fileCount}
+      onOpenFile={onOpenProjectFile}
     />
   );
 }
