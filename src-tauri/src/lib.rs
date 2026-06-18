@@ -3093,7 +3093,20 @@ fn list_project_git_commits(
 }
 
 #[tauri::command]
-fn run_project_git_action(
+async fn run_project_git_action(
+    path: String,
+    action: String,
+    paths: Option<Vec<String>>,
+    message: Option<String>,
+) -> Result<ProjectGitActionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_project_git_action_sync(path, action, paths, message)
+    })
+    .await
+    .map_err(|e| format!("Failed to join git action task: {e}"))?
+}
+
+fn run_project_git_action_sync(
     path: String,
     action: String,
     paths: Option<Vec<String>>,

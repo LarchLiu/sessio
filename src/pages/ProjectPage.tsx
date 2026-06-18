@@ -846,6 +846,8 @@ function ProjectSourceControlPanel({
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
+  const [activeGitAction, setActiveGitAction] = useState<ProjectGitAction | null>(null);
+  const activeGitActionRef = useRef<ProjectGitAction | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     staged: true,
     changes: true,
@@ -936,6 +938,9 @@ function ProjectSourceControlPanel({
     options: { paths?: string[]; message?: string | null } = {},
   ) => {
     if (!project.path) return;
+    if (activeGitActionRef.current) return;
+    activeGitActionRef.current = action;
+    setActiveGitAction(action);
     try {
       onError(null);
       await runProjectGitAction(project.path, action, options);
@@ -943,6 +948,9 @@ function ProjectSourceControlPanel({
       await loadSourceControl({ background: true });
     } catch (err) {
       onError(String(err));
+    } finally {
+      activeGitActionRef.current = null;
+      setActiveGitAction(null);
     }
   };
 
@@ -981,6 +989,7 @@ function ProjectSourceControlPanel({
 
   const summary = state?.summary ?? null;
   const canCommit = Boolean(message.trim()) && staged.length > 0;
+  const gitActionBusy = activeGitAction !== null;
 
   if (loading && state === null) {
     return (
@@ -1032,7 +1041,7 @@ function ProjectSourceControlPanel({
                 </div>
                 <GitIconButton
                   label={t("project.source_control_refresh")}
-                  disabled={refreshing}
+                  disabled={refreshing || gitActionBusy}
                   onClick={() => void loadSourceControl({ background: true })}
                   icon={refreshing ? LoaderCircle : RefreshCw}
                   spin={refreshing}
@@ -1049,26 +1058,34 @@ function ProjectSourceControlPanel({
             <div className="flex items-center gap-1 leading-none">
               <GitIconButton
                 label={t("project.source_control_fetch")}
+                disabled={gitActionBusy}
                 onClick={() => void runAction("fetch")}
-                icon={ArrowDown}
+                icon={activeGitAction === "fetch" ? LoaderCircle : ArrowDown}
+                spin={activeGitAction === "fetch"}
                 className="h-6 w-8"
               />
               <GitIconButton
                 label={t("project.source_control_sync")}
+                disabled={gitActionBusy}
                 onClick={() => void runAction("sync")}
-                icon={GitCompareArrows}
+                icon={activeGitAction === "sync" ? LoaderCircle : GitCompareArrows}
+                spin={activeGitAction === "sync"}
                 className="h-6 w-8"
               />
               <GitIconButton
                 label={t("project.source_control_pull")}
+                disabled={gitActionBusy}
                 onClick={() => void runAction("pull")}
-                icon={GitPullRequestArrow}
+                icon={activeGitAction === "pull" ? LoaderCircle : GitPullRequestArrow}
+                spin={activeGitAction === "pull"}
                 className="h-6 w-8"
               />
               <GitIconButton
                 label={t("project.source_control_push")}
+                disabled={gitActionBusy}
                 onClick={() => void runAction("push")}
-                icon={Upload}
+                icon={activeGitAction === "push" ? LoaderCircle : Upload}
+                spin={activeGitAction === "push"}
                 className="h-6 w-8"
               />
             </div>
@@ -1078,7 +1095,7 @@ function ProjectSourceControlPanel({
               value={message}
               onChange={(event) => setMessage(event.target.value)}
               onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canCommit) {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && canCommit && !gitActionBusy) {
                   event.preventDefault();
                   void runAction("commit", { message });
                 }
@@ -1090,9 +1107,9 @@ function ProjectSourceControlPanel({
             <Tooltip content={t("project.source_control_commit")} placement="bottom">
               <button
                 type="button"
-                disabled={!canCommit}
+                disabled={!canCommit || gitActionBusy}
                 onClick={() => void runAction("commit", { message })}
-                className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md bg-ink px-3 text-body-sm font-medium text-[rgb(var(--color-bg-panel))] transition hover:opacity-90 disabled:opacity-30"
+                className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-[rgb(var(--color-emerald)/0.28)] bg-[rgb(var(--color-emerald)/0.12)] px-3 text-body-sm font-medium text-ink/76 transition hover:border-[rgb(var(--color-emerald)/0.36)] hover:bg-[rgb(var(--color-emerald)/0.17)] hover:text-ink/86 disabled:border-ink/10 disabled:bg-ink/[0.035] disabled:text-ink/22"
                 aria-label={t("project.source_control_commit")}
               >
                 <Check className="h-4 w-4" />
@@ -1120,6 +1137,7 @@ function ProjectSourceControlPanel({
               <>
                 <GitIconButton
                   label={t("project.source_control_unstage_all")}
+                  disabled={gitActionBusy}
                   onClick={() => void runAction("unstageAll")}
                   icon={Minus}
                 />
@@ -1137,6 +1155,7 @@ function ProjectSourceControlPanel({
                   <>
                     <GitIconButton
                       label={t("project.source_control_unstage")}
+                      disabled={gitActionBusy}
                       onClick={() => void runAction("unstage", { paths: [change.path] })}
                       icon={Minus}
                     />
@@ -1160,6 +1179,7 @@ function ProjectSourceControlPanel({
               <>
                 <GitIconButton
                   label={t("project.source_control_stage_all")}
+                  disabled={gitActionBusy}
                   onClick={() => void runAction("stageAll")}
                   icon={Plus}
                 />
@@ -1167,6 +1187,7 @@ function ProjectSourceControlPanel({
                   {(confirm) => (
                     <GitIconButton
                       label={t("project.source_control_discard_all")}
+                      disabled={gitActionBusy}
                       onClick={(event) =>
                         confirm(event, {
                           title: t("project.source_control_discard_all_confirm"),
@@ -1193,6 +1214,7 @@ function ProjectSourceControlPanel({
                   <>
                     <GitIconButton
                       label={t("project.source_control_stage")}
+                      disabled={gitActionBusy}
                       onClick={() => void runAction("stage", { paths: [change.path] })}
                       icon={Plus}
                     />
@@ -1200,6 +1222,7 @@ function ProjectSourceControlPanel({
                       {(confirm) => (
                         <GitIconButton
                           label={t("project.source_control_discard")}
+                          disabled={gitActionBusy}
                           onClick={(event) =>
                             confirm(event, {
                               title: t("project.source_control_discard_confirm"),
@@ -1233,6 +1256,7 @@ function ProjectSourceControlPanel({
               <>
                 <GitIconButton
                   label={t("project.source_control_stage_all_untracked")}
+                  disabled={gitActionBusy}
                   onClick={() => void runAction("stage", { paths: untrackedChanges.map((change) => change.path) })}
                   icon={Plus}
                 />
@@ -1240,6 +1264,7 @@ function ProjectSourceControlPanel({
                   {(confirm) => (
                     <GitIconButton
                       label={t("project.source_control_clean_all")}
+                      disabled={gitActionBusy}
                       onClick={(event) =>
                         confirm(event, {
                           title: t("project.source_control_clean_all_confirm"),
@@ -1266,6 +1291,7 @@ function ProjectSourceControlPanel({
                   <>
                     <GitIconButton
                       label={t("project.source_control_stage")}
+                      disabled={gitActionBusy}
                       onClick={() => void runAction("stage", { paths: [change.path] })}
                       icon={Plus}
                     />
@@ -1273,6 +1299,7 @@ function ProjectSourceControlPanel({
                       {(confirm) => (
                         <GitIconButton
                           label={t("project.source_control_clean")}
+                          disabled={gitActionBusy}
                           onClick={(event) =>
                             confirm(event, {
                               title: t("project.source_control_clean_confirm"),
@@ -1331,6 +1358,7 @@ function ProjectSourceControlPanel({
               <button
                 type="button"
                 onClick={() => void loadMoreCommits()}
+                disabled={gitActionBusy}
                 className="flex w-full items-center justify-center px-3 py-3 text-caption text-ink/45 transition hover:bg-ink/[0.04] hover:text-ink/70"
               >
                 {t("project.source_control_load_more")}
