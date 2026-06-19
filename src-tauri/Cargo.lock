@@ -4243,6 +4243,7 @@ dependencies = [
  "ecb",
  "futures",
  "hex",
+ "libc",
  "log",
  "md-5",
  "notify",

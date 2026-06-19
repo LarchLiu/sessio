@@ -645,20 +645,73 @@ struct SpawnedAcpTransport {
     incoming: tokio::process::ChildStdout,
     stderr: tokio::process::ChildStderr,
     child: TokioChild,
+    group: ChildProcessGroup,
 }
 
-struct TokioChildGuard(TokioChild);
+struct TokioChildGuard {
+    child: TokioChild,
+    group: ChildProcessGroup,
+}
 
 impl TokioChildGuard {
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.0.wait().await
+        self.child.wait().await
     }
 }
 
 impl Drop for TokioChildGuard {
     fn drop(&mut self) {
-        let _ = self.0.start_kill();
+        kill_child_process_group(&mut self.child, &self.group);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ChildProcessGroup {
+    #[cfg(unix)]
+    Unix(libc::pid_t),
+    None,
+}
+
+#[cfg(unix)]
+fn configure_child_process_group(child: &mut TokioCommand) {
+    // Put the ACP launcher in its own process group so cleanup can reap
+    // npm/node/codex-acp descendants together instead of leaving orphans.
+    unsafe {
+        child.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_child_process_group(_child: &mut TokioCommand) {}
+
+#[cfg(unix)]
+fn child_process_group(child: &TokioChild) -> ChildProcessGroup {
+    child
+        .id()
+        .map(|pid| ChildProcessGroup::Unix(pid as libc::pid_t))
+        .unwrap_or(ChildProcessGroup::None)
+}
+
+#[cfg(not(unix))]
+fn child_process_group(_child: &TokioChild) -> ChildProcessGroup {
+    ChildProcessGroup::None
+}
+
+fn kill_child_process_group(child: &mut TokioChild, group: &ChildProcessGroup) {
+    #[cfg(unix)]
+    if let ChildProcessGroup::Unix(pgid) = group {
+        // Negative pid targets the entire process group.
+        unsafe {
+            libc::kill(-(*pgid), libc::SIGKILL);
+        }
+        return;
+    }
+    let _ = child.start_kill();
 }
 
 fn spawn_acp_transport(command: &str, workspace_path: &str) -> Result<SpawnedAcpTransport> {
@@ -669,6 +722,7 @@ fn spawn_acp_transport(command: &str, workspace_path: &str) -> Result<SpawnedAcp
         .context("ACP command cannot be empty")?;
 
     let mut child = TokioCommand::new(program);
+    configure_child_process_group(&mut child);
     child
         .args(rest)
         .current_dir(workspace_path)
@@ -679,6 +733,7 @@ fn spawn_acp_transport(command: &str, workspace_path: &str) -> Result<SpawnedAcp
     let mut child = child.spawn().with_context(|| {
         format!("spawn ACP command `{command}` with cwd `{workspace_path}`")
     })?;
+    let group = child_process_group(&child);
     let outgoing = child.stdin.take().context("failed to open ACP stdin")?;
     let incoming = child.stdout.take().context("failed to open ACP stdout")?;
     let stderr = child.stderr.take().context("failed to open ACP stderr")?;
@@ -688,6 +743,7 @@ fn spawn_acp_transport(command: &str, workspace_path: &str) -> Result<SpawnedAcp
         incoming,
         stderr,
         child,
+        group,
     })
 }
 
@@ -701,8 +757,9 @@ impl agent_client_protocol::ConnectTo<AcpClientRole> for SpawnedAcpTransport {
             incoming,
             stderr,
             child,
+            group,
         } = self;
-        let mut child = TokioChildGuard(child);
+        let mut child = TokioChildGuard { child, group };
 
         let stderr_task = tauri::async_runtime::spawn(async move {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
@@ -1603,6 +1660,21 @@ mod tests {
             rest,
             &["-y".to_string(), "@zed-industries/codex-acp@latest".to_string()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_unix_child_uses_its_own_process_group() {
+        tauri::async_runtime::block_on(async {
+            let workspace = std::env::temp_dir();
+            let transport = spawn_acp_transport("sleep 5", &workspace.to_string_lossy())
+                .expect("spawn sleep transport");
+            let pid = transport.child.id().expect("child pid") as libc::pid_t;
+            let pgid = unsafe { libc::getpgid(pid) };
+
+            assert_eq!(pgid, pid);
+            drop(transport);
+        });
     }
 
     #[test]
