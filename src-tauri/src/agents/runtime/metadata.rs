@@ -194,7 +194,7 @@ fn detect_capabilities_with_initialize_only(
             workspace_path
         ));
     }
-    acp_transport::probe_initialize_response(command)
+    acp_transport::probe_initialize_response(command, workspace_path.to_string())
 }
 
 #[allow(dead_code)]
@@ -287,5 +287,21 @@ mod tests {
         assert_eq!(loaded.protocol_version.as_deref(), Some("1"));
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn initialize_only_probe_requires_workspace_and_uses_acp_transport() {
+        let result = detect_capabilities_with_initialize_only(
+            Agent::Codex,
+            "/tmp/sessio-probe-workspace",
+            RuntimeTransportKind::PlainCli,
+            "npx -y @zed-industries/codex-acp@latest".to_string(),
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("initialize-only probe currently only supports ACP transport"));
     }
 }

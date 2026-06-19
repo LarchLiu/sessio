@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,9 +10,15 @@ use agent_client_protocol::schema::{
     RequestPermissionResponse, ResumeSessionRequest, SessionId, SessionNotification, SessionUpdate,
     StopReason, TextContent, TextResourceContents,
 };
-use agent_client_protocol::{AcpAgent, Agent as AcpAgentRole, ConnectionTo, UntypedMessage};
+use agent_client_protocol::{
+    Agent as AcpAgentRole, ByteStreams, Client as AcpClientRole, ConnectionTo, UntypedMessage,
+};
 use anyhow::{Context, Result};
 use base64::Engine;
+use futures::future::{Either, select};
+use tokio::io::AsyncBufReadExt as _;
+use tokio::process::{Child as TokioChild, Command as TokioCommand};
+use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 use super::acp::{
     acp_protocol_event, convert_session_notification, permission_response_from_decision,
@@ -131,14 +136,15 @@ pub fn spawn_session(
     AcpSessionController { command_tx }
 }
 
-pub fn probe_capabilities(command: String) -> Result<RuntimeCapabilitySet> {
+pub fn probe_capabilities(command: String, workspace_path: String) -> Result<RuntimeCapabilitySet> {
     tauri::async_runtime::block_on(async move {
-        let agent = AcpAgent::from_str(&command)
-            .with_context(|| format!("failed to parse ACP command: {command}"))?;
+        let transport = spawn_acp_transport(&command, &workspace_path).with_context(|| {
+            format!("failed to spawn ACP command in workspace {workspace_path}")
+        })?;
         agent_client_protocol::Client
             .builder()
             .name("sessio")
-            .connect_with(agent, |connection: ConnectionTo<AcpAgentRole>| async move {
+            .connect_with(transport, |connection: ConnectionTo<AcpAgentRole>| async move {
                 let init = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -152,14 +158,15 @@ pub fn probe_capabilities(command: String) -> Result<RuntimeCapabilitySet> {
     })
 }
 
-pub fn probe_initialize_response(command: String) -> Result<AcpInitializeProbe> {
+pub fn probe_initialize_response(command: String, workspace_path: String) -> Result<AcpInitializeProbe> {
     tauri::async_runtime::block_on(async move {
-        let agent = AcpAgent::from_str(&command)
-            .with_context(|| format!("failed to parse ACP command: {command}"))?;
+        let transport = spawn_acp_transport(&command, &workspace_path).with_context(|| {
+            format!("failed to spawn ACP command in workspace {workspace_path}")
+        })?;
         agent_client_protocol::Client
             .builder()
             .name("sessio")
-            .connect_with(agent, |connection: ConnectionTo<AcpAgentRole>| async move {
+            .connect_with(transport, |connection: ConnectionTo<AcpAgentRole>| async move {
                 let init = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
                     .block_task()
@@ -232,10 +239,8 @@ async fn run_session(
         runtime_config,
         start,
     } = spec;
-    let launch_command = workspace_wrapped_acp_command(&command, &workspace_path);
-    let acp_agent = AcpAgent::from_str(&launch_command).with_context(|| {
-        format!("failed to parse ACP command: {launch_command}")
-    })?;
+    let spawned_transport = spawn_acp_transport(&command, &workspace_path)
+        .with_context(|| format!("failed to spawn ACP command in workspace {workspace_path}"))?;
     let current_turn_id = Arc::new(Mutex::new(None::<String>));
     let turn_activity = Arc::new(Mutex::new(HashMap::<String, Instant>::new()));
     let notification_manager = manager.clone();
@@ -247,7 +252,7 @@ async fn run_session(
     let permission_turn_id = current_turn_id.clone();
     let permission_turn_activity = turn_activity.clone();
 
-    agent_client_protocol::Client
+    AcpClientRole
         .builder()
         .name("sessio")
         .on_receive_notification(
@@ -403,7 +408,7 @@ async fn run_session(
             },
             agent_client_protocol::on_receive_request!(),
         )
-        .connect_with(acp_agent, move |connection: ConnectionTo<AcpAgentRole>| {
+        .connect_with(spawned_transport, move |connection: ConnectionTo<AcpAgentRole>| {
             let manager = manager.clone();
             let sessio_runtime_session_id = sessio_runtime_session_id.clone();
             let agent = agent;
@@ -635,6 +640,117 @@ async fn run_session(
         .map_err(anyhow::Error::from)
 }
 
+struct SpawnedAcpTransport {
+    outgoing: tokio::process::ChildStdin,
+    incoming: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    child: TokioChild,
+}
+
+struct TokioChildGuard(TokioChild);
+
+impl TokioChildGuard {
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.0.wait().await
+    }
+}
+
+impl Drop for TokioChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.start_kill();
+    }
+}
+
+fn spawn_acp_transport(command: &str, workspace_path: &str) -> Result<SpawnedAcpTransport> {
+    let args = shell_words::split(command)
+        .with_context(|| format!("failed to parse ACP command: {command}"))?;
+    let (program, rest) = args
+        .split_first()
+        .context("ACP command cannot be empty")?;
+
+    let mut child = TokioCommand::new(program);
+    child
+        .args(rest)
+        .current_dir(workspace_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = child.spawn().with_context(|| {
+        format!("spawn ACP command `{command}` with cwd `{workspace_path}`")
+    })?;
+    let outgoing = child.stdin.take().context("failed to open ACP stdin")?;
+    let incoming = child.stdout.take().context("failed to open ACP stdout")?;
+    let stderr = child.stderr.take().context("failed to open ACP stderr")?;
+
+    Ok(SpawnedAcpTransport {
+        outgoing,
+        incoming,
+        stderr,
+        child,
+    })
+}
+
+impl agent_client_protocol::ConnectTo<AcpClientRole> for SpawnedAcpTransport {
+    async fn connect_to(
+        self,
+        client: impl agent_client_protocol::ConnectTo<AcpAgentRole>,
+    ) -> std::result::Result<(), agent_client_protocol::Error> {
+        let SpawnedAcpTransport {
+            outgoing,
+            incoming,
+            stderr,
+            child,
+        } = self;
+        let mut child = TokioChildGuard(child);
+
+        let stderr_task = tauri::async_runtime::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            let mut collected = String::new();
+            while let Some(line) = lines.next_line().await.transpose() {
+                let line = line.map_err(agent_client_protocol::Error::into_internal_error)?;
+                if !collected.is_empty() {
+                    collected.push('\n');
+                }
+                collected.push_str(&line);
+            }
+            Ok::<String, agent_client_protocol::Error>(collected)
+        });
+
+        let protocol_future = agent_client_protocol::ConnectTo::<AcpClientRole>::connect_to(
+            ByteStreams::new(outgoing.compat_write(), incoming.compat()),
+            client,
+        );
+
+        let child_monitor = async move {
+            let status = child
+                .wait()
+                .await
+                .map_err(agent_client_protocol::Error::into_internal_error)?;
+            if status.success() {
+                Ok(())
+            } else {
+                let stderr = stderr_task
+                    .await
+                    .map_err(agent_client_protocol::Error::into_internal_error)??;
+                let message = if stderr.is_empty() {
+                    format!("Process exited with {status}")
+                } else {
+                    format!("Process exited with {status}: {stderr}")
+                };
+                Err(agent_client_protocol::Error::internal_error().data(message))
+            }
+        };
+
+        let protocol_future = std::pin::pin!(protocol_future);
+        let child_monitor = std::pin::pin!(child_monitor);
+
+        match select(protocol_future, child_monitor).await {
+            Either::Left((result, _)) | Either::Right((result, _)) => result,
+        }
+    }
+}
+
 fn new_session_request(
     agent: Agent,
     workspace_path: String,
@@ -678,36 +794,6 @@ fn new_session_request(
     );
     request.meta = Some(meta);
     request
-}
-
-fn workspace_wrapped_acp_command(command: &str, workspace_path: &str) -> String {
-    if cfg!(target_os = "windows") {
-        let workspace = windows_cmd_quote(workspace_path);
-        let script = format!("cd /d {workspace} && {command}");
-        return format!("cmd /C {}", posix_single_quote(&script));
-    }
-
-    let workspace = posix_single_quote(workspace_path);
-    let script = format!("cd -- {workspace} && exec {command}");
-    format!("/bin/sh -lc {}", posix_single_quote(&script))
-}
-
-fn posix_single_quote(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('\'');
-    for ch in value.chars() {
-        if ch == '\'' {
-            quoted.push_str("'\"'\"'");
-        } else {
-            quoted.push(ch);
-        }
-    }
-    quoted.push('\'');
-    quoted
-}
-
-fn windows_cmd_quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 async fn apply_initial_session_config(
@@ -1507,42 +1593,16 @@ mod tests {
     }
 
     #[test]
-    fn workspace_wrapped_command_uses_workspace_as_process_cwd() {
-        let wrapped = workspace_wrapped_acp_command(
-            "npx -y @zed-industries/codex-acp@latest",
-            "/tmp/demo workspace",
+    fn spawn_acp_transport_parses_npx_command_without_shell_wrapper() {
+        let args = shell_words::split("npx -y @zed-industries/codex-acp@latest")
+            .expect("split command");
+        let (program, rest) = args.split_first().expect("program");
+
+        assert_eq!(*program, "npx");
+        assert_eq!(
+            rest,
+            &["-y".to_string(), "@zed-industries/codex-acp@latest".to_string()]
         );
-
-        if cfg!(target_os = "windows") {
-            let agent = AcpAgent::from_str(&wrapped).expect("parse wrapped command");
-            match agent.server() {
-                agent_client_protocol::schema::McpServer::Stdio(stdio) => {
-                    assert_eq!(stdio.command.to_string_lossy(), "cmd");
-                    assert_eq!(stdio.args.first().map(String::as_str), Some("/C"));
-                    let script = stdio.args.get(1).map(String::as_str).unwrap_or_default();
-                    assert!(script.contains("cd /d \"/tmp/demo workspace\""));
-                    assert!(script.contains("&& npx -y @zed-industries/codex-acp@latest"));
-                }
-                _ => panic!("expected stdio server"),
-            }
-        } else {
-            let agent = AcpAgent::from_str(&wrapped).expect("parse wrapped command");
-            match agent.server() {
-                agent_client_protocol::schema::McpServer::Stdio(stdio) => {
-                    assert_eq!(stdio.command.to_string_lossy(), "/bin/sh");
-                    assert_eq!(stdio.args.first().map(String::as_str), Some("-lc"));
-                    let script = stdio.args.get(1).map(String::as_str).unwrap_or_default();
-                    assert!(script.contains("cd -- '/tmp/demo workspace'"));
-                    assert!(script.contains("&& exec npx -y @zed-industries/codex-acp@latest"));
-                }
-                _ => panic!("expected stdio server"),
-            }
-        }
-    }
-
-    #[test]
-    fn posix_single_quote_escapes_embedded_quotes() {
-        assert_eq!(posix_single_quote("/tmp/it's here"), "'/tmp/it'\"'\"'s here'");
     }
 
     #[test]

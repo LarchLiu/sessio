@@ -4241,6 +4241,7 @@ dependencies = [
  "crossbeam-channel",
  "dirs 5.0.1",
  "ecb",
+ "futures",
  "hex",
  "log",
  "md-5",
@@ -4254,6 +4255,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "shell-words",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -4263,6 +4265,8 @@ dependencies = [
  "tauri-plugin-shell",
  "tauri-plugin-updater",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "tungstenite",
  "walkdir",
 ]
@@ -5155,6 +5159,7 @@ dependencies = [
  "libc",
  "mio 1.2.0",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "windows-sys 0.61.2",
 ]
@@ -5177,6 +5182,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",
