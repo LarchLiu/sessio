@@ -547,6 +547,62 @@ export default function App() {
     if (thread) clearThreadUnread(thread);
   }, [clearThreadUnread, selectedThreadId, threadIndexItems, unreadSessionIds]);
 
+  const openSessionSelection = useCallback((
+    session: SessionInfo,
+    options?: {
+      detailMode?: DetailMode;
+      revealWindow?: boolean;
+      projectLabel?: string;
+    },
+  ) => {
+    const project = session.projectPath
+      ? projects.find((item) => item.path === session.projectPath) ?? null
+      : null;
+    if (project) {
+      rememberSidebarProject({ key: project.id });
+      setFilter({
+        kind: "project",
+        key: projectFilterKey(project),
+        label: options?.projectLabel ?? project.name,
+      });
+    }
+    setAutoTasksOpen(false);
+    setSelectedProject(null);
+    setSelectedThread(null);
+    setNewChatProjectKey(null);
+    setSelected(session);
+    setDetailMode(options?.detailMode ?? "chat");
+    if (options?.revealWindow) void revealMainWindow();
+  }, [projects, rememberSidebarProject, setFilter]);
+
+  const openThreadSelection = useCallback((
+    thread: ThreadIndexItemInfo,
+    options?: {
+      detailMode?: DetailMode;
+      revealWindow?: boolean;
+      projectLabel?: string;
+      clearUnread?: boolean;
+    },
+  ) => {
+    const project = projects.find((item) => item.id === thread.projectId) ?? null;
+    if (project) {
+      rememberSidebarProject({ key: project.id });
+      setFilter({
+        kind: "project",
+        key: projectFilterKey(project),
+        label: options?.projectLabel ?? project.name,
+      });
+    }
+    if (options?.clearUnread !== false) clearThreadUnread(thread);
+    setAutoTasksOpen(false);
+    setSelected(null);
+    setSelectedProject(null);
+    setSelectedThread({ projectId: thread.projectId, threadId: thread.threadId, goal: thread.goal });
+    setNewChatProjectKey(null);
+    setDetailMode(options?.detailMode ?? "threadMultiSessionChat");
+    if (options?.revealWindow) void revealMainWindow();
+  }, [clearThreadUnread, projects, rememberSidebarProject, setFilter]);
+
   useSystemNotifications({
     t,
     sessions,
@@ -575,36 +631,15 @@ export default function App() {
       install: openUpdateConfirm,
     }, {
       onSelectSession: (session) => {
-        const project = session.projectPath
-          ? projects.find((item) => item.path === session.projectPath) ?? null
-          : null;
-        if (project) {
-          rememberSidebarProject({ key: project.id });
-          setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
-        }
-        setSelectedProject(null);
-        setSelectedThread(null);
-        setNewChatProjectKey(null);
-        setSelected(session);
-        setDetailMode("chat");
-        void revealMainWindow();
+        openSessionSelection(session, { revealWindow: true });
       },
       onSelectThread: (thread) => {
-        const project = projects.find((item) => item.id === thread.projectId) ?? null;
-        if (project) {
-          rememberSidebarProject({ key: project.id });
-          setFilter({ kind: "project", key: projectFilterKey(project), label: project.name });
-        }
-        clearThreadUnread(thread);
-        setSelected(null);
-        setSelectedProject(null);
-        setSelectedThread({ projectId: thread.projectId, threadId: thread.threadId, goal: thread.goal });
-        setNewChatProjectKey(null);
-        setDetailMode("threadMultiSessionChat");
-        void revealMainWindow();
+        openThreadSelection(thread, { revealWindow: true, detailMode: "threadMultiSessionChat" });
       },
     });
   }, [
+    openSessionSelection,
+    openThreadSelection,
     recentForMenu,
     t,
     systemAppearance,
@@ -612,10 +647,6 @@ export default function App() {
     update.latestVersion,
     update.installing,
     openUpdateConfirm,
-    projects,
-    rememberSidebarProject,
-    clearThreadUnread,
-    setFilter,
   ]);
 
   const removeSessionsInScope = async (scope: SessionScope) => {

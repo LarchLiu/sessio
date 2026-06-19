@@ -30,6 +30,7 @@ export function useUnreadSessions({
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [windowFocused, setWindowFocused] = useState(true);
   const messageCountBySourceRef = useRef<Map<string, number>>(new Map());
   const runtimeSessionAliasesRef = useRef<Record<string, string>>({});
   const selectedUnreadKeysRef = useRef<Set<string>>(new Set());
@@ -40,12 +41,17 @@ export function useUnreadSessions({
     let cancelled = false;
     getCurrentWindow().isFocused()
       .then((focused) => {
-        if (!cancelled) windowFocusedRef.current = focused;
+        if (!cancelled) {
+          windowFocusedRef.current = focused;
+          setWindowFocused(focused);
+        }
       })
       .catch(() => {});
     let unlisten: (() => void) | null = null;
     getCurrentWindow().onFocusChanged(({ payload }) => {
-      windowFocusedRef.current = Boolean(payload);
+      const focused = Boolean(payload);
+      windowFocusedRef.current = focused;
+      setWindowFocused(focused);
     })
       .then((fn) => {
         if (cancelled) fn();
@@ -109,10 +115,10 @@ export function useUnreadSessions({
   }, [sessions]);
 
   useEffect(() => {
-    if (!selected || !windowFocusedRef.current) return;
+    if (!selected || !windowFocused) return;
     const selectedKeys = sessionUnreadKeys(selected, runtimeSessionAliases);
     setUnreadSessionIds((prev) => deleteUnreadKeys(prev, selectedKeys));
-  }, [runtimeSessionAliases, selected]);
+  }, [runtimeSessionAliases, selected, windowFocused]);
 
   const handleMessageCount = useCallback((
     agent: Agent,
