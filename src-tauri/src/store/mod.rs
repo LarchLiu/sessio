@@ -820,8 +820,10 @@ pub trait SessionStore: Send + Sync {
         agent: Agent,
         adapter_version: &str,
     ) -> Result<Option<RuntimeAgentSessionConfigRecord>>;
-    fn list_runtime_agent_session_configs(&self, agent: Agent)
-        -> Result<Vec<RuntimeAgentSessionConfigRecord>>;
+    fn list_runtime_agent_session_configs(
+        &self,
+        agent: Agent,
+    ) -> Result<Vec<RuntimeAgentSessionConfigRecord>>;
     fn mark_runtime_agent_session_config_needs_refresh(
         &self,
         agent: Agent,

@@ -10,12 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
-use crate::app_paths;
 use crate::agents::runtime::types::{
     AgentInput, AgentRuntimeEvent, AgentRuntimeEventPayload, AgentSessionHandle, RuntimeMetadata,
     StartAgentSession,
 };
 use crate::agents::runtime::{RuntimeCleanupReport, RuntimeManager};
+use crate::app_paths;
 use crate::models::{
     Agent, AgentInfo, PlanRoundMode, PlanRoundSource, PlanRoundStatus, PlanTaskInfo, PlanTaskRisk,
     PlanTaskSessionRole, PlanTaskStatus, SessionInfo, StageStatus, ThreadInfo, ThreadKind,

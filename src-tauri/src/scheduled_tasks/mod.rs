@@ -489,7 +489,9 @@ impl SchedulerState {
                     log_scheduled_chat_cleanup_issue(&handle.sessio_runtime_session_id, &cleanup);
                     self.fail_run_with_stamp_error(
                         run_id,
-                        &format!("failed to spawn stamp waiter: {spawn_error:#}; cleanup={cleanup:?}"),
+                        &format!(
+                            "failed to spawn stamp waiter: {spawn_error:#}; cleanup={cleanup:?}"
+                        ),
                     );
                 }
             }

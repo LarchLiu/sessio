@@ -26,8 +26,8 @@ use sha2::Sha256;
 // the `Md5Digest` alias above, which makes `Sha256::update`/`finalize` work
 // without an extra trait import.
 
-use crate::app_paths;
 use crate::agents::runtime::types::AgentAttachmentKind;
+use crate::app_paths;
 
 use super::super::attachments::{allocate_attachment_path, attachment_dir, InboundAttachment};
 use super::super::config::WechatConfig;

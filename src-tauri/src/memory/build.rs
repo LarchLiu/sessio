@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::app_paths;
 use crate::agents::sources::registry::AgentSourceRegistry;
 use crate::agents::sources::types::{MessageEvent, MessageRole, SessionSource};
+use crate::app_paths;
 use crate::memory::artifacts::{MarkdownArtifactSink, MemoryArtifactSink};
 use crate::memory::dedupe::{should_suppress_source, DedupeAction, DedupeMatch};
 use crate::memory::normalize::normalize_events;

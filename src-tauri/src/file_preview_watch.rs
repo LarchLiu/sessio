@@ -146,7 +146,11 @@ fn emit_preview_events(
     };
 
     for watched_path in watched_paths {
-        if !event.paths.iter().any(|event_path| event_path == &watched_path) {
+        if !event
+            .paths
+            .iter()
+            .any(|event_path| event_path == &watched_path)
+        {
             continue;
         }
         let _ = app.emit(

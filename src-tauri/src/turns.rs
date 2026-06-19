@@ -1434,7 +1434,13 @@ fn tool_content_to_file_edit(tool: &SessionHistoryToolCall, content: &Value) -> 
         return None;
     }
     let patch = path.as_deref().and_then(|value| {
-        synthetic_tool_diff_patch(value, old_content.as_deref(), new_content.as_deref(), tool, content)
+        synthetic_tool_diff_patch(
+            value,
+            old_content.as_deref(),
+            new_content.as_deref(),
+            tool,
+            content,
+        )
     });
     Some(json!({
         "path": path.clone().unwrap_or_else(|| "file".to_string()),
@@ -1520,7 +1526,9 @@ fn start_lines_from_value(value: &Value) -> Option<(i64, i64)> {
     let old_start = number_field(value, "oldStart").or(start);
     let new_start = number_field(value, "newStart").or(start);
     match (old_start, new_start) {
-        (Some(old_start), Some(new_start)) if old_start > 0 && new_start > 0 => Some((old_start, new_start)),
+        (Some(old_start), Some(new_start)) if old_start > 0 && new_start > 0 => {
+            Some((old_start, new_start))
+        }
         _ => None,
     }
 }
@@ -1546,9 +1554,7 @@ fn matching_tool_location_line(locations: &[Value], path: &str) -> Option<i64> {
 fn same_file_path(left: &str, right: &str) -> bool {
     let left = left.replace('\\', "/");
     let right = right.replace('\\', "/");
-    left == right
-        || left.ends_with(&format!("/{right}"))
-        || right.ends_with(&format!("/{left}"))
+    left == right || left.ends_with(&format!("/{right}")) || right.ends_with(&format!("/{left}"))
 }
 
 fn patch_display_path(path: &str) -> String {
@@ -3334,9 +3340,7 @@ mod tests {
             .find(|block| block.update_type.as_deref() == Some("file_edit"))
             .expect("file_edit block");
         let data = file_edit.data.as_ref().unwrap();
-        let patch = data["edits"][0]["patch"]
-            .as_str()
-            .expect("generated patch");
+        let patch = data["edits"][0]["patch"].as_str().expect("generated patch");
         assert!(patch.contains("@@ -10,2 +10,3 @@"));
         assert!(patch.contains("--- a/src/main.rs"));
         assert!(patch.contains("+++ b/src/main.rs"));
@@ -3395,9 +3399,7 @@ mod tests {
             .find(|block| block.update_type.as_deref() == Some("file_edit"))
             .expect("file_edit block");
         let data = file_edit.data.as_ref().unwrap();
-        let patch = data["edits"][0]["patch"]
-            .as_str()
-            .expect("generated patch");
+        let patch = data["edits"][0]["patch"].as_str().expect("generated patch");
         assert!(patch.contains("@@ -24,2 +24,2 @@"));
         assert!(patch.contains("--- a/src/main.rs"));
         assert!(patch.contains("+++ b/src/main.rs"));

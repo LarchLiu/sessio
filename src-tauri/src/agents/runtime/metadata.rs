@@ -3,9 +3,9 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 
-use crate::app_paths;
 use super::acp_transport;
 use super::types::{RuntimeCapabilitySet, RuntimeTransportKind};
+use crate::app_paths;
 use crate::models::{Agent, AgentInfo, AgentType, RuntimeAgentMetadata};
 use crate::store::{RuntimeAgentCapabilityRecord, SessionStore};
 

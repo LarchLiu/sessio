@@ -1174,7 +1174,10 @@ impl RuntimeManager {
         Some(sessio_runtime_session_id.to_string())
     }
 
-    fn persist_runtime_session_config_if_needed(&self, sessio_runtime_session_id: &str) -> Result<()> {
+    fn persist_runtime_session_config_if_needed(
+        &self,
+        sessio_runtime_session_id: &str,
+    ) -> Result<()> {
         let Some(store) = self.inner.app.try_state::<Arc<dyn SessionStore>>() else {
             return Ok(());
         };
@@ -1208,7 +1211,8 @@ impl RuntimeManager {
             &session_state,
             current.as_ref(),
             now_ms(),
-        )? else {
+        )?
+        else {
             return Ok(());
         };
         store.upsert_runtime_agent_session_config(&record)

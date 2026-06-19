@@ -3,11 +3,11 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use crate::app_paths;
 use crate::agents::runtime::types::AcpProtocolMessage;
 use crate::agents::sources::shared::convert::project_key_for_path_or_name;
 use crate::agents::sources::system_time_to_millis;
 use crate::agents::sources::types::{HistoryAcpMessage, SourceLocation};
+use crate::app_paths;
 use crate::models::{normalize_preview, Agent, SessionInfo};
 use crate::turns::session_history_turns_from_acp_messages;
 

@@ -8333,7 +8333,10 @@ impl SessionStore for SqliteStore {
              WHERE agent = ?
              ORDER BY updated_at DESC, adapter_version ASC",
         )?;
-        let rows = stmt.query_map(params![agent.as_str()], runtime_agent_session_config_from_row)?;
+        let rows = stmt.query_map(
+            params![agent.as_str()],
+            runtime_agent_session_config_from_row,
+        )?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -14466,10 +14469,7 @@ mod schema_tests {
         store.init().unwrap();
 
         store
-            .mark_runtime_agent_session_config_needs_refresh(
-                Agent::Codex,
-                "codex-acp@1.2.3",
-            )
+            .mark_runtime_agent_session_config_needs_refresh(Agent::Codex, "codex-acp@1.2.3")
             .unwrap();
         assert!(store
             .get_runtime_agent_session_config(Agent::Codex, "codex-acp@1.2.3")
@@ -14494,7 +14494,9 @@ mod schema_tests {
         assert_eq!(loaded.available_commands_json, r#"[{"name":"plan"}]"#);
         assert_eq!(loaded.config_options_json, r#"[{"id":"model"}]"#);
 
-        let rows = store.list_runtime_agent_session_configs(Agent::Codex).unwrap();
+        let rows = store
+            .list_runtime_agent_session_configs(Agent::Codex)
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].adapter_version, "codex-acp@1.2.3");
 
